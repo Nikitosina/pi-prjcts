@@ -12,6 +12,8 @@ import { expandSkillCommand, listSkills } from "./coordinator-skills.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
+import { startWebhooks } from "./webhook.ts";
+import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
@@ -604,6 +606,24 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "monitor-enable": return withDurableOwner({ id: input.id, operation: owner => owner.monitorSetEnabled(input.monitorId, input.enabled) });
     case "monitor-snapshot": return (await durable(input.id)).monitorSnapshot();
     case "event-opt-in": return withDurableOwner({ id: input.id, operation: owner => owner.scheduleSetEventOptIn(input.enabled) });
+    case "automation-snapshot": return automationSnapshot(input.id);
+    case "automation-update": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived || project.runtime !== "durable") throw new Error("Automations need an active Durable project");
+      const owner = await durable(input.id), before = loadAutomations(input.id);
+      if (input.change.eventChat && input.change.eventChat !== "main") { const chat = (await owner.chats()).find(item => item.id === input.change.eventChat); if (!chat || chat.archived) throw new Error("Choose an existing, active chat for events"); }
+      const next = await withProjectLock(input.id, async () => updateAutomations(input.id, input.change));
+      if (next.follow.enabled && (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs)) owner.followKick();
+      recordHostEvent("automations", `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}`);
+      return automationSnapshot(input.id);
+    }
+    case "webhook-rotate": {
+      if (input.confirm !== input.id) throw new Error("Rotating the webhook secret requires confirmation matching project id");
+      await withProjectLock(input.id, async () => rotateWebhookSecret(input.id));
+      recordHostEvent("automations", `${input.id}:webhook-rotated`);
+      return automationSnapshot(input.id);
+    }
+    case "follow-poll": { const result = await (await durable(input.id)).followPoll(); return { result, ...(await automationSnapshot(input.id)) }; }
     case "event-ingest": return withDurableOwner({ id: input.id, operation: owner => owner.ingestLocalEvent({ eventId: input.eventId, kind: input.kind, payload: input.payload }) });
     case "thread-steer": {
       const project = loadProject(input.id);
@@ -703,6 +723,15 @@ const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (awai
   if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");
   return saveUpload(ownedProjectDir(id), { filename, bytes });
 }));
+const webhooks = await startWebhooks(async (id, event) => {
+  if (closing) throw new Error("Host is stopping");
+  const result = await (await durable(id)).ingestAutomationEvent(event);
+  return { status: result.status, ...(result.duplicate ? { duplicate: true as const } : {}) };
+});
+async function automationSnapshot(id: string) {
+  const project = loadProject(id), config = loadAutomations(id);
+  return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
+}
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
@@ -739,6 +768,7 @@ function shutdown(): Promise<void> {
     let failed = ownerCloseFailed.size !== 0;
     const report = (error: unknown) => { failed = true; process.stderr.write(errorText(error) + "\n"); };
     try { web.close(); } catch (error) { report(error); }
+    try { webhooks.close(); } catch (error) { report(error); }
     try { server.close(); } catch (error) { report(error); }
     try { await githubInspection.close(); } catch (error) { report(error); }
     for (const pending of durableRuntimes.values()) {

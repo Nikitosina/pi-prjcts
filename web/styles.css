@@ -426,3 +426,19 @@ button.attach-chip { padding: 3px 8px 3px 6px; }
 .upload-text { max-height: 55vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .dragging { outline: 2px dashed var(--accent); outline-offset: -4px; }
 @media (max-width: 600px) { .upload-row small { display: none; } .attach-chip .attach-name { max-width: 140px; } }
+
+/* Events in (Settings) and event cards in the transcript */
+.events-in { display: grid; gap: 12px; }
+.events-group { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; min-width: 0; }
+.events-group legend { font-weight: 600; padding: 0 4px; }
+.events-in .field { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.events-in .check { display: flex; align-items: center; gap: 8px; }
+.events-in code.mono { overflow-wrap: anywhere; font-size: 12px; }
+.events-in .bad { color: var(--bad, #b42318); }
+.fix-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.fix-attempt { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 6px; background: var(--soft, #f2f2f2); font-size: 12px; }
+.fix-attempt.failed { color: var(--bad, #b42318); }
+.event-card > summary .event-mark { flex: none; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; }
+.event-card.github { border-left: 3px solid #6e7781; }
+.event-card.webhook { border-left: 3px solid #8250df; }
+.events-in input[type="number"] { width: 72px; flex: none; }

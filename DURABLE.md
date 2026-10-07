@@ -304,3 +304,31 @@ Owner files are project knowledge. They live in `uploads/` of the project state 
 - Also in this change: Observability health "Failed jobs" counts failed and interrupted jobs across all chats (`show.failedJobs`). "Project" reads "needs attention" when any chat's newest turn failed. The CLI `owner-skills-catalog` pages through the whole catalog (64 per page, one revision) and prints every candidate. Both are checked in `scripts/skills-scale-chats-e2e.mjs` (L1, L2).
 
 Verified by `scripts/uploads-search-e2e.mjs`, which uses fake text and vision models, headless Chrome, a host restart and a 390px viewport. The failures it covers are listed in `scripts/uploads-search-failures.md`. A red run against 94ea815 is kept in `artifacts/uploads-search-red-*`. C7 (re-admitting a queued job with attachments after a crash) follows the same code path, but no E2E covers it.
+
+## Events in: Follow PRs and the generic webhook
+
+Both are owner opt-ins in Settings → Events in, stored in `automations.json` beside `project.json` (0600; `src/project-automations.ts`). Events from either go to one chat: Main by default, or the chat chosen there; an archived or unknown chosen chat falls back to Main. They use the existing event-ingest path (`scheduleRuntime.ingest`), now with a target chat (the intent records `conversationId`, and reconcile looks the submission up in that chat) and an `automation` flag that replaces the `eventOptIn` gate, because the Settings toggle is the opt-in. Uncertain provider writes still block admission, and a paused project records the event as interrupted, as before. The transcript shows these inputs as event cards ("GitHub activity", "Webhook · <type>"), not as owner messages. RPC: `automation-snapshot`, `automation-update`, `webhook-rotate`, `follow-poll`.
+
+### Follow PRs
+
+`src/durable-follow.ts`. When on, each authorized GitHub repository (`githubAuthorization`) is polled every 1, 5, 15 or 60 minutes (a 15 s tick checks whether a poll is due; `PI_PROJECTS_FOLLOW_TICK_MS` overrides the tick in tests), plus Check now. The host already opens every Durable project at start, so polling resumes after a restart.
+
+- Reads (fake-gh compatible): the repository identity (numeric ID must match the grant), the newest 30 PRs (`state=all`), check runs for each open PR head until CI is terminal for that head, and reviews, issue comments and review comments when the PR's `updated_at` changed. Commit statuses (the legacy status API) are not read.
+- Reported changes: opened, merged, closed, reopened, new head, CI failed (names of failing checks), CI passed, and new reviews and comments (bots marked). The first poll per repository is a silent baseline. Everything new in one poll goes out as one `github.follow` event, whose ID is a hash of the per-change IDs. The per-PR state (`projects.pr-follow` doc on the root) advances in the same commit that records the event, so a crash or a failed poll never loses or repeats a change.
+- Auto-fix: when CI fails on a PR this project published (head branch under the grant's branch prefix, or a verified `create-pr` receipt), a fix goes out. If the receipt's worker thread still exists, it gets a follow-up; otherwise a new worker gets the repository's scope (whole-repository scope first). The worker reports to the event chat. Guards: an attempt is recorded before dispatch, at most once per head SHA. Nothing is dispatched while the previous fix for that PR is queued or running. There are at most `fixCap` attempts per PR (default 3, settable 0 to 10), and auto-fix can be turned off separately. Each failure line in the event says what happened (dispatched, still running, cap reached, not published, auto-fix off, no scope).
+- Failures: a gh error leaves the state untouched, shows as the follow problem in Settings, and backs off (interval × 2^n, at most a day). A paused project does not poll. Without a GitHub authorization, polling reports a blocker.
+- Settings shows the last check, the changes sent, any problem and each fix attempt with its work status.
+
+Verified by `scripts/follow-prs-e2e.mjs` (fake model, fake gh, headless Chrome, a host restart and a 390px viewport); failures in `scripts/follow-prs-failures.md`. A red run against f8ffe5c is kept in `artifacts/follow-prs-red-*`. The follow-up-to-the-publishing-thread path has no E2E (the E2E PRs are not published by a worker), so only the new-worker path is covered.
+
+### Generic webhook
+
+`src/webhook.ts`: a separate loopback listener whose port is kept in `<home>/webhook.json`, so the URL survives restarts. It moves only if that port is taken. `POST /hook/<projectId>`:
+- Auth: `Authorization: Bearer <secret>` or `X-Hub-Signature-256` / `X-Signature-256: sha256=<HMAC-SHA256 of the raw body>`, compared in constant time. The 64-hex secret is per project; Rotate (two clicks in Settings, or `webhook-rotate` with confirmation) replaces it at once.
+- A disabled webhook and an unknown or inactive project all answer 404. Bodies over 1 MiB get 413 before buffering. More than 20 authenticated deliveries a minute per project get 429 with `Retry-After`.
+- Delivery ID: `X-Event-Id`, `X-GitHub-Delivery`, `X-Request-Id` or `Idempotency-Key`, else the SHA-256 of the body. A repeat answers 200 `duplicate: true`. The same ID with a different body gets 409. Event kind is `webhook.<X-Event-Type | X-GitHub-Event | delivery>`. The body arrives as UTF-8 text (first 30,000 characters) under an "untrusted data" preamble. A new delivery gets 202.
+- The browser port has no `/hook`, the webhook port has no `/api`, and the browser token is not a webhook secret.
+
+Verified by `scripts/webhook-e2e.mjs` (fake model, headless Chrome, a host restart and a 390px viewport); failures in `scripts/webhook-failures.md`. A red run against f8ffe5c is kept in `artifacts/webhook-red-*`.
+
+`scripts/fake-gh.mjs` now also serves PR `state`, `merged_at`, `updated_at` and `user`, `state=all` listing, check runs per commit, PR reviews, review comments and issue comments on PRs, and `failPaths` fault injection.

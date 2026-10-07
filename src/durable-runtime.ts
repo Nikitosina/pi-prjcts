@@ -30,6 +30,8 @@ import { Project as ProjectSchema, addNote, notes, parse, projectDir, type Durab
 import { catalog } from "./workspace-authorization.ts";
 import { scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
+import { followRuntime } from "./durable-follow.ts";
+import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { githubOperations, type ExecutionInput } from "./github-operations.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
@@ -160,6 +162,12 @@ export type DurableProjectRuntime = {
   monitorCreate(input: MonitorInput): ReturnType<ReturnType<typeof monitorRuntime>["create"]>;
   monitorSetEnabled(id: string, enabled: boolean): ReturnType<ReturnType<typeof monitorRuntime>["setEnabled"]>;
   monitorSnapshot(): ReturnType<ReturnType<typeof monitorRuntime>["snapshot"]>;
+  /** Follow PRs: poll now (joins a running poll), status, and restart the schedule after an opt-in change. */
+  followPoll(): Promise<unknown>;
+  followSnapshot(): ReturnType<ReturnType<typeof followRuntime>["snapshot"]>;
+  followKick(): void;
+  /** Automation event (webhook) into the chat chosen in Settings; a repeated event ID returns the first intent with `duplicate`. */
+  ingestAutomationEvent(input: { eventId: string; kind: string; payload: string }): ReturnType<ReturnType<typeof scheduleRuntime>["ingest"]>;
   operationRequest: OperationApprovals["request"];
   operationDecide: OperationApprovals["decide"];
   operationSnapshot: OperationApprovals["snapshot"];
@@ -362,7 +370,19 @@ export async function openDurableProject(input: { project: Project; dir: string;
       void operation.finally(() => monitorOperations.delete(operation));
     }, 60000);
     monitorWake.unref();
+    // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
+    const eventTarget = async (): Promise<Conversation> => { try { const { conversation, chat } = await resolveChat(loadAutomations(project.id).eventChat); return chat.archived ? root : conversation; } catch { return root; } };
+    const follow = followRuntime(root, project.id, schedules, {
+      planWork: async (work, chat) => { await admitting(() => planning.plan(root, { work: [{ id: work.workId, threadId: work.threadId, role: "worker", text: work.text, requestId: work.requestId, workspaceScopeId: work.workspaceScopeId }] }, chat as Conversation["id"])); },
+      followUp: (id, text, requestId, chat) => admitting(() => planning.followUp(root, id, text, requestId, chat as Conversation["id"])),
+      threads: async () => (await planning.threadIdentities(root)).map(thread => ({ threadId: thread.threadId, conversationId: Number(thread.conversationId), stopping: thread.stopping })),
+      workStatus: async id => (await planning.snapshot(root)).work.find(work => work.id === id)?.status ?? null,
+      target: eventTarget,
+    }, () => closed);
+    const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
+    followWake.unref();
     stopMonitors = async () => {
+      clearInterval(followWake); follow.abort();
       clearInterval(monitorWake);
       await monitors.close();
       await Promise.allSettled([...monitorOperations]);
@@ -548,7 +568,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const generations = await coordinatorGenerationTasks(openedStorage, child, await openedHarness.inspect(context));
         return { threadId, items: page.items, offset: page.offset, limit: page.limit, textLimit: page.textLimit, total: page.total, nextOffset: page.nextOffset, observedAtMs: page.observedAtMs, toolNames: (await child.agent(context)).tools.map(tool => tool.name), generations: generations.slice(-10).map(({ phase, state, terminal, outcome }) => ({ phase, state, terminal, outcome })) };
       },
-      pausePlan: async () => { monitors.abort(); operations.abort(); commands.abort(); const paused = await schedules.mutex.run(async () => { dispatchReady = false; const value = await planning.pause(root); await input.afterPausePersisted?.({ paused: value.snapshot.paused, pausing: value.snapshot.pausing, rootConversationId: Number(root.id) }); return value; }); await Promise.all(paused.taskIds.map(id => openedHarness.abortTask(id, context))); await Promise.all(paused.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true }))); await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true }); await abortChats(openedHarness); await cancelLegacyWorkers(openedHarness, openedStorage, root); await planning.completePause(root); await schedules.reconcile(); return planning.snapshot(root); },
+      pausePlan: async () => { monitors.abort(); follow.abort(); operations.abort(); commands.abort(); const paused = await schedules.mutex.run(async () => { dispatchReady = false; const value = await planning.pause(root); await input.afterPausePersisted?.({ paused: value.snapshot.paused, pausing: value.snapshot.pausing, rootConversationId: Number(root.id) }); return value; }); await Promise.all(paused.taskIds.map(id => openedHarness.abortTask(id, context))); await Promise.all(paused.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true }))); await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true }); await abortChats(openedHarness); await cancelLegacyWorkers(openedHarness, openedStorage, root); await planning.completePause(root); await schedules.reconcile(); return planning.snapshot(root); },
       scheduleCreate: input => schedules.create(input),
       scheduleSetEnabled: async (id, enabled) => { const value = await schedules.setEnabled(id, enabled); await armWake(); return value; },
       scheduleSetEventOptIn: enabled => schedules.setEventOptIn(enabled),
@@ -558,6 +578,10 @@ export async function openDurableProject(input: { project: Project; dir: string;
       monitorCreate: value => monitors.create(value),
       monitorSetEnabled: (id, enabled) => monitors.setEnabled(id, enabled),
       monitorSnapshot: () => monitors.snapshot(),
+      followPoll: () => { assertOpen(); return follow.poll(true); },
+      followSnapshot: () => { assertOpen(); return follow.snapshot(); },
+      followKick: () => follow.kick(),
+      ingestAutomationEvent: async value => { assertOpen(); return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true }); },
       resumePlan: async () => schedules.mutex.run(async () => { try { const value = await planning.resume(root); dispatchReady = true; await armWake(); return value; } catch (error) { dispatchReady = false; throw error; } }),
       planSnapshot: async () => planning.snapshot(root),
       operationRequest: approvals.request,

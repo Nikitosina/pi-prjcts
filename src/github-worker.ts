@@ -128,6 +128,11 @@ export function githubWriteInspector(root: Conversation, projectId: string) {
   return { inspect, close };
 }
 
+/** PRs this project opened (verified create-pr receipts) and the worker conversation that opened each. */
+export async function githubPublishedPullRequests(root: Conversation, numericId: number): Promise<Array<{ number: number; conversationId: number }>> {
+  return root.commit(async tx => (await tx.doc(Writes, root.id)).items.flatMap(row => row.operation === "create-pr" && row.state === "done" && row.effect.kind === "pr" && row.resource.startsWith(`${numericId}:pr:`) ? [{ number: row.effect.number, conversationId: row.conversationId }] : []), BACKGROUND_CONTEXT);
+}
+
 export async function githubPublishedHead(root: Conversation, input: { scopeId: string; numericId: number; pullRequest: number }) {
   return root.commit(async tx => {
     const rows = (await tx.doc(Writes, root.id)).items;

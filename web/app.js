@@ -266,7 +266,7 @@ function setTab(next) {
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") void loadAutomationStrip();
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); }
 }
 
 function render() {
@@ -386,9 +386,54 @@ function renderPanels() {
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(false, wholeRepository ? "3. Worker skills" : "4. Worker skills", wholeRepository ? "Configured Pi skills are available automatically." : "Optional, explicitly selected repository skills.")].join(""));
-  if (tab === "settings" && plan) void loadAutomationStrip();
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); }
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
+}
+
+// Events in: Follow PRs and the generic webhook (one card in Settings, rendered from automation-snapshot).
+let eventsIn = null;
+async function loadEventsIn(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#events-in");
+  if (!id || !plan || !force && eventsIn?.projectId === id) return;
+  if (eventsIn?.projectId !== id) eventsIn = { projectId: id, data: null, reveal: false, rotateArmed: false };
+  try { const data = await api({ action: "automation-snapshot", id }); if (id === projectId && current === generation) { eventsIn.data = data; renderEventsIn(); } }
+  catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Events unavailable: ${esc(error.message)}</p>`; }
+}
+const everyChoices = [[60000, "1 min"], [300000, "5 min"], [900000, "15 min"], [3600000, "1 hour"]];
+function renderEventsIn() {
+  const data = eventsIn?.data, node = document.querySelector("#events-in");
+  if (!data) return;
+  const f = data.follow, chats = (view?.chats ?? [{ id: "main", title: "Main" }]).filter(chat => !chat.archived || chat.id === data.eventChat);
+  const ago = at => at ? when(at) : "never";
+  const fixes = (f?.fixes ?? []).map(fix => `<li><b>${esc(fix.pr)}</b> ${fix.attempts.map((item, index) => `<span class="fix-attempt ${esc(item.status ?? (item.error ? "failed" : "none"))}" title="${esc(item.error ?? item.mode)}">${index + 1}: ${esc(item.sha.slice(0, 7))} · ${esc(item.mode === "none" ? "no scope" : item.status ?? (item.error ? "dispatch failed" : "pending"))}</span>`).join(" ")}</li>`).join("");
+  node.innerHTML = `<div class="events-in">
+    <label class="field">Send events to <select id="event-chat">${chats.map(chat => `<option value="${esc(chat.id)}" ${chat.id === data.eventChat ? "selected" : ""}>${esc(chat.title)}${chat.archived ? " (archived, using Main)" : ""}</option>`).join("")}</select></label>
+    <fieldset class="events-group"><legend>Follow PRs</legend>
+      <p class="note">${data.githubRepositories.length ? `Repositories: ${esc(data.githubRepositories.join(", "))}. Opened, merged and closed PRs, CI results, reviews and comments (bots too). The first check records what exists without sending it.` : "Connect GitHub in Owner setup first."}</p>
+      <label class="check"><input type="checkbox" id="follow-enabled" ${f?.enabled ? "checked" : ""}> Follow all PRs</label>
+      <label class="field">Check every <select id="follow-every">${everyChoices.map(([ms, label]) => `<option value="${ms}" ${f?.everyMs === ms ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+      <label class="check"><input type="checkbox" id="follow-autofix" ${f?.autoFix ? "checked" : ""}> When CI fails on a PR this project opened, send a worker to fix it</label>
+      <label class="field">Fix attempts per PR <input type="number" id="follow-cap" min="0" max="10" value="${esc(f?.fixCap ?? 3)}"></label>
+      <div class="kv follow-status"><span>Last check</span><b id="follow-last">${esc(ago(f?.lastPollAtMs))}${f?.polling ? " · checking…" : ""}</b><span>Changes sent</span><b id="follow-events">${esc(f?.events ?? 0)}</b>${f?.lastError ? `<span>Problem</span><b id="follow-error" class="bad">${esc(f.lastError)}</b>` : ""}</div>
+      ${fixes ? `<ul id="follow-fixes" class="fix-list">${fixes}</ul>` : ""}
+      <div class="row"><button data-action="follow-poll" ${f?.enabled ? "" : "disabled"}>Check now</button></div>
+    </fieldset>
+    <fieldset class="events-group"><legend>Webhook</legend>
+      <label class="check"><input type="checkbox" id="webhook-enabled" ${data.webhook.enabled ? "checked" : ""}> Accept webhook deliveries</label>
+      <div class="kv"><span>URL</span><code id="webhook-url" class="mono">${esc(data.webhook.url)}</code><span>Secret</span><code id="webhook-secret" class="mono">${eventsIn.reveal ? esc(data.webhook.secret) : "•".repeat(16)}</code></div>
+      <div class="row"><button class="ghost small" data-action="webhook-reveal">${eventsIn.reveal ? "Hide" : "Reveal"} secret</button><button class="ghost small" data-action="webhook-copy" data-what="url">Copy URL</button><button class="ghost small" data-action="webhook-copy" data-what="secret">Copy secret</button><button class="small ${eventsIn.rotateArmed ? "danger" : "ghost"}" data-action="webhook-rotate">${eventsIn.rotateArmed ? "Confirm: rotate secret" : "Rotate secret"}</button></div>
+      <p class="note">POST any body. Authenticate with <code>Authorization: Bearer &lt;secret&gt;</code> or <code>X-Hub-Signature-256: sha256=&lt;HMAC-SHA256 of the body&gt;</code>. <code>X-Event-Id</code> (or <code>X-GitHub-Delivery</code>) deduplicates retries; <code>X-Event-Type</code> names the event. Up to 1 MiB, 20 a minute.</p>
+    </fieldset>
+    <div class="row"><button class="primary" data-action="automation-save">Save</button></div>
+  </div>`;
+}
+async function saveEventsIn() {
+  const value = selector => document.querySelector(selector);
+  const cap = Number(value("#follow-cap").value);
+  if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10) throw new Error("Fix attempts must be 0-10");
+  const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked } } }, "Events settings saved.");
+  eventsIn.data = data; renderEventsIn();
 }
 
 async function loadAutomationStrip() {
@@ -524,12 +569,23 @@ function reportHtml(message, match) {
   const known = plan?.work.some(work => work.threadId === threadId);
   return `<details class="report ${esc(status)}"><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
 }
+// Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
+function eventHtml(message, kind, body) {
+  const github = kind === "github.follow", hook = kind.startsWith("webhook.");
+  const changes = github ? (body.match(/^- /gm) ?? []).length : 0;
+  const title = github ? "GitHub activity" : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
+  // Webhook bodies follow a fixed preamble line; summarize the body itself.
+  const summary = github ? `${changes} change${changes === 1 ? "" : "s"}${/auto-fix (dispatched|sent)/.test(body) ? " · auto-fix sent" : ""}` : clip((hook ? body.slice(body.indexOf("\n\n") + 2) : body).replace(/\s+/g, " ").trim(), 120);
+  return `<details class="report event-card ${github ? "github" : hook ? "webhook" : "event"}" data-kind="${esc(kind)}"><summary><span class="event-mark">${github ? "PR" : hook ? "↯" : "•"}</span><b>${esc(title)}</b><span class="report-task">${esc(summary)}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}</div></details>`;
+}
 function chatMessageHtml(message, assistant) {
   if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message);
   const thought = message.thinking ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>` : "";
   if (!message.text?.trim()) return thought;
   const report = message.role === "user" && reportPattern.exec(message.text);
   if (report) return reportHtml(message, report);
+  const event = message.role === "user" && /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text);
+  if (event) return eventHtml(message, event[1], event[2]);
   const label = message.role === "user" ? "You" : message.role === "assistant" ? assistant : message.role;
   // The host shows an invoked skill as `/skill:<name> args`; render the command as a chip.
   const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
@@ -970,6 +1026,17 @@ async function action(node) {
     case "lifecycle-confirm": lifecycleConfirm(node.dataset.project, node.dataset.operation); break;
     case "open-retained": showDialog("Open known retained project", '<p>Enter an owned project UUID to inspect retained state, including projects removed from the ordinary list. This does not restore/resume it.</p><form data-open-retained><label>Known project UUID<input name="id" required maxlength="36" autocomplete="off"></label><button type="submit">Open retained metadata</button></form>'); break;
     case "settings-list": await settingsList(); break;
+    case "automation-refresh": await loadEventsIn(true); break;
+    case "automation-save": await saveEventsIn(); break;
+    case "follow-poll": { const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub."); eventsIn.data = data; renderEventsIn(); break; }
+    case "webhook-reveal": eventsIn.reveal = !eventsIn.reveal; renderEventsIn(); break;
+    case "webhook-copy": await navigator.clipboard.writeText(node.dataset.what === "url" ? eventsIn.data.webhook.url : eventsIn.data.webhook.secret); toast(node.dataset.what === "url" ? "Webhook URL copied." : "Webhook secret copied."); break;
+    case "webhook-rotate": {
+      if (!eventsIn.rotateArmed) { eventsIn.rotateArmed = true; renderEventsIn(); setTimeout(() => { if (eventsIn?.rotateArmed) { eventsIn.rotateArmed = false; renderEventsIn(); } }, 6000); break; }
+      eventsIn.rotateArmed = false;
+      const data = await mutate({ action: "webhook-rotate", id: projectId, confirm: projectId }, "Webhook secret rotated. The old secret no longer works.");
+      eventsIn.data = data; eventsIn.reveal = true; renderEventsIn(); break;
+    }
     case "owner-setup": await ownerSetupDialog(); break;
     case "workspace-quick": await workspaceQuickDialog(); break;
     case "workspace-quick-confirm": await workspaceQuickConfirm(node.dataset.project, node.dataset.revision); break;
