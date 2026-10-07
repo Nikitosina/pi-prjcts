@@ -44,11 +44,11 @@ function summary(issue: Issue) {
   };
 }
 
-export function coordinatorGithubTools(input: { projectId: string; root: () => Conversation | undefined }) {
+export function coordinatorGithubTools(input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }) {
   /** Re-read on every call: a revoked or stale grant (workspace changed since authorization) stops working immediately. */
   function grant(api: ToolExecutionApi, requested?: string): GithubAuthorization {
     const root = input.root();
-    if (!root || api.conversationId !== root.id) throw new Error("GitHub issue tools are coordinator-only");
+    if (!root || !input.isCoordinator(api.conversationId)) throw new Error("GitHub issue tools are coordinator-only");
     const project = loadProject(input.projectId);
     if (project.archived || project.deleted) throw new Error("Project is archived or deleted");
     const revision = authorizationFingerprint(project), owner = trustedOwner();

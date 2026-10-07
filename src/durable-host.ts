@@ -9,17 +9,18 @@ export async function openDurableHost(project: Project, configuredSkillLoader?: 
   try {
     if ((await owner.planSnapshot()).paused) return owner;
     for (const job of jobs(project.id).filter(job => job.state === "queued" || job.state === "running")) {
-      await owner.admit(job.text, { requestId: job.id });
+      await owner.admit(job.text, { requestId: job.id, chatId: job.chatId });
     }
     return owner;
   } catch (error) { await owner.close(); throw error; }
 }
 
-export async function durableHostSnapshot(owner: DurableProjectRuntime): Promise<Snapshot> {
-  const view = await owner.snapshot();
+export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string): Promise<Snapshot> {
+  const view = await owner.snapshot(chatId);
   const paused = (await owner.planSnapshot()).paused;
   const project = loadProject(view.project.id);
-  const ledger = jobs(project.id);
+  // Each chat has its own ledger; jobs without a chat belong to Main.
+  const ledger = jobs(project.id).filter(job => (job.chatId ?? "main") === view.chatId);
   for (const job of ledger) {
     const submission = view.coordinator.submissions.find(item => item.requestId === job.id);
     if (!submission) continue;
@@ -35,7 +36,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime): Promise
   // Only the newest settled turn decides attention; a later success clears an earlier failure.
   const settled = ledger.findLast(job => job.state === "done" || job.state === "failed");
   project.problem = settled?.state === "failed" ? settled.error : null;
-  project.phase = project.problem ? "attention" : view.coordinator.busy ? "busy" : "ready";
+  project.phase = project.problem ? "attention" : view.chats.some(chat => chat.busy) ? "busy" : "ready";
   saveProject(project);
   const dir = projectDir(project.id);
   return {
@@ -46,6 +47,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime): Promise
     activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
+    chatId: view.chatId, chats: view.chats,
   };
 }
 

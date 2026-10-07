@@ -204,7 +204,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         });
         // The answer is recorded first; waking the coordinator is best effort (a paused project keeps it for later).
         if (input.action === "answer" && entry.kind === "question") {
-          try { await dispatchRequest({ action: "message", id: input.id, text: `Owner answered your question "${entry.title}":\n${input.text}` }); }
+          // The answer wakes the chat that asked; questions from before chats existed go to Main.
+          const asked = entry.native ? (await (await durable(input.id)).chats()).find(chat => chat.conversationId === entry.native?.conversationId)?.id : undefined;
+          try { await dispatchRequest({ action: "message", id: input.id, text: `Owner answered your question "${entry.title}":\n${input.text}`, ...(asked && asked !== "main" ? { chatId: asked } : {}) }); }
           catch (error) { recordHostEvent("answer-delivery-deferred", errorText(error)); }
         }
         return entry;
@@ -379,7 +381,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       } finally { settingsUpdating.delete(input.id); }
     }
-    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id)) : (await runtime(input.id)).snapshot();
+    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId) : (await runtime(input.id)).snapshot();
+    case "chat-create": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted || project.archived) throw new Error("Inactive project cannot open a chat"); }, operation: owner => owner.chatCreate(input.title) });
+    case "chat-update": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted) throw new Error("Project is deleted"); }, operation: owner => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }) });
     case "delete": return lifecycle(input.id, () => {
       if (input.confirm !== input.id) throw new Error("Deletion requires confirmation matching project id");
     }, async owner => {
@@ -620,7 +624,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const project = loadProject(input.id);
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
-        return { id: randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null } satisfies import("./state.ts").Job;
+        return { id: randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}) } satisfies import("./state.ts").Job;
       };
       if (loadProject(input.id).runtime === "durable") return withDurableOwner({ id: input.id, validate: project => {
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
@@ -631,8 +635,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const text = await expandSkillCommand(await configuredSkills(input.id), job.text);
         const plan = await owner.planSnapshot();
         if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
+        // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+        const chat = (await owner.chats()).find(item => item.id === (input.chatId ?? "main"));
+        if (!chat) throw new Error("Unknown chat for this project");
+        if (chat.archived) throw new Error("Chat is archived; restore it before sending");
         saveJob(input.id, job);
-        await owner.admit(text, { requestId: job.id });
+        await owner.admit(text, { requestId: job.id, chatId: input.chatId, title: job.text });
         return job;
       } });
       ownedProjectDir(input.id);
@@ -681,7 +689,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   }
 }
 
-const web = await startWeb(dispatch, async (id, onFrame, onEnd) => (await durable(id)).watchLive(onFrame, onEnd));
+const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId));
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");

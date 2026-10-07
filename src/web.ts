@@ -7,7 +7,7 @@ import { readEvidence } from "./evidence.ts";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 
-type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void) => Promise<() => void>;
+type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
 const liveStreams = new Set<() => void>();
 
@@ -73,8 +73,10 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
       if (request.method === "GET" && url.pathname === "/live") {
         const id = url.searchParams.get("project") ?? "";
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
+        const chat = url.searchParams.get("chat") ?? "main";
+        if (!/^(main|[a-f0-9-]{36})$/.test(chat)) throw new Error("Invalid chat ID");
         loadProject(id);
-        await serveLive(response, headers, (onFrame, onEnd) => watchLive(id, onFrame, onEnd));
+        await serveLive(response, headers, (onFrame, onEnd) => watchLive(id, onFrame, onEnd, chat));
         return;
       }
       if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {

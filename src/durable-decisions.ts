@@ -13,7 +13,7 @@ function copy(entry: Question): Question {
   return { kind: "question", id: entry.id, at: entry.at, title: entry.title, question: entry.question, choices: [...entry.choices], result: null,
     ...(entry.native ? { native: { projectId: entry.native.projectId, conversationId: entry.native.conversationId, taskId: entry.native.taskId, callId: entry.native.callId } } : {}) };
 }
-export function durableDecisions(options: { projectId: string; dir: string; enabled: boolean; root: () => Conversation | undefined }) {
+export function durableDecisions(options: { projectId: string; dir: string; enabled: boolean; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }) {
   function owner(): Conversation {
     const root = options.root();
     if (!root) throw new Error("Durable decision owner is unavailable");
@@ -25,7 +25,7 @@ export function durableDecisions(options: { projectId: string; dir: string; enab
     async execute(args, api, context) {
       context.abortSignal?.throwIfAborted();
       const root = owner();
-      if (!options.enabled || api.conversationId !== root.id) throw new Error("Decision creation requires an explicit coordinator grant");
+      if (!options.enabled || !options.isCoordinator(api.conversationId)) throw new Error("Decision creation requires an explicit coordinator grant");
       const key = `${api.taskId}:${api.callId}`;
       const entry = await api.commit(async tx => {
         const planning = await tx.doc(DurablePlanning, root.id);

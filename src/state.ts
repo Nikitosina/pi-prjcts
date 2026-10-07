@@ -74,8 +74,11 @@ export const Job = Type.Object({
   id: Id, text, at: text,
   state: Type.Union([Type.Literal("queued"), Type.Literal("running"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("interrupted")]),
   error: Type.Union([Type.String(), Type.Null()]),
+  /** Coordinator chat the message went to; absent on older jobs and for Main. */
+  chatId: Type.Optional(Id),
 }, { additionalProperties: false });
 export type Job = Static<typeof Job>;
+export const ChatId = Type.Union([Type.Literal("main"), Id]);
 const answer = Type.Union([
   Type.Object({ at: text, text, job: Id }, { additionalProperties: false }),
   Type.Object({ at: text, text, delivery: Type.Literal("manual") }, { additionalProperties: false }),
@@ -141,6 +144,8 @@ export const Snapshot = Type.Object({
   runStates: Type.Array(Type.Object({ id: Id, state: text, summary: Type.String(), sessionFile: Type.Union([text, Type.Null()]) })),
   durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(Type.Object({ tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) }, { additionalProperties: false })),
+  chatId: Type.Optional(ChatId),
+  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean() }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
 export const Delegation = Type.Object({ runId: Id, role: Role, dir: text });
@@ -174,7 +179,9 @@ export const Request = Type.Union([
     models: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }, { additionalProperties: false })),
     knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 }))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("show"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("chat-create"), id: Id, title: Type.Optional(Type.String({ maxLength: 120 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("chat-update"), id: Id, chatId: ChatId, title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })), archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("pause"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("plan-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("resume"), id: Id }, { additionalProperties: false }),
@@ -212,7 +219,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("legacy-thread-history"), id: Id, name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-history"), id: Id, threadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("message"), id: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("schedule-create"), id: Id, scheduleId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), atMs: Type.Integer({ minimum: 0 }), everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })), calendar: Type.Optional(Type.Union([
     Type.Object({ kind: Type.Literal("daily"), timezone: Type.String({ minLength: 1, maxLength: 256 }), time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }) }, { additionalProperties: false }),
     Type.Object({ kind: Type.Literal("weekly"), timezone: Type.String({ minLength: 1, maxLength: 256 }), time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }), days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }) }, { additionalProperties: false })

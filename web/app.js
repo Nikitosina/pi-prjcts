@@ -40,6 +40,9 @@ let providerInspection = null;
 let lastDraftError = null;
 let projects = [];
 let projectId = initial.searchParams.get("project");
+// Selected coordinator chat; "main" is the project's original coordinator. Drafts are kept per chat.
+let chatId = /^(main|[a-f0-9-]{36})$/.test(initial.searchParams.get("chat") ?? "") ? initial.searchParams.get("chat") : "main";
+function draftKey(id = projectId, chat = chatId) { return chat === "main" ? id : `${id}:${chat}`; }
 let view = null;
 let knowledgeDocs = [];
 // One SSE reader for the selected project; frames from other projects are dropped.
@@ -72,7 +75,7 @@ async function start() {
     projects = loaded;
     renderProjects();
     if (!projects.some(p => p.id === projectId)) projectId = projects[0]?.id ?? null;
-    changeProject(projectId);
+    changeProject(projectId, chatId);
   } catch (error) { if (current === generation) showError(error); }
 }
 
@@ -80,10 +83,12 @@ async function refresh() {
   if (!projectId) return;
   if (polling === generation) { refreshQueued = true; return; }
   const current = generation;
-  const id = projectId;
+  const id = projectId, chat = chatId;
   polling = current;
   try {
-    const next = await api({ action: "show", id });
+    let next;
+    try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) }); }
+    catch (error) { if (chat !== "main" && /Unknown chat/.test(error.message) && current === generation) { polling = null; changeChat("main"); return; } throw error; }
     if (current !== generation) return;
     const [nextPlan, nextApprovals, nextDocs] = await Promise.all(next.project.runtime === "durable" ? [api({ action: "plan-snapshot", id }), api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }), api({ action: "knowledge-list", id })] : [null, null, api({ action: "knowledge-list", id })]);
     if (current !== generation) return;
@@ -110,23 +115,23 @@ async function refresh() {
 let refreshQueued = false;
 
 function ensureLive() {
-  if (liveStream?.id === projectId) return;
+  if (liveStream?.id === projectId && liveStream.chat === chatId) return;
   liveStream?.controller.abort();
-  const stream = { id: projectId, controller: new AbortController() };
+  const stream = { id: projectId, chat: chatId, controller: new AbortController() };
   liveStream = stream;
   void readLive(stream).finally(() => {
     if (liveStream !== stream) return;
     liveStream = null;
     if (stream.controller.signal.aborted) return;
     // Runtime closed or the network dropped: back off, then reconnect through the next refresh.
-    setTimeout(() => { if (projectId === stream.id && !liveStream) void refresh(); }, liveRetryMs);
+    setTimeout(() => { if (projectId === stream.id && chatId === stream.chat && !liveStream) void refresh(); }, liveRetryMs);
     liveRetryMs = Math.min(liveRetryMs * 2, 15000);
   });
 }
 
 async function readLive(stream) {
   try {
-    const response = await fetch(`/live?project=${encodeURIComponent(stream.id)}`, { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal });
+    const response = await fetch(`/live?project=${encodeURIComponent(stream.id)}&chat=${encodeURIComponent(stream.chat)}`, { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal });
     if (!response.ok || !response.body) return;
     liveRetryMs = 1000;
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -188,19 +193,20 @@ function renderLive() {
   renderWorkingPill();
 }
 
-function changeProject(id) {
+function changeProject(id, chat = "main") {
   generation++;
   workerChat = null;
-  projectId = id;
+  projectId = id; chatId = chat;
   captureDialogDraft();
   liveStream?.controller.abort(); liveStream = null; liveFrame = null; renderLive(); knowledgeDocs = []; stickToBottom = true;
   view = null; plan = null; observability = null; observabilityLoading = false; eventOffset = 0; approvalPage = null; operationCache.clear(); knowledgeCache.clear(); libraryCache.clear(); libraryPayload = null; settingsCache = null; modelCache.clear(); providerCache.clear(); routineCache = null; selected = null;
   closeDialog();
   const url = new URL(location.href);
   if (id) url.searchParams.set("project", id); else url.searchParams.delete("project");
+  if (chat === "main") url.searchParams.delete("chat"); else url.searchParams.set("chat", chat);
   history.replaceState(null, "", url);
   document.querySelector("#projects").value = id ?? "";
-  document.querySelector("#compose textarea").value = drafts.get(id) ?? ""; autosize(document.querySelector("#compose textarea"));
+  document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? ""; autosize(document.querySelector("#compose textarea"));
   document.querySelector("#compose button").disabled = !id || busy;
   html.clear(); usageObs = null;
   const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
@@ -209,11 +215,36 @@ function changeProject(id) {
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
   document.querySelector("#subtitle").textContent = id ? "Restoring the coordinator and worker controls…" : "Choose a trusted workspace. Then send the coordinator any request.";
   document.querySelector("#avatar").textContent = initials(p?.name);
-  for (const selector of ["#queue", "#letter", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
+  for (const selector of ["#chat-bar", "#queue", "#letter", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
+  document.querySelector("#chat-bar").dataset.html = "";
   renderProjects();
   document.querySelector("#warning").hidden = true;
   disableActions();
   void refresh();
+}
+
+// Switching chats keeps the project, plan and rail; only the transcript, live stream and draft change.
+function changeChat(chat) {
+  if (chat === chatId && view?.chatId === chat) return;
+  generation++;
+  chatId = chat;
+  const url = new URL(location.href);
+  if (chat === "main") url.searchParams.delete("chat"); else url.searchParams.set("chat", chat);
+  history.replaceState(null, "", url);
+  liveStream?.controller.abort(); liveStream = null; liveFrame = null; renderLive(); stickToBottom = true;
+  closeSkillMenu();
+  const textarea = document.querySelector("#compose textarea");
+  textarea.value = drafts.get(draftKey()) ?? ""; autosize(textarea);
+  if (view) { view = { ...view, chatId: chat, messages: [], jobs: [] }; render(); }
+  void refresh();
+}
+function currentChat() { return view?.chats?.find(chat => chat.id === chatId) ?? null; }
+function renderChats() {
+  const node = document.querySelector("#chat-bar"), chats = view?.chats ?? [];
+  const current = currentChat(), archived = chats.filter(chat => chat.archived && chat.id !== chatId);
+  const button = chat => `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span></button>`;
+  const next = !view?.chats ? "" : `<nav id="chat-list" class="chat-list" aria-label="Chats">${chats.filter(chat => !chat.archived || chat.id === chatId).map(button).join("")}</nav><button type="button" class="ghost small" data-action="chat-new" title="Start a chat that shares this project's workers and knowledge">＋ New chat</button><span class="chat-tools">${current ? `<button type="button" class="ghost small" data-action="chat-rename">Rename</button>` : ""}${current && current.id !== "main" ? current.archived ? `<button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(current.id)}">Restore</button>` : `<button type="button" class="ghost small" data-action="chat-archive">Archive</button>` : ""}${archived.length ? `<details id="chat-archived" class="chat-archived"><summary>Archived (${archived.length})</summary><div class="archived-list">${archived.map(chat => `<div class="archived-row"><span>${esc(chat.title)}</span><span><button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button> <button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(chat.id)}">Restore</button></span></div>`).join("")}</div></details>` : ""}</span>`;
+  if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
 
 function renderProjects() {
@@ -251,6 +282,7 @@ function render() {
   document.querySelector("#avatar").textContent = initials(view.project.name);
   for (const selector of ["#needs-count"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
   renderProjects();
+  renderChats();
   document.querySelector("#subtitle").textContent = pendingTotal && pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for the rest.` : view.project.objective ?? "";
   setHtml("#queue", pending.length < 2 ? "" : pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : item.kind === "approval" ? "Exact bound operation, not an execution" : `${esc(item.outcome)} run ready for review`}</small></span><span class="arrow">↗</span></button>`).join(""));
   setHtml("#letter", entry ? letter(entry) : "");
@@ -537,7 +569,7 @@ function pickSkill(name) {
   textarea.value = `/skill:${name} ${rest}`;
   const caret = name.length + 8;
   textarea.setSelectionRange(caret, caret);
-  drafts.set(projectId, textarea.value); autosize(textarea); persistDraftsSafely();
+  drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
   closeSkillMenu(); textarea.focus();
 }
 // Folders the owner collapsed, shared by the rail and the Knowledge tab; raw legacy answers start collapsed.
@@ -591,7 +623,7 @@ function ago(at) { const ms = Date.now() - new Date(at).getTime(); return ms < 6
 function size(bytes) { return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
 function badge(value) { return `<span class="badge ${esc(value)}"><span class="dot"></span>${esc(value)}</span>`; }
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
-function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted; }
+function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived); }
 function disableActions() {
   document.querySelectorAll('#letter button, #letter textarea, .panel button').forEach(node => { node.disabled = busy || !view; });
   document.querySelectorAll('#compose button, #compose textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
@@ -795,7 +827,29 @@ async function action(node) {
       const job = view.jobs.find(item => item.id === node.dataset.job);
       if (node.dataset.project !== projectId || !job || !["failed", "interrupted"].includes(job.state)) throw new Error("Displayed failed message changed; refresh before retrying");
       node.disabled = true; // a second click must not resend
-      await mutate({ action: "message", id: projectId, text: job.text }, "Message resent to the coordinator."); break;
+      await mutate({ action: "message", id: projectId, text: job.text, ...(chatId === "main" ? {} : { chatId }) }, "Message resent to the coordinator."); break;
+    }
+    case "chat-select": changeChat(node.dataset.chat); break;
+    case "chat-new": {
+      const id = projectId, created = await mutate({ action: "chat-create", id }, "New chat opened. It shares this project's workers and knowledge.");
+      if (id === projectId) changeChat(created.id);
+      break;
+    }
+    case "chat-rename": {
+      const chat = currentChat(); if (!chat) throw new Error("Chat list is still loading");
+      showDialog("Rename chat", `<form data-chat-rename data-project="${esc(projectId)}" data-chat="${esc(chat.id)}"><label>Title<input name="title" maxlength="120" required value="${esc(chat.title)}"></label><div class="row"><button type="submit" class="primary">Rename</button></div></form>`);
+      document.querySelector("#dialog form[data-chat-rename] input").select();
+      break;
+    }
+    case "chat-archive": {
+      const chat = currentChat(); if (!chat || chat.id === "main") throw new Error("Main cannot be archived");
+      await mutate({ action: "chat-update", id: projectId, chatId: chat.id, archived: true }, "Chat archived. Its history is kept.");
+      changeChat("main"); break;
+    }
+    case "chat-restore": {
+      const target = node.dataset.chat;
+      await mutate({ action: "chat-update", id: projectId, chatId: target, archived: false }, "Chat restored.");
+      changeChat(target); break;
     }
     case "accept": {
       if (entry?.kind !== "review" || entry.result || entry.run !== node.dataset.run) throw new Error("Displayed review changed or is resolved; refresh before deciding");
@@ -939,14 +993,19 @@ async function submit(form) {
       formDrafts.delete(draftKey); persistBrowserDrafts();
       if (projectId === target && workerChat?.threadId === threadId) await inspectThread(threadId);
     }
+  } else if (form.matches("[data-chat-rename]")) {
+    requireProject(form.dataset.project);
+    const title = data.get("title").trim(); if (!title) return;
+    await mutate({ action: "chat-update", id: form.dataset.project, chatId: form.dataset.chat, title }, "Chat renamed.");
+    closeCurrentDialog(id, version);
   } else if (form.id === "compose") {
     closeSkillMenu();
-    const submitted = data.get("message");
+    const submitted = data.get("message"), chat = chatId, key = draftKey(id, chat);
     const text = submitted.trim(); if (!text) return;
     persistBrowserDrafts();
-    await mutate({ action: "message", id, text }, "Request sent to the coordinator.");
-    if (drafts.get(id) === submitted) drafts.delete(id);
-    if (projectId === id && form.querySelector("textarea").value === submitted) { form.reset(); autosize(form.querySelector("textarea")); }
+    await mutate({ action: "message", id, text, ...(chat === "main" ? {} : { chatId: chat }) }, "Request sent to the coordinator.");
+    if (drafts.get(key) === submitted) drafts.delete(key);
+    if (projectId === id && chatId === chat && form.querySelector("textarea").value === submitted) { form.reset(); autosize(form.querySelector("textarea")); }
   } else if (form.matches("[data-answer-adopt]")) {
     const proposal = answerAdoption; requireProject(form.dataset.project);
     if (!proposal || proposal.projectId !== projectId || proposal.entryId !== form.dataset.entry || proposal.version !== version || data.get("confirm") !== projectId || answers.get(proposal.entryId) !== proposal.text) throw new Error("Draft adoption binding changed; inspect and confirm it again");
@@ -1173,10 +1232,10 @@ function report(error, frame = error instanceof UiRequestError ? error.frame : u
   else { const node = document.querySelector("#error"); node.dataset.source = "action"; node.textContent = text; node.hidden = false; }
 }
 document.addEventListener("click", event => { const node = event.target.closest("[data-action]"); if (node && !node.disabled) void uiAction(() => action(node)); });
-document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
+document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
 function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; }
 document.addEventListener("input", event => {
-  if (event.target.closest("#compose")) { drafts.set(projectId, event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
+  if (event.target.closest("#compose")) { drafts.set(draftKey(), event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
   const answerForm = event.target.closest("[data-answer]");
   if (answerForm?.dataset.project === projectId) answers.set(answerKey(projectId, answerForm.dataset.entry), answerForm.querySelector("textarea").value);
   const form = event.target.closest("[data-task-message], [data-inline-thread-send]");
@@ -1851,7 +1910,7 @@ function validateBrowserDraftState(state) {
   if (state?.settings !== undefined && (!pairs(state.settings) || state.settings.some(([key, value]) => !/^[a-f0-9-]{36}:(?:name|objective)$/.test(key) || !value || !text(value.text) || !/^[a-f0-9]{64}$/.test(value.expectedRevision)))) throw new Error("Malformed settings drafts; nothing restored or truncated");
   if (state?.uploads !== undefined && (!pairs(state.uploads) || state.uploads.some(([id, value]) => !uuid(id) || !value || value.importId !== id || !uuid(value.projectId) || typeof value.filename !== "string" || value.filename.length > 240 || typeof value.title !== "string" || value.title.length > 1000 || !["utf8", "base64"].includes(value.encoding) || typeof value.text !== "string" || value.text.length > 43692 || value.submittedFingerprint !== null && !/^[a-f0-9]{64}$/.test(value.submittedFingerprint)))) throw new Error("Malformed upload drafts; nothing restored or truncated");
   if (state?.knowledge !== undefined && (!pairs(state.knowledge) || state.knowledge.some(([key, value]) => !uuid(key.slice(0, 36)) || key[36] !== ":" || !knowledgePath(key.slice(37)) || !value || !text(value.text) || value.expectedRevision !== null && !/^[a-f0-9]{64}$/.test(value.expectedRevision))) || state?.knowledgePaths !== undefined && (!pairs(state.knowledgePaths) || state.knowledgePaths.some(([id, value]) => !uuid(id) || typeof value !== "string" || value.length > 240))) throw new Error("Malformed browser knowledge drafts; nothing restored or truncated");
-  if (!state || state.version !== 1 || !pairs(state.coordinator) || !pairs(state.answers) || !pairs(state.forms) || state.coordinator.some(([id, value]) => !uuid(id) || !text(value)) || state.answers.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !text(value)) || state.forms.some(([key, value]) => !/^[a-f0-9-]{36}:(?:steer|revise|thread-send|thread-steer):[a-f0-9-]{36}$/.test(key) || !value || !text(value.text) || !uuid(value.requestId) || value.submittedText !== null && !text(value.submittedText))) throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
+  if (!state || state.version !== 1 || !pairs(state.coordinator) || !pairs(state.answers) || !pairs(state.forms) || state.coordinator.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !text(value)) || state.answers.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !text(value)) || state.forms.some(([key, value]) => !/^[a-f0-9-]{36}:(?:steer|revise|thread-send|thread-steer):[a-f0-9-]{36}$/.test(key) || !value || !text(value.text) || !uuid(value.requestId) || value.submittedText !== null && !text(value.submittedText))) throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
 }
 function restoreBrowserDrafts() {
   try {

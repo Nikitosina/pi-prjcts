@@ -43,7 +43,7 @@ export function compactSkillText(text: string): string {
   return match ? `/skill:${match[1]}${match[3] ? ` ${match[3]}` : ""}` : text;
 }
 
-export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conversation | undefined }) {
+export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }) {
   const tool = defineTool({
     name: "projects_skill_file",
     description: "Read a file that belongs to a pi skill, e.g. a reference an invoked <skill> block mentions. path is relative to the skill's directory (default SKILL.md). Paged by characters.",
@@ -51,7 +51,7 @@ export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conve
     replay: "safe",
     async execute(args, api: ToolExecutionApi) {
       const root = input.root();
-      if (!root || api.conversationId !== root.id) throw new Error("Skill files are coordinator-only");
+      if (!root || !input.isCoordinator(api.conversationId)) throw new Error("Skill files are coordinator-only");
       const skill = input.loader?.getSkills().skills.find(item => item.name === args.skill);
       if (!skill) throw new Error(`Unknown skill ${args.skill}`);
       // Checked lexically first, then again after symlinks resolve.

@@ -269,3 +269,16 @@ Master-detail layout: the work list on the left, with the selected row marked; t
 Verified by `scripts/live-chain-e2e.mjs`; failures in `scripts/live-chain-failures.md`.
 
 Verified by `scripts/ui-polish-e2e.mjs`; failures in `scripts/ui-polish-failures.md`. Regression E2Es were updated for the deliberate changes: Workers card versus Recent results, tool-call icon colours, rail line format, one-click revoke, and the knowledge tree selectors in ui-polish and coordinator-live.
+
+## Multiple chats per project
+
+Each chat is its own Durable coordinator conversation. Main is the original root conversation; existing projects open with Main only and keep their transcript. Other chats are ownerless conversations listed in the root's `projects.chats` document. Each gets the root's coordinator configuration (model, instructions, tools, extensions) on creation, and again on every open if it differs, so recovery re-adds tools the same way it does for the root. Chats share knowledge, standing instructions, the one plan/worker pool, the Activity tab and the inbox.
+
+- Coordinator-only tools (worker management, questions, GitHub, library, skill files, knowledge writes) accept Main and any chat conversation, never a worker thread.
+- `projects_delegate` and `projects_worker_plan` admit into the root's plan from any chat. The work records the delegating chat (`chatConversationId`), and its report goes to that chat only. A follow-up, steer or retry reports to the chat that issued it; an owner thread follow-up keeps the thread's chat. An owner answer wakes the chat that asked the question.
+- Host: `show`/`message` take an optional `chatId` (`main` or a UUID); jobs record `chatId`, and each chat has its own ledger. `chat-create` and `chat-update` (title, archived) manage the list. Main cannot be archived. An archived chat keeps its history and refuses messages until restored. A new chat is titled from its first message. `/live?project=…&chat=…` streams one chat. Project pause aborts every chat.
+- UI: chat pills above the transcript (busy dot), New chat, Rename, Archive, and an Archived list with Open and Restore. The URL keeps `chat`, and drafts are kept per chat.
+
+Not covered: usage and Observability still count only Main and the workers, and `project.problem` comes from the chat being viewed.
+
+Verified by `scripts/multi-chat-e2e.mjs` (fake model and headless Chrome, private HOME, with a host restart); failures are listed in `scripts/multi-chat-failures.md`.
