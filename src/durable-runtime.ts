@@ -323,6 +323,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     registry.install(reviewerTools.extension);
     registry.install(planning.extension);
     registry.install(planning.capabilities);
+    registry.install(planning.delegation);
     registry.install(workerManagement.extension);
     registry.install(github.extension);
     registry.install(skillFiles.extension);

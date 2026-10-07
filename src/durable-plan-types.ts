@@ -16,6 +16,8 @@ export type DurablePlanWork = Readonly<{
   requiredTools?: readonly string[];
   /** Host-persisted workspace scope identifier; model input never carries raw provider/path/owner data. */
   workspaceScopeId?: string;
+  /** Parent worker thread of a child (one level of nesting); the child's results go to that thread. */
+  parentThreadId?: string;
 }>;
 export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork[] }>;
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */
@@ -27,7 +29,7 @@ export type DurableResolvedAttempt = Readonly<{
 }>;
 export type DurablePlanWorkSnapshot = Readonly<{
   id: string; threadId: string; role: DurableRole; text: string; dependsOn: readonly string[];
-  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; attempt: DurableResolvedAttempt | null;
+  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; /** Parent worker thread of a child thread; null for top-level work. */ parentThreadId: string | null; attempt: DurableResolvedAttempt | null;
 }>;
 export type DurablePlanSnapshot = Readonly<{ paused: boolean; pausing: boolean; workerCap: number | null; work: readonly DurablePlanWorkSnapshot[] }>;
 

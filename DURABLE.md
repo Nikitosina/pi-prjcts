@@ -350,3 +350,15 @@ Receipts (`merges` in the `projects.pr-follow` doc): `uncertain` is recorded bef
 Also: a head whose CI failed is re-read on later polls, so a re-run that passes on the same head is reported (and can unblock a merge).
 
 Verified by `scripts/auto-merge-e2e.mjs` (fake model, fake gh with branch protection, commit statuses, merge, GraphQL ready-for-review, a push racing the merge call and a merge that answers 502; a worker really publishes the PRs through `open_draft_pr`; host restart; 390 px). Failures are listed in `scripts/auto-merge-failures.md`; A20 is by inspection. A red run against 26aca32 is kept in `artifacts/auto-merge-red-*`.
+
+## Nested subagents (one level)
+
+A top-level **worker** thread gets `projects_delegate_child` (extension `projects.worker-delegation`, `src/durable-planning.ts`), whether scoped or unscoped. The coordinator, scouts, reviewers and child threads never get it, and the tool also refuses calls from them. The tool takes `{task, role}`. A child worker gets the parent's `workspaceScopeId` (its own worktree, like any thread). A scout or reviewer child gets read-only code tools. At most 4 of a parent's children may be queued or running. Children share the project worker pool and cap: the parent ends its turn, and the children then run.
+
+- **Link.** `parentThreadId` is stored on the child's work items and thread record. Every later attempt on a child thread keeps it. It shows in `plan-snapshot` and in `projects_workers` (work and threads, with report `delivered to parent`).
+- **Reports.** When a child settles, its result becomes a follow-up work item on the parent thread: text `[Child work <id>, …]`, with the stable requestId `child-report:<workId>:<attempt>` and the parent's chat. The coordinator never gets the child report. It gets the parent's answer, in the chat that delegated the parent. If the parent is gone or stopped, the child reports to that chat as usual.
+- **Stop.** Stopping a parent stops its children's queued and running work with the same stop id (blocker "Stopped with its parent worker"). The cascade drains together.
+- **UI.**
+  - Activity nests children (`.work-children[data-parent] > .work.child`, "sub-agent" label) under the parent's newest row.
+  - The Observability trace nests child threads (`.trace-child`) under the parent thread, not under the chat.
+- **E2E.** `scripts/nested-subagents-e2e.mjs`. Failure cases are in `scripts/nested-subagents-failures.md`.
