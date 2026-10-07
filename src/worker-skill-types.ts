@@ -47,15 +47,17 @@ export type FrozenWorkerSkill = Static<typeof FrozenWorkerSkill>;
 export const WorkerSkillCandidate = Type.Omit(FrozenWorkerSkill, ["references"]);
 export type WorkerSkillCandidate = Static<typeof WorkerSkillCandidate>;
 
+/** Owners routinely have ~100 configured skills; callers page the catalog (host `worker-skills-catalog` offset/limit). */
+export const SKILL_CATALOG_LIMITS = { candidates: 512, diagnostics: 1024, bytes: 16 * 1024 * 1024 } as const;
 export const WorkerSkillCatalog = Type.Object({
   projectId: uuid,
   workspaceRevision: digest,
   revision: digest,
-  candidates: Type.Array(WorkerSkillCandidate, { maxItems: 64 }),
+  candidates: Type.Array(WorkerSkillCandidate, { maxItems: SKILL_CATALOG_LIMITS.candidates }),
   diagnostics: Type.Array(Type.Union([
     Type.Object({ kind: Type.Literal("repository"), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), path: relativeDocument, fingerprint: digest }, { additionalProperties: false }),
     Type.Object({ kind: Type.Literal("configured"), source: Type.Union([Type.Literal("sdk"), Type.Literal("capture")]), fingerprint: digest }, { additionalProperties: false }),
-  ]), { maxItems: 256 }),
+  ]), { maxItems: SKILL_CATALOG_LIMITS.diagnostics }),
   blockers: Type.Array(Type.Union([Type.Literal("owned-workspace-unavailable"), Type.Literal("loaded-configured-catalog-unavailable")]), { maxItems: 2, uniqueItems: true }),
 }, { additionalProperties: false });
 export type WorkerSkillCatalog = Static<typeof WorkerSkillCatalog>;

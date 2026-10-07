@@ -242,7 +242,7 @@ function currentChat() { return view?.chats?.find(chat => chat.id === chatId) ??
 function renderChats() {
   const node = document.querySelector("#chat-bar"), chats = view?.chats ?? [];
   const current = currentChat(), archived = chats.filter(chat => chat.archived && chat.id !== chatId);
-  const button = chat => `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span></button>`;
+  const button = chat => `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.attention ? "attention" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : chat.attention ? " · needs attention" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span></button>`;
   const next = !view?.chats ? "" : `<nav id="chat-list" class="chat-list" aria-label="Chats">${chats.filter(chat => !chat.archived || chat.id === chatId).map(button).join("")}</nav><button type="button" class="ghost small" data-action="chat-new" title="Start a chat that shares this project's workers and knowledge">＋ New chat</button><span class="chat-tools">${current ? `<button type="button" class="ghost small" data-action="chat-rename">Rename</button>` : ""}${current && current.id !== "main" ? current.archived ? `<button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(current.id)}">Restore</button>` : `<button type="button" class="ghost small" data-action="chat-archive">Archive</button>` : ""}${archived.length ? `<details id="chat-archived" class="chat-archived"><summary>Archived (${archived.length})</summary><div class="archived-list">${archived.map(chat => `<div class="archived-row"><span>${esc(chat.title)}</span><span><button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button> <button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(chat.id)}">Restore</button></span></div>`).join("")}</div></details>` : ""}</span>`;
   if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
@@ -318,7 +318,9 @@ function render() {
   const warnings = failures.map(job => `<div>${esc(job.state)}: ${esc(job.error ?? job.text)} <button class="ghost small" data-action="retry-message" data-project="${esc(view.project.id)}" data-job="${esc(job.id)}">Retry</button></div>`);
   if (plan) warnings.push(...plan.work.filter(work => work.blocker && !work.archived).slice(-3).map(work => `<div>${esc(`${work.role} ${work.threadId}: ${work.blocker}`)}</div>`));
   const shownProblem = failures.some(job => job.error === view.project.problem);
-  if (view.project.problem && !shownProblem && !pending.some(item => item.kind === "question" && item.question === view.project.problem)) warnings.unshift(`<div>${esc(view.project.problem)}</div>`);
+  // The problem may come from another chat; offer to open it.
+  const problemChat = (view.chats ?? []).find(chat => chat.attention && chat.id !== chatId && view.project.problem?.startsWith(`Chat "${chat.title}": `));
+  if (view.project.problem && !shownProblem && !pending.some(item => item.kind === "question" && item.question === view.project.problem)) warnings.unshift(`<div>${esc(view.project.problem)}${problemChat ? ` <button class="ghost small" data-action="chat-select" data-chat="${esc(problemChat.id)}">Open chat</button>` : ""}</div>`);
   const warning = document.querySelector("#warning");
   setHtml("#warning", warnings.join("")); warning.hidden = !warnings.length;
   renderContextMeter(view.context);
@@ -364,7 +366,12 @@ function renderPanels() {
   if (tab === "observability" && plan && !observability && !observabilityLoading) void loadObservability();
   const threads = new Map();
   for (const item of work) threads.set(item.threadId, [...threads.get(item.threadId) ?? [], item]);
-  setHtml("#obs-trace", `<ul class="trace"><li><details open><summary><b>Coordinator</b> <small class="inline">${esc(p.model)} · ${view.busy ? "busy" : "idle"}</small></summary><ul>${[...threads].map(([threadId, items]) => `<li><details ${items.some(item => ["running", "queued", "blocked"].includes(item.status)) ? "open" : ""}><summary>${badge(items.at(-1).status)} <b>${esc(items[0].role)} thread</b> <small class="inline mono">${esc(threadId.slice(0, 8))} · ${items.length} work item(s)</small> <button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">history ↗</button></summary><ul>${items.map(item => `<li>${badge(item.status)} ${esc(item.text.slice(0, 160))} <small class="inline">${esc(item.attempt?.model ?? "")}</small></li>`).join("")}${(observability?.tools ?? []).filter(call => call.threadId === threadId).map(call => `<li>${toolCallHtml(call)}</li>`).join("")}</ul></details></li>`).join("") || '<li class="note">No threads yet.</li>'}</ul></details></li></ul>`);
+  // One node per chat; each worker thread sits under the chat that delegated its latest work (null means Main).
+  const chats = view.chats ?? [{ id: "main", title: "Coordinator", conversationId: null, busy: view.busy, archived: false }];
+  const mainConversation = chats.find(chat => chat.id === "main")?.conversationId ?? null;
+  const owner = items => chats.find(chat => chat.conversationId === (items.at(-1).chatConversationId ?? mainConversation)) ?? chats[0];
+  const threadHtml = ([threadId, items]) => `<li><details ${items.some(item => ["running", "queued", "blocked"].includes(item.status)) ? "open" : ""}><summary>${badge(items.at(-1).status)} <b>${esc(items[0].role)} thread</b> <small class="inline mono">${esc(threadId.slice(0, 8))} · ${items.length} work item(s)</small> <button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">history ↗</button></summary><ul>${items.map(item => `<li>${badge(item.status)} ${esc(item.text.slice(0, 160))} <small class="inline">${esc(item.attempt?.model ?? "")}</small></li>`).join("")}${(observability?.tools ?? []).filter(call => call.threadId === threadId).map(call => `<li>${toolCallHtml(call)}</li>`).join("")}</ul></details></li>`;
+  setHtml("#obs-trace", `<ul class="trace">${chats.map(chat => { const owned = [...threads].filter(([, items]) => owner(items) === chat); return `<li class="trace-chat" data-chat="${esc(chat.id)}"><details ${chat.busy || owned.length || chat.id === "main" ? "open" : ""}><summary><b>${esc(chat.title)}</b> <small class="inline">chat · ${esc(p.model)} · ${chat.busy ? "busy" : "idle"}${chat.archived ? " · archived" : ""}${chat.attention ? " · needs attention" : ""}</small></summary><ul>${owned.map(threadHtml).join("") || '<li class="note">No threads from this chat.</li>'}</ul></details></li>`; }).join("")}</ul>`);
   setHtml("#obs-usage", usageHtml());
   renderUsageBuckets();
   const now = Date.now(), starts = work.map(item => item.startedAt).filter(Number.isFinite), ends = work.map(item => item.endedAt).filter(Number.isFinite);
@@ -415,7 +422,7 @@ function usageHtml() {
   if (!usageObs) return '<p class="note">Reading SDK conversation counters…</p>';
   if (usageObs.error) return `<p class="note">Usage unavailable: ${esc(usageObs.error)}</p>`;
   const { page } = usageObs, money = value => `$${Number(value).toFixed(2)}`, tokens = value => value >= 1000 ? `${(value / 1000).toFixed(1)}k` : String(value);
-  const rows = [{ label: "Coordinator", total: page.coordinator.total }, ...page.workers.map(worker => {
+  const rows = [...usageChatRows(page).map(row => ({ label: row.label, total: row.value.total })), ...page.workers.map(worker => {
     if (worker.kind !== "thread") return { label: `Legacy ${worker.name}`, total: worker.total };
     const matching = plan?.work.filter(item => item.threadId === worker.threadId) ?? [];
     const latest = matching.at(-1);
@@ -423,9 +430,14 @@ function usageHtml() {
   })];
   const max = Math.max(...rows.map(row => row.total.totalTokens), 1);
   const cost = rows.reduce((sum, row) => sum + row.total.cost.total, 0), all = rows.reduce((sum, row) => sum + row.total.totalTokens, 0);
-  return `<div class="usage-head"><div><b>${tokens(all)}</b><small>tokens</small></div><div><b>${money(cost)}</b><small>SDK estimate</small></div><div><b>${page.totalWorkers}</b><small>worker conversations</small></div></div>${rows.map(row => `<div class="hbar"><span title="${esc(row.label)}">${esc(row.label)}</span><progress max="${max}" value="${row.total.totalTokens}"></progress><small class="mono">${tokens(row.total.totalTokens)} · ${money(row.total.cost.total)}</small></div>`).join("")}<p class="note">${page.nextOffset !== null ? "First 100 workers only. " : ""}Estimates are not billing. Observed ${esc(new Date(page.observedAtMs ?? usageObs.at).toLocaleTimeString())}.</p>`;
+  return `<div class="usage-head"><div><b>${tokens(all)}</b><small>tokens</small></div><div><b>${money(cost)}</b><small>SDK estimate</small></div><div><b>${1 + (page.chats?.length ?? 0)}</b><small>chats</small></div><div><b>${page.totalWorkers}</b><small>worker conversations</small></div></div>${rows.map(row => `<div class="hbar"><span title="${esc(row.label)}">${esc(row.label)}</span><progress max="${max}" value="${row.total.totalTokens}"></progress><small class="mono">${tokens(row.total.totalTokens)} · ${money(row.total.cost.total)}</small></div>`).join("")}<p class="note">${page.nextOffset !== null ? "First 100 workers only. " : ""}Estimates are not billing. Observed ${esc(new Date(page.observedAtMs ?? usageObs.at).toLocaleTimeString())}.</p>`;
 }
 
+// Main is the root coordinator conversation; every other chat is counted too.
+function usageChatRows(page) {
+  const main = view?.chats?.find(chat => chat.id === "main")?.title ?? "Main";
+  return [{ label: `Chat · ${main}`, value: page.coordinator }, ...(page.chats ?? []).map(chat => ({ label: `Chat · ${chat.title}${chat.archived ? " (archived)" : ""}`, value: chat }))];
+}
 async function loadObservability() {
   if (!plan || observabilityLoading) return;
   const id = projectId, current = generation;
@@ -452,7 +464,7 @@ async function loadObservability() {
 }
 function renderHealth(project) {
   const h = observability?.health;
-  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime ?? "legacy"], ["Coordinator", view.busy ? "busy" : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
+  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime ?? "legacy"], ["Coordinator", (view.chats ?? []).some(chat => chat.busy) || view.busy ? `busy${(view.chats?.length ?? 0) > 1 ? ` · ${view.chats.filter(chat => chat.busy).length}/${view.chats.length} chats` : ""}` : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
   setHtml("#obs-health", `<div class="health">${values.map(([label, value]) => `<div><small>${esc(label)}</small><b>${esc(value)}</b></div>`).join("")}</div>`);
 }
 function renderEventLog() {
@@ -462,7 +474,7 @@ function renderEventLog() {
 }
 function renderUsageBuckets() {
   const target = document.querySelector("#obs-usage-time");
-  const rows = [{ label: "Coordinator", value: usageObs?.page?.coordinator }, ...(usageObs?.page?.workers ?? []).map(worker => ({ label: worker.title ?? worker.role ?? worker.name ?? "Worker", value: worker }))];
+  const rows = [...(usageObs?.page ? usageChatRows(usageObs.page) : []), ...(usageObs?.page?.workers ?? []).map(worker => ({ label: worker.title ?? worker.role ?? worker.name ?? "Worker", value: worker }))];
   if (!rows.length || usageObs?.error) { if (usageObs?.error) setHtml("#obs-usage-time", `<p class="note">Usage over time unavailable: ${esc(usageObs.error)}</p>`); return; }
   const buckets = rows.flatMap(row => ["hourly", "daily"].flatMap(period => (row.value?.timeBuckets?.[period] ?? []).map(bucket => ({ ...bucket, period, label: row.label }))));
   const max = Math.max(1, ...buckets.map(bucket => bucket.totalTokens ?? 0));
@@ -1514,10 +1526,16 @@ async function ownerSetupEdit(kind, payload) {
   let candidates = "";
   if (kind === "worker-skills-grant-set") {
     const version = showDialog("Owner setup · repository skill catalog", '<p class="note">Capturing the current owner-authorized catalog…</p>');
-    const catalog = await api({ action: "worker-skills-catalog", id: target, offset: 0, limit: 16 });
+    // Owners can have hundreds of skills; read every page of one catalog revision.
+    const catalog = await api({ action: "worker-skills-catalog", id: target, offset: 0, limit: 64 });
+    for (let page = catalog.page; page.nextOffset !== null;) {
+      const next = await api({ action: "worker-skills-catalog", id: target, offset: page.nextOffset, limit: 64 });
+      if (next.revision !== catalog.revision || next.page.offset !== page.nextOffset) throw new Error("Skill catalog changed while paging; reopen to refresh");
+      catalog.candidates.push(...next.candidates); page = next.page;
+    }
     if (projectId !== target || generation !== currentGeneration || !dialog.open || dialogVersion !== version) return;
     initial.expectedCatalogRevision = catalog.revision;
-    candidates = `<p>Catalog revision ${esc(catalog.revision)}. Use these opaque catalog IDs, selected scope IDs, and explicit relative reference names only.</p><ul>${catalog.candidates.map(skill => `<li>${esc(skill.name)} · ${esc(skill.catalogId)} · ${esc(skill.origin.kind === "repository" ? skill.origin.repositoryId : skill.origin.source)}</li>`).join("")}</ul><p>${esc(catalog.blockers.includes("loaded-configured-catalog-unavailable") ? "Configured catalog unavailable. Repository candidates only." : "")}</p>`;
+    candidates = `<p>Catalog revision ${esc(catalog.revision)} · ${catalog.page.total} skills. Use these opaque catalog IDs, selected scope IDs, and explicit relative reference names only.</p><ul>${catalog.candidates.map(skill => `<li>${esc(skill.name)} · ${esc(skill.catalogId)} · ${esc(skill.origin.kind === "repository" ? skill.origin.repositoryId : skill.origin.source)}</li>`).join("")}</ul><p>${esc(catalog.blockers.includes("loaded-configured-catalog-unavailable") ? "Configured catalog unavailable. Repository candidates only." : "")}</p>`;
   }
   if (projectId !== target || generation !== currentGeneration) return;
   showDialog(`Owner setup · ${kind}`, `<p>Project ${esc(target)}. Edit only the action fields. The host checks the inspected revision and immutable identities. Owner confirmation is required below for each write and is never saved in the draft.</p>${candidates}<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}"><label><span>API fields as JSON</span><textarea name="payload" required spellcheck="false">${esc(JSON.stringify(initial, null, 2))}</textarea></label>${kind.endsWith("-revoke") ? `<input type="hidden" name="confirm" value="${esc(target)}">` : ""}<button class="danger" type="submit">Confirm</button><p>Cancel leaves authority unchanged. Workspace/GitHub revocation stops future admissions. Retained receipts and history remain.</p></form>`);

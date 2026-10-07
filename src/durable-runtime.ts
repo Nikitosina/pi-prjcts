@@ -117,6 +117,8 @@ export type DurableProjectSnapshot = {
 export type DurableProjectRuntime = {
   admit(text: string, options: { requestId: string; steer?: boolean; chatId?: string; /** Names an untitled chat. */ title?: string }): Promise<{ submissionId: number }>;
   chats(): Promise<DurableChat[]>;
+  /** Input submissions of one chat, without the transcript; used to settle ledgers of chats not being viewed. */
+  chatSubmissions(chatId: string): Promise<DurableSubmissionState[]>;
   chatCreate(title?: string): Promise<DurableChat>;
   chatUpdate(id: string, change: { title?: string; archived?: boolean }): Promise<DurableChat>;
   result(submissionId: number): Promise<DurableSubmissionState>;
@@ -476,6 +478,12 @@ export async function openDurableProject(input: { project: Project; dir: string;
         return admitted;
       }),
       chats: () => { assertOpen(); return chatList(); },
+      chatSubmissions: async id => {
+        assertOpen();
+        const { conversation } = await resolveChat(id), admitted = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
+        const ids = await coordinatorInputSubmissionIds(openedStorage, conversation, await openedHarness.inspect(context), admitted?.ids ?? []);
+        return Promise.all(ids.map(submission => projectSubmission(openedHarness, conversation, submission)));
+      },
       chatCreate: async title => {
         assertOpen();
         const agent = await chatAgent();
@@ -552,7 +560,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const legacy = await openedHarness.snapshot(Workers, root.id, context);
         const aliases = Object.entries(legacy?.agents ?? {}).map(([name, worker]) => ({ name, conversationId: worker.conversationId }));
         const plan = await planning.snapshot(root);
-        return durableUsageSnapshot(openedHarness, root, await planning.threadIdentities(root), options, aliases, plan.work);
+        return durableUsageSnapshot(openedHarness, root, await planning.threadIdentities(root), options, aliases, plan.work, await chatList());
       },
       operationExecute: value => operations.execute(value),
       operationInspect: value => operations.inspect(value),

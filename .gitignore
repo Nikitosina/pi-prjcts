@@ -13,6 +13,7 @@ artifacts/
 *secrets*
 *auth*
 !src/workspace-authorization.ts
+!src/github-authorization.ts
 
 # Local state and runtime output
 state/

@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { lstat, opendir, realpath } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { captureRepositorySkillCandidate } from "./worker-skill-catalog.ts";
-import type { WorkerSkillCandidate } from "./worker-skill-types.ts";
+import { SKILL_CATALOG_LIMITS, type WorkerSkillCandidate } from "./worker-skill-types.ts";
 
 type Input = Pick<Parameters<typeof captureRepositorySkillCandidate>[0], "repositoryId" | "ownerCheckout" | "protectedFiles">;
 type Diagnostic = { path: string; fingerprint: string };
-const entryLimit = 512, candidateLimit = 64, byteLimit = 1024 * 1024, depthLimit = 8;
+const entryLimit = 4096, candidateLimit = SKILL_CATALOG_LIMITS.candidates, byteLimit = SKILL_CATALOG_LIMITS.bytes, depthLimit = 8;
 
 async function optionalFacts(path: string) {
   try { return await lstat(path, { bigint: true }); }

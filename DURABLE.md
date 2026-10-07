@@ -279,6 +279,16 @@ Each chat is its own Durable coordinator conversation. Main is the original root
 - Host: `show`/`message` take an optional `chatId` (`main` or a UUID); jobs record `chatId`, and each chat has its own ledger. `chat-create` and `chat-update` (title, archived) manage the list. Main cannot be archived. An archived chat keeps its history and refuses messages until restored. A new chat is titled from its first message. `/live?project=…&chat=…` streams one chat. Project pause aborts every chat.
 - UI: chat pills above the transcript (busy dot), New chat, Rename, Archive, and an Archived list with Open and Restore. The URL keeps `chat`, and drafts are kept per chat.
 
-Not covered: usage and Observability still count only Main and the workers, and `project.problem` comes from the chat being viewed.
+- Usage (`usage-snapshot`) returns `chats` (every non-Main chat, archived included) and `chatTotal`; the web usage card and usage-over-time list a row per chat (`Chat · <title>`) plus a chat count. The plan snapshot carries each work item's `chatConversationId` (null = Main), and the Observability trace has one node per chat (busy, archived, needs attention) with each worker thread under the chat that delegated its latest work. Health "Coordinator" is busy when any chat is.
+- Attention is per project, not per viewed chat: `show` also settles the unsettled jobs of other chats (`chatSubmissions`), flags each chat whose newest settled turn failed (`chats[].attention`, red pill dot), and sets `project.problem` to the viewed chat's error or else `Chat "<title>": <error>` with an Open chat button. A later success in that chat clears it.
+- Projects written before multi-chat (95817c3: no `projects.chats` doc, jobs without `chatId`) open with Main only and keep their transcript and ledger. At 390px the chat bar stays inside the viewport; the pill list scrolls horizontally.
 
 Verified by `scripts/multi-chat-e2e.mjs` (fake model and headless Chrome, private HOME, with a host restart); failures are listed in `scripts/multi-chat-failures.md`.
+
+## Owner worker-skills catalog scale
+
+The owner catalog (repository + configured skills) holds up to 512 candidates, 1024 diagnostics and 16 MiB of captured main documents (`SKILL_CATALOG_LIMITS` in `src/worker-skill-types.ts`), instead of throwing above 64. `worker-skills-catalog` pages it (offset ≤ 512, limit ≤ 64); the revision is stable across pages of an unchanged catalog, so grants can use any page. The owner grant dialog reads every page and refuses a revision change mid-paging. Repository discovery uses the same limits (4096 directory entries).
+
+`src/github-authorization.ts` was hidden by the `*auth*` ignore rule and never committed; it is now unignored and tracked.
+
+Verified, together with the multi-chat follow-ups above, by `scripts/skills-scale-chats-e2e.mjs` (89 configured skills, three chats with a failing one, 390px screenshot, and a project created by the 95817c3 host extracted with `git archive`); failures are listed in `scripts/skills-scale-chats-failures.md`.

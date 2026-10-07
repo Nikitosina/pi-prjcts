@@ -46,6 +46,7 @@ const NativeUsageCounters = Type.Object({
 const usageBuckets = { conversationId: Type.Integer({ minimum: 1 }), models: Type.Record(Type.String(), NativeUsageCounters), tools: Type.Record(Type.String(), NativeUsageCounters), total: NativeUsageCounters };
 export const NativeUsage = Type.Object({
   coordinator: Type.Object(usageBuckets),
+  chats: Type.Optional(Type.Array(Type.Object({ ...usageBuckets, chatId: Type.String(), title: Type.String(), archived: Type.Boolean() }))), chatTotal: Type.Optional(NativeUsageCounters),
   workers: Type.Array(Type.Union([
     Type.Object({ ...usageBuckets, kind: Type.Literal("thread"), threadId: Id, legacyNames: Type.Array(Type.String()) }),
     Type.Object({ ...usageBuckets, kind: Type.Literal("legacy"), name: Type.String(), legacyNames: Type.Array(Type.String()) }),

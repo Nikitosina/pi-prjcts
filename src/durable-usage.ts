@@ -74,7 +74,7 @@ type WorkerIdentity =
   | { kind: "thread"; threadId: string; conversationId: ConversationId; legacyNames: string[] }
   | { kind: "legacy"; name: string; conversationId: ConversationId; legacyNames: string[] };
 
-export async function durableUsageSnapshot(harness: Harness, root: Conversation, threads: readonly { threadId: string; conversationId: ConversationId }[], options: { offset?: number; limit?: number }, legacy: readonly { name: string; conversationId: ConversationId }[] = [], work: readonly { threadId: string; role: string; text: string }[] = []) {
+export async function durableUsageSnapshot(harness: Harness, root: Conversation, threads: readonly { threadId: string; conversationId: ConversationId }[], options: { offset?: number; limit?: number }, legacy: readonly { name: string; conversationId: ConversationId }[] = [], work: readonly { threadId: string; role: string; text: string }[] = [], chats: readonly { id: string; title: string; archived: boolean; conversationId: number }[] = []) {
   const offset = options.offset ?? 0, limit = options.limit ?? 100;
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid usage page");
   const identities = new Map<ConversationId, WorkerIdentity>();
@@ -99,6 +99,14 @@ export async function durableUsageSnapshot(harness: Harness, root: Conversation,
   const selected = workersByIdentity.slice(offset, offset + limit);
   const now = Date.now();
   const coordinator = { conversationId: Number(root.id), ...buckets(await harness.snapshot(UsageDoc, root.id, BACKGROUND_CONTEXT)), timeBuckets: await usageTimeline(root, now) };
+  // Chats other than Main are separate coordinator conversations; every one is counted, archived included.
+  const chatUsage = await Promise.all(chats.filter(chat => chat.conversationId !== Number(root.id)).map(async chat => {
+    const conversation = await harness.conversation(chat.conversationId as ConversationId, BACKGROUND_CONTEXT);
+    if (!conversation) throw new Error("Owned chat conversation is missing");
+    return { chatId: chat.id, title: chat.title, archived: chat.archived, conversationId: chat.conversationId, ...buckets(await harness.snapshot(UsageDoc, conversation.id, BACKGROUND_CONTEXT)), timeBuckets: await usageTimeline(conversation, now) };
+  }));
+  const chatTotal = empty();
+  for (const chat of chatUsage) add(chatTotal, chat.total);
   const workers = await Promise.all(selected.map(async thread => {
     const conversation = await harness.conversation(thread.conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error("Owned usage conversation is missing");
@@ -107,6 +115,6 @@ export async function durableUsageSnapshot(harness: Harness, root: Conversation,
   }));
   const workerPageTotal = empty();
   for (const worker of workers) add(workerPageTotal, worker.total);
-  return { coordinator, workers, workerPageTotal: copy(workerPageTotal), totalWorkers: workersByIdentity.length, totalThreads: threads.length, legacyOnlyWorkers: workersByIdentity.filter(worker => worker.kind === "legacy").length, offset, nextOffset: offset + workers.length < workersByIdentity.length ? offset + workers.length : null,
-    observedAtMs: Date.now(), accounting: "Each registered conversation is counted once, including retained legacy workers. Worker totals cover this page only. These are live reads, not an atomic accounting snapshot. Reasoning is included in output, and cacheWrite1h in cacheWrite. Costs are SDK estimates, not billing receipts." };
+  return { coordinator, chats: chatUsage, chatTotal: copy(chatTotal), workers, workerPageTotal: copy(workerPageTotal), totalWorkers: workersByIdentity.length, totalThreads: threads.length, legacyOnlyWorkers: workersByIdentity.filter(worker => worker.kind === "legacy").length, offset, nextOffset: offset + workers.length < workersByIdentity.length ? offset + workers.length : null,
+    observedAtMs: Date.now(), accounting: "Each registered conversation is counted once: Main (coordinator), every other chat, and workers including retained legacy ones. Worker totals cover this page only. These are live reads, not an atomic accounting snapshot. Reasoning is included in output, and cacheWrite1h in cacheWrite. Costs are SDK estimates, not billing receipts." };
 }

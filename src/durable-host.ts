@@ -1,6 +1,6 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
-import { openDurableProject, type DurableCoordinatorMessage, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { openDurableProject, type DurableCoordinatorMessage, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
 import { compactSkillText } from "./coordinator-skills.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
@@ -19,35 +19,47 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
   const view = await owner.snapshot(chatId);
   const paused = (await owner.planSnapshot()).paused;
   const project = loadProject(view.project.id);
-  // Each chat has its own ledger; jobs without a chat belong to Main.
-  const ledger = jobs(project.id).filter(job => (job.chatId ?? "main") === view.chatId);
-  for (const job of ledger) {
-    const submission = view.coordinator.submissions.find(item => item.requestId === job.id);
-    if (!submission) continue;
-    switch (submission.status) {
-      case "queued": job.state = "queued"; job.error = null; break;
-      case "placed": job.state = "running"; job.error = null; break;
-      case "done": job.state = "done"; job.error = null; break;
-      case "unanswered": job.state = submission.reason === "aborted" ? "interrupted" : "failed"; job.error = submission.detail ? `${submission.reason}: ${submission.detail}` : submission.reason; break;
-      default: { const exhaustive: never = submission.status; throw new Error(String(exhaustive)); }
+  // Each chat has its own ledger; jobs without a chat belong to Main. Unsettled jobs of other chats are settled too, so attention covers every chat.
+  const all = jobs(project.id), ledgerOf = (id: string) => all.filter(job => (job.chatId ?? "main") === id);
+  const settle = (ledger: typeof all, submissions: DurableSubmissionState[]) => {
+    for (const job of ledger) {
+      const submission = submissions.find(item => item.requestId === job.id);
+      if (!submission) continue;
+      const before = `${job.state}\0${job.error}`;
+      switch (submission.status) {
+        case "queued": job.state = "queued"; job.error = null; break;
+        case "placed": job.state = "running"; job.error = null; break;
+        case "done": job.state = "done"; job.error = null; break;
+        case "unanswered": job.state = submission.reason === "aborted" ? "interrupted" : "failed"; job.error = submission.detail ? `${submission.reason}: ${submission.detail}` : submission.reason; break;
+        default: { const exhaustive: never = submission.status; throw new Error(String(exhaustive)); }
+      }
+      if (`${job.state}\0${job.error}` !== before || ledger === viewed) saveJob(project.id, job);
     }
-    saveJob(project.id, job);
+  };
+  const viewed = ledgerOf(view.chatId);
+  settle(viewed, view.coordinator.submissions);
+  for (const chat of view.chats) {
+    if (chat.id === view.chatId) continue;
+    const ledger = ledgerOf(chat.id);
+    if (ledger.some(job => job.state === "queued" || job.state === "running")) settle(ledger, await owner.chatSubmissions(chat.id));
   }
-  // Only the newest settled turn decides attention; a later success clears an earlier failure.
-  const settled = ledger.findLast(job => job.state === "done" || job.state === "failed");
-  project.problem = settled?.state === "failed" ? settled.error : null;
+  // Per chat, only the newest settled turn decides attention; a later success clears an earlier failure.
+  const failure = (id: string) => { const settled = ledgerOf(id).findLast(job => job.state === "done" || job.state === "failed"); return settled?.state === "failed" ? settled.error : null; };
+  const chats = view.chats.map(chat => ({ ...chat, attention: failure(chat.id) !== null }));
+  const failing = [chats.find(chat => chat.id === view.chatId), ...chats].find(chat => chat?.attention);
+  project.problem = !failing ? null : failing.id === view.chatId ? failure(failing.id) : `Chat "${failing.title}": ${failure(failing.id)}`;
   project.phase = project.problem ? "attention" : view.chats.some(chat => chat.busy) ? "busy" : "ready";
   saveProject(project);
   const dir = projectDir(project.id);
   return {
-    project, busy: view.coordinator.busy, paused, jobs: ledger,
+    project, busy: view.coordinator.busy, paused, jobs: viewed,
     messages: transcriptWindow(view.coordinator.messages).map(message => "kind" in message
       ? { role: "tool", at: message.at, text: "", kind: message.kind, name: message.name, argsPreview: message.argsPreview, status: message.status, resultPreview: message.resultPreview }
       : { role: message.role, at: message.at, text: message.role === "user" ? compactSkillText(message.text) : message.text, ...(message.thinking ? { thinking: message.thinking } : {}) }),
     activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
-    chatId: view.chatId, chats: view.chats,
+    chatId: view.chatId, chats,
   };
 }
 

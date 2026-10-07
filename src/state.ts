@@ -145,7 +145,7 @@ export const Snapshot = Type.Object({
   durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(Type.Object({ tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) }, { additionalProperties: false })),
   chatId: Type.Optional(ChatId),
-  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean() }, { additionalProperties: false }))),
+  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
 export const Delegation = Type.Object({ runId: Id, role: Role, dir: text });
@@ -153,7 +153,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("worker-skills-catalog"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 64 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("worker-skills-catalog"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-grants"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 128 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-grant-read"), id: Id, grantId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-grant-set"), id: Id, confirm: Id, expectedCatalogRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), expectedGrantsRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), selection: Type.Unknown() }, { additionalProperties: false }),

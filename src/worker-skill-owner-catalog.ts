@@ -4,7 +4,7 @@ import { parse } from "./state.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
 import { discoverRepositorySkills } from "./worker-skill-discovery.ts";
 import { captureConfiguredSkillCatalog } from "./worker-skill-configured.ts";
-import { WorkerSkillCatalog } from "./worker-skill-types.ts";
+import { SKILL_CATALOG_LIMITS, WorkerSkillCatalog } from "./worker-skill-types.ts";
 
 type ConfiguredSource = Parameters<typeof captureConfiguredSkillCatalog>[0]["source"];
 type ProtectedFiles = Parameters<typeof discoverRepositorySkills>[0]["protectedFiles"];
@@ -17,7 +17,7 @@ export async function captureOwnerWorkerSkillCatalog(input: { project: () => Pro
   const blockers: WorkerSkillCatalog["blockers"] = [];
   let bytes = 0;
   function enforceLimits() {
-    if (candidates.length > 64 || diagnostics.length > 256 || bytes > 1024 * 1024) throw new Error("Owner skill catalog exceeds combined capture limits");
+    if (candidates.length > SKILL_CATALOG_LIMITS.candidates || diagnostics.length > SKILL_CATALOG_LIMITS.diagnostics || bytes > SKILL_CATALOG_LIMITS.bytes) throw new Error("Owner skill catalog exceeds combined capture limits");
     if (new Set(candidates.map(item => item.catalogId)).size !== candidates.length) throw new Error("Owner skill catalog contains ambiguous candidate identities");
   }
   const authorization = project.workspaceAuthorization;
