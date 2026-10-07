@@ -332,3 +332,21 @@ Verified by `scripts/follow-prs-e2e.mjs` (fake model, fake gh, headless Chrome, 
 Verified by `scripts/webhook-e2e.mjs` (fake model, headless Chrome, a host restart and a 390px viewport); failures in `scripts/webhook-failures.md`. A red run against f8ffe5c is kept in `artifacts/webhook-red-*`.
 
 `scripts/fake-gh.mjs` now also serves PR `state`, `merged_at`, `updated_at` and `user`, `state=all` listing, check runs per commit, PR reviews, review comments and issue comments on PRs, and `failPaths` fault injection.
+
+## Auto-merge (per-project opt-in)
+
+Settings → Events in → Auto-merge (`automations.json` `autoMerge.enabled`; off by default, and files written before this feature read as off). It runs inside the Follow PRs poll (`src/durable-follow.ts`), so Follow PRs must be on. Otherwise merges keep the owner-approval flow (`src/github-operations.ts` is unchanged).
+
+A PR merges only when all of these hold, re-read at merge time:
+- the project published it: a verified `create-pr` receipt for that PR number (a `pi/` branch name alone is not enough);
+- it is open, its head and base are in the authorized repository and the base is the grant's base branch, and the GitHub authorization is still current;
+- every check run at the head completed and passed (at least one), and every required status check from branch protection passed, as a check run or as a commit status (404 = no protection);
+- a reviewer thread approved that exact head SHA with `projects_review_verdict`.
+
+Flow: when CI turns green on a published PR head with no verdict, the poll dispatches one reviewer for that head (the PR diff, up to 20,000 chars, in the task; the report goes to the event chat). `projects_review_verdict` (`src/durable-review.ts`) is offered to new reviewer threads only and refuses calls from any other thread; a verdict kicks a poll. A new push needs a new review. A draft PR is marked ready (GraphQL) only after every gate passed. The merge is `PUT …/merge` with `sha` = the reviewed head and `merge_method: squash`, so GitHub refuses it if the head moved.
+
+Receipts (`merges` in the `projects.pr-follow` doc): `uncertain` is recorded before the call, then `merged` (merge commit) or `failed`. A 4xx is a definite failure and that head is not retried. Any other error leaves `uncertain`; the next poll reads the PR first: merged with the receipt's marker in the merge commit message → `merged`; still open → retryable failure (at most 3 attempts per head). A paused project does not poll. Each status change for a PR goes to the event chat once (merged, waiting for review, changes requested, required check missing, refused, outcome unknown); Settings lists receipts and the latest status per PR.
+
+Also: a head whose CI failed is re-read on later polls, so a re-run that passes on the same head is reported (and can unblock a merge).
+
+Verified by `scripts/auto-merge-e2e.mjs` (fake model, fake gh with branch protection, commit statuses, merge, GraphQL ready-for-review, a push racing the merge call and a merge that answers 502; a worker really publishes the PRs through `open_draft_pr`; host restart; 390 px). Failures are listed in `scripts/auto-merge-failures.md`; A20 is by inspection. A red run against 26aca32 is kept in `artifacts/auto-merge-red-*`.

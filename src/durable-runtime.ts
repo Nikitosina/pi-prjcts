@@ -26,11 +26,12 @@ import { loadDurableStanding } from "./durable-standing.ts";
 import { durableWorkspaceBinding } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
 import { ensureKnowledge, historyKnowledge, knowledgeContext, listKnowledge, memoryIndex, readKnowledge, writeKnowledge } from "./knowledge.ts";
-import { Project as ProjectSchema, addNote, notes, parse, projectDir, type DurableInspection, type Project } from "./state.ts";
+import { Project as ProjectSchema, addNote, loadProject, notes, parse, projectDir, type DurableInspection, type Project } from "./state.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
+import { reviewVerdictTools } from "./durable-review.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { githubOperations, type ExecutionInput } from "./github-operations.ts";
@@ -312,11 +313,14 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const binder = durableWorkspaceBinding({ project, configuredSkillLoader: input.configuredSkillLoader, projectStanding: standing, commands, commandApprovals: () => approvals, isClosed: () => closed, conversation: () => { if (!rootReference) throw new Error("Durable root is unavailable for workspace allocation"); return rootReference; }, controlRoot: dir });
     const prepareWorkerEnvironment = binder === undefined ? undefined : async (request: Readonly<{ conversationId: number; workId: string; threadId: string; role: "worker" | "scout" | "reviewer"; workspaceScopeId: string }>) => { const environment = await binder(request); await input.testAfterWorkerPreparation?.({ conversationId: request.conversationId, workId: request.workId, threadId: request.threadId, cwd: environment.cwd, bindingRevision: environment.bindingRevision }); return environment; };
     const readOnlyCode = readOnlyCodeTools(project.cwd);
-    const planning = planningRuntime({ projectId: project.id, models: { worker: workerModel, scout: scoutModel, reviewer: reviewerModel }, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, instructions: { worker: `${workerStanding}\nRole profile: worker.`, scout: `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}`, reviewer: `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}` }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text)}\nRole profile: ${role}.`, knowledgeTools: workerKnowledge, readOnlyCode, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? 1, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id });
+    let kickFollow = () => {};
+    const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => (loadProject(project.id).githubAuthorization ?? []).map(item => item.repositoryId), onVerdict: () => kickFollow() });
+    const planning = planningRuntime({ projectId: project.id, models: { worker: workerModel, scout: scoutModel, reviewer: reviewerModel }, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, instructions: { worker: `${workerStanding}\nRole profile: worker.`, scout: `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}`, reviewer: `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}` }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text)}\nRole profile: ${role}.`, knowledgeTools: workerKnowledge, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? 1, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id });
     registry.install(policy);
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
     registry.install(readOnlyCode.extension);
+    registry.install(reviewerTools.extension);
     registry.install(planning.extension);
     registry.install(planning.capabilities);
     registry.install(workerManagement.extension);
@@ -373,12 +377,14 @@ export async function openDurableProject(input: { project: Project; dir: string;
     // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
     const eventTarget = async (): Promise<Conversation> => { try { const { conversation, chat } = await resolveChat(loadAutomations(project.id).eventChat); return chat.archived ? root : conversation; } catch { return root; } };
     const follow = followRuntime(root, project.id, schedules, {
+      planReview: async (work, chat) => { await admitting(() => planning.plan(root, { work: [{ id: work.workId, threadId: work.threadId, role: "reviewer", text: work.text, requestId: work.requestId }] }, chat as Conversation["id"])); },
       planWork: async (work, chat) => { await admitting(() => planning.plan(root, { work: [{ id: work.workId, threadId: work.threadId, role: "worker", text: work.text, requestId: work.requestId, workspaceScopeId: work.workspaceScopeId }] }, chat as Conversation["id"])); },
       followUp: (id, text, requestId, chat) => admitting(() => planning.followUp(root, id, text, requestId, chat as Conversation["id"])),
       threads: async () => (await planning.threadIdentities(root)).map(thread => ({ threadId: thread.threadId, conversationId: Number(thread.conversationId), stopping: thread.stopping })),
       workStatus: async id => (await planning.snapshot(root)).work.find(work => work.id === id)?.status ?? null,
       target: eventTarget,
     }, () => closed);
+    kickFollow = () => { if (!closed && loadAutomations(project.id).autoMerge.enabled) follow.kick(); };
     const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
     followWake.unref();
     stopMonitors = async () => {

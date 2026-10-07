@@ -30,11 +30,17 @@ if (method === "GET" && parts[0] === "search" && parts[1] === "issues") {
   const found = issues.filter(item => (!wantState || item.state === wantState) && words.every(word => (item.title + " " + (item.body ?? "")).toLowerCase().includes(word.toLowerCase())));
   out({ total_count: found.length, items: found.map(issueView) });
 }
+// Auto-merge: marking a draft ready (GraphQL markPullRequestReadyForReview by node_id "PR_<number>").
+if (method === "POST" && parts[0] === "graphql") {
+  const body = JSON.parse(input), number = Number(/^PR_(\d+)$/.exec(body.variables?.id ?? "")?.[1]), item = state.pulls.find(value => value.number === number);
+  if (!/markPullRequestReadyForReview/.test(body.query ?? "") || !item) fail(422, "Could not resolve to a node");
+  item.draft = false; saveState(); log({ status: 200, body: input }); process.stdout.write(JSON.stringify({ data: { markPullRequestReadyForReview: { pullRequest: { isDraft: false } } } })); process.exit(0);
+}
 if (parts[0] !== "repos" || parts[1] + "/" + parts[2] !== repo.full_name) fail(404, "Not Found");
 const rest = parts.slice(3);
 // Follow PRs fields: item.state ("open"|"closed"), item.merged, item.sha (head override), item.user, item.reviews / comments / lineComments; updated_at changes whenever the item does, as on GitHub.
 const login = name => ({ login: name ?? "owner", type: /\[bot\]$/.test(name ?? "") ? "Bot" : "User" });
-const pr = item => ({ number: item.number, html_url: "https://github.invalid/" + repo.full_name + "/pull/" + item.number, title: item.title, body: item.body, draft: item.draft, state: item.state ?? "open", merged_at: item.merged ? "2026-10-03T00:00:00Z" : null, user: login(item.user), updated_at: new Date(Date.parse("2026-10-01T00:00:00Z") + parseInt(createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0, 8), 16) % 2592000000).toISOString(), head: { ref: item.head, sha: item.sha ?? head(item.head), repo: repoRef }, base: { ref: item.base, sha: head(item.base), repo: repoRef } });
+const pr = item => ({ number: item.number, node_id: "PR_" + item.number, merge_commit_sha: item.mergeCommit ?? null, html_url: "https://github.invalid/" + repo.full_name + "/pull/" + item.number, title: item.title, body: item.body, draft: item.draft, state: item.state ?? "open", merged_at: item.merged ? "2026-10-03T00:00:00Z" : null, user: login(item.user), updated_at: new Date(Date.parse("2026-10-01T00:00:00Z") + parseInt(createHash("sha256").update(JSON.stringify(item)).digest("hex").slice(0, 8), 16) % 2592000000).toISOString(), head: { ref: item.head, sha: item.sha ?? head(item.head), repo: repoRef }, base: { ref: item.base, sha: head(item.base), repo: repoRef } });
 const feedback = (list, extra = () => ({})) => (list ?? []).map(entry => ({ id: entry.id, user: login(entry.user), body: entry.body ?? "", created_at: "2026-10-02T00:00:00Z", updated_at: "2026-10-02T00:00:00Z", ...extra(entry) }));
 if (method === "GET" && rest.length === 0) out({ ...repoRef, default_branch: repo.default_branch });
 if (method === "GET" && rest[0] === "git" && rest[1] === "matching-refs" && rest[2] === "heads") { const branch = rest.slice(3).join("/"), sha = head(branch); out(sha ? [{ ref: "refs/heads/" + branch, object: { sha } }] : []); }
@@ -46,6 +52,22 @@ if (method === "GET" && rest[0] === "pulls" && rest.length === 1) { const wanted
 if (method === "GET" && rest[0] === "commits" && rest[2] === "check-runs") { const runs = (state.checks ?? {})[rest[1]] ?? []; out({ total_count: runs.length, check_runs: runs.map((run, index) => ({ id: run.id ?? index + 1, name: run.name, head_sha: rest[1], status: run.status ?? "completed", conclusion: run.conclusion ?? null, details_url: null })) }); }
 if (method === "GET" && rest[0] === "pulls" && rest.length === 3 && (rest[2] === "reviews" || rest[2] === "comments")) { const item = state.pulls.find(value => value.number === Number(rest[1])); if (!item) fail(404, "Not Found"); out(rest[2] === "reviews" ? feedback(item.reviews, entry => ({ state: entry.state ?? "COMMENTED", submitted_at: "2026-10-02T00:00:00Z" })) : feedback(item.lineComments, entry => ({ path: entry.path ?? "README.md", line: 1, commit_id: item.sha ?? head(item.head) }))); }
 if (method === "GET" && rest[0] === "issues" && rest[2] === "comments" && !issues.some(value => value.number === Number(rest[1]))) { const item = state.pulls.find(value => value.number === Number(rest[1])); if (!item) fail(404, "Not Found"); out(feedback(item.comments)); }
+// Auto-merge reads/writes: state.protection[branch] = { contexts, checks }, state.statuses[sha] = [{ context, state }], state.racePush[number] = sha (a push landing just before the merge call).
+if (method === "GET" && rest[0] === "branches" && rest.at(-2) === "protection" && rest.at(-1) === "required_status_checks") { const rule = (state.protection ?? {})[decodeURIComponent(rest.slice(1, -2).join("/"))]; if (!rule) fail(404, "Branch not protected"); out({ strict: false, contexts: rule.contexts ?? [], checks: (rule.checks ?? []).map(context => ({ context, app_id: null })) }); }
+if (method === "GET" && rest[0] === "commits" && rest[2] === "status") out({ sha: rest[1], state: "success", statuses: (state.statuses ?? {})[rest[1]] ?? [] });
+if (method === "GET" && rest[0] === "commits" && rest.length === 2) { const message = (state.mergeCommits ?? {})[rest[1]]; if (message === undefined) fail(404, "No commit found"); out({ sha: rest[1], commit: { message } }); }
+if (method === "GET" && rest[0] === "pulls" && rest[2] === "files") { const item = state.pulls.find(value => value.number === Number(rest[1])); if (!item) fail(404, "Not Found"); let files = []; try { const range = head(item.base) + "..." + (item.sha ?? head(item.head)); files = g("diff", "--name-status", range).split("\n").filter(Boolean).map(line => { const [code, filename] = line.split("\t"); return { filename, status: { A: "added", D: "removed" }[code] ?? "modified", additions: 1, deletions: 0, patch: g("diff", range, "--", filename).split("\n").slice(4).join("\n") }; }); } catch {} out(files); }
+if (method === "PUT" && rest[0] === "pulls" && rest[2] === "merge") {
+  const item = state.pulls.find(value => value.number === Number(rest[1])), body = JSON.parse(input); if (!item) fail(404, "Not Found");
+  log({ status: "attempt", body: input });
+  const race = (state.racePush ?? {})[item.number]; if (race) { item.sha = race; delete state.racePush[item.number]; saveState(); }
+  if ((item.state ?? "open") !== "open" || item.merged) fail(405, "Pull Request is not mergeable");
+  if (item.draft) fail(405, "Pull Request is still a draft");
+  if (body.sha && body.sha !== (item.sha ?? head(item.head))) fail(409, "Head branch was modified. Review and try the merge again.");
+  const sha = createHash("sha1").update("merge:" + item.number + ":" + body.sha).digest("hex");
+  Object.assign(item, { state: "closed", merged: true, mergeCommit: sha, mergeMethod: body.merge_method }); (state.mergeCommits ??= {})[sha] = body.commit_title + "\n\n" + body.commit_message; saveState();
+  out({ sha, merged: true, message: "Pull Request successfully merged" });
+}
 if (method === "GET" && rest[0] === "pulls" && rest.length === 2) { const item = state.pulls.find(value => value.number === Number(rest[1])); if (!item) fail(404, "Not Found"); out(pr(item)); }
 if (method === "POST" && rest[0] === "pulls" && rest.length === 1) {
   const body = JSON.parse(input);

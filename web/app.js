@@ -407,6 +407,7 @@ function renderEventsIn() {
   const f = data.follow, chats = (view?.chats ?? [{ id: "main", title: "Main" }]).filter(chat => !chat.archived || chat.id === data.eventChat);
   const ago = at => at ? when(at) : "never";
   const fixes = (f?.fixes ?? []).map(fix => `<li><b>${esc(fix.pr)}</b> ${fix.attempts.map((item, index) => `<span class="fix-attempt ${esc(item.status ?? (item.error ? "failed" : "none"))}" title="${esc(item.error ?? item.mode)}">${index + 1}: ${esc(item.sha.slice(0, 7))} · ${esc(item.mode === "none" ? "no scope" : item.status ?? (item.error ? "dispatch failed" : "pending"))}</span>`).join(" ")}</li>`).join("");
+  const merges = (f?.merges ?? []).map(item => `<li class="merge-row"><b>${esc(item.pr)}</b> ${item.receipts.map(r => `<span class="merge-receipt ${esc(r.state)}" title="${esc(r.error ?? r.marker)}">${esc(r.sha.slice(0, 7))} · ${esc(r.state)}${r.mergeCommit ? ` → ${esc(r.mergeCommit.slice(0, 7))}` : ""}</span>`).join(" ")}${item.note ? `<span class="merge-note">${esc(mergeNoteText(item.note))}</span>` : ""}</li>`).join("");
   node.innerHTML = `<div class="events-in">
     <label class="field">Send events to <select id="event-chat">${chats.map(chat => `<option value="${esc(chat.id)}" ${chat.id === data.eventChat ? "selected" : ""}>${esc(chat.title)}${chat.archived ? " (archived, using Main)" : ""}</option>`).join("")}</select></label>
     <fieldset class="events-group"><legend>Follow PRs</legend>
@@ -419,6 +420,11 @@ function renderEventsIn() {
       ${fixes ? `<ul id="follow-fixes" class="fix-list">${fixes}</ul>` : ""}
       <div class="row"><button data-action="follow-poll" ${f?.enabled ? "" : "disabled"}>Check now</button></div>
     </fieldset>
+    <fieldset class="events-group" id="auto-merge"><legend>Auto-merge</legend>
+      <label class="check"><input type="checkbox" id="merge-enabled" ${f?.autoMerge ? "checked" : ""}> Merge PRs this project opened once CI and every required check pass and a reviewer worker approved that exact head</label>
+      <p class="note">${f?.autoMerge && !f?.enabled ? "Turn on Follow PRs: auto-merge runs on its checks." : "Off by default. A reviewer is sent when CI turns green; a new push needs a new review. The merge pins the reviewed head (squash). Otherwise merges wait for your approval."}</p>
+      ${merges ? `<ul id="merge-receipts" class="fix-list">${merges}</ul>` : ""}
+    </fieldset>
     <fieldset class="events-group"><legend>Webhook</legend>
       <label class="check"><input type="checkbox" id="webhook-enabled" ${data.webhook.enabled ? "checked" : ""}> Accept webhook deliveries</label>
       <div class="kv"><span>URL</span><code id="webhook-url" class="mono">${esc(data.webhook.url)}</code><span>Secret</span><code id="webhook-secret" class="mono">${eventsIn.reveal ? esc(data.webhook.secret) : "•".repeat(16)}</code></div>
@@ -428,11 +434,12 @@ function renderEventsIn() {
     <div class="row"><button class="primary" data-action="automation-save">Save</button></div>
   </div>`;
 }
+function mergeNoteText(note) { const [kind, , ...rest] = note.split(":"); return { merged: "merged", review: "waiting for review", changes: "reviewer requested changes", required: `required check missing: ${rest.join(":")}`, ci: "CI not green", refused: "refused by GitHub", uncertain: "outcome unknown, checking", grant: "authorization changed", target: "outside authorized base", ready: "draft could not be marked ready", "review-none": "reviewer gave no verdict" }[kind] ?? kind.replace(/^review-/, "reviewer "); }
 async function saveEventsIn() {
   const value = selector => document.querySelector(selector);
   const cap = Number(value("#follow-cap").value);
   if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10) throw new Error("Fix attempts must be 0-10");
-  const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked } } }, "Events settings saved.");
+  const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked }, autoMerge: { enabled: value("#merge-enabled").checked } } }, "Events settings saved.");
   eventsIn.data = data; renderEventsIn();
 }
 

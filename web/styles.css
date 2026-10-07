@@ -438,6 +438,10 @@ button.attach-chip { padding: 3px 8px 3px 6px; }
 .fix-list { margin: 0; padding-left: 18px; font-size: 13px; }
 .fix-attempt { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 6px; background: var(--soft, #f2f2f2); font-size: 12px; }
 .fix-attempt.failed { color: var(--bad, #b42318); }
+.merge-receipt { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 6px; background: var(--soft, #f2f2f2); font-size: 12px; overflow-wrap: anywhere; }
+.merge-receipt.merged { color: var(--good, #067647); }
+.merge-receipt.failed { color: var(--bad, #b42318); }
+.merge-note { display: inline-block; font-size: 12px; color: var(--muted, #667085); }
 .event-card > summary .event-mark { flex: none; font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; }
 .event-card.github { border-left: 3px solid #6e7781; }
 .event-card.webhook { border-left: 3px solid #8250df; }

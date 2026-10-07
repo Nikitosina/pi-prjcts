@@ -86,6 +86,7 @@ export const AutomationChange = Type.Object({
   eventChat: Type.Optional(Type.String({ pattern: "^(main|[a-f0-9-]{36})$" })),
   follow: Type.Optional(Type.Object({ enabled: Type.Optional(Type.Boolean()), everyMs: Type.Optional(Type.Integer({ minimum: 60_000, maximum: 86_400_000 })), autoFix: Type.Optional(Type.Boolean()), fixCap: Type.Optional(Type.Integer({ minimum: 0, maximum: 10 })) }, { additionalProperties: false })),
   webhook: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
+  autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
 }, { additionalProperties: false });
 const answer = Type.Union([
   Type.Object({ at: text, text, job: Id }, { additionalProperties: false }),
