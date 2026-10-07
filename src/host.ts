@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { home, socketPath, Request, Project, errorText, jobs, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { loadProjectResourceLoader, openCoordinator, type Runtime } from "./coordinator.ts";
+import { expandSkillCommand, listSkills } from "./coordinator-skills.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
@@ -191,15 +192,23 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   switch (input.action) {
     case "web": return { url: web.url };
     case "answer": case "review": {
-      if (loadProject(input.id).runtime === "durable") return withProjectLock(input.id, async () => {
-        const project = loadProject(input.id);
-        const dir = ownedProjectDir(input.id);
-        const entry = resolveEntry(dir, input, "manual");
-        if (entry.kind === "question" && project.problem === entry.question) project.problem = null;
-        project.phase = inbox(dir).some(item => !item.result) || project.problem ? "attention" : "ready";
-        saveProject(project);
+      if (loadProject(input.id).runtime === "durable") {
+        const entry = await withProjectLock(input.id, async () => {
+          const project = loadProject(input.id);
+          const dir = ownedProjectDir(input.id);
+          const entry = resolveEntry(dir, input, "manual");
+          if (entry.kind === "question" && project.problem === entry.question) project.problem = null;
+          project.phase = inbox(dir).some(item => !item.result) || project.problem ? "attention" : "ready";
+          saveProject(project);
+          return entry;
+        });
+        // The answer is recorded first; waking the coordinator is best effort (a paused project keeps it for later).
+        if (input.action === "answer" && entry.kind === "question") {
+          try { await dispatchRequest({ action: "message", id: input.id, text: `Owner answered your question "${entry.title}":\n${input.text}` }); }
+          catch (error) { recordHostEvent("answer-delivery-deferred", errorText(error)); }
+        }
         return entry;
-      });
+      }
       const owner = await runtime(input.id);
       const entry = resolveEntry(projectDir(input.id), input);
       if (entry.kind === "question" && owner.project.problem === entry.question) owner.project.problem = null;
@@ -229,7 +238,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           model: input.model ?? "openai-codex/gpt-5.6-sol",
           models: { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" },
           runtime: "durable", ...(input.requestId ? { creation: { requestId: input.requestId, fingerprint } } : {}),
-          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), sessionFile: null, phase: "ready", problem: null, runs: [],
+          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), decisionAccess: "coordinator", sessionFile: null, phase: "ready", problem: null, runs: [],
         });
         saveProject(created);
         return created;
@@ -248,6 +257,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-list": return libraryList(ownedProjectDir(input.id), input);
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
+    case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
       await validateProjectModelChanges(input.changes);
@@ -617,10 +627,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (project.archived) throw new Error("Project is archived; admission is denied");
       }, operation: async owner => {
         const job = prepareJob();
+        // The job keeps what the owner typed; the coordinator receives the expanded skill.
+        const text = await expandSkillCommand(await configuredSkills(input.id), job.text);
         const plan = await owner.planSnapshot();
         if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
         saveJob(input.id, job);
-        await owner.admit(job.text, { requestId: job.id });
+        await owner.admit(text, { requestId: job.id });
         return job;
       } });
       ownedProjectDir(input.id);

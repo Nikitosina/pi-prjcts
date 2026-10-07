@@ -100,7 +100,7 @@ async function waitFor(expression, session, label) {
 
 const git = (...args) => execFileSync('/usr/bin/git', ['-C', workspace, ...args], { encoding: 'utf8' }).trim();
 const card = s => evaluate(`document.querySelector('#activity').innerText`, s);
-const lines = s => evaluate(`[...document.querySelectorAll('#activity .worker-line')].map(node => node.innerText.replace(/\\s+/g, ' ').trim())`, s);
+const lines = s => evaluate(`[...document.querySelectorAll('#activity .worker-line, #outcomes .worker-line')].map(node => node.innerText.replace(/\\s+/g, ' ').trim())`, s);
 try {
   git('init', '-b', 'main'); git('config', 'user.email', 'e2e@example.invalid'); git('config', 'user.name', 'E2E');
   writeFileSync(join(workspace, 'README.md'), 'base\n'); git('add', '.'); git('commit', '-m', 'c1');
@@ -125,15 +125,15 @@ try {
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`[...document.querySelectorAll('#activity .worker-line')].some(n => /^completed/.test(n.innerText)) && [...document.querySelectorAll('#activity .worker-line')].some(n => /^running/.test(n.innerText))`, s, 'completed + running lines');
+  await waitFor(`[...document.querySelectorAll('#outcomes .worker-line')].some(n => n.classList.contains('completed')) && [...document.querySelectorAll('#activity .worker-line')].some(n => n.classList.contains('running'))`, s, 'completed + running lines');
   let shown = await lines(s);
   result.linesRunning = shown;
-  if (!shown.some(line => /^completed worker MARK-OK Fix the typo in README$/.test(line))) throw new Error('Completed line wrong: ' + JSON.stringify(shown));
+  if (!shown.some(line => /^MARK-OK Fix the typo in README worker · completed( · .+ ago)?$/.test(line))) throw new Error('Completed line wrong: ' + JSON.stringify(shown));
   result.checks.push('W1 one line per item with status, role and title');
   await delay(2500);
   shown = await lines(s);
-  const running = shown.find(line => line.startsWith('running'));
-  if (!/^running worker MARK-HOLD .+ \d+s$/.test(running ?? '')) throw new Error('Running line lacks elapsed time: ' + running);
+  const running = shown.find(line => / · running · /.test(line));
+  if (!/^MARK-HOLD .+ worker · running · \d+s$/.test(running ?? '')) throw new Error('Running line lacks elapsed time: ' + running);
   result.checks.push('W2 running line shows elapsed time and live-updates');
   const title = await evaluate(`document.querySelector('#activity .worker-line.running .worker-title').innerText`, s);
   if (title.length > 60 || !title.endsWith('…')) throw new Error('Title not shortened: ' + title);
@@ -141,9 +141,9 @@ try {
   await shot('01-workers-running', s, true);
 
   await rpc({ action: 'pause', id: project.id });
-  await waitFor(`!document.querySelector('#paused-hint').hidden && [...document.querySelectorAll('#activity .worker-line')].some(n => /^interrupted/.test(n.innerText))`, s, 'paused hint + interrupted line');
+  await waitFor(`!document.querySelector('#paused-hint').hidden && [...document.querySelectorAll('#activity .worker-line')].some(n => n.classList.contains('interrupted'))`, s, 'paused hint + interrupted line');
   shown = await lines(s);
-  if (!shown.some(line => /^interrupted worker MARK-HOLD .+ Interrupted by project pause$/.test(line))) throw new Error('Interrupted line lacks reason: ' + JSON.stringify(shown));
+  if (!shown.some(line => /^MARK-HOLD .+ worker · interrupted · Interrupted by project pause$/.test(line))) throw new Error('Interrupted line lacks reason: ' + JSON.stringify(shown));
   result.checks.push('W4 interrupted line shows the pause reason');
   const hint = await evaluate(`document.querySelector('#paused-hint').innerText`, s);
   if (!/Paused/.test(hint) || !(await evaluate(`document.querySelector('#compose textarea').disabled`, s)) || !(await evaluate(`!!document.querySelector('#paused-hint [data-action=resume-project]')`, s))) throw new Error('Paused hint missing: ' + hint);
@@ -160,7 +160,7 @@ try {
   result.checks.push('W6 hint Resume opens the resume flow');
   await waitFor(`document.querySelector('#paused-hint').hidden`, s, 'hint hidden after resume');
   result.checks.push('W8 hint hides after resume');
-  await waitFor(`[...document.querySelectorAll('#activity .worker-line')].filter(n => /^completed/.test(n.innerText)).length === 2`, s, 'both completed after resume');
+  await waitFor(`[...document.querySelectorAll('#outcomes .worker-line')].filter(n => n.classList.contains('completed')).length === 2`, s, 'both completed after resume');
   result.linesDone = await lines(s);
   result.checks.push('W7 resumed work completes and the card live-updates');
   await shot('04-workers-done', s, true);

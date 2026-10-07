@@ -15,6 +15,18 @@ const head = branch => { try { return g("rev-parse", "--verify", "refs/heads/" +
 if (command !== "api" || hostname !== "github.com") fail(400, "unsupported invocation");
 const url = new URL(target, "https://api.github.invalid/"), parts = url.pathname.slice(1).split("/");
 const repo = state.repo, repoRef = { id: repo.id, full_name: repo.full_name };
+// Issues (coordinator GitHub tools): state.issues = [{ number, title, body, state, state_reason, labels, assignees, comments: [{ body }] }].
+const issues = state.issues ??= [];
+const issueView = item => ({ number: item.number, title: item.title, body: item.body ?? null, state: item.state, state_reason: item.state_reason ?? null, html_url: "https://github.invalid/" + repo.full_name + "/issues/" + item.number, user: { login: "owner" }, labels: item.labels.map(name => ({ name })), assignees: item.assignees.map(login => ({ login })), milestone: null, comments: item.comments.length, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z" });
+const saveState = () => writeFileSync(statePath, JSON.stringify(state));
+if (method === "GET" && parts[0] === "search" && parts[1] === "issues") {
+  const q = url.searchParams.get("q") ?? "";
+  if (!q.includes("repo:" + repo.full_name)) fail(422, "Validation Failed");
+  const words = q.split(/\s+/).filter(word => word && !word.includes(":"));
+  const wantState = /is:(open|closed)/.exec(q)?.[1];
+  const found = issues.filter(item => (!wantState || item.state === wantState) && words.every(word => (item.title + " " + (item.body ?? "")).toLowerCase().includes(word.toLowerCase())));
+  out({ total_count: found.length, items: found.map(issueView) });
+}
 if (parts[0] !== "repos" || parts[1] + "/" + parts[2] !== repo.full_name) fail(404, "Not Found");
 const rest = parts.slice(3);
 const pr = item => ({ number: item.number, html_url: "https://github.invalid/" + repo.full_name + "/pull/" + item.number, title: item.title, body: item.body, draft: item.draft, state: "open", head: { ref: item.head, sha: head(item.head), repo: repoRef }, base: { ref: item.base, sha: head(item.base), repo: repoRef } });
@@ -37,5 +49,24 @@ if (method === "PATCH" && rest[0] === "pulls" && rest.length === 2) {
   const item = state.pulls.find(value => value.number === Number(rest[1])); if (!item) fail(404, "Not Found");
   const body = JSON.parse(input); if (typeof body.title === "string") item.title = body.title; if (typeof body.body === "string") item.body = body.body;
   writeFileSync(statePath, JSON.stringify(state)); out(pr(item));
+}
+if (rest[0] === "issues") {
+  const item = rest.length >= 2 ? issues.find(value => value.number === Number(rest[1])) : null;
+  if (rest.length >= 2 && !item) fail(404, "Not Found");
+  const body = input ? JSON.parse(input) : {};
+  if (method === "GET" && rest.length === 1) { const wanted = url.searchParams.get("state") ?? "open"; out(issues.filter(value => wanted === "all" || value.state === wanted).map(issueView)); }
+  if (method === "GET" && rest.length === 2) out(issueView(item));
+  if (method === "GET" && rest[2] === "comments") out(item.comments.map((comment, index) => ({ id: index + 1, body: comment.body, user: { login: "owner" }, created_at: "2026-10-02T00:00:00Z", html_url: issueView(item).html_url + "#issuecomment-" + (index + 1) })));
+  if (method === "POST" && rest.length === 1) {
+    if (!body.title) fail(422, "Validation Failed");
+    const created = { number: issues.length + 100, title: body.title, body: body.body ?? null, state: "open", labels: body.labels ?? [], assignees: body.assignees ?? [], comments: [] };
+    issues.push(created); saveState(); out(issueView(created));
+  }
+  if (method === "POST" && rest[2] === "comments") { item.comments.push({ body: body.body }); saveState(); out({ id: item.comments.length, body: body.body, html_url: issueView(item).html_url + "#issuecomment-" + item.comments.length }); }
+  if (method === "PATCH" && rest.length === 2) {
+    for (const key of ["title", "body", "labels", "assignees", "state", "state_reason"]) if (key in body) item[key] = body[key];
+    if (body.state === "open") item.state_reason = null;
+    saveState(); out(issueView(item));
+  }
 }
 fail(501, "fake gh does not implement " + method + " " + target);

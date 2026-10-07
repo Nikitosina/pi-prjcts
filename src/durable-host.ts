@@ -1,6 +1,7 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
-import { openDurableProject, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { openDurableProject, type DurableCoordinatorMessage, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { compactSkillText } from "./coordinator-skills.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(project: Project, configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader): Promise<DurableProjectRuntime> {
@@ -39,11 +40,19 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime): Promise
   const dir = projectDir(project.id);
   return {
     project, busy: view.coordinator.busy, paused, jobs: ledger,
-    messages: view.coordinator.messages.slice(-30).map(message => "kind" in message
+    messages: transcriptWindow(view.coordinator.messages).map(message => "kind" in message
       ? { role: "tool", at: message.at, text: "", kind: message.kind, name: message.name, argsPreview: message.argsPreview, status: message.status, resultPreview: message.resultPreview }
-      : { role: message.role, at: message.at, text: message.text }),
+      : { role: message.role, at: message.at, text: message.role === "user" ? compactSkillText(message.text) : message.text, ...(message.thinking ? { thinking: message.thinking } : {}) }),
     activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
   };
+}
+
+// The last 30 conversational messages and every step between them, so a long tool chain never hides the turn that started it.
+function transcriptWindow(messages: readonly DurableCoordinatorMessage[]): DurableCoordinatorMessage[] {
+  const rows = messages.filter(message => "kind" in message || message.text.trim() || message.thinking);
+  let start = rows.length;
+  for (let texts = 0; start > 0 && texts < 30; start--) if (!("kind" in rows[start - 1])) texts++;
+  return rows.slice(Math.max(start, rows.length - 400));
 }

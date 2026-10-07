@@ -115,8 +115,8 @@ try {
 
   await evaluate(`document.querySelector('#dialog details.advanced').open = true; document.querySelector('#dialog [data-kind=workspace-revoke]').click()`, s);
   await waitFor(`!!document.querySelector('#dialog form[data-owner-write][data-kind=workspace-revoke]')`, s, 'revoke form');
-  if (!await evaluate(`!!document.querySelector('#dialog form[data-kind=workspace-revoke] input[name=confirm][required]')`, s)) throw new Error('Revoke lost its typed confirmation');
-  result.checks.push('revoke still requires typing the project ID');
+  if (await evaluate(`!!document.querySelector('#dialog form[data-kind=workspace-revoke] input[name=confirm]:not([type=hidden])')`, s)) throw new Error('Revoke still asks to type the project ID');
+  result.checks.push('revoke is one-click (no typed project ID)');
   await evaluate(`document.querySelector('#dialog [data-action=close-dialog]').click()`, s);
   await waitFor(`/Workers can edit this repository/.test(document.querySelector('#owner-steps').innerText) && !document.querySelector('#owner-steps [data-action=workspace-quick]')`, s, 'stepper done');
   result.checks.push('stepper marks workspace done and hides the one-click button');

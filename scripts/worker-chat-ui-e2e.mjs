@@ -143,9 +143,9 @@ try {
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
   await waitFor(`document.querySelectorAll('#messages .tool-call').length >= 2`, s, 'coordinator tool calls');
-  const colors = await evaluate(`[...document.querySelectorAll('#messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n).backgroundColor }))`, s);
+  const colors = await evaluate(`[...document.querySelectorAll('#messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`, s);
   result.colors = colors;
-  if (!colors.some(c => c.status === 'ok' && c.color === 'rgb(237, 247, 239)') || !colors.some(c => c.status === 'error' && c.color === 'rgb(252, 238, 237)')) throw Error('Coordinator state backgrounds wrong: ' + JSON.stringify(colors));
+  if (!colors.some(c => c.status === 'ok' && c.color === 'rgb(220, 235, 223)') || !colors.some(c => c.status === 'error' && c.color === 'rgb(246, 216, 211)')) throw Error('Coordinator state icon colours wrong: ' + JSON.stringify(colors));
   await evaluate(`document.querySelector('#messages .tool-call summary').click()`, s);
   if (!(await evaluate(`document.querySelector('#messages .tool-call pre').innerText.includes('Result:')`, s))) throw Error('Missing expanded tool result');
   result.checks.push('C1 coordinator tool colors and expandable results');
@@ -155,7 +155,7 @@ try {
   result.checks.push('C7 two workers execute concurrently at cap 2');
   await evaluate(`document.querySelector('[data-action="thread"][data-thread="${threadId}"]').click()`, s);
   await waitFor(`!!document.querySelector('#worker-messages .tool-call[data-status="pending"]')`, s, 'pending worker tool');
-  if (!(await evaluate(`getComputedStyle(document.querySelector('#worker-messages .tool-call[data-status="pending"]')).backgroundColor === 'rgb(241, 242, 243)'`, s))) throw Error('Pending tool background wrong');
+  if (!(await evaluate(`document.querySelector('#worker-messages .tool-call[data-status="pending"] .tool-icon')?.innerText === '…'`, s))) throw Error('Pending tool icon wrong');
   result.checks.push('C2 pending tool background');
   if (!(await evaluate(`!!document.querySelector('#worker-messages .msg.you .text') && document.querySelector('#worker-messages').compareDocumentPosition(document.querySelector('[data-inline-thread-send]')) & Node.DOCUMENT_POSITION_FOLLOWING`, s))) throw Error('Chat bubbles or composer order wrong');
   result.checks.push('C3 worker chat layout');

@@ -163,9 +163,9 @@ Verified by `scripts/coordinator-stability-e2e.mjs` (fake model and headless Chr
 
 ## Live coordinator stream
 
-`GET /live?project=<id>` (bearer token, same as `/api`) is a server-sent event stream built on Durable `viewState()`. Each frame is a compact projection of `pi.live`: running flag, attempt, tail of the partial answer (max 4,000 chars), thinking flag, running tools, retry error and time, compaction, and transcript length. Durable commits partials at most every 100 ms; identical frames are dropped. The browser reads it with `fetch` (EventSource cannot send the token), shows a live bubble above the composer, refreshes the snapshot when the transcript length or running state changes, drops the stream on project switch and reconnects with backoff (1–15 s). The runtime ends every open stream on close.
+`GET /live?project=<id>` (bearer token, same as `/api`) is a server-sent event stream built on Durable `viewState()`. Each frame is a compact projection of `pi.live`: running flag, attempt, tail of the partial answer (max 4,000 chars), thinking flag and the tail of the reasoning summary (max 300 chars), running tools, retry error and time, compaction, and transcript length. Durable commits partials at most every 100 ms; identical frames are dropped. The browser reads it with `fetch` (EventSource cannot send the token), shows a live bubble above the composer, refreshes the snapshot when the transcript length or running state changes (waiting for a refresh that actually ran before moving the bubble on, so a committed step never blinks out), drops the stream on project switch and reconnects with backoff (1–15 s). The runtime ends every open stream on close.
 
-The Project memory card lists recent knowledge documents (newest first), and the Knowledge tab lists all of them inline; the browser fetches `knowledge-list` on each refresh.
+The rail Knowledge card and the Knowledge tab show documents as a folder tree (see Browser UI polish); the browser fetches `knowledge-list` on each refresh.
 
 Verified by `scripts/coordinator-live-e2e.mjs`; failures in `scripts/coordinator-live-failures.md`.
 
@@ -175,8 +175,97 @@ Scout and reviewer threads always get `code_read`, `code_grep`, `code_find` and 
 
 ## Archiving work
 
-Completed and archived work leave the Workers card right away; failed, stopped and blocked work stay until archived. The coordinator archives with `projects_worker_archive` (`workIds` or `terminal: true`), and the owner archives from the Activity tab. Archive sets `archivedAt` only: the work record, thread conversation and report are kept, and `projects_workers`/`plan-snapshot` report `archived: true`. Running, queued, interrupted and unknown work is refused. Activity hides archived work unless "Show archived" is on.
+Running, queued, interrupted and blocked work shows in the Workers card. Completed, failed and stopped work moves to Recent results until archived. The coordinator archives with `projects_worker_archive` (`workIds` or `terminal: true`), and the owner archives from the Activity tab. Archive sets `archivedAt` only: the work record, thread conversation and report are kept, and `projects_workers`/`plan-snapshot` report `archived: true`. Running, queued, interrupted and unknown work is refused. Activity hides archived work unless "Show archived" is on.
 
 The live coordinator bubble streams inside the transcript scroll (`#transcript`) and follows the bottom only while the reader is there. Scrolling up pauses following until the reader scrolls back down or sends a message.
 
 Verified by `scripts/coordinator-workers-ui-e2e.mjs`; failures in `scripts/coordinator-workers-ui-failures.md`.
+
+## Delegation defaults and answers
+
+New projects default to `decisionAccess: "coordinator"`, so the coordinator can ask with `projects_question`. Existing projects with no stored value keep `none`, and an explicit `none` removes the tool. Answering a question records it and then sends `Owner answered your question "<title>": <answer>` to the coordinator, which continues its turn. Delivery is best effort: on a paused or archived project the answer is still recorded, and the failed delivery is logged as a host event. Answers grant no extra permissions.
+
+`projects_delegate` with role `worker`, no `workspaceScopeId` and no `requiredTools` uses the project's only whole-repository scope when exactly one exists. With several scopes or a folder-limited scope, the choice stays explicit. Scout and reviewer are unaffected. The admission receipt now includes `workspaceScopeId`, so the coordinator sees which scope it got.
+
+Verified by `scripts/delegate-defaults-e2e.mjs`; failures in `scripts/delegate-defaults-failures.md`. The cases with multiple scopes and a folder-limited scope are covered by code inspection only.
+
+## Coordinator GitHub tools
+
+When the project has a GitHub authorization, the coordinator gets three tools (`src/coordinator-github-tools.ts`). It no longer has to delegate a worker to read an issue:
+- `projects_github_issue_read`: an issue or PR with body, labels, assignees, milestone and comments (50 per page). A PR adds its branches, draft/merged state and diff size.
+- `projects_github_issues`: list or search issues and PRs. Search is always scoped with `repo:<authorized repo>`.
+- `projects_github_issue_write`: create, comment (issue or PR), update title/body/labels/assignees/milestone, close (completed or not planned, optional comment), reopen. It returns the URL.
+
+Rules:
+- The owner chose that the existing GitHub authorization covers these writes; there is no per-write approval. Nothing merges, deletes or touches code; branches, commits and PRs stay with workers.
+- Every call re-reads the project: the repository must be in a current grant (owner matches, workspace revision unchanged). `repository` is optional when exactly one is authorized. Writes first check that the repository still has the authorized numeric id.
+- The tools are offered only while an authorization exists; the extension is installed always so recorded calls still resolve.
+- Errors keep gh's one-line reason (for example `Not Found (HTTP 404)`), with tokens redacted.
+- Writes are `replay: "unsafe"`: an interrupted call is reported, never rerun. The description tells the coordinator to search before retrying.
+
+## Owner skills (`/` in the composer)
+
+- Typing `/` at the start of the coordinator composer opens a skill picker. It lists every skill pi loads for the project: repository `.agents/skills`/`.pi/skills` first, then the owner's, then pi packages, including skills with `disable-model-invocation`. There is no 64-skill cap; the owner has 89. Picking inserts `/skill:<name> `. Filtering ranks by name, then description; ↑/↓, Enter/Tab and Esc work, and Enter picks rather than sends. A `/` after other text never opens it, and the global `/` shortcut still just focuses the composer.
+- On send the host expands `/skill:<name> args` exactly like pi: `<skill name location>` block, frontmatter stripped, then the args (`src/coordinator-skills.ts`). An unknown name is refused and the draft kept. The job keeps the typed text. The transcript shows the user message as `/skill:<name> args`, rendered as a chip.
+- `projects_skill_file` lets the coordinator read files inside an invoked skill's directory (lexical and realpath checks).
+- The admission cap is now 120000 characters for the expanded text; owner input stays capped at 32000.
+- `GET coordinator-skills` returns the list.
+
+Verified by `scripts/coordinator-github-skills-e2e.mjs` (fake model, `scripts/fake-gh.mjs` extended with issue and search endpoints, private `HOME`); failures in `scripts/coordinator-github-skills-failures.md`.
+
+## Browser UI polish
+
+Polished by driving the UI on a real coordinator (`openai-codex/gpt-6-luna`) against this repository.
+
+### Layout
+- The page never scrolls. Header and tabs stay fixed, and the transcript, rail, work list and thread scroll independently. Below 820 px the layout reverts to normal page flow, and the sidebar collapses to a project picker.
+
+### Header
+- The eyebrow appears only when something needs you.
+- The subtitle is the project objective.
+- The state chip reads Working / Idle / Paused.
+- Only the relevant one of Pause and Resume is shown.
+
+### Conversation
+- Worker reports (`[Durable work …]` user messages) render as collapsible "<Role> report" cards that link to their thread. A look-alike message stays plain.
+- Tool calls are one-line human labels (for example "Delegated to scout: …", "Edited web/styles.css"); the raw call is available on expand.
+- Messages from today show the time only.
+- Markdown keeps numbered lists together across blank lines, and colours `diff` code blocks.
+
+### Composer
+- `/` opens the skill picker (see Owner skills).
+- The textarea auto-grows.
+- The hint shows the model.
+- The context ring shows a percentage.
+
+### Rail
+- The Needs-you card is hidden when nothing is pending. When something is, the question appears once, with neutral choices.
+- Workers shows only active work, with "View all work (n)" linking to Activity.
+- Order: Needs you, Workers, Knowledge, Recent results.
+- Recent results lists finished work and opens its thread.
+- The Knowledge card is a compact folder tree of topic documents; it hides the starter files and `research/legacy/`.
+
+### Activity
+Master-detail layout: the work list on the left, with the selected row marked; the thread pane on the right. The thread pane shows:
+- a header with status, role, model and the task, which expands on click
+- the transcript
+- the follow-up composer
+- evidence, changes and steer/stop controls in a collapsible section
+
+### Knowledge
+- Documents form a folder tree: folders first with counts and a collapse chevron, then files (MEMORY.md and preferences.md first, then newest). Rows show author, relative time and size. `research/legacy/` starts collapsed; collapsed folders stay collapsed across refreshes and are shared with the rail.
+- Documents render as markdown, with plain Edit and History.
+
+### Copy and confirmations
+- Typed project-UUID confirmations are removed from every dialog, at the owner's request. Forms send the project ID as a hidden field, so the host contracts are unchanged.
+- Legalistic copy in create, knowledge and workspace texts is shortened.
+
+### Live chain
+- The host returns the last 30 conversational messages plus every tool row between them (cap 400 rows), dropping empty assistant rows, so a long tool chain never hides the turn that started it. It used to be the last 30 rows of any kind.
+- Assistant steps carry their reasoning summary (`thinking`, max 300 chars). The transcript shows it as a quiet "Thought" line, so models that think instead of writing preamble text (`gpt-5.6-sol`) still leave a trace of each step.
+- The live bubble always has a status line: "Thinking · <summary>", the human tool label ("Read knowledge…"), or "Writing…".
+- When the owner scrolls up during a run, a pill pinned above the composer shows the same status and jumps back to the latest.
+
+Verified by `scripts/live-chain-e2e.mjs`; failures in `scripts/live-chain-failures.md`.
+
+Verified by `scripts/ui-polish-e2e.mjs`; failures in `scripts/ui-polish-failures.md`. Regression E2Es were updated for the deliberate changes: Workers card versus Recent results, tool-call icon colours, rail line format, one-click revoke, and the knowledge tree selectors in ui-polish and coordinator-live.

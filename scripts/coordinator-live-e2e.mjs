@@ -160,10 +160,10 @@ try {
 
   const know = await rpc({ action: 'message', id: a.id, text: 'MARK-KNOW save it' });
   if ((await settle(a.id, know)).state !== 'done') throw Error('Knowledge turn failed');
-  await waitFor(`document.querySelector('#notes').innerText.includes('research/live-test.md')`, s, 'memory card lists knowledge doc', 40);
+  await waitFor(`!!document.querySelector('#notes [data-path="research/live-test.md"]')`, s, 'memory card lists knowledge doc', 40);
   result.checks.push('L6 Project memory card lists coordinator-written doc without reload');
   await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
-  await waitFor(`(document.querySelector('#knowledge-inline')?.innerText ?? '').includes('research/live-test.md')`, s, 'inline knowledge list', 40);
+  await waitFor(`!!document.querySelector('#knowledge-inline [data-path="research/live-test.md"]')`, s, 'inline knowledge list', 40);
   await evaluate(`document.querySelector('#knowledge-inline [data-path="research/live-test.md"]').click()`, s);
   await waitFor(`document.querySelector('dialog')?.open && document.querySelector('dialog').innerText.includes('KNOW-BODY')`, s, 'doc opens', 40);
   result.checks.push('L7 Knowledge tab lists docs inline; click opens the doc');

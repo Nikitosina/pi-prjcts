@@ -96,7 +96,7 @@ async function refresh() {
     knowledgeDocs = Array.isArray(nextDocs) ? nextDocs.filter(doc => knowledgePath(doc.path)) : [];
     for (const record of nextApprovals?.items ?? []) operationCache.set(record.id, record);
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
-    document.querySelector("#connection").textContent = `${next.busy ? "Coordinating" : "Connected"} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
     if (next.project.runtime === "durable") ensureLive();
     if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
@@ -149,23 +149,43 @@ async function applyLive(frame) {
   const previous = liveFrame;
   liveFrame = frame;
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
-  if (previous && (previous.entries !== frame.entries || previous.running !== frame.running)) await refresh();
+  if (previous && (previous.entries !== frame.entries || previous.running !== frame.running)) await settledRefresh();
   renderLive();
+}
+
+// A refresh that starts after this call and finishes. A plain refresh() only queues while a poll is in flight, which used to hide the bubble before the transcript caught up.
+async function settledRefresh() {
+  while (polling === generation) await new Promise(resolve => setTimeout(resolve, 30));
+  await refresh();
+}
+
+function thoughtText(text) { return text.replace(/\*\*/g, "").split(/\n\s*\n/).map(line => line.trim()).filter(Boolean).join(" · "); }
+function liveStatus(frame) {
+  const tools = frame.tools.filter(tool => tool.status !== "done");
+  if (frame.retry) return `Model error: ${frame.retry.error}. Retrying (attempt ${frame.attempt ?? 1}) at ${new Date(frame.retry.at).toLocaleTimeString()}…`;
+  if (frame.compacting) return "Compacting context…";
+  if (tools.length) return `${tools.map(tool => toolLabel({ name: tool.name })).join(", ")}…`;
+  if (frame.text) return "Writing…";
+  const thought = frame.thinkingText ? thoughtText(frame.thinkingText) : "";
+  return thought ? `Thinking · ${thought}` : "Thinking…";
+}
+function renderWorkingPill() {
+  const pill = document.querySelector("#working-pill"), frame = liveStream?.id === projectId ? liveFrame : null;
+  const status = frame?.running ? liveStatus(frame) : "";
+  pill.hidden = !status || stickToBottom;
+  pill.querySelector(".pill-text").textContent = status;
 }
 
 function renderLive() {
   const node = document.querySelector("#live-reply");
   const frame = liveStream?.id === projectId ? liveFrame : null;
-  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; return; }
-  const tools = frame.tools.filter(tool => tool.status !== "done");
-  let status;
-  if (frame.retry) status = `Model error: ${esc(frame.retry.error)}. Retrying (attempt ${esc(frame.attempt ?? 1)}) at ${esc(new Date(frame.retry.at).toLocaleTimeString())}…`;
-  else if (frame.compacting) status = "Compacting context…";
-  else if (tools.length) status = `Running ${tools.map(tool => `<code>${esc(tool.name)}</code>`).join(", ")}…`;
-  else if (!frame.text) status = "Thinking…";
-  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${frame.text ? `<div class="text">${renderMarkdown(frame.text)}</div>` : ""}${status ? `<p class="live-status"><span class="live-dot"></span>${status}</p>` : ""}`;
+  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; renderWorkingPill(); return; }
+  // Once text streams, the reasoning summary steps aside into a quiet line above it, as in the transcript.
+  const status = liveStatus(frame), thought = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
+  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${thought ? `<p class="thought live"><span class="thought-mark">Thinking</span>${esc(thought)}</p>` : ""}${frame.text ? `<div class="text">${renderMarkdown(frame.text)}</div>` : ""}<p class="live-status"><span class="live-dot"></span><span>${esc(status)}</span></p>`;
   node.hidden = false;
   followTranscript();
+  renderWorkingPill();
 }
 
 function changeProject(id) {
@@ -180,12 +200,12 @@ function changeProject(id) {
   if (id) url.searchParams.set("project", id); else url.searchParams.delete("project");
   history.replaceState(null, "", url);
   document.querySelector("#projects").value = id ?? "";
-  document.querySelector("#compose textarea").value = drafts.get(id) ?? "";
+  document.querySelector("#compose textarea").value = drafts.get(id) ?? ""; autosize(document.querySelector("#compose textarea"));
   document.querySelector("#compose button").disabled = !id || busy;
   html.clear(); usageObs = null;
-  const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); }
+  const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
   const p = projects.find(p => p.id === id);
-  document.querySelector("#eyebrow").textContent = "Pi Projects";
+  document.querySelector("#eyebrow").hidden = true;
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
   document.querySelector("#subtitle").textContent = id ? "Restoring the coordinator and worker controls…" : "Choose a trusted workspace. Then send the coordinator any request.";
   document.querySelector("#avatar").textContent = initials(p?.name);
@@ -212,6 +232,8 @@ function setTab(next) {
   const url = new URL(location.href); url.searchParams.set("tab", next); history.replaceState(null, "", url);
   document.querySelectorAll("[data-panel]").forEach(node => { node.hidden = node.dataset.panel !== next; });
   document.querySelectorAll(".tabs [data-tab]").forEach(node => node.classList.toggle("on", node.dataset.tab === next));
+  // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
+  if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
   if (next === "settings") void loadAutomationStrip();
 }
@@ -222,23 +244,25 @@ function render() {
   const pendingTotal = view.inbox.filter(item => !item.result).length + (approvalPage?.total ?? 0);
   const entry = pending.find(item => item.id === selected) ?? pending[0];
   selected = entry?.id ?? null;
-  document.querySelector("#eyebrow").textContent = pendingTotal ? `${pendingTotal} ${pendingTotal === 1 ? "thing needs" : "things need"} your call` : "Nothing needs your call";
+  const eyebrow = document.querySelector("#eyebrow");
+  eyebrow.textContent = pendingTotal ? `${pendingTotal} ${pendingTotal === 1 ? "thing needs" : "things need"} your call` : ""; eyebrow.hidden = !pendingTotal;
   document.title = `${view.project.name} · Pi Projects`;
   document.querySelector("#title").textContent = view.project.name;
   document.querySelector("#avatar").textContent = initials(view.project.name);
-  for (const selector of ["#needs-count", "#needs-badge"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
+  for (const selector of ["#needs-count"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
   renderProjects();
-  document.querySelector("#subtitle").textContent = pendingTotal ? pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for additional records.` : "The coordinator is holding these questions and results for you. Everything else can stay out of the way." : view.busy || (plan ? plan.work.some(work => work.status === "running") : view.activeRuns.length) ? "Work is continuing. Questions and terminal run results will arrive here." : "You are caught up. Send any request to the coordinator, or inspect a previous result.";
-  setHtml("#queue", pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : item.kind === "approval" ? "Exact bound operation, not an execution" : `${esc(item.outcome)} run ready for review`}</small></span><span class="arrow">↗</span></button>`).join(""));
-  setHtml("#letter", entry ? letter(entry) : `<p class="note">${view.activeRuns.length || plan?.work.some(work => work.status === "running") ? "Workers are still running. Their results will appear here." : "No decisions or reviews are waiting."}</p>`);
+  document.querySelector("#subtitle").textContent = pendingTotal && pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for the rest.` : view.project.objective ?? "";
+  setHtml("#queue", pending.length < 2 ? "" : pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : item.kind === "approval" ? "Exact bound operation, not an execution" : `${esc(item.outcome)} run ready for review`}</small></span><span class="arrow">↗</span></button>`).join(""));
+  setHtml("#letter", entry ? letter(entry) : "");
+  document.querySelector("#needs-card").hidden = !entry;
   setHtml("#activity", plan ? durableActivity() : view.activeRuns.map(run => `<div class="task">${badge(state(run.id))}<strong>${esc(run.task.slice(0, 160))}</strong><small>${esc(run.role)} · ${esc(view.project.models[run.role])}</small><br><button class="ghost small" data-action="worker" data-run="${run.id}">Inspect worker ↗</button></div>`).join("") || '<p class="note">No workers are running.</p>');
   const outcomes = view.inbox.filter(item => item.kind === "review" && item.result).slice(-5).reverse();
-  setHtml("#outcomes", outcomes.map(item => `<div class="task">${badge(item.outcome)}<strong>${esc(item.title)}</strong><small>${item.result.action === "accept" ? "You accepted this result" : "You requested changes"}</small><br><button class="ghost small" data-action="worker" data-run="${item.run}">Read result ↗</button></div>`).join("") || '<p class="note">No reviewed results yet.</p>');
-  const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const docLink = doc => `<button class="link knowledge-doc" data-action="knowledge-read" data-project="${esc(view.project.id)}" data-path="${esc(doc.path)}">${esc(doc.path)}</button>`;
-  const latestNote = view.notes.at(-1)?.text;
-  setHtml("#notes", `${topics.length ? `<ul class="knowledge-docs">${topics.slice(0, 5).map(doc => `<li>${docLink(doc)}</li>`).join("")}</ul>${topics.length > 5 ? `<p class="note">+${topics.length - 5} more in Knowledge</p>` : ""}` : `<p class="note">No knowledge documents yet.</p>`}${latestNote ? `<p class="note">Latest note: ${esc(latestNote)}</p>` : ""}`);
-  setHtml("#knowledge-inline", knowledgeDocs.length ? `<ul class="knowledge-docs">${knowledgeDocs.map(doc => `<li>${docLink(doc)} <small class="note">${esc(doc.author)} · ${esc(new Date(doc.updatedAt).toLocaleString())} · ${doc.size} bytes</small></li>`).join("")}</ul>` : `<p class="note">No knowledge documents yet.</p>`);
+  if (plan) setHtml("#outcomes", durableResults());
+  else setHtml("#outcomes", outcomes.map(item => `<div class="task">${badge(item.outcome)}<strong>${esc(item.title)}</strong><small>${item.result.action === "accept" ? "You accepted this result" : "You requested changes"}</small><br><button class="ghost small" data-action="worker" data-run="${item.run}">Read result ↗</button></div>`).join("") || '<p class="note">No reviewed results yet.</p>');
+  // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
+  const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"));
+  setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
+  setHtml("#knowledge-inline", knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>');
   setHtml("#messages", view.messages.map(message => chatMessageHtml(message, "Coordinator")).join("") || `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`);
   const reply = view.messages.findLast(message => message.role === "assistant" && message.text.trim());
   setHtml("#reply-summary", reply ? `<div class="reply-text">${renderMarkdown(reply.text.slice(0, 500))}</div><button type="button" class="ghost small" data-action="conversation">Read conversation ↗</button>` : "");
@@ -251,10 +275,11 @@ function render() {
   const historyButton = document.querySelector('[data-action="routine-history"]');
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
-  document.querySelector("#message-count").textContent = `${view.messages.length} recent messages · ${view.project.model}`;
+  const hint = document.querySelector("#compose-hint");
+  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
-  document.querySelector("#workspace-policy").textContent = plan ? "Durable workers use only explicitly authorized isolated/scoped workspaces. Your Mac must stay awake. No OS sandbox or cloud execution is claimed." : "Legacy workers use the selected checkout. Your Mac must stay awake. Migration/isolation requires explicit authorization.";
+  document.querySelector("#workspace-policy").textContent = plan ? "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs." : "Legacy workers use this checkout directly. Keep the Mac awake while work runs.";
   // Failures older than the newest settled turn are history, not current problems.
   const lastDone = view.jobs.findLastIndex(job => job.state === "done");
   const failures = view.jobs.slice(lastDone + 1).filter(job => ["failed", "interrupted"].includes(job.state)).slice(-2);
@@ -278,6 +303,7 @@ function renderContextMeter(context) {
   meter.dataset.level = percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
   meter.setAttribute("aria-label", label);
   meter.querySelector(".context-popup").textContent = label;
+  meter.querySelector(".context-pct").textContent = known ? `${percent}%` : "";
 }
 
 function renderPanels() {
@@ -286,14 +312,20 @@ function renderPanels() {
   const transcript = document.querySelector("#transcript");
   if (transcript.dataset.count !== String(view.messages.length)) {
     // The owner's own send always returns them to the newest message.
-    if (view.messages.at(-1)?.role === "user") stickToBottom = true;
+    if (view.messages.findLast(message => message.text?.trim() || message.kind === "tool")?.role === "user") stickToBottom = true;
     transcript.dataset.count = String(view.messages.length);
   }
   followTranscript();
   setHtml("#evidence-inline", view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
   const archivable = item => ["completed", "failed", "stopped", "blocked"].includes(item.status) && !item.archived;
-  const workRow = item => `<div class="work ${item.archived ? "archived" : ""}">${badge(item.status)}${item.archived ? '<span class="badge">archived</span>' : ""}<div class="grow"><strong>${esc(item.text.slice(0, 240))}</strong><small>${esc(item.role)} · ${esc(item.attempt?.model ?? "no attempt yet")}${item.dependsOn.length ? ` · after ${item.dependsOn.length} item(s)` : ""}${item.blocker ? ` · ${esc(item.blocker)}` : ""}</small></div>${archivable(item) ? `<button class="ghost small" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(item.id)}">Archive</button>` : ""}<button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(item.threadId)}">Open thread ↗</button></div>`;
-  setHtml("#work-list", plan ? work.filter(item => showArchived || !item.archived).toReversed().map(workRow).join("") || '<p class="note">No work items yet. Message the coordinator to start.</p>' : view.activeRuns.map(run => `<div class="work">${badge(state(run.id))}<div class="grow"><strong>${esc(run.task.slice(0, 240))}</strong><small>${esc(run.role)}</small></div><button class="ghost small" data-action="worker" data-run="${run.id}">Inspect ↗</button></div>`).join("") || '<p class="note">No workers are running.</p>');
+  const workRow = item => {
+    const when = item.status === "running" && item.startedAt ? `running ${duration(Date.now() - item.startedAt)}` : item.endedAt ? `${item.status} ${duration(Date.now() - item.endedAt)} ago` : item.status;
+    const meta = [item.role, item.attempt?.model?.split("/").at(-1), when, item.archived ? "archived" : "", item.dependsOn.length ? `after ${item.dependsOn.length} item(s)` : ""].filter(Boolean).join(" · ");
+    return `<div class="work ${esc(item.status)} ${item.archived ? "archived" : ""} ${workerChat?.threadId === item.threadId ? "on" : ""}"><button class="work-open" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(item.threadId)}" title="${esc(item.text)}"><span class="dot"></span><strong>${esc(item.text.replace(/\s+/g, " ").trim().slice(0, 240))}</strong><small>${esc(meta)}</small>${item.blocker ? `<small class="work-blocker">${esc(item.blocker)}</small>` : ""}</button>${archivable(item) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(item.id)}">Archive</button>` : ""}</div>`;
+  };
+  const listed = work.filter(item => showArchived || !item.archived);
+  document.querySelector("#work-count").textContent = plan ? `Work · ${listed.length}` : "Workers";
+  setHtml("#work-list", plan ? listed.toReversed().map(workRow).join("") || '<p class="note">No work yet. Message the coordinator to start.</p>' : view.activeRuns.map(run => `<div class="work">${badge(state(run.id))}<div class="grow"><strong>${esc(run.task.slice(0, 240))}</strong><small>${esc(run.role)}</small></div><button class="ghost small" data-action="worker" data-run="${run.id}">Inspect ↗</button></div>`).join("") || '<p class="note">No workers are running.</p>');
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
   setHtml("#obs-kpis", [kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""), kpi("Running", plan ? count("running") : view.activeRuns.length), kpi("Queued", count("queued")), kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""), kpi("Work items", work.length), kpi("Worker cap", plan?.workerCap ?? "—")].join(""));
   renderHealth(p);
@@ -308,14 +340,14 @@ function renderPanels() {
   setHtml("#obs-timeline", work.length ? work.toReversed().map(item => {
     const start = Number.isFinite(item.startedAt) ? item.startedAt : null, end = Number.isFinite(item.endedAt) ? item.endedAt : (start !== null && item.status === "running" ? now : null);
     const x = start === null ? 0 : Math.max(0, Math.min(100, (start - rangeStart) / span * 100)), width = start === null ? 0 : Math.max(1, Math.min(100 - x, ((end ?? start + 1) - start) / span * 100));
-    return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
+    return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
   }).join("") : '<p class="note">No worker timestamps recorded.</p>');
   const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0;
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(false, wholeRepository ? "3. Worker skills" : "4. Worker skills", wholeRepository ? "Configured Pi skills are available automatically." : "Optional, explicitly selected repository skills.")].join(""));
   if (tab === "settings" && plan) void loadAutomationStrip();
-  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role)}</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
+  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
 
@@ -359,7 +391,7 @@ function usageHtml() {
   })];
   const max = Math.max(...rows.map(row => row.total.totalTokens), 1);
   const cost = rows.reduce((sum, row) => sum + row.total.cost.total, 0), all = rows.reduce((sum, row) => sum + row.total.totalTokens, 0);
-  return `<div class="usage-head"><div><b>${tokens(all)}</b><small>tokens</small></div><div><b>${money(cost)}</b><small>SDK estimate</small></div><div><b>${page.totalWorkers}</b><small>worker conversations</small></div></div>${rows.map(row => `<div class="hbar"><span>${esc(row.label)}</span><progress max="${max}" value="${row.total.totalTokens}"></progress><small class="mono">${tokens(row.total.totalTokens)} · ${money(row.total.cost.total)}</small></div>`).join("")}<p class="note">${page.nextOffset !== null ? "First 100 workers only. " : ""}Estimates are not billing. Observed ${esc(new Date(page.observedAtMs ?? usageObs.at).toLocaleTimeString())}.</p>`;
+  return `<div class="usage-head"><div><b>${tokens(all)}</b><small>tokens</small></div><div><b>${money(cost)}</b><small>SDK estimate</small></div><div><b>${page.totalWorkers}</b><small>worker conversations</small></div></div>${rows.map(row => `<div class="hbar"><span title="${esc(row.label)}">${esc(row.label)}</span><progress max="${max}" value="${row.total.totalTokens}"></progress><small class="mono">${tokens(row.total.totalTokens)} · ${money(row.total.cost.total)}</small></div>`).join("")}<p class="note">${page.nextOffset !== null ? "First 100 workers only. " : ""}Estimates are not billing. Observed ${esc(new Date(page.observedAtMs ?? usageObs.at).toLocaleTimeString())}.</p>`;
 }
 
 async function loadObservability() {
@@ -405,20 +437,144 @@ function renderUsageBuckets() {
   target.innerHTML = buckets.length ? `<div class="usage-bars">${buckets.slice(-60).map(bucket => `<div class="usage-bar-row"><small>${esc(bucket.label)} · ${esc(bucket.period)} ${esc(new Date(bucket.at).toLocaleString())}</small><progress max="${max}" value="${Number(bucket.totalTokens) || 0}"></progress><b>${Number(bucket.totalTokens) || 0} tokens</b></div>`).join("")}</div>` : '<p class="note">No time-bucketed usage recorded.</p>';
 }
 
+function toolArgs(call) { try { const args = JSON.parse(call.argsPreview ?? ""); return args && typeof args === "object" ? args : {}; } catch { return {}; } }
+function toolLabel(call) {
+  const a = toolArgs(call), path = a.path ?? a.file ?? a.filePath ?? "";
+  const labels = {
+    projects_delegate: () => `Delegated to ${a.role ?? "a worker"}${a.task ? `: ${a.task}` : ""}`,
+    projects_worker_archive: () => "Archived finished work",
+    projects_worker_control: () => `${a.operation ? a.operation[0].toUpperCase() + a.operation.slice(1) : "Controlled"} worker`,
+    projects_control: () => `${a.operation ? a.operation[0].toUpperCase() + a.operation.slice(1) : "Controlled"} worker`,
+    projects_workers: () => "Checked workers", projects_worker_plan: () => "Checked the plan", projects_worker_read: () => "Read a worker result",
+    projects_question: () => `Asked you${a.question ? `: ${a.question.split("\n")[0]}` : ""}`,
+    projects_knowledge_write: () => `Updated knowledge ${path}`, projects_knowledge_read: () => `Read knowledge ${path}`,
+    projects_knowledge_list: () => "Listed knowledge", projects_knowledge_history: () => `Read history of ${path}`,
+    projects_note: () => "Added a note", projects_notes: () => "Read notes", projects_evidence: () => `Attached evidence${a.title ? `: ${a.title}` : ""}`,
+    projects_library_list: () => "Listed the library", projects_library_read: () => "Read from the library",
+    projects_workspace_catalog: () => "Checked workspaces", projects_skill_read: () => `Read skill ${a.name ?? ""}`,
+    projects_skill_file: () => `Read skill file ${a.skill ?? ""}/${a.path ?? "SKILL.md"}`,
+    projects_github_issue_read: () => `Read GitHub #${a.number ?? ""}`,
+    projects_github_issues: () => a.query ? `Searched GitHub for “${a.query}”` : `Listed GitHub ${a.kind === "pr" ? "PRs" : "issues"}`,
+    projects_github_issue_write: () => ({ create: `Created GitHub issue “${a.title ?? ""}”`, comment: `Commented on GitHub #${a.number}`, update: `Updated GitHub #${a.number}`, close: `Closed GitHub #${a.number}`, reopen: `Reopened GitHub #${a.number}` })[a.action] ?? "Changed a GitHub issue",
+    code_read: () => `Read ${path}`, read: () => `Read ${path}`, code_grep: () => `Searched for “${a.pattern ?? ""}”`, grep: () => `Searched for “${a.pattern ?? ""}”`,
+    code_find: () => `Found files ${a.pattern ?? a.glob ?? ""}`, find: () => `Found files ${a.pattern ?? ""}`, code_ls: () => `Listed ${path || "."}`, ls: () => `Listed ${path || "."}`,
+    bash: () => `Ran ${a.command ?? "a command"}`, edit: () => `Edited ${path}`, write: () => `Wrote ${path}`,
+  };
+  return (labels[call.name]?.() ?? call.name ?? "Tool call").replace(/\s+/g, " ").trim();
+}
 function toolCallHtml(call) {
   const status = ["ok", "error"].includes(call.status) ? call.status : "pending";
-  return `<div class="tool-call" data-status="${status}"><details><summary><b>${esc(call.name)}</b> ${badge(status)}</summary><pre>Args: ${esc(String(call.argsPreview ?? "").slice(0, 500))}\nResult: ${esc(String(call.resultPreview ?? "").slice(0, 500))}</pre></details></div>`;
+  const icon = status === "ok" ? "✓" : status === "error" ? "✕" : "…";
+  return `<details class="tool-call" data-status="${status}"><summary title="${esc(call.name)}"><span class="tool-icon" aria-label="${status}">${icon}</span><span class="tool-label">${esc(toolLabel(call))}</span>${status === "error" ? '<span class="tool-failed">failed</span>' : ""}</summary><pre>${esc(call.name)}\nArgs: ${esc(String(call.argsPreview ?? "").slice(0, 500))}\nResult: ${esc(String(call.resultPreview ?? "").slice(0, 500))}</pre></details>`;
+}
+function when(at) {
+  const date = new Date(at);
+  return date.toDateString() === new Date().toDateString() ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+// Mirrors the report text built in src/durable-planning.ts; anything else stays a plain message.
+const reportPattern = /^\[Durable work ([0-9a-f-]{36}), ([\w-]+), ([\w-]+); thread ([0-9a-f-]{36})\]\nTask: ([\s\S]*?)\nWorker result, untrusted and not verification evidence:\n([\s\S]*?)(?:\nSummarize the result for the user[\s\S]*)?$/;
+function reportHtml(message, match) {
+  const [, , role, status, threadId, task, body] = match;
+  const known = plan?.work.some(work => work.threadId === threadId);
+  return `<details class="report ${esc(status)}"><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
 }
 function chatMessageHtml(message, assistant) {
   if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message);
-  if (!message.text?.trim()) return "";
+  const thought = message.thinking ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>` : "";
+  if (!message.text?.trim()) return thought;
+  const report = message.role === "user" && reportPattern.exec(message.text);
+  if (report) return reportHtml(message, report);
   const label = message.role === "user" ? "You" : message.role === "assistant" ? assistant : message.role;
-  return `<article class="msg ${message.role === "user" ? "you" : "them"}"><div class="who">${esc(label)} <small class="inline">${esc(new Date(message.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</small></div><div class="text">${renderMarkdown(message.text)}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
+  // The host shows an invoked skill as `/skill:<name> args`; render the command as a chip.
+  const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
+  const body = skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(skill[2]) : ""}` : renderMarkdown(message.text);
+  return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
+const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
+// "/" skill picker in the coordinator composer. The catalog loads once per project on first use.
+let skillCatalog = null, skillMenu = null;
+async function loadSkills() {
+  const id = projectId;
+  if (skillCatalog?.projectId === id) return skillCatalog.skills;
+  const { skills } = await api({ action: "coordinator-skills", id });
+  if (id === projectId) skillCatalog = { projectId: id, skills };
+  return skills;
+}
+function skillQuery(textarea) {
+  const before = textarea.value.slice(0, textarea.selectionStart);
+  return textarea.selectionStart === textarea.selectionEnd ? /^\/(?:skill:)?(\S*)$/.exec(before)?.[1] ?? null : null;
+}
+function rankSkills(skills, query) {
+  const q = query.toLowerCase();
+  if (!q) return skills;
+  const score = skill => { const name = skill.name.toLowerCase(); return name.startsWith(q) ? 0 : name.includes(q) ? 1 : skill.description.toLowerCase().includes(q) ? 2 : 3; };
+  return skills.map(skill => [score(skill), skill]).filter(([rank]) => rank < 3).sort((a, b) => a[0] - b[0]).map(([, skill]) => skill);
+}
+function closeSkillMenu() { skillMenu = null; const node = document.querySelector("#skill-menu"); if (node) { node.hidden = true; node.innerHTML = ""; } document.querySelector("#compose textarea")?.removeAttribute("aria-activedescendant"); }
+async function updateSkillMenu(textarea) {
+  const query = skillQuery(textarea);
+  if (query === null) { closeSkillMenu(); return; }
+  const skills = await loadSkills();
+  if (skillQuery(textarea) !== query) return;
+  const items = rankSkills(skills, query).slice(0, 60);
+  skillMenu = { items, index: Math.min(skillMenu?.query === query ? skillMenu.index : 0, Math.max(0, items.length - 1)), query };
+  renderSkillMenu();
+}
+function renderSkillMenu() {
+  const node = document.querySelector("#skill-menu");
+  if (!node || !skillMenu) return;
+  const source = { repo: "Repository", global: "Yours", package: "Package" };
+  node.innerHTML = skillMenu.items.length
+    ? skillMenu.items.map((skill, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option${index === skillMenu.index ? " active" : ""}" aria-selected="${index === skillMenu.index}" data-action="skill-pick" data-name="${esc(skill.name)}"><span class="skill-name">/${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description)}</span><span class="skill-source">${esc(source[skill.source] ?? skill.source)}</span></button>`).join("")
+    : `<p class="skill-empty">No skill matches “${esc(skillMenu.query)}”</p>`;
+  node.hidden = false;
+  document.querySelector("#compose textarea").setAttribute("aria-activedescendant", skillMenu.items.length ? `skill-option-${skillMenu.index}` : "");
+  node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
+}
+function pickSkill(name) {
+  const textarea = document.querySelector("#compose textarea");
+  const rest = textarea.value.slice(textarea.selectionStart).replace(/^\S*\s*/, "");
+  textarea.value = `/skill:${name} ${rest}`;
+  const caret = name.length + 8;
+  textarea.setSelectionRange(caret, caret);
+  drafts.set(projectId, textarea.value); autosize(textarea); persistDraftsSafely();
+  closeSkillMenu(); textarea.focus();
+}
+// Folders the owner collapsed, shared by the rail and the Knowledge tab; raw legacy answers start collapsed.
+const closedFolders = new Set(["research/legacy"]);
+const folderIcon = '<svg class="tree-icon folder" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 4.25c0-.55.45-1 1-1h3.4l1.5 1.6h5.6c.55 0 1 .45 1 1v6.4c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1z"/></svg>';
+const fileIcon = '<svg class="tree-icon file" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.75h5.25L12.5 5v9.25H4z"/><path d="M9.25 1.75V5h3.25"/></svg>';
+function knowledgeTree(docs, compact) {
+  const root = { path: "", folders: new Map(), files: [] };
+  for (const doc of docs) {
+    const parts = doc.path.split("/");
+    let node = root;
+    for (const [index, name] of parts.slice(0, -1).entries()) {
+      if (!node.folders.has(name)) node.folders.set(name, { path: parts.slice(0, index + 1).join("/"), folders: new Map(), files: [] });
+      node = node.folders.get(name);
+    }
+    node.files.push(doc);
+  }
+  const count = node => node.files.length + [...node.folders.values()].reduce((sum, folder) => sum + count(folder), 0);
+  const rank = doc => doc.path === "MEMORY.md" ? 0 : doc.path === "preferences.md" ? 1 : 2;
+  const file = doc => {
+    const name = doc.path.split("/").at(-1);
+    return `<button class="tree-file${doc.path === "MEMORY.md" ? " memory" : ""}" data-action="knowledge-read" data-project="${esc(view.project.id)}" data-path="${esc(doc.path)}" title="${esc(doc.path)}">${fileIcon}<span class="tree-name">${esc(name)}</span><small class="tree-meta">${esc(compact ? ago(doc.updatedAt) : `${doc.author} · updated ${ago(doc.updatedAt)} · ${size(doc.size)}`)}</small></button>`;
+  };
+  const branch = node => [...node.folders.values()].sort((a, b) => a.path.localeCompare(b.path)).map(folder => `<details class="tree-folder" data-folder="${esc(folder.path)}"${closedFolders.has(folder.path) ? "" : " open"}><summary><span class="tree-chevron" aria-hidden="true"></span>${folderIcon}<span class="tree-name">${esc(folder.path.split("/").at(-1))}</span><span class="tree-count">${count(folder)}</span></summary><div class="tree-children">${branch(folder)}</div></details>`).join("")
+    + node.files.toSorted((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)).map(file).join("");
+  return `<div class="tree${compact ? " compact" : ""}" role="tree">${branch(root)}</div>`;
+}
+document.addEventListener("toggle", event => {
+  const folder = event.target;
+  if (!(folder instanceof HTMLDetailsElement) || !folder.classList.contains("tree-folder")) return;
+  if (folder.open) closedFolders.delete(folder.dataset.folder); else closedFolders.add(folder.dataset.folder);
+}, true);
+function clip(value, size) { return value.length > size ? `${value.slice(0, size - 1)}…` : value; }
 
 function letter(entry) {
   if (entry.kind === "approval") return operationLetter(entry.record);
-  if (entry.kind === "question") return `<article class="letter"><div class="row between"><span class="eyebrow">From your coordinator</span>${badge("question")}</div><h2>${esc(entry.title)}</h2><p class="description">${esc(entry.question)}</p><div class="choices">${entry.choices.map((choice, index) => `<button class="${index === 0 ? "primary" : ""}" data-action="answer" data-project="${esc(projectId)}" data-entry="${entry.id}" data-choice="${index}" data-choice-text="${esc(choice)}">${esc(choice)}</button>`).join("")}</div>${entry.choices.length && !customAnswers.has(answerKey(projectId, entry.id)) ? `<button class="ghost" data-action="custom-answer" data-project="${esc(projectId)}" data-entry="${entry.id}">Write a different answer…</button>` : answerForm(entry)}${answers.has(entry.id) && !answers.has(answerKey(projectId, entry.id)) ? `<p class="notice">An old UUID-only draft is retained without project ownership. It has not been filled into this question.</p><button data-action="answer-adopt" data-project="${esc(projectId)}" data-entry="${esc(entry.id)}">Inspect and explicitly adopt old draft</button>` : ""}<p class="signoff">${esc(view.project.model)} · saved question · ${esc(new Date(entry.at).toLocaleString())}</p></article>`;
+  if (entry.kind === "question") return `<article class="letter"><h2>${esc(entry.title)}</h2>${entry.question.trim() !== entry.title ? `<p class="description">${esc(entry.question.startsWith(entry.title) ? entry.question.slice(entry.title.length).trim() : entry.question)}</p>` : ""}<div class="choices">${entry.choices.map((choice, index) => `<button data-action="answer" data-project="${esc(projectId)}" data-entry="${entry.id}" data-choice="${index}" data-choice-text="${esc(choice)}">${esc(choice)}</button>`).join("")}</div>${entry.choices.length && !customAnswers.has(answerKey(projectId, entry.id)) ? `<button class="ghost" data-action="custom-answer" data-project="${esc(projectId)}" data-entry="${entry.id}">Write a different answer…</button>` : answerForm(entry)}${answers.has(entry.id) && !answers.has(answerKey(projectId, entry.id)) ? `<p class="notice">An old UUID-only draft is retained without project ownership. It has not been filled into this question.</p><button data-action="answer-adopt" data-project="${esc(projectId)}" data-entry="${esc(entry.id)}">Inspect and explicitly adopt old draft</button>` : ""}<p class="signoff">Asked ${esc(ago(entry.at))}</p></article>`;
   const run = view.project.runs.find(run => run.id === entry.run);
   const status = view.runStates.find(state => state.id === entry.run);
   const files = view.evidence.filter(file => status?.sessionFile && file.sessionFile === status.sessionFile);
@@ -431,6 +587,8 @@ function answerForm(entry) {
 function artifactButton(file) { return `<button class="artifact" data-action="artifact" data-file="${file.id}"><strong>${esc(file.title)}</strong><small>${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB · SHA-256 ${esc(file.sha256.slice(0, 12))}</small></button>`; }
 function state(id) { return view.runStates.find(run => run.id === id)?.state ?? "unknown"; }
 function duration(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`; }
+function ago(at) { const ms = Date.now() - new Date(at).getTime(); return ms < 60000 ? "just now" : `${duration(ms)} ago`; }
+function size(bytes) { return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
 function badge(value) { return `<span class="badge ${esc(value)}"><span class="dot"></span>${esc(value)}</span>`; }
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
 function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted; }
@@ -444,9 +602,11 @@ function disableActions() {
   });
   document.querySelectorAll('#dialog [data-thread-mutation], #inline-thread [data-thread-mutation], [data-inline-thread-send] button, [data-inline-thread-send] textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
   document.querySelector('#lifecycle').hidden = view?.project.runtime !== 'durable';
-  document.querySelector('#lifecycle-state').textContent = !view ? '' : view.project.deleted ? 'Deleted. State retained.' : view.project.archived ? 'Archived' : view.paused ? 'Paused' : 'Ready';
-  document.querySelector('#project-pause').disabled = busy || admissionBlocked();
-  document.querySelector('#project-resume').disabled = busy || !view?.paused || view.project.archived || view.project.deleted;
+  document.querySelector('#lifecycle-state').textContent = !view ? '' : view.project.deleted ? 'Deleted' : view.project.archived ? 'Archived' : view.paused ? 'Paused' : view.busy || plan?.work.some(work => work.status === 'running') ? 'Working' : 'Idle';
+  document.querySelector('#lifecycle-state').dataset.state = document.querySelector('#lifecycle-state').textContent.toLowerCase();
+  const pause = document.querySelector('#project-pause'), resume = document.querySelector('#project-resume');
+  pause.hidden = !view || view.paused || view.project.archived || view.project.deleted; pause.disabled = busy || admissionBlocked();
+  resume.hidden = !view?.paused || view.project.archived || view.project.deleted; resume.disabled = busy;
   document.querySelector('#paused-hint').hidden = !view?.paused || view.project.archived || view.project.deleted;
 }
 
@@ -478,7 +638,7 @@ async function mutate(input, success) {
 
 function showError(error) {
   const text = error instanceof Error ? error.message : String(error);
-  document.querySelector("#connection").textContent = "Disconnected";
+  document.querySelector("#connection").textContent = "Disconnected"; document.querySelector("#connection").dataset.state = "down";
   const node = document.querySelector("#error");
   node.dataset.source = "connection";
   node.textContent = `${text}. If the host restarted, run /projects-ui to reopen its current address.`;
@@ -487,16 +647,20 @@ function showError(error) {
 function toast(text) { clearTimeout(toastTimer); const node = document.querySelector("#toast"); node.textContent = text; node.classList.add("visible"); toastTimer = setTimeout(() => node.classList.remove("visible"), 4500); }
 function esc(value) { return String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
 function renderMarkdown(value) {
-  const blocks = String(value ?? "").split(/```[^\n]*\n([\s\S]*?)```/g);
+  const blocks = String(value ?? "").split(/```([^\n]*)\n([\s\S]*?)```/g);
   return blocks.map((part, index) => {
-    if (index % 2) return `<pre><code>${esc(part)}</code></pre>`;
+    if (index % 3 === 1) return "";
+    if (index % 3 === 2) return blocks[index - 1].trim() === "diff" ? `<pre class="diff"><code>${part.split("\n").map(line => `<span class="${line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : ""}">${esc(line)}</span>`).join("\n")}</code></pre>` : `<pre><code>${esc(part)}</code></pre>`;
     const lines = part.split("\n"), out = [];
     let list = null, quote = [];
-    const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map(item => `<li>${inlineMarkdown(item)}</li>`).join("")}</${list.tag}>`); list = null; } };
+    const flushList = () => { if (list) { out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ""}>${list.items.map(item => `<li>${inlineMarkdown(item)}</li>`).join("")}</${list.tag}>`); list = null; } };
     const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${quote.map(inlineMarkdown).join("<br>")}</blockquote>`); quote = []; } };
     for (const line of lines) {
-      const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line), unordered = /^\s*[-*]\s+(.+)$/.exec(line);
-      if (ordered || unordered) { flushQuote(); const tag = ordered ? "ol" : "ul"; if (list?.tag !== tag) flushList(); if (!list) list = { tag, items: [] }; list.items.push((ordered || unordered)[1]); continue; }
+      const ordered = /^\s*(\d+)[.)]\s+(.+)$/.exec(line), unordered = /^\s*[-*]\s+(.+)$/.exec(line);
+      if (ordered || unordered) { flushQuote(); const tag = ordered ? "ol" : "ul"; if (list?.tag !== tag) flushList(); if (!list) list = { tag, items: [], start: ordered ? Number(ordered[1]) : 1 }; list.items.push(ordered ? ordered[2] : unordered[1]); continue; }
+      // Blank lines between items keep one list; indented lines continue the last item.
+      if (list && !line.trim()) continue;
+      if (list && /^\s{2,}\S/.test(line)) { list.items[list.items.length - 1] += ` ${line.trim()}`; continue; }
       flushList();
       const quoted = /^>\s?(.*)$/.exec(line);
       if (quoted) { quote.push(quoted[1]); continue; }
@@ -555,7 +719,7 @@ function creationEdit(id) {
     showDialog("Retained creation outcome", `<p>${draft.outcome === "created" ? `Project ${esc(draft.createdId)} was created. Open its known UUID; do not recreate it.` : draft.requestBound === true ? `Creation outcome is unknown. An explicitly confirmed exact retry uses bound request/project UUID ${esc(id)}, without restoring or resuming it.` : "Old creation outcome is unbound. This draft cannot be resubmitted. Inspect the owned project list before starting any separate creation."}</p><pre>${esc(JSON.stringify({ name: draft.name, cwd: draft.cwd, objective: draft.objective }, null, 2))}</pre>${draft.outcome === "unknown" && draft.requestBound === true ? `<form data-create data-draft="${esc(id)}" data-retry="true"><label class="checkbox"><input name="trusted" type="checkbox" required><span>Retry exactly this stored creation request using the same UUID and inputs. Do not restore, resume or replace any existing project.</span></label><button type="submit">Retry the exact bound request</button></form>` : ""}<button data-action="creation-list">Back to retained drafts</button>`);
     return;
   }
-  showDialog("Create a local project", `<form data-create data-draft="${esc(id)}"><label><span>Project name</span><input name="name" maxlength="120" value="${esc(draft.name)}" required></label><label><span>Absolute workspace path</span><input name="cwd" maxlength="32000" value="${esc(draft.cwd)}" placeholder="/absolute/path/to/your/project" required></label><label><span>Objective</span><textarea name="objective" maxlength="32000">${esc(draft.objective)}</textarea></label><label class="checkbox"><input name="trusted" type="checkbox" required><span>I trust this local workspace's Pi resources. Create a Durable coordinator; worker workspace/tools and provider publication require separate explicit grants. Merge, deployment and destructive effects require exact executable approval.</span></label><button class="primary" type="submit">Create project</button><p>Consent is never stored. Unknown outcomes block same-draft resubmission.</p></form>`);
+  showDialog("New project", `<form data-create data-draft="${esc(id)}"><label><span>Project name</span><input name="name" maxlength="120" value="${esc(draft.name)}" required></label><label><span>Folder</span><input name="cwd" maxlength="32000" value="${esc(draft.cwd)}" placeholder="/Users/you/Projects/my-app" required></label><label><span>Objective <small>(optional)</small></span><textarea name="objective" maxlength="32000" rows="3" placeholder="What should the coordinator help you achieve?">${esc(draft.objective)}</textarea></label><label class="checkbox"><input name="trusted" type="checkbox" required><span>I trust this folder. Workers still need separate permission to edit code or publish.</span></label><button class="primary" type="submit">Create project</button></form>`);
   dialog.querySelector("input").focus();
 }
 function captureCreationDraft() {
@@ -569,7 +733,7 @@ async function resumeDialog() {
   const version = showDialog("Resume this project?", '<p class="note">Reading the saved plan…</p>');
   const plan = await api({ action: "plan-snapshot", id });
   if (!dialog.open || version !== dialogVersion || id !== projectId) return;
-  dialog.querySelector(".dialog-body").innerHTML = `<details><summary>Saved plan</summary><pre>${esc(JSON.stringify(plan, null, 2))}</pre></details><p>Resume restarts work the pause interrupted, on the same threads and worktrees. Stopped and failed work stays as it is.</p><form data-resume-project data-project="${esc(id)}"><label><span>Type the project ID to confirm: ${esc(id)}</span><input name="confirm" required autocomplete="off"></label><button type="submit" class="primary">Resume and continue work</button></form><hr><p class="note">A project with no prior work can resume without confirmation.</p><button data-action="confirm-resume" data-project="${esc(id)}">Resume idle project</button>`;
+  dialog.querySelector(".dialog-body").innerHTML = `<details><summary>Saved plan</summary><pre>${esc(JSON.stringify(plan, null, 2))}</pre></details><p>Resume restarts work the pause interrupted, on the same threads and worktrees. Stopped and failed work stays as it is.</p><form data-resume-project data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit" class="primary">Resume and continue work</button></form><hr><p class="note">A project with no prior work can resume without confirmation.</p><button data-action="confirm-resume" data-project="${esc(id)}">Resume idle project</button>`;
   disableActions();
 }
 
@@ -610,7 +774,7 @@ async function action(node) {
       if (entry?.kind !== "question" || entry.result || !answers.has(entry.id)) throw new Error("No retained unbound draft for this pending question");
       const key = answerKey(projectId, entry.id), text = answers.get(entry.id);
       if (answers.has(key)) throw new Error("A project-bound draft already exists; it will not be overwritten");
-      const version = showDialog("Adopt this old answer draft?", `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><label>Type the project UUID<input name="confirm" autocomplete="off" required></label><button type="submit">Copy draft only, do not send</button></form>`);
+      const version = showDialog("Adopt this old answer draft?", `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Copy draft only, do not send</button></form>`);
       answerAdoption = { projectId, entryId: entry.id, text, version }; break;
     }
     case "custom-answer": {
@@ -620,7 +784,7 @@ async function action(node) {
     case "answer": {
       const index = Number(node.dataset.choice);
       if (entry?.kind !== "question" || entry.result || !Number.isSafeInteger(index) || index < 0 || index >= entry.choices.length || entry.choices[index] !== node.dataset.choiceText) throw new Error("Displayed choice changed or question is resolved; refresh and choose again");
-      await mutate({ action: "answer", id: node.dataset.project, entry: entry.id, text: node.dataset.choiceText }, view.project.runtime === "durable" ? "Answer recorded. Pause and execution authority are unchanged." : "Answer saved and sent to the coordinator."); break;
+      await mutate({ action: "answer", id: node.dataset.project, entry: entry.id, text: node.dataset.choiceText }, "Answer sent to the coordinator."); break;
     }
     case "work-archive": {
       const work = plan?.work.find(item => item.id === node.dataset.work);
@@ -643,7 +807,11 @@ async function action(node) {
     }
     case "worker": await inspectWorker(node.dataset.run); break;
     case "thread-list": threadList(); break;
-    case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; dialogVersion++; break;
+    case "all-work": setTab("activity"); break;
+    case "jump-latest": stickToBottom = true; followTranscript(); renderWorkingPill(); break;
+    case "skill-pick": pickSkill(node.dataset.name); break;
+    case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; render(); break;
+    case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
     case "provider-fresh": requireProject(node.dataset.project); await providerFresh(node.dataset.record); break;
@@ -772,12 +940,13 @@ async function submit(form) {
       if (projectId === target && workerChat?.threadId === threadId) await inspectThread(threadId);
     }
   } else if (form.id === "compose") {
+    closeSkillMenu();
     const submitted = data.get("message");
     const text = submitted.trim(); if (!text) return;
     persistBrowserDrafts();
     await mutate({ action: "message", id, text }, "Request sent to the coordinator.");
     if (drafts.get(id) === submitted) drafts.delete(id);
-    if (projectId === id && form.querySelector("textarea").value === submitted) form.reset();
+    if (projectId === id && form.querySelector("textarea").value === submitted) { form.reset(); autosize(form.querySelector("textarea")); }
   } else if (form.matches("[data-answer-adopt]")) {
     const proposal = answerAdoption; requireProject(form.dataset.project);
     if (!proposal || proposal.projectId !== projectId || proposal.entryId !== form.dataset.entry || proposal.version !== version || data.get("confirm") !== projectId || answers.get(proposal.entryId) !== proposal.text) throw new Error("Draft adoption binding changed; inspect and confirm it again");
@@ -791,7 +960,7 @@ async function submit(form) {
     const text = data.get("answer").trim(); if (!text) return;
     const entry = view?.inbox.find(entry => entry.id === form.dataset.entry && !entry.result);
     if (!entry) throw new Error("Answer target is no longer pending in this project");
-    await mutate({ action: "answer", id, entry: form.dataset.entry, text }, view.project.runtime === "durable" ? "Answer recorded. Pause and execution authority are unchanged." : "Answer saved and sent to the coordinator.");
+    await mutate({ action: "answer", id, entry: form.dataset.entry, text }, "Answer sent to the coordinator.");
   } else if (form.matches("[data-task-message]")) {
     const target = form.dataset.project; requireProject(target);
     const text = data.get("message"); if (!text.trim()) return;
@@ -1005,8 +1174,9 @@ function report(error, frame = error instanceof UiRequestError ? error.frame : u
 }
 document.addEventListener("click", event => { const node = event.target.closest("[data-action]"); if (node && !node.disabled) void uiAction(() => action(node)); });
 document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
+function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; }
 document.addEventListener("input", event => {
-  if (event.target.closest("#compose")) drafts.set(projectId, event.target.value);
+  if (event.target.closest("#compose")) { drafts.set(projectId, event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
   const answerForm = event.target.closest("[data-answer]");
   if (answerForm?.dataset.project === projectId) answers.set(answerKey(projectId, answerForm.dataset.entry), answerForm.querySelector("textarea").value);
   const form = event.target.closest("[data-task-message], [data-inline-thread-send]");
@@ -1020,8 +1190,11 @@ document.addEventListener("input", event => {
   }
   captureKnowledgeDraft(); captureUploadDraft(); captureSettingsDraft(); captureCreationDraft(); persistDraftsSafely();
 });
+// Clicking elsewhere closes the skill picker; moving the caret re-evaluates it.
+document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if (skillMenu && !event.target.closest("#compose")) closeSkillMenu(); });
+document.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) && event.target.closest("#compose textarea")) void updateSkillMenu(event.target).catch(() => closeSkillMenu()); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
-document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; }, { passive: true });
+document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
 document.querySelector("#show-archived").addEventListener("change", event => { showArchived = event.target.checked; if (view) render(); });
 document.addEventListener("click", event => {
   const pick = event.target.closest("[data-select-project]");
@@ -1044,6 +1217,12 @@ dialog.addEventListener("close", () => {
   dialogVersion++; if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null;
 });
 document.addEventListener("keydown", event => {
+  if (skillMenu && event.target.closest("#compose textarea") && !event.isComposing) {
+    const count = skillMenu.items.length;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { skillMenu.index = (skillMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSkillMenu(); } return; }
+    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickSkill(skillMenu.items[skillMenu.index].name); return; }
+    if (event.key === "Escape") { event.preventDefault(); closeSkillMenu(); return; }
+  }
   const textarea = event.target.closest("#compose textarea, [data-answer] textarea, [data-task-message] textarea, [data-inline-thread-send] textarea");
   if (textarea && event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     const form = textarea.form;
@@ -1101,7 +1280,7 @@ function providerInspect(key) {
   const { kind, record } = ownedProviderRecord(key);
   if (kind !== "writes") throw new Error("Effect inspection requires an original native write intent");
   const grant = providerBinding(record.scopeId), proposal = { projectId, key: record.key, record, repositoryId: grant.repositoryId, numericId: grant.numericId };
-  showDialog("Inspect retained native effect?", `<p>Repository ${esc(grant.repositoryId)} (${grant.numericId})<br>Exact key ${esc(record.key)}. Only actual matching native evidence may settle the original record. Missing markers remain uncertain. No publication, rollback, replay or retry permission.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><form data-provider-inspect data-project="${esc(projectId)}" data-key="${esc(record.key)}"><label>Type project ID ${esc(projectId)}<input name="confirm" required autocomplete="off"></label><button type="submit">Inspect exact retained effect only</button></form>`);
+  showDialog("Inspect retained native effect?", `<p>Repository ${esc(grant.repositoryId)} (${grant.numericId})<br>Exact key ${esc(record.key)}. Only actual matching native evidence may settle the original record. Missing markers remain uncertain. No publication, rollback, replay or retry permission.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><form data-provider-inspect data-project="${esc(projectId)}" data-key="${esc(record.key)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Inspect exact retained effect only</button></form>`);
   providerInspection = proposal; disableActions();
 }
 function providerKnown() {
@@ -1121,7 +1300,7 @@ function lifecycleConfirm(id, operation) {
   const inactive = view.project.archived || view.project.deleted;
   if (operation === "restore" ? !inactive : inactive) throw new Error("Project lifecycle state changed; reopen its controls");
   const consequence = operation === "restore" ? "Restore retained metadata. Remain paused; no work is resumed or replayed." : operation === "archive" ? "Pause and archive the project. Conversations, receipts, repository changes, allocated workspaces and remote PRs remain." : "Pause and remove the project from ordinary listing. All project data, repository changes, allocated workspaces and remote PRs remain. Use its known UUID to reopen/restore later.";
-  showDialog(`Confirm ${operation}`, `<p>${esc(consequence)}</p><p>Project ${esc(view.project.name)}<br>ID ${esc(id)}. This performs no filesystem/provider cleanup.</p><form data-lifecycle-change data-project="${esc(id)}" data-operation="${operation}"><label>Type project ID ${esc(id)}<input name="confirm" required autocomplete="off"></label><button type="submit" class="danger">Confirm ${operation} only</button></form>`); disableActions();
+  showDialog(`Confirm ${operation}`, `<p>${esc(consequence)}</p><p>Project ${esc(view.project.name)}<br>ID ${esc(id)}. This performs no filesystem/provider cleanup.</p><form data-lifecycle-change data-project="${esc(id)}" data-operation="${operation}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit" class="danger">Confirm ${operation} only</button></form>`); disableActions();
 }
 async function routineList(lens = "schedules", offset = 0) {
   if (lens === "history") return routineHistory("intents", 0, 0);
@@ -1183,7 +1362,7 @@ function routineConfirm(kind, recordId, value) {
   if (view.project.archived || view.project.deleted) throw new Error("Restore this retained project before changing routines");
   if ((kind === "events" ? record.eventOptIn : record.enabled) === enabled) throw new Error("Displayed routine setting changed; reread before confirming");
   const binding = JSON.stringify(record);
-  const version = showDialog("Confirm routine setting", `<p>Project ${esc(id)}. ${enabled ? "Enable" : "Disable"} ${esc(kind)} ${esc(recordId)}.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><p>Enabling permits future authorized work/polling while awake. It does not resume, grant tools/publication, clear uncertainty or replay retained intents. Monitors need separate event opt-in and current repository authorization. Disabling keeps ticks/cursors. Local confirmation pins this displayed snapshot, not a backend CAS.</p><form data-routine-change data-project="${esc(id)}"><label>Type the project UUID<input name="confirm" autocomplete="off" required></label><button type="submit">Record this setting only</button></form>`);
+  const version = showDialog("Confirm routine setting", `<p>Project ${esc(id)}. ${enabled ? "Enable" : "Disable"} ${esc(kind)} ${esc(recordId)}.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><p>Enabling permits future authorized work/polling while awake. It does not resume, grant tools/publication, clear uncertainty or replay retained intents. Monitors need separate event opt-in and current repository authorization. Disabling keeps ticks/cursors. Local confirmation pins this displayed snapshot, not a backend CAS.</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit">Record this setting only</button></form>`);
   routineConfirmation = { project: id, kind, recordId, enabled, binding, version };
 }
 async function usageList(offset = 0) {
@@ -1282,7 +1461,7 @@ async function ownerSetupEdit(kind, payload) {
     candidates = `<p>Catalog revision ${esc(catalog.revision)}. Use these opaque catalog IDs, selected scope IDs, and explicit relative reference names only.</p><ul>${catalog.candidates.map(skill => `<li>${esc(skill.name)} · ${esc(skill.catalogId)} · ${esc(skill.origin.kind === "repository" ? skill.origin.repositoryId : skill.origin.source)}</li>`).join("")}</ul><p>${esc(catalog.blockers.includes("loaded-configured-catalog-unavailable") ? "Configured catalog unavailable. Repository candidates only." : "")}</p>`;
   }
   if (projectId !== target || generation !== currentGeneration) return;
-  showDialog(`Owner setup · ${kind}`, `<p>Project ${esc(target)}. Edit only the action fields. The host checks the inspected revision and immutable identities. Owner confirmation is required below for each write and is never saved in the draft.</p>${candidates}<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}"><label><span>API fields as JSON</span><textarea name="payload" required spellcheck="false">${esc(JSON.stringify(initial, null, 2))}</textarea></label>${kind.endsWith("-revoke") ? `<label><span>Type project ID ${esc(target)} to confirm this revocation</span><input name="confirm" autocomplete="off" required></label>` : ""}<button class="danger" type="submit">Confirm</button><p>Cancel leaves authority unchanged. Workspace/GitHub revocation stops future admissions. Retained receipts and history remain.</p></form>`);
+  showDialog(`Owner setup · ${kind}`, `<p>Project ${esc(target)}. Edit only the action fields. The host checks the inspected revision and immutable identities. Owner confirmation is required below for each write and is never saved in the draft.</p>${candidates}<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}"><label><span>API fields as JSON</span><textarea name="payload" required spellcheck="false">${esc(JSON.stringify(initial, null, 2))}</textarea></label>${kind.endsWith("-revoke") ? `<input type="hidden" name="confirm" value="${esc(target)}">` : ""}<button class="danger" type="submit">Confirm</button><p>Cancel leaves authority unchanged. Workspace/GitHub revocation stops future admissions. Retained receipts and history remain.</p></form>`);
 }
 
 async function ownerProfileRead(target, profileId) {
@@ -1332,7 +1511,7 @@ async function settingsModels(role, revision, offset = 0) {
 function settingsReview(revision, changes, draftKey = null) {
   if (!settingsCache || settingsCache.projectId !== projectId || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("Reopen the owned settings proposal");
   const proposal = { projectId, revision, changes, draftKey };
-  showDialog("Confirm exact project setting change", `<p>Project ${esc(projectId)}<br>Expected revision ${esc(revision)}. A conflict retains drafts and does not retry/rebase. Changes require host idle/compatibility checks. No model request, shell, publication or merge is authorized here.</p><pre>${esc(JSON.stringify(changes, null, 2))}</pre><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><label>Type project ID ${esc(projectId)}<input name="confirm" required autocomplete="off"></label><button type="submit">Save exact revision-checked change</button></form>`);
+  showDialog("Confirm exact project setting change", `<p>Project ${esc(projectId)}<br>Expected revision ${esc(revision)}. A conflict retains drafts and does not retry/rebase. Changes require host idle/compatibility checks. No model request, shell, publication or merge is authorized here.</p><pre>${esc(JSON.stringify(changes, null, 2))}</pre><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Save exact revision-checked change</button></form>`);
   settingsConfirmation = proposal; disableActions();
 }
 function captureUploadDraft() {
@@ -1374,7 +1553,7 @@ async function uploadReview(importId) {
   const latest = await prepareUpload(draft);
   if (latest.fingerprint !== payload.fingerprint || draft.submittedFingerprint !== null && draft.submittedFingerprint !== payload.fingerprint) throw new Error("Unresolved UUID cannot accept changed bytes/metadata; restore the exact payload or explicitly create a separate draft");
   if (id !== projectId || current !== generation || version !== dialogVersion || !dialog.open) return;
-  showDialog("Confirm exact owner reference import", `<p>Stores an owner reference, not native worker evidence. Grants no agent access or execution authority.</p><pre>${esc(JSON.stringify({ projectId: payload.projectId, importId: payload.importId, filename: payload.filename, title: payload.title, bytes: payload.size, sha256: payload.sha256, fingerprint: payload.fingerprint }, null, 2))}</pre><details><summary>Exact canonical base64 bytes</summary><pre>${esc(payload.data)}</pre></details><form data-upload-confirm data-project="${esc(id)}" data-import="${esc(importId)}" data-fingerprint="${esc(payload.fingerprint)}"><label>Type project ID ${esc(id)}<input name="confirm" required autocomplete="off"></label><button type="submit">Import these exact bytes</button></form>`);
+  showDialog("Confirm exact owner reference import", `<p>Stores an owner reference, not native worker evidence. Grants no agent access or execution authority.</p><pre>${esc(JSON.stringify({ projectId: payload.projectId, importId: payload.importId, filename: payload.filename, title: payload.title, bytes: payload.size, sha256: payload.sha256, fingerprint: payload.fingerprint }, null, 2))}</pre><details><summary>Exact canonical base64 bytes</summary><pre>${esc(payload.data)}</pre></details><form data-upload-confirm data-project="${esc(id)}" data-import="${esc(importId)}" data-fingerprint="${esc(payload.fingerprint)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit">Import these exact bytes</button></form>`);
   uploadConfirmations.set(importId, payload); disableActions();
 }
 function validateLibraryRecord(record, id) {
@@ -1487,7 +1666,7 @@ async function knowledgeRead(path) {
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
   validateKnowledgeDocument(doc, path); knowledgeCache.set(`${id}:${path}`, doc);
   const draft = knowledgeDrafts.get(`${id}:${path}`);
-  dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(doc.author)} · ${esc(doc.updatedAt)} · ${doc.size} bytes<br>Revision ${esc(doc.revision)}</p>${path === "MEMORY.md" ? `<p>${[...doc.text].length}/3,000 Unicode code points</p>` : ""}${draft ? `<p class="notice">Retained draft uses revision ${esc(draft.expectedRevision ?? "null, create only")}. ${draft.expectedRevision !== doc.revision ? "It conflicts with this current document. Rereading does not rebase it." : "It remains unsent."}</p>` : ""}<div class="row"><button data-action="knowledge-edit" data-project="${esc(id)}" data-path="${esc(path)}">${draft ? "Open retained draft" : "Edit with revision check"}</button><button data-action="knowledge-history" data-project="${esc(id)}" data-path="${esc(path)}">Inspect revision history</button>${draft ? `<button data-action="knowledge-discard" data-project="${esc(id)}" data-path="${esc(path)}">Discard draft, explicit confirmation</button>` : ""}</div><pre>${esc(doc.text)}</pre>`;
+  dialog.querySelector(".dialog-body").innerHTML = `<p class="note" title="Revision ${esc(doc.revision)}">${esc(doc.author)} · updated ${esc(ago(doc.updatedAt))} · ${esc(size(doc.size))}${path === "MEMORY.md" ? ` · ${[...doc.text].length.toLocaleString()} / 3,000 code points` : ""}</p>${draft ? `<p class="notice">Retained draft uses revision ${esc(draft.expectedRevision ?? "null, create only")}. ${draft.expectedRevision !== doc.revision ? "It conflicts with this current document. Rereading does not rebase it." : "It remains unsent."}</p>` : ""}<div class="row"><button class="primary small" data-action="knowledge-edit" data-project="${esc(id)}" data-path="${esc(path)}">${draft ? "Continue draft" : "Edit"}</button><button class="small" data-action="knowledge-history" data-project="${esc(id)}" data-path="${esc(path)}">History</button>${draft ? `<button class="small" data-action="knowledge-discard" data-project="${esc(id)}" data-path="${esc(path)}">Discard draft…</button>` : ""}</div><div class="doc-view text">${renderMarkdown(doc.text)}</div>`;
   disableActions();
 }
 function knowledgeEdit(id, path, create = false) {
@@ -1501,12 +1680,12 @@ function knowledgeEdit(id, path, create = false) {
   }
   if (!editableKnowledge(draft.text)) throw new Error("Unsafe control/invalid Unicode text cannot enter the editor; inspect the read-only document");
   persistBrowserDrafts();
-  showDialog(`Edit ${path}`, `<p>Project ${esc(id)}<br>Original revision ${esc(draft.expectedRevision ?? "null, create only")}. Conflicts retain this draft; no automatic rebase or MEMORY.md update.</p><form data-knowledge-write data-project="${esc(id)}" data-path="${esc(path)}"><label>Document text<textarea name="text" rows="16" maxlength="32000">${esc(draft.text)}</textarea></label><label>Type project ID ${esc(id)} to confirm a managed write<input name="confirm" required autocomplete="off"></label><button type="submit">Write against original revision</button></form><button data-action="knowledge-read" data-project="${esc(id)}" data-path="${esc(path)}">Reread without discarding draft</button>`);
+  showDialog(`Edit ${path}`, `<form data-knowledge-write data-project="${esc(id)}" data-path="${esc(path)}"><label><span class="sr-only">Document text</span><textarea name="text" rows="18" maxlength="32000" class="doc-editor">${esc(draft.text)}</textarea></label><p class="note">If someone else changed this document since you opened it, saving fails and your draft is kept.</p><input type="hidden" name="confirm" value="${esc(id)}"><div class="row"><button class="primary" type="submit">Save</button><button type="button" data-action="knowledge-read" data-project="${esc(id)}" data-path="${esc(path)}">Cancel</button></div></form>`);
   disableActions();
 }
 function knowledgeNew() {
   if (!view) throw new Error("Select a loaded project first");
-  showDialog("Create a managed topic", `<p>Use architecture/, research/, decisions/, runbooks/ or plans/, optionally legacy/. Creation uses a null revision and cannot replace an existing file. MEMORY.md is not changed automatically.</p><form data-knowledge-path data-project="${esc(projectId)}"><label>Managed topic path<input name="path" maxlength="240" required value="${esc(knowledgePaths.get(projectId) ?? "")}" placeholder="research/topic.md"></label><button type="submit">Open topic body draft</button></form>`);
+  showDialog("New knowledge document", `<form data-knowledge-path data-project="${esc(projectId)}"><label><span>Path</span><input name="path" maxlength="240" required value="${esc(knowledgePaths.get(projectId) ?? "")}" placeholder="research/topic.md"></label><p class="note">Use a folder: architecture/, research/, decisions/, runbooks/ or plans/. Add it to MEMORY.md yourself if the coordinator should find it.</p><button class="primary" type="submit">Continue</button></form>`);
 }
 function knowledgeDiscard(id, path) {
   requireProject(id);
@@ -1557,27 +1736,32 @@ function operationView(id, fingerprint) {
 function operationDecision(id, fingerprint, mode) {
   const record = ownedOperation(id, fingerprint);
   if (record.status !== "pending" || !["plain", "execution", "reject"].includes(mode) || mode === "execution" && !executionConsentAvailable(record)) throw new Error("This immutable/deferred operation cannot accept that decision");
-  showDialog(mode === "execution" ? "Permit exact executor?" : mode === "plain" ? "Approve record only?" : "Reject permanently?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${mode === "execution" ? "This permits the exact recorded executor, including its bound effect. It does not execute it here." : "This records a decision only. It does not authorize execution or perform a remote effect."}</p><form data-operation-decision data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}" data-decision="${esc(mode)}">${mode !== "reject" ? `<label>Type project ID ${esc(projectId)}<input name="confirm" required autocomplete="off"></label>` : ""}<button type="submit" class="danger">Confirm this exact decision</button></form>`); disableActions();
+  showDialog(mode === "execution" ? "Permit exact executor?" : mode === "plain" ? "Approve record only?" : "Reject permanently?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${mode === "execution" ? "This permits the exact recorded executor, including its bound effect. It does not execute it here." : "This records a decision only. It does not authorize execution or perform a remote effect."}</p><form data-operation-decision data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}" data-decision="${esc(mode)}">${mode !== "reject" ? `<input type="hidden" name="confirm" value="${esc(projectId)}">` : ""}<button type="submit" class="danger">Confirm this exact decision</button></form>`); disableActions();
 }
 function operationExecution(id, fingerprint, inspect = false) {
   const record = ownedOperation(id, fingerprint);
   if (!mergeExecutionAvailable(record)) throw new Error("Only a separately executable exact-head GitHub merge can run here");
-  showDialog(inspect ? "Inspect this original merge outcome?" : "Execute this exact-head merge?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${inspect ? "Read the original bound outcome. Positive matching evidence may settle its journal; missing evidence remains uncertain. This does not merge, replay or grant another attempt." : "This can change the remote repository. The executor rechecks repository/scope/head. Uncertain effects are not replayed automatically."} No command, deployment, Arc or auto-merge execution through this control.</p><form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><label>Type project ID ${esc(projectId)}<input name="confirm" required autocomplete="off"></label><button type="submit" class="danger">${inspect ? "Inspect original outcome only" : "Execute bound merge"}</button></form>`); disableActions();
+  showDialog(inspect ? "Inspect this original merge outcome?" : "Execute this exact-head merge?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${inspect ? "Read the original bound outcome. Positive matching evidence may settle its journal; missing evidence remains uncertain. This does not merge, replay or grant another attempt." : "This can change the remote repository. The executor rechecks repository/scope/head. Uncertain effects are not replayed automatically."} No command, deployment, Arc or auto-merge execution through this control.</p><form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit" class="danger">${inspect ? "Inspect original outcome only" : "Execute bound merge"}</button></form>`); disableActions();
 }
 function uuid(value) { return typeof value === "string" && /^[a-f0-9-]{36}$/.test(value); }
 function requireProject(id) { if (id !== projectId) throw new Error("Selected project changed. Reopen the intended control."); }
 function closeCurrentDialog(id, version) { if (projectId === id && dialogVersion === version) closeDialog(); }
 function requireThread(id) { if (!uuid(id) || !plan?.work.some(work => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan"); }
+function workLine(work, detail) {
+  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}</small></button>`;
+}
+const finished = work => ["completed", "failed", "stopped"].includes(work.status);
 function durableActivity() {
-  const order = { running: 0, queued: 1, interrupted: 2, blocked: 3, failed: 4, stopped: 5, completed: 6 };
-  // Completed and archived work leave this panel; Activity keeps the full list.
-  const shown = plan.work.filter(work => work.status !== "completed" && !work.archived).toSorted((a, b) => order[a.status] - order[b.status] || (b.endedAt ?? b.startedAt ?? 0) - (a.endedAt ?? a.startedAt ?? 0)).slice(0, 12);
-  const clip = (value, size) => value.length > size ? `${value.slice(0, size - 1)}…` : value;
-  const line = work => {
-    const detail = work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
-    return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-status">${esc(work.status)}</span><span class="worker-role">${esc(work.role)}</span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span>${detail ? `<small class="worker-detail">${esc(detail)}</small>` : ""}</button>`;
-  };
-  return (shown.map(line).join("") || `<p class="note">${plan.work.length ? "No active workers." : "No workers yet."}</p>`) + (plan.work.length ? `<button class="ghost small" data-action="thread-list">All ${plan.work.length} work items ↗</button>` : "");
+  const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
+  // Finished and archived work leave this panel for Recent results; Activity keeps the full list.
+  const shown = plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
+  const detail = work => work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
+  const total = plan.work.length;
+  return (shown.map(work => workLine(work, detail(work))).join("") || `<p class="note">${total ? "No active workers." : "No workers yet."}</p>`) + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
+}
+function durableResults() {
+  const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);
+  return done.map(work => workLine(work, work.endedAt ? `${duration(Date.now() - work.endedAt)} ago` : "")).join("") || '<p class="note">Finished work appears here.</p>';
 }
 function threadList() {
   if (!plan) throw new Error("Durable plan is not loaded");
@@ -1590,16 +1774,17 @@ async function inspectThread(threadId, offset = null, textOffset = 0) {
   workerChat = chat;
   setTab("activity");
   const target = document.querySelector("#inline-thread");
-  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>';
+  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>'; document.querySelector("#thread-empty").hidden = true;
   const version = ++dialogVersion;
   const page = await workerChatPage(chat);
   if (workerChat !== chat || version !== dialogVersion || chat.generation !== generation || target.hidden) return;
   const work = plan.work.findLast(item => item.threadId === threadId);
   const draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`);
-  target.innerHTML = `<div class="row between"><h2>Worker conversation</h2><button class="ghost small" data-action="thread-close">Close</button></div><p class="note">${esc(work?.text ?? "")}</p><div class="worker-convo"><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" placeholder="Follow up on this worker…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Enter to send · Shift+Enter for a new line</small><button class="primary" type="submit">Send follow-up</button></div></form></div><details class="worker-controls"><summary>Thread details and controls</summary><p>Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}</p><p>Existing scope/model/tools stay frozen. History/partial files/receipts are retained.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer with confirmation</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop with confirmation</button></div></details><div id="worker-evidence"></div>`;
+  const role = work?.role ?? "worker";
+  target.innerHTML = `<div class="thread-head"><div class="grow"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p></div><button class="ghost small" data-action="thread-close" aria-label="Close thread">✕</button></div><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><details class="worker-controls"><summary>Evidence, changes and controls</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop…</button></div></details>`;
+  document.querySelector("#thread-empty").hidden = true;
   renderWorkerChat(chat, page, true);
-  disableActions();
-  target.scrollIntoView({ block: "nearest" });
+  render();
 }
 async function workerChatPage(chat) {
   const read = offset => api({ action: "thread-history", id: chat.id, threadId: chat.threadId, offset, limit: 30, textOffset: chat.textOffset, textLimit: 4000 });
@@ -1622,7 +1807,7 @@ function renderWorkerChat(chat, page, opening = false) {
     if (atEnd) transcript.scrollTop = transcript.scrollHeight;
   }
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
-  document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length}/${page.total}</small>`;
+  document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
   document.querySelector("#worker-evidence").innerHTML = workerChanges(chat.threadId, page.items);
 }
 function workerChanges(threadId, items) {
@@ -1637,7 +1822,7 @@ function workerChanges(threadId, items) {
       return typeof path === "string" ? esc(path) : esc(item.name);
     } catch { return esc(item.name); }
   });
-  return `<section class="changes-evidence"><h3>Changes and evidence</h3><h4>Evidence</h4>${linked.map(artifactButton).join("") || '<p class="note">No evidence linked to this thread.</p>'}${legacy ? '<p class="note">Legacy evidence without native provenance stays unlinked.</p>' : ""}<h4>Files touched (from tool calls)</h4>${paths.length ? `<ul>${paths.map(path => `<li>${path}</li>`).join("")}</ul>` : '<p class="note">No write/edit tool calls in this page.</p>'}</section>`;
+  return `<section class="changes-evidence"><h4>Evidence</h4>${linked.map(artifactButton).join("") || '<p class="note">No evidence linked to this thread.</p>'}${legacy ? '<p class="note">Legacy evidence without native provenance stays unlinked.</p>' : ""}<h4>Files touched (from tool calls)</h4>${paths.length ? `<ul>${paths.map(path => `<li>${path}</li>`).join("")}</ul>` : '<p class="note">No write/edit tool calls in this page.</p>'}</section>`;
 }
 function captureDialogDraft() {
   const form = dialog.querySelector("[data-task-message]");

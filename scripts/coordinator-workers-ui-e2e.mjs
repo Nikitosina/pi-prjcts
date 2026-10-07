@@ -176,10 +176,10 @@ try {
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`document.querySelector('#title')?.innerText === 'Workers UI' && document.querySelector('#activity').innerText.includes('failed')`, s, 'project loaded');
+  await waitFor(`document.querySelector('#title')?.innerText === 'Workers UI' && document.querySelector('#outcomes').innerText.includes('failed')`, s, 'project loaded');
   const panel = await evaluate(`document.querySelector('#activity').innerText`, s);
   if (/completed/i.test(panel) || /MARK-SCOUTTASK|MARK-REVIEWTASK/.test(await evaluate(`[...document.querySelectorAll('#activity [title]')].map(n => n.title).join(' ')`, s))) throw Error('Completed work still in Workers panel: ' + panel);
-  result.checks.push('A1 Workers panel hides completed work, keeps failed');
+  result.checks.push('A1 Workers panel hides finished work; failed shows under Recent results');
 
   await ask('MARK-HOLD');
   const holdWork = await eventually(async () => { const w = await workFor(id, 'MARK-HOLDTASK'); return w.status === 'running' && w; }, 'hold not running');
@@ -196,7 +196,7 @@ try {
   const failA = afterArchive.find(w => w.text.startsWith('MARK-FAILTASK'));
   if (!failA?.archived || !/archived/i.test(archAll)) throw Error('Coordinator archive failed: ' + archAll.slice(0, 300));
   if (afterArchive.length < 4 || !(await rpc({ action: 'thread-history', id, threadId: failA.threadId }).catch(() => null))) throw Error('Archive removed history');
-  await waitFor(`!document.querySelector('#activity').innerText.includes('failed') && !document.querySelector('#warning').innerText.includes('${failA.threadId}')`, s, 'failed hidden from panel and warning after archive');
+  await waitFor(`!document.querySelector('#outcomes').innerText.includes('failed') && !document.querySelector('#warning').innerText.includes('${failA.threadId}')`, s, 'failed hidden from panel and warning after archive');
   result.checks.push('A3 coordinator archives terminal work; panel hides it; record and thread retained');
 
   await ask('MARK-FAILB');
