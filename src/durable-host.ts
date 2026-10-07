@@ -2,6 +2,7 @@ import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableCoordinatorMessage, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
 import { compactSkillText } from "./coordinator-skills.ts";
+import { attachmentContent, listUploads } from "./uploads.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(project: Project, configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader): Promise<DurableProjectRuntime> {
@@ -9,7 +10,7 @@ export async function openDurableHost(project: Project, configuredSkillLoader?: 
   try {
     if ((await owner.planSnapshot()).paused) return owner;
     for (const job of jobs(project.id).filter(job => job.state === "queued" || job.state === "running")) {
-      await owner.admit(job.text, { requestId: job.id, chatId: job.chatId });
+      await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), { requestId: job.id, chatId: job.chatId });
     }
     return owner;
   } catch (error) { await owner.close(); throw error; }
@@ -59,7 +60,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
-    chatId: view.chatId, chats,
+    chatId: view.chatId, chats, uploads: listUploads(dir), failedJobs: all.filter(job => job.state === "failed" || job.state === "interrupted").length,
   };
 }
 

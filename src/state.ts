@@ -76,6 +76,8 @@ export const Job = Type.Object({
   error: Type.Union([Type.String(), Type.Null()]),
   /** Coordinator chat the message went to; absent on older jobs and for Main. */
   chatId: Type.Optional(Id),
+  /** Owner uploads attached to the message. */
+  attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
 }, { additionalProperties: false });
 export type Job = Static<typeof Job>;
 export const ChatId = Type.Union([Type.Literal("main"), Id]);
@@ -145,6 +147,8 @@ export const Snapshot = Type.Object({
   durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(Type.Object({ tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) }, { additionalProperties: false })),
   chatId: Type.Optional(ChatId),
+  /** Owner uploads (metadata, newest first) and failed/interrupted jobs across every chat. */
+  uploads: Type.Optional(Type.Array(Type.Unknown())), failedJobs: Type.Optional(Type.Integer({ minimum: 0 })),
   chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
@@ -219,7 +223,10 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("legacy-thread-history"), id: Id, name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-history"), id: Id, threadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("upload-read"), id: Id, uploadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("upload-delete"), id: Id, uploadId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("schedule-create"), id: Id, scheduleId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), atMs: Type.Integer({ minimum: 0 }), everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })), calendar: Type.Optional(Type.Union([
     Type.Object({ kind: Type.Literal("daily"), timezone: Type.String({ minLength: 1, maxLength: 256 }), time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }) }, { additionalProperties: false }),
     Type.Object({ kind: Type.Literal("weekly"), timezone: Type.String({ minLength: 1, maxLength: 256 }), time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }), days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }) }, { additionalProperties: false })

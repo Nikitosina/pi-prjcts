@@ -2,7 +2,8 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { body } from "./http.ts";
+import { body, bytes } from "./http.ts";
+import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
 import { readEvidence } from "./evidence.ts";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
@@ -37,7 +38,7 @@ async function serveLive(response: ServerResponse, headers: Record<string, strin
   heartbeat = setInterval(() => response.write(": ping\n\n"), 15000);
 }
 
-export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch) {
+export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch, upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>) {
   const token = randomBytes(32).toString("hex");
   let origin = "";
   const assets = new Map([
@@ -79,6 +80,27 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         await serveLive(response, headers, (onFrame, onEnd) => watchLive(id, onFrame, onEnd, chat));
         return;
       }
+      // Raw file body (≤ 20 MiB); the display name travels URI-encoded in x-filename.
+      if (request.method === "POST" && url.pathname === "/upload") {
+        const id = url.searchParams.get("project") ?? "";
+        if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
+        let filename: string;
+        try { filename = decodeURIComponent(String(request.headers["x-filename"] ?? "")); } catch { throw new Error("Invalid x-filename header"); }
+        validUploadName(filename); loadProject(id);
+        let data: Buffer;
+        try { data = await bytes(request, UPLOAD_MAX_BYTES); } catch (error) { status = 413; throw error; }
+        const stored = await upload(id, filename, data);
+        response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data: stored }));
+        return;
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/uploads/")) {
+        const parts = url.pathname.split("/");
+        if (parts.length !== 4) throw new Error("Invalid upload URL");
+        const project = loadProject(parts[2]);
+        const result = uploadBytes(projectDir(project.id), parts[3]);
+        response.writeHead(200, { ...headers, "content-type": result.record.kind === "text" ? "text/plain; charset=utf-8" : result.record.mime, "content-length": result.bytes.length }).end(result.bytes);
+        return;
+      }
       if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {
         const parts = url.pathname.split("/");
         if (parts.length !== 4) throw new Error("Invalid evidence URL");
@@ -90,7 +112,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
       status = 404;
       throw new Error("Unknown endpoint");
     } catch (error) {
-      response.writeHead(status, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+      response.writeHead(status, { ...headers, "content-type": "application/json", ...(status === 413 ? { connection: "close" } : {}) }).end(JSON.stringify({ ok: false, error: errorText(error) }));
     }
   });
   server.requestTimeout = 120000;

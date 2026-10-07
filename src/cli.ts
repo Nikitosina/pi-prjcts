@@ -143,7 +143,7 @@ switch (command) {
   case "owner-workspaces": case "owner-skills-catalog": case "owner-skills-grants": case "owner-command-profiles": case "owner-setup": {
     if (!first || second !== undefined || rest.length) throw new Error(`Usage: ${command} <project-id>`);
     const action = command === "owner-workspaces" ? "workspace-catalog" : command === "owner-skills-catalog" ? "worker-skills-catalog" : command === "owner-skills-grants" ? "worker-skills-grants" : command === "owner-command-profiles" ? "command-profiles-snapshot" : "owner-setup-snapshot";
-    input = parse(Request, { action, id: first }); break;
+    input = parse(Request, { action, id: first, ...(action === "worker-skills-catalog" ? { limit: 64 } : {}) }); break;
   }
   case "owner-workspace-revoke": {
     const [expectedRevision, confirm] = rest;
@@ -200,7 +200,18 @@ switch (command) {
     process.exit(1);
 }
 try {
-  const data = await request(input, startHost && command !== "host-stop");
+  let data = await request(input, startHost && command !== "host-stop");
+  // The owner catalog is paged; print every page of one revision.
+  if (input.action === "worker-skills-catalog") {
+    const catalog = data as { revision: string; candidates: unknown[]; page: { offset: number; limit: number; total: number; nextOffset: number | null } };
+    for (let page = catalog.page; page.nextOffset !== null;) {
+      const next = await request({ ...input, offset: page.nextOffset, limit: 64 }, false) as typeof catalog;
+      if (next.revision !== catalog.revision || next.page.offset !== page.nextOffset) throw new Error("Skill catalog changed while paging; run the command again");
+      catalog.candidates.push(...next.candidates); page = next.page;
+    }
+    catalog.page = { offset: 0, limit: catalog.candidates.length, total: catalog.candidates.length, nextOffset: null };
+    data = catalog;
+  }
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 } catch (error) {
   process.stderr.write(errorText(error) + "\n");

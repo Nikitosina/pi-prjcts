@@ -404,3 +404,25 @@ pre.diff .del { color: #a3301f; background: #f9e3df; display: inline-block; min-
 .chat-archived[open] { position: relative; }
 .chat-archived .archived-list { position: absolute; right: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 220px; box-shadow: 0 6px 20px #0002; }
 .chat-archived .archived-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 4px; }
+
+/* Uploads and attachments */
+.attach-chips, .attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.msg .attach-row { margin: 8px 0 0; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--chip); font-size: 12px; line-height: 1.4; }
+button.attach-chip { padding: 3px 8px 3px 6px; }
+.attach-chip.pending { opacity: .65; }
+.attach-chip.gone { color: var(--muted); padding-right: 8px; }
+.attach-chip .attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.attach-chip button { padding: 0 6px; border: 0; background: transparent; font-size: 14px; line-height: 1; }
+.file-kind { flex: none; padding: 1px 4px; border-radius: 4px; background: #e4ddcc; color: #5d5640; font: 700 9px/1.5 Menlo, Consolas, monospace; letter-spacing: .5px; }
+.file-kind.image { background: #dfe9dc; color: #3c5a35; }
+.file-kind.pdf { background: #f3dcd3; color: #8a3f1c; }
+.attach-button { padding: 5px 7px; display: inline-flex; align-items: center; color: var(--muted); }
+.upload-list { display: grid; gap: 4px; margin: 4px 0 18px; }
+.upload-row { display: flex; align-items: center; gap: 10px; text-align: left; padding: 8px 10px; background: var(--panel); min-width: 0; }
+.upload-row .upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-row small { flex: none; }
+.upload-image { display: block; max-width: 100%; max-height: 60vh; margin: 8px 0 14px; border-radius: 6px; border: 1px solid var(--line); }
+.upload-text { max-height: 55vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.dragging { outline: 2px dashed var(--accent); outline-offset: -4px; }
+@media (max-width: 600px) { .upload-row small { display: none; } .attach-chip .attach-name { max-width: 140px; } }

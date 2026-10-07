@@ -157,6 +157,11 @@ try {
   const big = await rpc({ action: 'worker-skills-catalog', id, offset: 64, limit: 64 });
   if (big.candidates.length !== SKILLS - 64 || big.page.nextOffset !== null || big.revision !== pages[0].revision) throw Error('64-wide page wrong');
   result.catalog = { total: SKILLS, pages: pages.length, revision: pages[0].revision };
+  // L2: the CLI prints every page, not the first 16.
+  const cliEnv = { ...env }; delete cliEnv.PI_PROJECTS_HOST;
+  const cli = JSON.parse(execFileSync(process.execPath, [join(repo, 'src/cli.ts'), '--no-start', 'owner-skills-catalog', id], { cwd: repo, env: cliEnv, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
+  if (cli.candidates.length !== SKILLS || cli.page.nextOffset !== null || cli.revision !== pages[0].revision || new Set(cli.candidates.map(c => c.catalogId)).size !== SKILLS) throw Error('CLI catalog incomplete: ' + JSON.stringify({ n: cli.candidates.length, page: cli.page }));
+  result.checks.push(`L2 CLI owner-skills-catalog returns all ${SKILLS} candidates of one revision`);
   result.checks.push('F1-F5 owner worker-skills catalog with 89 configured skills captures; 16-wide pages 0..88 are disjoint, stable revision, nextOffset ends null; offset 64 accepted');
   const last = all.at(-1), scopeId = (await rpc({ action: 'show', id })).project.workspaceAuthorization.scopes[0].id;
   const grants = await rpc({ action: 'worker-skills-grants', id });
@@ -221,6 +226,9 @@ try {
   const usageText = await evaluate(`document.querySelector('#obs-usage').innerText`, s);
   if (!/3\s*chats/.test(usageText)) throw Error('Usage head lacks chat count: ' + usageText.slice(0, 300));
   result.trace = trace;
+  // L1: host health aggregates failed jobs and attention across chats while Main is viewed.
+  await waitFor(`(() => { const t = document.querySelector('#obs-health')?.innerText ?? ''; return /Failed jobs\\s*1\\b/.test(t) && /Project\\s*needs attention/.test(t); })()`, s, 'health aggregates chats');
+  result.checks.push('L1 Observability health shows Failed jobs 1 and Project "needs attention" from the Broken chat while Main is viewed');
   await shot('03-observability-all-chats', s);
   result.checks.push('F10-F13 usage counts Main, Research and Broken with per-chat rows; the trace has one node per chat with the scout thread under Research');
 

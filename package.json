@@ -16,11 +16,12 @@
     "e2e:durable-switch": "node scripts/durable-switch-e2e.mjs",
     "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",
     "link:durable": "node scripts/link-durable.mjs",
+    "link:unpdf": "node scripts/link-unpdf.mjs",
     "e2e:tui": "node scripts/tui-e2e.ts",
     "projects": "node src/cli.ts"
   },
   "pi": { "extensions": ["src/extension.ts"] },
-  "dependencies": { "@earendil-works/pi-durable": "1.0.0" },
+  "dependencies": { "@earendil-works/pi-durable": "1.0.0", "unpdf": "1.8.1" },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",

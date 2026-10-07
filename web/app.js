@@ -206,7 +206,7 @@ function changeProject(id, chat = "main") {
   if (chat === "main") url.searchParams.delete("chat"); else url.searchParams.set("chat", chat);
   history.replaceState(null, "", url);
   document.querySelector("#projects").value = id ?? "";
-  document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? ""; autosize(document.querySelector("#compose textarea"));
+  document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? ""; autosize(document.querySelector("#compose textarea")); renderAttachments();
   document.querySelector("#compose button").disabled = !id || busy;
   html.clear(); usageObs = null;
   const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
@@ -295,6 +295,7 @@ function render() {
   const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"));
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
   setHtml("#knowledge-inline", knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>');
+  setHtml("#uploads-inline", uploadsHtml()); renderAttachments();
   setHtml("#messages", view.messages.map(message => chatMessageHtml(message, "Coordinator")).join("") || `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`);
   const reply = view.messages.findLast(message => message.role === "assistant" && message.text.trim());
   setHtml("#reply-summary", reply ? `<div class="reply-text">${renderMarkdown(reply.text.slice(0, 500))}</div><button type="button" class="ghost small" data-action="conversation">Read conversation ↗</button>` : "");
@@ -464,7 +465,7 @@ async function loadObservability() {
 }
 function renderHealth(project) {
   const h = observability?.health;
-  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime ?? "legacy"], ["Coordinator", (view.chats ?? []).some(chat => chat.busy) || view.busy ? `busy${(view.chats?.length ?? 0) > 1 ? ` · ${view.chats.filter(chat => chat.busy).length}/${view.chats.length} chats` : ""}` : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
+  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime ?? "legacy"], ["Coordinator", (view.chats ?? []).some(chat => chat.busy) || view.busy ? `busy${(view.chats?.length ?? 0) > 1 ? ` · ${view.chats.filter(chat => chat.busy).length}/${view.chats.length} chats` : ""}` : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : project.phase === "attention" ? "needs attention" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.failedJobs ?? view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
   setHtml("#obs-health", `<div class="health">${values.map(([label, value]) => `<div><small>${esc(label)}</small><b>${esc(value)}</b></div>`).join("")}</div>`);
 }
 function renderEventLog() {
@@ -495,6 +496,7 @@ function toolLabel(call) {
     projects_knowledge_list: () => "Listed knowledge", projects_knowledge_history: () => `Read history of ${path}`,
     projects_note: () => "Added a note", projects_notes: () => "Read notes", projects_evidence: () => `Attached evidence${a.title ? `: ${a.title}` : ""}`,
     projects_library_list: () => "Listed the library", projects_library_read: () => "Read from the library",
+    projects_search: () => `Searched knowledge${a.query ? ` for “${a.query}”` : ""}`, projects_upload_list: () => "Listed uploads", projects_upload_read: () => `Read upload ${view?.uploads?.find(item => item.id === a.uploadId)?.filename ?? ""}`.trim(),
     projects_workspace_catalog: () => "Checked workspaces", projects_skill_read: () => `Read skill ${a.name ?? ""}`,
     projects_skill_file: () => `Read skill file ${a.skill ?? ""}/${a.path ?? "SKILL.md"}`,
     projects_github_issue_read: () => `Read GitHub #${a.number ?? ""}`,
@@ -531,7 +533,8 @@ function chatMessageHtml(message, assistant) {
   const label = message.role === "user" ? "You" : message.role === "assistant" ? assistant : message.role;
   // The host shows an invoked skill as `/skill:<name> args`; render the command as a chip.
   const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
-  const body = skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(skill[2]) : ""}` : renderMarkdown(message.text);
+  const attached = message.role === "user" ? attachmentChips(message.text) : { text: message.text, chips: "" };
+  const body = (skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(attachmentChips(skill[2]).text) : ""}` : renderMarkdown(attached.text)) + attached.chips;
   return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
@@ -632,7 +635,83 @@ function artifactButton(file) { return `<button class="artifact" data-action="ar
 function state(id) { return view.runStates.find(run => run.id === id)?.state ?? "unknown"; }
 function duration(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`; }
 function ago(at) { const ms = Date.now() - new Date(at).getTime(); return ms < 60000 ? "just now" : `${duration(ms)} ago`; }
-function size(bytes) { return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
+function size(bytes) { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
+// Uploads: owner files stored as project knowledge (Knowledge tab) or attached to a composer message. The host extracts PDF text; agents search with projects_search.
+const UPLOAD_LIMIT = 20 * 1024 * 1024;
+const attachmentDrafts = new Map();
+function fileKind(kind) { return `<span class="file-kind ${esc(kind ?? "")}">${kind === "image" ? "IMG" : kind === "pdf" ? "PDF" : kind ? "TXT" : "…"}</span>`; }
+async function uploadFile(file, id) {
+  if (!file.size) throw new Error(`${file.name} is empty`);
+  if (file.size > UPLOAD_LIMIT) throw new Error(`${file.name} is larger than 20 MB`);
+  const response = await fetch(`/upload?project=${encodeURIComponent(id)}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "x-filename": encodeURIComponent(file.name), "content-type": "application/octet-stream" }, body: file, signal: AbortSignal.timeout(300000) });
+  const reply = await response.json().catch(() => null);
+  if (!response.ok || reply?.ok !== true) throw new Error(`${file.name}: ${typeof reply?.error === "string" ? reply.error : `upload failed (${response.status})`}`);
+  return reply.data;
+}
+async function uploadToKnowledge(files) {
+  const id = projectId;
+  if (!id || !view) throw new Error("Select a project first");
+  const results = await Promise.allSettled(files.map(file => uploadFile(file, id)));
+  if (id === projectId) await refresh();
+  const failed = results.filter(result => result.status === "rejected").map(result => result.reason.message), done = results.length - failed.length;
+  if (done) toast(`${done} file${done === 1 ? "" : "s"} added to knowledge.`);
+  if (failed.length) throw new Error(failed.join("; "));
+}
+async function attachFiles(files) {
+  if (!view || admissionBlocked()) throw new Error("This project cannot accept a request now.");
+  const key = draftKey(), id = projectId, list = attachmentDrafts.get(key) ?? [];
+  if (list.length + files.length > 10) throw new Error("At most 10 attachments per message");
+  attachmentDrafts.set(key, list);
+  const errors = [];
+  await Promise.all(files.map(async file => {
+    const item = { filename: file.name, pending: true };
+    list.push(item); renderAttachments();
+    try { Object.assign(item, await uploadFile(file, id), { pending: false }); }
+    catch (error) { list.splice(list.indexOf(item), 1); errors.push(error.message); }
+    renderAttachments();
+  }));
+  if (errors.length) throw new Error(errors.join("; "));
+}
+function renderAttachments() {
+  const node = document.querySelector("#attachments"), list = attachmentDrafts.get(draftKey()) ?? [];
+  node.hidden = !list.length;
+  node.innerHTML = list.map((item, i) => `<span class="attach-chip ${item.pending ? "pending" : ""}" title="${esc(item.filename)}">${fileKind(item.kind)}<span class="attach-name">${esc(item.filename)}</span>${item.pending ? "<small>uploading…</small>" : `<small>${size(item.size)}</small><button type="button" class="ghost small" data-action="attach-remove" data-index="${i}" aria-label="Remove ${esc(item.filename)}">×</button>`}</span>`).join("");
+}
+function uploadsHtml() {
+  const list = view?.uploads ?? [];
+  return list.length ? `<div class="upload-list">${list.map(item => `<button class="upload-row" data-action="upload-open" data-upload="${esc(item.id)}">${fileKind(item.kind)}<span class="upload-name">${esc(item.filename)}</span><small>${size(item.size)} · ${esc(ago(item.at))}${item.extractError ? " · no text extracted" : ""}</small></button>`).join("")}</div>` : '<p class="note">Drop files here or use Upload files: text, code, Markdown, PDF and PNG/JPEG/WebP images up to 20 MB. The coordinator and workers can search them.</p>';
+}
+// The host appends an attachment block to the coordinator message; show it as chips.
+const attachmentBlock = /\n\n\[Attached files: [^\]\n]*\]\n((?:- [^\n]*(?:\n|$))+)$/;
+function attachmentChips(text) {
+  const match = attachmentBlock.exec(text);
+  if (!match) return { text, chips: "" };
+  const chips = match[1].trim().split("\n").map(line => {
+    const known = /^- (.+) · (text|pdf|image) · (\d+) bytes · upload ([a-f0-9-]{36})/.exec(line), gone = /^- deleted upload ([a-f0-9-]{36})/.exec(line);
+    return known ? `<button type="button" class="attach-chip" data-action="upload-open" data-upload="${esc(known[4])}" title="${esc(known[1])}">${fileKind(known[2])}<span class="attach-name">${esc(known[1])}</span><small>${size(Number(known[3]))}</small></button>` : gone ? `<span class="attach-chip gone">Deleted upload</span>` : "";
+  }).join("");
+  return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>` };
+}
+async function uploadOpen(uploadId) {
+  const id = projectId, record = (view?.uploads ?? []).find(item => item.id === uploadId);
+  const version = showDialog(record?.filename ?? "Upload", '<p class="note">Reading…</p>');
+  let body, meta = record;
+  if (record?.kind === "image") {
+    const response = await fetch(`/uploads/${encodeURIComponent(id)}/${encodeURIComponent(uploadId)}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120000) });
+    if (!response.ok) throw new Error(`Image unavailable (${response.status})`);
+    const blob = await response.blob();
+    if (version !== dialogVersion || id !== projectId) return;
+    blobUrl = URL.createObjectURL(blob);
+    body = `<img class="upload-image" src="${blobUrl}" alt="${esc(record.filename)}">`;
+  } else {
+    const page = await api({ action: "upload-read", id, uploadId, limit: 20000 });
+    meta = page.record;
+    body = page.record.extractError ? `<p class="note">${esc(page.record.extractError)}</p>` : `<pre class="upload-text">${esc(page.text)}</pre>${page.nextOffset !== null ? `<p class="note">Showing the first ${page.nextOffset.toLocaleString()} of ${page.record.textChars.toLocaleString()} characters. Agents read the rest with projects_upload_read.</p>` : ""}`;
+  }
+  if (version !== dialogVersion || id !== projectId) return;
+  dialog.querySelector("#dialog-title").textContent = meta.filename;
+  dialog.querySelector(".dialog-body").innerHTML = `<p class="note">${esc(meta.kind.toUpperCase())} · ${size(meta.size)} · uploaded ${esc(ago(meta.at))}${meta.kind === "pdf" && !meta.extractError ? ` · ${meta.textChars.toLocaleString()} characters of text` : ""}</p>${body}<div class="row"><button class="small danger" data-action="upload-delete" data-project="${esc(id)}" data-upload="${esc(uploadId)}">Delete upload</button></div>`;
+}
 function badge(value) { return `<span class="badge ${esc(value)}"><span class="dot"></span>${esc(value)}</span>`; }
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
 function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived); }
@@ -914,6 +993,11 @@ async function action(node) {
       settingsReview(model.revision, changes); break;
     }
     case "upload-list": uploadList(); break;
+    case "upload-pick": document.querySelector("#upload-input").click(); break;
+    case "attach-pick": document.querySelector("#attach-input").click(); break;
+    case "attach-remove": { const list = attachmentDrafts.get(draftKey()) ?? []; list.splice(Number(node.dataset.index), 1); renderAttachments(); break; }
+    case "upload-open": await uploadOpen(node.dataset.upload); break;
+    case "upload-delete": requireProject(node.dataset.project); await mutate({ action: "upload-delete", id: node.dataset.project, uploadId: node.dataset.upload }, "Upload deleted."); closeDialog(); break;
     case "upload-new": {
       if (!view) throw new Error("Select a loaded project first");
       const draft = { projectId, importId: crypto.randomUUID(), filename: "reference.md", title: "Project reference", encoding: "utf8", text: "", submittedFingerprint: null };
@@ -1014,9 +1098,12 @@ async function submit(form) {
     closeSkillMenu();
     const submitted = data.get("message"), chat = chatId, key = draftKey(id, chat);
     const text = submitted.trim(); if (!text) return;
+    const list = attachmentDrafts.get(key) ?? [];
+    if (list.some(item => item.pending)) throw new Error("Attachments are still uploading. Your draft was kept.");
     persistBrowserDrafts();
-    await mutate({ action: "message", id, text, ...(chat === "main" ? {} : { chatId: chat }) }, "Request sent to the coordinator.");
+    await mutate({ action: "message", id, text, ...(chat === "main" ? {} : { chatId: chat }), ...(list.length ? { attachments: list.map(item => item.id) } : {}) }, "Request sent to the coordinator.");
     if (drafts.get(key) === submitted) drafts.delete(key);
+    if (attachmentDrafts.get(key) === list) { attachmentDrafts.delete(key); renderAttachments(); }
     if (projectId === id && chatId === chat && form.querySelector("textarea").value === submitted) { form.reset(); autosize(form.querySelector("textarea")); }
   } else if (form.matches("[data-answer-adopt]")) {
     const proposal = answerAdoption; requireProject(form.dataset.project);
@@ -1266,6 +1353,21 @@ document.addEventListener("mousedown", event => { if (event.target.closest(".ski
 document.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) && event.target.closest("#compose textarea")) void updateSkillMenu(event.target).catch(() => closeSkillMenu()); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
 document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
+for (const id of ["attach-input", "upload-input"]) document.querySelector(`#${id}`).addEventListener("change", event => {
+  const files = [...event.target.files]; event.target.value = "";
+  if (files.length) void uiAction(() => id === "attach-input" ? attachFiles(files) : uploadToKnowledge(files));
+});
+// Files dropped on the composer or transcript attach to the next message; on the Knowledge tab they become knowledge.
+const dropZone = event => event.dataTransfer?.types.includes("Files") ? event.target.closest?.("#compose, #transcript, [data-panel='knowledge']") ?? null : null;
+document.addEventListener("dragover", event => { if (!event.dataTransfer?.types.includes("Files")) return; event.preventDefault(); const zone = dropZone(event); event.dataTransfer.dropEffect = zone ? "copy" : "none"; document.querySelectorAll(".dragging").forEach(node => { if (node !== zone) node.classList.remove("dragging"); }); zone?.classList.add("dragging"); });
+document.addEventListener("dragleave", event => { if (!event.relatedTarget) document.querySelectorAll(".dragging").forEach(node => node.classList.remove("dragging")); });
+document.addEventListener("drop", event => {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+  const zone = dropZone(event), files = [...event.dataTransfer.files];
+  document.querySelectorAll(".dragging").forEach(node => node.classList.remove("dragging"));
+  if (zone && files.length) void uiAction(() => zone.matches("[data-panel='knowledge']") ? uploadToKnowledge(files) : attachFiles(files));
+});
 document.querySelector("#show-archived").addEventListener("change", event => { showArchived = event.target.checked; if (view) render(); });
 document.addEventListener("click", event => {
   const pick = event.target.closest("[data-select-project]");

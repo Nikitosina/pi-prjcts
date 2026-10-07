@@ -18,6 +18,7 @@ import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
+import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { projectModelCatalog, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { WorkerSkillGrant, WorkerSkillGrantInput } from "./worker-skill-types.ts";
@@ -257,6 +258,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return libraryImport(ownedProjectDir(input.id), input);
     });
     case "library-list": return libraryList(ownedProjectDir(input.id), input);
+    case "upload-list": return listUploads(ownedProjectDir(input.id));
+    case "upload-read": {
+      const { record, text } = uploadText(ownedProjectDir(input.id), input.uploadId), chars = [...text], offset = input.offset ?? 0, end = Math.min(chars.length, offset + (input.limit ?? 20_000));
+      return { record, text: chars.slice(offset, end).join(""), offset, nextOffset: end < chars.length ? end : null };
+    }
+    case "upload-delete": return withProjectLock(input.id, async () => deleteUpload(ownedProjectDir(input.id), input.uploadId));
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
@@ -624,8 +631,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const project = loadProject(input.id);
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
-        return { id: randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}) } satisfies import("./state.ts").Job;
+        for (const upload of input.attachments ?? []) uploadRecord(ownedProjectDir(input.id), upload);
+        return { id: randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) } satisfies import("./state.ts").Job;
       };
+      if (input.attachments && loadProject(input.id).runtime !== "durable") throw new Error("Attachments need a Durable project");
       if (loadProject(input.id).runtime === "durable") return withDurableOwner({ id: input.id, validate: project => {
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
@@ -640,7 +649,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (!chat) throw new Error("Unknown chat for this project");
         if (chat.archived) throw new Error("Chat is archived; restore it before sending");
         saveJob(input.id, job);
-        await owner.admit(text, { requestId: job.id, chatId: input.chatId, title: job.text });
+        await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), { requestId: job.id, chatId: input.chatId, title: job.text });
         return job;
       } });
       ownedProjectDir(input.id);
@@ -689,7 +698,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   }
 }
 
-const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId));
+const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId), (id, filename, bytes) => withProjectLock(id, async () => {
+  const project = loadProject(id);
+  if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");
+  return saveUpload(ownedProjectDir(id), { filename, bytes });
+}));
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
