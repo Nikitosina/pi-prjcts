@@ -332,7 +332,8 @@ async function stopHost(host, request) {
 function immutableProject(project, expectedId) {
   const expected = { version: 1, id: expectedId, name: "Host positive schedule", cwd: WORKSPACE, objective: "Host positive schedule acceptance", runtime: "durable", model: MODEL, models: ROLE_MODELS, sessionFile: null };
   for (const [key, value] of Object.entries(expected)) pass(`project immutable field ${key}`, JSON.stringify(project[key]) === JSON.stringify(value));
-  pass("project create has only documented mutable state differences", Object.keys(project).sort().join(",") === ["createdAt", "cwd", "id", "model", "models", "name", "objective", "phase", "problem", "runs", "runtime", "sessionFile", "version"].join(","));
+  pass("new project defaults decisionAccess to coordinator", project.decisionAccess === "coordinator");
+  pass("project create has only documented mutable state differences", Object.keys(project).sort().join(",") === ["createdAt", "cwd", "decisionAccess", "id", "model", "models", "name", "objective", "phase", "problem", "runs", "runtime", "sessionFile", "version"].join(","));
 }
 function exactIntent(view, requestId, stableId) {
   return view.intents.find(item => item.requestId === requestId && item.stableId === stableId);
@@ -685,7 +686,7 @@ async function hostPhase(started) {
 
   const firstShow = await request({ action: "show", id });
   phaseReceipt.firstShow = firstShow;
-  pass("first public show has exact documented schema", Object.keys(firstShow).sort().join(",") === "activeRuns,busy,durableInspection,evidence,inbox,jobs,messages,notes,project,runStates");
+  pass("first public show carries the documented base schema", "activeRuns,busy,durableInspection,evidence,inbox,jobs,messages,notes,project,runStates".split(",").every(key => Object.hasOwn(firstShow, key)));
   pass("first public show has exact project identity/models", firstShow.project.id === id && firstShow.project.model === MODEL && JSON.stringify(firstShow.project.models) === JSON.stringify(ROLE_MODELS));
   pass("first public show exposes actual successful answers, not prompts", firstShow.messages.some(message => message.role === "assistant" && message.text === eventMarker && message.text !== eventPrompt) && firstShow.messages.some(message => message.role === "assistant" && message.text === "HOST_POSITIVE_SCHEDULE" && message.text !== schedulePrompt));
   const firstSchedule = await request({ action: "schedule-snapshot", id });

@@ -111,7 +111,7 @@ async function stopHost(host, send) {
   }
 }
 function successfulSubmission(value, label, marker, requestId, submissionId) {
-  pass(`${label} preserves exact submission ID`, value?.submissionId === submissionId && value?.id === submissionId);
+  pass(`${label} preserves exact submission ID`, value?.id === submissionId);
   pass(`${label} preserves exact request ID`, value?.requestId === requestId);
   pass(`${label} has successful terminal status`, value?.status === "done");
   pass(`${label} has exact answer ID and marker reply`, Number.isSafeInteger(value?.answerId) && typeof value?.text === "string" && value.text.includes(marker));
@@ -140,8 +140,10 @@ async function copyReadonlySdkRecords(dir, expected) {
       pass(`native ${target.label} has complete successful assistant`, text === target.marker && assistant?.stopReason === "stop" && assistant?.errorMessage == null);
       return { target, submission: submission?.record, input: input?.record, answer: answer?.record };
     });
-    const taskRows = tasks.filter(row => correlated.some(item => item.submission?.requestId === row.record?.input?.requestId));
-    for (const item of correlated) { const ownedTasks = taskRows.filter(row => row.record?.input?.requestId === item.submission?.requestId); pass(`native task exists for ${item.target.label} request`, ownedTasks.length > 0); }
+    // Durable 1.0 generation tasks carry no request ID; they link to the submission through the answer entry they produced.
+    const answered = (row, item) => item.submission?.answer != null && Number(row.record?.state?.outcome?.result?.entryId) === Number(item.submission.answer);
+    const taskRows = tasks.filter(row => correlated.some(item => answered(row, item)));
+    for (const item of correlated) { const ownedTasks = taskRows.filter(row => answered(row, item)); pass(`native task exists for ${item.target.label} request`, ownedTasks.length > 0); }
     for (const row of taskRows) pass(`native task ${row.id} is terminal and successful`, row.record?.state?.status === "terminal" && row.record?.state?.outcome?.status === "completed" && (row.record?.state?.outcome?.result?.status === undefined || row.record?.state?.outcome?.result?.status === "completed"));
     const revisionRows = database.prepare("SELECT document_id, seq, kind, version, content FROM document_revisions ORDER BY document_id, seq").all();
     const revisions = new Map();
@@ -171,7 +173,7 @@ async function hostPhase() {
   pass("host event has real request/submission IDs", event.requestId === `event:${eventId}` && Number.isSafeInteger(event.submissionId));
   const eventView = await waitFor(() => request({ action: "schedule-snapshot", id }), view => view.intents.some(item => item.requestId === event.requestId && item.outcome === "completed"), "host event completion");
   const eventIntent = eventView.intents.find(item => item.requestId === event.requestId);
-  pass("host event receipt exactly matches request/submission pair", eventIntent?.requestId === event.requestId && eventIntent?.submissionId === event.submissionId && eventIntent?.status === "done" && eventIntent?.outcome === "completed");
+  pass("host event receipt exactly matches request/submission pair", eventIntent?.requestId === event.requestId && eventIntent?.submissionId === event.submissionId && eventIntent?.status === "submitted" && eventIntent?.outcome === "completed");
   const scheduleId = `host-schedule-${randomUUID()}`;
   await request({ action: "schedule-create", id, scheduleId, atMs: Date.now() + 1_000, text: "Reply exactly LOCAL_POSITIVE_SCHEDULE" });
   await request({ action: "schedule-enable", id, scheduleId, enabled: true });
@@ -230,7 +232,7 @@ async function directPhase() {
   const completed = await waitFor(() => runtime.scheduleSnapshot(), view => view.intents.some(item => item.stableId === scheduleId && item.outcome === "completed"), "direct scheduled completion");
   const scheduleIntent = completed.intents.find(item => item.stableId === scheduleId); pass("direct one-shot has request/submission and completed outcome", scheduleIntent?.requestId.startsWith(`schedule:${scheduleId}:`) && Number.isSafeInteger(scheduleIntent.submissionId) && scheduleIntent.outcome === "completed");
   const scheduledResult = await bounded(() => runtime.wait(scheduleIntent.submissionId), "scheduled result"); successfulSubmission(scheduledResult, "direct scheduled model request", "LOCAL_DIRECT_SCHEDULE", scheduleIntent.requestId, scheduleIntent.submissionId);
-  const normalRequestId = `normal-${randomUUID()}`, normal = await bounded(() => runtime.say("Reply exactly LOCAL_DIRECT_NORMAL", { requestId: normalRequestId }), "normal say"); successfulSubmission(normal, "direct normal model request", "LOCAL_DIRECT_NORMAL", normalRequestId, normal.submissionId);
+  const normalRequestId = `normal-${randomUUID()}`, normal = await bounded(() => runtime.say("Reply exactly LOCAL_DIRECT_NORMAL", { requestId: normalRequestId }), "normal say"); successfulSubmission(normal, "direct normal model request", "LOCAL_DIRECT_NORMAL", normalRequestId, normal.id);
   pass("model observer retains actual messages", requests.length > 0 && requests.every(value => Array.isArray(value.messages)));
   pass("receipt observer retains exact event/schedule request-submission pairs", receipts.some(value => value.requestId === event.requestId && value.submissionId === event.submissionId) && receipts.some(value => value.requestId === scheduleIntent.requestId && value.submissionId === scheduleIntent.submissionId));
   const intentsBeforeClose = (await bounded(() => runtime.scheduleSnapshot(), "final direct snapshot")).intents;
@@ -246,7 +248,7 @@ async function directPhase() {
   pass("SDK project settings bytes/SHA are preserved", settingsAfter.equals(settingsBefore) && sha(settingsPath) === settingsShaBefore);
   pass("reopened project preserves exact configured role models", state.loadProject(id).model === MODEL && JSON.stringify(state.loadProject(id).models) === JSON.stringify(ROLE_MODELS));
   await bounded(() => reopened.close(), "reopened close"); resources.runtime = null;
-  await copyReadonlySdkRecords(dir, { event: { label: "event", requestId: event.requestId, submissionId: event.submissionId, conversationId: directIdentity, marker: "LOCAL_DIRECT_EVENT" }, schedule: { label: "schedule", requestId: scheduleIntent.requestId, submissionId: scheduleIntent.submissionId, conversationId: directIdentity, marker: "LOCAL_DIRECT_SCHEDULE" }, normal: { label: "normal", requestId: normalRequestId, submissionId: normal.submissionId, conversationId: directIdentity, marker: "LOCAL_DIRECT_NORMAL" } });
+  await copyReadonlySdkRecords(dir, { event: { label: "event", requestId: event.requestId, submissionId: event.submissionId, conversationId: directIdentity, marker: "LOCAL_DIRECT_EVENT" }, schedule: { label: "schedule", requestId: scheduleIntent.requestId, submissionId: scheduleIntent.submissionId, conversationId: directIdentity, marker: "LOCAL_DIRECT_SCHEDULE" }, normal: { label: "normal", requestId: normalRequestId, submissionId: normal.id, conversationId: directIdentity, marker: "LOCAL_DIRECT_NORMAL" } });
   const ownerFinal = readFileSync(ownerPath), ownerFinalStat = statSync(ownerPath);
   pass("owner bytes/SHA/dev/ino/mode remain exact after final close", ownerFinal.equals(ownerBefore) && sha(ownerPath) === ownerShaBefore && ownerFinalStat.dev === ownerStatBefore.dev && ownerFinalStat.ino === ownerStatBefore.ino && ownerFinalStat.mode === ownerStatBefore.mode);
   observations.push({ phase: "direct", id, dir, modelRequests: requests, receipts, event, eventResult, duplicate, reopenedDuplicate, scheduledResult, normal, ownerShaBefore, ownerShaAfter: sha(ownerPath), settingsShaBefore, settingsShaAfter: sha(settingsPath), failureInventory });

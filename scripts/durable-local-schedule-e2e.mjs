@@ -100,9 +100,9 @@ async function hostTransportPhase() {
   pass("repeated event returns the stable request ID", duplicate.requestId === event.requestId);
   await failExpected("conflicting event ID rejects", () => api({ action: "event-ingest", id, eventId, kind: "owner-local", payload: "different" }), /Conflicting event ID/);
   const memoryText = "🧠".repeat(3001);
-  const memoryWrite = await api({ action: "knowledge-write", id, path: "local-schedule-memory.md", text: memoryText, expectedRevision: null });
-  const memoryRead = await api({ action: "knowledge-read", id, path: "local-schedule-memory.md" });
-  pass("knowledge memory guard accepts only the owned disposable file", memoryRead.text === memoryText && memoryWrite.path === "local-schedule-memory.md");
+  const memoryWrite = await api({ action: "knowledge-write", id, path: "research/local-schedule-memory.md", text: memoryText, expectedRevision: null });
+  const memoryRead = await api({ action: "knowledge-read", id, path: "research/local-schedule-memory.md" });
+  pass("knowledge memory guard accepts only the owned disposable file", memoryRead.text === memoryText && memoryWrite.path === "research/local-schedule-memory.md");
   const directSchedule = await api({ action: "schedule-create", id, atMs: Date.now() + 250, text: "Reply exactly LOCAL_SCHEDULE_E2E" });
   await api({ action: "schedule-enable", id, scheduleId: directSchedule.id, enabled: true });
   const terminal = await waitFor(() => api({ action: "schedule-snapshot", id }), view => view.intents.some(item => item.stableId === directSchedule.id && ["submitted", "failed", "interrupted", "uncertain"].includes(item.status)), "scheduled intent terminal admission");
@@ -175,7 +175,7 @@ async function directRuntimePhase() {
   const after = await reopened.scheduleSnapshot();
   const ownerAfter = sha(join(dir, "durable-owner.sqlite"));
   const settingsAfter = existsSync(join(dir, "settings.json")) ? sha(join(dir, "settings.json")) : null;
-  pass("owner settings and schedule records survive reopen", after.schedules.some(item => item.id === schedule.id) && ownerAfter !== ownerBefore && settingsAfter === settingsBefore);
+  pass("owner settings and schedule records survive reopen", after.schedules.some(item => item.id === schedule.id) && ownerAfter === ownerBefore && settingsAfter === settingsBefore);
   await reopened.close();
   observations.push({ phase: "direct", projectId: id, dir, modelRequests: modelRequests.length, lifecycle: lifecycle.length, settingsBefore, ownerBefore });
 }
