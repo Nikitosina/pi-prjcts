@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Projects</title>
+  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="side" aria-label="Projects">
+      <div class="brand">π <b>Projects</b> <span class="local">LOCAL</span></div>
+      <button id="create">＋ New project</button>
+      <div class="side-label">Projects</div>
+      <nav id="project-list"></nav>
+      <select id="projects" aria-label="Select project" hidden><option>Loading…</option></select>
+      <button class="ghost small" data-action="open-retained">Open known project UUID…</button>
+      <div class="side-foot"><span id="connection" role="status">Connecting…</span><button id="refresh" class="ghost small">Refresh</button></div>
+    </aside>
+    <main class="main">
+      <header class="phead">
+        <div class="row"><span id="avatar" class="avatar">π</span><div><div id="eyebrow" class="eyebrow">Pi Projects</div><h1 id="title">Opening your projects.</h1><p id="subtitle"></p></div></div>
+        <div id="lifecycle" class="row" aria-label="Project lifecycle" hidden><span id="lifecycle-state" class="chip" role="status"></span><button id="project-pause" data-action="pause-project">❚❚ Pause</button><button id="project-resume" data-action="resume-project">▶ Resume</button><button class="ghost" data-action="lifecycle-more" title="Archive, delete or restore">⋯</button></div>
+      </header>
+      <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="activity">Activity</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
+      <div class="body">
+        <div id="error" role="alert" hidden></div><div id="warning" hidden></div>
+
+        <section class="panel grid2" data-panel="coordinator">
+          <div class="convo">
+            <div class="row between"><h2>Coordinator</h2><small id="message-count"></small></div>
+            <div id="transcript" class="transcript"><div id="messages" aria-live="polite"></div><div id="live-reply" class="msg them live-reply" aria-live="polite" hidden></div></div>
+            <p id="paused-hint" class="paused-hint" role="status" hidden><span>Paused. Workers are stopped and the coordinator takes no new messages.</span><button class="primary small" data-action="resume-project">Resume</button></p>
+            <form id="compose" class="composer" aria-label="Coordinator messaging"><textarea name="message" aria-label="Message coordinator" placeholder="Message the coordinator… (Enter to send, Shift+Enter for a new line)" maxlength="32000" required></textarea><div class="row between"><small id="compose-hint">Enter sends. Shift+Enter adds a line. / focuses this box.</small><span class="row compose-actions"><span class="context-meter" tabindex="0" role="img" aria-label="Context use unknown"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="track"/><circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/></svg><span class="context-popup" role="tooltip">Context use unknown</span></span><button type="submit" class="primary">Send ↵</button></span></div></form>
+            <div id="reply-summary" hidden></div>
+          </div>
+          <aside class="col">
+            <div class="card"><div class="row between"><b>Needs you</b><span id="needs-badge" class="count" hidden></span></div><nav id="queue" aria-label="Pending decisions"></nav><div id="letter"></div></div>
+            <div class="card"><b>Workers</b><div id="activity"></div></div>
+            <div class="card"><b>Recent outcomes</b><div id="outcomes"></div></div>
+            <div class="card"><div class="row between"><b>Project memory</b><button class="ghost small" data-tab="knowledge">Open</button></div><div id="notes"></div></div>
+          </aside>
+        </section>
+
+        <section class="panel" data-panel="knowledge" hidden>
+          <div class="tiles">
+            <button class="tile" data-action="knowledge-list"><span class="ic">◆</span><b>Managed knowledge</b><small>Topics and instructions · compare-and-swap edits</small></button>
+            <button class="tile" data-action="notes"><span class="ic">✎</span><b>Shared notes</b><small>Coordinator and owner notes</small></button>
+            <button class="tile" data-action="library-list"><span class="ic">▤</span><b>Project library</b><small>Hash-pinned references</small></button>
+            <button class="tile" data-action="upload-list"><span class="ic">＋</span><b>Upload pasted reference</b><small>Imported as data, never instructions</small></button>
+            <button class="tile" data-action="evidence-list"><span class="ic">◉</span><b>Recent evidence</b><small>Immutable worker captures</small></button>
+          </div>
+          <h3 class="section">Knowledge documents</h3><div id="knowledge-inline"></div><h3 class="section">Latest evidence</h3><div id="evidence-inline"></div>
+          <h3 class="section">Workspace</h3><p id="workspace" class="note mono"></p><p id="workspace-policy" class="note">Your Mac must stay awake. Workspace scope and isolation require explicit authorization.</p>
+        </section>
+
+        <section class="panel" data-panel="activity" hidden><label class="row archive-toggle"><input type="checkbox" id="show-archived"> Show archived</label><div id="work-list"></div><section id="inline-thread" class="card" hidden></section></section>
+
+        <section class="panel" data-panel="observability" hidden>
+          <div id="obs-kpis" class="kpis"></div>
+          <div class="grid-obs">
+            <div class="card"><div class="row between"><b>Usage by conversation</b><button class="ghost small" data-action="usage-list" id="usage-button">Full breakdown ↗</button></div><div id="obs-usage"></div></div>
+            <div class="card"><b>Host health</b><div id="obs-health"></div></div>
+          </div>
+          <div class="card"><b>Trace</b> <small class="inline">coordinator → reusable threads → work items</small><div id="obs-trace"></div></div>
+          <div class="grid-obs">
+            <div class="card"><b>Worker timeline</b><div id="obs-timeline"></div></div>
+            <div class="card"><b>Event log</b><div id="obs-event-log"></div><b>Usage over time</b><div id="obs-usage-time"></div></div>
+          </div>
+        </section>
+
+        <section class="panel settings" data-panel="settings" hidden>
+          <div class="card"><div class="row between"><b>Owner setup</b><button id="owner-setup-button" data-action="owner-setup" class="primary" hidden>Open owner setup</button></div><p class="note">Workers get only the workspace, GitHub target, command profile and skills granted here. Missing grants stay visible blockers.</p><ol id="owner-steps" class="stepper"></ol></div>
+          <div class="card"><div class="row between"><b>Project settings</b><button id="settings-button" data-action="settings-list" hidden>Name, objective, models, access ↗</button></div><div id="settings-summary"></div></div>
+          <div class="card"><div class="row between"><b>Automations</b><button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button></div><p class="note">Schedules and monitors. Toggling always asks for confirmation.</p><div id="automation-history" class="automation-strip"><p class="note">Reading recent automation history…</p></div><button data-action="routine-history" data-project="" data-kind="intents" data-offset="0" data-text-offset="0">Recent run history</button></div>
+          <div class="card"><div class="row between"><b>Approvals and providers</b><span class="row"><button id="approvals-button" data-action="operation-list" hidden>All retained approvals ↗</button><button id="provider-button" data-action="provider-list" hidden>GitHub PR/CI/review receipts ↗</button></span></div><p id="approval-page-note" class="note"></p></div>
+          <div class="card danger-zone"><div class="row between"><b>Lifecycle</b><button data-action="lifecycle-more">Archive / delete / restore…</button></div></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+</body>
+</html>

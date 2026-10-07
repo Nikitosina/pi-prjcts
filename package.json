@@ -1,0 +1,30 @@
+{
+  "name": "pi-projects-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "e2e": "node scripts/e2e.ts",
+    "inbox": "node src/cli.ts ui",
+    "e2e:inbox": "node scripts/inbox-e2e.mjs",
+    "e2e:knowledge": "node scripts/knowledge-e2e.mjs",
+    "e2e:durable-foundation": "node scripts/durable-foundation-e2e.mjs",
+    "e2e:durable-migration": "node scripts/durable-migration-e2e.mjs",
+    "e2e:durable-runtime": "node scripts/durable-runtime-e2e.mjs",
+    "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
+    "e2e:durable-switch": "node scripts/durable-switch-e2e.mjs",
+    "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",
+    "link:durable": "node scripts/link-durable.mjs",
+    "e2e:tui": "node scripts/tui-e2e.ts",
+    "projects": "node src/cli.ts"
+  },
+  "pi": { "extensions": ["src/extension.ts"] },
+  "dependencies": { "@earendil-works/pi-durable": "1.0.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "pi-subagents": "*",
+    "typebox": "*"
+  }
+}

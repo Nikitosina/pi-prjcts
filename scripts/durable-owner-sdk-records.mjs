@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+// Public-record companion: decode durable SQLite records read-only. No private APIs or mutations.
+import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { applyImmutable } from '@earendil-works/chord/delta';
+const fixture = process.argv[2] && resolve(process.argv[2]);
+if (!fixture) throw new Error('fixture root required');
+const out = resolve(process.argv[3] ?? join(fixture, 'sdk-records.json'));
+const latest = JSON.parse(readFileSync(join(fixture, 'latest.json'), 'utf8'));
+const project = latest.project;
+const dbPath = join(fixture, 'state', project.id, 'durable.sqlite');
+const digest = path => existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
+const hashes = () => Object.fromEntries(['durable.sqlite', 'durable.sqlite-wal', 'durable.sqlite-shm'].map(name => [name, digest(join(fixture, 'state', project.id, name))]));
+const before = hashes();
+const db = new DatabaseSync(dbPath, { readOnly: true });
+const entries = db.prepare('select id, conversation_id, commit_seq, record from entries order by id').all().map(row => ({ ...row, record: JSON.parse(row.record) }));
+const tasks = db.prepare('select id, conversation_id, kind, status, abort_requested, background, record from tasks order by id').all().map(row => ({ ...row, record: JSON.parse(row.record) }));
+const conversations = db.prepare('select id, owner_conversation_id, owner_task_id from conversations order by id').all();
+const documents = db.prepare('select id, kind, family, key_value, scope_kind, owner_id, created_at, retired_at, record from documents order by id').all().map(row => ({ ...row, record: JSON.parse(row.record) }));
+const revisions = db.prepare('select document_id, seq, kind, version, content from document_revisions order by document_id, seq').all();
+const foldedDocuments = documents.map(doc => { doc.kind = doc.kind.replaceAll('"', ''); let value = null; for (const revision of revisions.filter(item => item.document_id === doc.id)) { const content = JSON.parse(revision.content); value = Array.isArray(content) ? applyImmutable(value, content) : content; } return { ...doc, latest: value }; });
+const planning = foldedDocuments.find(doc => doc.kind === 'projects.durable-planning')?.latest ?? null;
+const isolation = foldedDocuments.find(doc => doc.kind === 'projects.workspace-isolation')?.latest ?? null;
+const configDocs = foldedDocuments.filter(doc => doc.kind === 'pi.agent' || doc.kind === 'pi.config' || doc.kind === 'pi.session');
+const calls = [], results = [];
+const cursor = row => ({ entryId: row.id, conversationId: row.conversation_id, commitSeq: row.commit_seq });
+for (const row of entries) for (const model of row.record.model ?? []) {
+  if (model.role === 'assistant') for (const part of model.content ?? []) if (part.type === 'toolCall') calls.push({ rowCursor: cursor(row), callId: part.id, name: part.name, arguments: part.arguments });
+  if (model.role === 'toolResult') { const text = (model.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''); let parsed = null; try { parsed = JSON.parse(text); } catch {} results.push({ rowCursor: cursor(row), toolCallId: model.toolCallId, toolName: model.toolName, isError: model.isError, details: model.details ?? null, contentText: text, parsed }); }
+}
+const relevant = name => name === 'projects_workspace_catalog' || name === 'projects_delegate' || name?.startsWith('projects_workspace_');
+const selectedCalls = calls.filter(call => relevant(call.name));
+const selectedResults = results.filter(result => relevant(result.toolName));
+const pair = selectedCalls.map(call => ({ call, result: selectedResults.find(result => result.toolCallId === call.callId && result.rowCursor.conversationId === call.rowCursor.conversationId) ?? null }));
+const write = selectedResults.find(result => result.toolName.endsWith('_write') && !result.isError && result.parsed?.revision);
+const delegateResults = selectedResults.filter(result => result.toolName === 'projects_delegate' && !result.isError && result.parsed?.workId);
+if (delegateResults.length !== 1) throw new Error(`expected one successful delegate result, got ${delegateResults.length}`);
+const delegate = delegateResults[0].parsed;
+const workerTasks = tasks.filter(task => task.record.input?.workId === delegate?.workId);
+if (workerTasks.length !== 1) throw new Error(`expected one worker task for delegated work, got ${workerTasks.length}`);
+const workerTask = workerTasks[0];
+const work = planning?.work?.[delegate?.workId] ?? null;
+const attempt = work?.attempt ?? null;
+const receiptEntries = Object.values(isolation?.receipts ?? {}).filter(receipt => receipt?.state === 'allocated');
+const delegateResult = selectedResults.find(result => result.toolName === 'projects_delegate' && !result.isError && result.parsed?.workId === delegate?.workId);
+const delegateCall = selectedCalls.find(call => call.callId === delegateResult?.toolCallId);
+const workerConversationId = workerTask?.conversation_id ?? work?.attempt?.conversationId ?? null;
+const coordinatorConversationId = delegateCall?.rowCursor.conversationId ?? null;
+const documentConfig = conversationId => foldedDocuments.filter(doc => doc.kind === 'pi.agent' && String(doc.owner_id) === String(conversationId) && doc.latest?.model && doc.latest?.tools);
+const workerDocs = documentConfig(workerConversationId), coordinatorDocs = documentConfig(coordinatorConversationId);
+if (workerDocs.length !== 1 || coordinatorDocs.length !== 1) throw new Error('missing or ambiguous correlated worker/coordinator agent document');
+const workerDocument = workerDocs[0], coordinatorDocument = coordinatorDocs[0], workerConfig = workerDocument.latest;
+if (!attempt?.cwd || !attempt.bindingRevision || !workerConfig.cwd || workerConfig.cwd !== attempt.cwd) throw new Error('missing or mismatched persisted worker cwd/binding');
+const writeReceiptId = write?.details?.receipt ?? write?.parsed?.receipt ?? null;
+const scope = project.workspaceAuthorization?.scopes?.[0]; const repository = project.workspaceAuthorization?.repositories?.find(item => item.repositoryId === scope?.repositoryId);
+if (!scope || !repository) throw new Error('missing scoped repository authorization');
+const receiptCandidates = receiptEntries.filter(item => item.scope?.projectId === project.id && item.scope?.repositoryId === scope.repositoryId && item.scope?.ownerCheckout === repository.ownerCheckout && item.scope?.approvedRoot === repository.approvedRoot && item.scope?.baseRevision === scope.baseRevision && (writeReceiptId === null || item.intentId === writeReceiptId));
+if (receiptCandidates.length !== 1) throw new Error(`expected one correlated allocation receipt, got ${receiptCandidates.length}`);
+const receipt = receiptCandidates[0];
+const cwd = attempt.cwd;
+const observedFile = join(cwd, 'owned', 'assigned.txt');
+const physical = path => { try { const s = lstatSync(path); return { path, exists: true, dev: s.dev, ino: s.ino, mode: s.mode }; } catch (error) { if (error.code === 'ENOENT') return { path, exists: false, error: 'ENOENT' }; throw error; } };
+const output = { method: { readOnly: true, sqliteOpen: 'DatabaseSync(path,{readOnly:true})', foldedPublicDocuments: true, deltaApplier: '@earendil-works/chord/delta.applyImmutable' }, fixture, project: { id: project.id, scope: project.workspaceAuthorization?.scopes?.[0] ?? null }, db: { path: dbPath, hashesBefore: before }, conversations, documents: foldedDocuments, planning, allocation: { receipts: receiptEntries, authoritative: receipt }, config: { worker: workerConfig, workerDocument: { id: workerDocument.id, ownerId: workerDocument.owner_id }, coordinator: coordinatorDocument.latest, coordinatorDocument: { id: coordinatorDocument.id, ownerId: coordinatorDocument.owner_id }, attempt }, taskStates: tasks.map(task => ({ rowCursor: { taskId: task.id, conversationId: task.conversation_id }, kind: task.kind, status: task.status, abortRequested: task.abort_requested, recordState: task.record.state, input: task.record.input ?? null })), calls: selectedCalls, results: selectedResults, correlations: pair, worker: { task: workerTask ? { rowCursor: { taskId: workerTask.id, conversationId: workerTask.conversation_id }, status: workerTask.status, input: workerTask.record.input, state: workerTask.record.state } : null, planningWork: work, workspace: { receipt: receipt.intentId, cwd, observedFile, physical: physical(observedFile), rootPhysical: physical(cwd), assignedPhysical: physical(observedFile), peerPhysical: physical(join(cwd, 'owned', 'peer.txt')), sentinelPhysical: physical(join(cwd, 'owned', 'sentinel.txt')), exists: existsSync(observedFile), sha256: existsSync(observedFile) ? digest(observedFile) : null, bytes: existsSync(observedFile) ? readFileSync(observedFile).length : null } }, dbHashesAfter: hashes() };
+if (output.db.hashesBefore['durable.sqlite'] !== output.dbHashesAfter['durable.sqlite']) throw new Error('read-only extraction changed database');
+writeFileSync(out, JSON.stringify(output, null, 2) + '\n'); process.stdout.write(`${out}\n`);

@@ -1,0 +1,38 @@
+node_modules/
+artifacts/
+.smoke/
+
+# Local credentials and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secrets*
+*auth*
+!src/workspace-authorization.ts
+
+# Local state and runtime output
+state/
+session/
+sessions/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+.pi/
+**/.pi/
+
+# Dependencies, generated output, and local metadata
+.dependencies/
+**/node_modules/
+**/.dependencies/
+dist/
+build/
+out/
+coverage/
+generated/
+.DS_Store
