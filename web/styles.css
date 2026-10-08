@@ -636,6 +636,8 @@ mark, .search-mark { background: var(--k-f7dc84); color: var(--text); border-rad
 .skill-pick small { display: block; color: var(--muted); font-size: 12px; }
 .skill-pick small.skill-tag { display: inline; border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; font-size: 11px; }
 .skill-pick.inherited { opacity: .75; }
+#mcp-picker .skill-groups { max-height: none; }
+#mcp-picker .skill-pick label.check small, #mcp-picker .skill-pick .row small { display: inline; }
 /* Worktrees (Settings) */
 #worktrees { display: grid; gap: 10px; }
 #worktrees .field { display: flex; align-items: center; gap: 8px; }

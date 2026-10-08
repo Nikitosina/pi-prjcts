@@ -7,6 +7,7 @@ import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
+import { McpSettings } from "./mcp-profiles.ts";
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 /** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
@@ -72,6 +73,8 @@ export const Project = Type.Object({
   workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })), 
   /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
   skillProfiles: Type.Optional(SkillProfiles),
+  /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
+  mcp: Type.Optional(McpSettings),
   /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
   worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
   contextSettings: Type.Optional(ContextSettings),
@@ -172,6 +175,8 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("mcp-catalog"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("mcp-probe"), id: Id, server: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-catalog"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profiles-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profile-read"), id: Id, profileId: Id }, { additionalProperties: false }),
@@ -194,6 +199,8 @@ export const Request = Type.Union([
     knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** null restores the default (repository skills for every profile). */
     skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
+    /** null removes every MCP server. */
+    mcp: Type.Optional(Type.Union([McpSettings, Type.Null()])),
     /** "" removes the worktree setup command. */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     /** null restores the defaults (catalog window, pi-durable compaction policy). */

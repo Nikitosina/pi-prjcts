@@ -285,7 +285,7 @@ function setTab(next) {
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); void loadWorktrees(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -411,7 +411,7 @@ function renderPanels() {
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadWorktrees(); void loadContextSettings(); }
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
@@ -470,6 +470,58 @@ document.addEventListener("input", event => {
   if (event.target.id !== "skills-search" || !skillsPicker) return;
   skillsPicker.query = event.target.value; renderSkillsPicker();
   const input = document.querySelector("#skills-search"); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+});
+
+// MCP servers (Settings): same profile model as skills, plus a per-server "Allow writes". Servers come from the owner's mcp.json; env and arguments never reach the browser.
+const mcpStatusText = { ready: "", disabled: "disabled in mcp.json", "needs-sign-in": "needs sign-in (not supported)", invalid: "invalid config" };
+let mcpPicker = null;
+async function loadMcpPicker(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#mcp-picker");
+  if (!id || !plan || !force && mcpPicker?.projectId === id) return;
+  try {
+    const [settings, catalog] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "mcp-catalog", id })]);
+    if (id !== projectId || current !== generation) return;
+    const saved = settings.values.mcp ?? { all: [], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] };
+    mcpPicker = { projectId: id, catalog, isDefault: !settings.values.mcp, draft: structuredClone(saved), saved: JSON.stringify(saved), tab: mcpPicker?.projectId === id ? mcpPicker.tab : "all", note: "", probes: {} };
+    renderMcpPicker();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">MCP unavailable: ${esc(error.message)}</p>`; }
+}
+function renderMcpPicker() {
+  const state = mcpPicker, node = document.querySelector("#mcp-picker");
+  if (!state || state.projectId !== projectId) return;
+  const servers = state.catalog.servers, known = new Set(servers.map(item => item.name)), all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
+  const count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
+  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} for every profile`;
+  const row = server => {
+    const usable = server.status === "ready", inherited = state.tab !== "all" && all.has(server.name), probe = state.probes[server.name];
+    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${inherited || picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span>` : ""}</span></div>`;
+  };
+  const dirty = JSON.stringify(state.draft) !== state.saved;
+  node.innerHTML = `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === state.tab ? " on" : ""}" aria-selected="${role === state.tab}" data-action="mcp-tab" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>
+    <p class="note">${state.tab === "all" ? "Every profile gets these servers." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the servers checked here.`}</p>
+    <div class="skill-groups">${servers.map(row).join("") || `<p class="note">No servers in ${esc(state.catalog.path)}.</p>`}</div>
+    ${state.catalog.error ? `<p class="note bad">${esc(state.catalog.error)}</p>` : ""}${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
+    <div class="row"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled" : ""}>Remove all</button></div>`;
+}
+async function saveMcpPicker(reset) {
+  const state = mcpPicker, id = projectId;
+  if (!state || state.projectId !== id) throw new Error("Reload Settings before saving MCP");
+  const settings = await api({ action: "settings-snapshot", id });
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { mcp: reset ? null : state.draft } }, reset ? "MCP servers removed." : "MCP saved. Applies to the next tool call."); }
+  catch (error) { state.note = error.message; renderMcpPicker(); throw error; }
+  await loadMcpPicker(true);
+}
+async function testMcpServer(server) {
+  const state = mcpPicker; state.probes[server] = { ok: false, error: "Testing…" }; renderMcpPicker();
+  state.probes[server] = await api({ action: "mcp-probe", id: projectId, server }); renderMcpPicker();
+}
+document.addEventListener("change", event => {
+  const box = event.target.closest("[data-mcp-pick], [data-mcp-writes]");
+  if (!box || !mcpPicker) return;
+  const key = box.dataset.mcpPick !== undefined ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
+  if (box.checked) list.add(name); else list.delete(name);
+  mcpPicker.draft[key] = [...list].sort();
+  mcpPicker.note = ""; renderMcpPicker();
 });
 
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
@@ -1453,6 +1505,10 @@ async function action(node) {
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
     case "skills-save": await saveSkillsPicker(false); break;
     case "skills-reset": await saveSkillsPicker(true); break;
+    case "mcp-tab": mcpPicker.tab = node.dataset.role; renderMcpPicker(); break;
+    case "mcp-save": await saveMcpPicker(false); break;
+    case "mcp-reset": await saveMcpPicker(true); break;
+    case "mcp-test": await testMcpServer(node.dataset.server); break;
     case "follow-poll": { const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub."); eventsIn.data = data; renderEventsIn(); break; }
     case "webhook-reveal": eventsIn.reveal = !eventsIn.reveal; renderEventsIn(); break;
     case "webhook-copy": await navigator.clipboard.writeText(node.dataset.what === "url" ? eventsIn.data.webhook.url : eventsIn.data.webhook.secret); toast(node.dataset.what === "url" ? "Webhook URL copied." : "Webhook secret copied."); break;

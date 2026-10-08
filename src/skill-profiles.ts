@@ -7,7 +7,10 @@ import { Type, type Static } from "typebox";
 export const SKILL_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
 export type SkillRole = typeof SKILL_ROLES[number];
 const names = Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 512, uniqueItems: true });
-export const SkillProfiles = Type.Object({ all: names, coordinator: names, worker: names, scout: names, reviewer: names }, { additionalProperties: false });
+/** "all" plus one name list per role; shared by skills and MCP servers. */
+export const profileLists = { all: names, coordinator: names, worker: names, scout: names, reviewer: names };
+export const profileNames = names;
+export const SkillProfiles = Type.Object(profileLists, { additionalProperties: false });
 export type SkillProfiles = Static<typeof SkillProfiles>;
 type Loader = Pick<ResourceLoader, "getSkills">;
 

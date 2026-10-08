@@ -7,10 +7,11 @@ import type { Context as ModelRequest, Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   AssistantEntry, GenerationTask, Harness, ToolTask, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
-  type Conversation, type Storage, type Submission, type SubmissionId, type ToolRegistration,
+  type Conversation, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
+import type { Context } from "@earendil-works/chord";
 import { Workers, backgroundWorkers } from "./durable-workers.ts";
 import { DurablePlanning, planningRuntime } from "./durable-planning.ts";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
@@ -22,6 +23,9 @@ const READ_ONLY_CODE_NOTE = "Read project code with code_read, code_grep, code_f
 import { coordinatorWorkerTools } from "./durable-worker-tools.ts";
 import { COORDINATOR_GITHUB_TOOLS, coordinatorGithubTools } from "./coordinator-github-tools.ts";
 import { coordinatorSkillTool } from "./coordinator-skills.ts";
+import { mcpGatewayTools } from "./mcp-tools.ts";
+import { mcpPool } from "./mcp-servers.ts";
+import { MCP_NOTE } from "./mcp-profiles.ts";
 import type { DurableGenerationLifecycleObserver, DurablePlan, DurablePlanSnapshot, DurableWorkerToolBindings } from "./durable-plan-types.ts";
 export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
 import { loadDurableStanding } from "./durable-standing.ts";
@@ -317,14 +321,25 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const githubTools = project.githubAuthorization?.length ? github.tools : [];
     // Prompts carry only the index of each role's effective set; projects_skill_file reads a body on demand, restricted to the caller's set.
     const roleSkills = Object.fromEntries(SKILL_ROLES.map(role => [role, effectiveSkills(project.skillProfiles, input.configuredSkillLoader, role)])) as Record<SkillRole, ReturnType<typeof effectiveSkills>>;
+    const roleIndex = (role: SkillRole) => skillIndex(roleSkills[role]) + MCP_NOTE;
     const roleSkillNames = (role: SkillRole) => new Set(roleSkills[role].map(skill => skill.name));
-    const skillFiles = coordinatorSkillTool({ loader: input.configuredSkillLoader, root: () => rootReference, allowed: async (api, context) => {
-      if (isCoordinator(api.conversationId)) return new Set([...roleSkillNames("coordinator"), ...invokedSkills(dir)]);
+    // Who is calling and where: coordinators (Main and chats) work in the project checkout, a worker in its frozen worktree, scouts and reviewers in their read root.
+    const callerOf = async (api: ToolExecutionApi, context: Context): Promise<{ role: SkillRole; cwd: string } | null> => {
+      if (isCoordinator(api.conversationId)) return { role: "coordinator", cwd: project.cwd };
       const planRoot = rootReference;
-      if (!planRoot) return new Set();
-      const role = await api.commit(async tx => { const state = await tx.doc(DurablePlanning, planRoot.id), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId)); return entry ? Object.values(state.work).findLast(work => work.threadId === entry[0])?.role ?? null : null; }, context);
-      return role ? roleSkillNames(role) : new Set();
+      if (!planRoot) return null;
+      return api.commit(async tx => {
+        const state = await tx.doc(DurablePlanning, planRoot.id), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
+        const work = entry && Object.values(state.work).findLast(item => item.threadId === entry[0]);
+        return entry && work ? { role: work.role, cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
+      }, context);
+    };
+    const skillFiles = coordinatorSkillTool({ loader: input.configuredSkillLoader, root: () => rootReference, allowed: async (api, context) => {
+      const caller = await callerOf(api, context);
+      return !caller ? new Set() : caller.role === "coordinator" ? new Set([...roleSkillNames("coordinator"), ...invokedSkills(dir)]) : roleSkillNames(caller.role);
     } });
+    // Installed always so recorded calls resolve; the owner's per-profile selection is read fresh on every call.
+    const mcp = mcpGatewayTools({ pool: mcpPool, settings: () => loadProject(project.id).mcp, caller: callerOf });
     const artifacts = coordinatorArtifactTools({ controlRoot: dir, isCoordinator: id => coordinatorIds.has(id), threads: async () => {
       const planRoot = rootReference; if (!planRoot) return [];
       const work = (await planning.snapshot(planRoot)).work;
@@ -361,7 +376,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => (loadProject(project.id).githubAuthorization ?? []).map(item => item.repositoryId), onVerdict: () => kickFollow() });
-    const planning = planningRuntime({ projectId: project.id, models: { worker: workerModel, scout: scoutModel, reviewer: reviewerModel }, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, instructions: { worker: `${workerStanding}\nRole profile: worker.${skillIndex(roleSkills.worker)}`, scout: `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${skillIndex(roleSkills.scout)}`, reviewer: `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${skillIndex(roleSkills.reviewer)}` }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text)}\nRole profile: ${role}.${skillIndex(roleSkills[role])}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? 1, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), artifactSummary: thread => artifactSummary(dir, thread) });
+    const planning = planningRuntime({ projectId: project.id, models: { worker: workerModel, scout: scoutModel, reviewer: reviewerModel }, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, instructions: { worker: `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`, scout: `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`, reviewer: `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}` }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? 1, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), artifactSummary: thread => artifactSummary(dir, thread) });
     registry.install(policy);
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
@@ -373,6 +388,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     registry.install(workerManagement.extension);
     registry.install(github.extension);
     registry.install(skillFiles.extension);
+    registry.install(mcp.extension);
     registry.install(artifacts.extension);
     const legacyWorkers = backgroundWorkers({ model: workerModel, tools: workerKnowledge, instructions: workerStanding });
     registry.install(defineExtension({ name: "projects.legacy-worker-recovery", tasks: legacyWorkers.extension.tasks }));
@@ -389,10 +405,10 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const root = await harness.root(context, { agent: {
       model: coordinatorModel,
       thinkingLevel: "medium",
-      extensions: [policy, planning.extension, libraryPolicy, decisions.extension, workerManagement.extension, github.extension, skillFiles.extension, artifacts.extension],
-      tools: [...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, skillFiles.tool, ...artifacts.tools, planning.delegate, ...(planning.workspaceCatalog ? [planning.workspaceCatalog] : [])],
+      extensions: [policy, planning.extension, libraryPolicy, decisions.extension, workerManagement.extension, github.extension, skillFiles.extension, mcp.extension, artifacts.extension],
+      tools: [...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, skillFiles.tool, ...mcp.tools, ...artifacts.tools, planning.delegate, ...(planning.workspaceCatalog ? [planning.workspaceCatalog] : [])],
       cwd: project.cwd,
-      instructions: coordinatorInstructions(project, standing.text, skillIndex(roleSkills.coordinator)),
+      instructions: coordinatorInstructions(project, standing.text, roleIndex("coordinator")),
     } });
     rootReference = root;
     coordinatorIds.add(Number(root.id));
@@ -501,12 +517,12 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const recoveredAgent = await root.agent(context);
     const knowledgeNames = new Set(["projects_knowledge_list", "projects_knowledge_read", "projects_knowledge_history", "projects_notes", "projects_knowledge_write", "projects_note", "projects_search", "projects_upload_list", "projects_upload_read", "projects_library_list", "projects_library_read", "projects_question"]);
     const workerManagementNames = new Set(workerManagement.tools.map(tool => tool.name));
-    const ownedNames = new Set<string>([...COORDINATOR_GITHUB_TOOLS, skillFiles.tool.name, ...artifacts.tools.map(tool => tool.name)]);
-    const coordinatorTools = [...recoveredAgent.tools.filter(tool => !knowledgeNames.has(tool.name) && !workerManagementNames.has(tool.name) && !ownedNames.has(tool.name)), ...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, skillFiles.tool, ...artifacts.tools];
-    const instructions = coordinatorInstructions(project, standing.text, skillIndex(roleSkills.coordinator));
+    const ownedNames = new Set<string>([...COORDINATOR_GITHUB_TOOLS, skillFiles.tool.name, ...mcp.tools.map(tool => tool.name), ...artifacts.tools.map(tool => tool.name)]);
+    const coordinatorTools = [...recoveredAgent.tools.filter(tool => !knowledgeNames.has(tool.name) && !workerManagementNames.has(tool.name) && !ownedNames.has(tool.name)), ...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, skillFiles.tool, ...mcp.tools, ...artifacts.tools];
+    const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
     if (!recoveredAgent.extensions.some(extension => extension.name === github.extension.name) || !recoveredAgent.extensions.some(extension => extension.name === artifacts.extension.name) || recoveredAgent.model?.provider !== coordinatorModel.provider || recoveredAgent.model?.modelId !== coordinatorModel.modelId || recoveredAgent.instructions !== instructions || JSON.stringify(recoveredAgent.tools.map(tool => tool.name).sort()) !== JSON.stringify(coordinatorTools.map(tool => tool.name).sort())) {
-      const ownedExtensions = new Set([workerManagement.extension.name, github.extension.name, skillFiles.extension.name, artifacts.extension.name]);
-      await root.configure({ model: coordinatorModel, instructions, tools: coordinatorTools, extensions: [...recoveredAgent.extensions.filter(extension => !ownedExtensions.has(extension.name)), workerManagement.extension, github.extension, skillFiles.extension, artifacts.extension] }, context);
+      const ownedExtensions = new Set([workerManagement.extension.name, github.extension.name, skillFiles.extension.name, mcp.extension.name, artifacts.extension.name]);
+      await root.configure({ model: coordinatorModel, instructions, tools: coordinatorTools, extensions: [...recoveredAgent.extensions.filter(extension => !ownedExtensions.has(extension.name)), workerManagement.extension, github.extension, skillFiles.extension, mcp.extension, artifacts.extension] }, context);
     }
     // Chats run the same coordinator as Main; recovery re-adds tools to each, exactly as for the root.
     const chatAgent = async (): Promise<Parameters<typeof configure>[2]> => { const agent = await root.agent(context); return { model: coordinatorModel, thinkingLevel: "medium", cwd: project.cwd, instructions, tools: agent.tools, extensions: agent.extensions }; };

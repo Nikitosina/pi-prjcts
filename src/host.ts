@@ -10,6 +10,7 @@ import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
+import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
@@ -245,14 +246,21 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
+    case "mcp-catalog": loadProject(input.id); return mcpCatalog();
+    case "mcp-probe": {
+      const project = loadProject(input.id), info = mcpCatalog().servers.find(item => item.name === input.server);
+      if (!info || info.status !== "ready") return { ok: false, error: info ? `Server is ${info.status}` : "Unknown server" };
+      try { return { ok: true, tools: (await mcpPool.tools(input.server, project.cwd)).length }; }
+      catch (error) { return { ok: false, error: errorText(error) }; }
+    }
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
-      // Context/compaction settings apply live (read on every generation): no idle requirement, no reopen.
-      if (Object.keys(input.changes).every(key => key === "context")) return withProjectLock(input.id, async () => {
+      // Context/compaction and MCP settings apply live (read on every generation / tool call): no idle requirement, no reopen.
+      if (Object.keys(input.changes).every(key => key === "context" || key === "mcp")) return withProjectLock(input.id, async () => {
         const project = updateProjectSettings(loadProject(input.id), input);
         saveProject(project);
         const running = durableRuntimes.get(input.id);
-        if (running) (await running).applyContext(project.contextSettings);
+        if (running && input.changes.context !== undefined) (await running).applyContext(project.contextSettings);
         return projectSettings(project);
       });
       await validateProjectModelChanges(input.changes);
@@ -694,6 +702,7 @@ function shutdown(): Promise<void> {
     try { telegram.close(); await notifier.close(); } catch (error) { report(error); }
     try { server.close(); } catch (error) { report(error); }
     try { await githubInspection.close(); } catch (error) { report(error); }
+    try { await mcpPool.close(); } catch (error) { report(error); }
     for (const pending of durableRuntimes.values()) {
       try { await (await pending).close(); }
       catch (error) { report(error); }
