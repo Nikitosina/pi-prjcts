@@ -1,18 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, symlinkSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
 const pi = join(globalModules, "@earendil-works", "pi-coding-agent");
-const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const modules = join(agentDir, "npm", "node_modules");
 for (const [name, target] of [
   ["@earendil-works/pi-coding-agent", pi],
   ["@earendil-works/pi-tui", join(pi, "node_modules", "@earendil-works", "pi-tui")],
-  ["pi-subagents", join(modules, "pi-subagents")],
   ["typebox", join(pi, "node_modules", "typebox")],
   ["@types/node", join(pi, "node_modules", "@types", "node")],
 ]) {
@@ -27,5 +23,4 @@ for (const [name, target] of [
   }
   symlinkSync(target, link);
 }
-process.stdout.write("Linked installed Pi, pi-subagents, and host types.\n");
-await import("./pi1-subagents.mjs");
+process.stdout.write("Linked installed Pi and host types.\n");

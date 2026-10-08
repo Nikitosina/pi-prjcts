@@ -4,11 +4,10 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { home, socketPath, Request, Project, errorText, jobs, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
-import { loadProjectResourceLoader, openCoordinator, type Runtime } from "./coordinator.ts";
+import { loadProjectResourceLoader } from "./coordinator.ts";
 import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
@@ -33,7 +32,6 @@ import type { DurableProjectRuntime } from "./durable-runtime.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
-process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
 initTheme("light", false);
 mkdirSync(home(), { recursive: true, mode: 0o700 });
 const lock = join(home(), "host.lock");
@@ -56,7 +54,6 @@ catch (error) {
 }
 writeFileSync(lockFd, String(process.pid)); closeSync(lockFd);
 if (existsSync(socketPath())) unlinkSync(socketPath());
-const runtimes = new Map<string, Promise<Runtime>>();
 const configuredSkillLoaders = new Map<string, ReturnType<typeof loadProjectResourceLoader>>();
 function configuredSkills(id: string) {
   const present = configuredSkillLoaders.get(id);
@@ -111,15 +108,9 @@ async function withDurableOwner<T>({ id, validate, operation }: { id: string; va
   });
 }
 
-function runtime(id: string): Promise<Runtime> {
-  if (closing) throw new Error("Host is stopping");
-  if (loadProject(id).runtime === "durable") throw new Error("This legacy operation is not available for Durable projects yet");
-  const present = runtimes.get(id);
-  if (present) return present;
-  const opening = openCoordinator(loadProject(id), () => listProjects());
-  runtimes.set(id, opening);
-  opening.catch(() => { if (runtimes.get(id) === opening) runtimes.delete(id); });
-  return opening;
+function legacyUnavailable(id: string): never {
+  if (loadProject(id).runtime === "durable") throw new Error("This endpoint belongs to the removed legacy runtime; use Durable project controls instead.");
+  throw new Error("Legacy project execution was removed with pi-subagents. Project data is preserved; authorize Durable migration before running this project.");
 }
 
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
@@ -216,13 +207,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }
         return entry;
       }
-      const owner = await runtime(input.id);
-      const entry = resolveEntry(projectDir(input.id), input);
-      if (entry.kind === "question" && owner.project.problem === entry.question) owner.project.problem = null;
-      owner.project.phase = inbox(projectDir(input.id)).some(item => !item.result) || owner.project.problem ? "attention" : "ready";
-      saveProject(owner.project);
-      owner.pump();
-      return entry;
+      return legacyUnavailable(input.id);
     }
     case "list": return listProjects().filter(project => !project.deleted);
     case "create": {
@@ -328,7 +313,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       } finally { settingsUpdating.delete(input.id); }
     }
-    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId, input.focus) : (await runtime(input.id)).snapshot();
+    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId, input.focus) : legacyUnavailable(input.id);
     case "search": return searchProject(ownedProjectDir(input.id), input.query, loadProject(input.id).runtime === "durable" ? await (await durable(input.id)).searchSources() : null, input.limit);
     case "chat-create": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted || project.archived) throw new Error("Inactive project cannot open a chat"); }, operation: owner => owner.chatCreate(input.title) });
     case "chat-update": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted) throw new Error("Project is deleted"); }, operation: owner => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }) });
@@ -616,19 +601,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), { requestId: job.id, chatId: input.chatId, title: job.text });
         return job;
       } });
-      ownedProjectDir(input.id);
-      const before = loadProject(input.id);
-      if (before.deleted) throw new Error("Project is deleted; admission is denied");
-      if (before.archived) throw new Error("Project is archived; admission is denied");
-      const opening = runtime(input.id);
-      const owner = await opening;
-      return withProjectLock(input.id, async () => {
-        ownedProjectDir(input.id);
-        if (loadProject(input.id).runtime === "durable" || runtimes.get(input.id) !== opening) throw new Error("Legacy project owner changed; no message admitted");
-        const job = prepareJob();
-        saveJob(input.id, job); owner.pump();
-        return job;
-      });
+      return legacyUnavailable(input.id);
     }
     case "work-submit": {
       const validate = () => {
@@ -641,17 +614,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       validate();
       return withDurableOwner({ id: input.id, validate, operation: owner => owner.plan({ work: [{ id: input.requestId, requestId: input.requestId, threadId: input.threadId, role: "worker", text: input.text, workspaceScopeId: input.workspaceScopeId }] }) });
     }
-    case "delegate": return (await runtime(input.id)).delegate(input.role, input.task);
-    case "workers": {
-      const owner = await runtime(input.id);
-      return owner.inspect(input.run);
-    }
-    case "control": {
-      const owner = await runtime(input.id);
-      owner.ownRun(input.run);
-      if (input.operation === "steer" && !input.message?.trim()) throw new Error("Steering requires a message");
-      return owner.rpc(input.operation, { id: input.run, ...(input.message ? { message: input.message } : {}) });
-    }
+    case "delegate": case "workers": case "control": return legacyUnavailable(input.id);
     case "notes": loadProject(input.id); return notes(projectDir(input.id));
     case "knowledge-list": return listKnowledge(await knowledgeDir(input.id));
     case "knowledge-read": return readKnowledge(await knowledgeDir(input.id), input.path);
@@ -709,8 +672,8 @@ server.listen(socketPath(), () => {
   if (closing) return;
   chmodSync(socketPath(), 0o600);
   process.stderr.write(JSON.stringify({ event: "projects-host-started", pid: process.pid, socket: socketPath() }) + "\n");
-  for (const project of listProjects().filter(p => !p.deleted && !p.archived && (p.runtime === "durable" || p.sessionFile))) {
-    const restore = project.runtime === "durable" ? durable(project.id) : runtime(project.id).then(owner => { if (!closing) owner.pump(); });
+  for (const project of listProjects().filter(p => !p.deleted && !p.archived && p.runtime === "durable")) {
+    const restore = durable(project.id);
     void restore.catch(error => process.stderr.write(JSON.stringify({ event: "restore-failed", project: project.id, error: errorText(error) }) + "\n"));
   }
 });
@@ -732,15 +695,6 @@ function shutdown(): Promise<void> {
     for (const pending of durableRuntimes.values()) {
       try { await (await pending).close(); }
       catch (error) { report(error); }
-    }
-    for (const pending of runtimes.values()) {
-      let owner: Runtime | undefined;
-      try {
-        owner = await pending;
-        try { await owner.session.abort(); } catch (error) { report(error); }
-        try { await owner.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); } catch (error) { report(error); }
-      } catch (error) { report(error); }
-      finally { try { owner?.session.dispose(); } catch (error) { report(error); } }
     }
     await Promise.allSettled([...activeRequests]);
     try { if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock); }

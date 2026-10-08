@@ -6,7 +6,7 @@ The new `schedule-history` owner API samples at most 100 retained events/intents
 
 ## Worker dispatch and results
 
-Durable projects use the host's dispatcher on `pi-durable`, not `pi-subagents`. The legacy coordinator uses `pi-subagents`. Independent threads can run concurrently up to `workerCap`, which defaults to 1 and can be changed in Settings while work is idle.
+Durable projects use the host's dispatcher on `pi-durable`, independently of the interactive subagent manager. Legacy pi-subagents execution has been removed; saved legacy records remain unchanged and require owner-authorized Durable migration before execution. Independent threads can run concurrently up to `workerCap`, which defaults to 1 and can be changed in Settings while work is idle.
 
 The coordinator chooses `worker`, `scout`, or `reviewer`. Roles select configured models/instructions. Every role still needs an owner-authorized scope and receives only that scope's tools. Existing threads keep their frozen role/model.
 

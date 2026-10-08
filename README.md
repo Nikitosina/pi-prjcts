@@ -1,6 +1,6 @@
 # Pi Projects MVP
 
-Local persistent projects using installed Pi and official Pi Durable. New projects use Durable; unchanged existing projects retain their original runtime until explicit migration. A detached Node host owns coordinators/workers while your Mac is awake.
+Local persistent projects using installed Pi and official Pi Durable. New projects use Durable. Existing legacy records remain unchanged, but legacy execution is disabled after removal of pi-subagents; they require explicit Durable migration before execution. A detached Node host owns Durable coordinators/workers while your Mac is awake.
 
 Verification is currently suspended by the owner. New backend and native/browser changes are unverified. Five foundation milestones are accepted; full parity is not. See `PARITY.md` for evidence limits, `IMPLEMENTATION-REVIEW.md` for this source-only closeout and safe review path, `TUI-VERIFY.md` for native controls and `BROWSER-WIRING.md` for browser controls. Do not run verification or restart/migrate a production host without renewed permission. Any future interactive review requires a fresh owner-approved disposable project home, not the production home or current running Pi session.
 
@@ -309,7 +309,7 @@ not either live client.
 
 ## Verify and maintain
 
-Verification remains suspended. Commands below are reference, not permission to run checks/E2Es, alter shared installs or restart production. Historical/frozen fixtures and evidence must remain unchanged.
+General verification remains suspended. The pi-subagent-manager migration has owner approval for an isolated Durable-host E2E only. Commands below are otherwise reference, not permission to run unrelated checks/E2Es or restart production. Historical/frozen fixtures and evidence must remain unchanged.
 
 ```bash
 cd ~/.pi/agent/projects-mvp
@@ -320,7 +320,7 @@ npm run e2e:inbox
 npm run e2e:tui
 ```
 
-`link-host.mjs` links the existing global Pi installation and installed pi-subagents without installing a second SDK. With Pi 1.x it also patches the installed runner's obsolete core alias check. This does not downgrade Pi or supply a fake API. Run it after moving or reinstalling Pi, or updating pi-subagents; an upstream update can overwrite the patch. The type check requires the installed `tsc` command. Runtime requires Node 22.19 or newer with TypeScript stripping support.
+`link-host.mjs` links the existing global Pi installation and host types without installing a second SDK. There is no pi-subagents dependency or runner patch. Legacy execution endpoints reject requests without changing saved project data; Durable projects keep using pi-durable, independently of the interactive subagent manager. Run the link script after moving or reinstalling Pi. The type check requires the installed `tsc` command. Runtime requires Node 22.19 or newer with TypeScript stripping support.
 
 `npm run setup` is the one command for a fresh checkout: `link-host.mjs`, then `link-durable.mjs`, which fetches pinned Pi Durable 1.0.0 and unpdf 1.8.1, checks each archive against a pinned sha512, and links them to the installed Pi's shared libraries. Any installed Pi 1.x is accepted if it satisfies every range Durable declares (chord, pi-ai, typebox, diff); otherwise it names the mismatch and changes nothing. Re-running is idempotent. Verified by `scripts/setup-e2e.mjs`.
 
