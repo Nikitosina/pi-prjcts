@@ -59,7 +59,7 @@ try {
   git(repo, "push", "origin", "main");
   const { request } = await import("../src/client.ts");
   const [{ ModelRuntime }, chord, durable, binding, state, workspaceAuth, planning, githubWorker, coordinator] = await Promise.all([
-    import("@earendil-works/pi-coding-agent"), import("@earendil-works/chord/context"), import("@earendil-works/pi-durable"), import("../src/durable-workspace-binding.ts"), import("../src/state.ts"), import("../src/workspace-authorization.ts"), import("../src/durable-planning.ts"), import("../src/github-worker.ts"), import("../src/coordinator.ts"),
+    import("@earendil-works/pi-coding-agent"), import("@earendil-works/chord/context"), import("@earendil-works/pi-durable"), import("../src/durable-workspace-binding.ts"), import("../src/state.ts"), import("../src/workspace-authorization.ts"), import("../src/durable-planning.ts"), import("../src/github-worker.ts"), import("../src/project-resources.ts"),
   ]);
   BACKGROUND_CONTEXT = chord.BACKGROUND_CONTEXT;
   const project = await request({ action: "create", name: "GitHub quick", cwd: repo });

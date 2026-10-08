@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, lstatSync, mkdirSync, readdirSync } from "node:fs";
-import { open, realpath } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { open } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { Evidence, Id, parse, readJson, saveJson } from "./state.ts";
 
 const limit = 10 * 1024 * 1024;
@@ -10,30 +10,6 @@ export function evidence(dir: string): Evidence[] {
   const path = join(dir, "evidence");
   mkdirSync(path, { recursive: true, mode: 0o700 });
   return readdirSync(path).filter(name => name.endsWith(".json")).map(name => parse(Evidence, readJson(join(path, name)))).sort((a, b) => a.at.localeCompare(b.at));
-}
-
-export async function captureEvidence(input: { root: string; dir: string; path: string; title: string; sessionFile: string | null }): Promise<Evidence> {
-  const root = await realpath(input.root);
-  const source = await realpath(resolve(root, input.path));
-  const suffix = relative(root, source);
-  if (!suffix || suffix === ".." || suffix.startsWith("../") || isAbsolute(suffix)) throw new Error("Evidence must be a file inside the assigned workspace, including symlink targets");
-  const file = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  let bytes: Buffer;
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > limit) throw new Error("Evidence must be a regular file no larger than 10 MiB");
-    bytes = Buffer.alloc(stat.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await file.read(bytes, offset, bytes.length - offset, offset);
-      if (!read.bytesRead) break;
-      offset += read.bytesRead;
-    }
-    const after = await file.stat();
-    if (offset !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error("Evidence source changed during capture");
-    bytes = bytes.subarray(0, offset);
-  } finally { await file.close(); }
-  return captureEvidenceBytes({ dir: input.dir, filename: basename(source), title: input.title, sessionFile: input.sessionFile, bytes });
 }
 
 export async function captureEvidenceBytes(input: { dir: string; filename: string; title: string; sessionFile: string | null; bytes: Buffer; native?: Evidence["native"]; id?: string }): Promise<Evidence> {

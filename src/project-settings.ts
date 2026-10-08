@@ -9,7 +9,6 @@ export function projectSettings(project: Project) {
 export function updateProjectSettings(project: Project, input: Update): Project {
   if (input.id !== project.id || input.confirm !== project.id) throw new Error("Settings update requires confirmation matching project id");
   if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
-  if (project.runtime !== "durable") throw new Error("Legacy project settings require an explicit Durable migration");
   if (input.expectedRevision !== projectSettings(project).revision) throw new Error("Settings revision conflict; reread before updating");
   const patch = input.changes;
   const { skillProfiles, worktreeSetup, contextSettings, ...rest } = project;

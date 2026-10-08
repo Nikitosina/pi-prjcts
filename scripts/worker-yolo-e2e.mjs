@@ -82,11 +82,11 @@ try {
   try {
     const conversation = await harness.createConversation({ ownership: { kind: "conversation" } }, BACKGROUND_CONTEXT);
     const saved = state.loadProject(project.id), scope = saved.workspaceAuthorization.scopes[0];
-    const prepared = await binding.durableWorkspaceBinding({ project: saved, configuredSkillLoader: await (await import("../src/coordinator.ts")).loadProjectResourceLoader(saved), conversation: () => conversation, controlRoot: root })({ conversationId: 1, workId: randomUUID(), threadId: randomUUID(), role: "worker", workspaceScopeId: scope.id });
+    const prepared = await binding.durableWorkspaceBinding({ project: saved, configuredSkillLoader: await (await import("../src/project-resources.ts")).loadProjectResourceLoader(saved), conversation: () => conversation, controlRoot: root })({ conversationId: 1, workId: randomUUID(), threadId: randomUUID(), role: "worker", workspaceScopeId: scope.id });
     const names = prepared.tools.map(tool => tool.name);
     assert.ok(names.includes("bash")); assert.equal(prepared.cwd, prepared.tools.find(tool => tool.name === "bash") && prepared.cwd);
     assert.ok(names.includes("read") && names.includes("write"));
-    const listedSkills = (await (await import("../src/coordinator.ts")).loadProjectResourceLoader(saved)).getSkills().skills;
+    const listedSkills = (await (await import("../src/project-resources.ts")).loadProjectResourceLoader(saved)).getSkills().skills;
     assert.ok(listedSkills.length > 0, "fixture host should load configured skills");
     assert.doesNotMatch(prepared.workerInstructions, /Configured Pi skills/);
     assert.ok(!listedSkills.some(skill => prepared.workerInstructions.includes(skill.filePath)));
@@ -108,7 +108,7 @@ try {
     const grantSnap = await request({ action: "owner-setup-snapshot", id: project.id });
     await request({ action: "workspace-grant", id: project.id, confirm: project.id, expectedRevision: grantSnap.workspaceRevision, repositoryId: "acme/yolo-folder", provider: "github", ownerCheckout: fixture, approvedRoot: folderRoot, fileOwnershipPrefix: "docs", files: ["docs/a.md"], baseRevision: git(fixture, "rev-parse", "HEAD") });
     const folderProject = state.loadProject(project.id), folderScope = folderProject.workspaceAuthorization.scopes.find(item => !item.wholeRepository);
-    const folder = await binding.durableWorkspaceBinding({ project: folderProject, configuredSkillLoader: await (await import("../src/coordinator.ts")).loadProjectResourceLoader(folderProject), conversation: () => conversation, controlRoot: root })({ conversationId: 2, workId: randomUUID(), threadId: randomUUID(), role: "worker", workspaceScopeId: folderScope.id });
+    const folder = await binding.durableWorkspaceBinding({ project: folderProject, configuredSkillLoader: await (await import("../src/project-resources.ts")).loadProjectResourceLoader(folderProject), conversation: () => conversation, controlRoot: root })({ conversationId: 2, workId: randomUUID(), threadId: randomUUID(), role: "worker", workspaceScopeId: folderScope.id });
     const folderNames = folder.tools.map(tool => tool.name);
     assert.ok(!["bash", "edit", "write", "read"].some(name => folderNames.includes(name)), JSON.stringify(folderNames));
     assert.ok(folderNames.some(name => name.startsWith("projects_workspace_") && name.endsWith("_write")));

@@ -4,10 +4,10 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { home, socketPath, Request, Project, errorText, jobs, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
+import { home, socketPath, Request, Project, errorText, jobs, legacyProjectIds, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
-import { loadProjectResourceLoader } from "./coordinator.ts";
+import { loadProjectResourceLoader } from "./project-resources.ts";
 import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
@@ -109,11 +109,6 @@ async function withDurableOwner<T>({ id, validate, operation }: { id: string; va
   });
 }
 
-function legacyUnavailable(id: string): never {
-  if (loadProject(id).runtime === "durable") throw new Error("This endpoint belongs to the removed legacy runtime; use Durable project controls instead.");
-  throw new Error("Legacy project execution was removed with pi-subagents. Project data is preserved; authorize Durable migration before running this project.");
-}
-
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
   if (closing) throw new Error("Host is stopping");
   if (ownerCloseFailed.has(id)) throw new Error("Project owner close failed; restart the owned host before retrying");
@@ -122,7 +117,6 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
   const present = durableRuntimes.get(id);
   if (present) return present;
   const project = loadProject(id);
-  if (project.runtime !== "durable") throw new Error("Project has not been authorized for Durable migration");
   const opening = configuredSkills(id).then(loader => openDurableHost(project, loader));
   durableRuntimes.set(id, opening);
   opening.catch(() => { if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id); });
@@ -146,8 +140,7 @@ async function persistWorkspaceGrant<T>(before: ReturnType<typeof loadProject>, 
     const project = loadProject(before.id);
     if (workspaceAuthorizationRevision(project) !== expectedRevision || project.archived || project.deleted) throw new Error("Workspace authorization changed or project became inactive");
     saveProject(rebindOneClickGithub({ ...project, workspaceAuthorization: result.project.workspaceAuthorization })); return result.scope;
-  }, before.runtime === "durable");
-  if (before.runtime !== "durable") return persist();
+  }, true);
   return lifecycle(before.id, project => { if (workspaceAuthorizationRevision(project) !== expectedRevision) throw new Error("Workspace authorization changed; refresh before granting"); }, async owner => {
     const current = await owner.snapshot(), plan = await owner.planSnapshot();
     if (current.coordinator.busy || current.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(work => work.status === "queued" || work.status === "running")) throw new Error("Workspace grants require an idle Durable project");
@@ -188,27 +181,22 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
     case "web": return { url: web.url };
-    case "answer": case "review": {
-      if (loadProject(input.id).runtime === "durable") {
-        const entry = await withProjectLock(input.id, async () => {
-          const project = loadProject(input.id);
-          const dir = ownedProjectDir(input.id);
-          const entry = resolveEntry(dir, input, "manual");
-          if (entry.kind === "question" && project.problem === entry.question) project.problem = null;
-          project.phase = inbox(dir).some(item => !item.result) || project.problem ? "attention" : "ready";
-          saveProject(project);
-          return entry;
-        });
-        // The answer is recorded first; waking the coordinator is best effort (a paused project keeps it for later).
-        if (input.action === "answer" && entry.kind === "question") {
-          // The answer wakes the chat that asked; questions from before chats existed go to Main.
-          const asked = entry.native ? (await (await durable(input.id)).chats()).find(chat => chat.conversationId === entry.native?.conversationId)?.id : undefined;
-          try { await dispatchRequest({ action: "message", id: input.id, text: `Owner answered your question "${entry.title}":\n${input.text}`, ...(asked && asked !== "main" ? { chatId: asked } : {}) }); }
-          catch (error) { recordHostEvent("answer-delivery-deferred", errorText(error)); }
-        }
+    case "answer": {
+      const entry = await withProjectLock(input.id, async () => {
+        const project = loadProject(input.id);
+        const dir = ownedProjectDir(input.id);
+        const entry = resolveEntry(dir, input);
+        if (project.problem === entry.question) project.problem = null;
+        project.phase = inbox(dir).some(item => !item.result) || project.problem ? "attention" : "ready";
+        saveProject(project);
         return entry;
-      }
-      return legacyUnavailable(input.id);
+      });
+      // The answer is recorded first; waking the coordinator is best effort (a paused project keeps it for later).
+      // The answer wakes the chat that asked; questions from before chats existed go to Main.
+      const asked = entry.native ? (await (await durable(input.id)).chats()).find(chat => chat.conversationId === entry.native?.conversationId)?.id : undefined;
+      try { await dispatchRequest({ action: "message", id: input.id, text: `Owner answered your question "${entry.title}":\n${input.text}`, ...(asked && asked !== "main" ? { chatId: asked } : {}) }); }
+      catch (error) { recordHostEvent("answer-delivery-deferred", errorText(error)); }
+      return entry;
     }
     case "list": return listProjects().filter(project => !project.deleted);
     case "create": {
@@ -231,7 +219,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           model: input.model ?? "openai-codex/gpt-5.6-sol",
           models: { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" },
           runtime: "durable", ...(input.requestId ? { creation: { requestId: input.requestId, fingerprint } } : {}),
-          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), decisionAccess: "coordinator", sessionFile: null, phase: "ready", problem: null, runs: [],
+          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), decisionAccess: "coordinator", phase: "ready", problem: null,
         });
         saveProject(created);
         return created;
@@ -322,8 +310,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       } finally { settingsUpdating.delete(input.id); }
     }
-    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId, input.focus) : legacyUnavailable(input.id);
-    case "search": return searchProject(ownedProjectDir(input.id), input.query, loadProject(input.id).runtime === "durable" ? await (await durable(input.id)).searchSources() : null, input.limit);
+    case "show": return durableHostSnapshot(await durable(input.id), input.chatId, input.focus);
+    case "search": return searchProject(ownedProjectDir(input.id), input.query, await (await durable(input.id)).searchSources(), input.limit);
     case "chat-create": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted || project.archived) throw new Error("Inactive project cannot open a chat"); }, operation: owner => owner.chatCreate(input.title) });
     case "chat-update": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted) throw new Error("Project is deleted"); }, operation: owner => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }) });
     case "delete": return lifecycle(input.id, () => {
@@ -510,7 +498,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "workspace-revoke": {
       if (input.confirm !== input.id) throw new Error("Workspace revocation requires confirmation matching project id");
-      const before = loadProject(input.id);
       const persist = () => withProjectLock(input.id, async () => {
         const project = loadProject(input.id), auth = project.workspaceAuthorization;
         if (project.archived || project.deleted) throw new Error("Restore the project before changing workspace authorization");
@@ -525,8 +512,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const historyEntry = { revokedAt: new Date().toISOString(), repositoryId: repository.repositoryId, repositorySha256: workspaceRepositoryFingerprint(repository), scopeId: scope.id, scopeSha256: createHash("sha256").update(JSON.stringify(scope)).digest("hex"), baseRevision: scope.baseRevision };
         saveProject(rebindOneClickGithub({ ...project, workspaceAuthorization: scopes.length ? { ...auth, scopes, repositories } : undefined, workspaceAuthorizationHistory: [...history, historyEntry] }));
         return { revoked: true, scopeId: input.scopeId, repositoryId: scope.repositoryId };
-      }, before.runtime === "durable");
-      if (before.runtime !== "durable") return persist();
+      }, true);
       return lifecycle(input.id, project => {
         if (project.archived || project.deleted) throw new Error("Restore the project before changing workspace authorization");
         if (workspaceAuthorizationRevision(project) !== input.expectedRevision || !project.workspaceAuthorization?.scopes.some(scope => scope.id === input.scopeId)) throw new Error("Workspace scope changed or is unknown; refresh before revoking");
@@ -551,7 +537,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "automation-snapshot": return automationSnapshot(input.id);
     case "automation-update": {
       const project = loadProject(input.id);
-      if (project.deleted || project.archived || project.runtime !== "durable") throw new Error("Automations need an active Durable project");
+      if (project.deleted || project.archived) throw new Error("Automations need an active project");
       const owner = await durable(input.id), before = loadAutomations(input.id);
       if (input.change.eventChat && input.change.eventChat !== "main") { const chat = (await owner.chats()).find(item => item.id === input.change.eventChat); if (!chat || chat.archived) throw new Error("Choose an existing, active chat for events"); }
       const next = await withProjectLock(input.id, async () => updateAutomations(input.id, input.change));
@@ -597,8 +583,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         for (const upload of input.attachments ?? []) uploadRecord(ownedProjectDir(input.id), upload);
         return { id: input.requestId ?? randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) } satisfies import("./state.ts").Job;
       };
-      if (input.attachments && loadProject(input.id).runtime !== "durable") throw new Error("Attachments need a Durable project");
-      if (loadProject(input.id).runtime === "durable") return withDurableOwner({ id: input.id, validate: project => {
+      return withDurableOwner({ id: input.id, validate: project => {
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
       }, operation: async owner => {
@@ -620,20 +605,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), { requestId: job.id, chatId: input.chatId, title: job.text });
         return job;
       } });
-      return legacyUnavailable(input.id);
     }
     case "work-submit": {
       const validate = () => {
         ownedProjectDir(input.id);
         const project = loadProject(input.id);
-        if (project.runtime !== "durable") throw new Error("Scoped submission requires a Durable project; legacy delegation is separate");
         if (project.deleted || project.archived) throw new Error("Inactive project cannot admit scoped worker work");
         if (!project.workspaceAuthorization?.scopes.some(scope => scope.id === input.workspaceScopeId)) throw new Error("Scoped submission requires an existing owner-authorized workspace scope");
       };
       validate();
       return withDurableOwner({ id: input.id, validate, operation: owner => owner.plan({ work: [{ id: input.requestId, requestId: input.requestId, threadId: input.threadId, role: "worker", text: input.text, workspaceScopeId: input.workspaceScopeId }] }) });
     }
-    case "delegate": case "workers": case "control": return legacyUnavailable(input.id);
     case "notes": loadProject(input.id); return notes(projectDir(input.id));
     case "knowledge-list": return listKnowledge(await knowledgeDir(input.id));
     case "knowledge-read": return readKnowledge(await knowledgeDir(input.id), input.path);
@@ -669,7 +651,7 @@ const telegram = startTelegram({ dispatch: input => dispatch(parse(Request, inpu
 void telegram.flush();
 async function automationSnapshot(id: string) {
   const project = loadProject(id), config = loadAutomations(id);
-  return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, watchdog: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).watchdogSnapshot() : { ...config.watchdog }, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
+  return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, watchdog: !project.deleted && !project.archived ? await (await durable(id)).watchdogSnapshot() : { ...config.watchdog }, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
 }
 const server = createServer(async (request, response) => {
   try {
@@ -691,7 +673,8 @@ server.listen(socketPath(), () => {
   if (closing) return;
   chmodSync(socketPath(), 0o600);
   process.stderr.write(JSON.stringify({ event: "projects-host-started", pid: process.pid, socket: socketPath() }) + "\n");
-  for (const project of listProjects().filter(p => !p.deleted && !p.archived && p.runtime === "durable")) {
+  for (const id of legacyProjectIds()) process.stderr.write(JSON.stringify({ event: "legacy-project-refused", project: id, reason: "removed legacy runtime; not listed or opened" }) + "\n");
+  for (const project of listProjects().filter(p => !p.deleted && !p.archived)) {
     const restore = durable(project.id);
     void restore.catch(error => process.stderr.write(JSON.stringify({ event: "restore-failed", project: project.id, error: errorText(error) }) + "\n"));
   }

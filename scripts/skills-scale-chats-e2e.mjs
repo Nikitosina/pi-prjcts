@@ -1,11 +1,11 @@
 // Browser E2E with an isolated host and a local fake model. No real providers, no network.
 // Failure cases recorded in skills-scale-chats-failures.md before implementation.
 // Covers: owner worker-skills catalog with 89 configured skills (paged), usage/observability across chats,
-// project attention aggregated across chats, the chat bar at 390px, and a project written by the pre-multi-chat host (95817c3).
+// project attention aggregated across chats, the chat bar at 390px. (F19, the 95817c3 legacy-host fixture, was dropped with the legacy runtime.)
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, realpathSync, writeFileSync, createWriteStream, symlinkSync, readdirSync, existsSync, copyFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,13 +13,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 const repo = process.cwd();
 const artifacts = join(repo, 'artifacts', `skills-scale-chats-${new Date().toISOString().replaceAll(':', '-')}`);
 const root = join(realpathSync(tmpdir()), `skills-chats-${randomUUID()}`);
-const home = join(root, 'home'), workspace = join(root, 'workspace'), legacyCwd = join(root, 'legacy-cwd'), agentDir = join(root, 'agent'), userHome = join(root, 'userhome'), legacySrc = join(root, 'legacy-src');
+const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent'), userHome = join(root, 'userhome');
 if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
-for (const dir of [artifacts, root, home, workspace, legacyCwd, agentDir, userHome, legacySrc]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+for (const dir of [artifacts, root, home, workspace, agentDir, userHome]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, 'report.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
-writeFileSync(join(legacyCwd, 'README.md'), 'legacy fixture\n');
 
 // 89 configured skills, the owner's real count; above the old 64 cap.
 const SKILLS = 89;
@@ -29,11 +28,6 @@ git(workspace, 'init', '-b', 'main'); git(workspace, 'config', 'user.email', 'e2
 git(workspace, 'remote', 'add', 'origin', 'https://github.com/acme/skills.git');
 writeFileSync(join(workspace, 'README.md'), 'base\n'); git(workspace, 'add', '.'); git(workspace, 'commit', '-qm', 'c1');
 
-// The pre-multi-chat host, extracted from git (no worktree metadata), sharing this checkout's node_modules.
-execFileSync('/bin/sh', ['-c', `git -C "${repo}" archive 95817c3 | tar -x -C "${legacySrc}"`]);
-symlinkSync(join(repo, 'node_modules'), join(legacySrc, 'node_modules'));
-// src/github-authorization.ts was gitignored (*auth*) at 95817c3, so the archive lacks it; it is unchanged by the multi-chat commit.
-if (!existsSync(join(legacySrc, 'src/github-authorization.ts'))) copyFileSync(join(repo, 'src/github-authorization.ts'), join(legacySrc, 'src/github-authorization.ts'));
 
 const usage = { prompt_tokens: 120, completion_tokens: 8, total_tokens: 128 };
 const chunk = (delta, finish, extra = {}) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
@@ -125,23 +119,7 @@ const settle = async (id, chatId, job) => eventually(async () => { const view = 
 const ask = async (id, chatId, text) => { const job = await rpc({ action: 'message', id, text, ...(chatId ? { chatId } : {}) }); const done = await settle(id, chatId, job); if (done.state !== 'done') throw Error(`${text} failed: ${done.error}`); return done; };
 
 try {
-  // F19 part 1: the pre-multi-chat host writes a project with one turn.
-  await startHost(legacySrc);
-  const legacy = await rpc({ action: 'create', requestId: randomUUID(), name: 'Legacy fixture', cwd: legacyCwd, objective: 'Written by 95817c3', model: 'fake/fake-model' });
-  const legacySettings = await rpc({ action: 'settings-snapshot', id: legacy.id });
-  await rpc({ action: 'settings-update', id: legacy.id, confirm: legacy.id, expectedRevision: legacySettings.revision, changes: { models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
-  const legacyJob = await rpc({ action: 'message', id: legacy.id, text: 'MARK-LEGACY hello from the old host' });
-  const legacyDone = await eventually(async () => { const view = await rpc({ action: 'show', id: legacy.id }); const found = view.jobs.find(j => j.id === legacyJob.id); return found?.state === 'done' && view; }, 'Legacy turn did not finish');
-  if ('chats' in legacyDone || legacyDone.jobs.some(job => 'chatId' in job)) throw Error('Fixture is not the pre-multi-chat shape');
-  await stopHost();
-  result.legacyFiles = readdirSync(join(home, legacy.id)).sort();
-  result.checks.push('F19 fixture: commit 95817c3 host created a project and finished a turn (no chats, jobs without chatId)');
-
   await startHost();
-  const opened = await rpc({ action: 'show', id: legacy.id });
-  if (opened.chats?.length !== 1 || opened.chats[0].id !== 'main' || opened.chats[0].title !== 'Main' || opened.chatId !== 'main' || !opened.messages.some(m => m.text === 'Done MARK-LEGACY.') || opened.jobs.length !== 1 || opened.project.problem) throw Error('Legacy project opened wrong: ' + JSON.stringify({ chats: opened.chats, jobs: opened.jobs, problem: opened.project.problem }));
-  await ask(legacy.id, undefined, 'MARK-LEGACY2 after upgrade');
-  result.checks.push('F19 the 95817c3 project opens with exactly Main, keeps its transcript and ledger, and accepts a new turn');
 
   // A: 89 configured skills, paged.
   const project = await rpc({ action: 'create', requestId: randomUUID(), name: 'Skills and chats', cwd: workspace, objective: 'Disposable fixture', model: 'fake/fake-model' });
@@ -255,13 +233,6 @@ try {
   await shot('05-chat-bar-390-long-selected', s);
   result.checks.push('F18 at 390px the chat bar stays within the viewport, no horizontal page scroll, pills/New chat/tools do not overlap');
 
-  // F19 in the browser: the legacy project shows Main only.
-  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
-  const legacyUrl = new URL(web.url); legacyUrl.searchParams.set('project', legacy.id); legacyUrl.searchParams.set('tab', 'coordinator');
-  await send('Page.navigate', { url: legacyUrl.toString() }, s);
-  await waitFor(`document.querySelector('#messages')?.innerText.includes('Done MARK-LEGACY.') && document.querySelectorAll('#chat-list .chat').length === 1 && document.querySelector('#chat-list .chat.on')?.dataset.chat === 'main'`, s, 'legacy project in browser');
-  await shot('06-legacy-project-main', s);
-  result.checks.push('F19 the 95817c3 project renders with a single Main pill and its old transcript');
 
   result.httpErrors = result.httpErrors.filter(e => !e.url.endsWith('/live'));
   if (result.errors.length || result.httpErrors.length) throw Error('Browser errors captured: ' + JSON.stringify({ errors: result.errors, http: result.httpErrors }));

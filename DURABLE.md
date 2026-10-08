@@ -6,7 +6,7 @@ The new `schedule-history` owner API samples at most 100 retained events/intents
 
 ## Worker dispatch and results
 
-Durable projects use the host's dispatcher on `pi-durable`, independently of the interactive subagent manager. Legacy pi-subagents execution has been removed; saved legacy records remain unchanged and require owner-authorized Durable migration before execution. Independent threads can run concurrently up to `workerCap`, which defaults to 1 and can be changed in Settings while work is idle.
+Durable projects use the host's dispatcher on `pi-durable`, independently of the interactive subagent manager. The legacy runtime has been removed entirely; see "Legacy runtime removed" below. Independent threads can run concurrently up to `workerCap`, which defaults to 1 and can be changed in Settings while work is idle.
 
 The coordinator chooses `worker`, `scout`, or `reviewer`. Roles select configured models/instructions. Every role still needs an owner-authorized scope and receives only that scope's tools. Existing threads keep their frozen role/model.
 
@@ -109,14 +109,13 @@ A throwing memory section alone did not stop generation: Durable reported its er
 
 ## Integrated adapter and host
 
-New projects now carry `runtime: "durable"`; existing records without that field stay on the original runtime. The host admits UUID-keyed messages into Durable without waiting for a model and restores those submissions after restart. Its job files are admission receipts and UI projections, not a separate execution scheduler. Completed admission IDs live in a Durable document because `Harness.inspect()` lists active submissions only.
+Every project carries `runtime: "durable"`; records without it are refused ("Legacy runtime removed"). The host admits UUID-keyed messages into Durable without waiting for a model and restores those submissions after restart. Its job files are admission receipts and UI projections, not a separate execution scheduler. Completed admission IDs live in a Durable document because `Harness.inspect()` lists active submissions only.
 
 Verified reports:
 - `artifacts/durable-runtime-2026-10-02T11-01-50.834Z/report.json`: 12 real-model adapter checks, including background topic reads, enforced mutation denial, memory repair, identity preservation and unsafe-storage rejection.
-- `artifacts/durable-migration-2026-10-02T10-57-19.854Z/report.json`: 9 filesystem migration checks, including byte preservation, idempotence, interruption recovery and human-edit conflicts.
 - `artifacts/durable-host-2026-10-02T11-13-14.254Z/report.json`: 5 real-model host checks for nonblocking admission, existing client snapshot format, restart and no duplicate completed work.
 
-Repeat with `npm run e2e:durable-runtime`, `npm run e2e:durable-migration`, and `npm run e2e:durable-host`. Failed runs remain in `artifacts/`. The adapter's dangling-storage-symlink check and the host's completed-job projection failed first and were repaired against these tests.
+Repeat with `npm run e2e:durable-runtime` and `npm run e2e:durable-host`. Failed runs remain in `artifacts/`. The adapter's dangling-storage-symlink check and the host's completed-job projection failed first and were repaired against these tests.
 
 ## Durable knowledge
 
@@ -124,13 +123,7 @@ Repeat with `npm run e2e:durable-runtime`, `npm run e2e:durable-migration`, and 
 
 Repeat: `npm run e2e:durable-knowledge`. Creation supports explicit `knowledgeAccess: "maintain"`; absent or `"read-only"` grants workers no knowledge mutation tools. The coordinator always receives `projects_knowledge_write`/`projects_note` regardless of this setting, and retained coordinators gain them on reopen. Verified by `scripts/coordinator-knowledge-write-e2e.mjs` (fake model; failures in `scripts/coordinator-knowledge-write-failures.md`). This permission does not grant shell, repository or publishing access. Human document APIs keep revision checks. Model read tools paginate text/history/notes; standing instructions remain outside learned topic files. The optional typed request observer is for private verification and is not a dispatch or authorization gate.
 
-Integration remains partial. Durable worker controls/public UUID projections, approvals, executable workspace tools and usage views are not wired into the current host/UI. Legacy-only operations fail explicitly for Durable projects. Production state and host remain untouched.
-
-`src/copy-only-maintenance.ts` and standalone `projects --no-start copy-*` commands expose the copy-only inspection/archive/switch/rollback helpers without `ensureHost`. Initialize a new empty owned root first; use canonical paths and exact UUID confirmation. Active and SDK-default production project homes (including overlapping paths) are denied, and runtime override variables are refused rather than cleared. The copied project must be inactive and unknown/interrupted runs block archival; switching/rollback refuse a live copied-state host. See README for exact commands. Native `/project-migration-help` explains these limits. Never open/start a copy or treat this as production migration.
-
-`src/durable-switch.ts` provides disposable-copy switching and rollback, requiring expected identity/CWD and a verified archive. It holds the runtime's SQLite ownership lease, checks host ownership, atomically stages a validated switch marker, refuses human-edit conflicts, and keeps new Durable records on rollback. Historical tool calls remain archived data, never runnable submissions.
-
-`artifacts/durable-switch-2026-10-02T11-37-47.531Z/report.json` passed 20 checks from the integrated package, including real installed `SessionManager` history, a real-model Durable response, exact rollback hashes, marker interruption/retry, live ownership denial and unsafe-path rejection. Repeat: `npm run e2e:durable-switch`. This establishes the copied-state migration gate, not authorization or UI support for production migration. Process-crash recovery is covered; power-loss durability is not claimed.
+Integration remains partial. Durable worker controls/public UUID projections, approvals, executable workspace tools and usage views are not wired into the current host/UI. Production state and host remain untouched.
 
 ## Durable planning thread evidence
 
@@ -138,13 +131,17 @@ Integration remains partial. Durable worker controls/public UUID projections, ap
 
 The report does not establish full parity, production migration safety, provider lifecycle/thread-ID correlation, or broad standing-resource discovery.
 
-## Migration gates
+## Legacy runtime removed
 
-1. Verify the isolated real-model runtime, recovery, steering, replay rules, memory gates, ownership and denials. Preserve failed runs; dependency compatibility is not feature evidence.
-2. Add a Projects runtime module backed by Durable conversations/tasks. Keep project-facing identities stable; Durable's internal conversation/task IDs are numeric and must not replace public project or legacy run UUIDs.
-3. Import legacy history without executing it. Keep original sessions, notes, decisions, immutable evidence and receipts byte-for-byte. Preserve permission defaults. Mark interrupted operations explicitly; do not turn historical tool calls into runnable tasks.
-4. Verify migration and rollback in copied, disposable state. Do not migrate a project with active coordinator/worker work. Existing production projects remain on their current runtime until a safe migration is authorized; two runtimes must never own one conversation.
-5. Connect native/browser clients to committed Durable state and prove both surfaces. The previous Pi RPC/scout startup failures are retained evidence, not assumed fixed by this prototype.
+The pi-subagents era runtime is gone: legacy coordinator prompt/worker policy (`coordinator-prompt.ts`, `worker-policy.ts`, `knowledge-tools.ts`), copy-only maintenance/migration/switch (`copy-only-maintenance.ts`, `durable-migration.ts`, `durable-switch.ts`), RPC actions `delegate`/`workers`/`control`/`review`, CLI `delegate`/`workers`/`steer`/`stop`/`copy-*`, native `/project-delegate` and `/project-migration-help`, review/run items in the native and browser clients, the `activeRuns`/`runStates` snapshot fields, and the legacy E2Es (`e2e`, `e2e:inbox`, `e2e:tui`, `e2e:knowledge`, `e2e:durable-migration`, `e2e:durable-switch`). `src/coordinator.ts` is now `src/project-resources.ts` (only `loadProjectResourceLoader`). Native `/project-steer`/`/project-stop` now take Durable thread IDs (`thread-steer`/`thread-stop`); `/project-workers` lists Durable work.
+
+- **Refuse, not adopt.** `loadProject` throws `LegacyProjectError` for any `project.json` without `runtime: "durable"`: "Project "<name>" (<id>) uses the removed legacy runtime and cannot be opened. Only Durable projects are supported; its files in <dir> are left untouched." `list` skips such records, the host logs `{"event":"legacy-project-refused"}` once per record at start, and the browser shows the message and opens a listed project when the URL names one. Nothing is written to the record. Adopting was rejected: legacy records carry `runs`, a pi `sessionFile`, review decisions and `writer-launch.json`, which a fresh Durable coordinator would silently ignore.
+- Kept: `sessionFile`/`runs` stay in the schema as optional retired fields (the owner's live project has `sessionFile: null, runs: []`); old `review` decision files are skipped by the inbox; Durable-era compatibility (`projects.legacy-worker-recovery`, `legacy-thread-history`, legacy usage rows, the monitor guard, notes import into `research/legacy/`) is for older Durable stores, not the removed runtime.
+- Kept: `PI_SUBAGENT*` scrubbing when spawning the host, because the host loads global extensions and the owner's pi-subagent-manager reads `PI_SUBAGENT_EXTRA_AGENT_DIRS`.
+- `skills-scale-chats` F19 (started the 95817c3 host) is dropped. No TUI pseudo-terminal E2E remains.
+- Known `npm run check` errors (unchanged count): `src/project-owner-setup-screen.ts(138,26)` and `src/workspace-capabilities.ts(169,21)`.
+
+E2E: `env -u PI_PACKAGE_DIR node scripts/legacy-removal-e2e.mjs` (`npm run e2e:legacy-removal`; failure cases `scripts/legacy-removal-failures.md`). A legacy record next to a Durable project: list/host start/restart unaffected, five id actions refused with the message, refusal logged once, removed RPCs rejected by the schema, removed CLI commands print usage, stale review file ignored, record byte-identical; in the browser a message, a delegated worker with its report, and a question answer all work, and a legacy URL shows the refusal banner. Passed 25 checks: `artifacts/legacy-removal-2026-10-08T15-24-52.923Z/`. The full fake-model regression list passed sequentially afterwards (watchdog needed one rerun: a resume-then-restart race once denied a message with "Project plan is paused").
 
 ## Runtime rules
 

@@ -54,14 +54,14 @@ export type GithubAuthorization = Static<typeof GithubAuthorization>;
 export const GithubAuthorizationHistory = Type.Array(Type.Object({ revokedAt: Type.String(), authorization: GithubAuthorization }, { additionalProperties: false }), { maxItems: 64 });
 export const Project = Type.Object({
   version: Type.Literal(1), id: Id, name: text, cwd: text, objective: Type.String({ maxLength: 32000 }),
-  runtime: Type.Optional(Type.Literal("durable")),
+  runtime: Type.Literal("durable"),
   creation: Type.Optional(Type.Object({ requestId: Id, fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false })),
   archived: Type.Optional(Type.Boolean()),
   deleted: Type.Optional(Type.Boolean()),
   knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])),
   libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
   decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
-  /** Optional host-only workspace grant. Legacy projects without it receive no workspace scope. */
+  /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
   workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
   workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
   githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
@@ -77,10 +77,11 @@ export const Project = Type.Object({
   contextSettings: Type.Optional(ContextSettings),
   createdAt: text, model: text,
   models: Type.Object({ worker: text, scout: text, reviewer: text }),
-  sessionFile: Type.Union([text, Type.Null()]),
+  /** Retired legacy-runtime fields (always null / empty); accepted so existing project files load. */
+  sessionFile: Type.Optional(Type.Null()),
+  runs: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 0 })),
   phase: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("attention")]),
   problem: Type.Union([Type.String(), Type.Null()]),
-  runs: Type.Array(Type.Object({ id: Id, role: Role, dir: text, task: text, createdAt: text, receipt: Type.Union([text, Type.Null()]) })),
 }, { additionalProperties: false });
 export type Project = Static<typeof Project>;
 export const Note = Type.Object({ id: Id, at: text, author: text, text }, { additionalProperties: false });
@@ -110,12 +111,6 @@ const answer = Type.Union([
 ]);
 export const InboxEntry = Type.Union([
   Type.Object({ kind: Type.Literal("question"), id: Id, at: text, title: text, question: text, choices: Type.Array(text, { maxItems: 4 }), native: Type.Optional(Type.Object({ projectId: Id, conversationId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), taskId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), callId: text }, { additionalProperties: false })), result: Type.Union([Type.Null(), answer]) }, { additionalProperties: false }),
-  Type.Object({ kind: Type.Literal("review"), id: Id, at: text, title: text, run: Id, outcome: text, result: Type.Union([
-    Type.Null(),
-    Type.Object({ action: Type.Literal("accept"), at: text, text: Type.String({ maxLength: 32000 }) }, { additionalProperties: false }),
-    Type.Object({ action: Type.Literal("revise"), at: text, text, job: Id }, { additionalProperties: false }),
-    Type.Object({ action: Type.Literal("revise"), at: text, text, delivery: Type.Literal("manual") }, { additionalProperties: false }),
-  ]) }, { additionalProperties: false }),
 ]);
 export type InboxEntry = Static<typeof InboxEntry>;
 const evidenceNativeIdentity = { projectId: Id, scopeId: Id, workId: Id, conversationId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), taskId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), callId: text };
@@ -164,9 +159,7 @@ export type DurableInspection = Static<typeof DurableInspection>;
 export const Snapshot = Type.Object({
   project: Project, busy: Type.Boolean(), paused: Type.Optional(Type.Boolean()), jobs: Type.Array(Job),
   messages: Type.Array(Type.Object({ role: Type.String(), /** Position in the full transcript (search jumps). */ index: Type.Optional(Type.Integer({ minimum: 0 })), at: Type.Number(), text: Type.String(), thinking: Type.Optional(Type.String({ maxLength: 300 })), kind: Type.Optional(Type.Literal("tool")), name: Type.Optional(Type.String()), argsPreview: Type.Optional(Type.String({ maxLength: 500 })), status: Type.Optional(Type.Union([Type.Literal("ok"), Type.Literal("error"), Type.Literal("pending")])), resultPreview: Type.Optional(Type.String({ maxLength: 500 })) })), 
-  activeRuns: Project.properties.runs,
   inbox: Type.Array(InboxEntry), notes: Type.Array(Note), evidence: Type.Array(Evidence),
-  runStates: Type.Array(Type.Object({ id: Id, state: text, summary: Type.String(), sessionFile: Type.Union([text, Type.Null()]) })),
   durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(Type.Object({ tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) }, { additionalProperties: false })),
   chatId: Type.Optional(ChatId),
@@ -175,7 +168,6 @@ export const Snapshot = Type.Object({
   chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
-export const Delegation = Type.Object({ runId: Id, role: Role, dir: text });
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
@@ -186,7 +178,6 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-profile-set"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), profile: CommandProfileInput }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("web") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("review"), id: Id, entry: Id, operation: Type.Union([Type.Literal("accept"), Type.Literal("revise")]), text: Type.Optional(text) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("create"), requestId: Type.Optional(Id), name: text, cwd: text, objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text), knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("models-snapshot"), provider: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
@@ -273,10 +264,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("automation-update"), id: Id, change: AutomationChange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("webhook-rotate"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("follow-poll"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("delegate"), id: Id, role: Role, task: text }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("work-submit"), id: Id, threadId: Id, requestId: Id, workspaceScopeId: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("workers"), id: Id, run: Type.Optional(text) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("control"), id: Id, run: text, operation: Type.Union([Type.Literal("steer"), Type.Literal("stop")]), message: Type.Optional(text) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("notes"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("knowledge-list"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("knowledge-read"), id: Id, path: knowledgePath }, { additionalProperties: false }),
@@ -326,17 +314,34 @@ export function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+/** A project record written by the removed legacy (pi-subagents) runtime. It is never opened or modified. */
+export class LegacyProjectError extends Error {}
+
 export function loadProject(id: string): Project {
-  return parse(Project, readJson(join(projectDir(id), "project.json")));
+  const value = readJson(join(projectDir(id), "project.json"));
+  if (typeof value === "object" && value !== null && (value as { runtime?: unknown }).runtime !== "durable") {
+    const name = (value as { name?: unknown }).name;
+    throw new LegacyProjectError(`Project ${typeof name === "string" ? JSON.stringify(name.slice(0, 120)) : id} (${id}) uses the removed legacy runtime and cannot be opened. Only Durable projects are supported; its files in ${projectDir(id)} are left untouched.`);
+  }
+  return parse(Project, value);
 }
 
 export function saveProject(project: Project): void {
   saveJson(join(projectDir(project.id), "project.json"), parse(Project, project));
 }
 
+/** Durable projects only; legacy records are skipped (see `legacyProjectIds`). */
 export function listProjects(): Project[] {
+  return projectIds().flatMap(id => { try { return [loadProject(id)]; } catch (error) { if (error instanceof LegacyProjectError) return []; throw error; } });
+}
+
+export function legacyProjectIds(): string[] {
+  return projectIds().filter(id => { try { loadProject(id); return false; } catch (error) { return error instanceof LegacyProjectError; } });
+}
+
+function projectIds(): string[] {
   mkdirSync(home(), { recursive: true, mode: 0o700 });
-  return readdirSync(home()).filter(id => Value.Check(Id, id)).map(loadProject);
+  return readdirSync(home()).filter(id => Value.Check(Id, id));
 }
 
 export function addNote(dir: string, author: string, text: string): Note {

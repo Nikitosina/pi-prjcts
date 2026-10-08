@@ -76,14 +76,14 @@ export function commandProfilesSnapshot(project: Project) {
     id: profile.id, label: profile.label, repositoryId: profile.repositoryId, provider: profile.provider,
     scopeIds: [...profile.scopeIds], effect: profile.effect, enabled: profile.enabled,
     timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes, revision: profile.revision,
-    executable: profile.executable, arguments: [...profile.arguments], program: { ...profile.program }, executionAvailable: riskBlocker(profile) === null && profile.enabled && profile.provider === "github" && project.runtime === "durable" && !project.archived && !project.deleted && profile.owner === trustedOwner() && profile.workspaceRevision === authorizationFingerprint(project),
+    executable: profile.executable, arguments: [...profile.arguments], program: { ...profile.program }, executionAvailable: riskBlocker(profile) === null && profile.enabled && profile.provider === "github" && !project.archived && !project.deleted && profile.owner === trustedOwner() && profile.workspaceRevision === authorizationFingerprint(project),
     blocker: riskBlocker(profile) ?? (profile.provider === "arc" ? "Arc command execution is deferred; profiles cannot run" : profile.effect !== "workspace" ? "Separate exact owner approval with execution enabled is required" : !profile.enabled ? "Command profile is disabled" : profile.workspaceRevision !== authorizationFingerprint(project) ? "Command scope authorization changed; obtain a new grant" : null),
   })) };
 }
 
 export async function prepareCommandProfile(project: Project, input: Update): Promise<CommandProfile> {
   if (input.id !== project.id || input.confirm !== project.id) throw new Error("Command profile requires confirmation matching project id");
-  if (project.runtime !== "durable" || project.archived || project.deleted) throw new Error("Command profiles require an active Durable project");
+  if (project.archived || project.deleted) throw new Error("Command profiles require an active project");
   if (input.expectedRevision !== commandProfilesSnapshot(project).revision) throw new Error("Command profile revision conflict; reread before updating");
   const definition = parse(CommandProfileInput, input.profile);
   if (definition.arguments.some(value => value.includes("\0"))) throw new Error("Command arguments cannot contain NUL");
@@ -102,7 +102,7 @@ export async function prepareCommandProfile(project: Project, input: Update): Pr
 }
 
 export function applyCommandProfile(project: Project, input: Update, profile: CommandProfile): Project {
-  if (input.id !== project.id || input.confirm !== project.id || project.archived || project.deleted || project.runtime !== "durable") throw new Error("Command profile target is no longer authorized");
+  if (input.id !== project.id || input.confirm !== project.id || project.archived || project.deleted) throw new Error("Command profile target is no longer authorized");
   if (input.expectedRevision !== commandProfilesSnapshot(project).revision || profile.workspaceRevision !== authorizationFingerprint(project) || profile.owner !== trustedOwner()) throw new Error("Command profile authorization changed; reread before updating");
   if (profile.provider === "arc" && profile.enabled) throw new Error("Arc command execution is deferred; profiles cannot be enabled");
   validateCommandRisk(profile);

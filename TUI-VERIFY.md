@@ -203,6 +203,6 @@ configured real coordinator and inspect its stored result. Record the complete
 ANSI terminal stream, readable screen captures, assertions, and host snapshots.
 No unit tests or fake host are used.
 
-Repeat with `npm run e2e:tui`. The runner installs pyte into the run's isolated
+Historical: `e2e:tui` (legacy runs) was removed with the legacy runtime; no TUI E2E remains. The runner installs pyte into the run's isolated
 artifact directory to capture terminal screens, without modifying your Python
 installation. It uses real configured models and can incur provider usage.

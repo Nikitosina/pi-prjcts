@@ -33,6 +33,7 @@ export async function ensureHost(): Promise<void> {
   const log = openSync(join(home(), "host.log"), "a", 0o600);
   const env: NodeJS.ProcessEnv = { ...process.env, PI_PROJECTS_HOST: "1" };
   for (const key of Object.keys(env)) {
+    // Kept after the legacy runtime removal: the host loads global extensions, and pi-subagent-manager reads PI_SUBAGENT_*.
     if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE") delete env[key];
   }
   const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], { detached: true, stdio: ["ignore", log, log], env, cwd: fileURLToPath(new URL("..", import.meta.url)) });

@@ -75,6 +75,7 @@ let tab = tabs.includes(initial.searchParams.get("tab")) ? initial.searchParams.
 let usageObs = null, usageLoading = false;
 let observability = null, observabilityLoading = false, eventOffset = 0;
 
+let refusal = null;
 async function start() {
   document.querySelector("#compose button").disabled = true;
   const current = generation;
@@ -83,8 +84,15 @@ async function start() {
     if (current !== generation) return;
     projects = loaded;
     renderProjects();
-    if (!projects.some(p => p.id === projectId)) projectId = projects[0]?.id ?? null;
+    if (!projects.some(p => p.id === projectId)) {
+      // A legacy (pre-Durable) project is not listed; say why instead of silently opening another one.
+      const wanted = projectId;
+      projectId = projects[0]?.id ?? null;
+      if (wanted) await api({ action: "show", id: wanted }).catch(error => { if (current === generation && /removed legacy runtime/.test(error.message)) refusal = error.message; });
+      if (current !== generation) return;
+    }
     changeProject(projectId, chatId);
+    if (refusal) { const node = document.querySelector("#error"); node.dataset.source = "action"; node.textContent = refusal; node.hidden = false; refusal = null; }
   } catch (error) { if (current === generation) showError(error); }
 }
 
@@ -100,7 +108,7 @@ async function refresh() {
     try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }), ...focus }); }
     catch (error) { if (chat !== "main" && /Unknown chat/.test(error.message) && current === generation) { polling = null; changeChat("main"); return; } throw error; }
     if (current !== generation) return;
-    const [nextPlan, nextApprovals, nextDocs] = await Promise.all(next.project.runtime === "durable" ? [api({ action: "plan-snapshot", id }), api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }), api({ action: "knowledge-list", id })] : [null, null, api({ action: "knowledge-list", id })]);
+    const [nextPlan, nextApprovals, nextDocs] = await Promise.all([api({ action: "plan-snapshot", id }), api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }), api({ action: "knowledge-list", id })]);
     if (current !== generation) return;
     if (nextPlan && (!Array.isArray(nextPlan.work) || nextPlan.work.some(work => !uuid(work.id) || !uuid(work.threadId)))) throw new Error("Invalid owned Durable work projection");
     if (nextApprovals) {
@@ -113,7 +121,7 @@ async function refresh() {
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
-    if (next.project.runtime === "durable") ensureLive();
+    ensureLive();
     if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
   } catch (error) { if (current === generation) showError(error); }
   finally {
@@ -295,13 +303,11 @@ function render() {
   renderProjects();
   renderChats();
   document.querySelector("#subtitle").textContent = pendingTotal && pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for the rest.` : view.project.objective ?? "";
-  setHtml("#queue", pending.length < 2 ? "" : pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : item.kind === "approval" ? "Exact bound operation, not an execution" : `${esc(item.outcome)} run ready for review`}</small></span><span class="arrow">↗</span></button>`).join(""));
+  setHtml("#queue", pending.length < 2 ? "" : pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`).join(""));
   setHtml("#letter", entry ? letter(entry) : "");
   document.querySelector("#needs-card").hidden = !entry;
-  setHtml("#activity", plan ? durableActivity() : view.activeRuns.map(run => `<div class="task">${badge(state(run.id))}<strong>${esc(run.task.slice(0, 160))}</strong><small>${esc(run.role)} · ${esc(view.project.models[run.role])}</small><br><button class="ghost small" data-action="worker" data-run="${run.id}">Inspect worker ↗</button></div>`).join("") || '<p class="note">No workers are running.</p>');
-  const outcomes = view.inbox.filter(item => item.kind === "review" && item.result).slice(-5).reverse();
-  if (plan) setHtml("#outcomes", durableResults());
-  else setHtml("#outcomes", outcomes.map(item => `<div class="task">${badge(item.outcome)}<strong>${esc(item.title)}</strong><small>${item.result.action === "accept" ? "You accepted this result" : "You requested changes"}</small><br><button class="ghost small" data-action="worker" data-run="${item.run}">Read result ↗</button></div>`).join("") || '<p class="note">No reviewed results yet.</p>');
+  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  setHtml("#outcomes", plan ? durableResults() : "");
   // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
   const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"));
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
@@ -323,7 +329,7 @@ function render() {
   hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
-  document.querySelector("#workspace-policy").textContent = plan ? "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs." : "Legacy workers use this checkout directly. Keep the Mac awake while work runs.";
+  document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
   // Failures older than the newest settled turn are history, not current problems.
   const lastDone = view.jobs.findLastIndex(job => job.state === "done");
   const failures = view.jobs.slice(lastDone + 1).filter(job => ["failed", "interrupted"].includes(job.state)).slice(-2);
@@ -378,9 +384,9 @@ function renderPanels() {
   // One level of nesting: a parent worker's children sit under its newest row; orphans (parent hidden) stay top level.
   const newest = listed.toReversed(), shownThreads = new Set(newest.map(item => item.threadId));
   const treeRows = () => { const placed = new Set(); return newest.filter(item => !item.parentThreadId || !shownThreads.has(item.parentThreadId) || item.parentThreadId === item.threadId).map(item => { const first = !placed.has(item.threadId); placed.add(item.threadId); const kids = first ? newest.filter(candidate => candidate.parentThreadId === item.threadId && candidate.threadId !== item.threadId) : []; return workRow(item) + (kids.length ? `<div class="work-children" data-parent="${esc(item.threadId)}">${kids.map(workRow).join("")}</div>` : ""); }).join(""); };
-  setHtml("#work-list", plan ? treeRows() || '<p class="note">No work yet. Message the coordinator to start.</p>' : view.activeRuns.map(run => `<div class="work">${badge(state(run.id))}<div class="grow"><strong>${esc(run.task.slice(0, 240))}</strong><small>${esc(run.role)}</small></div><button class="ghost small" data-action="worker" data-run="${run.id}">Inspect ↗</button></div>`).join("") || '<p class="note">No workers are running.</p>');
+  setHtml("#work-list", plan ? treeRows() || '<p class="note">No work yet. Message the coordinator to start.</p>' : '<p class="note">No workers are running.</p>');
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
-  setHtml("#obs-kpis", [kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""), kpi("Running", plan ? count("running") : view.activeRuns.length), kpi("Queued", count("queued")), kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""), kpi("Work items", work.length), kpi("Worker cap", plan?.workerCap ?? "—")].join(""));
+  setHtml("#obs-kpis", [kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""), kpi("Running", count("running")), kpi("Queued", count("queued")), kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""), kpi("Work items", work.length), kpi("Worker cap", plan?.workerCap ?? "—")].join(""));
   renderHealth(p);
   if (tab === "observability" && plan && !observability && !observabilityLoading) void loadObservability();
   const threads = new Map();
@@ -767,7 +773,7 @@ async function loadObservability() {
 }
 function renderHealth(project) {
   const h = observability?.health;
-  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime ?? "legacy"], ["Coordinator", (view.chats ?? []).some(chat => chat.busy) || view.busy ? `busy${(view.chats?.length ?? 0) > 1 ? ` · ${view.chats.filter(chat => chat.busy).length}/${view.chats.length} chats` : ""}` : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : project.phase === "attention" ? "needs attention" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.failedJobs ?? view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
+  const values = [["Host", document.querySelector("#connection").textContent.split(" · ")[0]], ["Runtime", project.runtime], ["Coordinator", (view.chats ?? []).some(chat => chat.busy) || view.busy ? `busy${(view.chats?.length ?? 0) > 1 ? ` · ${view.chats.filter(chat => chat.busy).length}/${view.chats.length} chats` : ""}` : "idle"], ["Project", project.deleted ? "deleted" : project.archived ? "archived" : plan?.pausing ? "pausing" : view.paused ? "paused" : project.phase === "attention" ? "needs attention" : "ready"], ["Uptime", h ? duration(h.uptimeMs) : "Reading…"], ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"], ["Leases", h?.activeLeases ?? "—"], ["Project locks", h?.activeLocks ?? "—"], ["Mac awake", h?.macAwake === null ? "Unknown" : h?.macAwake ?? "Reading…"], ["Failed jobs", view.failedJobs ?? view.jobs.filter(job => ["failed", "interrupted"].includes(job.state)).length], ["Evidence", view.evidence.length]];
   setHtml("#obs-health", `<div class="health">${values.map(([label, value]) => `<div><small>${esc(label)}</small><b>${esc(value)}</b></div>`).join("")}</div>`);
 }
 function renderEventLog() {
@@ -937,17 +943,13 @@ function clip(value, size) { return value.length > size ? `${value.slice(0, size
 function letter(entry) {
   if (entry.kind === "approval") return operationLetter(entry.record);
   if (entry.kind === "question") return `<article class="letter"><h2>${esc(entry.title)}</h2>${entry.question.trim() !== entry.title ? `<p class="description">${esc(entry.question.startsWith(entry.title) ? entry.question.slice(entry.title.length).trim() : entry.question)}</p>` : ""}<div class="choices">${entry.choices.map((choice, index) => `<button data-action="answer" data-project="${esc(projectId)}" data-entry="${entry.id}" data-choice="${index}" data-choice-text="${esc(choice)}">${esc(choice)}</button>`).join("")}</div>${entry.choices.length && !customAnswers.has(answerKey(projectId, entry.id)) ? `<button class="ghost" data-action="custom-answer" data-project="${esc(projectId)}" data-entry="${entry.id}">Write a different answer…</button>` : answerForm(entry)}${answers.has(entry.id) && !answers.has(answerKey(projectId, entry.id)) ? `<p class="notice">An old UUID-only draft is retained without project ownership. It has not been filled into this question.</p><button data-action="answer-adopt" data-project="${esc(projectId)}" data-entry="${esc(entry.id)}">Inspect and explicitly adopt old draft</button>` : ""}<p class="signoff">Asked ${esc(ago(entry.at))}</p></article>`;
-  const run = view.project.runs.find(run => run.id === entry.run);
-  const status = view.runStates.find(state => state.id === entry.run);
-  const files = view.evidence.filter(file => status?.sessionFile && file.sessionFile === status.sessionFile);
-  return `<article class="letter"><div class="row between"><span class="eyebrow">A run result for your review</span>${badge(entry.outcome)}</div><h2>${esc(entry.title)}</h2><p class="description">${esc(status?.summary || "Open the worker report for its result and verification details.")}</p><button data-action="worker" data-run="${entry.run}">Read worker report ↗</button>${files.map(artifactButton).join("")}<p class="notice">${files.length ? "These are immutable copies captured by the worker." : "No verification files were attached to this run. Do not treat its process status as proof that the feature works."}</p><div class="row"><button class="primary" data-action="accept" data-project="${esc(projectId)}" data-entry="${entry.id}" data-run="${esc(entry.run)}">${entry.outcome === "complete" ? "Accept result" : "Acknowledge result"}</button><button data-action="revise" data-project="${esc(projectId)}" data-entry="${entry.id}" data-run="${esc(entry.run)}">Request changes</button></div><p class="notice signoff">Accepting closes this review. It does not merge, commit, publish, or start work.</p><p class="signoff">${esc(run?.role ?? "worker")} · ${esc(entry.run)} · ${esc(new Date(entry.at).toLocaleString())}</p></article>`;
+  return "";
 }
 
 function answerForm(entry) {
   return `<form data-answer data-project="${esc(projectId)}" data-entry="${entry.id}" class="stack"><textarea name="answer" aria-label="Answer coordinator" placeholder="Your answer… (Enter to send, Shift+Enter for a new line)" maxlength="24000" required>${esc(answers.get(answerKey(projectId, entry.id)) ?? "")}</textarea><div><button class="primary" type="submit">Send answer</button></div></form>`;
 }
 function artifactButton(file) { return `<button class="artifact" data-action="artifact" data-file="${file.id}"><strong>${esc(file.title)}</strong><small>${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB · SHA-256 ${esc(file.sha256.slice(0, 12))}</small></button>`; }
-function state(id) { return view.runStates.find(run => run.id === id)?.state ?? "unknown"; }
 function duration(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`; }
 function ago(at) { const ms = Date.now() - new Date(at).getTime(); return ms < 60000 ? "just now" : `${duration(ms)} ago`; }
 function size(bytes) { return bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
@@ -1146,7 +1148,7 @@ function disableActions() {
     node.disabled = busy || !view || view.project.archived || view.project.deleted || !record?.scopeCurrent;
   });
   document.querySelectorAll('#dialog [data-thread-mutation], #inline-thread [data-thread-mutation], [data-inline-thread-send] button, [data-inline-thread-send] textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
-  document.querySelector('#lifecycle').hidden = view?.project.runtime !== 'durable';
+  document.querySelector('#lifecycle').hidden = !view;
   document.querySelector('#lifecycle-state').textContent = !view ? '' : view.project.deleted ? 'Deleted' : view.project.archived ? 'Archived' : view.paused ? 'Paused' : view.busy || plan?.work.some(work => work.status === 'running') ? 'Working' : 'Idle';
   document.querySelector('#lifecycle-state').dataset.state = document.querySelector('#lifecycle-state').textContent.toLowerCase();
   const pause = document.querySelector('#project-pause'), resume = document.querySelector('#project-resume');
@@ -1288,15 +1290,6 @@ function inlineMarkdown(value) {
 function closeDialog() { captureDialogDraft(); answerAdoption = null; routineConfirmation = null; uploadConfirmations.clear(); settingsConfirmation = null; providerInspection = null; dialogVersion++; if (dialog.open) dialog.close(); if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null; }
 function showDialog(title, content) { closeDialog(); dialog.innerHTML = `<div class="row between"><h2 id="dialog-title">${esc(title)}</h2><button data-action="close-dialog" class="small">Close</button></div><div class="dialog-body">${content}</div>`; dialog.showModal(); return dialogVersion; }
 
-async function inspectWorker(id) {
-  const project = projectId;
-  const version = showDialog("Worker report", '<p class="note">Reading the saved run…</p>');
-  const result = await api({ action: "workers", id: project, run: id });
-  if (!dialog.open || version !== dialogVersion) return;
-  const active = view.activeRuns.some(run => run.id === id);
-  dialog.querySelector(".dialog-body").innerHTML = `<div class="worker-actions row">${badge(state(id))}${active ? `<button data-action="steer" data-run="${id}">Steer worker</button><button class="danger" data-action="stop" data-run="${id}">Stop worker</button>` : ""}</div><pre>${esc(result.text ?? JSON.stringify(result, null, 2))}</pre><button data-action="worker" data-run="${id}">Refresh report</button>`;
-}
-
 async function inspectArtifact(id) {
   const file = view?.evidence.find(file => file.id === id);
   if (!file) throw new Error("Evidence no longer belongs to the selected project");
@@ -1342,17 +1335,15 @@ async function resumeDialog() {
 function textDialog(mode, id) {
   captureDialogDraft();
   const project = projectId, draftKey = `${project}:${mode}:${id}`;
-  const review = mode === "revise" ? view?.inbox.find(entry => entry.id === id && entry.kind === "review" && !entry.result) : null;
-  if (mode === "revise" && !review) throw new Error("Pending review is unavailable; refresh before requesting changes");
   const draft = formDrafts.get(draftKey) ?? { text: "", requestId: crypto.randomUUID(), submittedText: null };
   formDrafts.set(draftKey, draft);
-  const title = mode === "thread-send" ? "Follow up on this thread" : mode === "thread-steer" ? "Steer this thread" : mode === "steer" ? "Steer this worker" : "Request another pass";
-  showDialog(title, `<form data-task-message data-project="${esc(project)}" data-draft-key="${esc(draftKey)}" data-mode="${esc(mode)}" data-id="${esc(id)}" data-run="${esc(review?.run ?? "")}"><textarea name="message" aria-label="${title}" placeholder="Describe the instruction…" maxlength="32000" required>${esc(draft.text)}</textarea><div class="row signoff"><button class="primary" type="submit">Send</button></div><p class="notice signoff">${mode.startsWith("thread-") ? `This reuses the owned thread with frozen scope/model/tools. Request UUID ${esc(draft.requestId)}. Unresolved retries must keep the same text.` : mode === "steer" ? "This instruction goes to the existing worker." : "The coordinator receives your request and inspects the existing run before planning another pass."}</p></form>`);
+  const title = mode === "thread-send" ? "Follow up on this thread" : "Steer this thread";
+  showDialog(title, `<form data-task-message data-project="${esc(project)}" data-draft-key="${esc(draftKey)}" data-mode="${esc(mode)}" data-id="${esc(id)}"><textarea name="message" aria-label="${title}" placeholder="Describe the instruction…" maxlength="32000" required>${esc(draft.text)}</textarea><div class="row signoff"><button class="primary" type="submit">Send</button></div><p class="notice signoff">${mode.startsWith("thread-") ? `This reuses the owned thread with frozen scope/model/tools. Request UUID ${esc(draft.requestId)}. Unresolved retries must keep the same text.` : ""}</p></form>`);
   dialog.querySelector("textarea").focus();
 }
 
 async function action(node) {
-  if (["answer", "custom-answer", "answer-adopt", "accept", "revise"].includes(node.dataset.action)) requireProject(node.dataset.project);
+  if (["answer", "custom-answer", "answer-adopt"].includes(node.dataset.action)) requireProject(node.dataset.project);
   const entry = view?.inbox.find(item => item.id === node.dataset.entry);
   switch (node.dataset.action) {
     case "select": selected = node.dataset.entry; document.activeElement.blur(); render(); break;
@@ -1421,15 +1412,6 @@ async function action(node) {
       await mutate({ action: "chat-update", id: projectId, chatId: target, archived: false }, "Chat restored.");
       changeChat(target); break;
     }
-    case "accept": {
-      if (entry?.kind !== "review" || entry.result || entry.run !== node.dataset.run) throw new Error("Displayed review changed or is resolved; refresh before deciding");
-      await mutate({ action: "review", id: node.dataset.project, entry: entry.id, operation: "accept" }, "Result accepted. No merge or publication."); break;
-    }
-    case "revise": {
-      if (entry?.kind !== "review" || entry.result || entry.run !== node.dataset.run) throw new Error("Displayed review changed or is resolved; refresh before requesting changes");
-      textDialog("revise", entry.id); break;
-    }
-    case "worker": await inspectWorker(node.dataset.run); break;
     case "thread-list": threadList(); break;
     case "all-work": setTab("activity"); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
@@ -1546,7 +1528,6 @@ async function action(node) {
       await mutate({ action: "thread-stop", id, threadId: node.dataset.thread }, "Thread stop recorded. History and work retained.");
       closeCurrentDialog(id, version); break;
     }
-    case "steer": textDialog("steer", node.dataset.run); break;
     case "resume-project": await resumeDialog(); break;
     case "confirm-resume": {
       const version = dialogVersion;
@@ -1565,14 +1546,9 @@ async function action(node) {
       closeCurrentDialog(node.dataset.project, version);
       break;
     }
-    case "stop": showDialog("Stop this worker?", `<p>Partial work stays in the checkout. This does not stop other workers or discard files.</p><button class="danger" data-action="confirm-stop" data-project="${esc(projectId)}" data-run="${esc(node.dataset.run)}">Stop worker</button>`); break;
-    case "confirm-stop": {
-      const id = node.dataset.project, version = dialogVersion; requireProject(id);
-      await mutate({ action: "control", id, run: node.dataset.run, operation: "stop" }, "Stop requested for this worker."); closeCurrentDialog(id, version); break;
-    }
     case "artifact": await inspectArtifact(node.dataset.file); break;
     case "notes": showDialog("Shared project notes", view.notes.map(note => `<article class="message"><div class="eyebrow">${esc(note.author)} · ${esc(new Date(note.at).toLocaleString())}</div><p>${esc(note.text)}</p></article>`).join("") || '<p class="note">No notes yet.</p>'); break;
-    case "evidence-list": showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured. Ask the worker to attach reports with projects_evidence.</p>'); break;
+    case "evidence-list": showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>'); break;
     case "conversation": document.querySelector(".conversation").open = true; document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: "smooth" }); document.querySelector(".conversation summary").focus(); break;
     case "close-dialog": closeDialog(); break;
     case "search": openSearch(); break;
@@ -1633,16 +1609,10 @@ async function submit(form) {
     const draft = formDrafts.get(form.dataset.draftKey);
     if (!draft) throw new Error("Form draft is missing; reopen the intended target");
     draft.text = data.get("message");
-    if (form.dataset.mode === "thread-send" || form.dataset.mode === "thread-steer") {
-      if (draft.submittedText !== null && draft.submittedText !== text) throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
-      draft.submittedText = text; persistBrowserDrafts();
-      await mutate({ action: form.dataset.mode, id: target, threadId: form.dataset.id, requestId: draft.requestId, text }, "Instruction recorded on the existing thread.");
-    } else if (form.dataset.mode === "steer") await mutate({ action: "control", id, run: form.dataset.id, operation: "steer", message: text }, "Instruction sent to the worker.");
-    else {
-      const review = view?.inbox.find(entry => entry.id === form.dataset.id && entry.kind === "review" && !entry.result);
-      if (!review || review.run !== form.dataset.run) throw new Error("Displayed review changed or is resolved; draft retained without submitting");
-      await mutate({ action: "review", id, entry: form.dataset.id, operation: "revise", text }, "Changes requested. The coordinator will inspect the result.");
-    }
+    if (form.dataset.mode !== "thread-send" && form.dataset.mode !== "thread-steer") throw new Error("Unknown message form");
+    if (draft.submittedText !== null && draft.submittedText !== text) throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
+    draft.submittedText = text; persistBrowserDrafts();
+    await mutate({ action: form.dataset.mode, id: target, threadId: form.dataset.id, requestId: draft.requestId, text }, "Instruction recorded on the existing thread.");
     if (formDrafts.get(form.dataset.draftKey) === draft) {
       if (draft.text === data.get("message")) { formDrafts.delete(form.dataset.draftKey); closeCurrentDialog(target, version); }
       else {

@@ -77,7 +77,7 @@ try {
   await ensureHost(); pid = (await health()).pid;
   project = await request({ action: 'create', name: 'Durable owner catalog positive', cwd: workspace, model: 'openai-codex/gpt-5.6-terra', objective: 'Perform only the bounded assigned workspace task in this test.' });
   assert.equal(project.runtime, 'durable');
-  const idle = await show(); assert.equal(idle.jobs.length, 0); assert.equal(idle.activeRuns.length, 0);
+  const idle = await show(); assert.equal(idle.jobs.length, 0);
   scope = await request({ action: 'workspace-grant', id: project.id, repositoryId: 'local-owner', provider: 'github', ownerCheckout: workspace, approvedRoot: approved, fileOwnershipPrefix: 'owned', files: ['owned/assigned.txt'], baseRevision });
   assert.match(scope.id, /^[a-f0-9-]{36}$/);
   const catalog = await request({ action: 'workspace-catalog', id: project.id }); assert.deepEqual(catalog, [scope]);
@@ -95,7 +95,7 @@ try {
   const workerConversationId = initial.worker.task?.rowCursor.conversationId;
   assert.ok(workerConversationId);
   const waited = await waitForTerminal(delegate.workId, workerConversationId); records = extract('settled');
-  assert.equal(waited.latest.view.activeRuns.length, 0);
+  assert.ok(!("activeRuns" in waited.latest.view));
   const target = records.worker.workspace.observedFile;
   assert.ok(records.calls.every(call => records.correlations.find(pair => pair.call.callId === call.callId)?.result), 'every public tool call has a paired result');
   const catalogCall = records.calls.find(item => item.name === 'projects_workspace_catalog'); const catalogResult = records.results.find(item => item.toolCallId === catalogCall?.callId); assert.ok(catalogCall && catalogResult && !catalogResult.isError); assert.equal(catalogCall.name, catalogResult.toolName); assert.equal(catalogCall.rowCursor.conversationId, catalogResult.rowCursor.conversationId); assert.deepEqual(catalogResult.parsed.scopes, [scope]);

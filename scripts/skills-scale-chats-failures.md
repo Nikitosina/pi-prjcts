@@ -23,7 +23,7 @@ Written before code. `scripts/skills-scale-chats-e2e.mjs` checks these with a fa
 16. A non-viewed chat's job stays queued/running in the ledger forever because only the viewed chat is reconciled, so its failure is never seen.
 17. The chat bar does not mark which chat needs attention.
 18. At 390px width the chat bar overflows the viewport horizontally, pills/tools overlap, or New chat is pushed off-screen.
-19. A project written by the pre-multi-chat code (commit 95817c3: no `projects.chats` doc, jobs without `chatId`) fails to open, shows no chat, shows something other than Main, or loses its transcript; a new message to it fails.
+19. (Removed with the legacy runtime; the 95817c3 host is no longer started.) A project written by the pre-multi-chat code (commit 95817c3: no `projects.chats` doc, jobs without `chatId`) fails to open, shows no chat, shows something other than Main, or loses its transcript; a new message to it fails.
 
 ## Regressions
 20. multi-chat, live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.

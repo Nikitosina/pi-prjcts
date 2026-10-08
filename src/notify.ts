@@ -4,10 +4,10 @@ import { inbox } from "./inbox.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 
-/** One thing the owner should hear about: a needs-you question, approval or review, a finished coordinator turn, or a failed one. */
+/** One thing the owner should hear about: a needs-you question or approval, a finished coordinator turn, or a failed one. */
 export type Notice = {
   seq: number; at: number; projectId: string; project: string; chatId: string; chat: string;
-  kind: "question" | "approval" | "review" | "result" | "error"; title: string; text: string;
+  kind: "question" | "approval" | "result" | "error"; title: string; text: string;
   entryId?: string; choices?: string[]; operationId?: string; fingerprint?: string; workId?: string; threadId?: string;
 };
 /** `workBaselined`: failed work existing before worker-failure notices (or before the project was first scanned) was marked seen silently. */
@@ -42,8 +42,8 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       if (seen.has(key)) continue;
       seen.add(key);
       if (silent) continue;
-      if (item.kind === "question") { const chat = chatOf(item.native?.conversationId); push({ ...base, chatId: chat.id, chat: chat.title, kind: "question", title: item.title, text: clip(item.question), entryId: item.id, choices: [...item.choices] }); }
-      else push({ ...base, chatId: "main", chat: chats[0].title, kind: "review", title: item.title, text: clip(`${item.outcome} run ready for review: ${item.title}`), entryId: item.id });
+      const chat = chatOf(item.native?.conversationId);
+      push({ ...base, chatId: chat.id, chat: chat.title, kind: "question", title: item.title, text: clip(item.question), entryId: item.id, choices: [...item.choices] });
     }
     for (const record of (await owner.operationSnapshot({ action: "operation-snapshot", id: project.id, status: "pending", offset: 0, limit: 100 })).items) {
       const key = `operation:${record.id}`;
@@ -96,7 +96,7 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
 
   async function scan(): Promise<void> {
     let changed = false;
-    for (const project of listProjects().filter(item => item.runtime === "durable" && !item.deleted && !item.archived)) {
+    for (const project of listProjects().filter(item => !item.deleted && !item.archived)) {
       if (closed) return;
       const opening = options.owner(project);
       if (!opening) continue;

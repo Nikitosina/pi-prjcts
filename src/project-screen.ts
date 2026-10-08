@@ -13,12 +13,9 @@ import { Type } from "typebox";
 import { request } from "./client.ts";
 import { readEvidence } from "./evidence.ts";
 import { Project, Snapshot, errorText, parse, projectDir, type InboxEntry, type Request } from "./state.ts";
-import { clean, details, items, lanes, layoutNames, layouts, worker, type Item, type Lane, type Layout, type Section } from "./project-items.ts";
+import { clean, details, items, lanes, layoutNames, layouts, type Item, type Lane, type Layout, type Section } from "./project-items.ts";
 
-type Run = Project["runs"][number];
-type Target = { kind: "answer"; entry: Extract<InboxEntry, { kind: "question" }> }
-  | { kind: "revise"; entry: Extract<InboxEntry, { kind: "review" }> }
-  | { kind: "steer"; run: Run }
+type Target = { kind: "answer"; entry: InboxEntry }
   | { kind: "thread-send" | "thread-steer"; work: NativeWork };
 export type FormDraft = { text: string; requestId: string; submittedText: string | null };
 type NativePanel = Pick<KnowledgeScreen, "focused" | "render" | "handleInput" | "invalidate" | "dispose">;
@@ -31,7 +28,6 @@ type Mode = { kind: "main"; focus: "list" | "detail" | "chat" }
   | { kind: "usage"; title: string; projectId: string; page: NativeUsage; scroll: ScrollView };
 type Region = { x: number; y: number; width: number; height: number; component: SelectList | Editor; lane?: Lane };
 
-const NativeText = Type.Object({ text: Type.String() });
 
 export class ProjectsScreen implements Component, Focusable {
   private tui: TUI;
@@ -110,8 +106,8 @@ export class ProjectsScreen implements Component, Focusable {
     const attention = this.snapshot.inbox.filter(entry => !entry.result).length + (this.pendingApprovals?.total ?? 0);
     const header = [
       this.theme.fg("accent", this.theme.bold(` PI PROJECTS / ${layoutNames[this.layout]}`)),
-      ` ${clean(p.name)} · ${this.snapshot.busy ? "coordinating" : p.phase} · ${this.plan?.work.filter(work => work.status === "running").length ?? this.snapshot.activeRuns.length} workers · ${attention} need you${p.runtime === "durable" && !this.pendingApprovals ? " + approvals loading" : ""}`,
-      this.theme.fg("muted", ` ${clean(p.cwd)} · ${p.runtime === "durable" ? `Durable · ${this.plan ? this.plan.pausing ? "pausing" : this.plan.paused ? "paused" : "active" : "plan loading"} · scoped workspaces` : "selected checkout · one writer"}`),
+      ` ${clean(p.name)} · ${this.snapshot.busy ? "coordinating" : p.phase} · ${this.plan?.work.filter(work => work.status === "running").length ?? 0} workers · ${attention} need you${!this.pendingApprovals ? " + approvals loading" : ""}`,
+      this.theme.fg("muted", ` ${clean(p.cwd)} · Durable · ${this.plan ? this.plan.pausing ? "pausing" : this.plan.paused ? "paused" : "active" : "plan loading"} · scoped workspaces`),
       this.theme.fg("border", "─".repeat(width)),
     ];
     let body: string[];
@@ -223,12 +219,6 @@ export class ProjectsScreen implements Component, Focusable {
     const item = this.current();
     if (item?.kind === "approval" && ["v", "y", "c", "g", "h"].includes(data)) { this.operationControl(item.operation, data); return; }
     if (data === "a" && item?.kind === "entry" && item.entry.kind === "question") { this.answerMenu(item.entry); return; }
-    if (data === "v" && item?.kind === "entry" && item.entry.kind === "review") {
-      const entry = item.entry;
-      this.confirm("Accept this result?", "This closes the review. It does not commit, merge, or publish.", "Accept result", async () => { await request({ action: "review", id: this.snapshot.project.id, entry: entry.id, operation: "accept" }, false); this.notice = "Result accepted. No commit, merge, or publish."; });
-      return;
-    }
-    if (data === "c" && item?.kind === "entry" && item.entry.kind === "review") { this.form("Request changes", { kind: "revise", entry: item.entry }); return; }
     if (item?.kind === "thread") {
       const id = this.snapshot.project.id, work = item.work;
       if (["f", "s", "x"].includes(data) && (this.snapshot.project.archived || this.snapshot.project.deleted)) { this.notice = "Restore the retained project before controlling threads."; this.paint(); return; }
@@ -242,13 +232,6 @@ export class ProjectsScreen implements Component, Focusable {
         this.confirm("Stop this thread?", `Thread ${work.threadId}. Conversation, partial files and receipts remain.`, "Stop thread", async () => { await request({ action: "thread-stop", id, threadId: work.threadId }, false); this.notice = "Thread stop recorded. History and workspace retained."; });
         return;
       }
-    }
-    const run = worker(item, this.snapshot);
-    if (data === "t" && run) { void this.transcript(run); return; }
-    if (data === "s" && run && this.snapshot.activeRuns.some(active => active.id === run.id)) { this.form("Steer worker", { kind: "steer", run }); return; }
-    if (data === "x" && run && this.snapshot.activeRuns.some(active => active.id === run.id)) {
-      this.confirm("Stop this worker?", clean(run.task), "Stop worker", async () => { await request({ action: "control", id: this.snapshot.project.id, run: run.id, operation: "stop" }, false); this.notice = "Stop requested. Partial work remains in the checkout."; });
-      return;
     }
     if (this.mode.focus === "detail") {
       if (this.keys.matches(data, "tui.select.confirm") && item?.kind === "evidence") void this.showEvidence(item);
@@ -319,14 +302,14 @@ export class ProjectsScreen implements Component, Focusable {
   private inbox(rows: Item[], width: number, height: number): string[] {
     const queueHeight = Math.min(Math.max(3, rows.length + 2), Math.max(3, Math.floor(height * .3)));
     const list = this.makeList(rows, queueHeight - 3);
-    const title = this.section === "inbox" ? rows.length ? `${rows.length} decisions/results shown · ${this.pendingApprovals?.total ?? 0} pending approvals · o all records` : this.snapshot.project.runtime === "durable" && !this.pendingApprovals ? "Loading pending approvals" : "Nothing needs your call" : this.sectionLabel();
+    const title = this.section === "inbox" ? rows.length ? `${rows.length} decisions/results shown · ${this.pendingApprovals?.total ?? 0} pending approvals · o all records` : !this.pendingApprovals ? "Loading pending approvals" : "Nothing needs your call" : this.sectionLabel();
     if (width < 90) return [...this.box(title, list.render(width - 2), width, queueHeight, this.mainFocus() === "list"), ...this.detail(width, Math.max(1, height - queueHeight))];
     const left = width - 30;
     this.regions.push({ x: 1, y: 5, width: left - 2, height: queueHeight - 2, component: list });
     const queue = this.box(title, list.render(left - 2), left, queueHeight, this.mainFocus() === "list");
     const letter = this.detail(left, Math.max(1, height - queueHeight));
     const reply = this.snapshot.messages.findLast(message => message.role === "assistant" && message.text.trim());
-    const background = [...(this.plan ? this.plan.work.filter(work => work.status === "running").map(work => `${work.role}: ${work.text}`) : this.snapshot.activeRuns.map(run => `${run.role}: ${run.task}`)), "", "Coordinator", "", clean(reply?.text ?? "Send any request with /.").slice(0, 200), "", "m  Read conversation", "", "Shared memory", "", clean(this.snapshot.notes.at(-1)?.text ?? "No shared notes yet.").slice(0, 200), "", "p  Switch project", "w  Inspect all work", "e  Evidence", "n  Shared notes"];
+    const background = [...(this.plan?.work.filter(work => work.status === "running").map(work => `${work.role}: ${work.text}`) ?? []), "", "Coordinator", "", clean(reply?.text ?? "Send any request with /.").slice(0, 200), "", "m  Read conversation", "", "Shared memory", "", clean(this.snapshot.notes.at(-1)?.text ?? "No shared notes yet.").slice(0, 200), "", "p  Switch project", "w  Inspect all work", "e  Evidence", "n  Shared notes"];
     const sidebar = this.box("While you decide", new Text(clean(background.join("\n")), 0, 0).render(27), 29, height, false);
     return this.columns([{ width: left, lines: [...queue, ...letter] }, { width: 29, lines: sidebar }], height);
   }
@@ -372,7 +355,7 @@ export class ProjectsScreen implements Component, Focusable {
       if (item.value === "custom") this.form("Answer the coordinator", { kind: "answer", entry });
       else {
         const text = entry.choices[Number(item.value)];
-        if (text) void this.act(async () => { await request({ action: "answer", id: this.snapshot.project.id, entry: entry.id, text }, false); this.mode = { kind: "main", focus: "list" }; this.notice = this.snapshot.project.runtime === "durable" ? "Answer recorded. Pause and execution authority are unchanged." : "Answer recorded in shared notes. Coordinator notified."; });
+        if (text) void this.act(async () => { await request({ action: "answer", id: this.snapshot.project.id, entry: entry.id, text }, false); this.mode = { kind: "main", focus: "list" }; this.notice = "Answer recorded; the coordinator was woken. Pause and execution authority are unchanged."; });
       }
     };
     this.menu("Answer the coordinator", entry.question, list);
@@ -380,7 +363,7 @@ export class ProjectsScreen implements Component, Focusable {
 
   private form(title: string, target: Target): void {
     const id = this.snapshot.project.id;
-    const targetId = target.kind === "answer" || target.kind === "revise" ? target.entry.id : target.kind === "steer" ? target.run.id : target.work.threadId;
+    const targetId = target.kind === "answer" ? target.entry.id : target.work.threadId;
     const draftKey = `${id}:${target.kind}:${targetId}`;
     if (!this.formDrafts.has(draftKey)) this.formDrafts.set(draftKey, { text: "", requestId: randomUUID(), submittedText: null });
     const editor = this.editor();
@@ -397,8 +380,6 @@ export class ProjectsScreen implements Component, Focusable {
         let input: Request;
         switch (target.kind) {
           case "answer": input = { action: "answer", id, entry: target.entry.id, text }; break;
-          case "revise": input = { action: "review", id, entry: target.entry.id, operation: "revise", text }; break;
-          case "steer": input = { action: "control", id, run: target.run.id, operation: "steer", message: text }; break;
           case "thread-send":
           case "thread-steer": input = { action: target.kind, id, threadId: target.work.threadId, requestId: draft.requestId, text }; break;
           default: { const exhaustive: never = target; throw new Error(String(exhaustive)); }
@@ -416,7 +397,6 @@ export class ProjectsScreen implements Component, Focusable {
   }
 
   private routinesPanel(): void {
-    if (this.snapshot.project.runtime !== "durable") { this.notice = "Routine controls require a Durable project. No migration is performed here."; this.paint(); return; }
     const panel = new RoutinesScreen({ project: this.snapshot.project, keys: this.keys, theme: this.listTheme(), height: () => Math.max(1, this.pageHeight - 1),
       paint: () => this.paint(), exit: () => { this.mode = { kind: "main", focus: "list" }; this.paint(); },
     });
@@ -424,7 +404,6 @@ export class ProjectsScreen implements Component, Focusable {
   }
 
   private githubPanel(): void {
-    if (this.snapshot.project.runtime !== "durable") { this.notice = "Native provider receipts require a Durable project. Arc adapter remains deferred."; this.paint(); return; }
     const panel = new GithubScreen({ project: this.snapshot.project, keys: this.keys, theme: this.listTheme(), height: () => Math.max(1, this.pageHeight - 1),
       paint: () => this.paint(), exit: () => { this.mode = { kind: "main", focus: "list" }; this.paint(); },
     });
@@ -437,7 +416,6 @@ export class ProjectsScreen implements Component, Focusable {
   }
 
   private settingsPanel(): void {
-    if (this.snapshot.project.runtime !== "durable") { this.notice = "Mutable settings require an explicit Durable migration."; this.paint(); return; }
     const panel = new SettingsScreen({ projectId: this.snapshot.project.id, tui: this.tui, keys: this.keys, theme: this.listTheme(), borderColor: text => this.theme.fg("borderAccent", text), drafts: this.settingsDrafts,
       height: () => Math.max(1, this.pageHeight - 1), paint: () => this.paint(), exit: () => { this.mode = { kind: "main", focus: "list" }; this.paint(); },
     });
@@ -446,7 +424,7 @@ export class ProjectsScreen implements Component, Focusable {
 
   private lifecycle(): void {
     const project = this.snapshot.project, id = project.id;
-    if (project.runtime !== "durable" || !this.plan) { this.notice = "Lifecycle controls require a loaded Durable plan. r refreshes."; this.paint(); return; }
+    if (!this.plan) { this.notice = "Lifecycle controls require a loaded Durable plan. r refreshes."; this.paint(); return; }
     const options = project.archived || project.deleted ? [{ value: "restore", label: "Restore retained project, remain paused" }]
       : [{ value: "pause", label: "Pause coordinator, workers and automatic admission" }, { value: "resume", label: "Resume and continue work the pause interrupted" }, { value: "archive", label: "Archive project, retain all work" }, { value: "delete", label: "Delete project from listing, retain all work" }];
     const list = new SelectList([{ value: "cancel", label: "Cancel, leave unchanged" }, ...options], 6, this.listTheme());
@@ -471,7 +449,6 @@ export class ProjectsScreen implements Component, Focusable {
   }
 
   private async usage(id: string, offset = 0): Promise<void> {
-    if (this.snapshot.project.runtime !== "durable") throw new Error("Owner-backed usage requires a Durable project");
     const page = parse(NativeUsage, await request({ action: "usage-snapshot", id, offset, limit: 100 }, false));
     if (this.closed || this.snapshot.project.id !== id) return;
     const coordinatorId = this.snapshot.durableInspection?.identity.coordinatorConversationId;
@@ -611,9 +588,6 @@ export class ProjectsScreen implements Component, Focusable {
     this.paint();
   }
 
-  private async transcript(run: Run): Promise<void> {
-    await this.act(async () => { const text = nativeText(await request({ action: "workers", id: this.snapshot.project.id, run: run.id }, false)); if (!this.closed) this.view("Worker transcript", new Text(clean(text), 0, 0)); });
-  }
   private async showEvidence(item: Extract<Item, { kind: "evidence" }>): Promise<void> {
     await this.act(async () => {
       const data = await readEvidence(projectDir(this.snapshot.project.id), item.evidence.id);
@@ -624,7 +598,7 @@ export class ProjectsScreen implements Component, Focusable {
     });
   }
   private view(title: string, component: Component): void { this.mode = { kind: "viewer", title, scroll: new ScrollView(component, { scrollbar: "hidden" }) }; this.paint(); }
-  private help(): void { this.view("Projects controls", new Text("Durable thread history and controls are implementation-only, unverified.\n\n1 / 2 / 3     Switch layout without leaving Pi\nw / i         Work / decision inbox\ne / n / l     Evidence / notes / coordinator requests\nK             Browse/edit managed knowledge and inspect history\nL             Paged hash-pinned library, verified images and byte previews\nA             Confirmed UTF-8/base64 reference upload, at most 32 KiB\nU             Owner-backed usage, [ / ] pages, r rereads\nP             Confirmed pause/resume/archive/restore/retained delete\nS             Confirmed settings, role defaults, grants and hard worker cap\nO             Owner workspace, GitHub, fixed-profile and skill setup\nG             GitHub PR/CI/review/publication receipts and pinned inspection\nR             Retained schedules/monitors and separately confirmed toggles\no             All approval records, [ / ] to page\nv / y / c     Plain approval / executable approval / reject\ng / h         Execute approved merge / inspect original outcome\nm             Read the coordinator conversation\np             Switch project\nr             Reconnect and refresh\n/             Focus the coordinator prompt\nTab           List → inspector → coordinator prompt\n↑↓ or j / k   Select items\n← →           Board lanes\nEnter         Inspect a result or answer a question\na             Answer the selected question\nv / c         Accept review / request changes\nt             Read the worker transcript\ns / x         Steer / stop the selected worker or Durable thread\nf             Follow up on a selected Durable thread\n[ / ]         Previous / next thread history message page\n{ / }         Previous / next thread history text slice\nPgUp/PgDn     Scroll the inspector or evidence viewer\nEsc           Return to the list, then close the screen\n\nAll actions target the live Projects host.\nStop and review acceptance require confirmation.\nClosing the screen keeps the coordinator and workers running.\nDurable workers use only owner-authorized scoped workspaces.\nThere is no manual board status editing.", 0, 0)); }
+  private help(): void { this.view("Projects controls", new Text("Durable thread history and controls are implementation-only, unverified.\n\n1 / 2 / 3     Switch layout without leaving Pi\nw / i         Work / decision inbox\ne / n / l     Evidence / notes / coordinator requests\nK             Browse/edit managed knowledge and inspect history\nL             Paged hash-pinned library, verified images and byte previews\nA             Confirmed UTF-8/base64 reference upload, at most 32 KiB\nU             Owner-backed usage, [ / ] pages, r rereads\nP             Confirmed pause/resume/archive/restore/retained delete\nS             Confirmed settings, role defaults, grants and hard worker cap\nO             Owner workspace, GitHub, fixed-profile and skill setup\nG             GitHub PR/CI/review/publication receipts and pinned inspection\nR             Retained schedules/monitors and separately confirmed toggles\no             All approval records, [ / ] to page\nv / y / c     Plain approval / executable approval / reject\ng / h         Execute approved merge / inspect original outcome\nm             Read the coordinator conversation\np             Switch project\nr             Reconnect and refresh\n/             Focus the coordinator prompt\nTab           List → inspector → coordinator prompt\n↑↓ or j / k   Select items\n← →           Board lanes\nEnter         Inspect a result or answer a question\na             Answer the selected question\nt             Read the selected thread history\ns / x         Steer / stop the selected thread\nf             Follow up on the selected thread\n[ / ]         Previous / next thread history message page\n{ / }         Previous / next thread history text slice\nPgUp/PgDn     Scroll the inspector or evidence viewer\nEsc           Return to the list, then close the screen\n\nAll actions target the live Projects host.\nStop requires confirmation.\nClosing the screen keeps the coordinator and workers running.\nDurable workers use only owner-authorized scoped workspaces.\nThere is no manual board status editing.", 0, 0)); }
 
   private async act(action: () => Promise<void>): Promise<void> {
     if (this.pending || this.closed) return;
@@ -642,9 +616,9 @@ export class ProjectsScreen implements Component, Focusable {
     try {
       const [snapshot, plan, approvals, pendingApprovals] = await Promise.all([
         request({ action: "show", id }, start).then(value => parse(Snapshot, value)),
-        this.snapshot.project.runtime === "durable" ? request({ action: "plan-snapshot", id }, false).then(value => parse(NativePlan, value)) : Promise.resolve(undefined),
-        this.snapshot.project.runtime === "durable" ? request({ action: "operation-snapshot", id, offset: approvalOffset, limit: 100 }, false).then(value => parse(NativeOperations, value)) : Promise.resolve(undefined),
-        this.snapshot.project.runtime === "durable" ? request({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }, false).then(value => parse(NativeOperations, value)) : Promise.resolve(undefined),
+        request({ action: "plan-snapshot", id }, false).then(value => parse(NativePlan, value)),
+        request({ action: "operation-snapshot", id, offset: approvalOffset, limit: 100 }, false).then(value => parse(NativeOperations, value)),
+        request({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }, false).then(value => parse(NativeOperations, value)),
       ]);
       if (this.closed || this.snapshot.project.id !== id || this.refreshEpoch !== epoch || this.approvalOffset !== approvalOffset) return;
       if (approvals && (approvals.offset !== approvalOffset || approvals.items.some(record => record.projectId !== id))) throw new Error("Approval page does not match the selected project and offset");
@@ -678,6 +652,3 @@ export class ProjectsScreen implements Component, Focusable {
   private listTheme(active = true): SelectListTheme { return { selectedPrefix: text => this.theme.fg(active ? "accent" : "muted", text), selectedText: text => active ? this.theme.bg("selectedBg", this.theme.fg("accent", text)) : this.theme.fg("muted", text), description: text => this.theme.fg("muted", text), scrollInfo: text => this.theme.fg("dim", text), noMatch: () => this.theme.fg("muted", "  Nothing here yet.") }; }
 }
 
-function nativeText(value: unknown): string {
-  return parse(NativeText, value).text;
-}

@@ -11,7 +11,6 @@ type Action =
   | { t: "project"; projectId: string }
   | { t: "chat"; projectId: string; chatId: string }
   | { t: "answer"; projectId: string; entryId: string; text: string }
-  | { t: "accept"; projectId: string; entryId: string }
   | { t: "approve" | "reject"; projectId: string; operationId: string; fingerprint: string };
 type Target = { projectId: string; chatId: string; entryId?: string };
 type State = {
@@ -29,7 +28,7 @@ type Button = { text: string; callback_data: string };
 class TelegramError extends Error { code: number; retryAfter?: number; constructor(message: string, code: number, retryAfter?: number) { super(message); this.code = code; this.retryAfter = retryAfter; } }
 
 const PAIR_MS = 10 * 60_000, PAIR_TRIES = 5, KEEP = 500, LIMIT = 4000;
-const LABEL: Record<Notice["kind"], string> = { question: "Question", approval: "Approval", review: "Review", result: "Finished", error: "Error" };
+const LABEL: Record<Notice["kind"], string> = { question: "Question", approval: "Approval", result: "Finished", error: "Error" };
 const clip = (text: string, max = LIMIT) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 const bounded = <T>(record: Record<string, T>) => { const keys = Object.keys(record); for (const key of keys.slice(0, Math.max(0, keys.length - KEEP))) delete record[key]; };
 /** Same update, same admission request ID: a replayed update cannot admit a second turn. */
@@ -67,7 +66,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
     persist();
   }
 
-  const active = () => listProjects().filter(project => project.runtime === "durable" && !project.deleted && !project.archived);
+  const active = () => listProjects().filter(project => !project.deleted && !project.archived);
   const pick = <T extends { title: string }>(items: T[], query: string): T | undefined => {
     const index = Number(query);
     if (Number.isSafeInteger(index) && index >= 1 && index <= items.length) return items[index - 1];
@@ -80,7 +79,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
   }
   async function select(projectId: string, chatId: string) {
     const project = loadProject(projectId);
-    if (project.deleted || project.archived || project.runtime !== "durable") throw new Error(`${project.name} is not active`);
+    if (project.deleted || project.archived) throw new Error(`${project.name} is not active`);
     const chat = (await options.chats(projectId)).find(item => item.id === chatId);
     if (!chat || chat.archived) throw new Error("That chat is archived or gone");
     state.route = { projectId, chatId }; persist();
@@ -151,12 +150,6 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
       if (action.t === "project") return await select(action.projectId, "main");
       if (action.t === "chat") return await select(action.projectId, action.chatId);
       if (action.t === "answer") { const reply = await answer(action.projectId, action.entryId, action.text); await clear(); return await say(reply); }
-      if (action.t === "accept") {
-        const entry = inbox(projectDir(action.projectId)).find(item => item.id === action.entryId);
-        if (!entry || entry.result) { await clear(); return await say("Already reviewed."); }
-        await options.dispatch({ action: "review", id: action.projectId, entry: action.entryId, operation: "accept" });
-        await clear(); return await say("Accepted.");
-      }
       const pending = (await options.dispatch({ action: "operation-snapshot", id: action.projectId, status: "pending", offset: 0, limit: 100 }) as { items: { id: string; fingerprint: string }[] }).items.find(item => item.id === action.operationId);
       if (!pending) { await clear(); return await say("Already decided."); }
       if (pending.fingerprint !== action.fingerprint) return await say("The approval changed; decide it in the browser.");
@@ -219,7 +212,6 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
     const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`)}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" ? "" : `: ${notice.title}`}`)}\n\n` + markdownToTelegramHtml(notice.text);
     if (notice.kind === "question") return { text: head + "\n\n<i>Tap an answer, or reply to this message in your own words.</i>", buttons: (notice.choices ?? []).map(choice => [{ text: choice.slice(0, 60), callback_data: key({ t: "answer", projectId: notice.projectId, entryId: notice.entryId!, text: choice }) }]) };
     if (notice.kind === "approval") return { text: head, buttons: [[{ text: "Approve", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
-    if (notice.kind === "review") return { text: head, buttons: [[{ text: "Accept", callback_data: key({ t: "accept", projectId: notice.projectId, entryId: notice.entryId! }) }]] };
     return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };
   }
   /** Sends one notice as HTML parts under 4096, buttons on the last; a part Telegram cannot parse goes as plain text instead. Every part routes replies. */

@@ -57,7 +57,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     messages: transcriptWindow(view.coordinator.messages, focus).map(([message, index]) => "kind" in message
       ? { role: "tool", index, at: message.at, text: "", kind: message.kind, name: message.name, argsPreview: message.argsPreview, status: message.status, resultPreview: message.resultPreview }
       : { role: message.role, index, at: message.at, text: message.role === "user" ? compactSkillText(message.text) : message.text, ...(message.thinking ? { thinking: message.thinking } : {}) }),
-    activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
+    inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
     chatId: view.chatId, chats, uploads: listUploads(dir), failedJobs: all.filter(job => job.state === "failed" || job.state === "interrupted").length,

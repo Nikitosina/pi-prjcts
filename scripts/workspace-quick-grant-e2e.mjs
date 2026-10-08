@@ -98,7 +98,7 @@ try {
   // ---- Worker binding, in process (no host, no model) ----
   const [{ ModelRuntime }, { BACKGROUND_CONTEXT }, { Harness, createRegistry }, { openNodeSqliteStorage }, { durableWorkspaceBinding }, state, auth, coordinator] = await Promise.all([
     import("@earendil-works/pi-coding-agent"), import("@earendil-works/chord/context"), import("@earendil-works/pi-durable"), import("@earendil-works/pi-durable/storage/sqlite/node"),
-    import("../src/durable-workspace-binding.ts"), import("../src/state.ts"), import("../src/workspace-authorization.ts"), import("../src/coordinator.ts"),
+    import("../src/durable-workspace-binding.ts"), import("../src/state.ts"), import("../src/workspace-authorization.ts"), import("../src/project-resources.ts"),
   ]);
   const catalogEntry = auth.catalog(state.loadProject(id)).find(item => item.wholeRepository);
   assert.ok(catalogEntry?.note?.includes("host opens a draft PR"));

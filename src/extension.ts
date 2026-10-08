@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { request, openInbox } from "./client.ts";
-import { Project, Role, Snapshot, Request, errorText, parse } from "./state.ts";
+import { Project, Snapshot, Request, errorText, parse } from "./state.ts";
 import { clean, Layout, layouts } from "./project-items.ts";
 import { draftSnapshot, restoreDrafts } from "./project-drafts.ts";
 import { ProjectsScreen, type FormDraft } from "./project-screen.ts";
@@ -57,7 +57,7 @@ export default function projects(pi: ExtensionAPI) {
     } finally { if (polling === token) polling = undefined; }
   }
   function applySnapshot(ctx: ExtensionContext, snapshot: Snapshot, initial: boolean) {
-    ctx.ui.setStatus("projects", `Project ${snapshot.project.name}: ${snapshot.busy ? "coordinating" : snapshot.project.phase} · ${snapshot.project.runtime === "durable" ? "Durable threads in Projects" : `${snapshot.activeRuns.length} legacy workers`}`);
+    ctx.ui.setStatus("projects", `Project ${snapshot.project.name}: ${snapshot.busy ? "coordinating" : snapshot.project.phase} · Durable threads in Projects`);
     if (snapshot.project.problem) ctx.ui.setWidget("projects-question", [snapshot.project.problem]);
     else ctx.ui.setWidget("projects-question", undefined);
     for (const message of snapshot.messages) {
@@ -91,9 +91,6 @@ export default function projects(pi: ExtensionAPI) {
       try { await handler(args.trim(), ctx); } catch (error) { ctx.ui.notify(errorText(error), "error"); }
     } });
   };
-  command("project-migration-help", "Show copy-only legacy maintenance limits", async (_args, ctx) => {
-    ctx.ui.notify("Copy-only maintenance is standalone: run projects --no-start copy-root-init <new-root>, then copy only an already-authorized inactive project into that root. Use copy-inspect/archive/switch/rollback with absolute canonical paths and --confirm <same-project-uuid>. It never starts a host. Production migration, opening the copy, history replay, active/unknown-run reconciliation and original SQLite access are unsupported. See DURABLE.md.", "info");
-  });
   async function create(name: string, ctx: ExtensionContext) {
     if (!ctx.hasUI) throw new Error("Create projects through the CLI in headless mode");
     const token = generation, cwd = ctx.cwd;
@@ -213,25 +210,18 @@ export default function projects(pi: ExtensionAPI) {
     try { await show(input); }
     catch (error) { throw new Error(`Thread ${input.threadId}, request ${input.requestId} has an unconfirmed response: ${errorText(error)}. Inspect the owned plan/history or retry exactly the same IDs, scope and text.`); }
   });
-  command("project-delegate", "Assign a bounded legacy task directly: <worker|scout|reviewer> <task>", async args => {
-    const space = args.indexOf(" ");
-    if (space < 0) throw new Error("Usage: /project-delegate <worker|scout|reviewer> <task>");
-    await show({ action: "delegate", id: current(), role: parse(Role, args.slice(0, space)), task: args.slice(space + 1) });
-  });
   command("project-workers", "List work or inspect an owned worker thread", async run => {
-    const id = current(), snapshot = parse(Snapshot, await request({ action: "show", id }));
-    if (snapshot.project.runtime === "durable") {
-      if (run) await show({ action: "thread-history", id, threadId: run });
-      else output(JSON.stringify(parse(NativePlan, await request({ action: "plan-snapshot", id })), null, 2));
-    } else await show({ action: "workers", id, ...(run ? { run } : {}) });
+    const id = current();
+    if (run) await show({ action: "thread-history", id, threadId: run });
+    else output(JSON.stringify(parse(NativePlan, await request({ action: "plan-snapshot", id })), null, 2));
   });
   command("project-notes", "Read shared project knowledge", async () => { await show({ action: "notes", id: current() }); });
-  command("project-steer", "Steer a worker: <run-id> <message>", async args => {
+  command("project-steer", "Steer a worker thread: <thread-id> <message>", async args => {
     const space = args.indexOf(" ");
-    if (space < 0) throw new Error("Usage: /project-steer <run-id> <message>");
-    await show({ action: "control", id: current(), run: args.slice(0, space), operation: "steer", message: args.slice(space + 1) });
+    if (space < 0) throw new Error("Usage: /project-steer <thread-id> <message>");
+    await show(parse(Request, { action: "thread-steer", id: current(), threadId: args.slice(0, space), requestId: randomUUID(), text: args.slice(space + 1) }));
   });
-  command("project-stop", "Stop a worker by run ID", async run => { await show({ action: "control", id: current(), run, operation: "stop" }); });
+  command("project-stop", "Stop a worker thread: <thread-id>", async threadId => { await show(parse(Request, { action: "thread-stop", id: current(), threadId })); });
   command("project-host-stop", "Stop the local project host, leaving detached workers recoverable", async (_args, ctx) => {
     if (!ctx.hasUI || !(await ctx.ui.confirm("Stop Projects host?", "All coordinators disconnect. Detached workers may continue. Reopening a project restores its session and worker controls."))) return;
     await request({ action: "shutdown" }, false);

@@ -24,7 +24,7 @@ export async function startWebhooks(deliver: Deliver) {
       if (request.method !== "POST" || !match) return reply(404, { ok: false, error: "Not found" });
       const id = match[1];
       let enabled = false;
-      try { const project = loadProject(id); enabled = !project.deleted && !project.archived && project.runtime === "durable" && loadAutomations(id).webhook.enabled; } catch {}
+      try { const project = loadProject(id); enabled = !project.deleted && !project.archived && loadAutomations(id).webhook.enabled; } catch {}
       // Unknown, inactive and disabled projects look the same.
       if (!enabled) return reply(404, { ok: false, error: "Not found" });
       let raw: Buffer;

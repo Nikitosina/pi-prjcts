@@ -1,26 +1,10 @@
 import { request, inboxUrl, openInbox } from "./client.ts";
-import { Role, parse, errorText, Request } from "./state.ts";
+import { parse, errorText, Request } from "./state.ts";
 
 const args = process.argv.slice(2);
 const startHost = args[0] !== "--no-start";
 if (!startHost) args.shift();
 const [command, first, second, ...rest] = args;
-if (command?.startsWith("copy-")) {
-  try {
-    if (startHost) throw new Error("Copy-only maintenance requires --no-start and never starts a host");
-    const { initializeDisposableRoot, inspectDisposableCopy, archiveDisposableCopy, switchCopy, rollbackCopy } = await import("./copy-only-maintenance.ts");
-    let result: unknown;
-    if (command === "copy-root-init" && first && !second && rest.length === 0) result = initializeDisposableRoot(first);
-    else if (["copy-inspect", "copy-archive", "copy-switch", "copy-rollback"].includes(command) && first && second && rest.length >= (command === "copy-inspect" ? 2 : 3)) {
-      const [cwd, archive, ...tail] = rest;
-      if (command === "copy-inspect" && (archive !== "--confirm" || tail.length !== 1 || tail[0] !== second)) throw new Error("Usage: --no-start copy-inspect <owned-root> <project-uuid> <cwd> --confirm <same-project-uuid>");
-      if (command !== "copy-inspect" && (tail.length !== 2 || tail[0] !== "--confirm" || tail[1] !== second)) throw new Error("Explicit --confirm <same-project-uuid> is required");
-      result = command === "copy-inspect" ? inspectDisposableCopy(first, second, cwd) : command === "copy-archive" ? archiveDisposableCopy(first, second, cwd, archive) : command === "copy-switch" ? switchCopy(first, second, cwd, archive) : rollbackCopy(first, second, cwd, archive);
-    } else throw new Error("Usage: --no-start copy-root-init <new-root> | copy-inspect <root> <uuid> <cwd> --confirm <uuid> | copy-archive|copy-switch|copy-rollback <root> <uuid> <cwd> <archive-dir> --confirm <uuid>");
-    process.stdout.write(JSON.stringify(result, null, 2) + "\\n");
-  } catch (error) { process.stderr.write(errorText(error) + "\\n"); process.exitCode = 1; }
-  process.exit(process.exitCode ?? 0);
-}
 if (command === "ui" || command === "ui-url") {
   try {
     if (!startHost) throw new Error("--no-start is only supported for API commands");
@@ -71,9 +55,6 @@ switch (command) {
   case "send":
     if (!first || !second) throw new Error("Usage: send <project-id> <message>");
     input = { action: "message", id: first, text: [second, ...rest].join(" ") }; break;
-  case "delegate":
-    if (!first || !second || !rest.length) throw new Error("Usage: delegate <project-id> <worker|scout|reviewer> <task>");
-    input = { action: "delegate", id: first, role: parse(Role, second), task: rest.join(" ") }; break;
   case "submit-scoped": {
     const [threadId, requestId, ...text] = rest;
     if (!first || !second || !threadId || !requestId || !text.length) throw new Error("Usage: submit-scoped <project-id> <scope-id> <thread-id> <request-id> <task>");
@@ -178,15 +159,9 @@ switch (command) {
     try { profile = JSON.parse(rest[0]); } catch { throw new Error("Profile JSON must be valid JSON"); }
     input = parse(Request, { action: "command-profile-set", id: first, expectedRevision: second, profile, confirm: rest[2] }); break;
   }
-  case "workers":
-    if (!first) throw new Error("Usage: workers <project-id> [run-id]");
-    input = { action: "workers", id: first, ...(second ? { run: second } : {}) }; break;
-  case "steer": case "stop":
-    if (!first || !second) throw new Error(`Usage: ${command} <project-id> <run-id>${command === "steer" ? " <message>" : ""}`);
-    input = { action: "control", id: first, run: second, operation: command, ...(command === "steer" ? { message: rest.join(" ") } : {}) }; break;
   case "host-stop": input = { action: "shutdown" }; break;
   default:
-    process.stderr.write("Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|delegate|submit-scoped|workers|steer|stop|thread-send|thread-steer|thread-stop|thread-history|legacy-thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|plan|pause|resume|archive|restore|delete|host-stop> ...\n");
+    process.stderr.write("Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|legacy-thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|plan|pause|resume|archive|restore|delete|host-stop> ...\n");
     process.exit(1);
 }
 try {

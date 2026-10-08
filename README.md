@@ -1,6 +1,6 @@
 # Pi Projects MVP
 
-Local persistent projects using installed Pi and official Pi Durable. New projects use Durable. Existing legacy records remain unchanged, but legacy execution is disabled after removal of pi-subagents; they require explicit Durable migration before execution. A detached Node host owns Durable coordinators/workers while your Mac is awake.
+Local persistent projects using installed Pi and official Pi Durable. Every project uses Durable; the legacy (pi-subagents era) runtime has been removed. A `project.json` without `runtime: "durable"` is refused: it is left out of the list, every action on its id fails with "uses the removed legacy runtime and cannot be opened", the host logs `legacy-project-refused` at start, the browser shows that message, and its files are never touched. A detached Node host owns Durable coordinators/workers while your Mac is awake.
 
 Verification is currently suspended by the owner. New backend and native/browser changes are unverified. Five foundation milestones are accepted; full parity is not. See `PARITY.md` for evidence limits, `IMPLEMENTATION-REVIEW.md` for this source-only closeout and safe review path, `TUI-VERIFY.md` for native controls and `BROWSER-WIRING.md` for browser controls. Do not run verification or restart/migrate a production host without renewed permission. Any future interactive review requires a fresh owner-approved disposable project home, not the production home or current running Pi session.
 
@@ -36,10 +36,8 @@ project, stop its host, or stop workers. Native draft snapshots now use public P
 
 Use `w` for work, `i` for the inbox, `m` for coordinator conversation, `e` for
 evidence, `n` for notes, and `l` for coordinator requests. Up/down or j/k select items. Left/right choose board lanes.
-Enter inspects an item or opens a question. `a` answers, `v` accepts a review,
-`c` requests changes, `t` reads a worker transcript, `s` steers, and `x` stops.
-Review acceptance and worker stopping both require confirmation, defaulting to
-cancel. `p` switches projects, `r` reconnects, and `?` shows all controls.
+Enter inspects an item or opens a question. `a` answers a coordinator question;
+the host wakes the coordinator with the answer. `p` switches projects, `r` reconnects, and `?` shows all controls.
 
 Durable controls also include `f` for an existing-thread follow-up; `o` for paged approvals; `K` for managed knowledge/topic creation; `L` for a hash-pinned library; `A` for confirmed pasted reference imports; `S` for revision-checked settings/model defaults; `U` for owner-backed usage; `P` for confirmed lifecycle actions; `G` for GitHub PR/CI/review/publication receipts; and `R` for retained routines with separately confirmed enable/disable and event opt-in. Plain approval and executable consent are separate. Exact-head GitHub merge execution is implemented but unverified and requires a separately executable approval plus explicit execution confirmation; no merge effect is authorized by this review. Auto-merge and Arc adapter/commands remain unavailable. These controls have no new walkthrough evidence.
 
@@ -62,26 +60,15 @@ From a shell:
 npm run inbox --prefix /Users/nikitarat/.pi/agent/projects-mvp
 ```
 
-The inbox has saved questions with choice buttons and custom answers, terminal
-worker results for review, immutable evidence previews, worker transcripts,
-steering and stop controls, shared notes, and coordinator messaging. The main
-conversation stays collapsed by default. A short latest-reply preview links to
-it. The message box stays available while reading the inbox; `/` focuses it.
-Drafts survive polling, in-flight sends and project switches within the tab. New Durable browser controls add owned thread history/follow-ups/steering, scoped approval records and separate execution/inspection, managed knowledge, a hash-pinned library with confirmed pasted imports, offline role settings, page-labelled usage, retained lifecycle actions, explicit pinned GitHub observations and retained routine views with separately confirmed toggles/event opt-in. All new controls remain unverified. Tab/origin-local draft snapshots restore no actions or confirmation inputs.
+The inbox has saved questions with choice buttons and custom answers, Durable
+worker threads (history, follow-up, steer, stop) in Activity, immutable evidence
+previews, shared notes, and coordinator messaging. The message box stays available
+while reading the inbox; `/` focuses it. Drafts survive polling, in-flight sends
+and project switches within the tab. Durable browser controls also cover scoped approval records and separate execution/inspection, managed knowledge, a hash-pinned library with confirmed pasted imports, role settings, usage, lifecycle actions, GitHub observations and routines. Tab/origin-local draft snapshots restore no actions or confirmation inputs.
 
-Accepting closes a review and saves an owner note. It does not commit, merge,
-publish, or start another task. Legacy change requests queue one coordinator instruction. Durable answers/revisions are manual-delivery results, not automatic resume, execution approval or queued replacement work. A complete run means the process ended, not that its verification
-passed. Failed and stopped runs keep their real status.
-
-Workers attach reports and screenshots using `projects_evidence`. Copies are
-limited to 10 MiB, must originate inside the assigned workspace, and have saved
-SHA-256 hashes. Text, including HTML and SVG, displays as text. PNG, JPEG, and
-WebP evidence can display as images. Files are associated with the worker session;
-older runs without attachments still expose their report and transcript.
-
-Questions and review decisions persist under `decisions/`. Legacy answer/change requests use fixed job IDs; Durable decision resolution retains its record without starting a legacy coordinator or inventing a delivery job.
-Accepted reviews stay closed after restart. The recovery path never replays a
-job that had already started.
+Answering a question records it under `decisions/` and wakes the asking chat's
+coordinator with the answer; it grants no execution authority. Old legacy `review`
+decision files are ignored.
 
 The browser listener binds only to `127.0.0.1` on a random port. A private launch
 link authenticates the tab, then the token leaves the address bar. Do not share
@@ -102,12 +89,11 @@ Run `/reload` in Pi, then:
 - Plain chat goes to the selected project's coordinator instead of the local Pi agent.
 - `/project-close` returns to ordinary local Pi without stopping project work.
 - `/project-status` shows requests, coordinator messages, and worker IDs.
-- `/project-delegate <worker|scout|reviewer> <task>` assigns a bounded task directly through the same delegate path the coordinator uses.
-- `/project-workers [run-id]` lists workers or reads a transcript.
-- `/project-steer <run-id> <message>` steers a worker.
-- `/project-stop <run-id>` stops a worker.
+- `/project-workers [thread-id]` lists Durable work or reads a thread's history.
+- `/project-steer <thread-id> <message>` steers a running Durable thread.
+- `/project-stop <thread-id>` stops a Durable thread.
 - `/project-notes` reads immutable audit notes.
-- `/project-host-stop` stops the local host. Durable shutdown cancels/drains its owned runtimes; uncertain cleanup remains a blocker. Legacy detached-worker behavior is separate. Use host stop/restart only in an owner-approved disposable review home; production host changes require explicit renewed permission.
+- `/project-host-stop` stops the local host. Durable shutdown cancels/drains its owned runtimes; uncertain cleanup remains a blocker. Use host stop/restart only in an owner-approved disposable review home; production host changes require explicit renewed permission.
 
 Slash commands and `!` shell commands still belong to the local Pi client. Project chat currently accepts text only.
 
@@ -179,10 +165,6 @@ No extra SDK or database service is installed. Recovery keeps
 a conflicting human edit and retains the interrupted write under
 `.knowledge/conflicts/`; do not delete those records as a repair shortcut.
 
-Historical verification entry point: `npm run e2e:knowledge`, not authorized while verification is suspended. The isolated-state E2E uses real configured
-models, saves prompt evidence, kills/restarts its own host, and exercises recovery
-from captured transaction fixtures. It does not restart the production host.
-
 ## CLI
 
 ```bash
@@ -193,10 +175,6 @@ npm run projects -- list
 npm run projects -- create "My project" /absolute/workspace "Build the approved feature"
 npm run projects -- send <project-id> "Implement this feature and return E2E evidence"
 npm run projects -- show <project-id>
-npm run projects -- delegate <project-id> scout "Inspect the authentication flow"
-npm run projects -- workers <project-id> [run-id]
-npm run projects -- steer <project-id> <run-id> "Additional requirement"
-npm run projects -- stop <project-id> <run-id>
 npm run projects -- host-stop
 ```
 
@@ -208,75 +186,23 @@ Routine CLI controls include `schedules`/`monitors` snapshots, stable-ID one-sho
 
 Owner setup uses `projects -- owner-setup <project-id>` for current bindings and revision-checked workspace/GitHub authorization and revocation, fixed-profile operations, and skill grants. Native Pi opens it with `O`; browser clients have an Owner setup button. Writes require fresh same-project consent. Revocation retains identity history and does not remove repository data or remote objects. Repository skill selection is implemented but unverified; configured Pi skills remain unavailable without a trusted already-loaded catalog snapshot. These owner-grant controls configure authority; they do not themselves authorize a worker effect. See `CLI-WIRING.md`. This wiring is unverified.
 
-Durable CLI controls are separate from legacy run controls: `thread-send`/`thread-steer` require project, thread and request UUIDs plus text; `thread-stop` requires matching `--confirm`; `thread-history` and `legacy-thread-history` expose message/Unicode slices. See `CLI-WIRING.md`. These additions are unverified.
+Durable thread CLI controls: `thread-send`/`thread-steer` require project, thread and request UUIDs plus text; `thread-stop` requires matching `--confirm`; `thread-history` and `legacy-thread-history` (threads from older Durable stores) expose message/Unicode slices. See `CLI-WIRING.md`. These additions are unverified.
 
 CLI creation trusts the named workspace's Pi resources and creates a Durable coordinator. It grants neither other workspaces nor worker/provider execution. Explicit workspace/tool/publication grants and executable-effect approvals remain separate.
 
-## Legacy behavior and current Durable controls
+## Durable controls
 
-The following native-subagent behavior describes retained legacy projects, not current Durable acceptance. Durable uses the official owned Harness, persistent UUID threads, scoped workspaces and fixed command profiles. Missing workspace/tool access remains a blocker. Worker execution requires explicit grants; the coordinator does not receive a shell. `COMMANDS.md` and `GITHUB-LOCAL.md` describe unverified command/publication limits.
+Durable uses the official owned Harness, persistent UUID threads, scoped workspaces and fixed command profiles. Missing workspace/tool access remains a blocker. Worker execution requires explicit grants; the coordinator does not receive a shell. `COMMANDS.md` and `GITHUB-LOCAL.md` describe command/publication limits.
 
 For Durable defaults, use confirmed `settings-update`, native `S` or browser settings rather than editing state or stopping production. Role model selection uses installed offline metadata; configured credentials do not prove connectivity or repair default transport. Existing threads retain frozen model/instruction text. `usage-snapshot`, native `U` and browser usage expose owner-backed counters; page-only worker totals and SDK estimates are not billing.
 
-Legacy behavior follows:
-
-The coordinator has a dedicated system prompt in `src/coordinator-prompt.ts`.
-It handles ordinary requests, plans and delegates, and normally steers an
-existing worker when a follow-up changes that worker's task. Its active-tool
-allowlist and tool-call checks prevent direct coding, shell execution, and
-alternate agent launchers. This is not an OS sandbox.
-
-pi-goal-x integration is deferred. The project coordinator does not load the
-goal lifecycle extension or expose its tools. Ordinary requests do not create
-goals. `/goal` still belongs to the local Pi session, not the project host. Native asynchronous subagents deliver completion notifications to the persistent coordinator. The host supplies a notification UI, so the coordinator remains responsive rather than waiting for the headless runner's automatic drain.
-
-Workers may edit and verify. Scouts and reviewers have read tools and shared-note tools, but no shell or file-mutation tools. Exactly one writer may enter a workspace at a time, including across projects using the same workspace. This MVP deliberately avoids Git or Arc worktree allocation; it works directly in the workspace you selected. Do not run unrelated writers there at the same time.
-
-Default coordinator and reviewer model: `openai-codex/gpt-5.6-sol`. Worker: `openai-codex/gpt-5.6-terra`. Scout: `openai-codex/gpt-5.6-luna`. Creation through Pi uses the client's current model for the coordinator. To change stored models, stop the host, edit the project's `project.json`, then reopen it. Existing child sessions retain their resolved models.
-
-Shared notes are immutable individual records, so concurrent agents cannot overwrite each other's notes. The latest notes enter coordinator and worker context. Verified decisions and artifact pointers should go into notes rather than relying only on conversation history.
-
-File mutation tools reject paths outside the workspace and symlink escapes. Shell checks reject obvious publishing, VCS mutation, deployment, and destructive commands. The MVP has no approval bypass for these actions; the human performs them separately.
-
 ## Persistence and recovery
-
-### Copy-only legacy maintenance (standalone; not production migration)
-
-The native `/project-migration-help` command describes the supported maintenance boundary. These CLI commands never start a host and require `--no-start`; nonempty `NODE_OPTIONS` or `PI_PACKAGE_DIR` is refused:
-
-```sh
-npm run projects -- --no-start copy-root-init /absolute/new/disposable-root
-# Copy only an already-authorized, inactive legacy project into the new root; never open/start it.
-npm run projects -- --no-start copy-inspect /absolute/new/disposable-root <project-uuid> /absolute/workspace --confirm <project-uuid>
-npm run projects -- --no-start copy-archive /absolute/new/disposable-root <project-uuid> /absolute/workspace /absolute/separate/archive --confirm <project-uuid>
-npm run projects -- --no-start copy-switch /absolute/new/disposable-root <project-uuid> /absolute/workspace /absolute/separate/archive --confirm <project-uuid>
-npm run projects -- --no-start copy-rollback /absolute/new/disposable-root <project-uuid> /absolute/workspace /absolute/separate/archive --confirm <project-uuid>
-```
-
-Root initialization requires a fresh absent path and creates an ownership marker. Use absolute canonical paths (no symlink aliases); the root cannot overlap the active or SDK-default production project home. Archive directory must already exist separately from the project. Exact project UUID confirmation is required. Inspection/archive reject active, interrupted or unknown work; switch/rollback refuse a live host and alter copied metadata only. These routes do not import history, start/open a copy, read original historical SQLite stores, replace original metadata, or reconcile unknown receipts. Preserve partial archives, marker temporaries and failed artifacts for inspection. Production migration is unsupported.
 
 Durable projects keep official runtime data under their owned project state, with one Harness/storage owner. Do not open extra historical stores, edit runtime databases or remove uncertainty records to enable replay. Interruptions and uncertain effects remain inspectable; recovery requires an explicit policy. Native draft snapshots are active-Pi-branch/session state; browser drafts are tab/origin-local `sessionStorage`, not proven across closed tabs, host-port changes or crashes. Restore of either UI state submits nothing.
 
-The legacy filesystem layout/recovery description below remains for existing legacy projects.
+Default state: `~/.pi/agent/projects/`. `PI_PROJECTS_HOME` selects a separate store. Each project directory holds `project.json` (identity, workspace, models, `runtime: "durable"`), the Durable runtime store, `knowledge/`, `notes/`, `inbox/`, `decisions/`, `evidence/` and `events.jsonl`. The host uses a private Unix socket and owner-only state files; `host.log` records startup failures and `legacy-project-refused` lines.
 
-Default state: `~/.pi/agent/projects/`. `PI_PROJECTS_HOME` selects a separate store.
-
-Each project has:
-
-- `project.json`, identity, workspace, models, session pointer, and worker history.
-- `sessions/`, persistent coordinator and child transcripts.
-- `notes/`, shared knowledge.
-- `inbox/`, accepted requests and their outcomes.
-- `runs/`, archived terminal worker status and output.
-- `decisions/`, durable questions, run reviews, and owner resolutions.
-- `evidence/`, captured files and hash-checked metadata.
-- `events.jsonl`, host lifecycle evidence.
-
-The host uses a private Unix socket and owner-only state files. `host.log` records startup failures. Native subagent runs also use pi-subagents' retention-managed runtime storage; terminal output is copied into the project store before that runtime storage expires.
-
-Reopening after a host restart restores the coordinator session and worker controls. Accepted requests that never started can run after recovery. Requests interrupted while running become `interrupted`; the host never automatically replays them. Inspect workers, then send a new instruction.
-
-A writer dispatch interrupted before its receipt was saved leaves `writer-launch.json`. That blocks further writers in the workspace. Inspect `/project-workers` and native run records, stop or account for the uncertain run, then remove that marker manually. Missing native status also blocks new writers unless a terminal receipt was already archived.
+Legacy records (no `runtime: "durable"`) are refused rather than adopted: they may carry legacy `runs`, a pi `sessionFile`, review decisions and `writer-launch.json`, and opening them as Durable would silently drop that history. Copy-only migration/switch tooling was removed with the legacy runtime; move such a project by creating a new Durable project for the same workspace.
 
 The host starts on demand and does not install a LaunchAgent. After reboot, reopen a project. Mac sleep pauses all local work. No cloud execution, scheduled work, external subscriptions, image chat, or OS sandbox is included. Workers currently have local coding tools, not your MCP tool catalog; Xcode and other MCP-backed workflows need a later tool-policy expansion.
 
@@ -315,24 +241,14 @@ General verification remains suspended. The pi-subagent-manager migration has ow
 cd ~/.pi/agent/projects-mvp
 npm run setup
 npm run check
-npm run e2e
-npm run e2e:inbox
-npm run e2e:tui
+npm run e2e:legacy-removal
 ```
 
-`link-host.mjs` links the existing global Pi installation and host types without installing a second SDK. There is no pi-subagents dependency or runner patch. Legacy execution endpoints reject requests without changing saved project data; Durable projects keep using pi-durable, independently of the interactive subagent manager. Run the link script after moving or reinstalling Pi. The type check requires the installed `tsc` command. Runtime requires Node 22.19 or newer with TypeScript stripping support.
+`link-host.mjs` links the existing global Pi installation and host types without installing a second SDK. There is no pi-subagents dependency or runner patch. Projects use pi-durable, independently of the interactive subagent manager; the host still scrubs `PI_SUBAGENT*` variables because the owner's global pi-subagent-manager extension (loaded by the host's resource loader) reads them. Run the link script after moving or reinstalling Pi. The type check requires the installed `tsc` command. Runtime requires Node 22.19 or newer with TypeScript stripping support.
 
 `npm run setup` is the one command for a fresh checkout: `link-host.mjs`, then `link-durable.mjs`, which fetches pinned Pi Durable 1.0.0 and unpdf 1.8.1, checks each archive against a pinned sha512, and links them to the installed Pi's shared libraries. Any installed Pi 1.x is accepted if it satisfies every range Durable declares (chord, pi-ai, typebox, diff); otherwise it names the mismatch and changes nothing. Re-running is idempotent. Verified by `scripts/setup-e2e.mjs`.
 
-All E2E commands use real configured models and incur provider usage.
-`e2e:inbox` also runs isolated headless Chrome, creates a disposable live project,
-exercises the browser controls, restarts the host, and saves screenshots plus
-captured evidence. On non-Mac systems, set `CHROME_BIN` to a Chrome-compatible
-browser executable. `e2e:tui` runs the actual Pi CLI in a pseudo-terminal and
-records ANSI output, readable screen captures, durable decisions, and live worker
-evidence. It installs pinned pyte dependencies only in its own artifact directory.
-It defaults to Pi 1.0's fullscreen mode; set `PI_PROJECTS_E2E_TUI_MODE=regular`
-to verify scrollback mode. See `TUI-VERIFY.md` for terminal failure cases.
+E2E scripts (`scripts/*-e2e.mjs`, run with `env -u PI_PACKAGE_DIR node scripts/<name>-e2e.mjs`) use a private HOME, a local fake model and headless Chrome; no real providers. On non-Mac systems, set `CHROME_BIN` to a Chrome-compatible browser executable. No TUI pseudo-terminal E2E remains (the old one drove legacy runs).
 
 Each run creates an isolated disposable workspace and project store under `artifacts/<timestamp>/`. `report.json`, `assertions.json`, worker inspection reports, and generated verification files are repeatable evidence. See `VERIFY.md` for the failure cases.
 

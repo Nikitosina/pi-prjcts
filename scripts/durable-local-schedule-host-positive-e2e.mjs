@@ -334,10 +334,10 @@ async function stopHost(host, request) {
 }
 
 function immutableProject(project, expectedId, models = ROLE_MODELS) {
-  const expected = { version: 1, id: expectedId, name: "Host positive schedule", cwd: WORKSPACE, objective: "Host positive schedule acceptance", runtime: "durable", model: MODEL, models, sessionFile: null };
+  const expected = { version: 1, id: expectedId, name: "Host positive schedule", cwd: WORKSPACE, objective: "Host positive schedule acceptance", runtime: "durable", model: MODEL, models };
   for (const [key, value] of Object.entries(expected)) pass(`project immutable field ${key}`, JSON.stringify(project[key]) === JSON.stringify(value));
   pass("new project defaults decisionAccess to coordinator", project.decisionAccess === "coordinator");
-  pass("project create has only documented mutable state differences", Object.keys(project).sort().join(",") === ["createdAt", "cwd", "decisionAccess", "id", "model", "models", "name", "objective", "phase", "problem", "runs", "runtime", "sessionFile", "version"].join(","));
+  pass("project create has only documented mutable state differences", Object.keys(project).sort().join(",") === ["createdAt", "cwd", "decisionAccess", "id", "model", "models", "name", "objective", "phase", "problem", "runtime", "version"].join(","));
 }
 function exactIntent(view, requestId, stableId) {
   return view.intents.find(item => item.requestId === requestId && item.stableId === stableId);
@@ -693,7 +693,7 @@ async function hostPhase(started) {
 
   const firstShow = await request({ action: "show", id });
   phaseReceipt.firstShow = firstShow;
-  pass("first public show carries the documented base schema", "activeRuns,busy,durableInspection,evidence,inbox,jobs,messages,notes,project,runStates".split(",").every(key => Object.hasOwn(firstShow, key)));
+  pass("first public show carries the documented base schema", "busy,durableInspection,evidence,inbox,jobs,messages,notes,project".split(",").every(key => Object.hasOwn(firstShow, key)));
   pass("first public show has exact project identity/models", firstShow.project.id === id && firstShow.project.model === MODEL && JSON.stringify(firstShow.project.models) === JSON.stringify(ROLE_MODELS));
   pass("first public show exposes actual successful answers, not prompts", firstShow.messages.some(message => message.role === "assistant" && message.text === eventMarker && message.text !== eventPrompt) && firstShow.messages.some(message => message.role === "assistant" && message.text === "HOST_POSITIVE_SCHEDULE" && message.text !== schedulePrompt));
   const firstSchedule = await request({ action: "schedule-snapshot", id });
@@ -763,7 +763,7 @@ async function hostPhase(started) {
   pass("consumed re-enable rejection preserves exact state", JSON.stringify(consumedAfter) === JSON.stringify(consumedBefore));
   const reopenedProject = JSON.parse(JSON.stringify(reopenedShow.project));
   phaseReceipt.reopenedProject = reopenedProject;
-  for (const key of ["version", "id", "name", "cwd", "objective", "runtime", "model", "models", "sessionFile"]) pass(`reopen preserves immutable configured field ${key}`, JSON.stringify(reopenedProject[key]) === JSON.stringify(firstProject[key]));
+  for (const key of ["version", "id", "name", "cwd", "objective", "runtime", "model", "models"]) pass(`reopen preserves immutable configured field ${key}`, JSON.stringify(reopenedProject[key]) === JSON.stringify(firstProject[key]));
   await stopHost(reopenedHost, reopenedRequest);
   resources.host = null; resources.request = null;
   const secondClosed = await forensicCopy(id, { event: { label: "event", requestId: event.requestId, submissionId: event.submissionId, prompt: eventPrompt, marker: eventMarker }, schedule: { label: "schedule", requestId: scheduleRequestId, submissionId: scheduleIntent.submissionId, prompt: schedulePrompt, marker: "HOST_POSITIVE_SCHEDULE" } }, HOME, "second-closed");
