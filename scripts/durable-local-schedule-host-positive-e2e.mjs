@@ -18,16 +18,20 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "node:path";
 import { applyImmutable, decoder } from "@earendil-works/chord/delta";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
-const MODEL = "openai-codex/gpt-5.6-terra";
-const ROLE_MODELS = { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" };
+// Offline: the coordinator and every role use the local fake model; the SDK home is private, so no owner credentials or real providers are reachable.
+const MODEL = FAKE_MODEL;
+const ROLE_MODELS = { worker: FAKE_MODEL, scout: FAKE_MODEL, reviewer: FAKE_MODEL };
+// Built-in role defaults that `create` stores (names only; the test replaces them before any request).
+const CREATE_ROLE_MODELS = { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" };
 const ROOT = resolve("artifacts", `durable-local-schedule-host-positive-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const HOME = join(ROOT, "state");
 const WORKSPACE = join(ROOT, "plaincwd");
 mkdirSync(ROOT, { recursive: true, mode: 0o700 });
 mkdirSync(HOME, { recursive: true, mode: 0o700 });
 mkdirSync(WORKSPACE, { recursive: true, mode: 0o700 });
-// This is the only project-home override. Existing SDK auth and SDK home remain untouched.
+const fake = await startFakeModel(ROOT);
 process.env.PI_PROJECTS_HOME = HOME;
 
 const checks = [];
@@ -329,8 +333,8 @@ async function stopHost(host, request) {
   }
 }
 
-function immutableProject(project, expectedId) {
-  const expected = { version: 1, id: expectedId, name: "Host positive schedule", cwd: WORKSPACE, objective: "Host positive schedule acceptance", runtime: "durable", model: MODEL, models: ROLE_MODELS, sessionFile: null };
+function immutableProject(project, expectedId, models = ROLE_MODELS) {
+  const expected = { version: 1, id: expectedId, name: "Host positive schedule", cwd: WORKSPACE, objective: "Host positive schedule acceptance", runtime: "durable", model: MODEL, models, sessionFile: null };
   for (const [key, value] of Object.entries(expected)) pass(`project immutable field ${key}`, JSON.stringify(project[key]) === JSON.stringify(value));
   pass("new project defaults decisionAccess to coordinator", project.decisionAccess === "coordinator");
   pass("project create has only documented mutable state differences", Object.keys(project).sort().join(",") === ["createdAt", "cwd", "decisionAccess", "id", "model", "models", "name", "objective", "phase", "problem", "runs", "runtime", "sessionFile", "version"].join(","));
@@ -645,8 +649,11 @@ async function hostPhase(started) {
   };
   const created = await request({ action: "create", cwd: WORKSPACE, name: "Host positive schedule", objective: "Host positive schedule acceptance", model: MODEL });
   pass("public create returns actual UUID durable project", created.runtime === "durable" && /^[a-f0-9-]{36}$/.test(created.id));
-  immutableProject(created, created.id);
+  immutableProject(created, created.id, CREATE_ROLE_MODELS);
   const id = created.id;
+  const settings = await request({ action: "settings-snapshot", id });
+  await request({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { models: ROLE_MODELS } });
+  pass("settings pin every role to the fake model", JSON.stringify((await request({ action: "show", id })).project.models) === JSON.stringify(ROLE_MODELS));
   host.projectId = id;
   phaseReceipt.host.projectId = id;
   phaseReceipt.created = created;
@@ -769,11 +776,8 @@ async function hostPhase(started) {
 async function modelAvailability() {
   const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
   const models = await bounded(() => ModelRuntime.create({ allowModelNetwork: false }), "SDK model availability", 30_000);
-  for (const model of [MODEL, ROLE_MODELS.scout, ROLE_MODELS.reviewer]) {
-    const [provider, id] = model.split("/", 2);
-    pass(`SDK exposes configured host model ${model}`, Boolean(models.getModel(provider, id)));
-    pass(`SDK reports configured auth for ${provider}`, models.getProviderAuthStatus(provider).configured === true);
-  }
+  const [provider, id] = MODEL.split("/", 2);
+  pass(`private SDK exposes the fake host model ${MODEL} and no owner auth`, Boolean(models.getModel(provider, id)) && models.getProviderAuthStatus("openai-codex").configured !== true);
 }
 
 function samePreservation(before, after) {
@@ -873,7 +877,8 @@ async function main() {
   failure = appendErrors(failure, attached, "cleanup/preservation/inventory");
   let report = null;
   try {
-    report = failure ? { ok: false, checks, observations, error: String(failure) } : { ok: true, checks, observations, source: sha(new URL(import.meta.url).pathname) };
+    if (!failure) pass("every model request went to the fake model", fake.requests.length > 0 && fake.requests.every(item => item.model === "fake-model"));
+    report = failure ? { ok: false, checks, observations, fakeModelRequests: fake.requests, error: String(failure) } : { ok: true, checks, observations, fakeModelRequests: fake.requests, source: sha(new URL(import.meta.url).pathname) };
   } catch (error) {
     const receipt = errorReceipt("report construction", error);
     stderrReceipt("report construction", error);
@@ -890,4 +895,4 @@ async function main() {
   if (failure) throw failure;
   console.log(JSON.stringify({ ok: true, root: ROOT, checks: checks.length, scope: "host-positive-only" }));
 }
-try { await main(); } catch (error) { throw error; }
+try { await main(); } finally { fake.close(); }

@@ -9,13 +9,15 @@ import { applyImmutable, decoder } from "@earendil-works/chord/delta";
 import { spawn } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
-const MODEL = "openai-codex/gpt-5.6-terra";
-const ROLE_MODELS = { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" };
+// Offline: every role uses the local fake model; the SDK home is private, so no owner credentials or real providers are reachable.
+const MODEL = FAKE_MODEL;
+const ROLE_MODELS = { worker: FAKE_MODEL, scout: FAKE_MODEL, reviewer: FAKE_MODEL };
 const ROOT = resolve("artifacts", `durable-local-schedule-positive-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const home = join(ROOT, "projects-home"), workspace = join(ROOT, "workspace");
 mkdirSync(workspace, { recursive: true, mode: 0o700 });
-// Preserve the configured SDK home/authentication. Only project state and workspace are disposable.
+const fake = await startFakeModel(ROOT);
 process.env.PI_PROJECTS_HOME = home;
 const failureInventory = ["race", "crash", "memory", "cancellation", "provider failure", "full F5/local feature milestone"];
 const checks = [], observations = [];
@@ -60,11 +62,8 @@ function api(socket) { return (input, timeout = 5_000) => bounded(() => new Prom
 async function sdkAvailabilityProbe() {
   const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
   const models = await bounded(() => ModelRuntime.create({ allowModelNetwork: false }), "SDK availability probe", 30_000);
-  for (const model of [MODEL, "openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]) {
-    const [provider, id] = model.split("/", 2);
-    pass(`public SDK exposes requested fixture model ${model}`, Boolean(models.getModel(provider, id)));
-    pass(`public SDK reports configured OAuth for ${provider}`, models.getProviderAuthStatus(provider).configured === true);
-  }
+  const [provider, id] = MODEL.split("/", 2);
+  pass(`private SDK exposes only the fake fixture model ${MODEL}`, Boolean(models.getModel(provider, id)) && models.getProviderAuthStatus("openai-codex").configured !== true);
 }
 async function startHost() {
   const { socketPath } = await import("../src/state.ts");
@@ -161,9 +160,12 @@ async function copyReadonlySdkRecords(dir, expected) {
 async function hostPhase() {
   const host = await startHost(), request = api(host.socket); resources.request = request;
   const created = await request({ action: "create", cwd: workspace, name: "Positive schedule host", objective: "Positive schedule acceptance", model: MODEL });
-  pass("public create returns configured Durable Codex project", created.runtime === "durable" && created.model === MODEL && created.cwd === workspace);
-  pass("public create uses exact resolved role models", created.model === MODEL && JSON.stringify(created.models) === JSON.stringify(ROLE_MODELS));
+  pass("public create returns configured Durable fake-model project", created.runtime === "durable" && created.model === MODEL && created.cwd === workspace);
   const id = created.id;
+  // Create gives workers the built-in default role models; point them at the fake model too so nothing can reach a real provider.
+  const settings = await request({ action: "settings-snapshot", id });
+  await request({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { models: ROLE_MODELS } });
+  pass("settings pin every role to the fake model", JSON.stringify((await request({ action: "show", id })).project.models) === JSON.stringify(ROLE_MODELS));
   const quiet = await request({ action: "schedule-create", id, scheduleId: "quiet", atMs: Date.now() + 60_000, text: "disabled" });
   pass("schedule is disabled by default", quiet.enabled === false);
   const eventId = `host-event-${randomUUID()}`;
@@ -264,7 +266,9 @@ async function main() {
   }
   if (primaryError) { observations.push({ cleanupErrors: cleanupErrors.map(String) }); throw primaryError; }
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "resource cleanup failed");
-  writeFileSync(join(ROOT, "report.json"), `${JSON.stringify({ ok: true, checks, observations, failureInventory, source: sha(new URL(import.meta.url).pathname) }, null, 2)}\n`);
+  pass("every model request went to the fake model", fake.requests.length > 0 && fake.requests.every(item => item.model === "fake-model"));
+  writeFileSync(join(ROOT, "report.json"), `${JSON.stringify({ ok: true, checks, observations, fakeModelRequests: fake.requests, failureInventory, source: sha(new URL(import.meta.url).pathname) }, null, 2)}\n`);
   console.log(JSON.stringify({ ok: true, root: ROOT, checks: checks.length, deferred: failureInventory }));
 }
-try { await main(); } catch (error) { mkdirSync(ROOT, { recursive: true, mode: 0o700 }); writeFileSync(join(ROOT, "report.json"), `${JSON.stringify({ ok: false, checks, observations, error: String(error) }, null, 2)}\n`); throw error; }
+try { await main(); } catch (error) { mkdirSync(ROOT, { recursive: true, mode: 0o700 }); writeFileSync(join(ROOT, "report.json"), `${JSON.stringify({ ok: false, checks, observations, fakeModelRequests: fake.requests, error: String(error) }, null, 2)}\n`); throw error; }
+finally { fake.close(); }
