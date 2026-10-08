@@ -5,6 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, symlink
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
 // Failure cases recorded before execution: Unicode index admission; prompt leakage;
 // unsafe path/symlink traversal; read-only coordinator write; stale/concurrent CAS; history
@@ -13,6 +14,7 @@ const root = resolve("artifacts", `durable-knowledge-${new Date().toISOString().
 const sourceRoot = resolve(process.env.PI_DURABLE_E2E_SOURCE_ROOT ?? new URL("..", import.meta.url).pathname);
 const source = name => pathToFileURL(join(sourceRoot, "src", name)).href;
 const fixture = join(root, "fixture-source"), state = join(root, "state"), workspace = join(root, "workspace");
+const fake = await startFakeModel(root); // offline: private SDK home with only the fake model
 process.env.PI_PROJECTS_HOME = state;
 mkdirSync(fixture, { recursive: true, mode: 0o700 });
 mkdirSync(workspace, { recursive: true, mode: 0o700 });
@@ -58,10 +60,10 @@ try {
   const { openDurableProject } = await import(source("durable-runtime.ts"));
   const { addNote, notes, projectDir, saveProject } = await import(source("state.ts"));
   const { ensureKnowledge, historyKnowledge, readKnowledge, writeKnowledge } = await import(source("knowledge.ts"));
-  const model = process.env.PI_DURABLE_E2E_MODEL ?? "openai-codex/gpt-5.6-terra";
+  const model = FAKE_MODEL;
   const makeProject = name => {
     const id = randomUUID(), dir = projectDir(id);
-    const project = { version: 1, id, name, cwd: workspace, objective: "Disposable knowledge verification only; do not publish or execute workspace files.", createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: "ready", problem: null, runs: [] };
+    const project = { version: 1, id, runtime: "durable", name, cwd: workspace, objective: "Disposable knowledge verification only; do not publish or execute workspace files.", createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: "ready", problem: null, runs: [] };
     saveProject(project);
     return { project, dir };
   };
@@ -106,29 +108,29 @@ try {
   catch (error) { invalid = { status: "unanswered", reason: error instanceof Error ? error.message : String(error) }; }
   const invalidView = await runtime.snapshot();
   const guardEvidence = [invalid.reason, invalid.text, ...reports.map(report => report.message)].filter(Boolean).join("\n");
-  pass("oversized Unicode MEMORY.md records memory guard failure before unsafe reply", invalid.status === "unanswered" && /3000|MEMORY\.md/i.test(guardEvidence) && !invalidView.coordinator.messages.some(message => message.role === "assistant" && message.text.includes("INVALID_SHOULD_NOT_RUN")));
+  pass("oversized Unicode MEMORY.md records memory guard failure before unsafe reply", invalid.status === "unanswered" && /3000|MEMORY\.md/i.test(guardEvidence) && !invalidView.coordinator.messages.some(message => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN")));
   const damaged = await readKnowledge(primary.dir, "MEMORY.md");
   memory = await writeKnowledge({ dir: primary.dir, path: "MEMORY.md", text: memory.text, expectedRevision: damaged.revision, author: "human-repair" });
   const initialRequestOffset = requests.length;
-  const initial = await runtime.say("Reply only INDEX_READY. Do not read any document or delegate.", { requestId: "index" }); assert.equal(initial.status, "done");
+  const initial = await runtime.say("Reply exactly INDEX_READY. Do not read any document or delegate.", { requestId: "index" }); assert.equal(initial.status, "done");
   const masterId = (await runtime.snapshot()).identities.coordinatorConversationId;
   const firstMaster = requests.slice(initialRequestOffset).find(request => request.conversationId === masterId)?.messages ?? [];
   pass("coordinator initial prepared request is index-only", has(firstMaster, marker) && ![topic, preference, legacyText].some(value => has(firstMaster, value)));
-  await runtime.say("Use projects_knowledge_read on research/topic.md and reply with its exact contents.", { requestId: "topic" });
-  pass("coordinator retrieves topic only on demand", (await runtime.snapshot()).coordinator.messages.some(message => message.text.includes(topic)));
-  await runtime.say("Use projects_knowledge_read on preferences.md and reply with its exact contents.", { requestId: "preferences" });
-  pass("preferences are absent until demanded", !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.messages.some(message => message.text.includes(preference)));
+  await runtime.say("Use projects_knowledge_read on research/topic.md and reply with its exact contents. FAKE-CALL projects_knowledge_read {\"path\":\"research/topic.md\"}", { requestId: "topic" });
+  pass("coordinator retrieves topic only on demand", (await runtime.snapshot()).coordinator.messages.some(message => message.text?.includes(topic)));
+  await runtime.say("Use projects_knowledge_read on preferences.md and reply with its exact contents. FAKE-CALL projects_knowledge_read {\"path\":\"preferences.md\"}", { requestId: "preferences" });
+  pass("preferences are absent until demanded", !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.messages.some(message => message.text?.includes(preference)));
   const workerId = randomUUID(), workerThreadId = randomUUID(), workerRequestAt = requests.length;
-  await runtime.plan({ work: [{ id: workerId, threadId: workerThreadId, role: "worker", text: "Read research/topic.md with projects_knowledge_read and report its exact text. Do not mutate anything." }] });
+  await runtime.plan({ work: [{ id: workerId, threadId: workerThreadId, role: "worker", text: "Read research/topic.md with projects_knowledge_read and report its exact text. Do not mutate anything. FAKE-CALL projects_knowledge_read {\"path\":\"research/topic.md\"}" }] });
   const workerPlan = await waitFor(async () => { const view = await runtime.planSnapshot(); return view.work.some(work => work.id === workerId && work.status === "completed") ? view : null; }, "UUID worker topic retrieval");
   assert.equal(workerPlan.work.find(work => work.id === workerId)?.threadId, workerThreadId);
   const workerRequests = requests.slice(workerRequestAt).filter(request => request.conversationId !== masterId), firstWorker = workerRequests[0]?.messages ?? [];
   pass("UUID worker retrieves topic and its first prepared prompt is index-only", has(firstWorker, marker) && ![topic, preference, legacyText].some(value => has(firstWorker, value)) && workerRequests.some(request => has(request.messages, topic)));
   document = await writeKnowledge({ dir: primary.dir, path: document.path, text: `${topic}\nHUMAN_EDIT`, expectedRevision: document.revision, author: "human" });
-  await runtime.say("Read research/topic.md and reply with the exact contents.", { requestId: "human-edit" });
-  pass("human edit is visible on next request", (await runtime.snapshot()).coordinator.messages.some(message => message.text.includes("HUMAN_EDIT")));
+  await runtime.say("Read research/topic.md and reply with the exact contents. FAKE-CALL projects_knowledge_read {\"path\":\"research/topic.md\"}", { requestId: "human-edit" });
+  pass("human edit is visible on next request", (await runtime.snapshot()).coordinator.messages.some(message => message.text?.includes("HUMAN_EDIT")));
   // Read-only gates workers only; the coordinator always maintains knowledge.
-  await runtime.say("Call projects_knowledge_write for research/topic.md with text COORDINATOR_WRITE and its current revision. Do not retry.", { requestId: "readonly-coordinator-write" });
+  await runtime.say(`Call projects_knowledge_write for research/topic.md with text COORDINATOR_WRITE and its current revision. Do not retry. FAKE-CALL projects_knowledge_write {"path":"research/topic.md","text":"COORDINATOR_WRITE","expectedRevision":"${document.revision}"} FAKE-SAY written`, { requestId: "readonly-coordinator-write" });
   const beforeDenied = await readKnowledge(primary.dir, document.path);
   pass("read-only scope still permits coordinator writes", beforeDenied.text === "COORDINATOR_WRITE");
   await boundedClose(runtime); runtime = undefined;
@@ -139,7 +141,7 @@ try {
   await ensureKnowledge(maintainedProject.dir);
   const maintainedSeed = await writeKnowledge({ dir: maintainedProject.dir, path: "research/topic.md", text: "MAINTAIN_TOPIC", expectedRevision: null, author: "fixture" });
   runtime = await openDurableProject({ project: maintainedProject.project, dir: maintainedProject.dir, ...options("maintain") });
-  await runtime.say("Read research/topic.md, then use projects_knowledge_write once with its returned revision to append MAINTAINED. Reply MAINTAINED.", { requestId: "maintain" });
+  await runtime.say("Read research/topic.md, then use projects_knowledge_write once with its returned revision to append MAINTAINED. FAKE-CALL projects_knowledge_read {\"path\":\"research/topic.md\"} FAKE-CALL projects_knowledge_write {\"path\":\"research/topic.md\",\"text\":\"MAINTAIN_TOPIC MAINTAINED\",\"expectedRevision\":\"$REV\"} FAKE-SAY MAINTAINED", { requestId: "maintain" });
   pass("distinct maintain scope permits revision-checked update", (await readKnowledge(maintainedProject.dir, maintainedSeed.path)).text.includes("MAINTAINED"));
   await boundedClose(runtime); runtime = undefined;
 
@@ -175,6 +177,6 @@ try {
   save("failure.json", failure); save("report.json", failure);
   throw error;
 } finally {
-  await boundedClose(runtime);
+  await boundedClose(runtime); fake.close();
   await Promise.all([...ownedChildren].map(async childProcess => { if (!childProcess.killed) childProcess.kill("SIGKILL"); await Promise.race([new Promise(resolveDone => childProcess.once("exit", resolveDone)), sleep(5000)]); }));
 }

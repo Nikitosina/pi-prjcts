@@ -67,7 +67,7 @@ function fixtureProject(name) {
   git(owner, "init", "-b", "main"); git(owner, "config", "user.email", "e2e@example.invalid"); git(owner, "config", "user.name", "E2E");
   writeFileSync(join(owner, "README.md"), "base\n"); git(owner, "add", "."); git(owner, "commit", "-m", "base");
   const model = "fake/fake-model";
-  const base = { version: 1, id: randomUUID(), name, cwd: owner, objective: "resume fixture", createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: "ready", problem: null, runs: [] };
+  const base = { version: 1, id: randomUUID(), runtime: "durable", name, cwd: owner, objective: "resume fixture", createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: "ready", problem: null, runs: [] };
   const { project, scope } = grantWholeRepository(base, join(root, name, "worktrees"));
   saveProject(project);
   return { project, scope };

@@ -2,8 +2,8 @@
 /**
  * Business E2E for durable scheduling.  This driver intentionally creates two
  * unrelated homes: the host transport phase and the direct-runtime phase never
- * share a project, owner database, socket, or PID.  It is a real-model driver;
- * it has no fake clock, SDK replacement, HTTP fixture, or database writer.
+ * share a project, owner database, socket, or PID.  It runs on the offline
+ * fake model; it has no fake clock, SDK replacement, HTTP fixture, or database writer.
  */
 import assert from "node:assert/strict";
 import { randomUUID, createHash } from "node:crypto";
@@ -12,8 +12,9 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
-const MODEL = "openai-codex/gpt-5.6-terra";
+const MODEL = FAKE_MODEL;
 const ROOT = resolve("artifacts", `durable-local-schedule-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const hostHome = join(ROOT, "host-state");
 const directHome = join(ROOT, "direct-state");
@@ -21,6 +22,7 @@ const hostWorkspace = join(ROOT, "host-workspace");
 const directWorkspace = join(ROOT, "direct-workspace");
 mkdirSync(hostWorkspace, { recursive: true, mode: 0o700 });
 mkdirSync(directWorkspace, { recursive: true, mode: 0o700 });
+const fake = await startFakeModel(ROOT); // offline: private SDK home with only the fake model; both phases inherit it
 
 const checks = [];
 const observations = [];
@@ -189,4 +191,4 @@ async function main() {
 try { await main(); } catch (error) {
   writeFileSync(join(ROOT, "report.json"), `${JSON.stringify({ ok: false, checks, observations, error: String(error) }, null, 2)}\n`);
   throw error;
-}
+} finally { fake.close(); }

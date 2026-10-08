@@ -5,11 +5,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { openDurableProject } from "../src/durable-runtime.ts";
-import { projectDir, saveProject } from "../src/state.ts";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
 const root = resolve("artifacts", `durable-workspace-frozen-standing-negative-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const state = join(root, "state");
+mkdirSync(root, { recursive: true });
+const fake = await startFakeModel(root); // offline: private SDK home with only the fake model
+process.env.PI_PROJECTS_HOME = state;
+const { openDurableProject } = await import("../src/durable-runtime.ts"), { projectDir, saveProject } = await import("../src/state.ts");
 const sha = value => createHash("sha256").update(value).digest("hex");
 const fileSha = path => sha(readFileSync(path));
 const git = (...args) => execFileSync("/usr/bin/git", args, { encoding: "utf8" }).trim();
@@ -79,9 +82,9 @@ try {
   const ownerId = `agent-session-${randomUUID()}`;
   const assignedRelative = "owned/write.txt";
   const project = {
-    version: 1, id: projectId, name: "frozen standing negative", cwd: owner, objective: "frozen standing negative",
-    createdAt: new Date().toISOString(), model: "openai-codex/gpt-5.6-terra",
-    models: { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-terra", reviewer: "openai-codex/gpt-5.6-terra" },
+    version: 1, id: projectId, runtime: "durable", name: "frozen standing negative", cwd: owner, objective: "frozen standing negative",
+    createdAt: new Date().toISOString(), model: FAKE_MODEL,
+    models: { worker: FAKE_MODEL, scout: FAKE_MODEL, reviewer: FAKE_MODEL },
     sessionFile: null, phase: "ready", problem: null, runs: [],
     workspaceAuthorization: { version: 1, provider: "github", owner: ownerId, repositories: [{ repositoryId: "local", provider: "github", ownerCheckout: owner, approvedRoot, fileOwnershipPrefix: "owned" }], scopes: [{ id: scopeId, repositoryId: "local", files: [assignedRelative], baseRevision }] },
   };
@@ -102,7 +105,7 @@ try {
   };
   const ownerPaths = { assigned: observed(join(owner, assignedRelative)), peer: observed(join(owner, "owned", "peer.txt")), sentinel: observed(join(owner, "owned", "sentinel.txt")) };
   report.preimage = { ...beforeCode, ownerPaths };
-  await runtime.plan({ work: [{ id: workId, threadId, role: "worker", workspaceScopeId: scopeId, text: "You must use the offered assigned-workspace tools. Read owned/write.txt, then call the offered workspace write tool for path owned/write.txt with exactly BASELINE\\n and the read revision (null if absent). Do not answer until the write result is returned." }] });
+  await runtime.plan({ work: [{ id: workId, threadId, role: "worker", workspaceScopeId: scopeId, text: "You must use the offered assigned-workspace tools. Read owned/write.txt, then call the offered workspace write tool for path owned/write.txt with exactly BASELINE\\n and the read revision (null if absent). Do not answer until the write result is returned. FAKE-CALL ~projects_workspace_[a-f0-9]+_write$ {\"path\":\"owned/write.txt\",\"text\":\"BASELINE\\n\",\"expectedRevision\":null} FAKE-SAY done" }] });
   const deadline = Date.now() + 60000;
   while (!preparedMetadata && Date.now() < deadline) await sleep(25);
   if (!preparedMetadata) throw new Error("pause-after-baseline timeout");
@@ -123,6 +126,8 @@ try {
   for (const field of ["model", "thinking", "instructions", "cwd", "toolNames", "bindingRevision", "standingRevision"]) assert.ok(baselineWork.attempt?.[field] !== undefined && baselineWork.attempt?.[field] !== null, `baseline profile missing ${field}`);
   assert.equal(baselineWork.attempt.cwd, preparedMetadata.cwd);
   assert.equal(baselineWork.attempt.bindingRevision, preparedMetadata.bindingRevision);
+  // The worker's result is reported to the coordinator, which is one more (fake) model turn: let it settle so the baseline counts are final.
+  for (let stable = 0, seen = -1; stable < 20; await sleep(100)) { stable = requests.length === seen ? stable + 1 : 0; seen = requests.length; }
   const baselineRequestCount = requests.length;
   const baselineStreamCount = streams.length;
   assert.ok(baselineRequestCount > 0);
@@ -218,7 +223,7 @@ try {
   const restorationOpened = await runtime.planSnapshot();
   const restorationResumed = await runtime.resumePlan();
   const restorationRequestId = `frozen-standing-restore-${randomUUID()}`;
-  const restorationAttemptReceipt = await runtime.followUp(threadId, "Restore owned/write.txt by calling the offered workspace write tool with exactly RESTORED\\n and expectedRevision equal to the prior BASELINE file revision. Do not answer until the successful write result is returned.", { requestId: restorationRequestId });
+  const restorationAttemptReceipt = await runtime.followUp(threadId, `Restore owned/write.txt by calling the offered workspace write tool with exactly RESTORED\\n and expectedRevision equal to the prior BASELINE file revision. Do not answer until the successful write result is returned. FAKE-CALL ~projects_workspace_[a-f0-9]+_write$ {"path":"owned/write.txt","text":"RESTORED\\n","expectedRevision":"${sha("BASELINE\n")}"} FAKE-SAY done`, { requestId: restorationRequestId });
   const restorationAttemptId = restorationAttemptReceipt.attemptId ?? restorationAttemptReceipt;
   const restorationDeadline = Date.now() + 60000;
   let restorationSnapshot;
@@ -304,4 +309,5 @@ try {
   throw error;
 } finally {
   if (runtime) await runtime.close();
+  fake.close();
 }

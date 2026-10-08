@@ -6,7 +6,6 @@
   "scripts": {
     "check": "tsc --noEmit",
     "inbox": "node src/cli.ts ui",
-    "e2e:durable-foundation": "node scripts/durable-foundation-e2e.mjs",
     "e2e:durable-runtime": "node scripts/durable-runtime-e2e.mjs",
     "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
     "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",

@@ -9,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Harness, createRegistry, defineExtension, hook, GenerationTask } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
 // Failure inventory before execution: fabricated ToolApi/call IDs are not Durable proof;
 // registry-name collisions can cross scopes; independent writers can race; unsafe calls can
@@ -16,14 +17,15 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 // This is a standalone Git-fixture authorization, not allocator/provider parity.
 const root = join("/Users/nikitarat/.pi/agent/projects-mvp/artifacts", `workspace-write-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const owner = join(root, "owner"), oneRoot = join(root, "worker-one"), twoRoot = join(root, "worker-two"), crashRoot = join(root, "worker-crash"), control = join(root, "control");
-mkdirSync(root, { recursive: true, mode: 0o700 }); mkdirSync(control, { mode: 0o700 });
+mkdirSync(root, { recursive: true, mode: 0o700 });
+const fake = await startFakeModel(root); // offline: private SDK home with only the fake model; the crash child inherits it mkdirSync(control, { mode: 0o700 });
 const checks = [], requests = [];
 const save = (name, value) => writeFileSync(join(root, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
 const pass = (name, condition = true) => { assert.ok(condition, name); checks.push(name); save("assertions.json", checks); };
 const git = (...args) => execFileSync("/usr/bin/git", args, { encoding: "utf8" }).trim();
 const source = pathToFileURL(join(process.cwd(), "src", "workspace-capabilities.ts")).href;
 const { workspaceCapabilities, workspaceToolNames } = await import(source);
-const modelName = process.env.PI_DURABLE_E2E_MODEL ?? "openai-codex/gpt-5.6-terra";
+const modelName = FAKE_MODEL;
 const [provider, ...modelParts] = modelName.split("/"), modelId = modelParts.join("/");
 let harness;
 try {
@@ -58,7 +60,7 @@ try {
   pass("workspace names are deterministic and distinct", firstNames.write !== secondNames.write && firstNames.read !== secondNames.read);
   await one.configure({ model: { provider, modelId }, cwd: oneRoot, tools: firstTools, instructions: `You are durable worker one. Use only ${firstNames.write} exactly once with {"path":"src/one.txt","text":"ONE\n","expectedRevision":null}. Then reply DONE.` }, BACKGROUND_CONTEXT);
   await two.configure({ model: { provider, modelId }, cwd: twoRoot, tools: secondTools, instructions: `You are durable worker two. Use only ${secondNames.write} exactly once with {"path":"src/two.txt","text":"TWO\n","expectedRevision":null}. Then reply DONE.` }, BACKGROUND_CONTEXT);
-  const firstRun = await one.submit({ type: "input", content: "Perform your assigned write now.", requestId: "write-one" }, BACKGROUND_CONTEXT); const secondRun = await two.submit({ type: "input", content: "Perform your assigned write now.", requestId: "write-two" }, BACKGROUND_CONTEXT);
+  const firstRun = await one.submit({ type: "input", content: `Perform your assigned write now. FAKE-CALL ${firstNames.write} {"path":"src/one.txt","text":"ONE\\n","expectedRevision":null} FAKE-SAY DONE`, requestId: "write-one" }, BACKGROUND_CONTEXT); const secondRun = await two.submit({ type: "input", content: `Perform your assigned write now. FAKE-CALL ${secondNames.write} {"path":"src/two.txt","text":"TWO\\n","expectedRevision":null} FAKE-SAY DONE`, requestId: "write-two" }, BACKGROUND_CONTEXT);
   const [firstOutcome, secondOutcome] = await Promise.all([firstRun.wait(BACKGROUND_CONTEXT), secondRun.wait(BACKGROUND_CONTEXT)]);
   pass("two authenticated worker conversations completed", firstOutcome.status === "done" && secondOutcome.status === "done");
   pass("workers wrote only assigned Git worktree files", readFileSync(join(oneRoot, "src", "one.txt"), "utf8") === "ONE\n" && readFileSync(join(twoRoot, "src", "two.txt"), "utf8") === "TWO\n" && !existsSync(join(oneRoot, "src", "two.txt")) && !existsSync(join(twoRoot, "src", "one.txt")));
@@ -66,12 +68,12 @@ try {
   const denied = ["../owner/src/.gitkeep", ".git/config", "escape/src/.gitkeep", "neighbour.txt", "/etc/passwd"];
   for (const path of denied) {
     await one.configure({ instructions: `Call ${firstNames.read} exactly once with JSON {"path":${JSON.stringify(path)}}. Then reply BLOCKED.` }, BACKGROUND_CONTEXT);
-    const run = await one.submit({ type: "input", content: `Call ${firstNames.read} exactly once with JSON {"path":${JSON.stringify(path)}}. Do not use another tool. Reply BLOCKED.`, requestId: `deny-${Buffer.from(path).toString("hex")}` }, BACKGROUND_CONTEXT);
+    const run = await one.submit({ type: "input", content: `Call ${firstNames.read} exactly once with JSON {"path":${JSON.stringify(path)}}. Do not use another tool. Reply BLOCKED. FAKE-CALL ${firstNames.read} {"path":${JSON.stringify(path)}} FAKE-SAY BLOCKED`, requestId: `deny-${Buffer.from(path).toString("hex")}` }, BACKGROUND_CONTEXT);
     const outcome = await run.wait(BACKGROUND_CONTEXT); pass(`actual registered worker denied ${path}`, outcome.status === "done");
   }
   const holder = lockHolder(join(control, "workspace-lock.sqlite")); await holder.ready;
   await one.configure({ instructions: `Call ${firstNames.write} exactly once with {"path":"src/lock.txt","text":"LOCKED\\n","expectedRevision":null}. Then reply BLOCKED.` }, BACKGROUND_CONTEXT);
-  const locked = await one.submit({ type: "input", content: `Call ${firstNames.write} exactly once with JSON {"path":"src/lock.txt","text":"LOCKED\\n","expectedRevision":null}. Do not use another tool.`, requestId: "cross-process-lock" }, BACKGROUND_CONTEXT);
+  const locked = await one.submit({ type: "input", content: `Call ${firstNames.write} exactly once with JSON {"path":"src/lock.txt","text":"LOCKED\\n","expectedRevision":null}. Do not use another tool. FAKE-CALL ${firstNames.write} {"path":"src/lock.txt","text":"LOCKED\\n","expectedRevision":null} FAKE-SAY BLOCKED`, requestId: "cross-process-lock" }, BACKGROUND_CONTEXT);
   await locked.wait(BACKGROUND_CONTEXT); pass("actual registered write is blocked by another process SQLite lock", !existsSync(join(oneRoot, "src", "lock.txt")));
   holder.child.kill("SIGKILL"); await holder.done;
   const recoveredLock = new (await import("node:sqlite")).DatabaseSync(join(control, "workspace-lock.sqlite"));
@@ -80,7 +82,7 @@ try {
   pass("SIGKILL releases the same process-safe SQLite lock", !existsSync(join(oneRoot, "src", "lock.txt")));
   const stale = "0".repeat(64);
   await one.configure({ instructions: `Call ${firstNames.write} exactly once with {"path":"src/one.txt","text":"STALE\\n","expectedRevision":"${stale}"}. Then reply BLOCKED.` }, BACKGROUND_CONTEXT);
-  const conflict = await one.submit({ type: "input", content: `Call ${firstNames.write} exactly once with JSON {"path":"src/one.txt","text":"STALE\\n","expectedRevision":"${stale}"}. Do not use another tool.`, requestId: "stale-cas" }, BACKGROUND_CONTEXT);
+  const conflict = await one.submit({ type: "input", content: `Call ${firstNames.write} exactly once with JSON {"path":"src/one.txt","text":"STALE\\n","expectedRevision":"${stale}"}. Do not use another tool. FAKE-CALL ${firstNames.write} {"path":"src/one.txt","text":"STALE\\n","expectedRevision":"${stale}"} FAKE-SAY BLOCKED`, requestId: "stale-cas" }, BACKGROUND_CONTEXT);
   await conflict.wait(BACKGROUND_CONTEXT); pass("actual registered stale CAS leaves bytes unchanged", readFileSync(join(oneRoot, "src", "one.txt"), "utf8") === "ONE\n");
   const mutable = { ...firstAuthority, files: [...firstAuthority.files] };
   const frozen = await workspaceCapabilities({ ...common, authority: mutable, binding: { role: "durable-worker", conversationId: Number(one.id) }, validateAuthority: validator(firstAuthority) }); mutable.files.push("neighbour.txt");
@@ -101,11 +103,11 @@ try {
     pass("registry reconstruction preserves exact worker bindings", oneNames.includes(firstNames.read) && oneNames.includes(firstNames.write) && !oneNames.includes(secondNames.write) && twoNames.includes(secondNames.read) && twoNames.includes(secondNames.write) && !twoNames.includes(firstNames.write));
   } finally { await restored.close(BACKGROUND_CONTEXT); }
   save("tool-outcomes.json", { first: firstView.messages, second: secondView.messages, crash, bytes: { one: readFileSync(join(oneRoot, "src", "one.txt")).byteLength, two: readFileSync(join(twoRoot, "src", "two.txt")).byteLength } });
-  save("report.json", { ok: true, kind: "actual-durable-harness-real-model-standalone-git-scope", root, model: modelName, workers: [Number(one.id), Number(two.id)], names: { firstNames, secondNames }, checks, owner: { head: ownerHead, statusBefore: ownerStatus, statusAfter: git("-C", owner, "status", "--porcelain=v1") }, crash, limitations: ["Standalone host Git inventory authorization only; not integrated allocator parity.", "No OS sandbox: malicious local-process TOCTOU remains."] });
+  save("report.json", { ok: true, kind: "actual-durable-harness-fake-model-standalone-git-scope", root, model: modelName, workers: [Number(one.id), Number(two.id)], names: { firstNames, secondNames }, checks, owner: { head: ownerHead, statusBefore: ownerStatus, statusAfter: git("-C", owner, "status", "--porcelain=v1") }, crash, limitations: ["Standalone host Git inventory authorization only; not integrated allocator parity.", "No OS sandbox: malicious local-process TOCTOU remains."] });
   process.stdout.write(`${join(root, "report.json")}\n`);
 } catch (error) {
   save("report.json", { ok: false, root, checks, error: error instanceof Error ? error.stack : String(error) }); throw error;
-} finally { await harness?.close(BACKGROUND_CONTEXT); }
+} finally { await harness?.close(BACKGROUND_CONTEXT); fake.close(); }
 
 async function proveUnsafeRecovery(input) {
   mkdirSync(input.control, { recursive: true, mode: 0o700 });
@@ -135,7 +137,7 @@ async function proveUnsafeRecovery(input) {
       const interrupted = JSON.stringify(recovered.messages).includes("was interrupted and may have partially run");
       const after = digest(readFileSync(target));
       await worker.configure({ model: { provider, modelId }, cwd: input.workspace, tools, instructions: `Call ${names.read} exactly once with {"path":"src/crash.txt"}. Reply with its revision.` }, BACKGROUND_CONTEXT);
-      const read = await worker.submit({ type: "input", content: `Call ${names.read} now.`, requestId: "recover-read" }, BACKGROUND_CONTEXT); await read.wait(BACKGROUND_CONTEXT);
+      const read = await worker.submit({ type: "input", content: `Call ${names.read} now. FAKE-CALL ${names.read} {"path":"src/crash.txt"}`, requestId: "recover-read" }, BACKGROUND_CONTEXT); await read.wait(BACKGROUND_CONTEXT);
       const view = await worker.context(BACKGROUND_CONTEXT), readHash = JSON.stringify(view.messages).includes(effect.revision) ? effect.revision : null;
       return { effect, beforeHash: before, afterHash: after, readHash, interrupted, recovered: recovered.messages, read: view.messages };
     } finally { await reopened.close(BACKGROUND_CONTEXT); }
@@ -181,7 +183,7 @@ try {
   registry.install(defineExtension({ name: "workspace-crash-tools", tools }));
   const names = workspaceToolNames(authority.workspaceId);
   await worker.configure({ model: { provider, modelId }, cwd: input.workspace, tools, instructions: "Call " + names.write + " exactly once with {\\"path\\":\\"src/crash.txt\\",\\"text\\":\\"CRASH\\\\n\\",\\"expectedRevision\\":null}." }, BACKGROUND_CONTEXT);
-  const run = await worker.submit({ type: "input", content: "Perform the assigned write now.", requestId: "crash-write" }, BACKGROUND_CONTEXT); await run.wait(BACKGROUND_CONTEXT);
+  const run = await worker.submit({ type: "input", content: "Perform the assigned write now. FAKE-CALL " + names.write + " {\\"path\\":\\"src/crash.txt\\",\\"text\\":\\"CRASH\\\\n\\",\\"expectedRevision\\":null}", requestId: "crash-write" }, BACKGROUND_CONTEXT); await run.wait(BACKGROUND_CONTEXT);
 } finally { await harness.close(BACKGROUND_CONTEXT); }
 `; }
 

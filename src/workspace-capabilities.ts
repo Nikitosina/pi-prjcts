@@ -268,7 +268,13 @@ export async function withWorkspaceMutationLock<T>(lock: WorkspaceWriteLock, act
 async function withWriteLock<T>(path: string, waitMs: number, action: () => Promise<T>): Promise<T> {
   const database = new DatabaseSync(path);
   try {
-    database.exec(`PRAGMA busy_timeout=${Math.max(0, Math.min(waitMs, 5_000))}; BEGIN IMMEDIATE`);
+    // SQLite's own busy wait would block the event loop, so a holder in this same process could never finish; poll instead.
+    database.exec("PRAGMA busy_timeout=0");
+    const deadline = Date.now() + Math.max(0, Math.min(waitMs, 5_000));
+    for (;;) {
+      try { database.exec("BEGIN IMMEDIATE"); break; }
+      catch (error) { if (!/locked|busy/i.test(message(error)) || Date.now() >= deadline) throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
+    }
     try { const value = await action(); database.exec("COMMIT"); return value; }
     catch (error) { try { database.exec("ROLLBACK"); } catch { } throw error; }
   } finally { database.close(); }
