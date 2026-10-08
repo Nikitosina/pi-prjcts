@@ -9,7 +9,8 @@ import { home, socketPath, Request, Project, errorText, jobs, listProjects, load
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader, openCoordinator, type Runtime } from "./coordinator.ts";
-import { expandSkillCommand, listSkills } from "./coordinator-skills.ts";
+import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
+import { recordInvokedSkill } from "./skill-profiles.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
@@ -26,9 +27,7 @@ import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { projectModelCatalog, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
-import { WorkerSkillGrant, WorkerSkillGrantInput } from "./worker-skill-types.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
-import { prepareWorkerSkillGrant, workerSkillGrantRevision } from "./worker-skill-grants.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 
@@ -300,70 +299,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const catalog = await captureOwnerWorkerSkillCatalog({ project: () => loadProject(input.id), configured: { kind: "loaded", loader: await configuredSkills(input.id) }, protectedFiles });
       const offset = input.offset ?? 0, limit = input.limit ?? 16;
       return { ...catalog, candidates: catalog.candidates.slice(offset, offset + limit), page: { offset, limit, total: catalog.candidates.length, nextOffset: offset + limit < catalog.candidates.length ? offset + limit : null } };
-    }
-    case "worker-skills-grants": {
-      const project = loadProject(input.id);
-      const grants = project.workerSkillGrants ?? [];
-      const revision = createHash("sha256").update(JSON.stringify(grants)).digest("hex");
-      const workspaceRevision = authorizationFingerprint(project);
-      const offset = input.offset ?? 0, limit = input.limit ?? 16;
-      const summaries = grants.map(grant => ({ id: grant.id, revision: grant.revision, enabled: grant.enabled, grantedAt: grant.grantedAt, scopeIds: grant.scopeIds, skills: grant.skills.map(skill => ({ catalogId: skill.catalogId, name: skill.name, disableModelInvocation: skill.disableModelInvocation, documents: [skill.main, ...skill.references].map(document => ({ id: document.id, relativePath: document.relativePath, sha256: document.sha256, size: document.size })) })), status: grant.workspaceRevision === workspaceRevision && grant.revision === workerSkillGrantRevision(grant) ? (grant.enabled ? "current" : "disabled") : "stale" }));
-      return { projectId: project.id, revision, workspaceRevision, grants: summaries.slice(offset, offset + limit), page: { offset, limit, total: summaries.length, nextOffset: offset + limit < summaries.length ? offset + limit : null } };
-    }
-    case "worker-skills-grant-read": {
-      const grant = (loadProject(input.id).workerSkillGrants ?? []).find(item => item.id === input.grantId);
-      if (!grant) throw new Error("Unknown worker skill grant");
-      return grant;
-    }
-    case "worker-skills-grant-set": {
-      if (input.confirm !== input.id) throw new Error("Skill grant requires confirmation matching project id");
-      const selection = parse(WorkerSkillGrantInput, input.selection);
-      const catalog = await captureOwnerWorkerSkillCatalog({ project: () => loadProject(input.id), configured: { kind: "loaded", loader: await configuredSkills(input.id) }, protectedFiles: await protectedSkillBackingFiles() });
-      if (catalog.revision !== input.expectedCatalogRevision) throw new Error("Skill catalog changed; refresh before granting");
-      const before = loadProject(input.id), grants = before.workerSkillGrants ?? [];
-      if (createHash("sha256").update(JSON.stringify(grants)).digest("hex") !== input.expectedGrantsRevision) throw new Error("Skill grants changed; refresh before granting");
-      const grant = await prepareWorkerSkillGrant({ project: before, selection, catalog: catalog.candidates, protectedFiles: await protectedSkillBackingFiles() });
-      let existing: Promise<DurableProjectRuntime> | undefined;
-      await withProjectLock(input.id, async () => {
-        const current = loadProject(input.id), currentGrants = current.workerSkillGrants ?? [];
-        if (authorizationFingerprint(current) !== catalog.workspaceRevision || createHash("sha256").update(JSON.stringify(currentGrants)).digest("hex") !== input.expectedGrantsRevision) throw new Error("Workspace or skill grants changed during capture");
-        if (current.archived || current.deleted) throw new Error("Inactive project cannot change worker skill grants");
-        existing = durableRuntimes.get(input.id); settingsUpdating.add(input.id);
-      });
-      try {
-        if (existing) {
-          const owner = await existing, view = await owner.snapshot(), plan = await owner.planSnapshot();
-          if (view.coordinator.busy || view.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("Skill grant changes require idle coordinator and workers");
-          await closeLifecycleOwner(input.id, owner);
-        }
-        return await withProjectLock(input.id, async () => {
-          const current = loadProject(input.id), currentGrants = current.workerSkillGrants ?? [];
-          if (authorizationFingerprint(current) !== catalog.workspaceRevision || createHash("sha256").update(JSON.stringify(currentGrants)).digest("hex") !== input.expectedGrantsRevision) throw new Error("Workspace or skill grants changed before persistence");
-          current.workerSkillGrants = [...currentGrants.filter(item => item.id !== grant.id), grant]; saveProject(current); return current.workerSkillGrants;
-        }, true);
-      } finally { settingsUpdating.delete(input.id); }
-    }
-    case "worker-skills-grant-revoke": {
-      if (input.confirm !== input.id) throw new Error("Skill grant revocation requires confirmation matching project id");
-      let existing: Promise<DurableProjectRuntime> | undefined;
-      await withProjectLock(input.id, async () => {
-        const current = loadProject(input.id), grants = current.workerSkillGrants ?? [];
-        if (createHash("sha256").update(JSON.stringify(grants)).digest("hex") !== input.expectedGrantsRevision) throw new Error("Skill grants changed; refresh before revoking");
-        if (!grants.some(item => item.id === input.grantId)) throw new Error("Unknown worker skill grant");
-        existing = durableRuntimes.get(input.id); settingsUpdating.add(input.id);
-      });
-      try {
-        if (existing) {
-          const owner = await existing, view = await owner.snapshot(), plan = await owner.planSnapshot();
-          if (view.coordinator.busy || view.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("Skill grant changes require idle coordinator and workers");
-          await closeLifecycleOwner(input.id, owner);
-        }
-        return await withProjectLock(input.id, async () => {
-          const current = loadProject(input.id), grants = current.workerSkillGrants ?? [];
-          if (createHash("sha256").update(JSON.stringify(grants)).digest("hex") !== input.expectedGrantsRevision) throw new Error("Skill grants changed before revocation");
-          current.workerSkillGrants = grants.map(item => item.id === input.grantId ? { ...item, enabled: false } : item); saveProject(current); return current.workerSkillGrants;
-        }, true);
-      } finally { settingsUpdating.delete(input.id); }
     }
     case "command-profiles-snapshot": return commandProfilesSnapshot(loadProject(input.id));
     case "command-profile-read": {
@@ -669,6 +604,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
         const text = await expandSkillCommand(await configuredSkills(input.id), job.text);
+        const invoked = SKILL_COMMAND.exec(job.text.trim())?.[1];
+        if (invoked) recordInvokedSkill(ownedProjectDir(input.id), invoked);
         const plan = await owner.planSnapshot();
         if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
         // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.

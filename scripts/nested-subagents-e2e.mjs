@@ -33,7 +33,7 @@ const model = createServer((req, res) => {
     const role = tools.includes('projects_delegate') ? 'coordinator' : tools.includes('projects_delegate_child') ? 'parent' : tools.includes('projects_review_verdict') ? 'reviewer' : tools.includes('code_read') ? 'scout' : tools.includes('bash') ? 'worker' : 'other';
     const lastUser = msgs.findLastIndex(m => m.role === 'user'), userText = contentText(msgs[lastUser]?.content);
     const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
-    result.calls.push({ at: Date.now(), role, user: userText.slice(0, 1500), results: results.map(r => r.slice(0, 4000)), tools });
+    result.calls.push({ at: Date.now(), role, user: userText.slice(0, 1500), results: results.map(r => r.slice(0, 200000)), tools });
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     if (role === 'coordinator') {
       const owner = !userText.startsWith('[Durable work') && !userText.startsWith('[Owner-local event'), tag = owner && /MARK-NEST-(\w+)/.exec(userText)?.[1];
@@ -48,7 +48,7 @@ const model = createServer((req, res) => {
       if (tag === 'A' && results.length === 0) return res.end(call('projects_delegate_child', { role: 'scout', task: 'CHILD-SCOUT-A read the README' }));
       if (tag === 'A' && results.length === 1) return res.end(call('projects_delegate_child', { role: 'worker', task: 'CHILD-WORKER-A write child.txt' }));
       if (tag === 'STOP' && results.length === 0) return res.end(call('projects_delegate_child', { role: 'worker', task: 'CHILD-SLOW-STOP long job' }));
-      if (tag === 'CAP' && results.length < 5) return res.end(call('projects_delegate_child', { role: 'scout', task: `CHILD-CAP-${results.length + 1} look` }));
+      if (tag === 'CAP' && results.length < 3) return res.end(call('projects_delegate_child', { role: 'scout', task: `CHILD-CAP-${results.length + 1} look` }));
       return res.end(say(`Delegated; waiting for children (${tag}).`));
     }
     if (role === 'worker') {
@@ -152,7 +152,8 @@ try {
   check('N6/N7 each child result came back to the parent thread as a work item, which completed', followUps.length === 2 && followUps.every(w => w.status === 'completed') && followUps.some(w => w.text.includes(scoutA.id)) && followUps.some(w => w.text.includes(workerA.id)) && result.calls.filter(c => c.role === 'parent' && c.user.startsWith('[Child work')).length === 2, followUps);
   const coordReports = result.calls.filter(c => c.role === 'coordinator' && c.user.startsWith('[Durable work'));
   check('N6 the coordinator never receives a child report directly', !coordReports.some(c => c.user.startsWith(`[Durable work ${scoutA.id}`) || c.user.startsWith(`[Durable work ${workerA.id}`)), coordReports.map(c => c.user.slice(0, 120)));
-  check('N7 the coordinator receives the parent\'s conclusions about both children', [scoutA.id, workerA.id].every(childId => coordReports.some(c => c.user.includes(`PARENT-CONCLUSION ${childId}`))), coordReports.map(c => c.user.slice(0, 200)));
+  const lastChild = [scoutA, workerA].find(child => followUps.at(-1).text.includes(child.id)), firstChild = [scoutA, workerA].find(child => child !== lastChild);
+  check('N7 the coordinator receives only the parent\'s conclusion after its last child (the earlier one is held)', coordReports.some(c => c.user.includes(`PARENT-CONCLUSION ${lastChild.id}`)) && !coordReports.some(c => c.user.includes(`PARENT-CONCLUSION ${firstChild.id}`)), coordReports.map(c => c.user.slice(0, 200)));
   check('N8 the parent, its children and its follow-ups all report via the Ops chat', [parentA, scoutA, workerA, ...followUps].every(w => w.chatConversationId === ops.conversationId), [parentA, scoutA, workerA, ...followUps].map(w => w.chatConversationId));
   const opsView = await rpc({ action: 'show', id, chatId: ops.id });
   check('N8 the parent\'s conclusions are in the Ops transcript, not Main', opsView.messages.some(m => /COORD-NOTED PARENT-CONCLUSION/.test(m.text ?? '')) && !(await rpc({ action: 'show', id })).messages.some(m => /COORD-NOTED PARENT-CONCLUSION/.test(m.text ?? '')));
@@ -229,13 +230,13 @@ try {
   await settleAll();
   check('N11 the parent thread accepts work again after the cascade drained', (await plan()).some(w => w.threadId === parentS.threadId && w.text.includes('STOPPED-AGAIN') && w.status === 'completed'));
 
-  // N4/N12: at most 4 active children; at worker cap 1 the parent's children run after it ends its turn (no deadlock).
+  // N4/N12: at most 2 active children; at worker cap 1 the parent's children run after it ends its turn (no deadlock).
   await ask('MARK-NEST-CAP please');
   work = await plan();
   const [parentC] = byText(work, 'PARENT-TASK-CAP'), capKids = work.filter(w => w.parentThreadId === parentC.threadId);
-  const capCall = result.calls.findLast(c => c.role === 'parent' && /PARENT-TASK-CAP/.test(c.user) && c.results.length === 5);
-  check('N4 the fifth active child is refused', capKids.length === 4 && /already have 4 children/.test(capCall?.results[4] ?? ''), { capKids: capKids.length, results: capCall?.results });
-  check('N12 at worker cap 1 all four children ran after the parent and reported back to it', (await rpc({ action: 'plan-snapshot', id })).workerCap === 1 && capKids.every(w => w.status === 'completed') && work.filter(w => w.threadId === parentC.threadId && w.text.startsWith('[Child work')).length === 4);
+  const capCall = result.calls.findLast(c => c.role === 'parent' && /PARENT-TASK-CAP/.test(c.user) && c.results.length === 3);
+  check('N4 the third active child is refused', capKids.length === 2 && /already have 2 children/.test(capCall?.results[2] ?? ''), { capKids: capKids.length, results: capCall?.results });
+  check('N12 at worker cap 1 both children ran after the parent and reported back to it', (await rpc({ action: 'plan-snapshot', id })).workerCap === 1 && capKids.every(w => w.status === 'completed') && work.filter(w => w.threadId === parentC.threadId && w.text.startsWith('[Child work')).length === 2);
 
   result.errors = result.errors.filter(e => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter(e => !e.url.endsWith('/api'));

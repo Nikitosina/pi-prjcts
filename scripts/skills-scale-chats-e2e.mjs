@@ -163,12 +163,11 @@ try {
   if (cli.candidates.length !== SKILLS || cli.page.nextOffset !== null || cli.revision !== pages[0].revision || new Set(cli.candidates.map(c => c.catalogId)).size !== SKILLS) throw Error('CLI catalog incomplete: ' + JSON.stringify({ n: cli.candidates.length, page: cli.page }));
   result.checks.push(`L2 CLI owner-skills-catalog returns all ${SKILLS} candidates of one revision`);
   result.checks.push('F1-F5 owner worker-skills catalog with 89 configured skills captures; 16-wide pages 0..88 are disjoint, stable revision, nextOffset ends null; offset 64 accepted');
-  const last = all.at(-1), scopeId = (await rpc({ action: 'show', id })).project.workspaceAuthorization.scopes[0].id;
-  const grants = await rpc({ action: 'worker-skills-grants', id });
-  await rpc({ action: 'worker-skills-grant-set', id, confirm: id, expectedCatalogRevision: pages[0].revision, expectedGrantsRevision: grants.revision, selection: { id: randomUUID(), scopeIds: [scopeId], skills: [{ catalogId: last.catalogId, references: [] }], enabled: true } });
-  const granted = await rpc({ action: 'worker-skills-grants', id });
-  if (granted.grants.length !== 1 || granted.grants[0].skills[0].name !== last.name) throw Error('Grant from last page failed');
-  result.checks.push(`F7 a skill from the last page (${last.name}) is granted against the same catalog revision`);
+  // Skills reach workers through Settings profiles now (the grant model is retired): a skill from the last page is saved for workers.
+  const last = all.at(-1), before = await rpc({ action: 'settings-snapshot', id });
+  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: before.revision, changes: { skills: { all: [], coordinator: [], worker: [last.name], scout: [], reviewer: [] } } });
+  if ((await rpc({ action: 'settings-snapshot', id })).values.skills?.worker?.[0] !== last.name) throw Error('Worker skill profile from the last page not saved');
+  result.checks.push(`F7 a skill from the last page (${last.name}) is saved in the worker skill profile`);
 
   // B: three chats. Main answers, "Research" delegates a scout, "Broken" fails.
   await ask(id, undefined, 'MARK-MAIN hello');
@@ -204,15 +203,15 @@ try {
   await shot('01-main-shows-broken-chat-attention', s);
   result.checks.push('F17 Main shows the Broken chat failure with Open chat, and the Broken pill is flagged');
 
-  // A in UI: the grant dialog lists all 89.
-  await click(s, '#owner-setup-button');
-  await waitFor(`!!document.querySelector('#dialog [data-kind="worker-skills-grant-set"]')`, s, 'owner setup dialog');
-  await click(s, '#dialog [data-kind="worker-skills-grant-set"]');
-  await waitFor(`document.querySelectorAll('#dialog .dialog-body ul li').length === ${SKILLS} && document.querySelector('#dialog .dialog-body').innerText.includes('${SKILLS} skills')`, s, 'grant dialog lists every skill', 400);
-  await evaluate(`document.querySelector('#dialog .dialog-body ul li:last-child').scrollIntoView()`, s);
-  await shot('02-skill-grant-dialog-89', s);
-  await evaluate(`document.querySelector('#dialog').close()`, s);
-  result.checks.push('F6 the owner grant dialog pages through and lists all 89 skills');
+  // A in UI: the Settings skills picker lists all 89.
+  const settingsUrl = new URL(launch); settingsUrl.searchParams.set('tab', 'settings');
+  await send('Page.navigate', { url: settingsUrl.toString() }, s);
+  await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === ${SKILLS}`, s, 'skills picker lists every skill', 400);
+  await evaluate(`document.querySelector('#skills-card').scrollIntoView()`, s);
+  await shot('02-skills-picker-89', s);
+  await send('Page.navigate', { url: launch.toString() }, s);
+  await waitFor(`document.querySelector('#messages')?.innerText.includes('Done MARK-MAIN')`, s, 'back to Main');
+  result.checks.push('F6 the Settings skills picker lists all 89 skills');
 
   // F10-F13: Observability covers every chat.
   const usagePage = await rpc({ action: 'usage-snapshot', id });

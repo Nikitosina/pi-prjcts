@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseFrontmatter, type ResourceLoader, type Skill } from "@earendil-works/pi-coding-agent";
 import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import type { Context } from "@earendil-works/chord";
 
 /** Owner-invoked skills: `/skill:<name> args` in the composer, expanded like pi does before it reaches the coordinator. */
 type Loader = Pick<ResourceLoader, "getSkills">;
@@ -43,17 +44,18 @@ export function compactSkillText(text: string): string {
   return match ? `/skill:${match[1]}${match[3] ? ` ${match[3]}` : ""}` : text;
 }
 
-export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }) {
+/** One reader for every role: the caller's effective skill set (see skill-profiles.ts) decides what it may open. */
+export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conversation | undefined; allowed: (api: ToolExecutionApi, context: Context) => Promise<ReadonlySet<string>> }) {
   const tool = defineTool({
     name: "projects_skill_file",
-    description: "Read a file that belongs to a pi skill, e.g. a reference an invoked <skill> block mentions. path is relative to the skill's directory (default SKILL.md). Paged by characters.",
+    description: "Read a file of a skill listed for your role (or a skill the owner invoked): SKILL.md by default, or a file it references. path is relative to the skill's directory. Paged by characters.",
     parameters: Type.Object({ skill: Type.String({ minLength: 1, maxLength: 128 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40000 })) }, { additionalProperties: false }),
     replay: "safe",
-    async execute(args, api: ToolExecutionApi) {
-      const root = input.root();
-      if (!root || !input.isCoordinator(api.conversationId)) throw new Error("Skill files are coordinator-only");
+    async execute(args, api: ToolExecutionApi, context) {
+      if (!input.root()) throw new Error("Project is unavailable");
       const skill = input.loader?.getSkills().skills.find(item => item.name === args.skill);
       if (!skill) throw new Error(`Unknown skill ${args.skill}`);
+      if (!(await input.allowed(api, context)).has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
       // Checked lexically first, then again after symlinks resolve.
       const escapes = (from: string, to: string) => { const inside = relative(from, to); return isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`); };
       const requested = resolve(skill.baseDir, args.path ?? "SKILL.md");

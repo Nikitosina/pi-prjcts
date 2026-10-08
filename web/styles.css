@@ -474,3 +474,16 @@ mark, .search-mark { background: #f7dc84; color: inherit; border-radius: 2px; pa
 .search-focus { box-shadow: 0 0 0 2px var(--accent); border-radius: 8px; animation: search-flash 1.6s ease-out 1; }
 @keyframes search-flash { from { background: #f7dc8466; } }
 @media (max-width: 600px) { .search-label, .search-kbd { display: none; } .search-row small { grid-column: 1 / -1; } }
+
+/* Skills (Settings) */
+.skill-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.skill-tabs button.on { background: var(--chip); color: var(--text); font-weight: 600; }
+.skill-tabs .count { color: var(--muted); font-weight: 400; }
+#skills-search { width: 100%; margin: 8px 0; }
+.skill-groups { display: grid; gap: 10px; max-height: 420px; overflow-y: auto; }
+.skill-pick { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 3px 0; }
+.skill-pick input { margin-top: 3px; flex: none; }
+.skill-pick span { min-width: 0; overflow-wrap: anywhere; }
+.skill-pick small { display: block; color: var(--muted); font-size: 12px; }
+.skill-pick small.skill-tag { display: inline; border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; font-size: 11px; }
+.skill-pick.inherited { opacity: .75; }

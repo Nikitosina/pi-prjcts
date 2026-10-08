@@ -17,8 +17,6 @@ import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
 import type { OperationApprovals } from "./operation-approvals.ts";
 import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
-import { workerSkillBinding } from "./worker-skill-tool.ts";
-import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export function durableWorkspaceBinding(input: { project: Project; configuredSkillLoader?: Pick<ResourceLoader, "getSkills">; conversation: () => Conversation; controlRoot: string; projectStanding?: DurableStanding; commands?: ReturnType<typeof commandExecution>; commandApprovals?: () => OperationApprovals; isClosed?: () => boolean }): DurablePrepareWorkerEnvironment | undefined {
@@ -59,19 +57,6 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent); if (receipt.state !== "allocated" || !receipt.workspacePath) throw new Error(`Workspace allocation is ${receipt.state}: ${receipt.reason ?? "no exact receipt"}`);
     if (JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope)) throw new Error("Frozen workspace allocation receipt differs from current host scope; refusing registry publication");
     const authority: WorkspaceAuthority = { projectId: input.project.id, repositoryId: repository.repositoryId, provider, workspaceId: `${scope.id}:${receipt.intentId}:${request.conversationId}`, receiptId: receipt.intentId, attemptId: receipt.attemptId, leaseRevision: receipt.lease?.renewedAt ?? receipt.providerFacts.head ?? scope.baseRevision, workspaceRoot: receipt.workspacePath, files: scope.files, ...(whole ? { wholeRepository: true } : {}), expiresAt: "2099-01-01T00:00:00.000Z" };
-    const configuredSkills = whole ? input.configuredSkillLoader?.getSkills().skills ?? [] : [];
-    if (whole && !input.configuredSkillLoader) throw new Error("Configured Pi skills loader is unavailable for whole-repository worker");
-    const configuredSkillInstructions = configuredSkills.length ? `\nConfigured Pi skills (read the listed SKILL.md files with read):\n${configuredSkills.map(skill => `- ${skill.name}: ${skill.description}; file=${skill.filePath}`).join("\n")}` : "";
-    const protectedFiles = await protectedSkillBackingFiles();
-    const skillBinding = workerSkillBinding(input.project, scope.id, () => loadProject(input.project.id), protectedFiles, async () => {
-      if (input.isClosed?.()) throw new Error("Project runtime is closing");
-      const current = loadProject(input.project.id);
-      if (current.archived || current.deleted || authorizationFingerprint(current) !== authorizationFingerprint(input.project) || Number(request.conversationId) < 0) throw new Error("Worker skill owner or scope authorization changed");
-      await input.conversation().commit(async tx => {
-        const state = await tx.doc(DurablePlanning, input.conversation().id), work = state.work[request.workId];
-        if (state.paused || state.pausing || !work || work.status !== "running" || work.workspaceScopeId !== selectedScope.id || Number(work.conversationId) !== request.conversationId || state.threads[work.threadId]?.activeWorkId !== work.id || work.threadId !== request.threadId) throw new Error("Skill read requires the active scoped worker");
-      }, BACKGROUND_CONTEXT);
-    });
     const commandProfiles = (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.repositoryId === repository.repositoryId && profile.scopeIds.includes(scope.id));
     if (commandProfiles.length && !input.commands) throw new Error("Host command executor is unavailable");
     const lock = { controlRoot: input.controlRoot, databasePath: await workspacePhysicalLockPath(input.controlRoot, receipt.workspacePath), waitMs: commandProfiles.length ? 0 : 5000 };
@@ -103,18 +88,17 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {
         return tool.execute(api.callId, args, context.abortSignal, update => api.output(update.content.map(item => item.type === "text" ? item.text : "").join("")));
       } }));
-      const skillTools = skillBinding.tools;
-      const skillNames = new Set(skillTools.map(tool => tool.name));
       const builtinNames = new Set(builtins.map(tool => tool.name));
-      tools.splice(0, tools.length, ...tools.filter(tool => !(tool.name.startsWith("projects_workspace_") && /_(?:read|write|read_list|list)$/.test(tool.name)) && !builtinNames.has(tool.name)), ...builtins.filter(builtin => !skillNames.has(builtin.name)), ...skillTools);
-    } else tools.push(...skillBinding.tools);
+      tools.splice(0, tools.length, ...tools.filter(tool => !(tool.name.startsWith("projects_workspace_") && /_(?:read|write|read_list|list)$/.test(tool.name)) && !builtinNames.has(tool.name)), ...builtins);
+    }
     // Deliberately uninstalled: ScopedAttempt publishes only after its post-preparation active/binding recheck.
     assertStanding();
     const extension = defineExtension({ name: `projects.workspace.${scope.id}.${intentId}.${request.conversationId}`, tools, hooks: [hook(ToolTask, { beforeTool: (_call, api) => {
       if (Number(api.conversationId) !== request.conversationId) return;
       try { assertStanding(); } catch (error) { return { block: error instanceof Error ? error.message : "Selected repository standing resources are unavailable" }; }
     } })] });
-    return { cwd: receipt.workspacePath, tools, extension, repositoryStanding, workerInstructions: `${skillBinding.instructions}${whole ? `${configuredSkillInstructions}\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. Commit and push only your branch ${branch}. Do not force-push, merge, delete branches, or push to the default branch. The owner approves merges.${publication ? ` After pushing, call the GitHub open_draft_pr tool with the pushed commit SHA to open or update the draft PR against ${publication.baseBranch}.` : ""}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: skillBinding.revision, names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
+    // Skills now come from the role profile (instructions + projects_skill_file). The retired grant fingerprint stays in the hash so existing threads keep their binding revision.
+    return { cwd: receipt.workspacePath, tools, extension, repositoryStanding, workerInstructions: `${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. Commit and push only your branch ${branch}. Do not force-push, merge, delete branches, or push to the default branch. The owner approves merges.${publication ? ` After pushing, call the GitHub open_draft_pr tool with the pushed commit SHA to open or update the draft PR against ${publication.baseBranch}.` : ""}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
   };
 }
 export function guardWorkerGitCommand(command: string, branch: string): string {

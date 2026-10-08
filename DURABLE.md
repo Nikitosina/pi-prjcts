@@ -207,7 +207,7 @@ Rules:
 
 - Typing `/` at the start of the coordinator composer opens a skill picker. It lists every skill pi loads for the project: repository `.agents/skills`/`.pi/skills` first, then the owner's, then pi packages, including skills with `disable-model-invocation`. There is no 64-skill cap; the owner has 89. Picking inserts `/skill:<name> `. Filtering ranks by name, then description; ↑/↓, Enter/Tab and Esc work, and Enter picks rather than sends. A `/` after other text never opens it, and the global `/` shortcut still just focuses the composer.
 - On send the host expands `/skill:<name> args` exactly like pi: `<skill name location>` block, frontmatter stripped, then the args (`src/coordinator-skills.ts`). An unknown name is refused and the draft kept. The job keeps the typed text. The transcript shows the user message as `/skill:<name> args`, rendered as a chip.
-- `projects_skill_file` lets the coordinator read files inside an invoked skill's directory (lexical and realpath checks).
+- `projects_skill_file` reads files inside a skill's directory (lexical and realpath checks). It is limited to the caller's role skill set (see Skill profiles); the coordinator may also read skills the owner invoked with `/skill:` (recorded in `invoked-skills.txt` in the project home).
 - The admission cap is now 120000 characters for the expanded text; owner input stays capped at 32000.
 - `GET coordinator-skills` returns the list.
 
@@ -287,7 +287,7 @@ Verified by `scripts/multi-chat-e2e.mjs` (fake model and headless Chrome, privat
 
 ## Owner worker-skills catalog scale
 
-The owner catalog (repository + configured skills) holds up to 512 candidates, 1024 diagnostics and 16 MiB of captured main documents (`SKILL_CATALOG_LIMITS` in `src/worker-skill-types.ts`), instead of throwing above 64. `worker-skills-catalog` pages it (offset ≤ 512, limit ≤ 64); the revision is stable across pages of an unchanged catalog, so grants can use any page. The owner grant dialog reads every page and refuses a revision change mid-paging. Repository discovery uses the same limits (4096 directory entries).
+The owner catalog (repository + configured skills) holds up to 512 candidates, 1024 diagnostics and 16 MiB of captured main documents (`SKILL_CATALOG_LIMITS` in `src/worker-skill-types.ts`), instead of throwing above 64. `worker-skills-catalog` pages it (offset ≤ 512, limit ≤ 64); the revision is stable across pages of an unchanged catalog. The worker-skill grant model (grant dialog, `worker-skills-grant*` RPCs, `owner-skill-grant`/`-revoke` CLI, `projects_skill_read`) is retired in favour of Skill profiles; saved `workerSkillGrants` stay in project files only to keep existing worker binding revisions stable. Repository discovery uses the same limits (4096 directory entries).
 
 `src/github-authorization.ts` was hidden by the `*auth*` ignore rule and never committed; it is now unignored and tracked.
 
@@ -315,7 +315,7 @@ Both are owner opt-ins in Settings → Events in, stored in `automations.json` b
 
 - Reads (fake-gh compatible): the repository identity (numeric ID must match the grant), the newest 30 PRs (`state=all`), check runs for each open PR head until CI is terminal for that head, and reviews, issue comments and review comments when the PR's `updated_at` changed. Commit statuses (the legacy status API) are not read.
 - Reported changes: opened, merged, closed, reopened, new head, CI failed (names of failing checks), CI passed, and new reviews and comments (bots marked). The first poll per repository is a silent baseline. Everything new in one poll goes out as one `github.follow` event, whose ID is a hash of the per-change IDs. The per-PR state (`projects.pr-follow` doc on the root) advances in the same commit that records the event, so a crash or a failed poll never loses or repeats a change.
-- Auto-fix: when CI fails on a PR this project published (head branch under the grant's branch prefix, or a verified `create-pr` receipt), a fix goes out. If the receipt's worker thread still exists, it gets a follow-up; otherwise a new worker gets the repository's scope (whole-repository scope first). The worker reports to the event chat. Guards: an attempt is recorded before dispatch, at most once per head SHA. Nothing is dispatched while the previous fix for that PR is queued or running. There are at most `fixCap` attempts per PR (default 3, settable 0 to 10), and auto-fix can be turned off separately. Each failure line in the event says what happened (dispatched, still running, cap reached, not published, auto-fix off, no scope).
+- Auto-fix: when CI fails on a PR this project published (a verified `create-pr` receipt only, the same rule as auto-merge; a branch prefix alone is "not published by this project"), a fix goes out. If the receipt's worker thread still exists, it gets a follow-up; otherwise a new worker gets the repository's scope (whole-repository scope first). The worker reports to the event chat. Guards: an attempt is recorded before dispatch, at most once per head SHA. Nothing is dispatched while the previous fix for that PR is queued or running. There are at most `fixCap` attempts per PR (default 3, settable 0 to 10), and auto-fix can be turned off separately. Each failure line in the event says what happened (dispatched, still running, cap reached, not published, auto-fix off, no scope).
 - Failures: a gh error leaves the state untouched, shows as the follow problem in Settings, and backs off (interval × 2^n, at most a day). A paused project does not poll. Without a GitHub authorization, polling reports a blocker.
 - Settings shows the last check, the changes sent, any problem and each fix attempt with its work status.
 
@@ -353,10 +353,10 @@ Verified by `scripts/auto-merge-e2e.mjs` (fake model, fake gh with branch protec
 
 ## Nested subagents (one level)
 
-A top-level **worker** thread gets `projects_delegate_child` (extension `projects.worker-delegation`, `src/durable-planning.ts`), whether scoped or unscoped. The coordinator, scouts, reviewers and child threads never get it, and the tool also refuses calls from them. The tool takes `{task, role}`. A child worker gets the parent's `workspaceScopeId` (its own worktree, like any thread). A scout or reviewer child gets read-only code tools. At most 4 of a parent's children may be queued or running. Children share the project worker pool and cap: the parent ends its turn, and the children then run.
+A top-level **worker** thread gets `projects_delegate_child` (extension `projects.worker-delegation`, `src/durable-planning.ts`), whether scoped or unscoped. The coordinator, scouts, reviewers and child threads never get it, and the tool also refuses calls from them. The tool takes `{task, role}`. A child worker gets the parent's `workspaceScopeId` (its own worktree, like any thread). A scout or reviewer child gets read-only code tools. At most 2 of a parent's children may be queued or running. The tool description tells workers to delegate only genuinely independent parallel work, do small reads/checks themselves and use at most one reviewer per head. Children share the project worker pool and cap: the parent ends its turn, and the children then run.
 
 - **Link.** `parentThreadId` is stored on the child's work items and thread record. Every later attempt on a child thread keeps it. It shows in `plan-snapshot` and in `projects_workers` (work and threads, with report `delivered to parent`).
-- **Reports.** When a child settles, its result becomes a follow-up work item on the parent thread: text `[Child work <id>, …]`, with the stable requestId `child-report:<workId>:<attempt>` and the parent's chat. The coordinator never gets the child report. It gets the parent's answer, in the chat that delegated the parent. If the parent is gone or stopped, the child reports to that chat as usual.
+- **Reports.** When a child settles, its result becomes a follow-up work item on the parent thread: text `[Child work <id>, …]`, with the stable requestId `child-report:<workId>:<attempt>` and the parent's chat. The coordinator never gets the child report. It gets only the parent's answer after its last child settled, in the chat that delegated the parent. A parent answer given while its children are still queued or running is held (`report` marked delivered with a `held:` requestId; `projects_workers` shows `held until children finish`). Each child report tells the parent how many children are still running. If the parent is gone or stopped, the child reports to that chat as usual.
 - **Stop.** Stopping a parent stops its children's queued and running work with the same stop id (blocker "Stopped with its parent worker"). The cascade drains together.
 - **UI.**
   - Activity nests children (`.work-children[data-parent] > .work.child`, "sub-agent" label) under the parent's newest row.
@@ -418,3 +418,22 @@ The live feed was fine (66 notices since 07:15, Telegram got them); the page dro
 - A failing feed shows "On, but not receiving notices: …" (401 → reopen the inbox link) until it recovers. A dismissed permission prompt explains itself. "Send a test notification" checks OS-level delivery (macOS notification settings for the browser, Focus), which a page cannot detect.
 
 Verified by `scripts/browser-notify-e2e.mjs` (N12–N17, failures 12–17 in `scripts/browser-notify-failures.md`); the red run before the fix is `artifacts/browser-notify-red-n12-*` (no notification while visible but unfocused).
+
+## Quiet coordinator (reporting, plan-first)
+
+- Settled-work reports are batched: the coordinator agent uses `followUpMode: "all"` (`src/durable-runtime.ts`), so reports queued while it is busy arrive in one turn.
+- The report text (`reportText` in `src/durable-planning.ts`) echoes at most 500 characters of the task and says whether other work for that chat is still queued or running. If so, the coordinator is told not to write to the owner and to end with no text or one short status line. If nothing else is running, it is told to give one concise final summary of the whole request (or ask the owner).
+- Notifications (`src/notify.ts`): a "Finished" notice goes out only when the chat has no queued or running work and no later work-report turn follows (batched submissions sharing one answer notify once), so intermediate status lines stay quiet.
+- Coordinator instructions: plan first, prefer following up an existing thread over new threads, no micro-delegation ("status" checks), at most one reviewer per PR head, report to the owner only at the end.
+- Coordinator repository instructions: the coordinator gets the project checkout's AGENTS.md and related standing files (the same loader as workers) under "Repository instructions". They are re-read on every open; recovery reconfigures the coordinator and chats when the text differs.
+
+Verified by `scripts/quiet-coordinator-e2e.mjs` (one parent worker with 2 children plus 2 scouts: 5 threads, 2 coordinator report turns, 1 owner notification; AGENTS.md edit applied after restart). Failures in `scripts/quiet-coordinator-failures.md`. The receipt-only auto-fix rule is covered by `scripts/follow-prs-e2e.mjs`.
+
+## Skill profiles
+
+- Settings → Skills: "All profiles" plus per-role additions for Coordinator, Worker, Scout and Reviewer. Candidates are every skill pi loads (repository, global, packages), grouped by source and searchable. Children use their role's set. Stored as `project.skillProfiles` (`settings-update` `changes.skills`; `null` resets). The default for new and existing projects is the repository skills in "All profiles", nothing else.
+- Prompts carry only names and descriptions of the role's effective set (`skillIndex` in `src/skill-profiles.ts`); skills with `disable-model-invocation` are left out. Names that no longer load are ignored. Workers no longer get every configured skill inlined.
+- Bodies are read on demand with `projects_skill_file` (coordinator, workers, scouts, reviewers), restricted to the caller's role set; the thread's role comes from the planning document.
+- The owner `/` picker still lists every skill.
+
+Verified by `scripts/skill-profiles-e2e.mjs` (2 repository + 4 global skills, per-role prompts including a child worker, refused cross-role read, path escape, thread created before the change, `/skill:` grant to the coordinator, 390px picker). Failures in `scripts/skill-profiles-failures.md`.

@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { request } from "./client.ts";
 import { errorText, parse, type Request } from "./state.ts";
 
-type Action = "workspace-grant" | "workspace-revoke" | "github-authorize" | "github-revoke" | "command-profile-set" | "worker-skills-grant-set" | "worker-skills-grant-revoke";
+type Action = "workspace-grant" | "workspace-revoke" | "github-authorize" | "github-revoke" | "command-profile-set";
 const OwnerFields = Type.Record(Type.String(), Type.Unknown());
 type Entry = { value: string; label: string };
 
@@ -76,7 +76,7 @@ export class OwnerSetupScreen implements Component, Focusable {
   }
   private menu() {
     const rows: Entry[] = [
-      { value: "inspect", label: "Inspect current workspace, GitHub, profiles and skill grants" },
+      { value: "inspect", label: "Inspect current workspace, GitHub and profiles" },
       { value: "scope-details", label: "Inspect exact scope files and base revisions" },
       { value: "profile-read", label: "Read exact fixed profile argv and executable identity" },
       { value: "catalog", label: "Inspect repository skill catalog" },
@@ -86,8 +86,6 @@ export class OwnerSetupScreen implements Component, Focusable {
       { value: "scope-grant", label: "Create a workspace scope" },
       { value: "github-authorize", label: "Authorize GitHub publication target" },
       { value: "profile-set", label: "Register or disable fixed command profile" },
-      { value: "skill-set", label: "Grant selected repository skills" },
-      { value: "skill-revoke", label: "Revoke worker skill grant" },
       { value: "cancel", label: "Back" },
     ];
     this.list = this.makeList(rows);
@@ -99,7 +97,7 @@ export class OwnerSetupScreen implements Component, Focusable {
     if (value === "profile-read") { this.profiles(); return; }
     if (value === "github-inspect") { this.githubInspect(); return; }
     if (value === "catalog") { this.inspect(await request({ action: "worker-skills-catalog", id: this.input.projectId }, false)); return; }
-    const actions: Record<string, Action> = { "scope-revoke": "workspace-revoke", "github-revoke": "github-revoke", "scope-grant": "workspace-grant", "github-authorize": "github-authorize", "profile-set": "command-profile-set", "skill-set": "worker-skills-grant-set", "skill-revoke": "worker-skills-grant-revoke" };
+    const actions: Record<string, Action> = { "scope-revoke": "workspace-revoke", "github-revoke": "github-revoke", "scope-grant": "workspace-grant", "github-authorize": "github-authorize", "profile-set": "command-profile-set" };
     const action = actions[value];
     if (!action) return;
     this.selectedAction = action;

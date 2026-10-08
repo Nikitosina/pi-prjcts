@@ -19,14 +19,12 @@ const save = () => writeFileSync(join(artifacts, 'report.json'), JSON.stringify(
 const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
 const sha = n => createHash('sha1').update(String(n)).digest('hex');
 
-// Fake GitHub acme/mari: #1 merged long ago, #2 open on the project's pi/ prefix (CI pending), #3 open from a person.
+// Fake GitHub acme/mari: #1 merged long ago. #2 is published by a project worker (receipt), then renamed and given pending CI; #3 open from a person.
 const bare = join(root, 'remote.git'), fakeGh = join(root, 'fake-gh'), ghState = join(root, 'fake-gh-state.json'), ghCalls = join(root, 'fake-gh-calls.jsonl');
 writeFileSync(fakeGh, `#!/bin/sh\nexec "${process.execPath}" "${join(repo, 'scripts/fake-gh.mjs')}" "$@"\n`); chmodSync(fakeGh, 0o755);
 const A = ['A1', 'A2', 'A3', 'A4', 'A5'].map(sha);
 writeFileSync(ghState, JSON.stringify({ repo: { id: 4242, full_name: 'acme/mari', default_branch: 'main' }, issues: [], checks: { [A[0]]: [{ name: 'lint', status: 'in_progress' }] }, pulls: [
   { number: 1, title: 'Old work', head: 'feature/old', base: 'main', sha: sha('S0'), state: 'closed', merged: true, comments: [{ id: 1, user: 'bob', body: 'OLD-COMMENT' }] },
-  { number: 2, title: 'Fix login copy', head: 'pi/fix-login', base: 'main', sha: A[0], user: 'pi-bot', reviews: [{ id: 5, user: 'carol', state: 'COMMENTED', body: 'OLD-REVIEW' }] },
-  { number: 3, title: 'Docs tweak', head: 'alice/docs', base: 'main', sha: sha('B1'), user: 'alice' },
 ] }));
 writeFileSync(ghCalls, '');
 const gh$ = () => JSON.parse(readFileSync(ghState, 'utf8'));
@@ -35,6 +33,7 @@ const pull = (state, n) => state.pulls.find(item => item.number === n);
 const ghLog = () => readFileSync(ghCalls, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
 
 const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const call = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, null) + chunk({}, 'tool_calls') + 'data: [DONE]\n\n';
 const say = value => chunk({ role: 'assistant', content: value }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n';
 const contentText = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('') : JSON.stringify(content ?? '');
 let holdFix = null; // when set, the next auto-fix worker turn waits on it
@@ -48,6 +47,10 @@ const model = createServer((req, res) => {
     const kind = userText.startsWith('[Owner-local event') ? 'event' : userText.startsWith('[Durable work') ? 'report' : userText.includes('[Follow PRs auto-fix]') ? 'fix' : 'other';
     result.calls.push({ at: Date.now(), coordinator, kind, user: userText.slice(0, 3000), ...(coordinator ? {} : { tools }) });
     res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const results = msgs.slice(msgs.findLastIndex(m => m.role === 'user') + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
+    if (coordinator && /^MARK-PUBLISH/.test(userText) && results.length === 0) return res.end(call('projects_delegate', { role: 'worker', task: 'MARK-PUBLISH-FIX make the change and open a draft PR' }));
+    if (!coordinator && /MARK-PUBLISH-FIX/.test(userText) && results.length === 0) return res.end(call('bash', { command: "printf 'fix\\n' > login.txt && git add -A && git commit -qm 'Fix login copy' && git push -q -u origin HEAD && git rev-parse HEAD" }));
+    if (!coordinator && /MARK-PUBLISH-FIX/.test(userText) && results.length === 1) return res.end(call(tools.find(name => name.endsWith('_open_draft_pr')), { expectedHead: /[a-f0-9]{40}/.exec(results[0])?.[0], title: 'Fix login copy', body: 'Fixes the login copy.' }));
     if (!coordinator && kind === 'fix' && holdFix) { const wait = holdFix; holdFix = null; await wait; }
     res.end(say(coordinator ? `Noted ${kind}.` : `Fixed it (${kind}).`));
   });
@@ -131,6 +134,16 @@ try {
   await rpc({ action: 'workspace-quick-grant', id, confirm: id, expectedRevision: first.workspaceRevision });
   const second = await rpc({ action: 'owner-setup-snapshot', id });
   await rpc({ action: 'github-quick-authorize', id, confirm: id, expectedRevision: second.githubRevision });
+  // C5: auto-fix eligibility is a publication receipt, so #2 is opened by a project worker; the fixture then shapes it.
+  await rpc({ action: 'message', id, text: 'MARK-PUBLISH open the login fix' });
+  await eventually(async () => gh$().pulls.length === 2 && (await rpc({ action: 'plan-snapshot', id })).work.every(w => !['queued', 'running'].includes(w.status)), 'worker did not publish #2', 1200);
+  await eventually(async () => !(await rpc({ action: 'show', id })).chats.some(c => c.busy), 'coordinator stayed busy');
+  ghSet(state => {
+    Object.assign(pull(state, 2), { sha: A[0], user: 'pi-bot', reviews: [{ id: 5, user: 'carol', state: 'COMMENTED', body: 'OLD-REVIEW' }] });
+    state.pulls.push({ number: 3, title: 'Docs tweak', head: 'alice/docs', base: 'main', sha: sha('B1'), user: 'alice' });
+  });
+  const fixBranch = pull(gh$(), 2).head;
+  if (!fixBranch.startsWith('pi/') || pull(gh$(), 2).title !== 'Fix login copy') throw Error('Publish fixture wrong: ' + JSON.stringify(pull(gh$(), 2)));
   const alerts = await rpc({ action: 'chat-create', id, title: 'Alerts' });
   const mainConv = (await rpc({ action: 'show', id })).chats?.find(c => c.id === 'main')?.conversationId ?? null;
   const snap = () => rpc({ action: 'automation-snapshot', id });
@@ -173,10 +186,12 @@ try {
   result.checks.push('F3/F4 the timer runs the first poll after opt-in; it records a silent baseline (old PRs, comments, pending CI) and reads only acme/mari');
 
   // A burst of changes: #4 opened by the project (CI passes), #3 merged, #2 CI fails + review + bot comment, #5 external with failing CI.
-  const C = ['C1', 'C2'].map(sha), E1 = sha('E1');
+  const C = ['C1', 'C2'].map(sha), E1 = sha('E1'), O1 = sha('O1');
   ghSet(state => {
     state.pulls.push({ number: 4, title: 'Add settings page', head: 'pi/settings', base: 'main', sha: C[0], user: 'pi-bot' });
     state.pulls.push({ number: 5, title: 'Fork change', head: 'mallory/x', base: 'main', sha: E1, user: 'mallory' });
+    state.pulls.push({ number: 8, title: 'Orphan branch', head: 'pi/orphan', base: 'main', sha: O1, user: 'pi-bot' });
+    state.checks[O1] = [{ name: 'lint', conclusion: 'failure' }];
     Object.assign(pull(state, 3), { state: 'closed', merged: true });
     Object.assign(pull(state, 2), { reviews: [...pull(state, 2).reviews, { id: 11, user: 'alice', state: 'CHANGES_REQUESTED', body: 'MARK-REVIEW please rename the button' }], comments: [{ id: 21, user: 'ci-bot[bot]', body: 'MARK-BOT coverage dropped 2%' }] });
     state.checks[A[0]] = [{ name: 'lint', conclusion: 'failure' }, { name: 'unit', conclusion: 'success' }];
@@ -186,14 +201,16 @@ try {
   await evaluate(`document.querySelector('[data-action="follow-poll"]').click()`, s);
   const [event] = await eventually(async () => { const list = await events(); return list.length === 1 && list; }, 'Check now did not deliver one event');
   const text = event.text;
-  for (const want of ['PR #4 “Add settings page” opened by pi-bot', 'PR #3 “Docs tweak” merged', 'PR #2 “Fix login copy” CI failed at', 'lint (failure)', 'PR #4 “Add settings page” CI passed', 'review by alice CHANGES_REQUESTED: MARK-REVIEW', 'comment by ci-bot[bot] (bot): MARK-BOT', 'untrusted', 'PR #5 “Fork change” CI failed', 'not published by this project; no auto-fix', 'auto-fix dispatched to a new worker', 'attempt 1 of 3']) if (!text.includes(want)) throw Error(`Event lacks "${want}": ${text}`);
+  for (const want of ['PR #4 “Add settings page” opened by pi-bot', 'PR #3 “Docs tweak” merged', 'PR #2 “Fix login copy” CI failed at', 'lint (failure)', 'PR #4 “Add settings page” CI passed', 'review by alice CHANGES_REQUESTED: MARK-REVIEW', 'comment by ci-bot[bot] (bot): MARK-BOT', 'untrusted', 'PR #5 “Fork change” CI failed', 'not published by this project; no auto-fix', 'auto-fix sent to the thread that opened it', 'attempt 1 of 3']) if (!text.includes(want)) throw Error(`Event lacks "${want}": ${text}`);
   if (/OLD-COMMENT|OLD-REVIEW|Old work/.test(text)) throw Error('Baseline items re-delivered: ' + text);
   result.checks.push('F8 one event lists opened, merged, CI failed/passed, review and bot comment, marked untrusted; baseline items stay out');
   if (event.conversationId !== alerts.conversationId) throw Error('Event not routed to Alerts: ' + JSON.stringify({ event: event.conversationId, alerts: alerts.conversationId }));
   result.checks.push('F9/F10 the batch is one event in the chat chosen in Settings');
   const fixes1 = await fixWork();
-  if (fixes1.length !== 1 || !fixes1[0].text.includes('PR #2') || !fixes1[0].text.includes('pi/fix-login') || fixes1[0].chatConversationId !== alerts.conversationId) throw Error('Fix dispatch wrong: ' + JSON.stringify(fixes1));
+  if (fixes1.length !== 1 || !fixes1[0].text.includes('PR #2') || !fixes1[0].text.includes(fixBranch) || fixes1[0].chatConversationId !== alerts.conversationId) throw Error('Fix dispatch wrong: ' + JSON.stringify(fixes1));
   result.checks.push('F12/F16 only the project-published PR (#2) gets a fix worker, scoped to the repository, reporting to Alerts; external #5 does not');
+  if (!/PR #8 “Orphan branch” CI failed[\s\S]*not published by this project; no auto-fix/.test(text)) throw Error('Receipt-less pi/ PR not refused: ' + text);
+  result.checks.push('Q18/C5 a failing pi/ PR without a publication receipt is not auto-fixed ("not published by this project")');
   await settleAll();
   const fixTools = result.calls.find(c => !c.coordinator && c.kind === 'fix')?.tools ?? [];
   if (!['write', 'edit'].every(name => fixTools.includes(name))) throw Error('Fix worker is not scoped to the repository: ' + JSON.stringify(fixTools));
@@ -241,9 +258,10 @@ try {
 
   // F17: auto-fix off.
   await rpc({ action: 'automation-update', id, change: { follow: { autoFix: false } } });
-  ghSet(state => { pull(state, 4).sha = C[1]; state.checks[C[1]] = [{ name: 'lint', conclusion: 'failure' }]; });
+  const A6 = sha('A6');
+  ghSet(state => { pull(state, 2).sha = A6; state.checks[A6] = [{ name: 'lint', conclusion: 'failure' }]; });
   await poll();
-  if ((await fixWork()).length !== 3 || !/PR #4 .*CI failed.*auto-fix is off/.test((await events()).at(-1).text)) throw Error('Auto-fix off not respected');
+  if ((await fixWork()).length !== 3 || !/PR #2 .*CI failed.*auto-fix is off/.test((await events()).at(-1).text)) throw Error('Auto-fix off not respected');
   result.checks.push('F17 auto-fix can be turned off while following continues');
   await settleAll();
 

@@ -6,6 +6,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { WorkerSkillGrant } from "./worker-skill-types.ts";
+import { SkillProfiles } from "./skill-profiles.ts";
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 const knowledgePath = Type.String({ minLength: 1, maxLength: 1024 });
@@ -58,8 +59,10 @@ export const Project = Type.Object({
   githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
   workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
   commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
-  /** Explicit owner-issued worker skill grants; absent on legacy projects means no access. */
+  /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
   workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })), 
+  /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
+  skillProfiles: Type.Optional(SkillProfiles),
   createdAt: text, model: text,
   models: Type.Object({ worker: text, scout: text, reviewer: text }),
   sessionFile: Type.Union([text, Type.Null()]),
@@ -165,10 +168,6 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-catalog"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("worker-skills-grants"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 128 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("worker-skills-grant-read"), id: Id, grantId: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("worker-skills-grant-set"), id: Id, confirm: Id, expectedCatalogRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), expectedGrantsRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), selection: Type.Unknown() }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("worker-skills-grant-revoke"), id: Id, confirm: Id, grantId: Id, expectedGrantsRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profiles-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profile-read"), id: Id, profileId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profile-set"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), profile: CommandProfileInput }, { additionalProperties: false }),
@@ -188,7 +187,9 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("settings-update"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), changes: Type.Object({
     name: Type.Optional(text), objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text),
     models: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }, { additionalProperties: false })),
-    knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 }))
+    knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+    /** null restores the default (repository skills for every profile). */
+    skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()]))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("search"), id: Id, query: Type.String({ minLength: 1, maxLength: 500 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }, { additionalProperties: false }),

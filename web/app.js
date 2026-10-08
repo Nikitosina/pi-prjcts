@@ -277,7 +277,7 @@ function setTab(next) {
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); renderNotify(); }
 }
 
 function render() {
@@ -402,12 +402,67 @@ function renderPanels() {
   const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0;
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
-  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(false, wholeRepository ? "3. Worker skills" : "4. Worker skills", wholeRepository ? "Configured Pi skills are available automatically." : "Optional, explicitly selected repository skills.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); }
+  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
+
+// Skills (Settings): "All profiles" plus per-role additions. Prompts carry only names and descriptions; bodies are read on demand.
+const skillProfileTabs = [["all", "All profiles"], ["coordinator", "Coordinator"], ["worker", "Worker"], ["scout", "Scout"], ["reviewer", "Reviewer"]];
+const skillSourceLabels = { repo: "Repository", global: "Global", package: "Packages" };
+let skillsPicker = null;
+async function loadSkillsPicker(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#skills-picker");
+  if (!id || !plan || !force && skillsPicker?.projectId === id) return;
+  try {
+    const [settings, { skills }] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "coordinator-skills", id })]);
+    if (id !== projectId || current !== generation) return;
+    const saved = settings.values.skills;
+    const profiles = saved ?? { all: skills.filter(skill => skill.source === "repo").map(skill => skill.name), coordinator: [], worker: [], scout: [], reviewer: [] };
+    skillsPicker = { projectId: id, skills, isDefault: !saved, draft: structuredClone(profiles), saved: JSON.stringify(profiles), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
+    renderSkillsPicker();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Skills unavailable: ${esc(error.message)}</p>`; }
+}
+function renderSkillsPicker() {
+  const state = skillsPicker, node = document.querySelector("#skills-picker");
+  if (!state || state.projectId !== projectId) return;
+  const known = new Set(state.skills.map(skill => skill.name)), count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
+  document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${state.isDefault && JSON.stringify(state.draft) === state.saved ? "default: repository skills" : `${count("all")} for every profile`}`;
+  const q = state.query.trim().toLowerCase(), all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
+  const shown = state.skills.filter(skill => !q || skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q));
+  const groups = Object.keys(skillSourceLabels).map(source => [source, shown.filter(skill => skill.source === source)]).filter(([, list]) => list.length);
+  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${inherited || picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
+  const dirty = JSON.stringify(state.draft) !== state.saved;
+  node.innerHTML = `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === state.tab ? " on" : ""}" aria-selected="${role === state.tab}" data-action="skills-tab" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>
+    <p class="note">${state.tab === "all" ? "Every profile gets these." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the skills checked here.`}</p>
+    <input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">
+    <div class="skill-groups">${groups.map(([source, list]) => `<fieldset class="events-group skill-group" data-source="${source}"><legend>${skillSourceLabels[source]} · ${list.length}</legend>${list.map(row).join("")}</fieldset>`).join("") || '<p class="note">No skill matches.</p>'}</div>
+    ${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
+    <div class="row"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled" : ""}>Reset to default</button></div>`;
+}
+async function saveSkillsPicker(reset) {
+  const state = skillsPicker, id = projectId;
+  if (!state || state.projectId !== id) throw new Error("Reload Settings before saving skills");
+  const settings = await api({ action: "settings-snapshot", id });
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: reset ? null : state.draft } }, reset ? "Skills reset to repository skills." : "Skills saved. New threads use them; running threads keep theirs."); }
+  catch (error) { state.note = error.message; renderSkillsPicker(); throw error; }
+  await loadSkillsPicker(true);
+}
+document.addEventListener("change", event => {
+  const box = event.target.closest("[data-skill-pick]");
+  if (!box || !skillsPicker) return;
+  const list = new Set(skillsPicker.draft[skillsPicker.tab]);
+  if (box.checked) list.add(box.dataset.skillPick); else list.delete(box.dataset.skillPick);
+  skillsPicker.draft[skillsPicker.tab] = [...list].sort();
+  skillsPicker.note = ""; renderSkillsPicker();
+});
+document.addEventListener("input", event => {
+  if (event.target.id !== "skills-search" || !skillsPicker) return;
+  skillsPicker.query = event.target.value; renderSkillsPicker();
+  const input = document.querySelector("#skills-search"); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+});
 
 // Events in: Follow PRs and the generic webhook (one card in Settings, rendered from automation-snapshot).
 let eventsIn = null;
@@ -1263,6 +1318,9 @@ async function action(node) {
       telegramRemoveArmed = false; await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed."); break;
     }
     case "automation-save": await saveEventsIn(); break;
+    case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
+    case "skills-save": await saveSkillsPicker(false); break;
+    case "skills-reset": await saveSkillsPicker(true); break;
     case "follow-poll": { const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub."); eventsIn.data = data; renderEventsIn(); break; }
     case "webhook-reveal": eventsIn.reveal = !eventsIn.reveal; renderEventsIn(); break;
     case "webhook-copy": await navigator.clipboard.writeText(node.dataset.what === "url" ? eventsIn.data.webhook.url : eventsIn.data.webhook.secret); toast(node.dataset.what === "url" ? "Webhook URL copied." : "Webhook secret copied."); break;
@@ -1502,7 +1560,7 @@ async function submit(form) {
     let fields;
     try { fields = JSON.parse(data.get("payload")); } catch { throw new Error("Owner setup payload must be valid JSON"); }
     if (!fields || typeof fields !== "object" || Array.isArray(fields)) throw new Error("Owner setup payload must be one JSON object");
-    const kind = form.dataset.kind, actionByKind = { "workspace-grant": "workspace-grant", "workspace-revoke": "workspace-revoke", "github-authorize": "github-authorize", "github-revoke": "github-revoke", "command-profile-set": "command-profile-set", "worker-skills-grant-set": "worker-skills-grant-set", "worker-skills-grant-revoke": "worker-skills-grant-revoke" };
+    const kind = form.dataset.kind, actionByKind = { "workspace-grant": "workspace-grant", "workspace-revoke": "workspace-revoke", "github-authorize": "github-authorize", "github-revoke": "github-revoke", "command-profile-set": "command-profile-set" };
     if (!Object.hasOwn(actionByKind, kind)) throw new Error("Unknown owner setup action");
     const result = await mutate({ ...fields, action: actionByKind[kind], id: target, confirm: target }, "Owner API recorded this explicit revision-checked change. No command was executed.");
     if (projectId === target && version === dialogVersion && dialog.open) await ownerSetupDialog(result);
@@ -1880,20 +1938,18 @@ async function ownerSetupDialog(result = null) {
   const workspaces = (snapshot.workspace?.scopes || []).map(scope => `<article class="task"><strong>Scope ${esc(scope.id)}</strong><p>Repository ${esc(scope.repositoryId)} · ${scope.fileCount} files · base ${esc(scope.baseRevision)}</p><button class="danger" data-action="owner-setup-edit" data-kind="workspace-revoke" data-payload="${esc(JSON.stringify({ scopeId: scope.id, expectedRevision: snapshot.workspaceRevision }))}">Revoke scope</button></article>`).join("") || '<p class="note">No active workspace scopes.</p>';
   const github = (snapshot.github || []).map(auth => `<article class="task"><strong>${esc(auth.repositoryId)}</strong><p>Repository ID ${esc(auth.numericId)} · ${esc(auth.branchPrefix)} · base ${esc(auth.baseBranch)}</p><button class="danger" data-action="owner-setup-edit" data-kind="github-revoke" data-payload="${esc(JSON.stringify({ repositoryId: auth.repositoryId, expectedRevision: snapshot.githubRevision }))}">Revoke GitHub authorization</button></article>`).join("") || '<p class="note">No active GitHub authorizations.</p>';
   const profiles = (snapshot.profiles || []).map(profile => `<article class="task"><strong>${esc(profile.label)} · ${esc(profile.id)}</strong><p>${esc(profile.repositoryId)} · ${profile.enabled ? "enabled" : "disabled"} · ${esc(profile.blocker || "No reported blocker")}</p><button data-action="owner-profile-read" data-project="${esc(id)}" data-profile="${esc(profile.id)}">Read fixed argv and executable identity</button></article>`).join("") || '<p class="note">No fixed command profiles.</p>';
-  const skills = (snapshot.grants || []).map(grant => `<article class="task"><strong>Grant ${esc(grant.id)}</strong><p>${grant.enabled ? "enabled" : "disabled"} · ${grant.skills.map(skill => esc(skill.name)).join(", ")}</p><button class="danger" data-action="owner-setup-edit" data-kind="worker-skills-grant-revoke" data-payload="${esc(JSON.stringify({ grantId: grant.id, expectedGrantsRevision: snapshot.grantsRevision }))}">Revoke skill grant</button></article>`).join("") || '<p class="note">No worker skill grants.</p>';
   const seeds = {
     "workspace-grant": { expectedRevision: snapshot.workspaceRevision, provider: "github", repositoryId: "", ownerCheckout: view.project.cwd, approvedRoot: "", fileOwnershipPrefix: "", files: [], baseRevision: "" },
     "github-authorize": { expectedRevision: snapshot.githubRevision, repositoryId: "", expectedRepositoryId: 0, branchPrefix: "" },
     "command-profile-set": { expectedRevision: snapshot.profilesRevision, profile: { id: crypto.randomUUID(), label: "", repositoryId: "", scopeIds: [], executable: "", arguments: [], effect: "workspace", timeoutMs: 300000, maxOutputBytes: 65536, enabled: false } },
-    "worker-skills-grant-set": { expectedCatalogRevision: "", expectedGrantsRevision: snapshot.grantsRevision, selection: { id: crypto.randomUUID(), scopeIds: [], skills: [], enabled: false } },
   };
-  const actions = [["workspace-grant", "Create workspace scope"], ["github-authorize", "Authorize GitHub target"], ["command-profile-set", "Register or disable fixed profile"], ["worker-skills-grant-set", "Grant selected repository skills"]].map(([kind, label]) => `<button data-action="owner-setup-edit" data-kind="${kind}" data-payload="${esc(JSON.stringify(seeds[kind]))}">${label}</button>`).join("");
-  const hist = `<p>Workspace revision ${esc(snapshot.workspaceRevision)} · GitHub revision ${esc(snapshot.githubRevision)} · grants revision ${esc(snapshot.grantsRevision)} · profile revision ${esc(snapshot.profilesRevision)}</p><p class="notice">${esc(snapshot.configuredCatalog?.reason || "Configured skills unavailable")}. No Arc setup. Profile registration does not execute commands or approve deployment/destructive effects.</p>`;
+  const actions = [["workspace-grant", "Create workspace scope"], ["github-authorize", "Authorize GitHub target"], ["command-profile-set", "Register or disable fixed profile"]].map(([kind, label]) => `<button data-action="owner-setup-edit" data-kind="${kind}" data-payload="${esc(JSON.stringify(seeds[kind]))}">${label}</button>`).join("");
+  const hist = `<p>Workspace revision ${esc(snapshot.workspaceRevision)} · GitHub revision ${esc(snapshot.githubRevision)} · profile revision ${esc(snapshot.profilesRevision)}</p><p class="notice">${esc(snapshot.configuredCatalog?.reason || "Configured skills unavailable")}. No Arc setup. Profile registration does not execute commands or approve deployment/destructive effects.</p>`;
   const whole = (snapshot.workspace?.scopes || []).find(scope => scope.wholeRepository);
   const connected = whole && (snapshot.github || []).find(auth => auth.repositoryId === whole.repositoryId);
   const githubCard = !whole ? "" : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
   const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from current HEAD.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
-  dialog.querySelector(".dialog-body").innerHTML = `${result ? `<p class="notice">Host response: ${esc(JSON.stringify(result))}</p>` : ""}${quick}<details class="advanced"><summary>Advanced: folder-limited scopes, GitHub, command profiles, skills</summary>${hist}<form data-owner-github-inspect data-project="${esc(id)}"><label><span>Exact owner/repository, matching the checkout's GitHub origin</span><input name="repositoryId" placeholder="owner/repository" required></label><button type="submit">Read GitHub numeric ID and default branch</button></form><div class="row">${actions}</div><h3>Workspace scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Fixed profiles</h3>${profiles}<h3>Worker skill grants</h3>${skills}</details><button data-action="owner-setup">Refresh</button>`;
+  dialog.querySelector(".dialog-body").innerHTML = `${result ? `<p class="notice">Host response: ${esc(JSON.stringify(result))}</p>` : ""}${quick}<details class="advanced"><summary>Advanced: folder-limited scopes, GitHub, command profiles</summary>${hist}<form data-owner-github-inspect data-project="${esc(id)}"><label><span>Exact owner/repository, matching the checkout's GitHub origin</span><input name="repositoryId" placeholder="owner/repository" required></label><button type="submit">Read GitHub numeric ID and default branch</button></form><div class="row">${actions}</div><h3>Workspace scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Fixed profiles</h3>${profiles}</details><button data-action="owner-setup">Refresh</button>`;
 }
 
 async function workspaceQuickDialog() {
@@ -1938,20 +1994,7 @@ async function ownerSetupEdit(kind, payload) {
   const target = projectId, currentGeneration = generation;
   let initial;
   try { initial = JSON.parse(payload); } catch { throw new Error("Owner setup seed is invalid"); }
-  let candidates = "";
-  if (kind === "worker-skills-grant-set") {
-    const version = showDialog("Owner setup · repository skill catalog", '<p class="note">Capturing the current owner-authorized catalog…</p>');
-    // Owners can have hundreds of skills; read every page of one catalog revision.
-    const catalog = await api({ action: "worker-skills-catalog", id: target, offset: 0, limit: 64 });
-    for (let page = catalog.page; page.nextOffset !== null;) {
-      const next = await api({ action: "worker-skills-catalog", id: target, offset: page.nextOffset, limit: 64 });
-      if (next.revision !== catalog.revision || next.page.offset !== page.nextOffset) throw new Error("Skill catalog changed while paging; reopen to refresh");
-      catalog.candidates.push(...next.candidates); page = next.page;
-    }
-    if (projectId !== target || generation !== currentGeneration || !dialog.open || dialogVersion !== version) return;
-    initial.expectedCatalogRevision = catalog.revision;
-    candidates = `<p>Catalog revision ${esc(catalog.revision)} · ${catalog.page.total} skills. Use these opaque catalog IDs, selected scope IDs, and explicit relative reference names only.</p><ul>${catalog.candidates.map(skill => `<li>${esc(skill.name)} · ${esc(skill.catalogId)} · ${esc(skill.origin.kind === "repository" ? skill.origin.repositoryId : skill.origin.source)}</li>`).join("")}</ul><p>${esc(catalog.blockers.includes("loaded-configured-catalog-unavailable") ? "Configured catalog unavailable. Repository candidates only." : "")}</p>`;
-  }
+  const candidates = "";
   if (projectId !== target || generation !== currentGeneration) return;
   showDialog(`Owner setup · ${kind}`, `<p>Project ${esc(target)}. Edit only the action fields. The host checks the inspected revision and immutable identities. Owner confirmation is required below for each write and is never saved in the draft.</p>${candidates}<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}"><label><span>API fields as JSON</span><textarea name="payload" required spellcheck="false">${esc(JSON.stringify(initial, null, 2))}</textarea></label>${kind.endsWith("-revoke") ? `<input type="hidden" name="confirm" value="${esc(target)}">` : ""}<button class="danger" type="submit">Confirm</button><p>Cancel leaves authority unchanged. Workspace/GitHub revocation stops future admissions. Retained receipts and history remain.</p></form>`);
 }

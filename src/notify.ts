@@ -55,7 +55,8 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
     }
     // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
     const quietWork = silent || !entry.workBaselined;
-    for (const work of (await owner.planSnapshot()).work) {
+    const planWork = (await owner.planSnapshot()).work;
+    for (const work of planWork) {
       if (work.status !== "failed") continue;
       const key = `work:${work.id}`;
       if (seen.has(key)) continue;
@@ -66,6 +67,9 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       push({ ...base, chatId: chat.id, chat: chat.title, kind: "error", title: `${work.parentThreadId ? "Sub-agent" : work.role[0].toUpperCase() + work.role.slice(1)} failed`, text: clip(`${work.role} failed: ${task.length > 200 ? `${task.slice(0, 199)}…` : task}${work.blocker ? `\n${work.blocker}` : ""}`), workId: work.id, threadId: work.threadId });
     }
     entry.workBaselined = true;
+    // A coordinator turn is a result only when nothing is still running in its chat and no work report follows it (a later report turn means
+    // work was still running when it was written); batched submissions share one answer and notify once. Intermediate status lines stay quiet.
+    const working = new Set(planWork.filter(work => work.status === "queued" || work.status === "running").map(work => work.chatConversationId === null ? chats[0].id : chatOf(work.chatConversationId).id));
     for (const chat of chats) {
       const after = entry.chats[chat.id];
       // Archived chats are skipped, but baselined once so a restored chat does not replay its history.
@@ -73,11 +77,11 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       const quiet = after === undefined && (silent || chat.archived);
       const submissions = await owner.chatSubmissions(chat.id, after ?? -1);
       let last = after ?? -1;
-      for (const submission of submissions) {
+      for (const [index, submission] of submissions.entries()) {
         if (submission.status === "queued" || submission.status === "placed") break;
         last = submission.id;
         if (quiet) continue;
-        if (submission.status === "done" && submission.text?.trim()) push({ ...base, chatId: chat.id, chat: chat.title, kind: "result", title: "Finished", text: clip(submission.text.trim()) });
+        if (submission.status === "done" && submission.text?.trim() && !working.has(chat.id) && !submissions.slice(index + 1).some(later => later.requestId?.startsWith("plan-report:") || later.answerId !== null && later.answerId === submission.answerId)) push({ ...base, chatId: chat.id, chat: chat.title, kind: "result", title: "Finished", text: clip(submission.text.trim()) });
         else if (submission.status === "unanswered" && submission.reason !== "aborted") push({ ...base, chatId: chat.id, chat: chat.title, kind: "error", title: "Coordinator turn failed", text: clip(`${submission.reason ?? "failed"}${submission.detail ? `: ${submission.detail}` : ""}`) });
       }
       entry.chats[chat.id] = last;

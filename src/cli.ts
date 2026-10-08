@@ -140,9 +140,9 @@ switch (command) {
     const [repositoryId, expectedRepositoryId, pullRequest, kind, everyMs] = values;
     input = parse(Request, { action: "monitor-create", id: first, monitorId: second, repositoryId, expectedRepositoryId: integerArgument(expectedRepositoryId, "Repository numeric ID"), pullRequest: integerArgument(pullRequest, "PR number"), kind, everyMs: integerArgument(everyMs, "Monitor interval milliseconds") }); break;
   }
-  case "owner-workspaces": case "owner-skills-catalog": case "owner-skills-grants": case "owner-command-profiles": case "owner-setup": {
+  case "owner-workspaces": case "owner-skills-catalog": case "owner-command-profiles": case "owner-setup": {
     if (!first || second !== undefined || rest.length) throw new Error(`Usage: ${command} <project-id>`);
-    const action = command === "owner-workspaces" ? "workspace-catalog" : command === "owner-skills-catalog" ? "worker-skills-catalog" : command === "owner-skills-grants" ? "worker-skills-grants" : command === "owner-command-profiles" ? "command-profiles-snapshot" : "owner-setup-snapshot";
+    const action = command === "owner-workspaces" ? "workspace-catalog" : command === "owner-skills-catalog" ? "worker-skills-catalog" : command === "owner-command-profiles" ? "command-profiles-snapshot" : "owner-setup-snapshot";
     input = parse(Request, { action, id: first, ...(action === "worker-skills-catalog" ? { limit: 64 } : {}) }); break;
   }
   case "owner-workspace-revoke": {
@@ -178,16 +178,6 @@ switch (command) {
     try { profile = JSON.parse(rest[0]); } catch { throw new Error("Profile JSON must be valid JSON"); }
     input = parse(Request, { action: "command-profile-set", id: first, expectedRevision: second, profile, confirm: rest[2] }); break;
   }
-  case "owner-skill-grant": {
-    if (!first || !second || rest.length !== 4 || rest[2] !== "--confirm" || rest[3] !== first) throw new Error("Usage: owner-skill-grant <project-id> <catalog-revision> <grants-revision> <selection-json> --confirm <same-project-id>");
-    let selection: unknown;
-    try { selection = JSON.parse(rest[1]); } catch { throw new Error("Skill selection must be valid JSON"); }
-    input = parse(Request, { action: "worker-skills-grant-set", id: first, expectedCatalogRevision: second, expectedGrantsRevision: rest[0], selection, confirm: rest[3] }); break;
-  }
-  case "owner-skill-revoke": {
-    if (!first || !second || rest.length !== 3 || rest[1] !== "--confirm" || rest[2] !== first) throw new Error("Usage: owner-skill-revoke <project-id> <grant-id> <grants-revision> --confirm <same-project-id>");
-    input = parse(Request, { action: "worker-skills-grant-revoke", id: first, grantId: second, expectedGrantsRevision: rest[0], confirm: rest[2] }); break;
-  }
   case "workers":
     if (!first) throw new Error("Usage: workers <project-id> [run-id]");
     input = { action: "workers", id: first, ...(second ? { run: second } : {}) }; break;
@@ -196,7 +186,7 @@ switch (command) {
     input = { action: "control", id: first, run: second, operation: command, ...(command === "steer" ? { message: rest.join(" ") } : {}) }; break;
   case "host-stop": input = { action: "shutdown" }; break;
   default:
-    process.stderr.write("Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|delegate|submit-scoped|workers|steer|stop|thread-send|thread-steer|thread-stop|thread-history|legacy-thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-skills-grants|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|owner-skill-grant|owner-skill-revoke|notes|plan|pause|resume|archive|restore|delete|host-stop> ...\n");
+    process.stderr.write("Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|delegate|submit-scoped|workers|steer|stop|thread-send|thread-steer|thread-stop|thread-history|legacy-thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|plan|pause|resume|archive|restore|delete|host-stop> ...\n");
     process.exit(1);
 }
 try {

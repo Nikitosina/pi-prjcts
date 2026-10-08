@@ -258,7 +258,8 @@ export function followRuntime(root: Conversation, projectId: string, schedules: 
       if (isClosed() || controller.signal.aborted) return { skipped: "closed" };
       const target = await fixer.target(), notes = new Map<string, string>();
       for (const failure of failed) {
-        const published = failure.ref.startsWith(failure.repo.branchPrefix) || (await githubPublishedPullRequests(root, failure.repo.numericId)).some(item => item.number === failure.number);
+        // Same rule as auto-merge: only a verified publication receipt makes a PR the project's; a branch prefix alone does not.
+        const published = (await githubPublishedPullRequests(root, failure.repo.numericId)).some(item => item.number === failure.number);
         notes.set(`${failure.repo.repositoryId}#${failure.number}`, !published ? "not published by this project; no auto-fix" : !config.follow.autoFix ? "auto-fix is off" : await fix(failure, state, config.follow.fixCap, Number(target.id)));
       }
       if (config.autoMerge.enabled) for (const repo of repos) for (const [number, pr] of Object.entries(repoStates[repo.repositoryId]?.prs ?? {})) {

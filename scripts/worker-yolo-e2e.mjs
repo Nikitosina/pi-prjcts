@@ -47,15 +47,13 @@ try {
   pass("push to the pi/* branch succeeds against the local bare remote", git(remote, "rev-parse", `refs/heads/${branch}`));
   const source = readFileSync(new URL("../src/durable-workspace-binding.ts", import.meta.url), "utf8");
   assert.match(source, /createCodingTools\(receipt\.workspacePath/);
-  assert.match(source, /workerInstructions: `\$\{skillBinding\.instructions\}/);
-  assert.match(source, /configuredSkillInstructions/);
+  assert.doesNotMatch(source, /configuredSkillInstructions|skillBinding/);
   assert.match(source, /const builtins: ToolRegistration\[\] = codingTools\.map/);
-  assert.match(source, /tools\.push\(\.\.\.skillBinding\.tools\)/);
-  pass("F1/F6/F7 whole-scope built-ins and configured skill listing are bound in the worktree; skills remain available", true);
+  pass("F1/F7 whole-scope built-ins are bound in the worktree; skills come from role profiles (index + projects_skill_file), not a full listing", true);
   assert.doesNotMatch(readFileSync(new URL("../src/durable-planning.ts", import.meta.url), "utf8"), /createCodingTools/);
   pass("F9 coordinator does not receive coding bash tools", true);
   const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
-  assert.match(app, /wholeRepository \? "3\. Worker skills"/);
+  assert.match(app, /"3\. Skills"/);
   assert.match(app, /wholeRepository \? \[\] : \[step\(false, "3\. Fixed command profile"/);
   pass("F10 owner setup labels worker skills automatic for whole-repo", true);
 
@@ -82,9 +80,9 @@ try {
     assert.ok(names.includes("read") && names.includes("write"));
     const listedSkills = (await (await import("../src/coordinator.ts")).loadProjectResourceLoader(saved)).getSkills().skills;
     assert.ok(listedSkills.length > 0, "fixture host should load configured skills");
-    assert.match(prepared.workerInstructions, /Configured Pi skills/);
-    assert.ok(listedSkills.every(skill => prepared.workerInstructions.includes(skill.name) && prepared.workerInstructions.includes(skill.filePath)));
-    pass("F6 configured global/package skills are listed with readable SKILL.md paths", listedSkills.length);
+    assert.doesNotMatch(prepared.workerInstructions, /Configured Pi skills/);
+    assert.ok(!listedSkills.some(skill => prepared.workerInstructions.includes(skill.filePath)));
+    pass("F6 the binding no longer inlines every configured skill (role skill index comes from the runtime)", listedSkills.length);
     assert.ok(!names.some(name => name.startsWith("projects_workspace_") && /_(read|write|read_list|list)$/.test(name)));
     pass("F1/F7 scoped binding has built-ins, worktree cwd, no duplicate scoped file tools", { cwd: prepared.cwd, names });
     git(prepared.cwd, "remote", "set-url", "origin", fixtureBare);
