@@ -323,7 +323,11 @@ details.advanced > summary { cursor: pointer; color: var(--muted); }
 .context-meter[data-level="mid"] .fill { stroke: #c9902f; }
 .context-meter[data-level="high"] .fill { stroke: #c4553f; }
 .context-popup { visibility: hidden; position: absolute; bottom: calc(100% + 8px); right: -8px; white-space: nowrap; background: #23262b; color: #fff; font-size: 12px; padding: 6px 9px; border-radius: 5px; pointer-events: none; z-index: 5; }
-.context-meter:hover .context-popup, .context-meter:focus .context-popup { visibility: visible; }
+.context-meter:hover .context-popup, .context-meter:focus-within .context-popup { visibility: visible; pointer-events: auto; }
+.context-popup { display: inline-flex; align-items: center; gap: 8px; }
+.context-popup::before { content: ""; position: absolute; left: 0; right: 0; bottom: -10px; height: 10px; }
+.context-popup button { color: #fff; border-color: #5a5f68; padding: 2px 8px; white-space: nowrap; flex: none; width: auto; min-width: max-content; }
+.context-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 14px; align-items: end; }
 #warning > div + div { margin-top: 6px; }
 
 .live-reply { opacity: .92; }

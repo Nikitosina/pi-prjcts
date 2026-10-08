@@ -9,6 +9,15 @@ import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
+/** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
+export const ContextSettings = Type.Object({
+  contextWindow: Type.Optional(Type.Integer({ minimum: 4096, maximum: 10_000_000 })),
+  autoCompact: Type.Boolean(),
+  /** Share of the window at which compaction starts. */
+  thresholdPercent: Type.Optional(Type.Integer({ minimum: 10, maximum: 95 })),
+  keepRecentTokens: Type.Optional(Type.Integer({ minimum: 1000, maximum: 1_000_000 })),
+}, { additionalProperties: false });
+export type ContextSettings = Static<typeof ContextSettings>;
 const knowledgePath = Type.String({ minLength: 1, maxLength: 1024 });
 const revision = Type.String({ minLength: 1, maxLength: 128 });
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
@@ -65,6 +74,7 @@ export const Project = Type.Object({
   skillProfiles: Type.Optional(SkillProfiles),
   /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
   worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
+  contextSettings: Type.Optional(ContextSettings),
   createdAt: text, model: text,
   models: Type.Object({ worker: text, scout: text, reviewer: text }),
   sessionFile: Type.Union([text, Type.Null()]),
@@ -193,8 +203,11 @@ export const Request = Type.Union([
     /** null restores the default (repository skills for every profile). */
     skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
     /** "" removes the worktree setup command. */
-    worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 }))
+    worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
+    /** null restores the defaults (catalog window, pi-durable compaction policy). */
+    context: Type.Optional(Type.Union([ContextSettings, Type.Null()]))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("compact"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),

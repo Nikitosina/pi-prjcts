@@ -258,6 +258,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
+      // Context/compaction settings apply live (read on every generation): no idle requirement, no reopen.
+      if (Object.keys(input.changes).every(key => key === "context")) return withProjectLock(input.id, async () => {
+        const project = updateProjectSettings(loadProject(input.id), input);
+        saveProject(project);
+        const running = durableRuntimes.get(input.id);
+        if (running) (await running).applyContext(project.contextSettings);
+        return projectSettings(project);
+      });
       await validateProjectModelChanges(input.changes);
       let existing: Promise<DurableProjectRuntime> | undefined;
       await withProjectLock(input.id, async () => {
@@ -352,6 +360,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       }, true);
     });
     case "plan-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.planSnapshot() });
+    case "compact": return withDurableOwner({ id: input.id, operation: owner => owner.compact(input.chatId) });
     case "worktrees-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.worktrees() });
     case "worktrees-cleanup": if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id"); return withDurableOwner({ id: input.id, operation: owner => owner.cleanupWorktrees() });
     case "work-archive": return withDurableOwner({ id: input.id, operation: owner => owner.archiveWork({ workIds: input.workIds, terminal: input.terminal }) });

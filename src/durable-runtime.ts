@@ -28,7 +28,7 @@ import { loadDurableStanding } from "./durable-standing.ts";
 import { durableWorkspaceBinding } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
 import { ensureKnowledge, historyKnowledge, knowledgeContext, listKnowledge, memoryIndex, readKnowledge, writeKnowledge } from "./knowledge.ts";
-import { Project as ProjectSchema, addNote, loadProject, notes, parse, projectDir, type DurableInspection, type Project } from "./state.ts";
+import { Project as ProjectSchema, addNote, loadProject, notes, parse, projectDir, type ContextSettings, type DurableInspection, type Project } from "./state.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
@@ -115,8 +115,8 @@ export type DurableProjectSnapshot = {
     busy: boolean;
     messages: DurableCoordinatorMessage[];
     submissions: DurableSubmissionState[];
-    /** Estimated size of the next coordinator request against its model's context window. */
-    context: { tokens: number; window: number | null };
+    /** Estimated size of the next coordinator request against its model's context window (the project override when set; `catalogWindow` without it). */
+    context: { tokens: number; window: number | null; catalogWindow: number | null; compacting: boolean };
   };
   workers: Record<string, { conversationId: number; reportedAnswerIds: number[] }>;
 };
@@ -161,6 +161,10 @@ export type DurableProjectRuntime = {
   resumePlan(): Promise<DurablePlanSnapshot>;
   planSnapshot(): Promise<DurablePlanSnapshot>;
   worktrees(): Promise<WorktreeInventory>;
+  /** Live context/compaction settings (read on every generation; no reopen). */
+  applyContext(settings: ContextSettings | undefined): void;
+  /** Manual compaction of one chat ("Compact now"); refuses while paused or already compacting. */
+  compact(chatId?: string): Promise<{ started: true; chatId: string }>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
   snapshot(chatId?: string): Promise<DurableProjectSnapshot>;
   threadHistory(threadId: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }): ReturnType<typeof threadHistory>;
@@ -283,6 +287,14 @@ export async function openDurableProject(input: { project: Project; dir: string;
       return stream;
     };
     const coordinatorModel = modelRef(project.model);
+    // Per-project context window override (coordinator model only); pi-durable reads getModel().contextWindow for its thresholds.
+    let contextSettings = project.contextSettings;
+    const catalogModel = models.getModel.bind(models);
+    const catalogWindow = () => catalogModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null;
+    models.getModel = ((provider: string, modelId: string) => {
+      const model = catalogModel(provider, modelId), window = contextSettings?.contextWindow;
+      return model && window && provider === coordinatorModel.provider && modelId === coordinatorModel.modelId ? { ...model, contextWindow: window } : model;
+    }) as typeof models.getModel;
     const workerModel = modelRef(project.models.worker);
     const scoutModel = modelRef(project.models.scout);
     const reviewerModel = modelRef(project.models.reviewer);
@@ -361,7 +373,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
       registry,
       // Reasoning models can stay silent for minutes; Durable checkpoints retries and resends only the failed request.
       // followUpMode "all": worker reports queued while the coordinator is busy are answered in one turn, not one turn each.
-      settings: { stream: { timeoutMs: 300_000 }, retry: { maxRetries: 3 }, followUpMode: "all" },
+      // Compaction is a getter: Durable reads settings on every resolution, so Settings changes apply to the next generation.
+      settings: { stream: { timeoutMs: 300_000 }, retry: { maxRetries: 3 }, followUpMode: "all", get compaction() { return compactionPolicy(contextSettings, contextSettings?.contextWindow ?? catalogWindow()); } },
       onReport: error => report(input.onReport, project.id, error),
     }, context);
     const root = await harness.root(context, { agent: {
@@ -650,6 +663,15 @@ export async function openDurableProject(input: { project: Project; dir: string;
       planSnapshot: async () => planning.snapshot(root),
       worktrees: () => worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir }),
       cleanupWorktrees: () => cleanup(),
+      applyContext: value => { contextSettings = value; },
+      compact: id => admitting(async () => {
+        const { conversation, chat } = await resolveChat(id);
+        if (chat.archived) throw new Error("Chat is archived; restore it before compacting");
+        const view = await conversation.viewState(context);
+        try { if (liveFrame(view.value).compacting) throw new Error("This chat is already compacting"); } finally { view.dispose(); }
+        await conversation.compact(undefined, context);
+        return { started: true as const, chatId: chat.id };
+      }),
       operationRequest: approvals.request,
       operationDecide: approvals.decide,
       operationSnapshot: approvals.snapshot,
@@ -669,7 +691,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       githubReadSnapshot: options => githubReadSnapshot(root, options),
       githubWriteSnapshot: options => githubWriteSnapshot(root, options),
       githubWriteInspect: value => { assertOpen(); return writeInspector.inspect(value); },
-      snapshot: async id => { const selected = await resolveChat(id); return snapshot(openedHarness, openedStorage, root, selected.conversation, selected.chat.id, await chatList(), project, await planning.threadIdentities(root), models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null); },
+      snapshot: async id => { const selected = await resolveChat(id); return snapshot(openedHarness, openedStorage, root, selected.conversation, selected.chat.id, await chatList(), project, await planning.threadIdentities(root), { window: models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null, catalogWindow: catalogWindow() }); },
       threadHistory: async (id, options = {}) => {
         assertOpen();
         const owned = (await planning.threadIdentities(root)).find(thread => thread.threadId === id);
@@ -829,7 +851,7 @@ async function normalizeSubmission(root: Conversation, submission: Submission): 
   };
 }
 
-async function snapshot(harness: Harness, storage: Storage, root: Conversation, chat: Conversation, chatIdValue: string, chats: DurableChat[], project: Project, threads: readonly { threadId: string; conversationId: Conversation["id"] }[], contextWindow: number | null): Promise<DurableProjectSnapshot> {
+async function snapshot(harness: Harness, storage: Storage, root: Conversation, chat: Conversation, chatIdValue: string, chats: DurableChat[], project: Project, threads: readonly { threadId: string; conversationId: Conversation["id"] }[], windows: { window: number | null; catalogWindow: number | null }): Promise<DurableProjectSnapshot> {
   const identity = await harness.snapshot(DurableProjectIdentity, root.id, context);
   if (!identity?.projectId || identity.coordinatorConversationId === null) throw new Error("Durable project identity is missing");
   const workerState = await harness.snapshot(Workers, root.id, context);
@@ -860,10 +882,19 @@ async function snapshot(harness: Harness, storage: Storage, root: Conversation, 
       durableInspection: { identity: { projectId: identity.projectId, coordinatorConversationId: identity.coordinatorConversationId }, coordinator: { conversationId: Number(chat.id), messages: textMessages(messages), submissions, generationTasks }, workers },
       identities: { projectId: identity.projectId, coordinatorConversationId: identity.coordinatorConversationId, workers: Object.fromEntries(Object.entries(workerState?.agents ?? {}).map(([name, worker]) => [name, Number(worker.conversationId)])) },
       chatId: chatIdValue, chats,
-      coordinator: { busy: submissions.some(submission => submission.status === "placed"), messages, submissions, context: { tokens: contextTokens((await chat.context(context)).messages), window: contextWindow } },
+      coordinator: { busy: submissions.some(submission => submission.status === "placed"), messages, submissions, context: { tokens: contextTokens((await chat.context(context)).messages), ...windows, compacting: liveFrame(view.value).compacting } },
       workers: Object.fromEntries(Object.entries(workerState?.agents ?? {}).map(([name, worker]) => [name, { conversationId: Number(worker.conversationId), reportedAnswerIds: worker.reported.map(Number) }])),
     };
   } finally { view.dispose(); }
+}
+
+/** Threshold % = where compaction starts (background), generation blocks only when the answer reserve is reached; absent fields keep pi-durable defaults. */
+export function compactionPolicy(settings: ContextSettings | undefined, window: number | null): { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number; backgroundTokens?: number } {
+  if (!settings) return {};
+  const keepRecentTokens = Math.min(settings.keepRecentTokens ?? 20_000, window ? Math.floor(window / 2) : Infinity);
+  if (settings.thresholdPercent === undefined || !window) return { enabled: settings.autoCompact, keepRecentTokens };
+  const start = Math.floor(window * settings.thresholdPercent / 100), reserveTokens = Math.max(1024, Math.min(16_384, window - start));
+  return { enabled: settings.autoCompact, keepRecentTokens, reserveTokens, backgroundTokens: Math.max(0, window - reserveTokens - start) };
 }
 
 // Same estimate as Pi's compaction: newest valid usage plus estimates of later messages.

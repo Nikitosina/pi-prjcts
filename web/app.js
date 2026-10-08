@@ -349,7 +349,9 @@ function renderContextMeter(context) {
   meter.querySelector(".fill").setAttribute("stroke-dasharray", `${(circumference * percent / 100).toFixed(2)} ${circumference.toFixed(2)}`);
   meter.dataset.level = percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
   meter.setAttribute("aria-label", label);
-  meter.querySelector(".context-popup").textContent = label;
+  const popup = meter.querySelector(".context-popup"), compacting = !!context?.compacting;
+  const popupHtml = `<span class="context-label">${esc(compacting ? `${label} · compacting…` : label)}</span><button type="button" class="ghost small" data-action="compact-now" ${compacting ? "disabled" : ""}>${compacting ? "Compacting…" : "Compact now"}</button>`;
+  if (popup.dataset.html !== popupHtml) { popup.innerHTML = popupHtml; popup.dataset.html = popupHtml; }
   meter.querySelector(".context-pct").textContent = known ? `${percent}%` : "";
 }
 
@@ -403,7 +405,7 @@ function renderPanels() {
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadWorktrees(); }
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
@@ -500,6 +502,42 @@ async function cleanupWorktreesNow() {
   const id = projectId, result = await mutate({ action: "worktrees-cleanup", id, confirm: id }, "Cleaning up worktrees…");
   toast(`Removed ${result.removed.length} worktree(s), reclaimed ${sizeText(result.reclaimedKb)}${result.failed.length ? `; ${result.failed.length} could not be removed` : ""}.`);
   await loadWorktrees(true);
+}
+
+// Context and compaction (Settings): window override, auto-compact, threshold, keep-recent; applied live. "Compact now" also sits in the context ring.
+let contextCard = null;
+async function loadContextSettings(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#context-settings");
+  if (!id || !plan || !force && contextCard?.projectId === id) return;
+  try {
+    const settings = await api({ action: "settings-snapshot", id });
+    if (id !== projectId || current !== generation) return;
+    contextCard = { projectId: id, values: settings.values.context, revision: settings.revision }; renderContextSettings();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Context settings unavailable: ${esc(error.message)}</p>`; }
+}
+function renderContextSettings() {
+  const state = contextCard, node = document.querySelector("#context-settings");
+  if (!state || state.projectId !== projectId) return;
+  const v = state.values, catalog = view?.context?.catalogWindow ?? null, window = v?.contextWindow ?? catalog;
+  const defaultPct = catalog ? Math.round((catalog - 16384 - 32768) / catalog * 100) : null;
+  document.querySelector("#context-summary").textContent = `${window ? `${window.toLocaleString()} tokens` : "window unknown"} · ${v && !v.autoCompact ? "auto-compact off" : `compacts at ${v?.thresholdPercent ?? defaultPct ?? "?"}%`}`;
+  node.innerHTML = `<div class="context-form">
+    <label class="field">Context window (tokens) <input type="number" id="context-window" min="4096" max="10000000" step="1000" placeholder="${catalog ? `${catalog} (model default)` : "model default"}" value="${esc(v?.contextWindow ?? "")}"></label>
+    <label class="check"><input type="checkbox" id="context-auto" ${!v || v.autoCompact ? "checked" : ""}> Compact automatically</label>
+    <label class="field">Compact at (% of window) <input type="number" id="context-threshold" min="10" max="95" placeholder="${defaultPct ? `${defaultPct} (default)` : "default"}" value="${esc(v?.thresholdPercent ?? "")}"></label>
+    <label class="field">Keep recent (tokens) <input type="number" id="context-keep" min="1000" max="1000000" step="1000" placeholder="20000 (default)" value="${esc(v?.keepRecentTokens ?? "")}"></label>
+  </div>
+  <div class="row"><button class="primary" data-action="context-save">Save</button><button class="ghost" data-action="context-reset" ${v ? "" : "disabled"}>Reset to defaults</button><button class="ghost" data-action="compact-now">Compact this chat now</button></div>`;
+}
+async function saveContextSettings(reset) {
+  const id = projectId, number = selector => { const raw = document.querySelector(selector).value.trim(); if (!raw) return undefined; const value = Number(raw); if (!Number.isSafeInteger(value)) throw new Error("Context settings must be whole numbers"); return value; };
+  const context = reset ? null : { autoCompact: document.querySelector("#context-auto").checked, ...Object.fromEntries([["contextWindow", number("#context-window")], ["thresholdPercent", number("#context-threshold")], ["keepRecentTokens", number("#context-keep")]].filter(([, value]) => value !== undefined)) };
+  const settings = await api({ action: "settings-snapshot", id });
+  await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { context } }, reset ? "Context settings reset to defaults." : "Context settings saved; they apply from the next step.");
+  await loadContextSettings(true);
+}
+async function compactNow() {
+  await mutate({ action: "compact", id: projectId, ...(chatId && chatId !== "main" ? { chatId } : {}) }, "Compacting this chat…");
 }
 
 // Events in: Follow PRs and the generic webhook (one card in Settings, rendered from automation-snapshot).
@@ -1359,6 +1397,9 @@ async function action(node) {
     case "worktree-setup-save": await saveWorktreeSetup(); break;
     case "worktrees-cleanup": await cleanupWorktreesNow(); break;
     case "worktrees-refresh": await loadWorktrees(true); break;
+    case "context-save": await saveContextSettings(false); break;
+    case "context-reset": await saveContextSettings(true); break;
+    case "compact-now": await compactNow(); break;
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
     case "skills-save": await saveSkillsPicker(false); break;
     case "skills-reset": await saveSkillsPicker(true); break;

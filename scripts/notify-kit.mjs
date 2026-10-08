@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export { delay, randomUUID };
-// `respond(ctx)` (optional) scripts the fake model first: return SSE text, { error } for an HTTP 400, 'HOLD' to never answer, or undefined for the default script.
+// `respond(ctx)` (optional, may be async) scripts the fake model first: return SSE text, { error } for an HTTP 400, 'HOLD' to never answer, or undefined for the default script.
 export async function kit(name, extraEnv = {}, respond) {
   const repo = process.cwd();
   const artifacts = join(repo, 'artifacts', `${name}-${new Date().toISOString().replaceAll(':', '-')}`);
@@ -32,14 +32,14 @@ export async function kit(name, extraEnv = {}, respond) {
   const model = createServer((req, res) => {
     req.setEncoding('utf8');
     let body = ''; req.on('data', part => { body += part; });
-    req.on('end', () => {
+    req.on('end', async () => {
       const input = JSON.parse(body), msgs = input.messages, tools = (input.tools ?? []).map(t => t.function?.name).filter(Boolean);
       const coordinator = tools.includes('projects_delegate'), lastUser = msgs.findLastIndex(m => m.role === 'user');
       const userText = contentText(msgs[lastUser]?.content), marker = /MARK-[A-Z0-9]+/.exec(userText)?.[0] ?? 'none';
       const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
       result.calls.push({ at: Date.now(), coordinator, marker, stage: results.length, user: userText.slice(0, 400) });
       const reply = text => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(text); };
-      const custom = respond?.({ coordinator, marker, userText, results, tools, say, call });
+      const custom = await respond?.({ coordinator, marker, userText, results, tools, say, call, msgs });
       if (custom === 'HOLD') return;
       if (custom?.error) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: custom.error } })); return; }
       if (typeof custom === 'string') return reply(custom);
