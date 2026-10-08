@@ -461,35 +461,53 @@ async function saveEventsIn() {
   eventsIn.data = data; renderEventsIn();
 }
 
-// Notifications (host-wide): browser notifications from the host notice feed while the tab is hidden, and the Telegram bot.
+// Notifications (host-wide): browser notifications from the host notice feed while the owner is away from this tab, and the Telegram bot.
+// Away = tab hidden or window not focused (another app in front keeps `visibilityState` "visible"). `notifyAway` also remembers that the
+// owner was away since the last poll, so a backlog collected after a throttled/frozen or failing poll still notifies on return.
 const notifyKey = "pi-projects-notify";
-let notifyCursor, notifyTimer = null;
+let notifyCursor, notifyTimer = null, notifyPolling = false, notifyAway = false, notifyProblem = "", notifyNote = "";
+const notifyAwayNow = () => document.visibilityState === "hidden" || !document.hasFocus();
 const noticeLabels = { question: "Question", approval: "Approval", review: "Review", result: "Finished", error: "Error" };
 function notifyEnabled() { return localStorage.getItem(notifyKey) === "1" && "Notification" in window && Notification.permission === "granted"; }
 function renderNotify() {
   const box = document.querySelector("#notify-browser"), state = document.querySelector("#notify-browser-state");
   box.checked = notifyEnabled();
-  state.textContent = !("Notification" in window) ? "This browser has no notifications." : Notification.permission === "denied" ? "Blocked by the browser. Allow notifications for this site, then turn this on." : notifyEnabled() ? "On. Shown only while this tab is hidden; click one to open its chat." : "Off.";
+  state.textContent = !("Notification" in window) ? "This browser has no notifications." : Notification.permission === "denied" ? "Blocked by the browser. Allow notifications for this site, then turn this on." : !notifyEnabled() ? notifyNote || "Off." : notifyProblem ? `On, but not receiving notices: ${notifyProblem}` : "On. Shown while this tab is in the background or another app is in front; click one to open its chat. No notification? Send a test: if it does not appear, allow this browser in the system notification settings and check Focus.";
+  state.classList.toggle("bad", Boolean(notifyEnabled() && notifyProblem));
+  document.querySelector("#notify-test").disabled = !("Notification" in window) || Notification.permission !== "granted";
 }
 async function toggleNotify(on) {
   if (on && "Notification" in window) {
     const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
     if (permission === "granted") localStorage.setItem(notifyKey, "1"); else localStorage.removeItem(notifyKey);
-  } else localStorage.removeItem(notifyKey);
-  notifyCursor = undefined; window.__notifyCursor = undefined;
+    notifyNote = permission === "default" ? "Off. The permission prompt was dismissed or blocked quietly; allow notifications for this site (address bar, site settings), then turn this on." : "";
+  } else { localStorage.removeItem(notifyKey); notifyNote = ""; }
+  notifyCursor = undefined; window.__notifyCursor = undefined; notifyProblem = "";
   renderNotify(); scheduleNotify();
 }
 function scheduleNotify() { clearTimeout(notifyTimer); notifyTimer = notifyEnabled() ? setTimeout(() => void pollNotify(), notifyCursor === undefined ? 0 : 3000) : null; }
 async function pollNotify() {
-  if (!notifyEnabled()) return;
+  if (!notifyEnabled() || notifyPolling) return;
+  notifyPolling = true;
   try {
     // The first read only takes the cursor, so a reload never replays old notices.
     const feed = await api({ action: "notify-feed", ...(notifyCursor === undefined ? {} : { after: notifyCursor }) });
     if (!notifyEnabled()) return;
-    if (notifyCursor !== undefined && document.visibilityState === "hidden") for (const item of feed.items) showNotice(item);
+    const away = notifyAwayNow();
+    if (notifyCursor !== undefined && (away || notifyAway)) for (const item of feed.items) showNotice(item);
+    if (!away) notifyAway = false;
     notifyCursor = feed.seq; window.__notifyCursor = notifyCursor;
-  } catch {}
+    if (notifyProblem) { notifyProblem = ""; renderNotify(); }
+  } catch (error) {
+    const message = error?.message ?? String(error);
+    const next = /authenticate|401/.test(message) ? "this tab's session ended; reopen the inbox link (projects ui)" : message;
+    if (next !== notifyProblem) { notifyProblem = next; renderNotify(); }
+  } finally { notifyPolling = false; }
   scheduleNotify();
+}
+function testNotice() {
+  const notice = new Notification("pi Projects · test", { body: "Test notification. Real ones look like this while this tab is in the background or another app is in front.", tag: "pi-projects-test" });
+  notice.onclick = () => { window.focus(); notice.close(); };
 }
 function showNotice(item) {
   const body = `${noticeLabels[item.kind] ?? item.kind}: ${item.kind === "approval" ? item.title : item.text}`;
@@ -529,7 +547,13 @@ async function telegramAction(input, done) {
   renderTelegram();
 }
 document.querySelector("#notify-browser").addEventListener("change", event => void toggleNotify(event.target.checked));
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && notifyEnabled()) scheduleNotify(); });
+document.querySelector("#notify-test").addEventListener("click", testNotice);
+// Leaving marks the owner away; coming back polls at once, so the backlog notifies before `notifyAway` is cleared.
+const markAway = () => { notifyAway = true; };
+const backAgain = () => { if (!notifyAwayNow() && notifyEnabled()) { clearTimeout(notifyTimer); notifyTimer = setTimeout(() => void pollNotify(), 0); } };
+addEventListener("blur", markAway); document.addEventListener("freeze", markAway); addEventListener("pagehide", markAway);
+addEventListener("focus", backAgain);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") markAway(); else backAgain(); });
 renderNotify(); scheduleNotify();
 
 async function loadAutomationStrip() {

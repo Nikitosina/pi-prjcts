@@ -40,7 +40,11 @@ async function serveLive(response: ServerResponse, headers: Record<string, strin
 }
 
 export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch, upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>) {
-  const token = randomBytes(32).toString("hex");
+  // Reuse the previous token (and below, port) when present: a tab left open across a host restart keeps its session and its notifications.
+  let saved: URL | null = null;
+  try { saved = new URL(JSON.parse(readFileSync(join(home(), "web.json"), "utf8")).url); } catch {}
+  const previous = new URLSearchParams(saved?.hash.slice(1) ?? "").get("token");
+  const token = previous && /^[a-f0-9]{64}$/.test(previous) ? previous : randomBytes(32).toString("hex");
   let origin = "";
   const assets = new Map([
     ["/", { path: "index.html", mime: "text/html; charset=utf-8" }],
@@ -119,10 +123,9 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
   server.requestTimeout = 120000;
   server.on("close", () => { for (const end of liveStreams) end(); });
   // Reuse the previous port when it is free: browser notification permission and the notifications toggle are per origin.
-  let saved = 0;
-  try { saved = Number(new URL(JSON.parse(readFileSync(join(home(), "web.json"), "utf8")).url).port) || 0; } catch {}
+  const port = Number(saved?.port) || 0;
   const listen = (port: number) => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
-  try { await listen(saved); } catch (error) { if (!saved) throw error; await listen(0); }
+  try { await listen(port); } catch (error) { if (!port) throw error; await listen(0); }
   server.on("error", error => process.stderr.write(JSON.stringify({ event: "web-error", error: errorText(error) }) + "\n"));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Browser listener has no TCP address");

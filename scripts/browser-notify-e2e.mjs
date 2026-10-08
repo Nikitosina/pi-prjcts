@@ -6,13 +6,17 @@ const k = await kit('browser-notify');
 const { result, rpc, eventually, evaluate, waitFor, shot, send } = k;
 // Stub: records notifications; the permission answer (kept per origin like a browser) and visibility are controlled by the test.
 const init = `(() => {
-  window.__notes = []; window.__vis = 'visible'; window.__perm = (() => { try { return localStorage.getItem('__perm') ?? 'default'; } catch { return 'default'; } })(); window.__permAnswer = 'denied';
+  window.__notes = []; window.__vis = 'visible'; window.__focus = true; window.__failFeed = false;
+  Document.prototype.hasFocus = function () { return window.__focus; };
+  const realFetch = window.fetch.bind(window);
+  window.fetch = (url, init) => window.__failFeed && String(init?.body ?? '').includes('"notify-feed"') ? Promise.reject(new TypeError('Failed to fetch')) : realFetch(url, init); window.__perm = (() => { try { return localStorage.getItem('__perm') ?? 'default'; } catch { return 'default'; } })(); window.__permAnswer = 'denied';
   Object.defineProperty(Document.prototype, 'visibilityState', { get() { return window.__vis; }, configurable: true });
   Object.defineProperty(Document.prototype, 'hidden', { get() { return window.__vis === 'hidden'; }, configurable: true });
   class FakeNotification { constructor(title, options = {}) { this.title = title; this.body = options.body; this.tag = options.tag; this.onclick = null; window.__notes.push(this); } close() { this.closed = true; }
     static get permission() { return window.__perm; } static requestPermission() { window.__perm = window.__permAnswer; try { localStorage.setItem('__perm', window.__perm); } catch {} return Promise.resolve(window.__perm); } }
   window.Notification = FakeNotification;
-  window.__setVisible = visible => { window.__vis = visible ? 'visible' : 'hidden'; document.dispatchEvent(new Event('visibilitychange')); };
+  window.__setVisible = visible => { window.__vis = visible ? 'visible' : 'hidden'; window.__focus = visible; document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event(visible ? 'focus' : 'blur')); };
+  window.__setFocus = focus => { window.__focus = focus; window.dispatchEvent(new Event(focus ? 'focus' : 'blur')); };
 })();`;
 const notes = s => evaluate(`window.__notes.map(n => ({ title: n.title, body: n.body, tag: n.tag }))`, s);
 const feedCalls = () => k.apiBodies.filter(item => item.body.includes('"notify-feed"')).length;
@@ -30,6 +34,9 @@ try {
   await waitFor(`/blocked|denied/i.test(document.querySelector('#notify-browser-state').innerText)`, s, 'denied state');
   if (await evaluate(`document.querySelector('#notify-browser').checked || localStorage.getItem('pi-projects-notify') === '1'`, s)) throw Error('Denied permission left the toggle on');
   result.checks.push('N4 off by default; a denied permission request leaves it off and says so');
+  await evaluate(`window.__perm = 'default'; window.__permAnswer = 'default'; document.querySelector('#notify-browser').click()`, s);
+  await waitFor(`/dismissed/i.test(document.querySelector('#notify-browser-state').innerText) && !document.querySelector('#notify-browser').checked`, s, 'dismissed prompt explained');
+  result.checks.push('N16 a dismissed permission prompt leaves it off and says why');
 
   // N8: no feed polling while off.
   await evaluate(`window.__setVisible(false)`, s);
@@ -50,6 +57,31 @@ try {
   await delay(4000);
   if ((await notes(s)).length) throw Error('Notified while visible: ' + JSON.stringify(await notes(s)));
   result.checks.push('N1 a result while the tab is visible shows no notification');
+
+  // N17: a test notification proves delivery end to end.
+  await evaluate(`document.querySelector('#notify-test').click()`, s);
+  await waitFor(`window.__notes.some(n => /test/i.test(n.title + n.body))`, s, 'test notification');
+  await evaluate(`window.__notes.length = 0`, s);
+  result.checks.push('N17 "Send a test" shows a notification immediately');
+
+  // N12: the window stays visible but another app has focus.
+  await evaluate(`window.__setFocus(false)`, s);
+  await k.ask(a, 'main', 'MARK-UNFOCUSED other app');
+  await eventually(async () => (await notes(s)).some(n => n.body?.includes('Done MARK-UNFOCUSED.')), 'no notification while visible but unfocused', 300);
+  await evaluate(`window.__setFocus(true); window.__notes.length = 0`, s);
+  result.checks.push('N12 a result while the window is visible but another app is focused shows a notification');
+
+  // N13/N15: polling stalls while away (throttled/frozen tab, or the feed failing); the backlog still notifies on return, and a failing feed is visible.
+  await evaluate(`window.__failFeed = true; window.__setVisible(false)`, s);
+  await k.ask(a, 'main', 'MARK-FROZEN while frozen');
+  await waitFor(`/not receiving/i.test(document.querySelector('#notify-browser-state').innerText)`, s, 'feed failure shown');
+  await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
+  await shot('01b-feed-failing', s);
+  await evaluate(`window.__setVisible(true); window.__failFeed = false`, s);
+  await eventually(async () => (await notes(s)).some(n => n.body?.includes('Done MARK-FROZEN.')), 'backlog from while away was dropped on return', 300);
+  await waitFor(`/^On\./.test(document.querySelector('#notify-browser-state').innerText)`, s, 'state recovers');
+  await evaluate(`window.__notes.length = 0`, s);
+  result.checks.push('N13/N15 notices that arrive while polling is stalled and the tab is away notify on return; a failing feed says "not receiving" until it recovers');
 
   // N2: hidden: results from another chat and another project, a question, an approval and an error.
   await evaluate(`window.__setVisible(false)`, s);
@@ -84,14 +116,21 @@ try {
 
   // N3/N10: reload does not replay; host restart does not re-emit; a fast turn between scans is still caught.
   const feedBefore = (await rpc({ action: 'notify-feed', after: 0 })).items.length;
+  const urlBefore = (await rpc({ action: 'web' })).url;
   await k.stopHost(); await k.startHost();
   await delay(2000);
   const feedAfter = (await rpc({ action: 'notify-feed', after: 0 })).items.length;
   if (feedAfter !== feedBefore) throw Error(`Restart re-emitted notices: ${feedBefore} → ${feedAfter}`);
   const web2 = new URL((await rpc({ action: 'web' })).url); web2.searchParams.set('project', a);
+  if ((await rpc({ action: 'web' })).url !== urlBefore) throw Error('Host address or token changed across restart');
+  // N14: the page left open across the restart keeps working: same port, same token.
+  await evaluate(`window.__setVisible(false)`, s);
+  await k.ask(a, 'main', 'MARK-SURVIVE across restart');
+  await eventually(async () => (await notes(s)).some(n => n.body?.includes('Done MARK-SURVIVE.')), 'tab left open across a host restart stopped notifying', 300);
+  if (result.httpErrors.some(e => e.status === 401)) throw Error('Open tab got 401 after restart');
+  result.checks.push('N14 a tab left open across a host restart keeps its session and keeps notifying');
+  await evaluate(`window.__setVisible(true); window.__notes.length = 0`, s);
   await send('Page.navigate', { url: web2.toString() }, s);
-  // The page left open across the restart polled the new host with its old token (401) until it was reopened with the new address.
-  result.httpErrors = result.httpErrors.filter(e => e.status !== 401);
   await waitFor(`window.__notifyCursor !== undefined`, s, 'cursor after reload');
   await evaluate(`window.__setVisible(false)`, s);
   await delay(3500);

@@ -439,7 +439,7 @@ button.attach-chip { padding: 3px 8px 3px 6px; }
 .events-in .field { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .events-in .check { display: flex; align-items: center; gap: 8px; }
 .events-in code.mono { overflow-wrap: anywhere; font-size: 12px; }
-.events-in .bad { color: var(--bad, #b42318); }
+.events-in .bad, #notify-browser-state.bad { color: var(--bad, #b42318); }
 .fix-list { margin: 0; padding-left: 18px; font-size: 13px; }
 .fix-attempt { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 6px; background: var(--soft, #f2f2f2); font-size: 12px; }
 .fix-attempt.failed { color: var(--bad, #b42318); }
