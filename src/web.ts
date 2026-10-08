@@ -50,6 +50,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
   let origin = "";
   const assets = new Map([
     ["/", { path: "index.html", mime: "text/html; charset=utf-8" }],
+    ["/theme.js", { path: "theme.js", mime: "text/javascript; charset=utf-8" }],
     ["/app.js", { path: "app.js", mime: "text/javascript; charset=utf-8" }],
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
   ]);

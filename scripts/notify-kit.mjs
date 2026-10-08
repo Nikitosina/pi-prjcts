@@ -120,6 +120,7 @@ export async function kit(name, extraEnv = {}, respond) {
     for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, sessionId);
     if (init) await send('Page.addScriptToEvaluateOnNewDocument', { source: init }, sessionId);
     await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, sessionId);
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, sessionId); // fixed light unless a test overrides it (System theme follows the OS)
     await send('Page.navigate', { url }, sessionId);
     return sessionId;
   }

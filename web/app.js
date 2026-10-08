@@ -690,6 +690,10 @@ async function telegramAction(input, done) {
   renderTelegram();
 }
 document.querySelector("#notify-browser").addEventListener("change", event => void toggleNotify(event.target.checked));
+// Appearance (per browser). /theme.js applies it before first paint and tracks the OS setting for System.
+const renderTheme = () => { for (const radio of document.querySelectorAll("#appearance-card input[name=theme]")) radio.checked = radio.value === window.piTheme.get(); };
+document.querySelector("#appearance-card").addEventListener("change", event => { window.piTheme.set(event.target.value); renderTheme(); });
+window.addEventListener("storage", renderTheme); renderTheme();
 document.querySelector("#notify-test").addEventListener("click", testNotice);
 // Leaving marks the owner away; coming back polls at once, so the backlog notifies before `notifyAway` is cleared.
 const markAway = () => { notifyAway = true; };

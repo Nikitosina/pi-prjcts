@@ -141,6 +141,7 @@ try {
   const { sessionId: s } = await send('Target.attachToTarget', { targetId, flatten: true }); chromeSession = s;
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, s); // colour assertions below are for the light theme
   await send('Page.navigate', { url: launch.toString() }, s);
   await waitFor(`document.querySelectorAll('#messages .tool-call').length >= 2`, s, 'coordinator tool calls');
   const colors = await evaluate(`[...document.querySelectorAll('#messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`, s);

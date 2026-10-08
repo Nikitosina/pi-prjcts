@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pi Projects</title>
+  <meta name="color-scheme" content="light dark"><script src="/theme.js"></script>
   <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
 </head>
 <body>
@@ -77,6 +78,7 @@
           <div class="card" id="context-card"><div class="row between"><b>Context and compaction</b><span id="context-summary" class="note"></span></div><p class="note">When a chat's context fills up, older messages are summarized and the recent part is kept verbatim. Applies to every chat and worker of this project from their next step; no restart.</p><div id="context-settings"><p class="note">Reading…</p></div></div>
           <div class="card"><div class="row between"><b>Automations</b><button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button></div><p class="note">Schedules and monitors. Toggling always asks for confirmation.</p><div id="automation-history" class="automation-strip"><p class="note">Reading recent automation history…</p></div><button data-action="routine-history" data-project="" data-kind="intents" data-offset="0" data-text-offset="0">Recent run history</button></div>
           <div class="card" id="events-in-card"><div class="row between"><b>Events in</b><button class="ghost small" data-action="automation-refresh">Refresh</button></div><p class="note">Follow PRs, the webhook and the worker watchdog send events to one chat. Text from GitHub or a webhook is untrusted.</p><div id="events-in"><p class="note">Reading…</p></div></div>
+          <div class="card" id="appearance-card"><div class="row between"><b>Appearance</b></div><p class="note">Theme for this browser. System follows your OS light/dark setting.</p><div class="row seg" role="radiogroup" aria-label="Theme"><label class="check"><input type="radio" name="theme" value="system"> System</label><label class="check"><input type="radio" name="theme" value="light"> Light</label><label class="check"><input type="radio" name="theme" value="dark"> Dark</label></div></div>
           <div class="card" id="notify-card"><div class="row between"><b>Notifications</b></div><p class="note">Questions, approvals, finished results and errors from every project on this host.</p>
             <fieldset class="events-group"><legend>This browser</legend><label class="check"><input type="checkbox" id="notify-browser"> Notify me while I'm away from this tab</label><p id="notify-browser-state" class="note"></p><div class="row"><button class="small" id="notify-test" type="button">Send a test notification</button></div></fieldset>
             <fieldset class="events-group"><legend>Telegram</legend><div id="telegram"><p class="note">Reading…</p></div></fieldset>

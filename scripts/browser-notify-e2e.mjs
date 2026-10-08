@@ -173,8 +173,9 @@ try {
   // Mobile layout.
   await evaluate(`window.__setVisible(true)`, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await evaluate(`window.__oldDocument = true`, s);
   await send('Page.navigate', { url: set.toString() }, s);
-  await waitFor(`!!document.querySelector('#notify-browser')`, s, 'mobile card');
+  await waitFor(`!window.__oldDocument && !!document.querySelector('#notify-browser')`, s, 'mobile card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   if (!await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s)) throw Error('Notifications card overflows at 390px');
   await shot('03-settings-mobile', s);
