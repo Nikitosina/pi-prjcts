@@ -35,3 +35,15 @@ Owner decision: one bot per host, token supplied in Settings. Long-polling `getU
 
 ## UI
 22. Settings do not show bot, pairing state, code with instructions, route and last error; the card overflows on a 390 px screen.
+
+## Formatting (Markdown → Telegram HTML), added before the change
+23. Messages arrive as raw Markdown (`**bold**`, `` ``` `` fences, `# Heading`, `[text](url)`) because no `parse_mode` is sent.
+24. Model text containing `<`, `>` or `&` is not escaped, so Telegram rejects the message (400 "can't parse entities") or renders injected tags.
+25. Unsupported tags are produced (`<h1>`, `<ul>`, `<li>`, `<p>`, `<br>`): headings must become bold, lists `•`/numbered lines.
+26. A code fence clipped mid-block (notice text is clipped at 3,500 chars) leaves an unclosed `<pre>`.
+27. A link with `"` or `javascript:` in its URL becomes a broken or unsafe `href`.
+28. snake_case words or `2*3*4` turn into italics.
+29. A message longer than 4,096 characters after escaping is clipped (content lost) or split inside a tag/entity, so a chunk has unbalanced tags.
+30. A multi-part message re-sends earlier parts after a mid-way send failure (duplicates), or reply-to on a later part does not route.
+31. Telegram still refuses the HTML (400 "can't parse entities"): the notice is stuck retrying forever instead of falling back to plain text.
+32. Bot command replies (help, /projects with names containing `<`) break because they are now parsed as HTML.

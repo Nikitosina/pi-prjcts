@@ -9,7 +9,24 @@ import { kit, delay, randomUUID } from './notify-kit.mjs';
 const TOKEN = '123456:AAFakeTokenForE2E_' + randomUUID().replaceAll('-', '');
 const TOKEN2 = '654321:AAOtherBotTokenE2E_' + randomUUID().replaceAll('-', '');
 const bots = { [TOKEN]: { id: 123456, username: 'pi_fake_bot' }, [TOKEN2]: { id: 654321, username: 'pi_other_bot' } };
-const tg = { updates: [], nextUpdate: 1000, sent: [], edits: [], answered: [], polls: [], waiters: new Set(), failPolls: 0, failSends: 0, revoked: new Set(), nextMessage: 1 };
+const tg = { updates: [], nextUpdate: 1000, sent: [], edits: [], answered: [], polls: [], waiters: new Set(), failPolls: 0, failSends: 0, revoked: new Set(), nextMessage: 1, refused: [] };
+// Telegram's HTML parse_mode: only these tags, properly nested, entities limited to &lt; &gt; &amp; &quot; and numeric. `PARSEFAIL` forces a refusal.
+const TAGS = new Set(['b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'code', 'pre', 'a', 'blockquote', 'tg-spoiler', 'span']);
+function htmlProblem(html) {
+  if (html.includes('PARSEFAIL')) return 'forced by test';
+  const stack = [];
+  for (const [tag, close, name] of html.matchAll(/<(\/?)([a-z-]+)[^>]*>/g)) {
+    if (!TAGS.has(name)) return `unsupported tag ${name}`;
+    if (!close) stack.push(name); else if (stack.pop() !== name) return `unmatched end tag ${name}`;
+  }
+  if (stack.length) return `unclosed ${stack.join(',')}`;
+  if (/<(?![a-z/])/.test(html) || /&(?!lt;|gt;|amp;|quot;|#\d+;)/.test(html)) return 'raw < or &';
+  return null;
+}
+const visible = html => html.replace(/<[^>]+>/g, '').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+const MD = ['# Release notes', '', 'This is **bold**, *italic*, _also italic_, ~~gone~~ and `a < b && c`. Keep snake_case_name and 2*3*4 as is.', '', '- first item', '- second **item**', '  - nested', '1. one', '2. two', '', '> quoted **line**', '> second', '', '[Docs](https://example.com/a?b=1&c="x") and [bad](javascript:alert(1))', '', '```ts', 'const x = a < b && c > d;', '```', '', '| a | b |', '|---|---|', '| 1 | 2 |', 'Tail <script>alert(1)</script> & done.'].join('\n');
+const BIG = 'Intro **bold** BIGMD\n```js\n' + Array.from({ length: 300 }, (_, i) => `l${String(i).padStart(3, '0')} a<b && c>d;`).join('\n') + '\n```\nafter';
+const respond = ({ coordinator, marker, say }) => !coordinator ? undefined : marker === 'MARK-MD' ? say(MD) : marker === 'MARK-BIGMD' ? say(BIG) : marker === 'MARK-PARSEFAIL' ? say('**PARSEFAIL** plain *fallback* text') : undefined;
 const OWNER = { id: 777001, first_name: 'Owner', type: 'private' }, STRANGER = { id: 888002, first_name: 'Mallory', type: 'private' }, GROUP = { id: -100500, title: 'Group', type: 'group' };
 const wake = () => { for (const fn of tg.waiters) fn(); };
 function push(update) { const item = { update_id: tg.nextUpdate++, ...update }; tg.updates.push(item); wake(); return item; }
@@ -32,9 +49,11 @@ const api = createServer((req, res) => {
       return reply(200, { ok: true, result: ready().slice(0, 100) });
     }
     if (method === 'sendMessage') {
+      if (tg.failWhen?.(input)) { tg.failWhen = null; return reply(502, { ok: false, error_code: 502, description: 'Bad Gateway' }); }
       if (tg.failSends > 0) { tg.failSends--; return reply(502, { ok: false, error_code: 502, description: 'Bad Gateway' }); }
       if (String(input.text ?? '').length > 4096) return reply(400, { ok: false, error_code: 400, description: 'Bad Request: message is too long' });
-      const message = { message_id: tg.nextMessage++, chat: { id: input.chat_id }, text: input.text, reply_markup: input.reply_markup, at: Date.now(), bot: bot.username };
+      if (input.parse_mode === 'HTML') { const problem = htmlProblem(input.text); if (problem) { tg.refused.push({ text: input.text, problem }); return reply(400, { ok: false, error_code: 400, description: `Bad Request: can't parse entities: ${problem}` }); } }
+      const message = { message_id: tg.nextMessage++, chat: { id: input.chat_id }, text: input.text, parse_mode: input.parse_mode, reply_markup: input.reply_markup, at: Date.now(), bot: bot.username };
       tg.sent.push(message); return reply(200, { ok: true, result: message });
     }
     if (method === 'answerCallbackQuery') { tg.answered.push(input); return reply(200, { ok: true, result: true }); }
@@ -43,7 +62,7 @@ const api = createServer((req, res) => {
   });
 });
 await new Promise(ok => api.listen(0, '127.0.0.1', ok));
-const k = await kit('telegram', { PI_PROJECTS_TELEGRAM_API: `http://127.0.0.1:${api.address().port}`, PI_PROJECTS_TELEGRAM_POLL_S: '20', PI_PROJECTS_TELEGRAM_BACKOFF_MS: '200' });
+const k = await kit('telegram', { PI_PROJECTS_TELEGRAM_API: `http://127.0.0.1:${api.address().port}`, PI_PROJECTS_TELEGRAM_POLL_S: '20', PI_PROJECTS_TELEGRAM_BACKOFF_MS: '200' }, respond);
 k.secrets.push(TOKEN, TOKEN2);
 const { result, rpc, eventually, evaluate, waitFor, shot, send } = k;
 const toOwner = () => tg.sent.filter(m => m.chat.id === OWNER.id);
@@ -171,6 +190,45 @@ try {
   await lastTo(/Done MARK-REPLY\./, 'reply routed', mark);
   if ((await jobs(b)).filter(j => j.text.includes('MARK-REPLY')).length !== 1 || (await jobs(a, two.id)).some(j => j.text.includes('MARK-REPLY'))) throw Error('Reply-to did not route to Beta');
   result.checks.push('T16 reply-to a result routes to that project/chat');
+
+  // T23-T28: Markdown is rendered as Telegram HTML.
+  mark = toOwner().length;
+  text(OWNER, 'MARK-MD render please');
+  const md = await lastTo(/Release notes/, 'markdown result', mark);
+  if (md.parse_mode !== 'HTML') throw Error('No parse_mode HTML: ' + JSON.stringify(md));
+  const want = ['<b>Release notes</b>', '<b>bold</b>', '<i>italic</i>', '<i>also italic</i>', '<s>gone</s>', '<code>a &lt; b &amp;&amp; c</code>', 'snake_case_name', '2*3*4', '• first item', '• second <b>item</b>', '  • nested', '1. one', '<blockquote>quoted <b>line</b>\nsecond</blockquote>', '<a href="https://example.com/a?b=1&amp;c=%22x%22">Docs</a>', '<pre><code class="language-ts">const x = a &lt; b &amp;&amp; c &gt; d;</code></pre>', '<pre>| a | b |', 'Tail &lt;script&gt;alert(1)&lt;/script&gt; &amp; done.'];
+  const missing = want.filter(part => !md.text.includes(part));
+  if (missing.length || /href="javascript/i.test(md.text) || /\*\*|```|^#/m.test(md.text) || /<(h\d|ul|li|p|br)\b/.test(md.text)) throw Error('Rendered HTML wrong, missing ' + JSON.stringify(missing) + ': ' + md.text);
+  result.renderedHtml = md.text;
+  result.checks.push('T23-T28 a Markdown result is sent with parse_mode HTML: headings bold, bold/italic/strike/code, fenced code as <pre><code class>, lists as •/numbered lines, blockquote, safe links, tables in <pre>, <>& escaped, snake_case untouched');
+
+  // T26/T29/T30: a long code-heavy result is split under 4096 with balanced tags; reply-to on the second part routes.
+  mark = toOwner().length;
+  tg.failWhen = input => String(input.text).startsWith('<pre>'); // part two fails once: the retry must not resend part one
+  text(OWNER, 'MARK-BIGMD split please');
+  await lastTo(/after|l\d{3}/, 'big markdown result', mark);
+  await delay(1500);
+  const parts = toOwner().slice(mark).filter(m => /BIGMD|l\d{3} a&lt;b/.test(m.text));
+  const lines = parts.flatMap(m => visible(m.text).match(/l\d{3} a<b && c>d;/g) ?? []);
+  if (parts.length < 2 || parts.some(m => m.parse_mode !== 'HTML' || m.text.length > 4096 || htmlProblem(m.text)) || !parts.slice(1).every(m => m.text.startsWith('<pre>'))) throw Error('Split wrong: ' + JSON.stringify(parts.map(m => ({ len: m.text.length, start: m.text.slice(0, 40), mode: m.parse_mode }))));
+  if (new Set(lines).size !== lines.length || lines.length < 150) throw Error('Split lost or duplicated lines: ' + lines.length);
+  text(OWNER, 'MARK-REPLY2 to part two', { reply_to_message: { message_id: parts[1].message_id, chat: OWNER, date: 0, text: parts[1].text } });
+  await lastTo(/Done MARK-REPLY2\./, 'reply to part two routed', mark);
+  result.split = parts.map(m => m.text.length);
+  result.checks.push(`T26/T29/T30 a ${lines.length}-line escaped code result (clipped mid-fence by the feed) is split into ${parts.length} HTML parts under 4096 (${result.split.join(', ')}), each balanced, code reopened in <pre>, no line lost or repeated even though part two failed once and was retried; reply-to on part two routes`);
+  if (tg.failWhen) throw Error('Part-two failure was not exercised');
+
+  // T31: Telegram refuses the HTML: plain-text fallback, outbox not stuck.
+  mark = toOwner().length;
+  text(OWNER, 'MARK-PARSEFAIL please');
+  const plain = await lastTo(/PARSEFAIL plain fallback text/, 'plain fallback', mark);
+  if (plain.parse_mode || /<\/?b>|\*\*/.test(plain.text) || !tg.refused.some(item => item.problem === 'forced by test')) throw Error('Fallback wrong: ' + JSON.stringify(plain));
+  text(OWNER, 'MARK-AFTERFAIL next');
+  await lastTo(/Done MARK-AFTERFAIL\./, 'next notice after fallback', mark);
+  result.checks.push('T31 a 400 "can\'t parse entities" falls back to plain text (markup stripped) once and the outbox moves on');
+  const commands = toOwner().filter(m => /^Now talking to|^Projects:|^Chats in/.test(m.text));
+  if (!commands.length || commands.some(m => m.parse_mode)) throw Error('Command replies must stay plain text');
+  result.checks.push('T32 bot command replies stay plain text');
 
   // T21: outbox retries in order after Bot API failures.
   mark = toOwner().length;

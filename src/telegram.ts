@@ -5,6 +5,7 @@ import { inbox } from "./inbox.ts";
 import { errorText, home, listProjects, loadProject, projectDir, saveJson, type Request } from "./state.ts";
 import type { Notice, Notifier } from "./notify.ts";
 import type { DurableChat } from "./durable-runtime.ts";
+import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml } from "./telegram-html.ts";
 
 type Action =
   | { t: "project"; projectId: string }
@@ -16,7 +17,8 @@ type Target = { projectId: string; chatId: string; entryId?: string };
 type State = {
   version: 1; token: string | null; bot: { id: number; username: string } | null;
   owner: { chatId: number; name: string } | null; pairing: { code: string; expiresAt: number; wrong: number } | null;
-  offset: number; sentSeq: number; route: { projectId: string; chatId: string } | null;
+  /** `sentPart`: parts of notice `seq` already sent, so a retry after a mid-way failure does not repeat them. */
+  offset: number; sentSeq: number; sentPart?: { seq: number; parts: number }; route: { projectId: string; chatId: string } | null;
   /** Inline-button payloads by short key (callback_data is capped at 64 bytes) and sent messages by id, both bounded. */
   keys: Record<string, Action>; messages: Record<string, Target>;
   lastError: string | null; lastPollAt: number | null;
@@ -212,12 +214,29 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
   }
   void loop();
 
+  /** Notice text is model Markdown, sent as Telegram HTML; the header and footer are ours, escaped. */
   function format(notice: Notice): { text: string; buttons: Button[][] } {
-    const head = `${notice.project} · ${notice.chat}\n${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" ? "" : `: ${notice.title}`}\n\n`;
-    if (notice.kind === "question") return { text: head + notice.text + "\n\nTap an answer, or reply to this message in your own words.", buttons: (notice.choices ?? []).map(choice => [{ text: choice.slice(0, 60), callback_data: key({ t: "answer", projectId: notice.projectId, entryId: notice.entryId!, text: choice }) }]) };
-    if (notice.kind === "approval") return { text: head + notice.text, buttons: [[{ text: "Approve", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
-    if (notice.kind === "review") return { text: head + notice.text, buttons: [[{ text: "Accept", callback_data: key({ t: "accept", projectId: notice.projectId, entryId: notice.entryId! }) }]] };
-    return { text: head + notice.text + "\n\nReply to this message to write to this chat.", buttons: [] };
+    const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`)}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" ? "" : `: ${notice.title}`}`)}\n\n` + markdownToTelegramHtml(notice.text);
+    if (notice.kind === "question") return { text: head + "\n\n<i>Tap an answer, or reply to this message in your own words.</i>", buttons: (notice.choices ?? []).map(choice => [{ text: choice.slice(0, 60), callback_data: key({ t: "answer", projectId: notice.projectId, entryId: notice.entryId!, text: choice }) }]) };
+    if (notice.kind === "approval") return { text: head, buttons: [[{ text: "Approve", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
+    if (notice.kind === "review") return { text: head, buttons: [[{ text: "Accept", callback_data: key({ t: "accept", projectId: notice.projectId, entryId: notice.entryId! }) }]] };
+    return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };
+  }
+  /** Sends one notice as HTML parts under 4096, buttons on the last; a part Telegram cannot parse goes as plain text instead. Every part routes replies. */
+  async function sendNotice(notice: Notice) {
+    if (!state.owner) return;
+    const { text, buttons } = format(notice), parts = splitTelegramHtml(text);
+    const target: Target = { projectId: notice.projectId, chatId: notice.chatId, ...(notice.kind === "question" ? { entryId: notice.entryId } : {}) };
+    for (let index = state.sentPart?.seq === notice.seq ? state.sentPart.parts : 0; index < parts.length; index++) {
+      const markup = index === parts.length - 1 && buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
+      let sent: { message_id: number };
+      try { sent = await call("sendMessage", { chat_id: state.owner.chatId, text: parts[index], parse_mode: "HTML", ...markup }); }
+      catch (error) {
+        if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
+        sent = await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(parts[index]), ...markup });
+      }
+      state.messages[String(sent.message_id)] = target; state.sentPart = { seq: notice.seq, parts: index + 1 }; persist();
+    }
   }
   /** Sends feed notices after `sentSeq` in order; a failure stops the batch and retries with backoff, so nothing is skipped or sent twice. */
   function flush(): Promise<void> {
@@ -228,14 +247,13 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
         while (!closed && state.token && state.owner && !rejected) {
           const next = options.notifier.feed(state.sentSeq).items[0];
           if (!next) break;
-          const { text, buttons } = format(next);
-          try { await say(clip(text), buttons, { projectId: next.projectId, chatId: next.chatId, ...(next.kind === "question" ? { entryId: next.entryId } : {}) }); sendFailures = 0; }
+          try { await sendNotice(next); sendFailures = 0; }
           catch (error) {
             sendFailures++; state.lastError = redact(errorText(error)); persist();
             clearTimeout(retry); retry = setTimeout(() => void flush(), Math.min(60_000, backoffMs * 2 ** Math.min(sendFailures - 1, 10))); retry.unref();
             return;
           }
-          state.sentSeq = next.seq; persist();
+          state.sentSeq = next.seq; delete state.sentPart; persist();
         }
       } while (flushAgain && !closed);
     })().finally(() => { flushing = null; });
