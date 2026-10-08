@@ -313,7 +313,7 @@ Verification remains suspended. Commands below are reference, not permission to 
 
 ```bash
 cd ~/.pi/agent/projects-mvp
-node scripts/link-host.mjs
+npm run setup
 npm run check
 npm run e2e
 npm run e2e:inbox
@@ -321,6 +321,8 @@ npm run e2e:tui
 ```
 
 `link-host.mjs` links the existing global Pi installation and installed pi-subagents without installing a second SDK. With Pi 1.x it also patches the installed runner's obsolete core alias check. This does not downgrade Pi or supply a fake API. Run it after moving or reinstalling Pi, or updating pi-subagents; an upstream update can overwrite the patch. The type check requires the installed `tsc` command. Runtime requires Node 22.19 or newer with TypeScript stripping support.
+
+`npm run setup` is the one command for a fresh checkout: `link-host.mjs`, then `link-durable.mjs`, which fetches pinned Pi Durable 1.0.0 and unpdf 1.8.1, checks each archive against a pinned sha512, and links them to the installed Pi's shared libraries. Any installed Pi 1.x is accepted if it satisfies every range Durable declares (chord, pi-ai, typebox, diff); otherwise it names the mismatch and changes nothing. Re-running is idempotent. Verified by `scripts/setup-e2e.mjs`.
 
 All E2E commands use real configured models and incur provider usage.
 `e2e:inbox` also runs isolated headless Chrome, creates a disposable live project,
