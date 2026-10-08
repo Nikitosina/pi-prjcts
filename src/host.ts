@@ -556,7 +556,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (input.change.eventChat && input.change.eventChat !== "main") { const chat = (await owner.chats()).find(item => item.id === input.change.eventChat); if (!chat || chat.archived) throw new Error("Choose an existing, active chat for events"); }
       const next = await withProjectLock(input.id, async () => updateAutomations(input.id, input.change));
       if (next.follow.enabled && (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs || next.autoMerge.enabled !== before.autoMerge.enabled)) owner.followKick();
-      recordHostEvent("automations", `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}`);
+      if (input.change.watchdog) owner.watchdogKick();
+      recordHostEvent("automations", `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}:watchdog=${next.watchdog.enabled}/${next.watchdog.everyMs}`);
       return automationSnapshot(input.id);
     }
     case "webhook-rotate": {
@@ -668,7 +669,7 @@ const telegram = startTelegram({ dispatch: input => dispatch(parse(Request, inpu
 void telegram.flush();
 async function automationSnapshot(id: string) {
   const project = loadProject(id), config = loadAutomations(id);
-  return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
+  return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, watchdog: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).watchdogSnapshot() : { ...config.watchdog }, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
 }
 const server = createServer(async (request, response) => {
   try {

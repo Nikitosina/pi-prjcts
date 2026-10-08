@@ -574,6 +574,12 @@ function renderEventsIn() {
       <p class="note">${f?.autoMerge && !f?.enabled ? "Turn on Follow PRs: auto-merge runs on its checks." : "Off by default. A reviewer is sent when CI turns green; a new push needs a new review. The merge pins the reviewed head (squash). Otherwise merges wait for your approval."}</p>
       ${merges ? `<ul id="merge-receipts" class="fix-list">${merges}</ul>` : ""}
     </fieldset>
+    <fieldset class="events-group" id="watchdog"><legend>Worker watchdog</legend>
+      <label class="check"><input type="checkbox" id="watchdog-enabled" ${data.watchdog?.enabled !== false ? "checked" : ""}> While workers run, have the coordinator check them on a fixed interval</label>
+      <label class="field">Check every <select id="watchdog-every">${[[300000, "5 min"], [600000, "10 min"], [900000, "15 min"], [1800000, "30 min"], [3600000, "1 hour"]].concat([[data.watchdog?.everyMs, `${Math.round((data.watchdog?.everyMs ?? 0) / 60000)} min`]]).filter(([ms], index, all) => ms && all.findIndex(([other]) => other === ms) === index).map(([ms, label]) => `<option value="${ms}" ${data.watchdog?.everyMs === ms ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+      <p class="note">Each check sends the coordinator a short digest per running worker (runtime, recent tool calls, repeats, errors, tokens, changed files). It steers a looping worker once, then stops and redispatches it if it is still stuck. You hear about it only in the final report or when it needs you.</p>
+      <div class="kv watchdog-status"><span>Last check</span><b id="watchdog-last">${esc(ago(data.watchdog?.lastTickAtMs))}</b><span>Checks</span><b id="watchdog-ticks">${esc(data.watchdog?.ticks ?? 0)}</b><span>Next</span><b id="watchdog-next">${data.watchdog?.nextAtMs ? esc(new Date(data.watchdog.nextAtMs).toLocaleTimeString()) : "when a worker runs"}</b>${data.watchdog?.lastError ? `<span>Problem</span><b class="bad">${esc(data.watchdog.lastError)}</b>` : ""}</div>
+    </fieldset>
     <fieldset class="events-group"><legend>Webhook</legend>
       <label class="check"><input type="checkbox" id="webhook-enabled" ${data.webhook.enabled ? "checked" : ""}> Accept webhook deliveries</label>
       <div class="kv"><span>URL</span><code id="webhook-url" class="mono">${esc(data.webhook.url)}</code><span>Secret</span><code id="webhook-secret" class="mono">${eventsIn.reveal ? esc(data.webhook.secret) : "•".repeat(16)}</code></div>
@@ -588,7 +594,7 @@ async function saveEventsIn() {
   const value = selector => document.querySelector(selector);
   const cap = Number(value("#follow-cap").value);
   if (!Number.isSafeInteger(cap) || cap < 0 || cap > 10) throw new Error("Fix attempts must be 0-10");
-  const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked }, autoMerge: { enabled: value("#merge-enabled").checked } } }, "Events settings saved.");
+  const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked }, autoMerge: { enabled: value("#merge-enabled").checked }, watchdog: { enabled: value("#watchdog-enabled").checked, ...(Number(value("#watchdog-every").value) >= 60000 ? { everyMs: Number(value("#watchdog-every").value) } : {}) } } }, "Events settings saved.");
   eventsIn.data = data; renderEventsIn();
 }
 
@@ -823,6 +829,7 @@ function reportHtml(message, match) {
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
   const github = kind === "github.follow", hook = kind.startsWith("webhook.");
+  if (kind === "worker.watchdog") { const workers = (body.match(/^- \w+ thread /gm) ?? []).length; return `<details class="report event-card watchdog" data-kind="worker.watchdog"${indexAttr(message)}><summary><span class="event-mark">⏱</span><b>Watchdog check</b><span class="report-task">${workers} running worker${workers === 1 ? "" : "s"}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text"><pre class="mono">${esc(body)}</pre></div></details>`; }
   const changes = github ? (body.match(/^- /gm) ?? []).length : 0;
   const title = github ? "GitHub activity" : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
   // Webhook bodies follow a fixed preamble line; summarize the body itself.

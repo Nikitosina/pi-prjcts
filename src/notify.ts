@@ -81,6 +81,8 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
         if (submission.status === "queued" || submission.status === "placed") break;
         last = submission.id;
         if (quiet) continue;
+        // Watchdog checks are internal coordinator turns, never an owner-facing "Finished".
+        if (submission.requestId?.startsWith("event:watchdog:")) continue;
         if (submission.status === "done" && submission.text?.trim() && !working.has(chat.id) && !submissions.slice(index + 1).some(later => later.requestId?.startsWith("plan-report:") || later.answerId !== null && later.answerId === submission.answerId)) push({ ...base, chatId: chat.id, chat: chat.title, kind: "result", title: "Finished", text: clip(submission.text.trim()) });
         else if (submission.status === "unanswered" && submission.reason !== "aborted") push({ ...base, chatId: chat.id, chat: chat.title, kind: "error", title: "Coordinator turn failed", text: clip(`${submission.reason ?? "failed"}${submission.detail ? `: ${submission.detail}` : ""}`) });
       }

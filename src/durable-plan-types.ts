@@ -32,7 +32,7 @@ export type DurableResolvedAttempt = Readonly<{
 }>;
 export type DurablePlanWorkSnapshot = Readonly<{
   id: string; threadId: string; role: DurableRole; text: string; dependsOn: readonly string[];
-  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; /** Parent worker thread of a child thread; null for top-level work. */ parentThreadId: string | null; attempt: DurableResolvedAttempt | null;
+  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; /** Parent worker thread of a child thread; null for top-level work. */ parentThreadId: string | null; attempt: DurableResolvedAttempt | null; /** This item replaced superseded work through an explicit steer. */ steering?: boolean;
 }>;
 export type DurablePlanSnapshot = Readonly<{ paused: boolean; pausing: boolean; workerCap: number | null; work: readonly DurablePlanWorkSnapshot[] }>;
 
