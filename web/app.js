@@ -29,6 +29,8 @@ const formDrafts = new Map();
 const creationDrafts = new Map();
 let plan = null;
 let workerChat = null;
+// Full-text search: the dialog's latest query/results, and the message a jump must render, highlight and scroll to.
+let searchState = { seq: 0, project: null, query: "", terms: [], results: [], active: 0 }, searchTimer = null, searchFocus = null, workerFocus = null;
 let approvalPage = null;
 const operationCache = new Map();
 const knowledgeCache = new Map();
@@ -94,7 +96,8 @@ async function refresh() {
   polling = current;
   try {
     let next;
-    try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) }); }
+    const focus = searchFocus?.project === id && searchFocus.chat === chat ? { focus: searchFocus.index } : {};
+    try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }), ...focus }); }
     catch (error) { if (chat !== "main" && /Unknown chat/.test(error.message) && current === generation) { polling = null; changeChat("main"); return; } throw error; }
     if (current !== generation) return;
     const [nextPlan, nextApprovals, nextDocs] = await Promise.all(next.project.runtime === "durable" ? [api({ action: "plan-snapshot", id }), api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }), api({ action: "knowledge-list", id })] : [null, null, api({ action: "knowledge-list", id })]);
@@ -202,7 +205,7 @@ function renderLive() {
 
 function changeProject(id, chat = "main") {
   generation++;
-  workerChat = null;
+  workerChat = null; searchFocus = null; workerFocus = null;
   projectId = id; chatId = chat;
   captureDialogDraft();
   liveStream?.controller.abort(); liveStream = null; liveFrame = null; renderLive(); knowledgeDocs = []; stickToBottom = true;
@@ -235,6 +238,7 @@ function changeChat(chat) {
   if (chat === chatId && view?.chatId === chat) return;
   generation++;
   chatId = chat;
+  if (searchFocus?.chat !== chat) searchFocus = null;
   const url = new URL(location.href);
   if (chat === "main") url.searchParams.delete("chat"); else url.searchParams.set("chat", chat);
   history.replaceState(null, "", url);
@@ -333,6 +337,7 @@ function render() {
   setHtml("#warning", warnings.join("")); warning.hidden = !warnings.length;
   renderContextMeter(view.context);
   disableActions();
+  applySearchFocus();
 }
 
 function renderContextMeter(context) {
@@ -658,7 +663,7 @@ const reportPattern = /^\[Durable work ([0-9a-f-]{36}), ([\w-]+), ([\w-]+); thre
 function reportHtml(message, match) {
   const [, , role, status, threadId, task, body] = match;
   const known = plan?.work.some(work => work.threadId === threadId);
-  return `<details class="report ${esc(status)}"><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
+  return `<details class="report ${esc(status)}"${indexAttr(message)}><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
@@ -667,8 +672,9 @@ function eventHtml(message, kind, body) {
   const title = github ? "GitHub activity" : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
   // Webhook bodies follow a fixed preamble line; summarize the body itself.
   const summary = github ? `${changes} change${changes === 1 ? "" : "s"}${/auto-fix (dispatched|sent)/.test(body) ? " · auto-fix sent" : ""}` : clip((hook ? body.slice(body.indexOf("\n\n") + 2) : body).replace(/\s+/g, " ").trim(), 120);
-  return `<details class="report event-card ${github ? "github" : hook ? "webhook" : "event"}" data-kind="${esc(kind)}"><summary><span class="event-mark">${github ? "PR" : hook ? "↯" : "•"}</span><b>${esc(title)}</b><span class="report-task">${esc(summary)}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}</div></details>`;
+  return `<details class="report event-card ${github ? "github" : hook ? "webhook" : "event"}" data-kind="${esc(kind)}"${indexAttr(message)}><summary><span class="event-mark">${github ? "PR" : hook ? "↯" : "•"}</span><b>${esc(title)}</b><span class="report-task">${esc(summary)}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}</div></details>`;
 }
+function indexAttr(message) { return Number.isInteger(message.index) ? ` data-index="${message.index}"` : ""; }
 function chatMessageHtml(message, assistant) {
   if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message);
   const thought = message.thinking ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>` : "";
@@ -682,7 +688,7 @@ function chatMessageHtml(message, assistant) {
   const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
   const attached = message.role === "user" ? attachmentChips(message.text) : { text: message.text, chips: "" };
   const body = (skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(attachmentChips(skill[2]).text) : ""}` : renderMarkdown(attached.text)) + attached.chips;
-  return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
+  return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
 // "/" skill picker in the coordinator composer. The catalog loads once per project on first use.
@@ -839,7 +845,7 @@ function attachmentChips(text) {
   }).join("");
   return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>` };
 }
-async function uploadOpen(uploadId) {
+async function uploadOpen(uploadId, focus = null) {
   const id = projectId, record = (view?.uploads ?? []).find(item => item.id === uploadId);
   const version = showDialog(record?.filename ?? "Upload", '<p class="note">Reading…</p>');
   let body, meta = record;
@@ -851,13 +857,120 @@ async function uploadOpen(uploadId) {
     blobUrl = URL.createObjectURL(blob);
     body = `<img class="upload-image" src="${blobUrl}" alt="${esc(record.filename)}">`;
   } else {
-    const page = await api({ action: "upload-read", id, uploadId, limit: 20000 });
+    // A search hit opens the text a little before the matched place.
+    const start = focus ? Math.max(0, focus.offset - 2000) : 0;
+    const page = await api({ action: "upload-read", id, uploadId, offset: start, limit: 20000 });
     meta = page.record;
-    body = page.record.extractError ? `<p class="note">${esc(page.record.extractError)}</p>` : `<pre class="upload-text">${esc(page.text)}</pre>${page.nextOffset !== null ? `<p class="note">Showing the first ${page.nextOffset.toLocaleString()} of ${page.record.textChars.toLocaleString()} characters. Agents read the rest with projects_upload_read.</p>` : ""}`;
+    const end = page.nextOffset ?? page.record.textChars;
+    body = page.record.extractError ? `<p class="note">${esc(page.record.extractError)}</p>` : `${start ? `<p class="note">Showing characters ${(start + 1).toLocaleString()}–${end.toLocaleString()} of ${page.record.textChars.toLocaleString()}.</p>` : ""}<pre class="upload-text">${esc(page.text)}</pre>${page.nextOffset !== null && !start ? `<p class="note">Showing the first ${page.nextOffset.toLocaleString()} of ${page.record.textChars.toLocaleString()} characters. Agents read the rest with projects_upload_read.</p>` : ""}`;
+    if (focus) focus = { ...focus, text: page.text, at: focus.offset - start };
   }
   if (version !== dialogVersion || id !== projectId) return;
   dialog.querySelector("#dialog-title").textContent = meta.filename;
   dialog.querySelector(".dialog-body").innerHTML = `<p class="note">${esc(meta.kind.toUpperCase())} · ${size(meta.size)} · uploaded ${esc(ago(meta.at))}${meta.kind === "pdf" && !meta.extractError ? ` · ${meta.textChars.toLocaleString()} characters of text` : ""}</p>${body}<div class="row"><button class="small danger" data-action="upload-delete" data-project="${esc(id)}" data-upload="${esc(uploadId)}">Delete upload</button></div>`;
+  if (focus?.text !== undefined) markAt(dialog.querySelector(".upload-text"), focus.terms, focus.text, focus.at);
+}
+// Search UI (Cmd/Ctrl+K): one project's chats (archived too), worker threads, knowledge and uploads. Results jump to the place and highlight it.
+function termPattern(terms) { return terms.length ? new RegExp(terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length).join("|"), "giu") : null; }
+function highlight(text, terms) {
+  const pattern = termPattern(terms);
+  if (!pattern) return esc(text);
+  let out = "", last = 0;
+  for (const match of text.matchAll(pattern)) { out += `${esc(text.slice(last, match.index))}<mark>${esc(match[0])}</mark>`; last = match.index + match[0].length; }
+  return out + esc(text.slice(last));
+}
+// Wraps every term match in rendered text nodes; returns the marks in document order.
+function markTerms(root, terms) {
+  const pattern = termPattern(terms), marks = [];
+  if (!root || !pattern) return marks;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: node => node.parentElement?.closest("mark, script, style") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue, matches = [...text.matchAll(pattern)];
+    if (!matches.length) continue;
+    const fragment = document.createDocumentFragment(); let last = 0;
+    for (const match of matches) {
+      fragment.append(text.slice(last, match.index));
+      const mark = document.createElement("mark"); mark.className = "search-mark"; mark.textContent = match[0]; fragment.append(mark); marks.push(mark);
+      last = match.index + match[0].length;
+    }
+    fragment.append(text.slice(last)); node.replaceWith(fragment);
+  }
+  return marks;
+}
+// Marks the terms and scrolls to the match at or after `offset` of the source text (counted by matches before it).
+function markAt(root, terms, text, offset) {
+  const marks = markTerms(root, terms), pattern = termPattern(terms);
+  if (!marks.length) return;
+  const before = [...[...text].slice(0, Math.max(0, offset)).join("").matchAll(pattern)].length;
+  const mark = marks[Math.min(before, marks.length - 1)];
+  mark.classList.add("current"); mark.scrollIntoView({ block: "center" });
+}
+function focusNode(node, focus) {
+  if (!node) return false;
+  if (!node.classList.contains("search-focus")) { node.classList.add("search-focus"); if (node.matches("details")) node.open = true; markTerms(node.querySelector(".text, .report-body") ?? node, focus.terms); }
+  if (!focus.scrolled) { focus.scrolled = true; node.scrollIntoView({ block: "center" }); requestAnimationFrame(() => node.isConnected && node.scrollIntoView({ block: "center" })); }
+  return true;
+}
+function applySearchFocus() {
+  if (!searchFocus || searchFocus.project !== projectId || searchFocus.chat !== chatId || view?.chatId !== chatId || tab !== "coordinator") return;
+  const first = !searchFocus.scrolled;
+  if (focusNode(document.querySelector(`#messages [data-index="${searchFocus.index}"]`), searchFocus) && first) { stickToBottom = false; renderWorkingPill(); }
+}
+function openSearch() {
+  if (!projectId) return;
+  const query = searchState.project === projectId ? searchState.query : "";
+  showDialog("Search", `<div class="search-box"><input id="search-input" type="search" placeholder="Search chats, workers, knowledge and files…" aria-label="Search this project" aria-controls="search-results" autocomplete="off" spellcheck="false" value="${esc(query)}"><p class="note search-scope">${esc(view?.project.name ?? "This project")}: every chat (archived too), worker threads, knowledge and uploaded files. ↑↓ to move, Enter to open.</p><div id="search-results" role="listbox" aria-label="Search results"></div></div>`);
+  const input = dialog.querySelector("#search-input"); input.focus(); input.select();
+  if (query) renderSearchResults(); else dialog.querySelector("#search-results").innerHTML = '<p class="note">Type a word to search.</p>';
+}
+function scheduleSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(() => void runSearch(), 180); }
+async function runSearch() {
+  const input = dialog.querySelector("#search-input");
+  if (!input || !dialog.open) return;
+  const query = input.value.trim(), id = projectId, seq = ++searchState.seq, version = dialogVersion, box = dialog.querySelector("#search-results");
+  if (!query) { searchState = { ...searchState, project: id, query: "", terms: [], results: [], active: 0 }; box.innerHTML = '<p class="note">Type a word to search.</p>'; return; }
+  box.setAttribute("aria-busy", "true");
+  let reply = null, failure = null;
+  try { reply = await api({ action: "search", id, query, limit: 30 }); } catch (error) { failure = error; }
+  // A slower earlier query, a closed dialog or another project never overwrites the newest list.
+  if (seq !== searchState.seq || version !== dialogVersion || id !== projectId || !box.isConnected) return;
+  box.removeAttribute("aria-busy");
+  if (failure) { searchState = { ...searchState, project: id, query, terms: [], results: [], active: 0 }; box.innerHTML = `<p class="note">${esc(failure.message.replace(/^Search query needs/, "Search needs"))}</p>`; return; }
+  searchState = { ...searchState, project: id, query, terms: reply.terms, results: reply.results, active: 0 };
+  renderSearchResults();
+}
+function searchWhere(hit) {
+  switch (hit.source) {
+    case "chat": return ["Chat", `${hit.chat}${hit.archived ? " (archived)" : ""} · ${hit.role === "user" ? (/^\[(Durable work|Child work|Owner-local event)/.test(hit.snippet) ? "Report" : "You") : "Coordinator"}`];
+    case "worker": return [hit.child ? "Sub-agent" : "Worker", `${hit.label} · ${hit.role === "user" ? "Task" : "Worker"}`];
+    case "knowledge": return ["Knowledge", hit.path];
+    default: return ["File", hit.filename];
+  }
+}
+function renderSearchResults() {
+  const box = dialog.querySelector("#search-results");
+  if (!box) return;
+  const { results, terms, active } = searchState;
+  box.innerHTML = results.length ? results.map((hit, i) => { const [kind, where] = searchWhere(hit); return `<button type="button" class="search-row${i === active ? " active" : ""}" role="option" aria-selected="${i === active}" data-action="search-open" data-i="${i}" data-source="${esc(hit.source)}"><span class="search-kind">${esc(kind)}</span><span class="search-where" title="${esc(where)}">${esc(where)}</span><small>${hit.at ? esc(when(hit.at)) : ""}</small><span class="search-snippet">${highlight(hit.snippet, terms)}</span></button>`; }).join("") : `<p class="note">No matches for “${esc(searchState.query)}”.</p>`;
+  box.querySelector(".search-row.active")?.scrollIntoView({ block: "nearest" });
+}
+async function openSearchHit(i) {
+  const hit = searchState.results[i], id = projectId;
+  if (!hit || searchState.project !== id) return;
+  const focus = { project: id, index: hit.index, terms: searchState.terms, offset: hit.offset, scrolled: false };
+  // The dialog's close event lands a task later and bumps dialogVersion; let it pass before opening the target.
+  if (dialog.open) { const closed = new Promise(resolve => dialog.addEventListener("close", resolve, { once: true })); closeDialog(); await closed; }
+  if (id !== projectId) return;
+  if (hit.source === "chat") {
+    searchFocus = { ...focus, chat: hit.chatId };
+    if (tab !== "coordinator") setTab("coordinator");
+    if (hit.chatId === chatId && view?.chatId === chatId) { html.delete("#messages"); await refresh(); } else changeChat(hit.chatId);
+  } else if (hit.source === "worker") {
+    workerFocus = { ...focus, threadId: hit.threadId };
+    await inspectThread(hit.threadId, Math.max(0, hit.index - 5));
+  } else if (hit.source === "knowledge") await knowledgeRead(hit.path, focus);
+  else await uploadOpen(hit.uploadId, focus);
 }
 function badge(value) { return `<span class="badge ${esc(value)}"><span class="dot"></span>${esc(value)}</span>`; }
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
@@ -1100,7 +1213,7 @@ async function action(node) {
     case "worker": await inspectWorker(node.dataset.run); break;
     case "thread-list": threadList(); break;
     case "all-work": setTab("activity"); break;
-    case "jump-latest": stickToBottom = true; followTranscript(); renderWorkingPill(); break;
+    case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickSkill(node.dataset.name); break;
     case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
@@ -1234,6 +1347,8 @@ async function action(node) {
     case "evidence-list": showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured. Ask the worker to attach reports with projects_evidence.</p>'); break;
     case "conversation": document.querySelector(".conversation").open = true; document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: "smooth" }); document.querySelector(".conversation summary").focus(); break;
     case "close-dialog": closeDialog(); break;
+    case "search": openSearch(); break;
+    case "search-open": await openSearchHit(Number(node.dataset.i)); break;
   }
 }
 
@@ -1260,7 +1375,7 @@ async function submit(form) {
     await mutate({ action: "chat-update", id: form.dataset.project, chatId: form.dataset.chat, title }, "Chat renamed.");
     closeCurrentDialog(id, version);
   } else if (form.id === "compose") {
-    closeSkillMenu();
+    closeSkillMenu(); searchFocus = null;
     const submitted = data.get("message"), chat = chatId, key = draftKey(id, chat);
     const text = submitted.trim(); if (!text) return;
     const list = attachmentDrafts.get(key) ?? [];
@@ -1499,6 +1614,7 @@ document.addEventListener("click", event => { const node = event.target.closest(
 document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
 function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; }
 document.addEventListener("input", event => {
+  if (event.target.id === "search-input") { scheduleSearch(); return; }
   if (event.target.closest("#compose")) { drafts.set(draftKey(), event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
   const answerForm = event.target.closest("[data-answer]");
   if (answerForm?.dataset.project === projectId) answers.set(answerKey(projectId, answerForm.dataset.entry), answerForm.querySelector("textarea").value);
@@ -1541,6 +1657,7 @@ document.addEventListener("click", event => {
   if (tabButton) setTab(tabButton.dataset.tab);
 });
 setTab(tab);
+document.querySelector(".search-kbd").textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K";
 document.querySelector("#create").addEventListener("click", createDialog);
 document.querySelector("#refresh").addEventListener("click", () => { void uiAction(async () => {
   const current = generation, id = projectId, loaded = await api({ action: "list" });
@@ -1555,6 +1672,13 @@ dialog.addEventListener("close", () => {
   dialogVersion++; if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null;
 });
 document.addEventListener("keydown", event => {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) { event.preventDefault(); openSearch(); return; }
+  if (event.target.id === "search-input" && !event.isComposing) {
+    const count = searchState.results.length;
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) { event.preventDefault(); searchState.active = (searchState.active + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSearchResults(); }
+    else if (event.key === "Enter") { event.preventDefault(); clearTimeout(searchTimer); if (searchState.query === event.target.value.trim() && count) void uiAction(() => openSearchHit(searchState.active)); else void runSearch(); }
+    return;
+  }
   if (skillMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = skillMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { skillMenu.index = (skillMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSkillMenu(); } return; }
@@ -2003,7 +2127,7 @@ async function knowledgeList() {
   dialog.querySelector(".dialog-body").innerHTML = `<p>MEMORY.md is an index capped at 3,000 Unicode code points. Other files load on demand. Learned knowledge is separate from standing execution instructions.</p><button data-action="knowledge-new">Create a topic</button>${docs.map(doc => `<article class="task"><strong>${esc(doc.path)}</strong><p>${esc(doc.author)} · ${esc(doc.updatedAt)}<br>Revision ${esc(doc.revision)}</p><button data-action="knowledge-read" data-project="${esc(id)}" data-path="${esc(doc.path)}">Read/edit document</button></article>`).join("")}`;
   disableActions();
 }
-async function knowledgeRead(path) {
+async function knowledgeRead(path, focus = null) {
   if (!knowledgePath(path)) throw new Error("Invalid managed knowledge path");
   const id = projectId, current = generation, version = showDialog(path, '<p>Reading current document and revision…</p>');
   const doc = await api({ action: "knowledge-read", id, path });
@@ -2012,6 +2136,7 @@ async function knowledgeRead(path) {
   const draft = knowledgeDrafts.get(`${id}:${path}`);
   dialog.querySelector(".dialog-body").innerHTML = `<p class="note" title="Revision ${esc(doc.revision)}">${esc(doc.author)} · updated ${esc(ago(doc.updatedAt))} · ${esc(size(doc.size))}${path === "MEMORY.md" ? ` · ${[...doc.text].length.toLocaleString()} / 3,000 code points` : ""}</p>${draft ? `<p class="notice">Retained draft uses revision ${esc(draft.expectedRevision ?? "null, create only")}. ${draft.expectedRevision !== doc.revision ? "It conflicts with this current document. Rereading does not rebase it." : "It remains unsent."}</p>` : ""}<div class="row"><button class="primary small" data-action="knowledge-edit" data-project="${esc(id)}" data-path="${esc(path)}">${draft ? "Continue draft" : "Edit"}</button><button class="small" data-action="knowledge-history" data-project="${esc(id)}" data-path="${esc(path)}">History</button>${draft ? `<button class="small" data-action="knowledge-discard" data-project="${esc(id)}" data-path="${esc(path)}">Discard draft…</button>` : ""}</div><div class="doc-view text">${renderMarkdown(doc.text)}</div>`;
   disableActions();
+  if (focus) markAt(dialog.querySelector(".doc-view"), focus.terms, doc.text, focus.offset);
 }
 function knowledgeEdit(id, path, create = false) {
   requireProject(id);
@@ -2113,6 +2238,7 @@ function threadList() {
 }
 async function inspectThread(threadId, offset = null, textOffset = 0) {
   requireThread(threadId);
+  if (workerFocus?.threadId !== threadId) workerFocus = null;
   if (![offset ?? 0, textOffset].every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)) throw new Error("Invalid thread history page");
   const chat = { id: projectId, generation, threadId, offset, textOffset };
   workerChat = chat;
@@ -2145,11 +2271,12 @@ async function refreshWorkerChat(chat) {
 function renderWorkerChat(chat, page, opening = false) {
   const transcript = document.querySelector("#worker-messages");
   const atEnd = opening || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-  const messages = page.items.map(message => chatMessageHtml(message, "Worker")).join("") || '<p class="note">No messages yet.</p>';
+  const messages = page.items.map((message, i) => chatMessageHtml({ ...message, index: page.offset + i }, "Worker")).join("") || '<p class="note">No messages yet.</p>';
   if (transcript.dataset.content !== messages) {
     transcript.innerHTML = messages; transcript.dataset.content = messages;
     if (atEnd) transcript.scrollTop = transcript.scrollHeight;
   }
+  if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id) focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
   document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
   document.querySelector("#worker-evidence").innerHTML = workerChanges(chat.threadId, page.items);

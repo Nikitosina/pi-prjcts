@@ -8,9 +8,10 @@ import type { DurableProjectRuntime } from "./durable-runtime.ts";
 export type Notice = {
   seq: number; at: number; projectId: string; project: string; chatId: string; chat: string;
   kind: "question" | "approval" | "review" | "result" | "error"; title: string; text: string;
-  entryId?: string; choices?: string[]; operationId?: string; fingerprint?: string;
+  entryId?: string; choices?: string[]; operationId?: string; fingerprint?: string; workId?: string; threadId?: string;
 };
-type ProjectState = { seen: string[]; chats: Record<string, number> };
+/** `workBaselined`: failed work existing before worker-failure notices (or before the project was first scanned) was marked seen silently. */
+type ProjectState = { seen: string[]; chats: Record<string, number>; workBaselined?: boolean };
 type State = { version: 1; startedAt: number; seq: number; feed: Notice[]; projects: Record<string, ProjectState> };
 const FEED = 200, SEEN = 2000, TEXT = 3500;
 const clip = (text: string, max = TEXT) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -52,6 +53,19 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       const op = record.operation, what = op.kind === "command" ? `command ${op.effect} in ${op.repositoryId}` : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
       push({ ...base, chatId: "main", chat: chats[0].title, kind: "approval", title: `${op.provider} ${what}`, text: `Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.`, operationId: record.id, fingerprint: record.fingerprint });
     }
+    // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
+    const quietWork = silent || !entry.workBaselined;
+    for (const work of (await owner.planSnapshot()).work) {
+      if (work.status !== "failed") continue;
+      const key = `work:${work.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (quietWork) continue;
+      const chat = work.chatConversationId === null ? chats[0] : chatOf(work.chatConversationId);
+      const task = work.text.replace(/\s+/g, " ").trim();
+      push({ ...base, chatId: chat.id, chat: chat.title, kind: "error", title: `${work.parentThreadId ? "Sub-agent" : work.role[0].toUpperCase() + work.role.slice(1)} failed`, text: clip(`${work.role} failed: ${task.length > 200 ? `${task.slice(0, 199)}…` : task}${work.blocker ? `\n${work.blocker}` : ""}`), workId: work.id, threadId: work.threadId });
+    }
+    entry.workBaselined = true;
     for (const chat of chats) {
       const after = entry.chats[chat.id];
       // Archived chats are skipped, but baselined once so a restored chat does not replay its history.

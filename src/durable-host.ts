@@ -16,7 +16,7 @@ export async function openDurableHost(project: Project, configuredSkillLoader?: 
   } catch (error) { await owner.close(); throw error; }
 }
 
-export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string): Promise<Snapshot> {
+export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string, focus?: number): Promise<Snapshot> {
   const view = await owner.snapshot(chatId);
   const paused = (await owner.planSnapshot()).paused;
   const project = loadProject(view.project.id);
@@ -54,9 +54,9 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
   const dir = projectDir(project.id);
   return {
     project, busy: view.coordinator.busy, paused, jobs: viewed,
-    messages: transcriptWindow(view.coordinator.messages).map(message => "kind" in message
-      ? { role: "tool", at: message.at, text: "", kind: message.kind, name: message.name, argsPreview: message.argsPreview, status: message.status, resultPreview: message.resultPreview }
-      : { role: message.role, at: message.at, text: message.role === "user" ? compactSkillText(message.text) : message.text, ...(message.thinking ? { thinking: message.thinking } : {}) }),
+    messages: transcriptWindow(view.coordinator.messages, focus).map(([message, index]) => "kind" in message
+      ? { role: "tool", index, at: message.at, text: "", kind: message.kind, name: message.name, argsPreview: message.argsPreview, status: message.status, resultPreview: message.resultPreview }
+      : { role: message.role, index, at: message.at, text: message.role === "user" ? compactSkillText(message.text) : message.text, ...(message.thinking ? { thinking: message.thinking } : {}) }),
     activeRuns: [], runStates: [], inbox: inbox(dir), notes: notes(dir), evidence: evidence(dir),
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
@@ -65,9 +65,13 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
 }
 
 // The last 30 conversational messages and every step between them, so a long tool chain never hides the turn that started it.
-function transcriptWindow(messages: readonly DurableCoordinatorMessage[]): DurableCoordinatorMessage[] {
-  const rows = messages.filter(message => "kind" in message || message.text.trim() || message.thinking);
+// With `focus` (a search jump), the window also reaches back to that message; older tool rows stay out beyond 400 rows. Pairs carry the transcript index.
+function transcriptWindow(messages: readonly DurableCoordinatorMessage[], focus?: number): [DurableCoordinatorMessage, number][] {
+  const rows = messages.map((message, index): [DurableCoordinatorMessage, number] => [message, index]).filter(([message]) => "kind" in message || message.text.trim() || message.thinking);
   let start = rows.length;
-  for (let texts = 0; start > 0 && texts < 30; start--) if (!("kind" in rows[start - 1])) texts++;
-  return rows.slice(Math.max(start, rows.length - 400));
+  for (let texts = 0; start > 0 && texts < 30; start--) if (!("kind" in rows[start - 1][0])) texts++;
+  const tail = Math.max(start, rows.length - 400), at = focus === undefined ? -1 : rows.findIndex(([, index]) => index >= focus);
+  if (at < 0 || at >= tail) return rows.slice(tail);
+  const from = Math.max(0, at - 3);
+  return rows.filter(([message], position) => position >= tail || position >= from && (!("kind" in message) || position <= at + 40));
 }

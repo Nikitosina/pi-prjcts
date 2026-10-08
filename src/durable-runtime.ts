@@ -119,6 +119,11 @@ export type DurableProjectSnapshot = {
   workers: Record<string, { conversationId: number; reportedAnswerIds: number[] }>;
 };
 
+export type SearchMessage = { index: number; role: "user" | "assistant"; at: number; text: string };
+export type SearchSources = {
+  chats: { id: string; title: string; archived: boolean; conversationId: number; messages: SearchMessage[] }[];
+  threads: { threadId: string; role: string; task: string; parentThreadId: string | null; conversationId: number; messages: SearchMessage[] }[];
+};
 export type AdmitContent = string | ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
 export type DurableProjectRuntime = {
   /** Content is text, or text plus image parts when the coordinator model accepts images (see `acceptsImages`). */
@@ -129,6 +134,8 @@ export type DurableProjectRuntime = {
   /** Input submissions of one chat, without the transcript; used to settle ledgers of chats not being viewed. */
   chatSubmissions(chatId: string, after?: number): Promise<DurableSubmissionState[]>;
   chatCreate(title?: string): Promise<DurableChat>;
+  /** Text messages of every chat (archived included) and every worker thread, for full-text search; `index` matches transcript and thread-history positions. */
+  searchSources(): Promise<SearchSources>;
   chatUpdate(id: string, change: { title?: string; archived?: boolean }): Promise<DurableChat>;
   result(submissionId: number): Promise<DurableSubmissionState>;
   wait(submissionId: number): Promise<DurableSubmissionState>;
@@ -517,6 +524,23 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const { conversation } = await resolveChat(id), admitted = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
         const ids = await coordinatorInputSubmissionIds(openedStorage, conversation, await openedHarness.inspect(context), admitted?.ids ?? []);
         return Promise.all(ids.filter(submission => submission > after).map(submission => projectSubmission(openedHarness, conversation, submission)));
+      },
+      searchSources: async () => {
+        assertOpen();
+        const read = async (conversation: Conversation | null | undefined): Promise<SearchMessage[]> => {
+          if (!conversation) return [];
+          const view = await conversation.viewState(context);
+          try { return coordinatorMessages(view.value.entries).flatMap((message, index) => "kind" in message || !message.text.trim() ? [] : [{ index, role: message.role, at: message.at, text: message.text }]); }
+          finally { view.dispose(); }
+        };
+        const work = (await planning.snapshot(root)).work;
+        return {
+          chats: await Promise.all((await chatList()).map(async chat => ({ id: chat.id, title: chat.title, archived: chat.archived, conversationId: chat.conversationId, messages: await read((await resolveChat(chat.id)).conversation) }))),
+          threads: await Promise.all((await planning.threadIdentities(root)).map(async thread => {
+            const latest = work.findLast(item => item.threadId === thread.threadId);
+            return { threadId: thread.threadId, role: latest?.role ?? "worker", task: latest?.text ?? "", parentThreadId: latest?.parentThreadId ?? null, conversationId: Number(thread.conversationId), messages: await read(await openedHarness.conversation(thread.conversationId, context)) };
+          })),
+        };
       },
       chatCreate: async title => {
         assertOpen();

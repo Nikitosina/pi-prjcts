@@ -456,3 +456,21 @@ button.attach-chip { padding: 3px 8px 3px 6px; }
 .telegram-token input { flex: 1 1 14rem; min-width: 0; }
 .pair-code { padding: .5rem .75rem; border-radius: 8px; background: var(--soft, rgba(0,0,0,.04)); overflow-wrap: anywhere; }
 .pair-code code { font-size: 1.05em; font-weight: 600; }
+
+/* Full-text search (Cmd/Ctrl+K) */
+.search-button { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.search-kbd { font: 11px ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.search-box #search-input { width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px 12px; }
+.search-box .search-scope { margin: 8px 0 4px; }
+#search-results { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.search-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 8px; width: 100%; min-width: 0; text-align: left; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); white-space: normal; height: auto; }
+.search-row.active, .search-row:hover { border-color: var(--accent); background: #fbf4ee; }
+.search-kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
+.search-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
+.search-row small { color: var(--muted); white-space: nowrap; }
+.search-snippet { grid-column: 1 / -1; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; line-height: 1.45; }
+mark, .search-mark { background: #f7dc84; color: inherit; border-radius: 2px; padding: 0 1px; }
+.search-mark.current { outline: 2px solid var(--accent); }
+.search-focus { box-shadow: 0 0 0 2px var(--accent); border-radius: 8px; animation: search-flash 1.6s ease-out 1; }
+@keyframes search-flash { from { background: #f7dc8466; } }
+@media (max-width: 600px) { .search-label, .search-kbd { display: none; } .search-row small { grid-column: 1 / -1; } }

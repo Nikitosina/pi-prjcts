@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { home, socketPath, Request, Project, errorText, jobs, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
+import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader, openCoordinator, type Runtime } from "./coordinator.ts";
 import { expandSkillCommand, listSkills } from "./coordinator-skills.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
@@ -392,7 +393,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       } finally { settingsUpdating.delete(input.id); }
     }
-    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId) : (await runtime(input.id)).snapshot();
+    case "show": return loadProject(input.id).runtime === "durable" ? durableHostSnapshot(await durable(input.id), input.chatId, input.focus) : (await runtime(input.id)).snapshot();
+    case "search": return searchProject(ownedProjectDir(input.id), input.query, loadProject(input.id).runtime === "durable" ? await (await durable(input.id)).searchSources() : null, input.limit);
     case "chat-create": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted || project.archived) throw new Error("Inactive project cannot open a chat"); }, operation: owner => owner.chatCreate(input.title) });
     case "chat-update": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted) throw new Error("Project is deleted"); }, operation: owner => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }) });
     case "delete": return lifecycle(input.id, () => {

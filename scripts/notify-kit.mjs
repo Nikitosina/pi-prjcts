@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export { delay, randomUUID };
-export async function kit(name, extraEnv = {}) {
+// `respond(ctx)` (optional) scripts the fake model first: return SSE text, { error } for an HTTP 400, 'HOLD' to never answer, or undefined for the default script.
+export async function kit(name, extraEnv = {}, respond) {
   const repo = process.cwd();
   const artifacts = join(repo, 'artifacts', `${name}-${new Date().toISOString().replaceAll(':', '-')}`);
   const root = join(realpathSync(tmpdir()), `${name}-${randomUUID()}`);
@@ -38,6 +39,10 @@ export async function kit(name, extraEnv = {}) {
       const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
       result.calls.push({ at: Date.now(), coordinator, marker, stage: results.length, user: userText.slice(0, 400) });
       const reply = text => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(text); };
+      const custom = respond?.({ coordinator, marker, userText, results, tools, say, call });
+      if (custom === 'HOLD') return;
+      if (custom?.error) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: custom.error } })); return; }
+      if (typeof custom === 'string') return reply(custom);
       if (!coordinator) return reply(say(`Worker ${marker}`));
       if (userText.startsWith('Owner answered your question')) return reply(say(`ANSWER-ACK ${/\n(.*)$/.exec(userText)?.[1] ?? ''}`));
       if (marker === 'MARK-FAIL') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Fake invalid request MARK-FAIL' } })); return; }
