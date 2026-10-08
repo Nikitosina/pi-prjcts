@@ -62,7 +62,7 @@ try {
   const id = project.id;
   let snap = await request({ action: "owner-setup-snapshot", id });
   const expectedRoot = join(realpathSync(process.env.PI_PROJECTS_HOME), id, "worktrees");
-  assert.deepEqual({ ...snap.quickGrant }, { available: true, repositoryId: "acme/demo", ownerCheckout: realpathSync(repo), approvedRoot: expectedRoot, head: c1, dirty: false });
+  assert.deepEqual({ ...snap.quickGrant }, { available: true, provider: "github", repositoryId: "acme/demo", ownerCheckout: realpathSync(repo), approvedRoot: expectedRoot, head: c1, dirty: false });
   pass("F2 preview derives repo ID from origin, root, HEAD", snap.quickGrant);
 
   // F3

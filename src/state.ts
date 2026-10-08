@@ -24,7 +24,7 @@ const revision = Type.String({ minLength: 1, maxLength: 128 });
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
-export const WorkspaceRepositoryAuthorization = Type.Object({ repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), ownerCheckout: Type.String({ minLength: 1, maxLength: 4096 }), approvedRoot: Type.String({ minLength: 1, maxLength: 4096 }), fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), sharedObjectStore: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 4096 }), Type.Null()])) }, { additionalProperties: false });
+export const WorkspaceRepositoryAuthorization = Type.Object({ repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), ownerCheckout: Type.String({ minLength: 1, maxLength: 4096 }), approvedRoot: Type.String({ minLength: 1, maxLength: 4096 }), fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), sharedObjectStore: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 4096 }), Type.Null()])), /** Arc: the project folder below the Arc root (empty or absent = the root). */ subpath: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false });
 export const WorkspaceScopeAuthorization = Type.Object({ id: Id, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), files: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { maxItems: 1024, uniqueItems: true }), baseRevision: Type.String({ pattern: "^[0-9a-f]{40,64}$" }), evidenceCapture: Type.Optional(Type.Literal(true)), wholeRepository: Type.Optional(Type.Literal(true)) }, { additionalProperties: false });
 export const WorkspaceAuthorization = Type.Object({ version: Type.Literal(1), provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), owner: Type.String({ minLength: 1, maxLength: 512 }), repositories: Type.Array(WorkspaceRepositoryAuthorization, { minItems: 1, maxItems: 64 }), scopes: Type.Array(WorkspaceScopeAuthorization, { minItems: 1, maxItems: 1024 }) }, { additionalProperties: false });
 export type WorkspaceAuthorization = Static<typeof WorkspaceAuthorization>;
@@ -53,6 +53,12 @@ export const GithubAuthorization = Type.Object({
 }, { additionalProperties: false });
 export type GithubAuthorization = Static<typeof GithubAuthorization>;
 export const GithubAuthorizationHistory = Type.Array(Type.Object({ revokedAt: Type.String(), authorization: GithubAuthorization }, { additionalProperties: false }), { maxItems: 64 });
+/** Arcadia counterpart of GithubAuthorization: who pushes (login), where PRs go (trunk), bound to the workspace grant revision. */
+export const ArcAuthorization = Type.Object({
+  repositoryId: Type.String({ minLength: 1, maxLength: 256 }), login: Type.String({ minLength: 1, maxLength: 128 }), baseBranch: Type.Literal("trunk"),
+  owner: Type.String({ minLength: 1, maxLength: 512 }), workspaceRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), at: Type.String(),
+}, { additionalProperties: false });
+export type ArcAuthorization = Static<typeof ArcAuthorization>;
 export const Project = Type.Object({
   version: Type.Literal(1), id: Id, name: text, cwd: text, objective: Type.String({ maxLength: 32000 }),
   runtime: Type.Literal("durable"),
@@ -67,6 +73,7 @@ export const Project = Type.Object({
   workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
   githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
   githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
+  arcAuthorization: Type.Optional(ArcAuthorization),
   workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
   commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
   /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
@@ -242,6 +249,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("operation-decide"), id: Id, operationId: Id, fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }), decision: Type.Literal("reject") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-catalog"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-quick-authorize"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("arc-quick-authorize"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-quick-grant"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-grant"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Type.Literal("github"), ownerCheckout: text, approvedRoot: text, fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), files: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { minItems: 1, maxItems: 1024, uniqueItems: true }), baseRevision: Type.String({ pattern: "^[0-9a-f]{40}$" }), evidenceCapture: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-revoke"), id: Id, confirm: Id, scopeId: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),

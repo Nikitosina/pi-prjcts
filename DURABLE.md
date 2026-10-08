@@ -496,3 +496,17 @@ The owner's pi `mcp.json` (`~/.pi/agent/mcp.json`; `PI_PROJECTS_MCP_CONFIG` over
 - RPC: `mcp-catalog`, `mcp-probe` (Test button: connects and counts tools).
 - Existing worker threads created before this feature keep their frozen tool list (no MCP until a new thread).
 - E2E: `scripts/mcp-e2e.mjs` (fake stdio server `scripts/fake-mcp-server.mjs`, shared harness `scripts/lib/e2e-kit.mjs`), failures `scripts/mcp-failures.md`. Artifacts under `artifacts/mcp-<timestamp>/` (report.json + screenshots).
+
+## Arc projects: detect, grant, seams (S1)
+
+A project whose folder sits in an Arc mount (nearest `.arc` above the cwd; `.arc` wins over `.git` in one directory, a git repo nested in the mount is git) gets the Arc variant of the one-click grant; git projects spawn no arc process.
+
+- Seams (`src/vcs.ts` `cli`): `PI_PROJECTS_ARC_CLI`, `PI_PROJECTS_ARC_WT_CLI` (and later `PI_PROJECTS_ARCANUM_CLI`) replace `/opt/homebrew/bin/arc` and `/usr/local/bin/arc-wt` everywhere, including `src/workspace-isolation.ts`.
+- Preview (`arcFacts`, read-only commands): `arc root` must equal the walked root, `arc info --json` (`repository`, `user_login`), `arc-wt config` (`worktrees_base_path`, `object_store_path` required), trunk head from `arc log -n 1 --oneline --no-decorate trunk`, `arc status --short .`. Any failure is a blocker message, no grant. Worktrees live in arc-wt's `worktrees_base_path` (`~/arcadia-wt`), never in the project home, and must be outside the Arc root.
+- Grant: same `workspace-quick-grant` action. `provider: "arc"`, `ownerCheckout` = Arc root, `approvedRoot` = arc-wt worktree folder, `sharedObjectStore` = arc-wt object store, `subpath` = project folder below the root (new optional `WorkspaceRepositoryAuthorization.subpath`; part of the repository fingerprint only when set), whole-repository scope with `baseRevision` = trunk head (not the owner's branch). GitHub grants are unchanged.
+- "Connect Arcadia" (`arc-quick-authorize`, `Project.arcAuthorization` = repository, login, `baseBranch: "trunk"`, workspace revision): offline, needs the Arc grant, follows grant changes like one-click GitHub (`rebindAuthorizations`). Used by the PR/follow slices.
+- UI: step 2 is "Arcadia" for Arc projects; dialogs say arc-wt/trunk/project folder.
+- Skills: `~/.agents/skills` is a pi skill source (arc, arc-wt, arcanum-go, arcadia-ci show in the picker and the / menu; arc-wt is `disable-model-invocation`, so it is listed but not in the prompt index). `~/.claude/skills` is NOT a pi source: skills only there do not appear.
+- Fakes: `scripts/fake-arc.mjs`, `scripts/fake-arc-wt.mjs` (git-backed, leases, porcelain format, `--force` logged and refused), fixture `scripts/lib/fake-arc-kit.mjs`. The four scripts that used the real Arcadia are gone (`durable-workspace-arc-e2e`, `durable-workspace-arc-existing-thread-e2e`, `durable-workspace-original-intent-reconcile`; `workspace-allocation-e2e` keeps its git half).
+- E2E: `scripts/arc-detect-grant-e2e.mjs` (UI, grant, blockers, skills), `scripts/arc-isolation-e2e.mjs` (allocation, crash reconcile, foreign lease, blockers, release). Failures: `scripts/arc-detect-grant-failures.md`.
+- Known unrelated failure: `durable-workspace-admission-negatives-e2e` (project fixture lacks `runtime: "durable"`), fails before this slice too.

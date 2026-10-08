@@ -23,6 +23,7 @@ import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
+import { arcQuickPreview, authorizeArcQuick, rebindArc } from "./arc-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
@@ -133,6 +134,8 @@ async function lifecycle<T>(id: string, validate: (project: ReturnType<typeof lo
   finally { lifecycleChanging.delete(id); }
 }
 
+/** One-click authorizations (GitHub, Arcadia) follow workspace grant changes. */
+const rebindAuthorizations = (project: ReturnType<typeof loadProject>) => rebindArc(rebindOneClickGithub(project));
 /** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
 function workerWorktreeRoot(id: string): string { return join(projectDir(id), "worktrees"); }
 
@@ -140,7 +143,7 @@ async function persistWorkspaceGrant<T>(before: ReturnType<typeof loadProject>, 
   const persist = async () => withProjectLock(before.id, async () => {
     const project = loadProject(before.id);
     if (workspaceAuthorizationRevision(project) !== expectedRevision || project.archived || project.deleted) throw new Error("Workspace authorization changed or project became inactive");
-    saveProject(rebindOneClickGithub({ ...project, workspaceAuthorization: result.project.workspaceAuthorization })); return result.scope;
+    saveProject(rebindAuthorizations({ ...project, workspaceAuthorization: result.project.workspaceAuthorization })); return result.scope;
   }, true);
   return lifecycle(before.id, project => { if (workspaceAuthorizationRevision(project) !== expectedRevision) throw new Error("Workspace authorization changed; refresh before granting"); }, async owner => {
     const current = await owner.snapshot(), plan = await owner.planSnapshot();
@@ -413,7 +416,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const grants = project.workerSkillGrants ?? [];
       const grantsRevision = createHash("sha256").update(JSON.stringify(grants)).digest("hex");
       const profileSnapshot = commandProfilesSnapshot(project);
-      return { projectId: project.id, workspaceRevision, githubRevision, grantsRevision, profilesRevision: profileSnapshot.revision, workspace: project.workspaceAuthorization ? { version: project.workspaceAuthorization.version, provider: project.workspaceAuthorization.provider, owner: project.workspaceAuthorization.owner, repositories: project.workspaceAuthorization.repositories.map(repository => ({ repositoryId: repository.repositoryId, provider: repository.provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, fileOwnershipPrefix: repository.fileOwnershipPrefix })), scopes: project.workspaceAuthorization.scopes.map(scope => ({ id: scope.id, repositoryId: scope.repositoryId, fileCount: scope.files.length, baseRevision: scope.baseRevision, evidenceCapture: scope.evidenceCapture === true, wholeRepository: scope.wholeRepository === true })) } : null, quickGrant: quickWorkspacePreview(project, workerWorktreeRoot(project.id)), githubQuick: await githubQuickPreview(project), workspaceHistory: (project.workspaceAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.repositoryId, scopeId: item.scopeId, baseRevision: item.baseRevision, repositorySha256: item.repositorySha256, scopeSha256: item.scopeSha256 })), github: project.githubAuthorization ?? [], githubHistory: (project.githubAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.authorization.repositoryId, numericId: item.authorization.numericId, branchPrefix: item.authorization.branchPrefix, baseBranch: item.authorization.baseBranch, owner: item.authorization.owner })),  profiles: profileSnapshot.profiles.map(profile => ({ id: profile.id, label: profile.label, repositoryId: profile.repositoryId, scopeIds: profile.scopeIds, effect: profile.effect, enabled: profile.enabled, revision: profile.revision, executionAvailable: profile.executionAvailable, blocker: profile.blocker })), grants: grants.map(grant => ({ id: grant.id, revision: grant.revision, enabled: grant.enabled, scopeIds: grant.scopeIds, skills: grant.skills.map(skill => ({ catalogId: skill.catalogId, name: skill.name })) })), configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." } };
+      return { projectId: project.id, workspaceRevision, githubRevision, grantsRevision, profilesRevision: profileSnapshot.revision, workspace: project.workspaceAuthorization ? { version: project.workspaceAuthorization.version, provider: project.workspaceAuthorization.provider, owner: project.workspaceAuthorization.owner, repositories: project.workspaceAuthorization.repositories.map(repository => ({ repositoryId: repository.repositoryId, provider: repository.provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, fileOwnershipPrefix: repository.fileOwnershipPrefix, ...(repository.sharedObjectStore ? { sharedObjectStore: repository.sharedObjectStore } : {}), ...(repository.subpath ? { subpath: repository.subpath } : {}) })), scopes: project.workspaceAuthorization.scopes.map(scope => ({ id: scope.id, repositoryId: scope.repositoryId, fileCount: scope.files.length, baseRevision: scope.baseRevision, evidenceCapture: scope.evidenceCapture === true, wholeRepository: scope.wholeRepository === true })) } : null, quickGrant: quickWorkspacePreview(project, workerWorktreeRoot(project.id)), githubQuick: await githubQuickPreview(project), workspaceHistory: (project.workspaceAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.repositoryId, scopeId: item.scopeId, baseRevision: item.baseRevision, repositorySha256: item.repositorySha256, scopeSha256: item.scopeSha256 })), github: project.githubAuthorization ?? [], arc: project.arcAuthorization ?? null, arcRevision: createHash("sha256").update(JSON.stringify(project.arcAuthorization ?? null)).digest("hex"), arcQuick: arcQuickPreview(project), githubHistory: (project.githubAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.authorization.repositoryId, numericId: item.authorization.numericId, branchPrefix: item.authorization.branchPrefix, baseBranch: item.authorization.baseBranch, owner: item.authorization.owner })),  profiles: profileSnapshot.profiles.map(profile => ({ id: profile.id, label: profile.label, repositoryId: profile.repositoryId, scopeIds: profile.scopeIds, effect: profile.effect, enabled: profile.enabled, revision: profile.revision, executionAvailable: profile.executionAvailable, blocker: profile.blocker })), grants: grants.map(grant => ({ id: grant.id, revision: grant.revision, enabled: grant.enabled, scopeIds: grant.scopeIds, skills: grant.skills.map(skill => ({ catalogId: skill.catalogId, name: skill.name })) })), configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." } };
     }
     case "github-repository-inspect": {
       const project = loadProject(input.id), revision = workspaceAuthorizationRevision(project);
@@ -446,6 +449,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           saveProject({ ...project, githubAuthorization: [...entries.filter(item => item.repositoryId !== authorization.repositoryId), authorization] });
           return authorization;
         }, true);
+      });
+    }
+    case "arc-quick-authorize": {
+      if (input.confirm !== input.id) throw new Error("Arcadia authorization requires confirmation matching project id");
+      const revision = (project: ReturnType<typeof loadProject>) => createHash("sha256").update(JSON.stringify(project.arcAuthorization ?? null)).digest("hex");
+      const before = loadProject(input.id);
+      if (revision(before) !== input.expectedRevision) throw new Error("Arcadia authorization changed; refresh before authorizing");
+      const authorization = authorizeArcQuick(before, input);
+      const validate = (project: ReturnType<typeof loadProject>) => { if (revision(project) !== input.expectedRevision || authorizationFingerprint(project) !== authorizationFingerprint(before) || project.archived || project.deleted) throw new Error("Project authorization changed during Arcadia authorization"); };
+      return lifecycle(input.id, validate, async owner => {
+        const view = await owner.snapshot(), plan = await owner.planSnapshot();
+        if (view.coordinator.busy || view.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("Arcadia authorization requires no active project work");
+        await closeLifecycleOwner(input.id, owner);
+        return withProjectLock(input.id, async () => { const project = loadProject(input.id); validate(project); saveProject({ ...project, arcAuthorization: authorization }); return authorization; }, true);
       });
     }
     case "provider-pr-inspect": case "provider-ci-inspect": case "provider-review-inspect": case "provider-ci-detail": case "provider-conflict-inspect": case "provider-ci-job-inspect": {
@@ -518,7 +535,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (history.length >= 2048) throw new Error("Workspace authorization history limit reached");
         const scopes = auth.scopes.filter(item => item.id !== scope.id), repositories = auth.repositories.filter(item => scopes.some(remaining => remaining.repositoryId === item.repositoryId));
         const historyEntry = { revokedAt: new Date().toISOString(), repositoryId: repository.repositoryId, repositorySha256: workspaceRepositoryFingerprint(repository), scopeId: scope.id, scopeSha256: createHash("sha256").update(JSON.stringify(scope)).digest("hex"), baseRevision: scope.baseRevision };
-        saveProject(rebindOneClickGithub({ ...project, workspaceAuthorization: scopes.length ? { ...auth, scopes, repositories } : undefined, workspaceAuthorizationHistory: [...history, historyEntry] }));
+        saveProject(rebindAuthorizations({ ...project, workspaceAuthorization: scopes.length ? { ...auth, scopes, repositories } : undefined, workspaceAuthorizationHistory: [...history, historyEntry] }));
         return { revoked: true, scopeId: input.scopeId, repositoryId: scope.repositoryId };
       }, true);
       return lifecycle(input.id, project => {
