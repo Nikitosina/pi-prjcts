@@ -298,5 +298,7 @@ export function followRuntime(root: Conversation, projectId: string, schedules: 
       repos: Object.entries(state.repos).map(([repositoryId, repo]) => ({ repositoryId, baselined: repo.baselined, open: Object.values(repo.prs).filter(pr => pr.state === "open").length })),
       fixes: await Promise.all(Object.entries(state.fixes).map(async ([pr, attempts]) => ({ pr, attempts: await Promise.all(attempts.map(async item => ({ ...item, status: item.workId ? await fixer.workStatus(item.workId) : null }))) }))) };
   }
-  return { poll, tick, snapshot, kick: () => { nextAtMs = 0; failures = 0; }, abort: () => { for (const controller of controllers) controller.abort(); } };
+  /** Resume clears the "Project is paused" problem at once and polls on the next tick, instead of showing it until the next poll. */
+  const resumed = async () => { nextAtMs = 0; failures = 0; await root.commit(async tx => { const doc = await tx.doc(Follow, root.id); if (doc.lastError?.startsWith("Project is paused")) doc.lastError = null; }, BACKGROUND_CONTEXT); };
+  return { poll, tick, snapshot, resumed, kick: () => { nextAtMs = 0; failures = 0; }, abort: () => { for (const controller of controllers) controller.abort(); } };
 }

@@ -144,6 +144,8 @@ try {
   await evaluate(`(() => { document.querySelector('#event-chat').value = ${JSON.stringify(hooks.id)}; document.querySelector('#webhook-enabled').checked = true; document.querySelector('[data-action="automation-save"]').click(); })()`, s);
   await eventually(async () => { const v = await snap(); return v.webhook.enabled && v.eventChat === hooks.id; }, 'webhook opt-in not saved');
   await waitFor(`document.querySelector('#webhook-enabled')?.checked === true`, s, 'rerender');
+  // Save leaves the card busy for a moment (buttons disabled); click Reveal once it is enabled.
+  await waitFor(`!document.querySelector('[data-action="webhook-reveal"]').disabled`, s, 'reveal enabled');
   await evaluate(`document.querySelector('[data-action="webhook-reveal"]').click()`, s);
   await waitFor(`document.querySelector('#webhook-secret').innerText === ${JSON.stringify(initial.webhook.secret)}`, s, 'revealed secret');
   result.checks.push('W14 Settings shows the URL, masks the secret until Reveal, and saves enable + chat');

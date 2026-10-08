@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
@@ -117,10 +118,11 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
   });
   server.requestTimeout = 120000;
   server.on("close", () => { for (const end of liveStreams) end(); });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
+  // Reuse the previous port when it is free: browser notification permission and the notifications toggle are per origin.
+  let saved = 0;
+  try { saved = Number(new URL(JSON.parse(readFileSync(join(home(), "web.json"), "utf8")).url).port) || 0; } catch {}
+  const listen = (port: number) => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
+  try { await listen(saved); } catch (error) { if (!saved) throw error; await listen(0); }
   server.on("error", error => process.stderr.write(JSON.stringify({ event: "web-error", error: errorText(error) }) + "\n"));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Browser listener has no TCP address");

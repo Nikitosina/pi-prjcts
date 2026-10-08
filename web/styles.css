@@ -451,3 +451,8 @@ button.attach-chip { padding: 3px 8px 3px 6px; }
 .event-card.github { border-left: 3px solid #6e7781; }
 .event-card.webhook { border-left: 3px solid #8250df; }
 .events-in input[type="number"] { width: 72px; flex: none; }
+/* Notifications card */
+.telegram-token { flex-wrap: wrap; }
+.telegram-token input { flex: 1 1 14rem; min-width: 0; }
+.pair-code { padding: .5rem .75rem; border-radius: 8px; background: var(--soft, rgba(0,0,0,.04)); overflow-wrap: anywhere; }
+.pair-code code { font-size: 1.05em; font-weight: 600; }

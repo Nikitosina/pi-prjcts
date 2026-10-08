@@ -13,6 +13,8 @@ import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
 import { startWebhooks } from "./webhook.ts";
+import { startNotifier } from "./notify.ts";
+import { startTelegram } from "./telegram.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
@@ -652,13 +654,16 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
         for (const upload of input.attachments ?? []) uploadRecord(ownedProjectDir(input.id), upload);
-        return { id: randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) } satisfies import("./state.ts").Job;
+        return { id: input.requestId ?? randomUUID(), text: input.text, at: new Date().toISOString(), state: "queued", error: null, ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) } satisfies import("./state.ts").Job;
       };
       if (input.attachments && loadProject(input.id).runtime !== "durable") throw new Error("Attachments need a Durable project");
       if (loadProject(input.id).runtime === "durable") return withDurableOwner({ id: input.id, validate: project => {
         if (project.deleted) throw new Error("Project is deleted; admission is denied");
         if (project.archived) throw new Error("Project is archived; admission is denied");
       }, operation: async owner => {
+        // A repeated request ID (Telegram update replay) returns the job it already admitted.
+        const prior = input.requestId ? jobs(input.id).find(job => job.id === input.requestId) : undefined;
+        if (prior) return prior;
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
         const text = await expandSkillCommand(await configuredSkills(input.id), job.text);
@@ -713,6 +718,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "knowledge-read": return readKnowledge(await knowledgeDir(input.id), input.path);
     case "knowledge-write": return writeKnowledge({ dir: await knowledgeDir(input.id), path: input.path, text: input.text, expectedRevision: input.expectedRevision, author: "owner" });
     case "knowledge-history": return historyKnowledge(await knowledgeDir(input.id), input.path);
+    case "notify-feed": return notifier.feed(input.after);
+    case "telegram-snapshot": return telegram.snapshot();
+    case "telegram-token": { const snapshot = await telegram.setToken(input.token); recordHostEvent("telegram", `bot set: @${snapshot.botUsername}`); return snapshot; }
+    case "telegram-pair": recordHostEvent("telegram", "pairing code issued"); return telegram.pair();
+    case "telegram-unpair": recordHostEvent("telegram", "unpaired"); return telegram.unpair();
+    case "telegram-remove": recordHostEvent("telegram", "bot removed"); return telegram.remove();
     case "shutdown": closing = true; setTimeout(() => { void shutdown(); }, 50); return { stopping: true };
     default: { const exhaustive: never = input; throw new Error(String(exhaustive)); }
   }
@@ -728,6 +739,13 @@ const webhooks = await startWebhooks(async (id, event) => {
   const result = await (await durable(id)).ingestAutomationEvent(event);
   return { status: result.status, ...(result.duplicate ? { duplicate: true as const } : {}) };
 });
+// Notices for the browser and Telegram come from open Durable owners only; a project in a lifecycle or settings transition is skipped for that scan.
+const notifier = startNotifier({
+  owner: project => closing || lifecycleChanging.has(project.id) || settingsUpdating.has(project.id) || ownerCloseFailed.has(project.id) ? null : durableRuntimes.get(project.id) ?? null,
+  tickMs: Number(process.env.PI_PROJECTS_NOTIFY_TICK_MS ?? 3000), onNotice: () => { void telegram?.flush(); }, report: detail => recordHostEvent("notify", detail),
+});
+const telegram = startTelegram({ dispatch: input => dispatch(parse(Request, input)), chats: async id => (await durable(id)).chats(), notifier, report: detail => recordHostEvent("telegram", detail) });
+void telegram.flush();
 async function automationSnapshot(id: string) {
   const project = loadProject(id), config = loadAutomations(id);
   return { eventChat: config.eventChat, webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret }, follow: project.runtime === "durable" && !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null, githubRepositories: (project.githubAuthorization ?? []).map(item => item.repositoryId) };
@@ -769,6 +787,7 @@ function shutdown(): Promise<void> {
     const report = (error: unknown) => { failed = true; process.stderr.write(errorText(error) + "\n"); };
     try { web.close(); } catch (error) { report(error); }
     try { webhooks.close(); } catch (error) { report(error); }
+    try { telegram.close(); await notifier.close(); } catch (error) { report(error); }
     try { server.close(); } catch (error) { report(error); }
     try { await githubInspection.close(); } catch (error) { report(error); }
     for (const pending of durableRuntimes.values()) {

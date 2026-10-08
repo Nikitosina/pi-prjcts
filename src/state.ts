@@ -230,7 +230,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("legacy-thread-history"), id: Id, name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-history"), id: Id, threadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), requestId: Type.Optional(Id), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-read"), id: Id, uploadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-delete"), id: Id, uploadId: Id }, { additionalProperties: false }),
@@ -260,6 +260,12 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("knowledge-write"), id: Id, path: knowledgePath, text: Type.String({ maxLength: 32000 }), expectedRevision: Type.Union([revision, Type.Null()]) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("knowledge-history"), id: Id, path: knowledgePath }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("shutdown") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("notify-feed"), after: Type.Optional(Type.Integer({ minimum: 0 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telegram-snapshot") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telegram-token"), token: Type.String({ pattern: "^[0-9]{1,20}:[A-Za-z0-9_-]{20,100}$" }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telegram-pair") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telegram-unpair") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telegram-remove"), confirm: Type.Literal("remove") }, { additionalProperties: false }),
 ]);
 export type Request = Static<typeof Request>;
 export const Reply = Type.Union([

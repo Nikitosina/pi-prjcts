@@ -10,6 +10,13 @@ if (supplied) {
 initial.hash = "";
 history.replaceState(null, "", initial);
 const token = localStorage.getItem(key) || "";
+// The host keeps its port across restarts, so opening its new address in this tab is only a fragment change: take the new token and reload.
+addEventListener("hashchange", () => {
+  const next = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (!next) return;
+  localStorage.setItem(key, next);
+  const url = new URL(location.href); url.hash = ""; history.replaceState(null, "", url); location.reload();
+});
 const dialog = document.querySelector("#dialog");
 const html = new Map();
 const drafts = new Map();
@@ -266,7 +273,7 @@ function setTab(next) {
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); renderNotify(); }
 }
 
 function render() {
@@ -392,6 +399,7 @@ function renderPanels() {
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(false, wholeRepository ? "3. Worker skills" : "4. Worker skills", wholeRepository ? "Configured Pi skills are available automatically." : "Optional, explicitly selected repository skills.")].join(""));
   if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); }
+  if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
@@ -447,6 +455,77 @@ async function saveEventsIn() {
   const data = await mutate({ action: "automation-update", id: projectId, change: { eventChat: value("#event-chat").value, follow: { enabled: value("#follow-enabled").checked, everyMs: Number(value("#follow-every").value), autoFix: value("#follow-autofix").checked, fixCap: cap }, webhook: { enabled: value("#webhook-enabled").checked }, autoMerge: { enabled: value("#merge-enabled").checked } } }, "Events settings saved.");
   eventsIn.data = data; renderEventsIn();
 }
+
+// Notifications (host-wide): browser notifications from the host notice feed while the tab is hidden, and the Telegram bot.
+const notifyKey = "pi-projects-notify";
+let notifyCursor, notifyTimer = null;
+const noticeLabels = { question: "Question", approval: "Approval", review: "Review", result: "Finished", error: "Error" };
+function notifyEnabled() { return localStorage.getItem(notifyKey) === "1" && "Notification" in window && Notification.permission === "granted"; }
+function renderNotify() {
+  const box = document.querySelector("#notify-browser"), state = document.querySelector("#notify-browser-state");
+  box.checked = notifyEnabled();
+  state.textContent = !("Notification" in window) ? "This browser has no notifications." : Notification.permission === "denied" ? "Blocked by the browser. Allow notifications for this site, then turn this on." : notifyEnabled() ? "On. Shown only while this tab is hidden; click one to open its chat." : "Off.";
+}
+async function toggleNotify(on) {
+  if (on && "Notification" in window) {
+    const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+    if (permission === "granted") localStorage.setItem(notifyKey, "1"); else localStorage.removeItem(notifyKey);
+  } else localStorage.removeItem(notifyKey);
+  notifyCursor = undefined; window.__notifyCursor = undefined;
+  renderNotify(); scheduleNotify();
+}
+function scheduleNotify() { clearTimeout(notifyTimer); notifyTimer = notifyEnabled() ? setTimeout(() => void pollNotify(), notifyCursor === undefined ? 0 : 3000) : null; }
+async function pollNotify() {
+  if (!notifyEnabled()) return;
+  try {
+    // The first read only takes the cursor, so a reload never replays old notices.
+    const feed = await api({ action: "notify-feed", ...(notifyCursor === undefined ? {} : { after: notifyCursor }) });
+    if (!notifyEnabled()) return;
+    if (notifyCursor !== undefined && document.visibilityState === "hidden") for (const item of feed.items) showNotice(item);
+    notifyCursor = feed.seq; window.__notifyCursor = notifyCursor;
+  } catch {}
+  scheduleNotify();
+}
+function showNotice(item) {
+  const body = `${noticeLabels[item.kind] ?? item.kind}: ${item.kind === "approval" ? item.title : item.text}`;
+  const notice = new Notification(`${item.project} · ${item.chat}`, { body: body.length > 300 ? `${body.slice(0, 299)}…` : body, tag: `pi-projects-${item.seq}` });
+  notice.onclick = () => {
+    window.focus(); notice.close();
+    setTab("coordinator");
+    if (item.projectId !== projectId) changeProject(item.projectId, item.chatId); else changeChat(item.chatId);
+  };
+}
+let telegramView = null, telegramError = "", telegramRemoveArmed = false, telegramTimer = null;
+async function loadTelegram() {
+  try { telegramView = await api({ action: "telegram-snapshot" }); } catch (error) { telegramError = error.message; }
+  renderTelegram();
+  clearTimeout(telegramTimer);
+  if (tab === "settings") telegramTimer = setTimeout(() => void loadTelegram(), 2000);
+}
+function renderTelegram() {
+  const node = document.querySelector("#telegram"), t = telegramView;
+  if (!t) return;
+  const typed = document.querySelector("#telegram-token")?.value ?? "", focused = document.activeElement?.id === "telegram-token";
+  const bot = t.botUsername ? `@${t.botUsername}` : "the bot";
+  const next = `<div class="telegram">
+    <div class="row telegram-token"><input type="password" id="telegram-token" autocomplete="off" spellcheck="false" placeholder="${t.configured ? "Saved. Paste a new token to replace it" : "Bot token from @BotFather"}" aria-label="Telegram bot token"><button data-action="telegram-save">${t.configured ? "Replace token" : "Save token"}</button></div>
+    <div class="kv"><span>Bot</span><b>${t.configured ? esc(bot) : "Not set"}</b><span>Owner chat</span><b>${t.paired ? `Paired with ${esc(t.owner)}` : "Not paired"}</b><span>Text goes to</span><b>${t.route?.name ? esc(t.route.name) : "Nothing picked (use /projects in Telegram)"}</b><span>Polling</span><b>${t.polling ? `on${t.lastPollAt ? ` · ${esc(when(t.lastPollAt))}` : ""}` : "off"}</b>${t.lastError ? `<span>Problem</span><b class="bad">${esc(t.lastError)}</b>` : ""}${telegramError ? `<span>Not saved</span><b class="bad">${esc(telegramError)}</b>` : ""}</div>
+    ${t.pairing ? `<p class="pair-code">Send <code>/pair ${esc(t.pairing.code)}</code> to ${esc(bot)} in a private chat before ${esc(new Date(t.pairing.expiresAt).toLocaleTimeString())}. Only that chat will be heard.</p>` : ""}
+    <div class="row">${t.configured ? `<button data-action="telegram-pair">${t.pairing ? "New code" : t.paired ? "Pair another chat" : "Pair my chat"}</button>` : ""}${t.paired ? `<button class="ghost small" data-action="telegram-unpair">Unpair</button>` : ""}${t.configured ? `<button class="small ${telegramRemoveArmed ? "danger" : "ghost"}" data-action="telegram-remove">${telegramRemoveArmed ? "Confirm: remove bot" : "Remove bot"}</button>` : ""}</div>
+    <p class="note">One bot for this host. The token is kept in a private file on this machine and never shown again. Telegram gets questions (with answer buttons), approvals, results and errors; your text goes to the chat picked with /projects and /chats.</p>
+  </div>`;
+  if (node.dataset.html === next) return;
+  node.innerHTML = next; node.dataset.html = next;
+  const input = document.querySelector("#telegram-token"); input.value = typed; if (focused) input.focus();
+}
+async function telegramAction(input, done) {
+  try { telegramView = await api(input); telegramError = ""; if (done) toast(done); }
+  catch (error) { telegramError = error.message; }
+  renderTelegram();
+}
+document.querySelector("#notify-browser").addEventListener("change", event => void toggleNotify(event.target.checked));
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && notifyEnabled()) scheduleNotify(); });
+renderNotify(); scheduleNotify();
 
 async function loadAutomationStrip() {
   const id = projectId, current = generation, node = document.querySelector("#automation-history");
@@ -1039,6 +1118,13 @@ async function action(node) {
     case "open-retained": showDialog("Open known retained project", '<p>Enter an owned project UUID to inspect retained state, including projects removed from the ordinary list. This does not restore/resume it.</p><form data-open-retained><label>Known project UUID<input name="id" required maxlength="36" autocomplete="off"></label><button type="submit">Open retained metadata</button></form>'); break;
     case "settings-list": await settingsList(); break;
     case "automation-refresh": await loadEventsIn(true); break;
+    case "telegram-save": { const input = document.querySelector("#telegram-token"), token = input.value.trim(); input.value = ""; if (!token) throw new Error("Paste the bot token first"); await telegramAction({ action: "telegram-token", token }, "Telegram bot saved."); break; }
+    case "telegram-pair": await telegramAction({ action: "telegram-pair" }); break;
+    case "telegram-unpair": await telegramAction({ action: "telegram-unpair" }, "Telegram chat unpaired."); break;
+    case "telegram-remove": {
+      if (!telegramRemoveArmed) { telegramRemoveArmed = true; renderTelegram(); setTimeout(() => { if (telegramRemoveArmed) { telegramRemoveArmed = false; renderTelegram(); } }, 6000); break; }
+      telegramRemoveArmed = false; await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed."); break;
+    }
     case "automation-save": await saveEventsIn(); break;
     case "follow-poll": { const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub."); eventsIn.data = data; renderEventsIn(); break; }
     case "webhook-reveal": eventsIn.reveal = !eventsIn.reveal; renderEventsIn(); break;

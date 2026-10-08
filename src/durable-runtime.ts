@@ -127,7 +127,7 @@ export type DurableProjectRuntime = {
   acceptsImages: boolean;
   chats(): Promise<DurableChat[]>;
   /** Input submissions of one chat, without the transcript; used to settle ledgers of chats not being viewed. */
-  chatSubmissions(chatId: string): Promise<DurableSubmissionState[]>;
+  chatSubmissions(chatId: string, after?: number): Promise<DurableSubmissionState[]>;
   chatCreate(title?: string): Promise<DurableChat>;
   chatUpdate(id: string, change: { title?: string; archived?: boolean }): Promise<DurableChat>;
   result(submissionId: number): Promise<DurableSubmissionState>;
@@ -512,11 +512,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
         return admitted;
       }),
       chats: () => { assertOpen(); return chatList(); },
-      chatSubmissions: async id => {
+      chatSubmissions: async (id, after = -1) => {
         assertOpen();
         const { conversation } = await resolveChat(id), admitted = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
         const ids = await coordinatorInputSubmissionIds(openedStorage, conversation, await openedHarness.inspect(context), admitted?.ids ?? []);
-        return Promise.all(ids.map(submission => projectSubmission(openedHarness, conversation, submission)));
+        return Promise.all(ids.filter(submission => submission > after).map(submission => projectSubmission(openedHarness, conversation, submission)));
       },
       chatCreate: async title => {
         assertOpen();
@@ -589,7 +589,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       followSnapshot: () => { assertOpen(); return follow.snapshot(); },
       followKick: () => follow.kick(),
       ingestAutomationEvent: async value => { assertOpen(); return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true }); },
-      resumePlan: async () => schedules.mutex.run(async () => { try { const value = await planning.resume(root); dispatchReady = true; await armWake(); return value; } catch (error) { dispatchReady = false; throw error; } }),
+      resumePlan: async () => schedules.mutex.run(async () => { try { const value = await planning.resume(root); dispatchReady = true; await armWake(); await follow.resumed(); return value; } catch (error) { dispatchReady = false; throw error; } }),
       planSnapshot: async () => planning.snapshot(root),
       operationRequest: approvals.request,
       operationDecide: approvals.decide,
