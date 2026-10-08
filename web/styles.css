@@ -502,3 +502,14 @@ mark, .search-mark { background: #f7dc84; color: inherit; border-radius: 2px; pa
 .wt-setup.bad summary { color: var(--bad, #b42318); cursor: pointer; font-size: 12px; }
 .wt-setup.bad pre { max-height: 160px; overflow: auto; font-size: 11px; }
 details.wt-setup { display: inline-block; }
+
+/* Worker artifacts: inline in chat and in the thread pane. */
+.artifact-media { display: block; max-width: min(100%, 640px); max-height: 420px; border: 1px solid var(--line, #e3e1dc); border-radius: 6px; margin: 6px 0; background: #111; }
+img.artifact-media { background: #fff; }
+.artifact-missing { color: #a5432f; font-size: 12.5px; }
+.artifacts-box { margin: 6px 0 8px; }
+.artifact-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; max-height: 360px; overflow: auto; }
+.artifact-item { margin: 0; min-width: 0; }
+.artifact-item .artifact-media { max-height: 160px; margin: 0 0 4px; }
+.artifact-item figcaption { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-link { color: var(--accent); overflow-wrap: anywhere; }

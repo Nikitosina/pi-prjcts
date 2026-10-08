@@ -17,6 +17,7 @@ import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
 import { startTelegram } from "./telegram.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
+import { listArtifacts } from "./artifacts.ts";
 import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
@@ -360,6 +361,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       }, true);
     });
     case "plan-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.planSnapshot() });
+    case "artifacts-list": {
+      // Owner browsing: one thread's files, or every thread that has some (known threads of this project only).
+      const dir = ownedProjectDir(input.id), threads = (await (await durable(input.id)).planSnapshot()).work.map(work => work.threadId);
+      if (input.threadId) { if (!threads.includes(input.threadId)) throw new Error("Unknown thread for this project"); const { dir: _, ...listing } = listArtifacts(dir, input.threadId); return listing; }
+      return { threads: [...new Set(threads)].flatMap(threadId => { const { dir: _, ...listing } = listArtifacts(dir, threadId); return listing.files.length ? [listing] : []; }) };
+    }
     case "compact": return withDurableOwner({ id: input.id, operation: owner => owner.compact(input.chatId) });
     case "worktrees-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.worktrees() });
     case "worktrees-cleanup": if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id"); return withDurableOwner({ id: input.id, operation: owner => owner.cleanupWorktrees() });

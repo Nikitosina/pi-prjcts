@@ -208,6 +208,7 @@ export const Request = Type.Union([
     context: Type.Optional(Type.Union([ContextSettings, Type.Null()]))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("compact"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),

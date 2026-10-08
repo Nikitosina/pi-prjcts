@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
 import { readEvidence } from "./evidence.ts";
+import { openArtifact } from "./artifacts.ts";
+import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 
@@ -54,7 +56,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
-      "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     };
     let status = 400;
     try {
@@ -104,6 +106,21 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         const project = loadProject(parts[2]);
         const result = uploadBytes(projectDir(project.id), parts[3]);
         response.writeHead(200, { ...headers, "content-type": result.record.kind === "text" ? "text/plain; charset=utf-8" : result.record.mime, "content-length": result.bytes.length }).end(result.bytes);
+        return;
+      }
+      // Worker artifacts: /artifacts/<project>/<thread>/<path…>, token-authenticated like every route here; symlinks and traversal refused in openArtifact.
+      if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
+        const [, , project, thread, ...rest] = url.pathname.split("/");
+        let path: string;
+        try { path = rest.map(part => decodeURIComponent(part)).join("/"); } catch { throw new Error("Invalid artifact URL"); }
+        if (!/^[a-f0-9-]{36}$/.test(project ?? "") || !/^[a-f0-9-]{36}$/.test(thread ?? "")) throw new Error("Invalid artifact URL");
+        loadProject(project);
+        let opened: ReturnType<typeof openArtifact>;
+        try { opened = openArtifact(projectDir(project), thread, path); } catch (error) { status = /not found/i.test(errorText(error)) ? 404 : 403; throw error; }
+        response.writeHead(200, { ...headers, "content-type": opened.mime, "content-length": opened.size, "content-disposition": `${opened.kind === "image" || opened.kind === "video" ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(opened.path.split("/").at(-1)!)}` });
+        const stream = createReadStream("", { fd: opened.fd, autoClose: true });
+        stream.on("error", () => { try { closeSync(opened.fd); } catch {} response.destroy(); });
+        stream.pipe(response);
         return;
       }
       if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {

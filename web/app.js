@@ -1211,9 +1211,66 @@ function renderMarkdown(value) {
   }).join("");
 }
 if (initial.searchParams.get("e2e") === "1") window.__projectsRenderMarkdown = renderMarkdown;
+// Artifact references become <img>/<video>/download links. Bytes are fetched once per page (token header, so no plain URLs) and cached as blob URLs.
+const artifactBlobs = new Map();
+const artifactKindOf = path => /\.(png|jpe?g|webp|gif)$/i.test(path) ? "image" : /\.(webm|mp4)$/i.test(path) ? "video" : "other";
+function artifactBlob(project, thread, path) {
+  const key = `${project}/${thread}/${path}`;
+  if (!artifactBlobs.has(key)) {
+    if (artifactBlobs.size >= 300) { const [oldest, value] = artifactBlobs.entries().next().value; artifactBlobs.delete(oldest); void value.then(url => URL.revokeObjectURL(url), () => {}); }
+    artifactBlobs.set(key, fetch(`/artifacts/${project}/${thread}/${path.split("/").map(encodeURIComponent).join("/")}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120000) }).then(async response => { if (!response.ok) throw new Error(response.status === 404 ? "missing" : `unavailable (${response.status})`); return URL.createObjectURL(await response.blob()); }));
+    artifactBlobs.get(key).catch(() => artifactBlobs.delete(key)); // a missing file may appear later
+  }
+  return artifactBlobs.get(key);
+}
+function hydrateArtifacts(root = document) {
+  for (const node of root.querySelectorAll(".artifact-ref:not([data-state])")) {
+    if (node.closest("details:not([open])")) continue;
+    const thread = node.dataset.artifactThread, path = node.dataset.artifactPath, label = node.textContent, kind = artifactKindOf(path), project = projectId;
+    if (!project) continue;
+    // Other files (logs, archives, possibly huge) are fetched only when the owner clicks.
+    if (!node.dataset.inline || kind === "other") { node.dataset.state = "link"; node.innerHTML = `<a href="#" class="artifact-link" title="${esc(path)}">${esc(label)}</a>`; continue; }
+    node.dataset.state = "loading";
+    artifactBlob(project, thread, path).then(url => {
+      node.dataset.state = "ready";
+      if (node.dataset.inline && kind === "image") node.innerHTML = `<img class="artifact-media" src="${url}" alt="${esc(label)}" title="${esc(path)}">`;
+      else if (node.dataset.inline && kind === "video") node.innerHTML = `<video class="artifact-media" src="${url}" controls preload="metadata" title="${esc(path)}"></video>`;
+      else node.innerHTML = `<a href="${url}" download="${esc(path.split("/").at(-1))}">${esc(label)}</a>`;
+    }, error => { node.dataset.state = "missing"; node.innerHTML = `<span class="artifact-missing">${esc(label)} (${esc(error.message === "missing" ? "missing artifact" : error.message)})</span>`; });
+  }
+}
+new MutationObserver(() => hydrateArtifacts()).observe(document.body, { childList: true, subtree: true });
+document.addEventListener("click", event => {
+  const link = event.target.closest?.(".artifact-ref[data-state=link] .artifact-link");
+  if (!link) return;
+  event.preventDefault();
+  const node = link.closest(".artifact-ref"), path = node.dataset.artifactPath;
+  artifactBlob(projectId, node.dataset.artifactThread, path).then(url => { const a = document.createElement("a"); a.href = url; a.download = path.split("/").at(-1); a.click(); }, error => { node.dataset.state = "missing"; node.innerHTML = `<span class="artifact-missing">${esc(node.textContent)} (${esc(error.message === "missing" ? "missing artifact" : error.message)})</span>`; });
+});
+document.addEventListener("toggle", event => { if (event.target.open) hydrateArtifacts(event.target); }, true);
+// Activity thread pane: the thread's artifacts folder, newest first, images and videos inline.
+async function loadWorkerArtifacts(chat) {
+  const node = document.querySelector("#worker-artifacts");
+  if (!node || Date.now() - (chat.artifactsAt ?? 0) < 4000) return;
+  chat.artifactsAt = Date.now();
+  const listing = await api({ action: "artifacts-list", id: chat.id, threadId: chat.threadId }).catch(error => ({ error: error.message }));
+  if (workerChat !== chat || !document.querySelector("#worker-artifacts")) return;
+  const files = (listing.files ?? []).toSorted((a, b) => b.mtimeMs - a.mtimeMs);
+  const size = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+  const html = listing.error ? `<p class="note">Artifacts unavailable: ${esc(listing.error)}</p>` : !files.length ? "" : `<details class="artifacts-box" open><summary><b>Artifacts</b> <small class="inline">${files.length} file(s) · ${esc(size(listing.totalBytes))}${listing.overCap ? ` · over the ${esc(size(listing.capBytes))} cap` : ""}${listing.skipped?.length ? ` · ${listing.skipped.length} skipped (symlinks)` : ""}</small></summary><div class="artifact-grid">${files.slice(0, 60).map(file => `<figure class="artifact-item ${esc(file.kind)}"><span class="artifact-ref" data-artifact-thread="${esc(chat.threadId)}" data-artifact-path="${esc(file.path)}" data-inline="${file.kind === "image" || file.kind === "video" ? "1" : ""}">${esc(file.path.split("/").at(-1))}</span><figcaption class="mono" title="${esc(file.ref)}">${esc(file.path)} · ${esc(size(file.size))}</figcaption></figure>`).join("")}</div></details>`;
+  if (node.dataset.content !== html) { node.innerHTML = html; node.dataset.content = html; }
+}
 function inlineMarkdown(value) {
   const code = [];
   let text = esc(value).replace(/`([^`]+)`/g, (_, body) => { const key = `\u0000${code.length}\u0000`; code.push(`<code>${body}</code>`); return key; });
+  // Worker artifacts: ![caption](artifact:<thread>/<path>) inline (images, videos), [name](artifact:…) as a download; hydrated by hydrateArtifacts().
+  text = text.replace(/(!?)\[([^\]]*)\]\(artifact:([a-f0-9-]{36})\/([^)\s]+)\)/g, (all, bang, label, thread, escapedPath) => {
+    const path = escapedPath.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+    if (path.split("/").some(part => !part || part === "." || part === "..")) return all;
+    const key = `\u0000${code.length}\u0000`;
+    code.push(`<span class="artifact-ref" data-artifact-thread="${thread}" data-artifact-path="${esc(path)}" data-inline="${bang ? "1" : ""}">${label || esc(path)}</span>`);
+    return key;
+  });
   text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (all, label, escapedHref) => {
     const href = escapedHref.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
     try { const url = new URL(href); return ["http:", "https:", "mailto:"].includes(url.protocol) ? `<a href="${esc(url.href)}" rel="noopener noreferrer" target="_blank">${label}</a>` : label; } catch { return label; }
@@ -2400,7 +2457,7 @@ async function inspectThread(threadId, offset = null, textOffset = 0) {
   const work = plan.work.findLast(item => item.threadId === threadId);
   const draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`);
   const role = work?.role ?? "worker";
-  target.innerHTML = `<div class="thread-head"><div class="grow"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p></div><button class="ghost small" data-action="thread-close" aria-label="Close thread">✕</button></div><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><details class="worker-controls"><summary>Evidence, changes and controls</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop…</button></div></details>`;
+  target.innerHTML = `<div class="thread-head"><div class="grow"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p></div><button class="ghost small" data-action="thread-close" aria-label="Close thread">✕</button></div><section id="worker-artifacts"></section><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><details class="worker-controls"><summary>Evidence, changes and controls</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop…</button></div></details>`;
   document.querySelector("#thread-empty").hidden = true;
   renderWorkerChat(chat, page, true);
   render();
@@ -2429,6 +2486,7 @@ function renderWorkerChat(chat, page, opening = false) {
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
   document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
   document.querySelector("#worker-evidence").innerHTML = workerChanges(chat.threadId, page.items);
+  void loadWorkerArtifacts(chat);
 }
 function workerChanges(threadId, items) {
   const workIds = new Set((plan?.work ?? []).filter(item => item.threadId === threadId).map(item => item.id));

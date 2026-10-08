@@ -457,3 +457,13 @@ Verified by `scripts/worktree-lifecycle-e2e.mjs` (setup via Settings, W1 opens P
 - "Compact now" (`compact` RPC, optional `chatId`): in the context ring popup of each chat and in the Settings card. Refused while paused, for archived chats, or while that chat is already compacting; a short chat finishes with nothing to compact. The ring shows "compacting…".
 
 Verified by `scripts/context-settings-e2e.mjs` (UI save, busy-coordinator save, invalid values, threshold compaction at 50% of a 20,000 override keeping the newest message, auto-compact off, Compact now from the ring, paused/archived/short chats, restart, reset, second project unaffected). Failures in `scripts/context-settings-failures.md`.
+
+## Worker artifacts folder (C7)
+
+- Each whole-repository worker thread gets `<projectHome>/artifacts/<threadId>/` (0700, outside the worktree, survives cleanup; children get their own). The path is in the worker instructions and in `$PI_ARTIFACTS_DIR` of every bash call. Workers are told to save evidence (screenshots, videos, logs) there and list the files in their result; no capture tools are built. The dangling `projects_evidence` instruction is gone. Scouts, reviewers and folder-scoped workers have no shell and no folder.
+- Cap: 500 MB per thread, soft. Over-cap is reported (listing, report, thread pane); nothing is deleted.
+- The settled report (to the coordinator, or to the parent for children) appends a list of up to 20 files as `artifact:<threadId>/<path>` refs. Coordinator tools (`projects.artifacts`): `projects_artifacts_list` (overview or one thread) and `projects_artifact_read` (text pages, images ≤5 MB as image content, metadata for video/binary). Known threads of this project only.
+- Safety (`src/artifacts.ts`): bounded walk (2000 entries, depth 8), symlinks skipped and reported, never followed; `..`/absolute/NUL/backslash refused; realpath must stay in the thread folder; files opened `O_NOFOLLOW` and must be regular.
+- Serving: `GET /artifacts/<project>/<thread>/<path>` with the web Bearer token (401 without). CSP gains `media-src 'self' blob:`.
+- Chat: `![caption](artifact:<thread>/<path>)` renders images inline and webm/mp4 as `<video controls>`; `[label](artifact:…)` and other kinds are links fetched only on click. Blob URLs are cached (300 entries) so re-renders do not refetch; a missing file shows "(missing artifact)". Activity thread pane shows an Artifacts box (sizes, cap warning, skipped symlinks, inline previews), refreshed at most every 4 s.
+- E2E: `scripts/artifacts-e2e.mjs` (failure cases `scripts/artifacts-failures.md`).
