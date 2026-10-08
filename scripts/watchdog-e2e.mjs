@@ -124,11 +124,38 @@ try {
   await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
 
   // D4: restart keeps the clock (last check, count); no check fires just because the host restarted.
-  await eventually(async () => (await work()).every(w => w.status !== 'running'), 'work still running after resume');
+  await eventually(async () => (await work()).every(w => !['queued', 'running'].includes(w.status)), 'work still active after resume');
   const before = await wd();
   await k.stopHost(); await k.startHost();
   const after = await wd();
   check('D4 the watchdog clock survives a restart', after.ticks === before.ticks && after.lastTickAtMs === before.lastTickAtMs && after.lastTickAtMs !== null, { before, after });
+
+  // D22: resume + restart + send. Settled work: always admitted (looped). Work still active at the restart: recovery re-pauses
+  // the project (durable-runtime open), so a send is denied until an explicit resume; this is by design, never a flake.
+  const settle = async () => { for (const w of (await work()).filter(w => ['queued', 'running'].includes(w.status))) await rpc({ action: 'thread-stop', id, threadId: w.threadId }).catch(() => {}); await eventually(async () => (await work()).every(w => !['queued', 'running'].includes(w.status)), 'race: work did not settle'); };
+  const raceLog = [];
+  for (let i = 0; i < 3; i++) {
+    await rpc({ action: 'message', id, text: `MARK-WD2 race ${i}` });
+    await eventually(async () => (await work()).some(w => w.status === 'running'), 'race: looper did not start');
+    await rpc({ action: 'pause', id });
+    await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
+    await settle();
+    await k.stopHost(); await k.startHost();
+    const accepted = await rpc({ action: 'message', id, text: `ping after settled restart ${i}` }).then(() => true, error => error.message);
+    raceLog.push({ i, settled: accepted });
+    if (accepted !== true) break;
+  }
+  check('D22 resume + settle + restart + send is admitted, 3 times in a row', raceLog.length === 3 && raceLog.every(r => r.settled === true), raceLog);
+  await rpc({ action: 'message', id, text: 'MARK-WD2 active at restart' });
+  await eventually(async () => (await work()).some(w => w.status === 'running'), 'race: looper did not start');
+  await rpc({ action: 'pause', id });
+  await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
+  await k.stopHost(); await k.startHost();
+  const denied = await rpc({ action: 'message', id, text: 'ping while recovered paused' }).then(() => null, error => error.message);
+  check('D22 work active at the restart: recovery re-pauses, send denied (by design)', /paused; admission is denied/.test(denied ?? ''), denied);
+  await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id }); await settle();
+  check('D22 explicit resume + settle: send admitted again', await rpc({ action: 'message', id, text: 'ping after explicit resume' }).then(() => true, error => error.message) === true);
+  result.raceLog = raceLog;
 
   // D5: Settings card shows the watchdog and turns it off; no checks while off even with a running worker.
   const web = await rpc({ action: 'web' }), url = new URL(web.url);

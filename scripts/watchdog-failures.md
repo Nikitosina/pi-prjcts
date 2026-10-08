@@ -30,3 +30,9 @@ Verified by `scripts/watchdog-e2e.mjs` unless marked (inspection).
 - D19 A scripted looping worker is never steered, or is stopped without a steer first.
 - D20 After the steer the still-looping worker is not stopped and redispatched.
 - D21 A healthy worker running in parallel is steered or stopped.
+
+## Resume + restart race (D22; found as a flake: "Project plan is paused; admission is denied" right after resume + restart)
+- D22 Root cause: resume requeues the work the pause interrupted (`requeuePauseInterrupted`); work is then `queued`/`running` again. Restarting the host in that window makes open-time recovery (`src/durable-runtime.ts` ~:486: queued/running work or pending inputs) pause the project again, so the next send is denied. This is the designed crash recovery, but the E2E raced it: after D2 it waited for "no running" work, which is also true while work is merely `queued`, then restarted.
+- D22a The E2E waits only for `running` to clear, so queued work survives into the restart (fixed: wait for no queued/running).
+- D22b Settled work + resume + restart must always admit a send (looped 3x, deterministic).
+- D22c Work still active at the restart must come back paused with a denied send (by design), and an explicit resume must admit again.
