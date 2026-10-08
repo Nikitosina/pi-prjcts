@@ -63,6 +63,8 @@ export const Project = Type.Object({
   workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })), 
   /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
   skillProfiles: Type.Optional(SkillProfiles),
+  /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
+  worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
   createdAt: text, model: text,
   models: Type.Object({ worker: text, scout: text, reviewer: text }),
   sessionFile: Type.Union([text, Type.Null()]),
@@ -189,8 +191,12 @@ export const Request = Type.Union([
     models: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }, { additionalProperties: false })),
     knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** null restores the default (repository skills for every profile). */
-    skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()]))
+    skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
+    /** "" removes the worktree setup command. */
+    worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 }))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("search"), id: Id, query: Type.String({ minLength: 1, maxLength: 500 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("chat-create"), id: Id, title: Type.Optional(Type.String({ maxLength: 120 })) }, { additionalProperties: false }),

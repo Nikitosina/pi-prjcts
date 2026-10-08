@@ -18,6 +18,9 @@ export type DurablePlanWork = Readonly<{
   workspaceScopeId?: string;
   /** Parent worker thread of a child (one level of nesting); the child's results go to that thread. */
   parentThreadId?: string;
+  /** Scout/reviewer code root chosen by the host (PR-head snapshot or parent worktree); never model-supplied paths. */
+  readRoot?: string;
+  readSha?: string;
 }>;
 export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork[] }>;
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */

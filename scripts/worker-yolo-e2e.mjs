@@ -34,11 +34,19 @@ try {
   writeFileSync(join(repo, "README.md"), "base\n"); git(repo, "add", "."); git(repo, "commit", "-m", "base");
   execFileSync("/usr/bin/git", ["init", "--bare", remote], { stdio: "ignore" }); git(repo, "remote", "add", "origin", remote); git(repo, "switch", "-c", branch); writeFileSync(join(repo, "worker.txt"), "worker\\n"); git(repo, "add", "."); git(repo, "commit", "-m", "worker");
   const { guardWorkerGitCommand } = await import("../src/durable-workspace-binding.ts");
-  for (const command of ["git push origin HEAD:master", "git push origin HEAD:other", "git push --force origin pi/x", "git push --force-with-lease origin pi/x", "git push --mirror", "git push --all", "git push --tags", "git push origin --delete pi/x", "git push origin :pi/x", "git push origin +HEAD:pi/x", "git -C /tmp/repo push origin HEAD:master", "git merge main", "gh pr merge 1", "gh api repos/a/b/merge"]) {
-    const guarded = guardWorkerGitCommand(command, branch);
-    assert.match(guarded, /Blocked by worker Git policy/);
+  const policy = { prefix: "pi/", protected: ["main"] };
+  for (const command of ["git push origin HEAD:master", "git push origin HEAD:main", "git push origin HEAD:other", "git push --force origin pi/x", "git push -f origin pi/x", "git push --force-with-lease origin HEAD:main", "git push --force-with-lease=main origin HEAD:pi/x", "git push --mirror", "git push --all", "git push --tags", "git push origin --delete pi/x", "git push origin :pi/x", "git push origin +HEAD:pi/x", "git push origin", "git -C /tmp/repo push origin HEAD:master", "git -c a=b push origin HEAD:main", "git branch -D pi/x", "gh pr merge 1", "gh api repos/a/b/merge", "git log -1 && git push origin HEAD:main"]) {
+    const guarded = guardWorkerGitCommand(command, branch, policy);
+    assert.match(guarded, /Blocked by worker Git policy at: /, command);
   }
-  pass("F3/F4 common push bypasses and merge forms are blocked", true);
+  pass("F3/F4 pushes to non-project branches, plain force, deletes and PR merges are blocked; the message names the segment", true);
+  for (const command of ["git merge origin/main", "git merge-base HEAD origin/main", "git log --oneline -1 && git merge-base --is-ancestor a b", "git rebase origin/main", "git push --force-with-lease origin HEAD:pi/other", "git push origin HEAD:pi/other", `git push --force-with-lease origin ${branch}`]) assert.equal(guardWorkerGitCommand(command, branch, policy), command, command);
+  assert.match(guardWorkerGitCommand("git push origin HEAD:pi/other", branch), /Blocked/);
+  pass("C2 merge, merge-base, rebase, --force-with-lease and pushes to other project branches pass; without a prefix only the own branch", true);
+  const quoted = guardWorkerGitCommand("git push origin 'HEAD:main'; echo it's", branch, policy);
+  const ran = (await import("node:child_process")).spawnSync("/bin/sh", ["-c", quoted], { encoding: "utf8" });
+  assert.equal(ran.status, 126); assert.equal(ran.stdout, ""); assert.match(ran.stderr, /at: git push origin 'HEAD:main'/);
+  pass("G8 the echoed blocked segment is shell-quoted", true);
   assert.equal(guardWorkerGitCommand(`git push origin ${branch}`, branch), `git push origin ${branch}`);
   assert.equal(guardWorkerGitCommand(`git push origin HEAD:${branch}`, branch), `git push origin HEAD:${branch}`);
   pass("F5 push to the worker's own branch passes the guard", branch);

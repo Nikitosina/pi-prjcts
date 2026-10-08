@@ -487,3 +487,14 @@ mark, .search-mark { background: #f7dc84; color: inherit; border-radius: 2px; pa
 .skill-pick small { display: block; color: var(--muted); font-size: 12px; }
 .skill-pick small.skill-tag { display: inline; border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; font-size: 11px; }
 .skill-pick.inherited { opacity: .75; }
+/* Worktrees (Settings) */
+#worktrees { display: grid; gap: 10px; }
+#worktrees .field { display: flex; align-items: center; gap: 8px; }
+#worktrees .field input { flex: 1; min-width: 0; }
+.wt-row { margin: 3px 0; overflow-wrap: anywhere; }
+.wt-row .good { color: var(--good, #067647); }
+.wt-pr, .wt-setup.ok { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--soft, #f2f2f2); font-size: 12px; }
+.wt-pr.merged, .wt-setup.ok { color: var(--good, #067647); }
+.wt-setup.bad summary { color: var(--bad, #b42318); cursor: pointer; font-size: 12px; }
+.wt-setup.bad pre { max-height: 160px; overflow: auto; font-size: 11px; }
+details.wt-setup { display: inline-block; }

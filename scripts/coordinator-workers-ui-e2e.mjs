@@ -163,9 +163,10 @@ try {
   if (workerTools.some(name => name.startsWith('code_'))) throw Error('Worker gained read-only code tools: ' + workerTools);
   result.checks.push('R4 worker role tools unchanged (no code_* tools)');
 
-  const scoped = await ask('MARK-SCOPED');
-  if (!/read-only/i.test(scoped) || (await rpc({ action: 'plan-snapshot', id })).work.some(w => w.text === 'MARK-SCOPEDTASK')) throw Error('Scoped scout not rejected with guidance: ' + scoped.slice(0, 400));
-  result.checks.push('R5 scoped scout is rejected with read-only guidance');
+  await ask('MARK-SCOPED');
+  const scopedScout = await terminal(id, 'MARK-SCOPEDTASK', 'completed');
+  if (scopedScout.workspaceScopeId != null || !(toolsSeen['MARK-SCOPEDTASK'] ?? []).includes('code_read')) throw Error('Scoped scout did not run read-only with the scope ignored: ' + JSON.stringify(scopedScout).slice(0, 400));
+  result.checks.push('R5 a scout given workspaceScopeId runs read-only (scope ignored, C11f)');
 
   // Browser: Workers panel hides completed, keeps failed.
   const web = await rpc({ action: 'web' });

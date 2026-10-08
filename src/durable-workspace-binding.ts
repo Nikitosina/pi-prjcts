@@ -17,6 +17,7 @@ import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
 import type { OperationApprovals } from "./operation-approvals.ts";
 import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
+import { worktreeSetup } from "./worktree-maintenance.ts";
 
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export function durableWorkspaceBinding(input: { project: Project; configuredSkillLoader?: Pick<ResourceLoader, "getSkills">; conversation: () => Conversation; controlRoot: string; projectStanding?: DurableStanding; commands?: ReturnType<typeof commandExecution>; commandApprovals?: () => OperationApprovals; isClosed?: () => boolean }): DurablePrepareWorkerEnvironment | undefined {
@@ -54,8 +55,12 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const baseRevision = !whole ? scope.baseRevision : allocated?.baseRevision ?? ownerHead(repository.ownerCheckout);
     const branch = allocated?.branch ?? (publication ? `${publication.branchPrefix}${name}` : whole ? `pi/${name}` : name);
     const intent: WorkspaceIntent = { id: intentId, attemptId, action: "allocate", scope: { projectId: input.project.id, repositoryId: repository.repositoryId, provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, workspacePath, workspaceName: name, branch, baseRevision, headRevision: baseRevision, owner: authorization.owner, leaseReason: `durable workspace ${request.threadId}`, sharedObjectStore: provider === "arc" ? repository.sharedObjectStore ?? null : null, fileOwnership: scope.files, capabilityProfileRevision: hash(JSON.stringify({ authorization, scope })), ...(whole ? { allowDirtyOwner: true as const } : {}) } };
-    let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent); if (receipt.state !== "allocated" || !receipt.workspacePath) throw new Error(`Workspace allocation is ${receipt.state}: ${receipt.reason ?? "no exact receipt"}`);
+    let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent);
+    if (receipt.state === "released" && receipt.providerFacts.remove === "cleanup-unforced") throw new Error(`This thread's worktree was cleaned up after its work settled; branch ${branch} is kept. Delegate a new worker and tell it to continue branch ${branch} (fetch it and push to it).`);
+    if (receipt.state !== "allocated" || !receipt.workspacePath) throw new Error(`Workspace allocation is ${receipt.state}: ${receipt.reason ?? "no exact receipt"}`);
     if (JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope)) throw new Error("Frozen workspace allocation receipt differs from current host scope; refusing registry publication");
+    // Setup runs once, for worktrees this dispatch created; its recorded result reaches the worker's frozen instructions and Settings.
+    const setup = whole ? await worktreeSetup({ command: allocated ? undefined : loadProject(input.project.id).worktreeSetup, controlRoot: input.controlRoot, intentId, workspacePath: receipt.workspacePath }) : "";
     const authority: WorkspaceAuthority = { projectId: input.project.id, repositoryId: repository.repositoryId, provider, workspaceId: `${scope.id}:${receipt.intentId}:${request.conversationId}`, receiptId: receipt.intentId, attemptId: receipt.attemptId, leaseRevision: receipt.lease?.renewedAt ?? receipt.providerFacts.head ?? scope.baseRevision, workspaceRoot: receipt.workspacePath, files: scope.files, ...(whole ? { wholeRepository: true } : {}), expiresAt: "2099-01-01T00:00:00.000Z" };
     const commandProfiles = (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.repositoryId === repository.repositoryId && profile.scopeIds.includes(scope.id));
     if (commandProfiles.length && !input.commands) throw new Error("Host command executor is unavailable");
@@ -83,8 +88,9 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     } : undefined, writeLock: lock });
     if (input.commands) tools.push(...await commandWorkerTools({ executor: input.commands, approvals: input.commandApprovals, project: input.project, root: input.conversation(), authority, scopeId: scope.id, conversationId: request.conversationId, workId: request.workId, lock }));
     if (publication) tools.push(...await githubWorkerTools({ project: input.project, root: input.conversation(), authority, conversationId: request.conversationId, branch, scopeId: scope.id, workId: request.workId, baseRevision, publication, isClosed: input.isClosed }));
+    const gitPolicy = { prefix: publication?.branchPrefix ?? "pi/", protected: publication ? [publication.baseBranch] : [] };
     if (whole) {
-      const codingTools = createCodingTools(receipt.workspacePath, { bash: { spawnHook: ({ command, ...context }) => ({ ...context, command: guardWorkerGitCommand(command, branch) }) } });
+      const codingTools = createCodingTools(receipt.workspacePath, { bash: { spawnHook: ({ command, ...context }) => ({ ...context, command: guardWorkerGitCommand(command, branch, gitPolicy) }) } });
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {
         return tool.execute(api.callId, args, context.abortSignal, update => api.output(update.content.map(item => item.type === "text" ? item.text : "").join("")));
       } }));
@@ -98,28 +104,42 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
       try { assertStanding(); } catch (error) { return { block: error instanceof Error ? error.message : "Selected repository standing resources are unavailable" }; }
     } })] });
     // Skills now come from the role profile (instructions + projects_skill_file). The retired grant fingerprint stays in the hash so existing threads keep their binding revision.
-    return { cwd: receipt.workspacePath, tools, extension, repositoryStanding, workerInstructions: `${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. Commit and push only your branch ${branch}. Do not force-push, merge, delete branches, or push to the default branch. The owner approves merges.${publication ? ` After pushing, call the GitHub open_draft_pr tool with the pushed commit SHA to open or update the draft PR against ${publication.baseBranch}.` : ""}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
+    return { cwd: receipt.workspacePath, tools, extension, repositoryStanding, workerInstructions: `${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. Your branch is ${branch}. You may fetch, merge, rebase, cherry-pick and resolve conflicts. Push to your branch, or to another existing project branch (${gitPolicy.prefix}*) when your task says to continue it (for example an open project PR): fetch it, work on top of it, and push with git push origin HEAD:<that branch>. After a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other non-project branches, never plain --force, delete branches or merge PRs; the owner approves merges.${publication ? ` Open or update a draft PR (GitHub open_draft_pr tool, after pushing your own branch, against ${publication.baseBranch}) only when your task asks for a PR; when you continue an existing PR branch, pushing updates that PR.` : ""}\n` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
   };
 }
-export function guardWorkerGitCommand(command: string, branch: string): string {
-  // This shell-text check is best-effort, not a sandbox. It catches common git/gh forms before spawn.
+/** Pushes may target this worker's branch or any other project branch (the publication prefix); never the base/default branch. */
+export function guardWorkerGitCommand(command: string, branch: string, policy: { prefix?: string; protected?: readonly string[] } = {}): string {
+  // This shell-text check is best-effort, not a sandbox. It catches common git/gh forms before spawn; one blocked segment blocks the whole command.
+  const prefix = policy.prefix && policy.prefix.length >= 2 ? policy.prefix : undefined;
+  const guarded = new Set(["main", "master", "HEAD", ...(policy.protected ?? [])]);
+  const project = (ref: string) => { const name = ref.replace(/^refs\/heads\//, ""); return !guarded.has(name) && (name === branch || (prefix !== undefined && name.startsWith(prefix) && name.length > prefix.length && !name.includes(".."))); };
   const chunks = command.split(/[;&|\n]+/).map(part => part.trim());
-  const denied = chunks.some(chunk => {
-    const git = chunk.match(/(?:^|\s)git\s+(.*)$/)?.[1]?.trim().replace(/^(?:-C\s+\S+\s+)+/, "");
-    if (git && /^(?:merge\b|branch\s+-(?:D|d)\b)/.test(git)) return true;
-    if (git && /^push\b/.test(git)) {
-      const args = git.replace(/^push\s+/, "");
-      if (/--(?:force|force-with-lease|mirror|all|tags|delete)\b|(?:^|\s)-[fd]\b/.test(args)) return true;
-      const refs = args.split(/\s+/).filter(value => value.includes(":"));
-      if (refs.length) return refs.some(ref => ref.startsWith("+") || ref.startsWith(":") || ref.split(":").at(-1) !== branch);
-      const targets = args.split(/\s+/).filter(value => !value.startsWith("-") && value !== "origin" && value !== "HEAD");
-      return targets.some(target => target !== branch) || (!args.includes(branch) && !/\bHEAD\b/.test(args));
+  const blocked = chunks.find(chunk => {
+    const git = chunk.match(/(?:^|\s)git\s+(.*)$/)?.[1]?.trim().replace(/^(?:-[Cc]\s+\S+\s+)+/, "");
+    if (git && /^branch\s+(?:-(?:D|d)|--delete)(?:\s|$)/.test(git)) return true;
+    if (git && /^push(?:\s|$)/.test(git)) {
+      const args = git.replace(/^push\s*/, "").split(/\s+/).filter(Boolean);
+      if (args.some(value => /^--(?:force|mirror|all|tags|delete|prune)$/.test(value) || /^-[a-zA-Z]*[fd]/.test(value) && !value.startsWith("--"))) return true;
+      const positional = args.filter(value => !value.startsWith("-"));
+      const refs = positional[0] === "origin" || positional[0] === "upstream" || (positional.length > 1 && !positional[0].includes(":")) ? positional.slice(1) : positional;
+      if (!refs.length) return true;
+      for (const ref of refs) {
+        if (ref.startsWith("+") || ref.startsWith(":")) return true;
+        const target = ref.includes(":") ? ref.split(":").at(-1)! : ref;
+        // A bare HEAD pushes the checked-out branch to its own name; best-effort as before.
+        if (!(ref === "HEAD" || project(target))) return true;
+      }
+      const lease = args.find(value => value.startsWith("--force-with-lease"));
+      if (lease?.includes("=") && !project(lease.slice(lease.indexOf("=") + 1).split(":")[0])) return true;
+      return false;
     }
     if (/\bgh\s+pr\s+merge\b/.test(chunk)) return true;
     if (/\bgh\s+api\b[^;&|\n]*\bmerge\b/i.test(chunk)) return true;
     return false;
   });
-  return denied ? "printf '%s\\n' 'Blocked by worker Git policy: push only to this worker branch; no force-push, remote delete, merge, or branch delete. This check is best-effort.' >&2; exit 126" : command;
+  if (blocked === undefined) return command;
+  const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; --force-with-lease is allowed there, plain --force, +refs, deletes, mirror/all/tags, pushes to ${[...guarded].filter(name => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
+  return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
 function ownerHead(checkout: string): string { return execFileSync("/usr/bin/git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }).trim(); }
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }

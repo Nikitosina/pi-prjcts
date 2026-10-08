@@ -277,7 +277,7 @@ function setTab(next) {
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -403,7 +403,7 @@ function renderPanels() {
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
   setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : ""), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); }
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadWorktrees(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
@@ -463,6 +463,44 @@ document.addEventListener("input", event => {
   skillsPicker.query = event.target.value; renderSkillsPicker();
   const input = document.querySelector("#skills-search"); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
 });
+
+// Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
+let worktrees = null;
+const sizeText = kb => kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+async function loadWorktrees(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#worktrees");
+  if (!id || !plan || !force && worktrees?.projectId === id && worktrees.data) return;
+  worktrees = { projectId: id, data: null, setup: "", revision: "" };
+  try {
+    const [data, settings] = await Promise.all([api({ action: "worktrees-snapshot", id }), api({ action: "settings-snapshot", id })]);
+    if (id !== projectId || current !== generation) return;
+    Object.assign(worktrees, { data, setup: settings.values.worktreeSetup ?? "", revision: settings.revision }); renderWorktrees();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Worktrees unavailable: ${esc(error.message)}</p>`; }
+}
+function renderWorktrees() {
+  const data = worktrees?.data, node = document.querySelector("#worktrees");
+  if (!data) return;
+  const removable = data.items.filter(item => item.removable);
+  document.querySelector("#worktrees-summary").textContent = `${data.items.length} · ${sizeText(data.totalKb)} · ${sizeText(data.reclaimableKb)} reclaimable`;
+  const setup = item => !item.setup ? "" : item.setup.ok ? `<span class="wt-setup ok">setup ok</span>` : `<details class="wt-setup bad"><summary>setup failed (exit ${esc(item.setup.exitCode)})</summary><pre>${esc(item.setup.output)}</pre></details>`;
+  const row = item => `<li class="wt-row${item.removable ? " removable" : ""}"><b class="mono">${esc(item.path.split("/").at(-1))}</b> <span class="note">${esc(item.kind === "read-head" ? "PR-head snapshot" : item.branch ?? "")}</span> <span>${esc(sizeText(item.sizeKb))}</span> ${item.pullRequests.map(pr => `<span class="wt-pr ${esc(pr.state)}">#${esc(pr.number)} ${esc(pr.state)}</span>`).join(" ")} ${setup(item)} <span class="${item.removable ? "good" : "note"}">${item.removable ? "can be removed" : esc(item.reasons.join("; "))}</span></li>`;
+  node.innerHTML = `<label class="field">Setup command <input id="worktree-setup" class="mono" maxlength="4000" placeholder="e.g. bun run worktree:setup" value="${esc(worktrees.setup)}"></label>
+    <p class="note">Runs once with sh in each new coding worktree before the worker starts (15 min limit). The worker is told whether it failed.</p>
+    <div class="row"><button data-action="worktree-setup-save">Save setup command</button></div>
+    ${data.items.length ? `<ul id="worktree-list" class="fix-list">${data.items.map(row).join("")}</ul>` : '<p class="note">No worktrees.</p>'}
+    <div class="row"><button class="primary" data-action="worktrees-cleanup" ${removable.length ? "" : "disabled"}>Clean up worktrees (${esc(sizeText(data.reclaimableKb))})</button><button class="ghost small" data-action="worktrees-refresh">Refresh</button></div>`;
+}
+async function saveWorktreeSetup() {
+  const id = projectId, value = document.querySelector("#worktree-setup").value.trim();
+  const settings = await api({ action: "settings-snapshot", id });
+  await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { worktreeSetup: value } }, value ? "Setup command saved. New worktrees run it." : "Setup command removed.");
+  await loadWorktrees(true);
+}
+async function cleanupWorktreesNow() {
+  const id = projectId, result = await mutate({ action: "worktrees-cleanup", id, confirm: id }, "Cleaning up worktrees…");
+  toast(`Removed ${result.removed.length} worktree(s), reclaimed ${sizeText(result.reclaimedKb)}${result.failed.length ? `; ${result.failed.length} could not be removed` : ""}.`);
+  await loadWorktrees(true);
+}
 
 // Events in: Follow PRs and the generic webhook (one card in Settings, rendered from automation-snapshot).
 let eventsIn = null;
@@ -1318,6 +1356,9 @@ async function action(node) {
       telegramRemoveArmed = false; await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed."); break;
     }
     case "automation-save": await saveEventsIn(); break;
+    case "worktree-setup-save": await saveWorktreeSetup(); break;
+    case "worktrees-cleanup": await cleanupWorktreesNow(); break;
+    case "worktrees-refresh": await loadWorktrees(true); break;
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
     case "skills-save": await saveSkillsPicker(false); break;
     case "skills-reset": await saveSkillsPicker(true); break;

@@ -352,6 +352,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       }, true);
     });
     case "plan-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.planSnapshot() });
+    case "worktrees-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.worktrees() });
+    case "worktrees-cleanup": if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id"); return withDurableOwner({ id: input.id, operation: owner => owner.cleanupWorktrees() });
     case "work-archive": return withDurableOwner({ id: input.id, operation: owner => owner.archiveWork({ workIds: input.workIds, terminal: input.terminal }) });
     case "event-log": return withDurableOwner({ id: input.id, operation: async owner => {
       const [plan, scheduled, view] = await Promise.all([owner.planSnapshot(), owner.scheduleSnapshot({ includeHistory: true }), owner.snapshot()]);
