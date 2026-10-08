@@ -34,7 +34,7 @@ The owner suspended all verification. Native/browser implementation has now begu
 | Browser UI | Same default inbox and owned controls; bounded tab-local drafts and late-success guards | Implementation only; old pause/resume evidence does not cover new controls |
 | Recovery | Retained native identity, no blind mutation replay, conservative uncertainty inspection | Focused earlier crash proofs are limited; newer command/provider/automation/UI races unverified |
 
-Native control details/failure cases are in `TUI-VERIFY.md`; browser details are in `BROWSER-WIRING.md`. Draft retention is bounded periodic/session or tab/origin-local state, not a proven crash/power-loss guarantee. Neither source implementation nor SDK byte/process status establishes task correctness or remote-effect success.
+Browser details are in `BROWSER-WIRING.md`. Draft retention is bounded periodic/session or tab/origin-local state, not a proven crash/power-loss guarantee. Neither source implementation nor SDK byte/process status establishes task correctness or remote-effect success.
 
 ## Implementation-only checkpoint
 

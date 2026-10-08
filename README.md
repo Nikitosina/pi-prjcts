@@ -2,57 +2,12 @@
 
 Local persistent projects using installed Pi and official Pi Durable. Every project uses Durable; the legacy (pi-subagents era) runtime has been removed. A `project.json` without `runtime: "durable"` is refused: it is left out of the list, every action on its id fails with "uses the removed legacy runtime and cannot be opened", the host logs `legacy-project-refused` at start, the browser shows that message, and its files are never touched. A detached Node host owns Durable coordinators/workers while your Mac is awake.
 
-Verification is currently suspended by the owner. New backend and native/browser changes are unverified. Five foundation milestones are accepted; full parity is not. See `PARITY.md` for evidence limits, `IMPLEMENTATION-REVIEW.md` for this source-only closeout and safe review path, `TUI-VERIFY.md` for native controls and `BROWSER-WIRING.md` for browser controls. Do not run verification or restart/migrate a production host without renewed permission. Any future interactive review requires a fresh owner-approved disposable project home, not the production home or current running Pi session.
-
-## Decision inbox inside Pi
-
-Run `/reload`, then `/projects`. Decision inbox is the default for new sessions.
-Use `/projects-inbox` to select it explicitly in a session with a saved layout.
-Press `/` to write any request, and `m` to read the coordinator conversation.
-The master plans, spawns workers, and steers existing workers when you change
-requirements. It delegates execution instead of coding itself.
-
-Other layouts remain available inside Pi:
-
-```text
-/projects-desk
-/projects-board
-/projects-inbox
-```
-
-If no project is selected, you can choose or create one first. `/projects` also
-opens the native screen after choosing a project. `/projects-view desk|board|inbox`
-is the single-command form. The last layout is saved in the Pi session.
-
-- Command desk: a task list beside a scrollable inspector.
-- Work board: host-derived Planned, Running, Needs you, and Complete lanes.
-- Decision inbox: pending questions and results before background activity.
-
-Press `1`, `2`, or `3` to switch layouts. `/` focuses the coordinator prompt;
-Enter sends and Shift+Enter adds a line. Drafts survive layout changes,
-polling, and project switches within the open screen. Tab moves between the list, inspector, and prompt. Escape first leaves
-an editor or inspector, then closes the screen. Closing does not detach the
-project, stop its host, or stop workers. Native draft snapshots now use public Pi session entries, including thread request IDs and knowledge/settings revisions. They checkpoint periodically and on close. Reload/restart retention is unverified, not a crash guarantee.
-
-Use `w` for work, `i` for the inbox, `m` for coordinator conversation, `e` for
-evidence, `n` for notes, and `l` for coordinator requests. Up/down or j/k select items. Left/right choose board lanes.
-Enter inspects an item or opens a question. `a` answers a coordinator question;
-the host wakes the coordinator with the answer. `p` switches projects, `r` reconnects, and `?` shows all controls.
-
-Durable controls also include `f` for an existing-thread follow-up; `o` for paged approvals; `K` for managed knowledge/topic creation; `L` for a hash-pinned library; `A` for confirmed pasted reference imports; `S` for revision-checked settings/model defaults; `U` for owner-backed usage; `P` for confirmed lifecycle actions; `G` for GitHub PR/CI/review/publication receipts; and `R` for retained routines with separately confirmed enable/disable and event opt-in. Plain approval and executable consent are separate. Exact-head GitHub merge execution is implemented but unverified and requires a separately executable approval plus explicit execution confirmation; no merge effect is authorized by this review. Auto-merge and Arc adapter/commands remain unavailable. These controls have no new walkthrough evidence.
-
-These are live terminal clients, not browser simulations. All mutations use the
-existing host APIs. Evidence comes from hash-checked captured files. Board lanes
-are not editable statuses, and none of the layouts allocates worktrees. Worker
-JSON and polling messages stay out of the underlying chat while the screen is
-open. The layouts require interactive Pi; RPC and print callers keep the existing
-commands. Terminal resize, active themes, and built-in Unicode editing are supported.
+Verification is currently suspended by the owner. New backend and native/browser changes are unverified. Five foundation milestones are accepted; full parity is not. See `PARITY.md` for evidence limits, `IMPLEMENTATION-REVIEW.md` for this source-only closeout and safe review path, and `BROWSER-WIRING.md` for browser controls. Do not run verification or restart/migrate a production host without renewed permission. Any future interactive review requires a fresh owner-approved disposable project home, not the production home or current running Pi session.
 
 ## Live decision inbox
 
-The browser client uses Decision inbox. In Pi, run `/reload`, then
-`/projects-ui`. It opens the selected project, or lets you choose or create one.
-The terminal client and browser share the same persistent coordinators.
+The browser client uses Decision inbox. Run `npm run inbox`. It opens the selected project, or lets you choose or create one.
+The CLI and browser share the same persistent coordinators.
 
 From a shell:
 
@@ -73,29 +28,12 @@ decision files are ignored.
 The browser listener binds only to `127.0.0.1` on a random port. A private launch
 link authenticates the tab, then the token leaves the address bar. Do not share
 launch links or `web.json`. The host rejects foreign origins and Host headers.
-Closing the tab does not stop work. After a host restart, run `/projects-ui`
+Closing the tab does not stop work. After a host restart, run `npm run inbox`
 again because the port and token change. For an owner-authorized review in a fresh disposable home only, load host-side updates after active work finishes by stopping that disposable host and reopening a project. This is not advice to stop or restart the production host.
 
 ## Use
 
-Run `/reload` in Pi, then:
-
-- `/projects-ui [project-id]` opens the live decision inbox.
-- `/projects` browses projects or creates one, then opens the native screen.
-- `/projects-desk`, `/projects-board`, `/projects-inbox` open the three native layouts.
-- `/project-create <name>` creates and opens a Durable project after trusted-resource consent. Worker workspace/tools and provider execution still need separate grants.
-- `/project-create-retry <UUID>` confirms an exact retained creation request from the current Pi session branch. Startup never retries it automatically.
-- `/project-open <project-id>` reconnects to a coordinator.
-- Plain chat goes to the selected project's coordinator instead of the local Pi agent.
-- `/project-close` returns to ordinary local Pi without stopping project work.
-- `/project-status` shows requests, coordinator messages, and worker IDs.
-- `/project-workers [thread-id]` lists Durable work or reads a thread's history.
-- `/project-steer <thread-id> <message>` steers a running Durable thread.
-- `/project-stop <thread-id>` stops a Durable thread.
-- `/project-notes` reads immutable audit notes.
-- `/project-host-stop` stops the local host. Durable shutdown cancels/drains its owned runtimes; uncertain cleanup remains a blocker. Use host stop/restart only in an owner-approved disposable review home; production host changes require explicit renewed permission.
-
-Slash commands and `!` shell commands still belong to the local Pi client. Project chat currently accepts text only.
+The terminal UI (Pi extension, `/projects*` and `/project-*` slash commands) was removed. Use the browser client (`npm run inbox`) and the CLI (`npm run projects -- <command>`).
 
 ## Lifecycle CLI
 
@@ -180,7 +118,7 @@ npm run projects -- host-stop
 
 `create-once <request-uuid> <name> <workspace> [objective]` uses a stable creation identity. Repeat the exact arguments to reuse that project, without restoring/resuming or resetting settings. It cannot reconstruct native/browser requests with additional explicit model/grant fields; use their stored request instead. Ordinary `create` still chooses a fresh project UUID. This new behavior is unverified.
 
-Scoped worker submission is explicit: CLI `submit-scoped <project-id> <scope-id> <thread-id> <request-id> <task>` or native `/project-submit-scoped <scope-id> <thread-id> <request-id> <task>` selects an existing owner-authorized scope. It grants no new tools or repository authority and uses the official Durable planner. This path is unverified.
+Scoped worker submission is explicit: CLI `submit-scoped <project-id> <scope-id> <thread-id> <request-id> <task>` selects an existing owner-authorized scope. It grants no new tools or repository authority and uses the official Durable planner. This path is unverified.
 
 Routine CLI controls include `schedules`/`monitors` snapshots, stable-ID one-shot/interval/daily/weekly creation, explicit event opt-in and confirmed enable/disable. They call the existing Durable backend without client timers, new grants or automatic resume. See `CLI-WIRING.md` for syntax and limits. This wiring is unverified.
 
@@ -227,9 +165,7 @@ Run only against trusted workspaces. Extensions execute with your account's perm
 
 ## UI choice
 
-Decision inbox is the chosen default for the browser and new native Pi sessions.
-Native Pi still offers all three layouts through `src/project-screen.ts`; they share one live project state and preserve
-the coordinator draft when switching. The browser client remains in `web/`.
+Decision inbox is the chosen default. The browser client lives in `web/`; the terminal UI was removed.
 Trial screenshots under `artifacts/ui-prototype/` show the earlier simulated app,
 not either live client.
 

@@ -8,7 +8,6 @@ const globalModules = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).
 const pi = join(globalModules, "@earendil-works", "pi-coding-agent");
 for (const [name, target] of [
   ["@earendil-works/pi-coding-agent", pi],
-  ["@earendil-works/pi-tui", join(pi, "node_modules", "@earendil-works", "pi-tui")],
   ["typebox", join(pi, "node_modules", "typebox")],
   ["@types/node", join(pi, "node_modules", "@types", "node")],
 ]) {

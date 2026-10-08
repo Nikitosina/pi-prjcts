@@ -14,11 +14,9 @@
     "e2e:legacy-removal": "node scripts/legacy-removal-e2e.mjs",
     "projects": "node src/cli.ts"
   },
-  "pi": { "extensions": ["src/extension.ts"] },
   "dependencies": { "@earendil-works/pi-durable": "1.0.0", "unpdf": "1.8.1" },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   }
 }
