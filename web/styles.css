@@ -474,6 +474,10 @@ details.advanced > summary { cursor: pointer; color: var(--muted); }
 .context-popup button { color: var(--k-fffef9); border-color: var(--k-5a5f68); padding: 2px 8px; white-space: nowrap; flex: none; width: auto; min-width: max-content; }
 .context-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 14px; align-items: end; }
 #warning > div + div { margin-top: 6px; }
+.notice-row { display: flex; align-items: flex-start; gap: 10px; }
+.notice-row > span { flex: 1; min-width: 0; }
+.notice-close { flex: none; border: 0; background: none; color: var(--muted); font-size: 13px; line-height: 1; padding: 4px 6px; margin: -3px -8px -3px 0; border-radius: 5px; cursor: pointer; }
+.notice-close:hover, .notice-close:focus-visible { color: var(--text); background: color-mix(in srgb, currentColor 10%, transparent); }
 
 .live-reply { opacity: .92; }
 .live-status { display: flex; align-items: center; gap: 8px; color: var(--k-6b6f76); font-size: 13px; margin: 6px 0 0; }

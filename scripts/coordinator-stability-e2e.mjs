@@ -143,12 +143,42 @@ try {
   result.checks.push('S4 failed turn shows provider error text and a Retry button');
   await shot('01-failed-with-retry', s);
 
+  // Dismiss: ✕ hides the warning across polls and reload; Retry untouched (D1-D4, D6).
+  const rows = await evaluate(`[...document.querySelectorAll('#warning .notice-row')].map(r => ({ text: r.innerText, close: !!r.querySelector('button.notice-close[aria-label="Dismiss"]') }))`, s);
+  if (!rows.length || rows.some(r => !r.close)) throw Error('Warning rows without ✕: ' + JSON.stringify(rows));
+  await evaluate(`document.querySelector('#warning .notice-row:has([data-action="retry-message"]) .notice-close').click()`, s);
+  await waitFor(`![...document.querySelectorAll('#warning .notice-row')].some(r => /overloaded|503/i.test(r.innerText))`, s, 'failed row dismissed');
+  if ((await rpc({ action: 'show', id: project.id })).jobs.length !== (fail.view.jobs.length)) throw Error('✕ triggered Retry');
+  await evaluate(`document.querySelector('#refresh').click()`, s); await delay(1500);
+  if (await evaluate(`/overloaded|503/i.test(document.querySelector('#warning').innerText) && !document.querySelector('#warning').hidden`, s)) throw Error('Dismissed warning came back after poll');
+  await send('Page.reload', {}, s);
+  await waitFor(`!!document.querySelector('#compose .context-meter') && document.querySelector('#title').textContent === 'Coordinator stability'`, s, 'reloaded'); await delay(1500);
+  if (await evaluate(`!document.querySelector('#warning').hidden && /overloaded|503/i.test(document.querySelector('#warning').innerText)`, s)) throw Error('Dismissed warning came back after reload');
+  result.checks.push('S9 ✕ dismisses a warning row; stays hidden after poll and reload; does not Retry');
+  // A new failure with different text shows again (D5).
+  await rpc({ action: 'message', id: project.id, text: 'MARK-FAIL second' }).then(settle);
+  await waitFor(`!document.querySelector('#warning').hidden && /overloaded|503/i.test(document.querySelector('#warning').innerText)`, s, 'new failure shown again (not hidden by old dismissal)');
+  result.checks.push('S10 a later failure is shown despite an earlier dismissal');
+  // Error box ✕ (D7).
+  await evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.value = '/skill:nope-missing do it'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`, s);
+  await waitFor(`!document.querySelector('#error').hidden && /Unknown skill/.test(document.querySelector('#error').innerText)`, s, 'error shown');
+  await shot('01b-error-with-close', s);
+  await evaluate(`document.querySelector('#error .notice-close').click()`, s);
+  await waitFor(`document.querySelector('#error').hidden`, s, 'error dismissed');
+  await evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.value = '/skill:other-missing do it'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`, s);
+  await waitFor(`!document.querySelector('#error').hidden && /other-missing/.test(document.querySelector('#error').innerText)`, s, 'different error shown again');
+  await evaluate(`(() => { document.querySelector('#error .notice-close').click(); const t = document.querySelector('#compose textarea'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`, s);
+  // The two refusals are expected 400s; anything else stays an error.
+  const expected400 = e => / 400 /.test(e); if (result.errors.filter(expected400).length !== 2 || result.httpErrors.filter(h => h.status === 400).length !== 2) throw Error('Unexpected refusal errors');
+  result.errors = result.errors.filter(e => !expected400(e)); result.httpErrors = result.httpErrors.filter(h => h.status !== 400);
+  result.checks.push('S11 ✕ closes the error box; a different later error shows again');
+
   failing = false;
   const beforeJobs = (await rpc({ action: 'show', id: project.id })).jobs.length;
   await evaluate(`(() => { const b = document.querySelector('#warning [data-action="retry-message"]'); b.click(); b.click(); })()`, s);
   const retried = await eventually(async () => { const view = await rpc({ action: 'show', id: project.id }); const last = view.jobs.at(-1); return view.jobs.length > beforeJobs && last.state === 'done' && view; }, 'Retry did not complete');
   const added = retried.jobs.slice(beforeJobs);
-  if (added.length !== 1 || added[0].text !== 'MARK-FAIL persistent') throw Error('Retry sent wrong/duplicate messages: ' + JSON.stringify(added));
+  if (added.length !== 1 || added[0].text !== 'MARK-FAIL second') throw Error('Retry sent wrong/duplicate messages: ' + JSON.stringify(added));
   result.checks.push('S5 Retry resends the same text exactly once');
   if (retried.project.phase === 'attention' || retried.project.problem) throw Error('Attention stuck after success: ' + JSON.stringify({ phase: retried.project.phase, problem: retried.project.problem }));
   await waitFor(`document.querySelector('#warning').hidden || !/overloaded|503/i.test(document.querySelector('#warning').innerText)`, s, 'warning cleared');

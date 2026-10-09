@@ -15,3 +15,13 @@ Observed on Mari (2026-10-06 16:54, 16:57): two coordinator turns failed with `W
 - Context indicator is missing, sits away from Send, or has no hover popup with a percentage.
 - Context percentage ignores the latest usage, exceeds 100 %, or divides by the wrong model's context window.
 - Context indicator throws or shows NaN before the first model response.
+
+## Dismissing notices (✕), recorded before implementation
+- D1 No ✕ on a warning row or on the error box, or it is not keyboard reachable.
+- D2 ✕ hides the row, but the next poll re-renders it (dismissal not remembered).
+- D3 ✕ on one warning hides the others too; or the box stays visible empty after the last row.
+- D4 ✕ is a data-action, so it is disabled while busy, or it fires the row's Retry.
+- D5 A dismissed problem stays hidden after its text changes (a new failure must show again).
+- D6 Reload loses the dismissal (kept per tab session), or it leaks across projects.
+- D7 ✕ on #error hides it, but a different later error stays hidden.
+- D8 The ✕ glyph is low-contrast or overlaps long text.

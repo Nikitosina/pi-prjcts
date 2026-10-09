@@ -69,6 +69,9 @@ let busy = false;
 let dialogVersion = 0;
 let blobUrl = null;
 let toastTimer;
+// Dismissed notices: an ✕ hides a warning or error until its text changes; remembered for this tab session.
+const dismissKey = "pi-projects-dismissed";
+const dismissed = new Set((() => { try { return JSON.parse(sessionStorage.getItem(dismissKey) ?? "[]"); } catch { return []; } })());
 const tabs = ["coordinator", "knowledge", "activity", "observability", "settings"];
 let tab = tabs.includes(initial.searchParams.get("tab")) ? initial.searchParams.get("tab") : "coordinator";
 // Observability usage is pinned to the project/generation that requested it.
@@ -92,7 +95,7 @@ async function start() {
       if (current !== generation) return;
     }
     changeProject(projectId, chatId);
-    if (refusal) { const node = document.querySelector("#error"); node.dataset.source = "action"; node.textContent = refusal; node.hidden = false; refusal = null; }
+    if (refusal) { setError(refusal, "action"); refusal = null; }
   } catch (error) { if (current === generation) showError(error); }
 }
 
@@ -333,14 +336,16 @@ function render() {
   // Failures older than the newest settled turn are history, not current problems.
   const lastDone = view.jobs.findLastIndex(job => job.state === "done");
   const failures = view.jobs.slice(lastDone + 1).filter(job => ["failed", "interrupted"].includes(job.state)).slice(-2);
-  const warnings = failures.map(job => `<div>${esc(job.state)}: ${esc(job.error ?? job.text)} <button class="ghost small" data-action="retry-message" data-project="${esc(view.project.id)}" data-job="${esc(job.id)}">Retry</button></div>`);
-  if (plan) warnings.push(...plan.work.filter(work => work.blocker && !work.archived).slice(-3).map(work => `<div>${esc(`${work.role} ${work.threadId}: ${work.blocker}`)}</div>`));
+  // Each warning row: [dismiss key, html]; the key is the project, the source (job/work/latest job) and the text, so a new failure shows again.
+  const row = (source, text, extra = "") => [`${view.project.id}:${source}:${text}`, `<span>${esc(text)}${extra}</span>`];
+  const warnings = failures.map(job => row(job.id, `${job.state}: ${job.error ?? job.text}`, ` <button class="ghost small" data-action="retry-message" data-project="${esc(view.project.id)}" data-job="${esc(job.id)}">Retry</button>`));
+  if (plan) warnings.push(...plan.work.filter(work => work.blocker && !work.archived).slice(-3).map(work => row(work.id, `${work.role} ${work.threadId}: ${work.blocker}`)));
   const shownProblem = failures.some(job => job.error === view.project.problem);
   // The problem may come from another chat; offer to open it.
   const problemChat = (view.chats ?? []).find(chat => chat.attention && chat.id !== chatId && view.project.problem?.startsWith(`Chat "${chat.title}": `));
-  if (view.project.problem && !shownProblem && !pending.some(item => item.kind === "question" && item.question === view.project.problem)) warnings.unshift(`<div>${esc(view.project.problem)}${problemChat ? ` <button class="ghost small" data-action="chat-select" data-chat="${esc(problemChat.id)}">Open chat</button>` : ""}</div>`);
-  const warning = document.querySelector("#warning");
-  setHtml("#warning", warnings.join("")); warning.hidden = !warnings.length;
+  if (view.project.problem && !shownProblem && !pending.some(item => item.kind === "question" && item.question === view.project.problem)) warnings.unshift(row(view.jobs.at(-1)?.id ?? "", view.project.problem, problemChat ? ` <button class="ghost small" data-action="chat-select" data-chat="${esc(problemChat.id)}">Open chat</button>` : ""));
+  const shown = warnings.filter(([key]) => !dismissed.has(key)), warning = document.querySelector("#warning");
+  setHtml("#warning", shown.map(([key, body]) => `<div class="notice-row">${body}${closeButton(key)}</div>`).join("")); warning.hidden = !shown.length;
   renderContextMeter(view.context);
   disableActions();
   applySearchFocus();
@@ -1285,11 +1290,22 @@ async function mutate(input, success) {
 function showError(error) {
   const text = error instanceof Error ? error.message : String(error);
   document.querySelector("#connection").textContent = "Disconnected"; document.querySelector("#connection").dataset.state = "down";
-  const node = document.querySelector("#error");
-  node.dataset.source = "connection";
-  node.textContent = `${text}. If the host restarted, run /projects-ui to reopen its current address.`;
-  node.hidden = false;
+  setError(`${text}. If the host restarted, run /projects-ui to reopen its current address.`, "connection");
 }
+function closeButton(key) { return `<button type="button" class="notice-close" data-dismiss="${esc(key)}" title="Dismiss" aria-label="Dismiss">✕</button>`; }
+function setError(text, source) {
+  const node = document.querySelector("#error"), key = `error:${text}`;
+  node.dataset.source = source;
+  node.innerHTML = `<div class="notice-row"><span>${esc(text)}</span>${closeButton(key)}</div>`; node.hidden = dismissed.has(key);
+}
+// ✕ on a notice: remember it, drop its row, and hide the box once empty. Not a data-action, so it works while busy.
+document.addEventListener("click", event => {
+  const button = event.target.closest("[data-dismiss]"); if (!button) return;
+  dismissed.add(button.dataset.dismiss);
+  try { sessionStorage.setItem(dismissKey, JSON.stringify([...dismissed].slice(-200))); } catch {}
+  const box = button.closest("#error, #warning"); button.closest(".notice-row").remove();
+  if (box && !box.querySelector(".notice-row")) box.hidden = true;
+});
 function toast(text) { clearTimeout(toastTimer); const node = document.querySelector("#toast"); node.textContent = text; node.classList.add("visible"); toastTimer = setTimeout(() => node.classList.remove("visible"), 4500); }
 function esc(value) { return String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
 function renderMarkdown(value) {
@@ -1913,7 +1929,7 @@ function report(error, frame = error instanceof UiRequestError ? error.frame : u
   if (frame.projectId !== projectId || frame.generation !== generation) return;
   const text = error instanceof Error ? error.message : String(error);
   if (dialog.open && frame.dialogVersion === dialogVersion) { let node = dialog.querySelector(".dialog-error"); if (!node) { node = document.createElement("p"); node.className = "dialog-error"; dialog.append(node); } node.textContent = text; }
-  else { const node = document.querySelector("#error"); node.dataset.source = "action"; node.textContent = text; node.hidden = false; }
+  else setError(text, "action");
 }
 document.addEventListener("click", event => { const node = event.target.closest("[data-action]"); if (node && !node.disabled) void uiAction(() => action(node)); });
 document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
