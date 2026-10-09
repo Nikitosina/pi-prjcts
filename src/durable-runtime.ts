@@ -9,7 +9,7 @@ import {
   AssistantEntry, GenerationTask, Harness, ToolTask, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
   type Conversation, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
 } from "@earendil-works/pi-durable";
-import { createModelRuntime } from "./provider-extensions.ts";
+import { createModelRuntime, observeProviderPrompt } from "./provider-extensions.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
@@ -306,7 +306,21 @@ export async function openDurableProject(input: { project: Project; dir: string;
       // cache on ~40% of input. The first message is the conversation's stored system entry: stable per conversation.
       const first = request.messages[0];
       const sessionId = options?.sessionId ?? (first ? `pi-projects-${createHash("sha256").update(`${project.id}\n${JSON.stringify(first)}`).digest("hex").slice(0, 32)}` : undefined);
-      const stream = dispatch(model, request, sessionId ? { ...options, sessionId } : options);
+      observeProviderPrompt(model.provider, request);
+      // Durable aborts every invocation's signal when the invocation ends, even after a normal response. A provider that keeps
+      // a query open across tool rounds (claude-bridge parks its Claude Code query at the tool boundary) would be killed by
+      // that routine end, so once the stream has settled only real aborts (stop/abort, no "invocation has ended") pass through.
+      let settled = false, signal = options?.signal;
+      if (signal) {
+        const outer = signal, controller = new AbortController();
+        const routineEnd = () => settled && outer.reason instanceof Error && /^Task \S+ invocation has ended$/.test(outer.reason.message);
+        if (outer.aborted) controller.abort(outer.reason);
+        else outer.addEventListener("abort", () => { if (!routineEnd()) controller.abort(outer.reason); }, { once: true });
+        signal = controller.signal;
+      }
+      const stream = dispatch(model, request, { ...options, ...(sessionId ? { sessionId } : {}), ...(signal ? { signal } : {}) });
+      const settle = () => { settled = true; };
+      void stream.result().then(settle, settle);
       if (input.onGenerationLifecycle) {
         // Durable 1.0 does not expose its IDs here. This trace is intentionally aggregate-only.
         const traceId = crypto.randomUUID();
