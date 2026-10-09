@@ -64,6 +64,7 @@ await kit.run(async () => {
   check('F4 a merged PR makes it removable', i5?.removable === true && i5.pullRequests.some(pr => pr.state === 'merged'), i5);
   check('F4 a lease held by someone else keeps it', i6 && !i6.removable && /lease/.test(why(i6)), why(i6));
   check('F5 Arc items are marked as arc-wt managed', [i1, i4].every(entry => entry.provider === 'arc'));
+  check('F5b Arc worktrees are never measured with du (virtual Arcadia mount): size unknown, not counted', [i1, i4].every(entry => entry.sizeKb === -1));
 
   // PR-head reads.
   const pr1 = store().prs.find(entry => entry.from_branch.includes('KEYBOARD-101')), head1 = pr1.diffSets.at(-1).head;

@@ -286,7 +286,7 @@ try {
   await waitFor(`!!document.querySelector('#worktree-list') && document.querySelector('[data-action="worktrees-cleanup"]') && !document.querySelector('[data-action="worktrees-cleanup"]').disabled`, s, 'worktree list with cleanup');
   await evaluate(`document.querySelector('#worktrees-card').scrollIntoView()`, s); await delay(300);
   await shot('01-worktrees-before-cleanup', s);
-  const uiText = await evaluate(`document.querySelector('#worktrees-card').innerText`, s);
+  const uiText = await evaluate(`document.querySelector('#worktrees-summary').innerText + '\\n' + document.querySelector('#worktrees-card').innerText`, s); // the summary sits in the section header since the Settings redesign
   check('K7 Settings shows sizes, kept reasons, setup failure and the reclaimable cleanup button', /reclaimable/.test(uiText) && /uncommitted or untracked changes/.test(uiText) && /not on any remote/.test(uiText) && /setup failed \(exit 3\)/.test(uiText) && /#1 merged/.test(uiText) && /Clean up worktrees \(/.test(uiText), uiText);
   const w1Path = inv.items.find(e => e.threadId === w1.threadId).path, w2Path = i2.path, w3Path = i3.path, headPath = heads[0].path;
   await evaluate(`document.querySelector('[data-action="worktrees-cleanup"]').click()`, s);

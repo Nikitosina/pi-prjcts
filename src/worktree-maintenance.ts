@@ -88,7 +88,13 @@ export function readHeads(checkout: string, controlRoot: string, arc?: { project
 export type WorktreeItem = { kind: "worker" | "read-head"; path: string; threadId: string | null; branch: string | null; sizeKb: number; removable: boolean; reasons: string[]; setup: SetupRecord | null; pullRequests: Array<{ number: number; state: string }>; intentId?: string; checkout: string; /** Arc worktrees are removed with arc-wt, never git. */ provider?: "arc"; leaseOwner?: string; entry?: string };
 export type WorktreeInventory = { items: WorktreeItem[]; reclaimableKb: number; totalKb: number };
 
-async function sizeKb(path: string): Promise<number> { const result = await run("/usr/bin/du", ["-sk", path]); return Number(/^(\d+)/.exec(result.stdout)?.[1] ?? 0); }
+/** Disk use of a git worktree; -1 when unknown. Arc worktrees are virtual mounts of all of Arcadia: `du` would walk (and fetch) the monorepo, so they are never measured. */
+async function sizeKb(path: string, arc = false): Promise<number> {
+  if (arc) return -1;
+  const result = await run("/usr/bin/du", ["-sk", path], { timeoutMs: 30_000 });
+  const kb = /^(\d+)/.exec(result.stdout)?.[1];
+  return result.code === 0 && kb ? Number(kb) : -1;
+}
 async function pullStates(project: Project, branches: string[], signal?: AbortSignal): Promise<Array<{ number: number; state: string }> | null> {
   const grant = project.githubAuthorization?.[0];
   if (!grant) return [];
@@ -112,7 +118,7 @@ export async function worktreeInventory(input: { project: Project; root: Convers
     if (receipt.state !== "allocated" || !receipt.workspacePath || !existsSync(receipt.workspacePath)) continue;
     if (receipt.scope.provider === "arc") {
       const facts = await arcWorkerFacts({ project: input.project, root: input.root, receipt, busy });
-      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath), removable: facts.removable, reasons: facts.reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: "arc", leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName });
+      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath, true), removable: facts.removable, reasons: facts.reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: "arc", leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName });
       continue;
     }
     if (receipt.scope.provider !== "git") continue;
@@ -140,9 +146,9 @@ export async function worktreeInventory(input: { project: Project; root: Convers
     const users = Object.entries(plan.threads).filter(([, thread]) => thread.readRoot === path).map(([id]) => id);
     const reasons = users.some(busy) ? ["a scout or reviewer reading it has queued or running work"] : [];
     const arcHead = existsSync(join(path, ".arc"));
-    items.push({ kind: "read-head", path, threadId: users[0] ?? null, branch: null, sizeKb: await sizeKb(path), removable: reasons.length === 0, reasons, setup: null, pullRequests: [], checkout: input.project.cwd, ...(arcHead ? { provider: "arc" as const, leaseOwner: arcLeaseOwner(input.project.id), entry: arcReadHeadName(path) } : {}) });
+    items.push({ kind: "read-head", path, threadId: users[0] ?? null, branch: null, sizeKb: await sizeKb(path, Boolean(arcHead)), removable: reasons.length === 0, reasons, setup: null, pullRequests: [], checkout: input.project.cwd, ...(arcHead ? { provider: "arc" as const, leaseOwner: arcLeaseOwner(input.project.id), entry: arcReadHeadName(path) } : {}) });
   }
-  return { items, reclaimableKb: items.filter(item => item.removable).reduce((sum, item) => sum + item.sizeKb, 0), totalKb: items.reduce((sum, item) => sum + item.sizeKb, 0) };
+  return { items, reclaimableKb: items.filter(item => item.removable).reduce((sum, item) => sum + Math.max(0, item.sizeKb), 0), totalKb: items.reduce((sum, item) => sum + Math.max(0, item.sizeKb), 0) };
 }
 
 /** Removes every removable worktree after re-checking it; unforced for worker worktrees, branches are kept. */
@@ -168,5 +174,5 @@ export async function cleanupWorktrees(input: { project: Project; root: Conversa
     }
     removed.push({ path: item.path, sizeKb: item.sizeKb });
   }
-  return { removed, kept: before.items.filter(entry => !entry.removable), failed, reclaimedKb: removed.reduce((sum, item) => sum + item.sizeKb, 0) };
+  return { removed, kept: before.items.filter(entry => !entry.removable), failed, reclaimedKb: removed.reduce((sum, item) => sum + Math.max(0, item.sizeKb), 0) };
 }

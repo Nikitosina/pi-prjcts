@@ -575,7 +575,7 @@ document.addEventListener("input", event => {
 
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
 let worktrees = null;
-const sizeText = kb => kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+const sizeText = kb => kb < 0 ? "size unknown" : kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
 async function loadWorktrees(force = false) {
   const id = projectId, current = generation, node = document.querySelector("#worktrees");
   if (!id || !plan || !force && worktrees?.projectId === id && worktrees.data) return;
@@ -592,7 +592,7 @@ function renderWorktrees() {
   const removable = data.items.filter(item => item.removable);
   document.querySelector("#worktrees-summary").textContent = `${data.items.length} · ${sizeText(data.totalKb)} · ${sizeText(data.reclaimableKb)} reclaimable`;
   const setup = item => !item.setup ? "" : item.setup.ok ? `<span class="wt-setup ok">setup ok</span>` : `<details class="wt-setup bad"><summary>setup failed (exit ${esc(item.setup.exitCode)})</summary><pre>${esc(item.setup.output)}</pre></details>`;
-  const row = item => `<li class="wt-row${item.removable ? " removable" : ""}"><b class="mono">${esc(item.path.split("/").at(-1))}</b> <span class="note">${esc(item.kind === "read-head" ? "PR-head snapshot" : item.branch ?? "")}</span> <span>${esc(sizeText(item.sizeKb))}</span> ${item.pullRequests.map(pr => `<span class="wt-pr ${esc(pr.state)}">#${esc(pr.number)} ${esc(pr.state)}</span>`).join(" ")} ${setup(item)} <span class="${item.removable ? "good" : "note"}">${item.removable ? "can be removed" : esc(item.reasons.join("; "))}</span></li>`;
+  const row = item => `<li class="wt-row${item.removable ? " removable" : ""}"><b class="mono">${esc(item.path.split("/").at(-1))}</b> <span class="note">${esc(item.kind === "read-head" ? "PR-head snapshot" : item.branch ?? "")}</span> <span>${esc(item.provider === "arc" ? "Arc virtual mount" : sizeText(item.sizeKb))}</span> ${item.pullRequests.map(pr => `<span class="wt-pr ${esc(pr.state)}">#${esc(pr.number)} ${esc(pr.state)}</span>`).join(" ")} ${setup(item)} <span class="${item.removable ? "good" : "note"}">${item.removable ? "can be removed" : esc(item.reasons.join("; "))}</span></li>`;
   node.innerHTML = `<label class="field">Setup command <input id="worktree-setup" class="mono" maxlength="4000" placeholder="e.g. bun run worktree:setup" value="${esc(worktrees.setup)}"></label>
     <p class="note">Runs once with sh in each new coding worktree before the worker starts (15 min limit). The worker is told whether it failed.</p>
     <div class="row"><button data-action="worktree-setup-save">Save setup command</button></div>
