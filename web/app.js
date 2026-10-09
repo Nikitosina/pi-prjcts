@@ -2858,7 +2858,14 @@ function requireProject(id) { if (id !== projectId) throw new Error("Selected pr
 function closeCurrentDialog(id, version) { if (projectId === id && dialogVersion === version) closeDialog(); }
 function requireThread(id) { if (!uuid(id) || !plan?.work.some(work => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan"); }
 function workLine(work, detail) {
-  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}</small></button>`;
+  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small></button>`;
+}
+// Shared resources a running worker holds: leases by resource name, and its running background commands.
+function holdsBadge(holds) {
+  if (!holds) return "";
+  const parts = [...holds.leases.map(lease => `lease ${lease.resource}`), ...(holds.background.length ? [`${holds.background.length} bg`] : [])];
+  const title = [...holds.leases.map(lease => `${lease.resource} until ${new Date(lease.until).toLocaleTimeString()}`), ...holds.background.map(item => `background: ${item.label}`)].join("\n");
+  return ` · <span class="worker-holds" title="${esc(title)}">${esc(parts.join(", "))}</span>`;
 }
 const finished = work => ["completed", "failed", "stopped"].includes(work.status);
 function durableActivity() {

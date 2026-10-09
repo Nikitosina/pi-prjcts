@@ -36,8 +36,10 @@ export type DurableResolvedAttempt = Readonly<{
 }>;
 export type DurablePlanWorkSnapshot = Readonly<{
   id: string; threadId: string; role: DurableRole; text: string; dependsOn: readonly string[];
-  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; /** Parent worker thread of a child thread; null for top-level work. */ parentThreadId: string | null; attempt: DurableResolvedAttempt | null; /** This item replaced superseded work through an explicit steer. */ steering?: boolean;
+  status: DurablePlanWorkStatus; blocker: string | null; startedAt: number | null; endedAt: number | null; archived: boolean; /** Delegating chat conversation; null means Main. */ chatConversationId: number | null; /** Parent worker thread of a child thread; null for top-level work. */ parentThreadId: string | null; attempt: DurableResolvedAttempt | null; /** This item replaced superseded work through an explicit steer. */ steering?: boolean; /** Present while the running thread holds leases or background commands. */ holds?: DurableHolds;
 }>;
+/** Shared resources a running worker thread holds right now (leases and background commands). */
+export type DurableHolds = Readonly<{ leases: readonly { resource: string; until: string }[]; background: readonly { id: string; label: string }[] }>;
 export type DurablePlanSnapshot = Readonly<{ paused: boolean; pausing: boolean; workerCap: number | null; work: readonly DurablePlanWorkSnapshot[] }>;
 
 /** Actual ModelRuntime stream lifecycle. traceId is locally generated and deliberately has no Durable thread/conversation meaning. */
