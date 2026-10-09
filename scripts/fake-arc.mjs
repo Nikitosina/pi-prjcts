@@ -75,6 +75,7 @@ if (command === "branch") {
 }
 if (command === "show") out(git("show", ...rest));
 if (command === "diff") out(here("diff", ...rest));
+if (command === "merge-base") out(git("merge-base", ...rest));
 // Server side: the remote name is users/<login>/<local>; a prefixed local name doubles it (the real double-prefix gotcha).
 if (command === "push") {
   const current = branch() || fail("detached HEAD cannot be pushed"), name = positional()[0] ?? flag("-u") ?? current, remote = server(name);

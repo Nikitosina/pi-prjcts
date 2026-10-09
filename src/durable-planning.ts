@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, UsageDoc, type Conversation, type ConversationId, type ModelRef, type TaskId, type ToolRegistration, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
@@ -190,16 +191,22 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
   });
 
-  const delegate = defineTool({ name: "projects_delegate", description: "Admit bounded durable worker work. Choose role worker, scout, or reviewer for the task. For an owner-authorized workspace, pass workspaceScopeId and omit requiredTools; a worker without one uses the project's only whole-repository scope when exactly one exists, and the receipt names the scope used. Roles select model/instructions; scout and reviewer also get read-only code tools (code_read, code_grep, code_find, code_ls) and ignore workspaceScopeId. Their code root is the project checkout unless you pass ref: a branch (e.g. a project PR branch pi/...), pull/<number> or a commit SHA; the host fetches it from origin into a read-only snapshot so they read the PR head, not the owner's checkout. Independent delegations run concurrently up to the project worker cap. Completion or failure sends a result back to this coordinator. The host supplies exact scoped read/write and authorized publication tools after allocation. requiredTools selects only additional global tool names explicitly advertised by the host; never invent aliases such as workspace_read, workspace_write or projects_github. Missing capabilities remain blocked.", parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])), requiredTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 64 })), workspaceScopeId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$" })), ref: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Scout/reviewer only: branch, pull/<number> or commit SHA to read instead of the project checkout." })) }), replay: "unsafe", async execute(args, api, context) {
+  const delegate = defineTool({ name: "projects_delegate", description: "Admit bounded durable worker work. Choose role worker, scout, or reviewer for the task. For an owner-authorized workspace, pass workspaceScopeId and omit requiredTools; a worker without one uses the project's only whole-repository scope when exactly one exists, and the receipt names the scope used. Roles select model/instructions; scout and reviewer also get read-only code tools (code_read, code_grep, code_find, code_ls) and ignore workspaceScopeId. Their code root is the project checkout unless you pass a target: threadId of an existing worker thread (they read that worker's worktree, including its uncommitted edits; use this to review a worker's PR or work), or ref: a branch (e.g. a project PR branch pi/...), pull/<number> or a commit SHA; the host fetches it from origin or Arcadia into a read-only snapshot so they read the PR head, not the owner's checkout. They also get code_diff (changed files and unified diff against the merge-base). Give every reviewer of a PR or worker's change a threadId or ref. An unknown threadId or unresolvable ref fails the call. Independent delegations run concurrently up to the project worker cap. Completion or failure sends a result back to this coordinator. The host supplies exact scoped read/write and authorized publication tools after allocation. requiredTools selects only additional global tool names explicitly advertised by the host; never invent aliases such as workspace_read, workspace_write or projects_github. Missing capabilities remain blocked.", parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])), requiredTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 64 })), workspaceScopeId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$" })), ref: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Scout/reviewer only: branch, pull/<number> or commit SHA to read instead of the project checkout." })), threadId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$", description: "Scout/reviewer only: UUID of an existing worker thread whose worktree to read (read-only)." })) }), replay: "unsafe", async execute(args, api, context) {
     const role = args.role ?? "worker";
     if (args.ref !== undefined && role === "worker") throw new Error("ref is for scout and reviewer; a worker continuing a branch fetches it itself (say the branch in the task)");
+    if (args.threadId !== undefined && role === "worker") throw new Error("threadId is for scout and reviewer; a worker is continued with a follow-up to its thread");
+    if (args.threadId !== undefined && args.ref !== undefined) throw new Error("Pass either threadId or ref, not both");
     if (args.ref !== undefined && !options.readHead) throw new Error("PR-head reads are unavailable for this project");
     const head = args.ref === undefined ? undefined : await options.readHead!(args.ref);
     const ignoredScope = role !== "worker" && args.workspaceScopeId !== undefined;
     // Every chat shares the root's plan and worker pool; the delegating chat receives the report.
     const owner = options.planRoot?.() ?? api.conversationId;
-    const receipt = await api.commit(async tx => workReceipt(await admit(tx, owner, { id: crypto.randomUUID(), threadId: crypto.randomUUID(), role, text: args.task, requiredTools: args.requiredTools, workspaceScopeId: role === "worker" ? args.workspaceScopeId ?? defaultWorkerScope(role, args.requiredTools) : undefined, ...(head ? { readRoot: head.root, readSha: head.sha } : {}) }, true, api.conversationId)), context);
-    return { content: [{ type: "text", text: JSON.stringify({ ...receipt, ...(head ? { reads: { ref: args.ref, sha: head.sha } } : {}), ...(ignoredScope ? { note: "workspaceScopeId ignored: scouts and reviewers are read-only" } : {}) }) }] };
+    const receipt = await api.commit(async tx => {
+      // A thread target is resolved against the plan in the same transaction, so an unknown or worktree-less thread fails the call instead of reading trunk.
+      const threadRoot = args.threadId === undefined ? undefined : threadReadRoot(await tx.doc(DurablePlanning, owner), args.threadId);
+      return workReceipt(await admit(tx, owner, { id: crypto.randomUUID(), threadId: crypto.randomUUID(), role, text: args.task, requiredTools: args.requiredTools, workspaceScopeId: role === "worker" ? args.workspaceScopeId ?? defaultWorkerScope(role, args.requiredTools) : undefined, ...(head ? { readRoot: head.root, readSha: head.sha } : threadRoot ? { readRoot: threadRoot } : {}) }, true, api.conversationId));
+    }, context);
+    return { content: [{ type: "text", text: JSON.stringify({ ...receipt, ...(head ? { reads: { ref: args.ref, sha: head.sha } } : {}), ...(args.threadId !== undefined ? { reads: { threadId: args.threadId } } : {}), ...(ignoredScope ? { note: "workspaceScopeId ignored: scouts and reviewers are read-only" } : {}) }) }] };
   } });
   // One level of nesting: top-level worker threads may delegate children; children never get this tool and are refused if they call it.
   const MAX_ACTIVE_CHILDREN = 2;
@@ -256,6 +263,15 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const model = options.resolveModel?.(profile.model, role) ?? Object.values(options.models).find(value => `${value.provider}/${value.modelId}` === profile.model);
     if (!model || `${model.provider}/${model.modelId}` !== profile.model) throw new Error("Frozen thread model is unavailable; restore its configured provider/model before continuing");
     return model;
+  }
+  /** Code root of an existing thread: a worker's worktree (not the shared project checkout) or a read-only thread's own root. Throws when it has none or is gone. */
+  function threadReadRoot(state: PlanningState, threadId: string): string {
+    const thread = state.threads[threadId], latest = Object.values(state.work).findLast(work => work.threadId === threadId);
+    if (!thread || !latest) throw new Error(`Unknown thread ${threadId}: pass the threadId of an existing worker thread`);
+    const root = latest.role === "worker" ? thread.workspaceConfigured && thread.workspaceScopeId !== null && latest.attempt?.cwd !== options.cwd ? latest.attempt?.cwd : undefined : thread.readRoot;
+    if (!root) throw new Error(`Thread ${threadId} has no worktree to read yet (it has not started or has no workspace); wait for it to start or pass a ref`);
+    if (!existsSync(root)) throw new Error(`The worktree of thread ${threadId} no longer exists (cleaned up); pass the PR ref instead`);
+    return root;
   }
   /** The calling scout/reviewer thread's code root, if it has one. */
   async function readTarget(api: ToolExecutionApi, context: Parameters<ToolExecutionApi["commit"]>[1]): Promise<{ root: string; sha?: string } | undefined> {
