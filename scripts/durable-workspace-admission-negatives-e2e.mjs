@@ -41,7 +41,7 @@ try {
   git("-C", owner, "add", "."); git("-C", owner, "commit", "-m", "fixture");
   const head = git("-C", owner, "rev-parse", "HEAD");
   const snapshot = () => ({ owner: sha(join(owner, "owned", "sentinel.txt")), head: git("-C", owner, "rev-parse", "HEAD"), branch: git("-C", owner, "branch", "--show-current"), inventory: git("-C", owner, "worktree", "list", "--porcelain") });
-  const base = authorization => ({ version: 1, id: randomUUID(), name: "negative", cwd: owner, objective: "negative", createdAt: new Date().toISOString(), model: "fake/fake-model", models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" }, sessionFile: null, phase: "ready", problem: null, runs: [], workspaceAuthorization: authorization });
+  const base = authorization => ({ version: 1, runtime: "durable", id: randomUUID(), name: "negative", cwd: owner, objective: "negative", createdAt: new Date().toISOString(), model: "fake/fake-model", models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" }, sessionFile: null, phase: "ready", problem: null, runs: [], workspaceAuthorization: authorization });
   const run = async (name, project, scope, role = "worker") => {
     saveProject(project); const before = snapshot();
     let runtime = await openDurableProject({ project, dir: projectDir(project.id), workerCap: 1 });
@@ -56,7 +56,7 @@ try {
         await sleep(100);
       }
       if (!terminal) throw Error(`${name} remained queued/running without terminal binder outcome`);
-      assert.equal(terminal.status, "failed", `${name} must fail, not complete`);
+      if (role === "worker") assert.equal(terminal.status, "failed", `${name} must fail, not complete`);
     }
     const after = snapshot(); assert.deepEqual(after, before);
     const sameRuntimeSnapshot = await runtime.planSnapshot(); await runtime.close();
@@ -64,8 +64,9 @@ try {
     const reopened = await runtime.planSnapshot(); await runtime.close();
     if (name === "scout-unknown-scope") {
       assert.equal(error, null);
-      assert.equal(terminal.blocker, "Unknown host workspace scope");
-      assert.equal(reopened.work[0].status, "failed");
+      // C11f: scouts are read-only and ignore workspaceScopeId, so an unknown scope no longer fails them.
+      assert.equal(terminal.status, "completed");
+      assert.equal(reopened.work[0].status, "completed");
     }
     report.cases.push({ name, role, error, plan, terminal, sameRuntimeSnapshot, reopened, before, after });
   };
