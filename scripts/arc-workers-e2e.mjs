@@ -31,13 +31,26 @@ await kit.run(async () => {
   const dispatch = async task => { const before = (await kit.plan(id)).length; await kit.ask(id, `MARK-W ${task}`); const work = (await kit.plan(id)).slice(before).at(-1) ?? (await kit.plan(id)).at(-1); return work; };
   const lastWorker = marker => kit.lastCall('worker', marker);
 
+  // F14: trunk is fetched before a new worker is based. First the fetch fails: visible error, no worktree, nothing cached.
+  const setState = patch => { const path = join(fake.dir, 'state.json'); writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ...patch }, null, 2)); };
+  const fetches = () => fake.calls().filter(item => item.tool === 'arc' && item.argv[0] === 'fetch');
+  const remoteHead = fake.git(fake.arcadia, 'commit-tree', '-m', 'remote trunk advance', '-p', fake.trunkHead, `${fake.trunkHead}^{tree}`);
+  setState({ fetchBroken: true });
+  const wf = await dispatch(`KEYBOARD-9 fetch fail f0\n${run(['pwd'])}`);
+  check('F14 a failing arc fetch trunk blocks the new worker visibly and creates no worktree', adds().length === 0 && /arc fetch trunk failed.*network unreachable/s.test(JSON.stringify(wf)) && !result.calls.some(item => item.role === 'worker' && item.user.includes('fetch fail f0') && item.results.length), JSON.stringify(wf).slice(0, 400));
+  setState({ fetchBroken: false, remoteTrunk: remoteHead });
+  const callsBeforeW1 = fake.calls().length;
+
   // W1: ticket task, full commit and push flow.
   const w1 = await dispatch(`KEYBOARD-15934 keys visual fix a1\n${run(['pwd', 'which arc', "echo 'let more = 2' >> Sources/Keys.swift", 'arc add Sources/Keys.swift', 'arc commit -m "KEYBOARD-15934: more keys"', 'arc push', 'arc status --short'])}`);
   const name1 = 'KEYBOARD-15934-keys-visual-fix-a1';
   const add1 = adds().find(item => item.argv[1] === name1);
   check('F2 a ticket task names the worktree and branch KEYBOARD-15934-<slug>, unprefixed', Boolean(add1) && add1.argv[2] === '--name' && add1.argv[3] === name1 && !add1.argv[1].startsWith('users/'), adds().map(item => item.argv.slice(0, 4)));
   const flag = (argv, name) => argv[argv.indexOf(name) + 1];
-  check('F3 the base is the trunk head, not the owner feature branch', flag(add1.argv, '--base') === fake.trunkHead && flag(add1.argv, '--base') !== fake.featureHead, flag(add1.argv, '--base'));
+  check('F3 the base is the trunk head, not the owner feature branch', flag(add1.argv, '--base') === remoteHead && flag(add1.argv, '--base') !== fake.featureHead, flag(add1.argv, '--base'));
+  const seq = fake.calls().slice(callsBeforeW1), fetchAt = seq.findIndex(item => item.tool === 'arc' && item.argv[0] === 'fetch' && item.argv[1] === 'trunk'), addAt = seq.findIndex(item => item.tool === 'arc-wt' && item.argv[0] === 'add');
+  check('F14 the fake records a trunk fetch, then the trunk read, before the worktree add', fetchAt >= 0 && fetchAt < addAt && seq.slice(fetchAt, addAt).some(item => item.argv[0] === 'log' && item.argv.includes('trunk')), seq.map(item => `${item.tool} ${item.argv.slice(0, 2).join(' ')}`));
+  check('F14 the base is the fetched trunk head, not the stale local one', flag(add1.argv, '--base') === remoteHead && remoteHead !== fake.trunkHead, [flag(add1.argv, '--base'), remoteHead]);
   check('F6 the lease owner names the project and the reason names project and thread', flag(add1.argv, '--lease-owner') === `pi-projects:${id}` && /YKKeyboard/.test(flag(add1.argv, '--lease-reason')) && flag(add1.argv, '--lease-reason').includes(w1.threadId), add1.argv);
   check('F2 the worktree lives in the arc-wt folder, not the project home', flag(add1.argv, '--path') === join(wtBase, name1) && flag(add1.argv, '--object-store-path') === real(fake.objects), add1.argv);
   const c1 = lastWorker('#a1') ?? lastWorker('keys visual fix a1');
@@ -57,6 +70,8 @@ await kit.run(async () => {
   check('F2 a task without a ticket is named pi-<thread>-<slug>', Boolean(name2) && name2.startsWith(`pi-${w2.threadId.replaceAll('-', '').slice(0, 8)}-`), adds().map(item => item.argv[3]));
   await kit.ask(id, `MARK-W KEYBOARD-15934 keys visual fix a1\n${run(['pwd'])}`);
   check('F2 a clashing name gets -2', adds().some(item => item.argv[3] === `${name1}-2`), adds().map(item => item.argv[3]));
+
+  check('F14 parallel/later workers within the burst do not fetch again', fetches().filter(item => item.argv[1] === 'trunk').length === 2 && fetches().length === 2, fetches().map(item => item.argv));
 
   // W4: guard.
   const guarded = ['git status', 'gh pr list', 'arc pr merge 1', 'arc push -d', 'arc push -u users/e2euser/x', 'arc push other-branch', 'arc-wt remove foo', 'arc pr create -m x', 'arc submit', 'ya tool arcanum pr auto-merge enable', 'arc checkout -b scratch', 'arc checkout trunk', 'arc push', 'arc status --short; git log', 'arc log -n 1 --oneline'];

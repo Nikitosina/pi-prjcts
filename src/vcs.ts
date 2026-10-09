@@ -56,6 +56,20 @@ export function runCli(file: string, args: string[], cwd?: string): Promise<CliR
 }
 /** Trunk head of an Arc checkout. */
 export const arcTrunkHead = (root: string): string => { const head = run(cli.arc(), ["log", "-n", "1", "--oneline", "--no-decorate", "trunk"], root).split(/\s+/)[0] ?? ""; if (!/^[0-9a-f]{40,64}$/.test(head)) throw new Error("Could not read the trunk head with arc log"); return head; };
+const FETCH_TTL_MS = 60_000, FETCH_TIMEOUT_MS = 90_000, fetched = new Map<string, { at: number; head: Promise<string> }>();
+/** Trunk head after `arc fetch trunk`. One fetch per checkout per minute (parallel workers share it). A failed or timed-out fetch fails visibly (never a silent stale base) and is retried on the next allocation. */
+export function arcFetchedTrunkHead(root: string): Promise<string> {
+  const cached = fetched.get(root);
+  if (cached && Date.now() - cached.at < FETCH_TTL_MS) return cached.head;
+  const head = (async () => {
+    const out = await new Promise<CliResult>(done => execFile(cli.arc(), ["fetch", "trunk"], { cwd: root, encoding: "utf8", timeout: FETCH_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr, ...(error?.killed ? { timedOut: true } : {}) } as CliResult)));
+    if (out.code) throw new Error(`arc fetch trunk ${(out as CliResult & { timedOut?: boolean }).timedOut ? `timed out after ${FETCH_TIMEOUT_MS / 1000}s` : "failed"}, so a new worker cannot be based on the current trunk: ${out.stderr.trim().slice(0, 300) || `exit ${out.code}`}`);
+    return arcTrunkHead(root);
+  })();
+  fetched.set(root, { at: Date.now(), head });
+  head.catch(() => { if (fetched.get(root)?.head === head) fetched.delete(root); });
+  return head;
+}
 /** Uncommitted paths of a worktree (git or Arc, by what is found above it); null when the status cannot be read. */
 export async function changedFiles(cwd: string): Promise<string[] | null> {
   const found = findVcsRoot(cwd);

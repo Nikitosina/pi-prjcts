@@ -21,7 +21,7 @@ import { worktreeSetup } from "./worktree-maintenance.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
 import { arcBranchName, arcTicket, arcWorkerInstructions, freeName, guardWorkerArcCommand } from "./arc-worker-policy.ts";
 import { arcWorkerTools } from "./arc-worker.ts";
-import { arcTakenNames, arcTrunkHead, cli, runCli } from "./vcs.ts";
+import { arcFetchedTrunkHead, arcTakenNames, cli, runCli } from "./vcs.ts";
 
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export function durableWorkspaceBinding(input: { project: Project; configuredSkillLoader?: Pick<ResourceLoader, "getSkills">; conversation: () => Conversation; controlRoot: string; projectStanding?: DurableStanding; commands?: ReturnType<typeof commandExecution>; commandApprovals?: () => OperationApprovals; isClosed?: () => boolean }): DurablePrepareWorkerEnvironment | undefined {
@@ -66,7 +66,7 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     // Arc: the worktree and branch are named from the task (ticket key or thread) on first allocation, then frozen with the receipt.
     const arcName = arc && !allocated ? await freeArcName(await taskText(request.workId), request.threadId) : undefined;
     const name = allocated?.workspaceName ?? arcName ?? `durable-${intentId.slice(0, 12)}`, workspacePath = allocated?.workspacePath ?? join(repository.approvedRoot, name);
-    const baseRevision = !whole ? scope.baseRevision : allocated?.baseRevision ?? (arc ? arcTrunkHead(repository.ownerCheckout) : ownerHead(repository.ownerCheckout));
+    const baseRevision = !whole ? scope.baseRevision : allocated?.baseRevision ?? (arc ? await arcFetchedTrunkHead(repository.ownerCheckout) : ownerHead(repository.ownerCheckout));
     const branch = allocated?.branch ?? (arc ? name : publication ? `${publication.branchPrefix}${name}` : whole ? `pi/${name}` : name);
     const intent: WorkspaceIntent = { id: intentId, attemptId, action: "allocate", scope: { projectId: input.project.id, repositoryId: repository.repositoryId, provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, workspacePath, workspaceName: name, branch, baseRevision, headRevision: baseRevision, owner: leaseOwner, leaseReason: arc ? `pi project ${input.project.name} thread ${request.threadId}` : `durable workspace ${request.threadId}`, sharedObjectStore: provider === "arc" ? repository.sharedObjectStore ?? null : null, fileOwnership: scope.files, capabilityProfileRevision: hash(JSON.stringify({ authorization, scope })), ...(whole ? { allowDirtyOwner: true as const } : {}) } };
     let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent);

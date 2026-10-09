@@ -29,7 +29,7 @@ const s = state();
 const branch = () => tryGit("branch", "--show-current") ?? "";
 const server = branchName => `users/${s.login}/${branchName}`;
 
-// Fault knobs in state.json: rootOverride, infoBroken, trunkBroken.
+// Fault knobs in state.json: rootOverride, infoBroken, trunkBroken, fetchBroken, fetchDelayMs, remoteTrunk.
 if (command === "root") out(s.rootOverride ?? root);
 if (command === "info") {
   if (s.infoBroken) fail("info unavailable");
@@ -59,6 +59,13 @@ if (command === "checkout" || command === "switch") {
   if (has("--")) { here("checkout", "-q", ...rest); out("restored"); }
   const target = positional()[0] ?? fail("checkout needs a target");
   here("checkout", "-q", target.replace(/^users\/[^/]+\//, "")); out(`switched to ${target}`);
+}
+// `fetch trunk`: moves the local trunk to state.remoteTrunk (the "server" head) when set; fetchBroken fails.
+if (command === "fetch" && positional()[0] === "trunk") {
+  if (s.fetchBroken) fail("network unreachable");
+  if (s.fetchDelayMs) execFileSync("/bin/sleep", [String(s.fetchDelayMs / 1000)]);
+  if (s.remoteTrunk) git("update-ref", "refs/heads/trunk", s.remoteTrunk);
+  out("Fetched trunk");
 }
 if (command === "pull" || command === "rebase" || command === "fetch") out("Already up to date.");
 if (command === "branch") {
