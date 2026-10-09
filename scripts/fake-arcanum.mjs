@@ -8,8 +8,10 @@ import { prStore } from './lib/fake-pr-state.mjs';
 
 const dir = process.env.FAKE_ARC_DIR, args = process.argv.slice(2), prs = prStore(dir);
 appendFileSync(join(dir, 'calls.jsonl'), JSON.stringify({ tool: 'arcanum', argv: args, cwd: process.cwd(), at: Date.now() }) + '\n');
-const envelope = (code, message, exit) => { process.stdout.write(JSON.stringify({ error: { code, message } }) + '\n'); process.exit(exit); };
-const out = value => { process.stdout.write(JSON.stringify(value) + '\n'); process.exit(0); };
+// Output is flushed before exit (large replies); `answered` keeps the trailing unsupported-command fallthrough quiet.
+let answered = false;
+const envelope = (code, message, exit) => { if (answered) return; process.stdout.write(JSON.stringify({ error: { code, message } }) + '\n'); process.exit(exit); };
+const out = value => { answered = true; process.stdout.write(JSON.stringify(value) + '\n', () => process.exit(0)); };
 const store = prs.load();
 if (store.rateLimit > 0) { store.rateLimit--; prs.save(store); envelope('RATE_LIMITED', 'too many requests', 75); }
 if ((store.failPaths ?? []).some(part => args.join(' ').includes(part))) envelope('REMOTE_ERROR', 'backend unavailable', 65);
@@ -28,6 +30,6 @@ if (group === 'pr' && sub === 'list') {
 }
 if (group === 'pr' && sub === 'link-tickets') { const pr = find(); pr.tickets = [...new Set([...pr.tickets, ...all('--ticket')])]; prs.save(store); out({ id: pr.id, tickets: pr.tickets }); }
 if (group === 'pr' && sub === 'auto-merge') { const pr = find(); const on = args[2] === 'enable'; if (on && pr.auto_merge !== 'disabled') out({ id: pr.id, status: 'noop' }); pr.auto_merge = on ? 'on_satisfied_requirements' : 'disabled'; if (on && prs.mergeAllowed(pr)) { pr.status = 'merged'; pr.merge_commit = prs.active(pr).head; } prs.save(store); out({ id: pr.id, status: on ? 'enabled' : 'disabled' }); }
-if (group === 'checks') { const { diff } = diffOf(flag('--diff-id')); const pr = diffOf(flag('--diff-id')).pr; out({ checks: (pr.checks[diff.id] ?? []).map(check => ({ key: { system: check.system, type: check.type }, status: check.status, required: check.required, satisfied: check.satisfied, description: check.description ?? '' })) }); }
+if (group === 'checks') { const { diff } = diffOf(flag('--diff-id')); const pr = diffOf(flag('--diff-id')).pr; out({ checks: (pr.checks[diff.id] ?? []).map(check => ({ key: { system: check.system, type: check.type }, status: check.status, required: check.required, satisfied: check.satisfied, description: check.description ?? '', ...(check.uri ? { uri: check.uri } : {}) })) }); }
 if (group === 'comment' && sub === 'list') out(find().comments.filter(comment => !args.includes('--open-issues') || comment.issue_status === 'open').map((comment, index) => ({ id: comment.id ?? index + 1, content: comment.content, author: { name: comment.author ?? 'reviewer', uid: comment.author ?? 'reviewer' }, created_at: comment.created_at ?? '2026-10-02T00:00:00Z', published_at: comment.created_at ?? '2026-10-02T00:00:00Z', is_draft: comment.is_draft === true, issue_status: comment.issue_status ?? 'not_issue', ...(comment.review_system ? { review_system: comment.review_system } : {}) })));
 envelope('INVALID_ARGS', `unsupported fake arcanum command: ${args.join(' ')}`, 64);

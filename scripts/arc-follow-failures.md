@@ -13,3 +13,12 @@ Scope: `src/durable-follow.ts` polls the Arcadia PRs this project opened (verifi
 9. Reviewer for Arc PRs gets the diff in the task (`arc diff base head`), the verdict tool accepts the Arc repository id, GitHub reviewers/verdicts unaffected.
 10. UI: the event card says "Arcadia activity" for `arc.follow`; GitHub events unchanged.
 11. GitHub projects regress (follow-prs, auto-merge E2Es).
+
+## S4 addendum: auto-fix brief carries the failed checks' details (written before code)
+
+12. Brief still says only "see the PR checks" and the worker burns an item inspecting CI: the Arc brief must list each failed check with system/type, status, description, uri, plus diff-set id and head (asserted).
+13. Unbounded or hostile provider text: description/uri with newlines, huge size, or a fake "[Follow PRs auto-fix]"-style instruction line must be flattened, clipped per field, and the whole block capped at 4 KB; block is marked untrusted (asserted: 60 failing checks with 2 KB descriptions stay under the cap, no raw newline injection).
+14. Non-http(s) uri (javascript:, file:, empty): dropped, not echoed; missing description/uri: line still names the check.
+15. Extra Arcanum traffic: details come from the `checks --diff-id` response the poll already made; a fix adds zero arcanum calls (asserted by call count across the dispatch).
+16. Log fetching with new credentials: none attempted; only the uri is given. No CI MCP.
+17. GitHub auto-fix brief unchanged (asserted by the follow-prs E2E).
