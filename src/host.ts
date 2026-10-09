@@ -589,6 +589,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (project.archived || project.deleted || !arcProject(project.cwd)) throw new Error("Watching PRs needs an active project in an Arcadia checkout");
       return { watched: await (await durable(input.id)).arcPrWatch(input.pr, input.watch) };
     }
+    case "arc-pr-hide": {
+      const project = loadProject(input.id);
+      if (project.archived || project.deleted || !arcProject(project.cwd)) throw new Error("Hiding PRs needs an active project in an Arcadia checkout");
+      return { hidden: await (await durable(input.id)).arcPrHide(input.pr, input.hide) };
+    }
     case "follow-poll": { const result = await (await durable(input.id)).followPoll(); return { result, ...(await automationSnapshot(input.id)) }; }
     case "event-ingest": return withDurableOwner({ id: input.id, operation: owner => owner.ingestLocalEvent({ eventId: input.eventId, kind: input.kind, payload: input.payload }) });
     case "thread-steer": {

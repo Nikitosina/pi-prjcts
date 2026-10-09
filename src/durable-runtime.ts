@@ -198,6 +198,7 @@ export type DurableProjectRuntime = {
   /** Arcadia PR card: the owner's open PRs (cached, shared across projects) plus this project's watch state; `refresh` bypasses the cache and runs one monitor poll. */
   arcPrs(refresh: boolean): Promise<Awaited<ReturnType<typeof listPrs>> & Awaited<ReturnType<ReturnType<typeof arcWatchRuntime>["snapshot"]>>>;
   arcPrWatch(id: number, watch: boolean): Promise<number[]>;
+  arcPrHide(id: number, hide: boolean): Promise<number[]>;
   watchdogSnapshot(): ReturnType<ReturnType<typeof watchdogRuntime>["snapshot"]>;
   watchdogKick(): void;
   /** Automation event (webhook) into the chat chosen in Settings; a repeated event ID returns the first intent with `duplicate`. */
@@ -720,6 +721,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       prNotices: async () => { assertOpen(); return [...await follow.notices(), ...await arcWatch.notices()]; },
       arcPrs: async refresh => { assertOpen(); const listing = await listPrs({ force: refresh }); if (refresh) await arcWatch.poll(true).catch(() => {}); return { ...listing, ...(await arcWatch.snapshot()) }; },
       arcPrWatch: (id, watch) => { assertOpen(); return arcWatch.setWatch(id, watch); },
+      arcPrHide: (id, hide) => { assertOpen(); return arcWatch.setHidden(id, hide); },
       watchdogSnapshot: () => { assertOpen(); return watchdog.snapshot(); },
       watchdogKick: () => watchdog.tick(),
       ingestAutomationEvent: async value => { assertOpen(); return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true }); },

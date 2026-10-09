@@ -1015,7 +1015,9 @@ function pickSkill(name) {
   closeSkillMenu(); textarea.focus();
 }
 // Arcadia PR card (Arc projects only) and the "#" PR menu. Rows come from the host's shared Arcanum cache; the browser asks at most every 20 s.
-let arcPrs = { projectId: null, data: null, at: 0, error: "" }, arcPrsLoading = false;
+let arcPrs = { projectId: null, data: null, at: 0, error: "" }, arcPrsLoading = false, arcPrsShowHidden = false;
+// Show/hide the hidden-PR list: local view state, not an action, so it works while busy.
+document.addEventListener("click", event => { if (!event.target.closest("[data-pr-show-hidden]")) return; arcPrsShowHidden = !arcPrsShowHidden; renderArcPrs(); });
 const arcPrNow = () => (arcPrs.projectId === projectId ? arcPrs.data : null);
 async function loadArcPrs(force = false) {
   const id = projectId;
@@ -1032,15 +1034,18 @@ function renderArcPrs() {
   hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (data?.arc ? " · # for PRs" : "");
   card.hidden = !data?.arc;
   if (!data?.arc) return;
-  const order = { failing: 0, running: 1, green: 2, none: 3 }, prs = [...data.prs].sort((a, b) => order[a.state] - order[b.state] || b.id - a.id), shown = prs.slice(0, 12), watched = new Set(data.watched ?? []);
+  // Hidden PRs leave the card and monitoring; "Show hidden" lists them dimmed with Unhide.
+  const hidden = new Set(data.hidden ?? []), all = [...data.prs], hiddenPrs = all.filter(pr => hidden.has(pr.id));
+  const order = { failing: 0, running: 1, green: 2, none: 3 }, prs = all.filter(pr => !hidden.has(pr.id)).sort((a, b) => order[a.state] - order[b.state] || b.id - a.id), shown = [...prs.slice(0, 12), ...(arcPrsShowHidden ? hiddenPrs : [])], watched = new Set(data.watched ?? []);
   const rows = shown.map(pr => {
+    const isHidden = hidden.has(pr.id), hideButton = `<button type="button" class="ghost small pr-hide" data-action="pr-hide" data-pr="${pr.id}" data-hide="${!isHidden}" title="${isHidden ? "Show this PR on the card and monitor it again" : "Hide this PR from the card and stop monitoring it"}" aria-label="${isHidden ? `Unhide PR #${pr.id}` : `Hide PR #${pr.id}`}">${isHidden ? "Unhide" : "Hide"}</button>`;
     const [glyph, tone, title] = prGlyph[pr.state] ?? prGlyph.none, counts = [["good", "✓", pr.counts.ok], ["bad", "✕", pr.counts.failed], ["warn", "●", pr.counts.running]].filter(([, , n]) => n).map(([cls, mark, n]) => `<span class="${cls}">${mark}${n}</span>`).join(" ");
     const detail = [counts, pr.conflicts ? '<span class="bad">conflicts</span>' : "", pr.mergeFailed ? '<span class="bad">merge failed</span>' : pr.autoMerge ? '<span class="good">auto-merge</span>' : "", pr.failedChecks.length ? `<span class="pr-fails">${esc(pr.failedChecks.slice(0, 2).join(", "))}${pr.failedChecks.length > 2 ? ` +${pr.failedChecks.length - 2}` : ""}</span>` : `<span class="pr-branch">${esc(pr.branch.replace(/^users\/[^/]+\//, ""))}</span>`].filter(Boolean).join(" ");
-    return `<div class="pr-row ${esc(pr.state)}"><span class="pr-icon ${tone}" title="${esc(title)}" role="img" aria-label="${esc(title)}">${glyph}</span><div class="pr-main"><a class="pr-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.summary)}"><span class="pr-id">#${pr.id}</span> ${esc(pr.summary)}</a><small class="pr-sub">${detail}</small></div><button type="button" class="ghost small pr-watch${watched.has(pr.id) ? " on" : ""}" data-action="pr-watch" data-pr="${pr.id}" aria-pressed="${watched.has(pr.id)}" title="${watched.has(pr.id) ? "Watching: the coordinator is told when a check or merge fails. Click to stop." : "Watch: tell the coordinator when a check or merge fails"}">${watched.has(pr.id) ? "Watching" : "Watch"}</button></div>`;
+    return `<div class="pr-row ${esc(pr.state)}${isHidden ? " hidden-pr" : ""}"><span class="pr-icon ${tone}" title="${esc(title)}" role="img" aria-label="${esc(title)}">${glyph}</span><div class="pr-main"><a class="pr-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.summary)}"><span class="pr-id">#${pr.id}</span> ${esc(pr.summary)}</a><small class="pr-sub">${detail}</small></div><span class="pr-actions">${isHidden ? "" : `<button type="button" class="ghost small pr-watch${watched.has(pr.id) ? " on" : ""}" data-action="pr-watch" data-pr="${pr.id}" aria-pressed="${watched.has(pr.id)}" title="${watched.has(pr.id) ? "Watching: the coordinator is told when a check or merge fails. Click to stop." : "Watch: tell the coordinator when a check or merge fails"}">${watched.has(pr.id) ? "Watching" : "Watch"}</button>`}${hideButton}</span></div>`;
   }).join("");
   const meta = data.rateLimitedUntilMs ? "rate limited" : data.fetchedAtMs ? ago(new Date(data.fetchedAtMs).toISOString()) : "";
   const problem = arcPrs.error || data.error;
-  setHtml("#prs", `${problem ? `<p class="note pr-error">${esc(problem)}${prs.length ? " (showing the last list)" : ""}</p>` : ""}${rows || (problem ? "" : '<p class="note">No open PRs.</p>')}${prs.length > shown.length ? `<p class="note">+${prs.length - shown.length} more in Arcanum</p>` : ""}${data.monitoring ? "" : '<p class="note pr-off">Monitoring is off. Turn on Follow PRs in Settings to hear about failing checks.</p>'}`);
+  setHtml("#prs", `${problem ? `<p class="note pr-error">${esc(problem)}${prs.length ? " (showing the last list)" : ""}</p>` : ""}${rows || (problem ? "" : '<p class="note">No open PRs.</p>')}${prs.length > 12 ? `<p class="note">+${prs.length - 12} more in Arcanum</p>` : ""}${hiddenPrs.length ? `<button type="button" class="ghost small pr-show-hidden" data-pr-show-hidden aria-expanded="${arcPrsShowHidden}">${arcPrsShowHidden ? "Hide" : "Show"} ${hiddenPrs.length} hidden</button>` : ""}${data.monitoring ? "" : '<p class="note pr-off">Monitoring is off. Turn on Follow PRs in Settings to hear about failing checks.</p>'}`);
   document.querySelector("#prs-meta").textContent = meta;
 }
 const prRefs = /(?:^|\s)#([^\s#]*)$/;
@@ -1600,6 +1605,7 @@ async function action(node) {
     case "skill-pick": pickSkill(node.dataset.name); break;
     case "pr-pick": pickPr(node.dataset.pr); break;
     case "prs-refresh": await loadArcPrs(true); break;
+    case "pr-hide": { await api({ action: "arc-pr-hide", id: projectId, pr: Number(node.dataset.pr), hide: node.dataset.hide === "true" }); arcPrs.at = 0; await loadArcPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "arc-pr-watch", id: projectId, pr: Number(node.dataset.pr), watch: on }); arcPrs.at = 0; await loadArcPrs(); break; }
     case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;

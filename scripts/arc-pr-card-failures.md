@@ -47,3 +47,13 @@ N1. A monitored PR whose required check fails raises exactly one host notice (br
 N2. Re-polls and host restarts never raise a second notice (keys persisted with the monitor state; the notifier keeps its own seen set in notifications.json).
 N3. A merged PR (confirmed by `pr get`) raises one "✓ Merged · PR #id summary" notice; worker-opened PRs notify too (their event lines stay with Follow PRs).
 N4. Telegram receives each notice exactly once (fake Bot API only). GitHub Follow PRs now raises the same two notices (CI failed on an open PR, PR merged) through the same list; covered by the follow-prs/browser-notify regressions, not by a new GitHub E2E.
+
+## Hiding PRs (owner request: hide PRs from monitoring and the card), recorded before implementation
+- H1 Hide only removes the row from the card; the monitor still sends events/notices for that PR (watched, touching the project dir, or opened by a worker).
+- H2 Hiding a watched PR leaves it in `watched`, so unhiding silently resumes watching (or hide is lost when watch is toggled).
+- H3 Hidden PRs are lost on host restart (stored only in memory/browser).
+- H4 No way back: hidden PRs are not listed anywhere, so they cannot be unhidden.
+- H5 Hidden list grows forever: merged/discarded PRs stay in it.
+- H6 Hide button is a data-action disabled while busy, or misclicks Watch (buttons too close / same handler).
+- H7 Unhiding a PR whose transition happened while hidden fires a stale event (baseline must be retaken).
+- H8 Invalid ids or non-Arc projects accepted.

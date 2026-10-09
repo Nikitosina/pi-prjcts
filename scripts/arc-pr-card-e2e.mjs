@@ -178,6 +178,27 @@ await kit.run(async () => {
   await delay(1500);
   const sentAll = tg.sent.filter(item => /CI failed|Merged/.test(item.text));
   check('N4 Telegram got each notice exactly once', sentAll.length === 2 && /Pull request/.test(sentAll[0].text) && /PR #102/.test(sentAll[0].text) && /PR #103/.test(sentAll[1].text), tg.sent.map(item => item.text));
+  // H1-H8: hiding. 101 is monitored (it touches the project dir): hidden, it gets no event; unhidden, the next poll is a silent baseline.
+  await rpc({ action: 'arc-pr-watch', id: arc, pr: 101, watch: true });
+  const hid = await rpc({ action: 'arc-pr-hide', id: arc, pr: 101, hide: true });
+  await rpc({ action: 'arc-pr-hide', id: arc, pr: 105, hide: true });
+  data = await prs(true);
+  check('H2 hiding a watched PR also stops watching it; hide is idempotent per id', JSON.stringify(hid.hidden) === '[101]' && !data.watched.includes(101) && JSON.stringify(data.hidden) === '[101,105]', [hid, data.watched, data.hidden]);
+  check('H8 bad ids and git projects are refused', await kit.rejects({ action: 'arc-pr-hide', id: arc, pr: 0, hide: true }) !== null && await kit.rejects({ action: 'arc-pr-hide', id: git, pr: 101, hide: true }) !== null);
+  const hideEvents = events().length, hideNotices = (await prNotices()).length;
+  patch(state => { const by = state.prs.find(item => item.id === 101); by.diffSets.push({ id: 1012, head: 'e'.repeat(40), base: 'b'.repeat(40), merge: 'e'.repeat(40), published: true }); by.conflicts = true; by.checks[1012] = [ci('failure')]; });
+  await prs(true); await delay(1500);
+  check('H1 a hidden PR sends no event and no notice, even with a new failing diff-set', events().length === hideEvents && (await prNotices()).length === hideNotices, events().slice(hideEvents).map(item => item.user));
+  await kit.restartHost();
+  check('H3 hidden PRs survive a host restart', JSON.stringify((await prs()).hidden) === '[101,105]', (await prs()).hidden);
+  await rpc({ action: 'arc-pr-hide', id: arc, pr: 101, hide: false });
+  await prs(true); await prs(true); await delay(1500);
+  check('H7 unhiding takes a fresh baseline: what changed while hidden is not replayed', events().length === hideEvents, events().slice(hideEvents).map(item => item.user));
+  patch(state => { state.prs.find(item => item.id === 105).status = 'merged'; });
+  data = await prs(true);
+  check('H5 merged/discarded PRs drop out of the hidden list', JSON.stringify(data.hidden) === '[]', data.hidden);
+  patch(state => { state.prs.find(item => item.id === 105).status = 'open'; });
+  await rpc({ action: 'arc-pr-watch', id: arc, pr: 101, watch: false });
   patch(state => { state.rateLimit = 1; });
   data = await prs(true);
   const limited = listCalls();
@@ -211,6 +232,18 @@ await kit.run(async () => {
     check(`F12 ${theme}: PR card contrast >= 4.5${dark ? ' and no light surfaces' : ''}`, scan.low.length === 0 && (!dark || scan.bright.length === 0) && scan.texts > 15, scan);
     await page.shot(`card-${theme}`);
   }
+  // H4/H6: hide from the card, list hidden, unhide.
+  await ev(`piTheme.set('light')`);
+  await ev(`document.querySelector('[data-action="pr-hide"][data-pr="104"]').click()`);
+  await page.waitFor(`!document.querySelector('.pr-row [data-pr="104"]') && !!document.querySelector('[data-pr-show-hidden]')`, 'hidden row gone');
+  check('H6 hide removes only that row and keeps Watch untouched', await ev(`!!document.querySelector('[data-action="pr-watch"][data-pr="101"]') && document.querySelectorAll('.pr-row').length >= 4`) && JSON.stringify((await prs()).hidden) === '[104]' && (await prs()).watched.includes(101));
+  await ev(`document.querySelector('[data-pr-show-hidden]').click()`);
+  await page.waitFor(`!!document.querySelector('.pr-row.hidden-pr [data-action="pr-hide"][data-pr="104"][data-hide="false"]')`, 'hidden list');
+  await page.shot('card-hidden-shown-light');
+  check('H4 "Show 1 hidden" lists the hidden PR dimmed with Unhide and no Watch', await ev(`(() => { const row = document.querySelector('.pr-row.hidden-pr'); return row && !row.querySelector('.pr-watch') && /Unhide/.test(row.innerText) && document.querySelector('[data-pr-show-hidden]').innerText === 'Hide 1 hidden' })()`));
+  await ev(`document.querySelector('.pr-row.hidden-pr [data-action="pr-hide"]').click()`);
+  await page.waitFor(`!document.querySelector('.pr-row.hidden-pr') && !document.querySelector('[data-pr-show-hidden]') && !!document.querySelector('[data-action="pr-watch"][data-pr="104"]')`, 'unhidden');
+  check('H4 Unhide puts it back on the card', JSON.stringify((await prs()).hidden) === '[]');
   // "#" menu.
   const type = text => ev(`(() => { const t = document.querySelector('#compose textarea'); t.focus(); t.value = ${JSON.stringify(text)}; t.setSelectionRange(t.value.length, t.value.length); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   const key = name => ev(`document.querySelector('#compose textarea').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(name)}, bubbles: true, cancelable: true }))`);
