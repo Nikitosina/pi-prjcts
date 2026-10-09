@@ -1,4 +1,4 @@
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, SettingsManager, getAgentDir, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
 import type { Request } from "./state.ts";
 
 type Changes = Extract<Request, { action: "settings-update" }>["changes"];
@@ -11,6 +11,18 @@ export async function projectModelCatalog(options: { provider?: string; offset?:
   const models = [...registry.getModels(options.provider)].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
   const items = models.slice(offset, offset + limit).map(model => ({ reference: `${model.provider}/${model.id}`, provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning, configured: registry.getProviderAuthStatus(model.provider).configured }));
   return { items, total: models.length, offset, nextOffset: offset + items.length < models.length ? offset + items.length : null, networkChecked: false };
+}
+/** Everything the picker needs in one offline response: all models (configured flag) plus Pi's own scoped list (settings enabledModels, resolved by Pi's resolver against configured models). */
+export async function projectModelPicker() {
+  const registry = await openRegistry();
+  const models = [...registry.getModels()].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
+  const items = models.map(model => ({ reference: `${model.provider}/${model.id}`, name: model.name, contextWindow: model.contextWindow, reasoning: model.reasoning, configured: registry.getProviderAuthStatus(model.provider).configured }));
+  let scoped: string[] = [];
+  try {
+    const patterns = SettingsManager.create(process.cwd(), getAgentDir()).getEnabledModels() ?? [];
+    if (patterns.length) scoped = (await resolveModelScopeWithDiagnostics(patterns, registry)).scopedModels.map(entry => `${entry.model.provider}/${entry.model.id}`);
+  } catch { scoped = []; }
+  return { items, scoped: [...new Set(scoped)], networkChecked: false };
 }
 export async function validateProjectModelChanges(changes: Changes): Promise<void> {
   const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => value !== undefined);

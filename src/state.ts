@@ -193,6 +193,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("create"), requestId: Type.Optional(Id), name: text, cwd: text, objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text), knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("models-snapshot"), provider: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("model-picker-snapshot") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("usage-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("event-log"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("host-health"), id: Id }, { additionalProperties: false }),

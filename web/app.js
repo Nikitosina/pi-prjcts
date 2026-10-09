@@ -1351,7 +1351,7 @@ function admissionBlocked() { return !view || view.paused || view.project.archiv
 function disableActions() {
   document.querySelectorAll('#letter button, #letter textarea, #questions textarea, .panel button').forEach(node => { node.disabled = busy || !view || node.hasAttribute('data-off'); }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
   document.querySelectorAll('#compose button, #compose textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
-  document.querySelectorAll('#dialog button[type="submit"], #dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"], #create').forEach(node => { node.disabled = busy; });
+  document.querySelectorAll('#dialog button[type="submit"], #dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"], #create').forEach(node => { node.disabled = busy || node.hasAttribute('data-off'); });
   document.querySelectorAll('[data-action="operation-decision"], [data-action="operation-execute"], [data-action="operation-inspect"]').forEach(node => {
     const record = operationCache.get(node.dataset.operation);
     node.disabled = busy || !view || view.project.archived || view.project.deleted || !record?.scopeCurrent;
@@ -1508,7 +1508,29 @@ function inlineMarkdown(value) {
   return text.replace(/\u0000(\d+)\u0000/g, (_, index) => code[Number(index)]);
 }
 function closeDialog() { captureDialogDraft(); answerAdoption = null; routineConfirmation = null; uploadConfirmations.clear(); settingsConfirmation = null; providerInspection = null; dialogVersion++; if (dialog.open) dialog.close(); if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null; }
-function showDialog(title, content) { closeDialog(); dialog.innerHTML = `<div class="row between"><h2 id="dialog-title">${esc(title)}</h2><button data-action="close-dialog" class="small">Close</button></div><div class="dialog-body">${content}</div>`; dialog.showModal(); return dialogVersion; }
+function showDialog(title, content, subtitle = "") { closeDialog(); dialog.innerHTML = `<header class="dialog-head"><div><h2 id="dialog-title">${esc(title)}</h2>${subtitle ? `<p class="dialog-sub">${esc(subtitle)}</p>` : ""}</div><button type="button" data-action="close-dialog" class="ghost small dialog-x" aria-label="Close" title="Close (Esc)">✕</button></header><div class="dialog-body">${content}</div>`; dialog.showModal(); return dialogVersion; }
+// Shared pieces of the Settings dialogs: sticky footer, buttons, pager, tabs, plain record summaries with raw JSON only inside a collapsed Details.
+const setDialogBody = html => { dialog.querySelector(".dialog-body").innerHTML = html; disableActions(); };
+const dlgBtn = (label, data = {}, cls = "") => `<button type="button"${cls ? ` class="${cls}"` : ""}${Object.entries(data).map(([key, value]) => ` data-${key}="${esc(value)}"`).join("")}>${label}</button>`;
+const dlgActions = (...parts) => `<div class="dialog-actions">${parts.join("")}</div>`;
+const rawDetails = (value, label = "Technical details") => `<details class="raw"><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(value, null, 2) ?? "")}</pre></details>`;
+const humanKey = key => key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ").replace(/^./, char => char.toUpperCase());
+const idLike = text => /^[a-f0-9-]{36,64}$/.test(text);
+function recordSummary(record, skip = []) {
+  const rows = Object.entries(record).filter(([key, value]) => !skip.includes(key) && value !== null && value !== undefined && typeof value !== "object").map(([key, value]) => {
+    const text = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value);
+    return `<span>${esc(humanKey(key))}</span><b${idLike(text) ? ` class="mono" title="${esc(text)}"` : ""}>${esc(idLike(text) && text.length > 40 ? `${text.slice(0, 12)}…` : text)}</b>`;
+  }).join("");
+  return `${rows ? `<div class="kv tight">${rows}</div>` : ""}${rawDetails(record)}`;
+}
+const compactTokens = count => !Number.isFinite(count) || count <= 0 ? "" : count >= 1e6 ? `${+(count / 1e6).toFixed(1)}M` : count >= 1e3 ? `${Math.round(count / 1e3)}k` : String(count);
+const stateChip = (text, tone = "") => `<span class="state-chip ${tone}">${esc(text)}</span>`;
+function pager({ offset, count, total, size, data }) {
+  const prev = offset > 0 ? Math.max(0, offset - size) : null, next = offset + count < total ? offset + count : null;
+  if (prev === null && next === null) return total > 0 ? `<span class="pager">${total} in total</span>` : "";
+  return `<span class="pager">${prev === null ? "" : dlgBtn("‹ Previous", { ...data, offset: prev }, "small")}<span>${offset + (count ? 1 : 0)}–${offset + count} of ${total}</span>${next === null ? "" : dlgBtn("Next ›", { ...data, offset: next }, "small")}</span>`;
+}
+const segTabs = items => `<div class="skill-tabs" role="group">${items.map(([label, data, on]) => `<button type="button"${on ? ' class="on"' : ""} aria-pressed="${on ? "true" : "false"}"${Object.entries(data).map(([key, value]) => ` data-${key}="${esc(value)}"`).join("")}>${label}</button>`).join("")}</div>`;
 
 async function inspectArtifact(id) {
   const file = view?.evidence.find(file => file.id === id);
@@ -1694,20 +1716,15 @@ async function action(node) {
     case "github-quick-confirm": await githubQuickConfirm(node.dataset.project, node.dataset.revision); break;
     case "owner-setup-edit": await ownerSetupEdit(node.dataset.kind, node.dataset.payload || "{}"); break;
     case "owner-profile-read": await ownerProfileRead(node.dataset.project, node.dataset.profile); break;
-    case "settings-edit": requireProject(node.dataset.project); settingsEdit(node.dataset.field); break;
+    case "settings-back": await settingsList(true); break;
+    case "mp-toggle": { const mp = node.closest(".mp"); if (mp.classList.contains("open")) mpClose(mp, true); else mpOpen(mp); break; }
+    case "mp-pick": mpPick(node.closest(".mp"), node.dataset.ref); break;
     case "settings-discard": settingsDiscard(node.dataset.project, node.dataset.field); break;
     case "settings-confirm-discard": {
       requireProject(node.dataset.project);
       if (!["name", "objective"].includes(node.dataset.field)) throw new Error("Unknown settings draft field");
-      settingsDrafts.delete(`${projectId}:${node.dataset.field}`); persistBrowserDrafts(); settingsEdit(node.dataset.field); break;
-    }
-    case "settings-models": requireProject(node.dataset.project); await settingsModels(node.dataset.role, node.dataset.revision, Number(node.dataset.offset ?? 0)); break;
-    case "settings-model": {
-      requireProject(node.dataset.project);
-      const model = modelCache.get(node.dataset.reference);
-      if (!model?.configured || model.projectId !== projectId || model.role !== node.dataset.role || model.revision !== node.dataset.revision) throw new Error("Reopen the configured offline model entry");
-      const changes = model.role === "coordinator" ? { model: model.reference } : { models: { [model.role]: model.reference } };
-      settingsReview(model.revision, changes); break;
+      settingsDrafts.delete(`${projectId}:${node.dataset.field}`); if (settingsPending?.projectId === projectId) delete settingsPending.flat[node.dataset.field];
+      persistBrowserDrafts(); await settingsList(true); break;
     }
     case "upload-list": uploadList(); break;
     case "upload-pick": document.querySelector("#upload-input").click(); break;
@@ -1898,44 +1915,38 @@ async function submit(form) {
     const repositoryId = data.get("repositoryId").trim();
     if (!repositoryId) throw new Error("Enter the exact owner/repository from the selected checkout origin");
     const result = await api({ action: "github-repository-inspect", id: target, repositoryId });
-    if (target === projectId && version === dialogVersion && dialog.open) dialog.querySelector(".dialog-body").innerHTML = `<p>Read-only GitHub identity lookup. Use the numeric repository ID and default branch shown to review a separate authorization request.</p><pre>${esc(JSON.stringify(result, null, 2))}</pre><button data-action="owner-setup">Back to owner setup</button>`;
+    if (target === projectId && version === dialogVersion && dialog.open) setDialogBody(`<p class="note">Read-only lookup. Use the numeric ID and default branch below when you authorize this repository.</p>${recordSummary(result)}${dlgActions(dlgBtn("Back to owner setup", { action: "owner-setup" }, "primary"))}`);
   } else if (form.matches("[data-owner-write]")) {
     const target = form.dataset.project; requireProject(target);
     if (form.dataset.kind.endsWith("-revoke") && data.get("confirm") !== target) throw new Error("Type the exact project ID for fresh owner consent");
-    let fields;
-    try { fields = JSON.parse(data.get("payload")); } catch { throw new Error("Owner setup payload must be valid JSON"); }
-    if (!fields || typeof fields !== "object" || Array.isArray(fields)) throw new Error("Owner setup payload must be one JSON object");
+    const fields = ownerFieldsValue(form);
     const kind = form.dataset.kind, actionByKind = { "workspace-grant": "workspace-grant", "workspace-revoke": "workspace-revoke", "github-authorize": "github-authorize", "github-revoke": "github-revoke", "command-profile-set": "command-profile-set" };
     if (!Object.hasOwn(actionByKind, kind)) throw new Error("Unknown owner setup action");
     const result = await mutate({ ...fields, action: actionByKind[kind], id: target, confirm: target }, "Owner API recorded this explicit revision-checked change. No command was executed.");
     if (projectId === target && version === dialogVersion && dialog.open) await ownerSetupDialog(result);
-  } else if (form.matches("[data-settings-edit]")) {
+  } else if (form.matches("[data-settings-form]")) {
     requireProject(form.dataset.project); captureSettingsDraft(); persistBrowserDrafts();
-    const field = form.dataset.field, key = `${projectId}:${field}`, draft = settingsDrafts.get(key);
-    if (!["name", "objective"].includes(field) || !draft || !editableKnowledge(draft.text) || field === "name" && !draft.text.trim()) throw new Error("Invalid settings text; draft retained");
-    settingsReview(draft.expectedRevision, { [field]: draft.text }, key);
-  } else if (form.matches("[data-settings-choice]")) {
-    requireProject(form.dataset.project);
-    const field = form.dataset.field, value = data.get("value");
-    const choices = { knowledgeAccess: ["read-only", "maintain"], libraryAccess: ["none", "coordinator"], decisionAccess: ["none", "coordinator"] };
-    if (field === "workerCap") { const cap = Number(value); if (!Number.isSafeInteger(cap) || cap < 1 || cap > 32) throw new Error("Worker cap must be 1-32"); settingsReview(form.dataset.revision, { workerCap: cap }); }
-    else { if (!Object.hasOwn(choices, field) || !choices[field].includes(value)) throw new Error("Unknown settings grant choice"); settingsReview(form.dataset.revision, { [field]: value }); }
+    if (!settingsCache || settingsCache.projectId !== projectId) throw new Error("Reopen the project settings first");
+    const changes = settingsChanges(settingsFormValues(form), settingsCache.values);
+    if (!Object.keys(changes).length) throw new Error("There are no changes to review yet.");
+    validateSettingsChanges(changes);
+    settingsReview(settingsRevisionFor(changes), changes);
   } else if (form.matches("[data-settings-confirm]")) {
     const target = form.dataset.project; requireProject(target);
     const proposal = settingsConfirmation;
     if (!proposal || proposal.projectId !== target || proposal.revision !== form.dataset.revision || data.get("confirm") !== target) throw new Error("Reopen the exact settings proposal and confirm its project ID");
     persistBrowserDrafts();
-    const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings update acknowledged. Existing threads retain frozen models/instructions.");
+    const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings saved. New threads use them; running threads keep what they started with.");
     validateSettings(result);
     for (const [field, changed] of Object.entries(proposal.changes)) {
       if (field === "models" ? Object.entries(changed).some(([role, reference]) => result.values.models[role] !== reference) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
     }
-    if (proposal.draftKey) {
-      const draft = settingsDrafts.get(proposal.draftKey);
-      if (draft?.expectedRevision === proposal.revision && draft.text === (proposal.changes.name ?? proposal.changes.objective)) settingsDrafts.delete(proposal.draftKey);
+    for (const key of proposal.draftKeys) {
+      const draft = settingsDrafts.get(key), field = key.slice(key.indexOf(":") + 1);
+      if (draft?.expectedRevision === proposal.revision && draft.text === proposal.changes[field]) settingsDrafts.delete(key);
     }
-    persistBrowserDrafts();
-    if (target === projectId && version === dialogVersion) { projects = projects.map(project => project.id === target ? { ...project, name: result.values.name } : project); renderProjects(); await settingsList(); }
+    persistBrowserDrafts(); settingsPending = null;
+    if (target === projectId) { settingsCache = { ...result, projectId: target }; projects = projects.map(project => project.id === target ? { ...project, name: result.values.name } : project); renderProjects(); closeCurrentDialog(target, version); }
   } else if (form.matches("[data-upload-edit]")) {
     requireProject(form.dataset.project); captureUploadDraft(); persistBrowserDrafts();
     await uploadReview(form.dataset.import);
@@ -2038,9 +2049,11 @@ function report(error, frame = error instanceof UiRequestError ? error.frame : u
   else setError(text, "action");
 }
 document.addEventListener("click", event => { const node = event.target.closest("[data-action]"); if (node && !node.disabled) void uiAction(() => action(node)); });
-document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-edit], [data-settings-choice], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
+document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-form], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
 function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; }
+document.addEventListener("change", event => { if (event.target.closest("[data-settings-form]")) settingsSync(); });
 document.addEventListener("input", event => {
+  if (event.target.matches(".mp-search")) { renderModelList(event.target.closest(".mp")); return; }
   if (event.target.id === "search-input") { scheduleSearch(); return; }
   if (event.target.closest("#compose")) { drafts.set(draftKey(), event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
   const answerForm = event.target.closest("[data-answer]");
@@ -2055,6 +2068,7 @@ document.addEventListener("input", event => {
     if (draft) draft.text = form.querySelector("textarea").value;
   }
   captureKnowledgeDraft(); captureUploadDraft(); captureSettingsDraft(); captureCreationDraft(); persistDraftsSafely();
+  if (event.target.closest("[data-settings-form]")) settingsSync();
 });
 // Clicking elsewhere closes the skill picker; moving the caret re-evaluates it.
 document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if ((skillMenu || prMenu) && !event.target.closest("#compose")) closeSkillMenu(); });
@@ -2096,9 +2110,16 @@ dialog.addEventListener("close", () => {
   // A delayed close event must not cancel a dialog that has since reopened.
   if (dialog.open) return;
   captureDialogDraft();
+  answerAdoption = null; routineConfirmation = null; uploadConfirmations.clear(); settingsConfirmation = null; providerInspection = null;
   dialogVersion++; if (blobUrl) URL.revokeObjectURL(blobUrl); blobUrl = null;
 });
+// Esc inside an open model list closes only the list.
+dialog.addEventListener("cancel", event => { const open = dialog.querySelector(".mp.open"); if (open) { event.preventDefault(); mpClose(open, true); } });
+dialog.addEventListener("mousedown", event => { if (event.target.closest(".mp-row")) event.preventDefault(); });
+document.addEventListener("click", event => { for (const mp of dialog.querySelectorAll(".mp.open")) if (!mp.contains(event.target)) mpClose(mp); });
 document.addEventListener("keydown", event => {
+  const picker = event.target.closest?.(".mp");
+  if (picker && !event.isComposing && mpKey(event, picker)) return;
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) { event.preventDefault(); openSearch(); return; }
   if (event.target.id === "search-input" && !event.isComposing) {
     const count = searchState.results.length;
@@ -2140,7 +2161,7 @@ function providerBinding(scopeId, repositoryId) {
 }
 async function providerList(kind = "reads", offset = 0) {
   if (!plan || !["reads", "writes"].includes(kind) || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("A loaded Durable project and valid receipt page are required");
-  const id = projectId, current = generation, version = showDialog("GitHub provider receipts", '<p>Reading retained native observations…</p>');
+  const id = projectId, current = generation, version = showDialog("GitHub receipts", '<p class="note">Reading what workers recorded…</p>', "What workers read from GitHub and sent to it, as recorded at the time. Not live status.");
   const page = await api({ action: kind === "reads" ? "github-read-snapshot" : "github-write-snapshot", id, offset, limit: 100 });
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
   if (!page || !Array.isArray(page.items) || page.items.length > 100 || !Number.isSafeInteger(page.total) || page.total < 0 || page.nextOffset !== null && (!page.items.length || page.nextOffset !== offset + page.items.length)) throw new Error("Invalid retained provider receipt page");
@@ -2148,10 +2169,11 @@ async function providerList(kind = "reads", offset = 0) {
   const rows = page.items.map(record => {
     if (!uuid(record.scopeId) || !Number.isSafeInteger(record.conversationId) || record.conversationId < 1 || !Number.isSafeInteger(record.taskId) || record.taskId < 1 || typeof record.callId !== "string" || typeof record.operation !== "string" || kind === "reads" && (typeof record.repositoryId !== "string" || !Number.isSafeInteger(record.pullRequest) || record.pullRequest < 1 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(record.head)) || kind === "writes" && (!/^[a-f0-9]{64}$/.test(record.key) || !["uncertain", "done"].includes(record.state))) throw new Error("Invalid native provider receipt identity");
     const cacheKey = crypto.randomUUID(); providerCache.set(cacheKey, { projectId: id, kind, record });
-    return `<article class="task"><strong>${kind === "reads" ? `${esc(record.repositoryId)} PR ${record.pullRequest} · ${esc(record.operation)}` : `${esc(record.state)} · ${esc(record.operation)} · ${esc(record.target)}`}</strong><p>${kind === "reads" ? `Head ${esc(record.head)}${record.ci ? ` · retained CI ${esc(record.ci.statusState)}` : ""}` : record.source === "local-git-verification" ? "Local-head verification only, no executed commit/push or remote write" : "Native effect receipt, not new execution authority"}</p><button data-action="provider-record" data-project="${esc(id)}" data-record="${esc(cacheKey)}">Inspect retained binding/data</button></article>`;
+    const title = kind === "reads" ? `${esc(record.repositoryId)} · PR #${record.pullRequest} · ${esc(humanKey(record.operation))}` : `${stateChip(record.state === "uncertain" ? "Outcome unknown" : "Done", record.state === "uncertain" ? "warn" : "on")}${esc(humanKey(record.operation))} · ${esc(record.target)}`;
+    const meta = kind === "reads" ? `Commit ${esc(record.head.slice(0, 12))}${record.ci ? ` · CI ${esc(record.ci.statusState)}` : ""}` : record.source === "local-git-verification" ? "Checked locally only. Nothing was pushed or written remotely." : "Recorded result. It does not allow another attempt.";
+    return `<div class="list-row"><div class="grow"><strong>${title}</strong><span class="meta">${meta}</span></div><div class="row-actions">${dlgBtn("Details", { action: "provider-record", project: id, record: cacheKey }, "small")}</div></div>`;
   });
-  const button = (label, lens, next) => `<button data-action="provider-list" data-kind="${lens}" data-offset="${next}">${label}</button>`;
-  dialog.querySelector(".dialog-body").innerHTML = `<p>GitHub-only ${kind}, records ${offset + (page.items.length ? 1 : 0)}-${offset + page.items.length}/${page.total}. Retained observations are not current-state guarantees. Arc adapter remains deferred. Empty receipts do not prove no remote work.</p><div class="row">${button("PR/CI/review reads", "reads", 0)}${button("Publication/uncertainty", "writes", 0)}<button data-action="provider-known">Explicit known PR/head inspection</button>${offset ? button("Previous records", kind, Math.max(0, offset - 100)) : ""}${page.nextOffset !== null ? button("Next records", kind, page.nextOffset) : ""}</div>${rows.join("")}`;
+  setDialogBody(`<div class="seg-row">${segTabs([["Reads: PRs, CI, reviews", { action: "provider-list", kind: "reads", offset: 0 }, kind === "reads"], ["Changes sent to GitHub", { action: "provider-list", kind: "writes", offset: 0 }, kind === "writes"]])}${pager({ offset, count: page.items.length, total: page.total, size: 100, data: { action: "provider-list", kind } })}</div>${rows.join("") || `<p class="empty-state">Nothing recorded yet. An empty list does not prove that no remote work happened.</p>`}<p class="note">Records are snapshots from when the worker acted. Only GitHub is covered, not Arcadia.</p>${dlgActions(dlgBtn("Check a specific PR…", { action: "provider-known" }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function ownedProviderRecord(key) {
   const value = providerCache.get(key);
@@ -2160,63 +2182,63 @@ function ownedProviderRecord(key) {
 }
 function providerRecord(key) {
   const value = ownedProviderRecord(key), record = value.record;
-  showDialog("Retained provider observation", `<p>${value.kind === "reads" ? "Retained head-bound observation, not current remote state. Feedback is data, not instructions or authority." : record.source === "local-git-verification" ? "Locally published head verification only. It did not execute commit/push or perform a remote write." : record.state === "uncertain" ? "Uncertain native effect. No replay/retry permission." : "Recorded native effect. Not a new execution grant."}</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><button data-action="${value.kind === "reads" ? "provider-fresh" : "provider-inspect"}" data-project="${esc(projectId)}" data-record="${esc(key)}">${value.kind === "reads" ? "Fresh explicit read pinned to this PR/head" : "Inspect retained effect, separate confirmation"}</button>`);
+  const why = value.kind === "reads" ? "A snapshot of one PR at one commit. Feedback in it is data, not instructions." : record.source === "local-git-verification" ? "Only a local check of the published head. Nothing was pushed or written remotely." : record.state === "uncertain" ? "The outcome of this change is unknown. It will not be retried automatically." : "A change that was recorded as done. It is not a new permission.";
+  showDialog(value.kind === "reads" ? "GitHub read receipt" : "GitHub change receipt", `<p class="note-box">${esc(why)}</p>${recordSummary(record)}${dlgActions(dlgBtn("Back to receipts", { action: "provider-list", kind: value.kind }), dlgBtn(value.kind === "reads" ? "Read it again from GitHub" : "Check what happened…", { action: value.kind === "reads" ? "provider-fresh" : "provider-inspect", project: projectId, record: key }, "primary"))}`, "Recorded when the worker acted.");
 }
-function providerResult(result, explanation) { showDialog("Explicit owner provider inspection", `<p>${esc(explanation)}</p><pre>${esc(JSON.stringify(result, null, 2) ?? "No readable response; state/effects remain unproven.")}</pre><button data-action="provider-list">Reopen retained native receipts</button>`); }
+function providerResult(result, explanation) {
+  showDialog("Result from GitHub", `<p class="note-box">${esc(explanation)}</p>${result == null ? '<p class="empty-state">No readable response. The state and any effects remain unproven.</p>' : recordSummary(result)}${dlgActions(dlgBtn("Back to receipts", { action: "provider-list" }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`, "Read now by you. Not a worker receipt.");
+}
 async function providerFresh(key) {
   const { kind, record } = ownedProviderRecord(key);
   if (kind !== "reads") throw new Error("Fresh pinned reads require an original read observation");
   const grant = providerBinding(record.scopeId, record.repositoryId), id = projectId, current = generation;
   const identity = { id, provider: "github", repositoryId: grant.repositoryId, expectedRepositoryId: grant.numericId, pullRequest: record.pullRequest, expectedHead: record.head };
   const input = record.operation === "ci" ? { action: "provider-ci-inspect", ...identity, page: record.ci?.page ?? 1 } : record.operation === "review" ? { action: "provider-review-inspect", ...identity, page: 1 } : { action: "provider-pr-inspect", ...identity };
-  const version = showDialog("Fresh pinned provider read", '<p>Reading the displayed repository/PR/exact head…</p>'), result = await api(input);
+  const version = showDialog("Reading from GitHub", '<p class="note">Reading the same PR at the same commit…</p>', `${record.repositoryId} · PR #${record.pullRequest}`), result = await api(input);
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
-  providerResult(result, `Explicit owner ${input.action} for ${record.repositoryId} PR ${record.pullRequest}, head ${record.head}. No worker task/call identity or native read receipt is invented. Review refresh starts at page 1; continuation metadata remains in the result.`);
+  providerResult(result, `Read of ${record.repositoryId} PR #${record.pullRequest} at commit ${record.head.slice(0, 12)}. No worker call is invented. Review reads start at page 1; more pages are listed in the result.`);
 }
 function providerInspect(key) {
   const { kind, record } = ownedProviderRecord(key);
   if (kind !== "writes") throw new Error("Effect inspection requires an original native write intent");
   const grant = providerBinding(record.scopeId), proposal = { projectId, key: record.key, record, repositoryId: grant.repositoryId, numericId: grant.numericId };
-  showDialog("Inspect retained native effect?", `<p>Repository ${esc(grant.repositoryId)} (${grant.numericId})<br>Exact key ${esc(record.key)}. Only actual matching native evidence may settle the original record. Missing markers remain uncertain. No publication, rollback, replay or retry permission.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><form data-provider-inspect data-project="${esc(projectId)}" data-key="${esc(record.key)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Inspect exact retained effect only</button></form>`);
+  showDialog("Check what happened?", `<div class="kv tight"><span>Repository</span><b>${esc(grant.repositoryId)}</b><span>Change</span><b>${esc(humanKey(record.operation))} · ${esc(record.target)}</b></div><p class="note-box">Only matching evidence on GitHub can settle this record; if none is found it stays unknown. This does not publish, roll back or retry anything.</p>${rawDetails(record)}<form data-provider-inspect data-project="${esc(projectId)}" data-key="${esc(record.key)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "provider-record", project: projectId, record: key }), '<button type="submit" class="primary">Check on GitHub</button>')}</form>`, "Read-only check against GitHub.");
   providerInspection = proposal; disableActions();
 }
 function providerKnown() {
   if (!plan || view.project.workspaceAuthorization?.provider !== "github" || view.project.archived || view.project.deleted) throw new Error("A current active GitHub scope is required. Arc remains deferred");
   const scopes = view.project.workspaceAuthorization.scopes.filter(scope => view.project.githubAuthorization?.some(grant => grant.repositoryId === scope.repositoryId));
   if (!scopes.length) throw new Error("No explicit GitHub repository/scope grant is available");
-  showDialog("Explicit known PR/head inspection", `<p>Read-only owner inspection, not a model probe or native worker receipt. The host rechecks the complete repository/PR/head binding. No execution authority. Use continuation page metadata from earlier results for CI/review paging.</p><form data-provider-known data-project="${esc(projectId)}"><label>Current authorized scope<select name="scope">${scopes.map(scope => `<option value="${esc(scope.id)}">${esc(scope.repositoryId)} · ${esc(scope.id)}</option>`).join("")}</select></label><label>Known PR number<input name="pr" type="number" min="1" required></label><label>Exact known head SHA<input name="head" minlength="40" maxlength="64" pattern="(?:[a-f0-9]{40}|[a-f0-9]{64})" required autocomplete="off"></label><label>Read kind<select name="kind"><option value="pr">PR</option><option value="ci">CI</option><option value="review">Reviews/comments</option></select></label><label>CI/review page<input name="page" type="number" min="1" max="1000000" value="1" required></label><button type="submit">Read this exact binding</button></form>`); disableActions();
+  showDialog("Check a specific pull request", `<form data-provider-known data-project="${esc(projectId)}"><div class="field-grid"><div class="field"><label><span class="flabel">Repository</span><select name="scope">${scopes.map(scope => `<option value="${esc(scope.id)}">${esc(scope.repositoryId)}</option>`).join("")}</select></label></div><div class="field"><label><span class="flabel">What to read</span><select name="kind"><option value="pr">The PR itself</option><option value="ci">CI results</option><option value="review">Reviews and comments</option></select></label></div><div class="field"><label><span class="flabel">PR number</span><input name="pr" type="number" min="1" required autofocus></label></div><div class="field"><label><span class="flabel">Page</span><input name="page" type="number" min="1" max="1000000" value="1" required></label><span class="fhelp">Only used for CI and reviews.</span></div></div><div class="field"><label><span class="flabel">Commit (full SHA of the PR head)</span><input name="head" class="mono" minlength="40" maxlength="64" pattern="(?:[a-f0-9]{40}|[a-f0-9]{64})" required autocomplete="off" placeholder="40 hexadecimal characters"></label><span class="fhelp">The host checks repository, PR and commit together before reading.</span></div>${dlgActions(dlgBtn("Back", { action: "provider-list" }), '<button type="submit" class="primary">Read from GitHub</button>')}</form>`, "Read-only. It reads exactly what you name and grants nothing.");
+  disableActions();
 }
 function lifecycleMore() {
   if (!plan) throw new Error("Lifecycle controls require a loaded Durable project");
-  const p = view.project, choices = p.archived || p.deleted ? ["restore"] : ["archive", "delete"];
-  showDialog("Retained project lifecycle", `<p>Project ${esc(p.name)} · ${esc(projectId)}<br>State ${p.deleted ? "deleted from ordinary listing" : p.archived ? "archived" : view.paused ? "paused" : "active"}. No repository/provider cleanup is offered. Restore remains paused. Existing pause/resume controls keep their explicit recovery policy.</p>${choices.map(operation => `<button class="danger" data-action="lifecycle-confirm" data-project="${esc(projectId)}" data-operation="${operation}">${operation === "restore" ? "Restore retained metadata, remain paused" : operation === "delete" ? "Delete from listing, retain work" : "Archive, retain work"}</button>`).join("")}`);
+  const p = view.project, inactive = p.archived || p.deleted, state = p.deleted ? "removed from the list" : p.archived ? "archived" : view.paused ? "paused" : "active";
+  const choices = inactive ? [["restore", "Restore", "Brings the project back. It stays paused until you resume it."]] : [["archive", "Archive", "Pauses the project and keeps everything. You can restore it later."], ["delete", "Remove from list", "Pauses it and hides it from the project list. Files and work are kept; open it by its ID to restore."]];
+  showDialog("Archive, delete or restore", `<div class="choice-list">${choices.map(([operation, label, help]) => `<div class="choice-card"><div><b>${label}</b><p>${help}</p></div>${dlgBtn(`${label}…`, { action: "lifecycle-confirm", project: projectId, operation }, operation === "restore" ? "" : "danger")}</div>`).join("")}</div><p class="note">Nothing in the repository, worker folders or remote PRs is deleted. Pause and resume keep their own controls.</p>${dlgActions(dlgBtn("Close", { action: "close-dialog" }))}`, `${p.name} is ${state}.`);
 }
 function lifecycleConfirm(id, operation) {
   requireProject(id);
   if (!plan || !["archive", "delete", "restore"].includes(operation)) throw new Error("Unknown Durable lifecycle action");
   const inactive = view.project.archived || view.project.deleted;
   if (operation === "restore" ? !inactive : inactive) throw new Error("Project lifecycle state changed; reopen its controls");
-  const consequence = operation === "restore" ? "Restore retained metadata. Remain paused; no work is resumed or replayed." : operation === "archive" ? "Pause and archive the project. Conversations, receipts, repository changes, allocated workspaces and remote PRs remain." : "Pause and remove the project from ordinary listing. All project data, repository changes, allocated workspaces and remote PRs remain. Use its known UUID to reopen/restore later.";
-  showDialog(`Confirm ${operation}`, `<p>${esc(consequence)}</p><p>Project ${esc(view.project.name)}<br>ID ${esc(id)}. This performs no filesystem/provider cleanup.</p><form data-lifecycle-change data-project="${esc(id)}" data-operation="${operation}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit" class="danger">Confirm ${operation} only</button></form>`); disableActions();
+  const copy = { restore: ["Restore this project?", "Restore project", "Brings the saved project back. It stays paused; no work is resumed or replayed."], archive: ["Archive this project?", "Archive project", "Pauses and archives the project. Conversations, receipts, repository changes, worker folders and remote PRs all remain."], delete: ["Remove this project from the list?", "Remove from list", "Pauses the project and hides it from the list. All data, repository changes, worker folders and remote PRs remain. Open it by its ID to restore it later."] }[operation];
+  showDialog(copy[0], `<p class="note-box${operation === "restore" ? "" : " warn"}">${esc(copy[2])}</p><div class="kv tight"><span>Project</span><b>${esc(view.project.name)}</b><span>ID</span><b class="mono">${esc(id)}</b></div><p class="note">No files or provider data are cleaned up.</p><form data-lifecycle-change data-project="${esc(id)}" data-operation="${operation}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "lifecycle-more" }), `<button type="submit" class="primary${operation === "restore" ? "" : " danger"}">${copy[1]}</button>`)}</form>`, view.project.name); disableActions();
 }
 async function routineList(lens = "schedules", offset = 0) {
   if (lens === "history") return routineHistory("intents", 0, 0);
   if (!plan || !["schedules", "monitors"].includes(lens) || !Number.isSafeInteger(offset) || offset < 0) throw new Error("Routine view requires a loaded Durable project and valid cached page");
-  const id = projectId, current = generation, version = showDialog("Retained Durable routines", '<p>Reading owned definitions, admission metadata and plan policy…</p>');
+  const id = projectId, current = generation, version = showDialog("Schedules and monitors", '<p class="note">Reading your automations…</p>', "Turn automations on or off. Every change asks you to confirm first.");
   const [schedules, monitors, policy] = await Promise.all([api({ action: "schedule-snapshot", id, includeHistory: false }), api({ action: "monitor-snapshot", id }), api({ action: "plan-snapshot", id })]);
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
   if (!schedules || typeof schedules.eventOptIn !== "boolean" || ![null, "uncertain-provider-write", "uncertain-command"].includes(schedules.automaticAdmissionBlocker) || !Array.isArray(schedules.schedules) || !Array.isArray(schedules.events) || !Array.isArray(schedules.intents) || schedules.events.length || schedules.intents.length || schedules.historyIncluded !== false || !Number.isSafeInteger(schedules.historyCounts?.events) || schedules.historyCounts.events < 0 || !Number.isSafeInteger(schedules.historyCounts?.intents) || schedules.historyCounts.intents < 0 || schedules.schedules.some(record => record.projectId !== id || typeof record.id !== "string" || !record.id || typeof record.enabled !== "boolean" || !["once", "interval", "calendar"].includes(record.kind) || typeof record.text !== "string") || !monitors || !Array.isArray(monitors.items) || monitors.items.some(record => !uuid(record.id) || typeof record.enabled !== "boolean" || !["pr", "ci", "review"].includes(record.kind) || typeof record.repositoryId !== "string" || !Number.isSafeInteger(record.expectedRepositoryId) || record.expectedRepositoryId < 1 || !Number.isSafeInteger(record.pullRequest) || record.pullRequest < 1) || !policy || typeof policy.paused !== "boolean" || typeof policy.pausing !== "boolean") throw new Error("Invalid owned routine projection");
   routineCache = { project: id, schedules, monitors, policy };
-  const button = (label, nextLens, nextOffset = 0) => `<button data-action="routine-list" data-project="${esc(id)}" data-lens="${nextLens}" data-offset="${nextOffset}">${label}</button>`;
-  const controls = `<div class="row">${button("Schedules", "schedules")}${button("GitHub monitors", "monitors")}${button(`Paged history: ${schedules.historyCounts.events} events / ${schedules.historyCounts.intents} intents`, "history")}</div>`;
-  const optIn = `<button data-action="routine-confirm" data-project="${esc(id)}" data-kind="events" data-record="" data-enabled="${!schedules.eventOptIn}">${schedules.eventOptIn ? "Disable" : "Separately opt into"} events</button>`;
-  let body;
-  {
-    const records = lens === "schedules" ? schedules.schedules : monitors.items, page = records.slice(offset, offset + 100);
-    body = `<h3>${lens} ${offset + (page.length ? 1 : 0)}-${offset + page.length}/${records.length}</h3><p>This pages a sampled full snapshot locally, not server-side history. Definitions are immutable by ID; enable/disable is separate.</p><div class="row">${offset ? button("Previous", lens, Math.max(0, offset - 100)) : ""}${offset + page.length < records.length ? button("Next", lens, offset + page.length) : ""}${button("Reread", lens, offset)}</div>${page.map(record => `<article class="task"><h3>${esc(record.kind)} ${esc(record.id)}</h3><p>${record.enabled ? "Enabled" : "Disabled"}</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><button data-action="routine-confirm" data-project="${esc(id)}" data-kind="${lens === "schedules" ? "schedule" : "monitor"}" data-record="${esc(record.id)}" data-enabled="${!record.enabled}">Inspect and confirm ${record.enabled ? "disable" : "enable"}</button></article>`).join("") || '<p>No retained definitions.</p>'}`;
-  }
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Plan ${policy.paused || policy.pausing ? "paused/draining" : "open"}. Events ${schedules.eventOptIn ? "opted in" : "off"}. Automatic admission blocker: ${esc(schedules.automaticAdmissionBlocker ?? "none recorded")}. These separate snapshot reads are not an atomic current-state guarantee.</p><p>No client-created timers or polling; existing authorized backend routines may continue. Creation uses stable-ID CLI commands and starts disabled. Arc monitoring remains deferred. Your Mac must stay awake.</p>${controls}${optIn}${body}`;
-  disableActions();
+  const records = lens === "schedules" ? schedules.schedules : monitors.items, page = records.slice(offset, offset + 100), kind = lens === "schedules" ? "schedule" : "monitor";
+  const tabs = segTabs([[`Schedules (${schedules.schedules.length})`, { action: "routine-list", project: id, lens: "schedules", offset: 0 }, lens === "schedules"], [`GitHub monitors (${monitors.items.length})`, { action: "routine-list", project: id, lens: "monitors", offset: 0 }, lens === "monitors"], [`History (${schedules.historyCounts.events + schedules.historyCounts.intents})`, { action: "routine-list", project: id, lens: "history" }, false]]);
+  const toggle = (label, enabled, recordId = "", recordKind = kind) => dlgBtn(label, { action: "routine-confirm", project: id, kind: recordKind, record: recordId, enabled: !enabled }, "small");
+  const rows = page.map(record => `<div class="list-row"><div class="grow"><strong>${lens === "schedules" ? esc(clip(record.text, 140)) : `${esc(record.repositoryId)} · PR #${record.pullRequest}`}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))}${lens === "monitors" ? " monitor" : " schedule"}</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`).join("") || `<p class="empty-state">No ${lens === "schedules" ? "schedules" : "monitors"} yet. They are created from the command line and start turned off.</p>`;
+  setDialogBody(`${policy.paused || policy.pausing || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused || policy.pausing ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. Arcadia monitoring is not available. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function validateRoutineRange(text, range, requested) {
   if (typeof text !== "string" || !range || ![range.offset, range.end, range.total].every(value => Number.isSafeInteger(value) && value >= 0) || !/^[a-f0-9]{64}$/.test(range.sha256) || range.offset !== Math.min(requested, range.total) || range.end < range.offset || range.end > range.total || range.end - range.offset !== Array.from(text).length || range.end - range.offset > 4000 || range.nextOffset !== (range.end < range.total ? range.end : null)) throw new Error("Routine history text range differs from its excerpt");
@@ -2224,7 +2246,7 @@ function validateRoutineRange(text, range, requested) {
 }
 async function routineHistory(kind = "intents", offset = 0, textOffset = 0) {
   if (!plan || !["events", "intents"].includes(kind) || ![offset, textOffset].every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)) throw new Error("Routine history requires a loaded owned project and valid page");
-  const id = projectId, current = generation, version = showDialog("Bounded retained routine history", '<p>Reading sampled owner-backed history without replay…</p>');
+  const id = projectId, current = generation, version = showDialog("Automation history", '<p class="note">Reading recent runs…</p>', "Recent runs and events. Read-only; nothing is replayed.");
   const page = await api({ action: "schedule-history", id, kind, offset, limit: 30, textOffset, textLimit: 4000 });
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
   if (!page || page.kind !== kind || page.offset !== offset || page.limit !== 30 || !Array.isArray(page.items) || page.items.length > 30 || !Number.isSafeInteger(page.total) || page.total < 0 || page.items.length > Math.max(0, page.total - offset) || page.nextOffset !== (offset + page.items.length < page.total ? offset + page.items.length : null) || page.nextOffset !== null && !page.items.length || !Number.isFinite(page.observedAtMs)) throw new Error("Routine history differs from the requested owned page");
@@ -2241,10 +2263,11 @@ async function routineHistory(kind = "intents", offset = 0, textOffset = 0) {
       if (item.outcome !== null) { const nextOutcome = validateRoutineRange(item.outcome, item.outcomeRange, textOffset); if (nextOutcome !== null) continuations.push(nextOutcome); }
     }
   }
-  const button = (label, nextKind, nextOffset, nextText) => `<button data-action="routine-history" data-project="${esc(id)}" data-kind="${nextKind}" data-offset="${nextOffset}" data-text-offset="${nextText}">${label}</button>`;
-  const nextText = continuations.length ? Math.min(...continuations) : null;
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Sampled ${esc(new Date(page.observedAtMs).toLocaleString())}. Pages are live observations, not a stable historical cursor. Full-text SHA-256 identifies recorded text; these excerpts cannot prove the full hash or external effects. No replay is permitted here.</p><h3>${kind} ${offset + (page.items.length ? 1 : 0)}-${offset + page.items.length}/${page.total}</h3><div class="row">${button("Events", "events", 0, 0)}${button("Intents", "intents", 0, 0)}${offset ? button("Previous records", kind, Math.max(0, offset - 30), 0) : ""}${page.nextOffset !== null ? button("Next records", kind, page.nextOffset, 0) : ""}${textOffset ? button("Previous text", kind, offset, Math.max(0, textOffset - 4000)) : ""}${nextText !== null ? button("Next text excerpts", kind, offset, nextText) : ""}${button("Reread this slice", kind, offset, textOffset)}</div><button data-action="routine-list" data-project="${esc(id)}">Return to routine definitions</button>${page.items.map(item => `<article class="task"><h3>${esc(item.requestId)}</h3><pre>${esc(JSON.stringify(item, null, 2))}</pre></article>`).join("") || '<p>No retained records in this sampled page.</p>'}`;
-  disableActions();
+  const nextText = continuations.length ? Math.min(...continuations) : null, at = (nextOffset, nextTextOffset) => ({ action: "routine-history", project: id, kind, offset: nextOffset, "text-offset": nextTextOffset });
+  const row = item => kind === "events"
+    ? `<div class="list-row"><div class="grow"><strong>${esc(humanKey(item.kind))}</strong><span class="meta">Event ${esc(item.eventId.slice(0, 12))}</span><pre class="excerpt">${esc(item.payload)}</pre></div>${rawDetails(item)}</div>`
+    : `<div class="list-row"><div class="grow"><strong>${stateChip(humanKey(item.status), item.status === "submitted" ? "on" : ["uncertain", "failed", "interrupted"].includes(item.status) ? "warn" : "")}${esc(humanKey(item.kind))} run</strong><span class="meta">Request ${esc(item.requestId.slice(0, 12))}</span><pre class="excerpt">${esc(item.text)}</pre>${item.outcome !== null ? `<pre class="excerpt">${esc(item.outcome)}</pre>` : ""}</div>${rawDetails(item)}</div>`;
+  setDialogBody(`<div class="seg-row">${segTabs([["Runs", { action: "routine-history", project: id, kind: "intents", offset: 0, "text-offset": 0 }, kind === "intents"], ["Events", { action: "routine-history", project: id, kind: "events", offset: 0, "text-offset": 0 }, kind === "events"]])}${pager({ offset, count: page.items.length, total: page.total, size: 30, data: { action: "routine-history", project: id, kind, "text-offset": 0 } })}</div><p class="note">Sampled ${esc(new Date(page.observedAtMs).toLocaleString())}. Long text is shown in parts; excerpts cannot prove the full text or any outside effect.</p>${page.items.map(row).join("") || '<p class="empty-state">Nothing recorded in this page.</p>'}${textOffset || nextText !== null ? `<div class="row">${textOffset ? dlgBtn("‹ Earlier text", at(offset, Math.max(0, textOffset - 4000)), "small") : ""}${nextText !== null ? dlgBtn("Later text ›", at(offset, nextText), "small") : ""}</div>` : ""}${dlgActions(dlgBtn("Back to schedules", { action: "routine-list", project: id }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function routineRecord(kind, recordId) {
   if (!routineCache || routineCache.project !== projectId || !["schedule", "monitor", "events"].includes(kind)) throw new Error("Owned routine snapshot unavailable; reread");
@@ -2258,64 +2281,73 @@ function routineConfirm(kind, recordId, value) {
   const record = routineRecord(kind, recordId), enabled = value === "true", id = projectId;
   if (view.project.archived || view.project.deleted) throw new Error("Restore this retained project before changing routines");
   if ((kind === "events" ? record.eventOptIn : record.enabled) === enabled) throw new Error("Displayed routine setting changed; reread before confirming");
-  const binding = JSON.stringify(record);
-  const version = showDialog("Confirm routine setting", `<p>Project ${esc(id)}. ${enabled ? "Enable" : "Disable"} ${esc(kind)} ${esc(recordId)}.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><p>Enabling permits future authorized work/polling while awake. It does not resume, grant tools/publication, clear uncertainty or replay retained intents. Monitors need separate event opt-in and current repository authorization. Disabling keeps ticks/cursors. Local confirmation pins this displayed snapshot, not a backend CAS.</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit">Record this setting only</button></form>`);
+  const binding = JSON.stringify(record), noun = kind === "events" ? "outside events" : `this ${kind}`, state = on => (on ? "On" : "Off");
+  const version = showDialog(`Turn ${enabled ? "on" : "off"} ${noun}?`, `<div class="diff-list">${diffItem(["Status", state(!enabled), state(enabled)])}</div>${kind === "events" ? "" : recordSummary(record)}<p class="note">${enabled ? "Turning on lets it run while your Mac is awake. It does not resume the project, grant tools or publishing, clear an uncertain outcome or replay anything. Monitors also need outside events on and current repository access." : "Turning off keeps its schedule, history and cursors. It just stops running."}</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "routine-list", project: id, lens: kind === "monitor" ? "monitors" : "schedules" }), `<button type="submit" class="primary">Turn ${enabled ? "on" : "off"}</button>`)}</form>`, view.project.name);
   routineConfirmation = { project: id, kind, recordId, enabled, binding, version };
 }
 async function usageList(offset = 0) {
   if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("Usage requires a loaded Durable project/valid page");
-  const id = projectId, current = generation, coordinatorId = view.durableInspection?.identity.coordinatorConversationId, version = showDialog("Owner-backed usage", '<p>Reading existing SDK conversation counters…</p>');
+  const id = projectId, current = generation, coordinatorId = view.durableInspection?.identity.coordinatorConversationId, version = showDialog("Usage", '<p class="note">Reading token counts…</p>', "Token counts recorded by the SDK. Estimates, not billing.");
   const page = await api({ action: "usage-snapshot", id, offset, limit: 100 });
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
   if (!page || page.offset !== offset || !Array.isArray(page.workers) || page.workers.length > 100 || !Number.isSafeInteger(page.totalWorkers) || page.totalWorkers < 0 || !page.coordinator || coordinatorId !== undefined && page.coordinator.conversationId !== coordinatorId || page.nextOffset !== null && (!page.workers.length || page.nextOffset !== offset + page.workers.length) || page.workers.some(worker => !["thread", "legacy"].includes(worker.kind) || worker.kind === "thread" && !uuid(worker.threadId) || !Number.isSafeInteger(worker.conversationId))) throw new Error("Usage projection differs from its owned conversation/page");
+  const number = value => Number(value).toLocaleString(), stat = (label, value) => `<div class="stat"><b>${esc(value)}</b><span>${esc(label)}</span></div>`;
   const counters = value => {
-    if (!value || [value.totalTokens, value.input, value.output, value.cacheRead, value.cacheWrite, value.cost?.total].some(number => typeof number !== "number" || !Number.isFinite(number) || number < 0)) throw new Error("Invalid SDK usage counters");
-    return `Tokens ${value.totalTokens} · input ${value.input} · output ${value.output} · cache read ${value.cacheRead} · cache write ${value.cacheWrite} · SDK estimated cost ${value.cost.total}`;
+    if (!value || [value.totalTokens, value.input, value.output, value.cacheRead, value.cacheWrite, value.cost?.total].some(count => typeof count !== "number" || !Number.isFinite(count) || count < 0)) throw new Error("Invalid SDK usage counters");
+    return `<div class="stats">${stat("Total tokens", number(value.totalTokens))}${stat("Input", number(value.input))}${stat("Output", number(value.output))}${stat("Cache read", number(value.cacheRead))}${stat("Cache written", number(value.cacheWrite))}${stat("Estimated cost", `$${value.cost.total.toFixed(2)}`)}</div>`;
   };
-  const detail = value => `<p>${esc(counters(value.total))}</p><details><summary>Recorded model/tool breakdown</summary><pre>${esc(JSON.stringify({ models: value.models, tools: value.tools }, null, 2))}</pre></details>`;
-  const button = (label, next) => `<button data-action="usage-list" data-offset="${next}">${label}</button>`;
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(page.accounting)}. SDK estimates are not billing or verified spend.</p><h3>Coordinator conversation ${esc(page.coordinator.conversationId)}</h3>${detail(page.coordinator)}<h3>Worker page ${offset + (page.workers.length ? 1 : 0)}-${offset + page.workers.length}/${page.totalWorkers}</h3><p>Registered reusable threads ${esc(page.totalThreads)} · legacy-only workers ${esc(page.legacyOnlyWorkers)}.</p><p>PAGE-ONLY worker total, not whole-project total: ${esc(counters(page.workerPageTotal))}</p><div class="row">${offset ? button("Previous workers", Math.max(0, offset - 100)) : ""}${page.nextOffset !== null ? button("Next workers", page.nextOffset) : ""}${button("Reread this page", offset)}</div>${page.workers.map(worker => `<article class="task"><h3>${worker.kind === "thread" ? `Thread ${esc(worker.threadId)}` : `Retained legacy worker ${esc(worker.name)}`}</h3><p>Conversation ${esc(worker.conversationId)}. Legacy names ${esc((worker.legacyNames ?? []).join(", ") || "none")}.</p>${detail(worker)}</article>`).join("")}`;
+  const detail = value => `${counters(value.total)}${rawDetails({ models: value.models, tools: value.tools }, "By model and tool")}`;
+  setDialogBody(`<h3>Coordinator</h3>${detail(page.coordinator)}<h3>Workers</h3><p class="note">${esc(page.totalThreads)} reusable threads and ${esc(page.legacyOnlyWorkers)} older workers. The totals below cover this page only, not the whole project.</p>${counters(page.workerPageTotal)}${page.workers.length ? `<div class="seg-row mt"><span class="note">Workers on this page</span>${pager({ offset, count: page.workers.length, total: page.totalWorkers, size: 100, data: { action: "usage-list" } })}</div>` : ""}${page.workers.map(worker => `<div class="list-row"><div class="grow"><strong>${worker.kind === "thread" ? `Thread ${esc(worker.threadId.slice(0, 8))}` : `Earlier worker ${esc(worker.name)}`}</strong><span class="meta">${number(worker.total.totalTokens)} tokens · $${worker.total.cost.total.toFixed(2)} estimated${(worker.legacyNames ?? []).length ? ` · also known as ${esc(worker.legacyNames.join(", "))}` : ""}</span></div>${detail(worker)}</div>`).join("") || '<p class="empty-state">No workers have run yet.</p>'}<p class="note">Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(String(page.accounting).replace(/\.$/, ""))}. SDK estimates are not billing or verified spend.</p>${dlgActions(dlgBtn("Refresh", { action: "usage-list", offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function validateSettings(value) {
   const v = value?.values;
   if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model, v.models?.worker, v.models?.scout, v.models?.reviewer].some(text => typeof text !== "string") || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
 }
 function captureSettingsDraft() {
-  const form = dialog.querySelector("[data-settings-edit]"), draft = form && settingsDrafts.get(`${form.dataset.project}:${form.dataset.field}`);
-  if (draft) draft.text = form.querySelector('[name="text"]').value;
+  const form = dialog.querySelector("[data-settings-form]");
+  if (!form || !settingsCache || form.dataset.project !== settingsCache.projectId) return;
+  const flat = settingsFormValues(form), was = flatSettings(settingsCache.values);
+  settingsPending = { projectId: form.dataset.project, flat: Object.fromEntries(Object.entries(flat).filter(([field, value]) => value !== was[field])) };
+  for (const field of ["name", "objective"]) {
+    const key = `${form.dataset.project}:${field}`, draft = settingsDrafts.get(key);
+    if (flat[field] === settingsCache.values[field]) settingsDrafts.delete(key);
+    else if (draft) draft.text = flat[field];
+    else settingsDrafts.set(key, { text: flat[field], expectedRevision: settingsCache.revision });
+  }
 }
 async function ownerSetupDialog(result = null) {
-  const id = projectId, generationAtOpen = generation, version = showDialog("Owner setup", '<p class="note">Reading current owner bindings…</p>');
+  const id = projectId, generationAtOpen = generation, version = showDialog("Owner setup", '<p class="note">Reading current owner bindings…</p>', "What workers on this project are allowed to touch.");
   const snapshot = await api({ action: "owner-setup-snapshot", id });
   if (!dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen) return;
-  const workspaces = (snapshot.workspace?.scopes || []).map(scope => `<article class="task"><strong>Scope ${esc(scope.id)}</strong><p>Repository ${esc(scope.repositoryId)} · ${scope.fileCount} files · base ${esc(scope.baseRevision)}</p><button class="danger" data-action="owner-setup-edit" data-kind="workspace-revoke" data-payload="${esc(JSON.stringify({ scopeId: scope.id, expectedRevision: snapshot.workspaceRevision }))}">Revoke scope</button></article>`).join("") || '<p class="note">No active workspace scopes.</p>';
-  const github = (snapshot.github || []).map(auth => `<article class="task"><strong>${esc(auth.repositoryId)}</strong><p>Repository ID ${esc(auth.numericId)} · ${esc(auth.branchPrefix)} · base ${esc(auth.baseBranch)}</p><button class="danger" data-action="owner-setup-edit" data-kind="github-revoke" data-payload="${esc(JSON.stringify({ repositoryId: auth.repositoryId, expectedRevision: snapshot.githubRevision }))}">Revoke GitHub authorization</button></article>`).join("") || '<p class="note">No active GitHub authorizations.</p>';
-  const profiles = (snapshot.profiles || []).map(profile => `<article class="task"><strong>${esc(profile.label)} · ${esc(profile.id)}</strong><p>${esc(profile.repositoryId)} · ${profile.enabled ? "enabled" : "disabled"} · ${esc(profile.blocker || "No reported blocker")}</p><button data-action="owner-profile-read" data-project="${esc(id)}" data-profile="${esc(profile.id)}">Read fixed argv and executable identity</button></article>`).join("") || '<p class="note">No fixed command profiles.</p>';
+  const row = (title, meta, button) => `<div class="list-row"><div class="grow"><strong>${title}</strong><span class="meta">${meta}</span></div><div class="row-actions">${button}</div></div>`;
+  const workspaces = (snapshot.workspace?.scopes || []).map(scope => row(`${esc(scope.repositoryId)}${scope.wholeRepository ? " · whole repository" : ""}`, `${scope.fileCount} files · base ${esc(String(scope.baseRevision).slice(0, 12))} · scope ${esc(String(scope.id).slice(0, 8))}`, dlgBtn("Revoke…", { action: "owner-setup-edit", kind: "workspace-revoke", payload: JSON.stringify({ scopeId: scope.id, expectedRevision: snapshot.workspaceRevision }) }, "danger small"))).join("") || '<p class="empty-state">No folder scopes.</p>';
+  const github = (snapshot.github || []).map(auth => row(esc(auth.repositoryId), `Branches ${esc(auth.branchPrefix)}… · draft PRs against ${esc(auth.baseBranch)}`, dlgBtn("Revoke…", { action: "owner-setup-edit", kind: "github-revoke", payload: JSON.stringify({ repositoryId: auth.repositoryId, expectedRevision: snapshot.githubRevision }) }, "danger small"))).join("") || '<p class="empty-state">No GitHub authorizations.</p>';
+  const profiles = (snapshot.profiles || []).map(profile => row(`${esc(profile.label)}`, `${esc(profile.repositoryId)} · ${profile.enabled ? "enabled" : "disabled"} · ${esc(profile.blocker || "no blocker")}`, dlgBtn("View command", { action: "owner-profile-read", project: id, profile: profile.id }, "small"))).join("") || '<p class="empty-state">No command profiles.</p>';
   const seeds = {
     "workspace-grant": { expectedRevision: snapshot.workspaceRevision, provider: "github", repositoryId: "", ownerCheckout: view.project.cwd, approvedRoot: "", fileOwnershipPrefix: "", files: [], baseRevision: "" },
     "github-authorize": { expectedRevision: snapshot.githubRevision, repositoryId: "", expectedRepositoryId: 0, branchPrefix: "" },
     "command-profile-set": { expectedRevision: snapshot.profilesRevision, profile: { id: crypto.randomUUID(), label: "", repositoryId: "", scopeIds: [], executable: "", arguments: [], effect: "workspace", timeoutMs: 300000, maxOutputBytes: 65536, enabled: false } },
   };
-  const actions = [["workspace-grant", "Create workspace scope"], ["github-authorize", "Authorize GitHub target"], ["command-profile-set", "Register or disable fixed profile"]].map(([kind, label]) => `<button data-action="owner-setup-edit" data-kind="${kind}" data-payload="${esc(JSON.stringify(seeds[kind]))}">${label}</button>`).join("");
-  const hist = `<p>Workspace revision ${esc(snapshot.workspaceRevision)} · GitHub revision ${esc(snapshot.githubRevision)} · profile revision ${esc(snapshot.profilesRevision)}</p><p class="notice">${esc(snapshot.configuredCatalog?.reason || "Configured skills unavailable")}. No Arc setup. Profile registration does not execute commands or approve deployment/destructive effects.</p>`;
+  const actions = [["workspace-grant", "Add a folder scope"], ["github-authorize", "Authorize a GitHub repository"], ["command-profile-set", "Register a command profile"]].map(([kind, label]) => dlgBtn(label, { action: "owner-setup-edit", kind, payload: JSON.stringify(seeds[kind]) }, "small")).join("");
+  const hist = `<p class="note">${esc((snapshot.configuredCatalog?.reason || "Configured skills unavailable").replace(/\.$/, ""))}. Registering a command profile does not run it or approve deployments or destructive actions.</p>${rawDetails({ workspaceRevision: snapshot.workspaceRevision, githubRevision: snapshot.githubRevision, profilesRevision: snapshot.profilesRevision }, "Revisions")}`;
   const whole = (snapshot.workspace?.scopes || []).find(scope => scope.wholeRepository);
   const connected = whole && (snapshot.github || []).find(auth => auth.repositoryId === whole.repositoryId);
   const arcCard = !whole ? "" : snapshot.arc ? `<div class="card"><b>✓ Arcadia connected</b><p class="note">Workers push users/${esc(snapshot.arc.login)}/ branches and open draft PRs against ${esc(snapshot.arc.baseBranch)}. You approve merges.</p></div>` : snapshot.arcQuick?.available ? `<div class="card"><b>Arcadia</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="arc-quick">Connect Arcadia</button></div>` : `<div class="card"><b>Arcadia</b><p class="note">${esc(snapshot.arcQuick?.blocker || "One-click Arcadia is unavailable")}</p></div>`;
   const githubCard = !whole ? "" : snapshot.workspace?.provider === "arc" ? arcCard : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
   const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from ${snapshot.workspace?.provider === "arc" ? "trunk (arc-wt worktrees)" : "current HEAD"}.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
-  dialog.querySelector(".dialog-body").innerHTML = `${result ? `<p class="notice">Host response: ${esc(JSON.stringify(result))}</p>` : ""}${quick}<details class="advanced"><summary>Advanced: folder-limited scopes, GitHub, command profiles</summary>${hist}<form data-owner-github-inspect data-project="${esc(id)}"><label><span>Exact owner/repository, matching the checkout's GitHub origin</span><input name="repositoryId" placeholder="owner/repository" required></label><button type="submit">Read GitHub numeric ID and default branch</button></form><div class="row">${actions}</div><h3>Workspace scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Fixed profiles</h3>${profiles}</details><button data-action="owner-setup">Refresh</button>`;
+  setDialogBody(`${result ? `<p class="note-box ok">Change recorded. No command was run.</p>${rawDetails(result, "Host response")}` : ""}<div class="choice-list">${quick}</div><details class="advanced"><summary>Advanced: folder scopes, GitHub targets, command profiles</summary>${hist}<h3>Look up a GitHub repository</h3><form data-owner-github-inspect data-project="${esc(id)}" class="row"><label class="grow"><span class="sr-only">Repository, owner/name</span><input name="repositoryId" placeholder="owner/repository" aria-label="Repository, owner/name" required></label><button type="submit" class="small">Look up</button></form><p class="note">Reads its numeric ID and default branch. It must match the checkout's GitHub origin.</p><h3>Add or change</h3><div class="row">${actions}</div><h3>Folder scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Command profiles</h3>${profiles}</details>${dlgActions(dlgBtn("Refresh", { action: "owner-setup" }), dlgBtn("Done", { action: "close-dialog" }, "primary"))}`);
 }
 
 async function workspaceQuickDialog() {
-  const id = projectId, generationAtOpen = generation, version = showDialog("Let workers edit this repo", '<p class="note">Reading the project checkout…</p>');
+  const id = projectId, generationAtOpen = generation, version = showDialog("Let workers edit this repo", '<p class="note">Reading the project checkout…</p>', "Workers get their own copy of your checkout. Your files are never written.");
   const snapshot = await api({ action: "owner-setup-snapshot", id });
   if (!dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen) return;
   const quick = snapshot.quickGrant;
-  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click access is unavailable")}</p><button data-action="owner-setup">Open owner setup</button>`; return; }
+  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click access is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
   const arc = quick.provider === "arc";
   dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>${arc ? "Arc checkout" : "Checkout"}</span><b class="mono">${esc(quick.ownerCheckout)}</b>${arc && quick.subpath ? `<span>Project folder</span><b class="mono">${esc(quick.subpath)}</b>` : ""}<span>Worker copies</span><b class="mono">${esc(quick.approvedRoot)}</b><span>${arc ? "Trunk head" : "Current HEAD"}</span><b class="mono">${esc(quick.head.slice(0, 12))}</b></div>
 ${arc ? `<ul><li>Each worker gets its own arc-wt worktree of the Arc checkout, leased to this project and starting from trunk, not from your current branch.</li><li>Workers may read, edit and create any file except VCS metadata. Work happens in the project folder (${esc(quick.subpath || ".")}) of the worktree; your mount is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need Arcadia (step 2); merges always need your approval.</li></ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 2); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${arc ? "start from trunk and" : "will"} not see them.</p>` : ""}
-<div class="row"><button class="primary" data-action="workspace-quick-confirm" data-project="${esc(id)}" data-revision="${esc(snapshot.workspaceRevision)}">Confirm</button><button data-action="close-dialog">Cancel</button></div>`;
+${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Allow workers to edit", { action: "workspace-quick-confirm", project: id, revision: snapshot.workspaceRevision }, "primary"))}`;
 }
 
 async function workspaceQuickConfirm(target, revision) {
@@ -2324,14 +2356,14 @@ async function workspaceQuickConfirm(target, revision) {
   if (projectId === target && dialog.open) await ownerSetupDialog();
 }
 async function arcQuickDialog() {
-  const id = projectId, generationAtOpen = generation, version = showDialog("Connect Arcadia", '<p class="note">Reading the Arc checkout…</p>');
+  const id = projectId, generationAtOpen = generation, version = showDialog("Connect Arcadia", '<p class="note">Reading the Arc checkout…</p>', "Let workers push branches and open draft pull requests.");
   const snapshot = await api({ action: "owner-setup-snapshot", id });
   if (!dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen) return;
   const quick = snapshot.arcQuick;
-  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click Arcadia is unavailable")}</p><button data-action="owner-setup">Open owner setup</button>`; return; }
+  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click Arcadia is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
   dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>Login</span><b class="mono">${esc(quick.login)}</b><span>Draft PRs target</span><b class="mono">${esc(quick.baseBranch)}</b><span>Worker branches</span><b class="mono">users/${esc(quick.login)}/…</b></div>
 <ul><li>Each worker commits and pushes only its own branch (arc adds the users/${esc(quick.login)}/ namespace).</li><li>The host checks the pushed branch against the worker's HEAD, then opens a draft PR against ${esc(quick.baseBranch)} and links the Tracker ticket named in the task.</li><li>Ticket statuses are never changed. Merges always need your approval.</li></ul>
-<div class="row"><button class="primary" data-action="arc-quick-confirm" data-project="${esc(id)}" data-revision="${esc(snapshot.arcRevision)}">Confirm</button><button data-action="close-dialog">Cancel</button></div>`;
+${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Connect Arcadia", { action: "arc-quick-confirm", project: id, revision: snapshot.arcRevision }, "primary"))}`;
 }
 async function arcQuickConfirm(target, revision) {
   requireProject(target);
@@ -2339,19 +2371,19 @@ async function arcQuickConfirm(target, revision) {
   if (projectId === target && dialog.open) await ownerSetupDialog();
 }
 async function githubQuickDialog() {
-  const id = projectId, generationAtOpen = generation, version = showDialog("Connect GitHub", '<p class="note">Reading the repository from GitHub…</p>');
+  const id = projectId, generationAtOpen = generation, version = showDialog("Connect GitHub", '<p class="note">Reading the repository from GitHub…</p>', "Let workers push branches and open draft pull requests.");
   const stale = () => !dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen;
   const snapshot = await api({ action: "owner-setup-snapshot", id });
   if (stale()) return;
   const quick = snapshot.githubQuick;
-  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click GitHub is unavailable")}</p><button data-action="owner-setup">Open owner setup</button>`; return; }
+  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click GitHub is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
   let remote;
   try { remote = await api({ action: "github-repository-inspect", id, repositoryId: quick.repositoryId }); }
-  catch (error) { if (!stale()) dialog.querySelector(".dialog-body").innerHTML = `<p>gh could not read ${esc(quick.repositoryId)}: ${esc(error.message)}</p><p class="note">Run <code>gh auth login</code>, then try again.</p>`; return; }
+  catch (error) { if (!stale()) dialog.querySelector(".dialog-body").innerHTML = `<p>gh could not read ${esc(quick.repositoryId)}: ${esc(error.message)}</p><p class="note">Run <code>gh auth login</code>, then try again.</p>${dlgActions(dlgBtn("Close", { action: "close-dialog" }))}`; return; }
   if (stale()) return;
   dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(remote.repositoryId)}</b><span>Repository ID</span><b class="mono">${esc(remote.numericId)}</b><span>Draft PRs target</span><b class="mono">${esc(remote.defaultBranch)}</b><span>Worker branches</span><b class="mono">${esc(quick.branchPrefix)}…</b></div>
 <ul><li>Each worker commits and pushes only its own ${esc(quick.branchPrefix)} branch.</li><li>The host checks that the pushed branch matches the worker's HEAD, then opens or updates a draft PR against ${esc(remote.defaultBranch)}.</li><li>Workers can read PRs, CI results and reviews, and reply to review comments.</li><li>Merges always need your approval.</li></ul>
-<div class="row"><button class="primary" data-action="github-quick-confirm" data-project="${esc(id)}" data-revision="${esc(snapshot.githubRevision)}">Confirm</button><button data-action="close-dialog">Cancel</button></div>`;
+${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Connect GitHub", { action: "github-quick-confirm", project: id, revision: snapshot.githubRevision }, "primary"))}`;
 }
 
 async function githubQuickConfirm(target, revision) {
@@ -2359,65 +2391,229 @@ async function githubQuickConfirm(target, revision) {
   await mutate({ action: "github-quick-authorize", id: target, confirm: target, expectedRevision: revision }, "GitHub connected. Workers can open draft PRs.");
   if (projectId === target && dialog.open) await ownerSetupDialog();
 }
+const ownerEditCopy = {
+  "workspace-grant": ["Add a folder scope", "Let workers read and edit files under one approved folder.", "Create scope"],
+  "github-authorize": ["Authorize a GitHub repository", "Let workers push branches and open draft pull requests on one repository.", "Authorize"],
+  "command-profile-set": ["Register a command profile", "A fixed executable and arguments that workers may run. It is not run now.", "Save profile"],
+  "workspace-revoke": ["Revoke this folder scope?", "Workers lose access to it for future work. Receipts and history stay.", "Revoke access"],
+  "github-revoke": ["Revoke GitHub access?", "Workers can no longer push or open pull requests there. Receipts and history stay.", "Revoke access"],
+};
+// Owner-setup writes keep their exact API fields; the form shows them as labelled controls and rebuilds the same JSON object.
+function ownerFieldInputs(value, path = [], hidden = false) {
+  return Object.entries(value).map(([key, item]) => {
+    const name = [...path, key].join("."), label = humanKey(key), data = `data-path="${esc(name)}" data-type="${typeof item}"`;
+    if (item && typeof item === "object" && !Array.isArray(item)) return `${hidden ? "" : `<h3>${esc(label)}</h3>`}${ownerFieldInputs(item, [...path, key], hidden)}`;
+    if (hidden || key === "expectedRevision" || key === "id") return `<input type="hidden" ${data} value="${esc(item)}">`;
+    if (Array.isArray(item)) return `<div class="field"><label><span class="flabel">${esc(label)}</span><span class="fhelp">One per line.</span><textarea rows="3" data-path="${esc(name)}" data-type="lines" spellcheck="false">${esc(item.join("\n"))}</textarea></label></div>`;
+    if (typeof item === "boolean") return `<div class="field"><label class="checkbox"><input type="checkbox" data-path="${esc(name)}" data-type="boolean"${item ? " checked" : ""}><span>${esc(label)}</span></label></div>`;
+    return `<div class="field"><label><span class="flabel">${esc(label)}</span><input ${data} ${typeof item === "number" ? 'type="number"' : ""} value="${esc(item)}"></label></div>`;
+  }).join("");
+}
+function ownerFieldsValue(form) {
+  const fields = {};
+  for (const input of form.querySelectorAll("[data-path]")) {
+    const keys = input.dataset.path.split("."), type = input.dataset.type;
+    const value = type === "lines" ? input.value.split("\n").map(line => line.trim()).filter(Boolean) : type === "boolean" ? input.checked : type === "number" ? Number(input.value) : input.value;
+    let target = fields;
+    for (const key of keys.slice(0, -1)) target = target[key] ??= {};
+    target[keys.at(-1)] = value;
+  }
+  return fields;
+}
 async function ownerSetupEdit(kind, payload) {
   if (!view) throw new Error("Select a project before owner setup");
   const target = projectId, currentGeneration = generation;
   let initial;
   try { initial = JSON.parse(payload); } catch { throw new Error("Owner setup seed is invalid"); }
-  const candidates = "";
-  if (projectId !== target || generation !== currentGeneration) return;
-  showDialog(`Owner setup · ${kind}`, `<p>Project ${esc(target)}. Edit only the action fields. The host checks the inspected revision and immutable identities. Owner confirmation is required below for each write and is never saved in the draft.</p>${candidates}<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}"><label><span>API fields as JSON</span><textarea name="payload" required spellcheck="false">${esc(JSON.stringify(initial, null, 2))}</textarea></label>${kind.endsWith("-revoke") ? `<input type="hidden" name="confirm" value="${esc(target)}">` : ""}<button class="danger" type="submit">Confirm</button><p>Cancel leaves authority unchanged. Workspace/GitHub revocation stops future admissions. Retained receipts and history remain.</p></form>`);
+  if (projectId !== target || generation !== currentGeneration || !Object.hasOwn(ownerEditCopy, kind)) return;
+  const [title, subtitle, submit] = ownerEditCopy[kind], revoke = kind.endsWith("-revoke");
+  const summary = revoke ? `<div class="kv tight">${Object.entries(initial).filter(([key]) => key !== "expectedRevision").map(([key, value]) => `<span>${esc(humanKey(key))}</span><b class="mono">${esc(value)}</b>`).join("")}</div><input type="hidden" name="confirm" value="${esc(target)}">` : "";
+  showDialog(title, `<form data-owner-write data-kind="${esc(kind)}" data-project="${esc(target)}">${summary}${ownerFieldInputs(initial, [], revoke)}<p class="note">${revoke ? "Revoking only stops future work. Nothing already recorded is deleted." : "The host checks the revision you are looking at and the repository identity before it saves. Nothing runs."}</p>${dlgActions(dlgBtn("Cancel", { action: "owner-setup" }), `<button type="submit" class="primary${revoke ? " danger" : ""}">${submit}</button>`)}</form>`, subtitle);
 }
 
 async function ownerProfileRead(target, profileId) {
   requireProject(target);
-  const generationAtOpen = generation, version = showDialog("Fixed command profile", '<p class="note">Reading the exact owner-defined executable and argv…</p>');
+  const generationAtOpen = generation, version = showDialog("Command profile", '<p class="note">Reading the exact command…</p>', "Fixed by you. The model cannot change it.");
   const profile = await api({ action: "command-profile-read", id: target, profileId });
   if (projectId !== target || generation !== generationAtOpen || !dialog.open || dialogVersion !== version) return;
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Fixed owner configuration only. The model cannot supply executable, argv, cwd or environment. This definition does not approve deployment/destructive execution.</p><pre>${esc(JSON.stringify(profile, null, 2))}</pre><button data-action="owner-setup">Back to owner setup</button>`;
+  setDialogBody(`<h3>Command</h3><pre>${esc([profile.executable, ...(profile.arguments ?? [])].filter(part => part !== undefined).join(" "))}</pre><p class="note">Workers cannot supply the executable, arguments, folder or environment. A profile does not approve deployments or destructive actions.</p><h3>Details</h3>${recordSummary(profile, ["executable"])}${dlgActions(dlgBtn("Back to owner setup", { action: "owner-setup" }, "primary"))}`);
 }
 
-async function settingsList() {
+// Project settings: one form (name, objective, models, access, worker limit), then one confirmation that shows every before → after.
+const settingsRoles = [["coordinator", "Coordinator", "Plans the work and talks to you."], ["worker", "Worker", "Writes code in its own worktree."], ["scout", "Scout", "Reads the repository and reports back."], ["reviewer", "Reviewer", "Checks changes and pull requests."]];
+const settingsAccess = {
+  knowledgeAccess: ["Workers and project knowledge", "The coordinator always keeps the knowledge notes up to date.", [["read-only", "Workers can read it"], ["maintain", "Workers can read and update it"]]],
+  libraryAccess: ["Uploaded files and evidence", "Whether the coordinator may open the project library.", [["none", "Coordinator cannot open them"], ["coordinator", "Coordinator can open them"]]],
+  decisionAccess: ["Questions for you", "Whether the coordinator may ask you to decide something.", [["none", "Coordinator cannot ask"], ["coordinator", "Coordinator can ask"]]],
+};
+let settingsPending = null, modelScoped = [];
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker, scout: values.models.scout, reviewer: values.models.reviewer, knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, workerCap: String(values.workerCap) });
+function settingsFormValues(form) {
+  const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
+  for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
+  for (const [role] of settingsRoles) flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+  return flat;
+}
+function settingsChanges(flat, values) {
+  const was = flatSettings(values), changes = {};
+  for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess"]) if (flat[field] !== was[field]) changes[field] = flat[field];
+  if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
+  if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
+  for (const role of ["worker", "scout", "reviewer"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role];
+  return changes;
+}
+function validateSettingsChanges(changes) {
+  if ("name" in changes && (!changes.name.trim() || !editableKnowledge(changes.name)) || "objective" in changes && !editableKnowledge(changes.objective)) throw new Error("The name cannot be empty, and name and objective cannot contain control characters. Your edits are kept.");
+  if ("workerCap" in changes && (!Number.isSafeInteger(changes.workerCap) || changes.workerCap < 1 || changes.workerCap > 32)) throw new Error("Workers at once must be a whole number from 1 to 32.");
+}
+// The request must use the revision each retained text edit started from, so a stale edit is rejected by the host instead of being rebased.
+function settingsRevisionFor(changes) {
+  const revisions = new Set();
+  for (const field of ["name", "objective"]) { const draft = field in changes && settingsDrafts.get(`${projectId}:${field}`); if (draft) revisions.add(draft.expectedRevision); }
+  if (revisions.size > 1) throw new Error("The name and objective edits started on different versions of the settings. Discard one of them or save them separately.");
+  return [...revisions][0] ?? settingsCache.revision;
+}
+function settingsSync() {
+  const form = dialog.querySelector("[data-settings-form]");
+  if (!form || !settingsCache) return;
+  const flat = settingsFormValues(form), was = flatSettings(settingsCache.values);
+  let count = 0;
+  for (const field of form.querySelectorAll(".field[data-field]")) { const changed = flat[field.dataset.field] !== was[field.dataset.field]; field.classList.toggle("changed", changed); if (changed) count++; }
+  const submit = form.querySelector('[type="submit"]'), hint = form.querySelector(".hint");
+  submit.toggleAttribute("data-off", !count); submit.disabled = busy || !count;
+  hint.textContent = count ? `${count} unsaved ${count === 1 ? "change" : "changes"}` : "No changes yet"; hint.classList.toggle("dirty", count > 0);
+}
+async function settingsList(keep = false) {
   if (!plan) throw new Error("Settings require a loaded Durable project");
-  const id = projectId, current = generation, version = showDialog("Project settings", '<p>Reading revision-checked project defaults…</p>');
-  const value = await api({ action: "settings-snapshot", id });
+  const id = projectId, current = generation, version = showDialog("Project settings", '<p class="note">Loading settings…</p>', "Name, objective, models and what workers may use.");
+  if (!keep) settingsPending = null;
+  const [value, pickerError] = await Promise.all([api({ action: "settings-snapshot", id }), loadModelPicker().then(() => "", error => error.message)]);
   if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
-  validateSettings(value); settingsCache = { ...value, projectId: id }; modelCache.clear();
-  const choices = { knowledgeAccess: ["read-only", "maintain"], libraryAccess: ["none", "coordinator"], decisionAccess: ["none", "coordinator"], workerCap: Array.from({ length: 32 }, (_, i) => String(i + 1)) };
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Revision ${esc(value.revision)}. Updates require an idle Durable project and explicit confirmation. Existing threads retain frozen models/instructions. Knowledge/library/question grants are separate from execution authority. knowledgeAccess gates workers only; the coordinator always maintains knowledge.</p><details><summary>Current defaults</summary><pre>${esc(JSON.stringify(value.values, null, 2))}</pre></details><div class="row">${["name", "objective"].map(field => `<button data-action="settings-edit" data-project="${esc(id)}" data-field="${field}">Edit ${field}${settingsDrafts.has(`${id}:${field}`) ? " retained draft" : ""}</button>`).join("")}</div><h3>Models for new threads/defaults</h3>${["coordinator", "worker", "scout", "reviewer"].map(role => `<p>${role}: ${esc(role === "coordinator" ? value.values.model : value.values.models[role])} <button data-action="settings-models" data-project="${esc(id)}" data-role="${role}" data-revision="${esc(value.revision)}">Choose offline catalog entry</button></p>`).join("")}<h3>Explicit grants and hard concurrency</h3>${Object.entries(choices).map(([field, options]) => `<form data-settings-choice data-project="${esc(id)}" data-field="${field}" data-revision="${esc(value.revision)}"><label>${field}<select name="value">${options.map(option => `<option value="${option}" ${String(value.values[field]) === option ? "selected" : ""}>${option}</option>`).join("")}</select></label><button type="submit">Review this single change</button></form>`).join("")}`;
-  disableActions();
+  validateSettings(value); settingsCache = { ...value, projectId: id };
+  const draftOf = field => settingsDrafts.get(`${id}:${field}`), pending = settingsPending?.projectId === id ? settingsPending.flat : {};
+  const shown = { ...flatSettings(value.values), ...Object.fromEntries(["name", "objective"].filter(field => draftOf(field)).map(field => [field, draftOf(field).text])), ...pending };
+  const draftNote = field => { const draft = draftOf(field); return draft && draft.text !== value.values[field] ? `<span class="field-draft">Unsent edit kept${draft.expectedRevision !== value.revision ? " from an older version of these settings. Saving it is checked and may be rejected" : ""}. ${dlgBtn("Discard edit…", { action: "settings-discard", project: id, field }, "ghost small")}</span>` : ""; };
+  const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const accessField = ([field, [label, help, options]]) => `<div class="field" data-field="${field}"><label><span class="flabel">${label}</span><select name="${field}">${options.map(([option, text]) => `<option value="${option}"${shown[field] === option ? " selected" : ""}>${text}</option>`).join("")}</select></label><span class="fhelp">${help}</span></div>`;
+  setDialogBody(`<form data-settings-form data-project="${esc(id)}" novalidate>
+<div class="field" data-field="name"><label><span class="flabel">Project name</span><input name="name" maxlength="120" autocomplete="off" value="${esc(shown.name)}"></label>${draftNote("name")}</div>
+<div class="field" data-field="objective"><label><span class="flabel">Objective</span><span class="fhelp">What this project is for. The coordinator reads it in every new conversation.</span><textarea name="objective" rows="5" maxlength="32000">${esc(shown.objective)}</textarea></label>${draftNote("objective")}</div>
+<h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
+<div class="field-grid">${settingsRoles.map(roleField).join("")}</div>
+<h3>Access and limits</h3>
+<div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}<div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32).</span></div></div>
+<p class="note">Saving needs an idle project. You review every change before it is saved.</p>
+${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { action: "close-dialog" }), '<button type="submit" class="primary" data-off disabled>Review changes</button>')}</form>`);
+  settingsSync();
 }
-function settingsEdit(field) {
-  if (!settingsCache || settingsCache.projectId !== projectId || !["name", "objective"].includes(field)) throw new Error("Reread the owned settings before editing");
-  const key = `${projectId}:${field}`;
-  let draft = settingsDrafts.get(key);
-  if (!draft) { draft = { text: settingsCache.values[field], expectedRevision: settingsCache.revision }; settingsDrafts.set(key, draft); }
-  if (!editableKnowledge(draft.text)) throw new Error("Control-bearing/invalid Unicode settings are read-only here; use the explicit API to repair them");
-  persistBrowserDrafts();
-  showDialog(`Edit project ${field}`, `<p>Original revision ${esc(draft.expectedRevision)}. ${draft.expectedRevision !== settingsCache.revision ? "Retained draft conflicts with the last read revision. Saving still uses the original revision, never a silently rebased value." : "Changes affect defaults, not frozen thread instructions."}</p><form data-settings-edit data-project="${esc(projectId)}" data-field="${field}"><label>${field}<textarea name="text" rows="${field === "name" ? 2 : 12}" maxlength="32000" ${field === "name" ? "required" : ""}>${esc(draft.text)}</textarea></label><button type="submit">Review exact change</button></form><div class="row"><button data-action="settings-list">Reread without discarding draft</button><button data-action="settings-discard" data-project="${esc(projectId)}" data-field="${field}">Discard retained draft, explicit confirmation</button></div>`); disableActions();
+const accessText = (field, value) => settingsAccess[field][2].find(([option]) => option === value)?.[1] ?? value;
+const modelText = ref => { const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
+const emptyText = text => text ? esc(text) : "<small>empty</small>";
+function settingsDiffRows(changes, values) {
+  const rows = [];
+  if ("name" in changes) rows.push(["Project name", emptyText(values.name), emptyText(changes.name)]);
+  if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
+  if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
+  for (const [role, label] of settingsRoles.slice(1)) if (changes.models?.[role]) rows.push([`${label} model`, modelText(values.models[role]), modelText(changes.models[role])]);
+  for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
+  if ("workerCap" in changes) rows.push(["Workers at once", String(values.workerCap), String(changes.workerCap)]);
+  return rows;
 }
+const diffItem = ([label, before, after]) => `<div class="diff-item"><b>${esc(label)}</b><div class="diff-pair"><div class="diff-side before"><small>Now</small>${before}</div><span class="arrow" aria-hidden="true">→</span><div class="diff-side after"><small>After saving</small>${after}</div></div></div>`;
 function settingsDiscard(id, field) {
   requireProject(id);
-  if (!["name", "objective"].includes(field) || !settingsCache || settingsCache.projectId !== id) throw new Error("Reread the owned settings before discarding a draft");
+  if (!["name", "objective"].includes(field) || !settingsCache || settingsCache.projectId !== id) throw new Error("Reopen the project settings before discarding an edit");
   const draft = settingsDrafts.get(`${id}:${field}`);
-  if (!draft) throw new Error("No retained settings draft");
-  showDialog("Discard retained settings draft?", `<p>This deletes only the unsent ${field} draft below. A new editor uses the last explicitly read settings revision, which the server still checks. No settings update happens here.</p><pre>${esc(draft.text)}</pre><button class="danger" data-action="settings-confirm-discard" data-project="${esc(id)}" data-field="${field}">Discard and start from last read settings</button>`);
+  if (!draft) throw new Error("There is no unsent edit to discard");
+  showDialog("Discard your unsent edit?", `<div class="diff-item"><b>Your edit of the ${field}</b><div class="diff-side before">${emptyText(draft.text)}</div></div><p class="note">The saved ${field} stays as it is. Nothing is sent to the server.</p>${dlgActions(dlgBtn("Keep editing", { action: "settings-back" }), dlgBtn("Discard edit", { action: "settings-confirm-discard", project: id, field }, "danger"))}`, "This only deletes the text you typed.");
 }
-async function settingsModels(role, revision, offset = 0) {
-  if (!["coordinator", "worker", "scout", "reviewer"].includes(role) || !settingsCache || settingsCache.projectId !== projectId || settingsCache.revision !== revision || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("Reread the intended settings/model page");
-  const id = projectId, current = generation, version = showDialog(`${role} model catalog`, '<p>Reading installed model and credential-status metadata without model/network probes…</p>');
-  const page = await api({ action: "models-snapshot", offset, limit: 100 });
-  if (!dialog.open || version !== dialogVersion || id !== projectId || current !== generation) return;
-  if (!page || page.offset !== offset || page.networkChecked !== false || !Array.isArray(page.items) || page.items.length > 100 || !Number.isSafeInteger(page.total) || page.total < 0 || page.nextOffset !== null && (!page.items.length || page.nextOffset !== offset + page.items.length) || page.items.some(model => typeof model.reference !== "string" || typeof model.name !== "string" || typeof model.configured !== "boolean")) throw new Error("Invalid offline model catalog");
-  modelCache.clear(); for (const model of page.items) modelCache.set(model.reference, { ...model, projectId: id, role, revision });
-  const button = (label, next) => `<button data-action="settings-models" data-project="${esc(id)}" data-role="${role}" data-revision="${esc(revision)}" data-offset="${next}">${label}</button>`;
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Entries ${offset + (page.items.length ? 1 : 0)}-${offset + page.items.length}/${page.total}. Offline metadata only. Configured credentials do not prove connectivity, quota or default transport. Existing threads retain their frozen model.</p><div class="row">${offset ? button("Previous models", Math.max(0, offset - 100)) : ""}${page.nextOffset !== null ? button("Next models", page.nextOffset) : ""}</div>${page.items.map(model => `<article class="task"><strong>${esc(model.name)}</strong><p>${esc(model.reference)} · credentials ${model.configured ? "configured, untested" : "missing"}</p><button data-action="settings-model" data-project="${esc(id)}" data-role="${role}" data-revision="${esc(revision)}" data-reference="${esc(model.reference)}" ${model.configured ? "" : "disabled"}>Review model default change</button></article>`).join("")}`;
-}
-function settingsReview(revision, changes, draftKey = null) {
-  if (!settingsCache || settingsCache.projectId !== projectId || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("Reopen the owned settings proposal");
-  const proposal = { projectId, revision, changes, draftKey };
-  showDialog("Confirm exact project setting change", `<p>Project ${esc(projectId)}<br>Expected revision ${esc(revision)}. A conflict retains drafts and does not retry/rebase. Changes require host idle/compatibility checks. No model request, shell, publication or merge is authorized here.</p><pre>${esc(JSON.stringify(changes, null, 2))}</pre><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Save exact revision-checked change</button></form>`);
+function settingsReview(revision, changes) {
+  if (!settingsCache || settingsCache.projectId !== projectId || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("Reopen the project settings");
+  const stale = revision !== settingsCache.revision, rows = settingsDiffRows(changes, settingsCache.values);
+  const proposal = { projectId, revision, changes, draftKeys: ["name", "objective"].filter(field => field in changes).map(field => `${projectId}:${field}`) };
+  showDialog("Save these changes?", `<div class="diff-list">${rows.map(diffItem).join("")}</div>${stale ? '<p class="note-box warn">One edit was started on an older version of these settings. If they changed since, the host rejects the save and your edit is kept.</p>' : ""}<p class="note">Applies to new threads. Running threads keep their model and instructions. The project must be idle. No model request, command, publication or merge happens here.</p><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back to editing", { action: "settings-back" }), '<button type="submit" class="primary">Save changes</button>')}</form>`, `Project ${view.project.name}. Nothing is saved until you confirm.`);
   settingsConfirmation = proposal; disableActions();
+}
+
+// Model picker: the current model, then an in-flow list with Pi's scoped models first and a search over every configured model.
+const modelNorm = text => text.toLowerCase().replace(/[-_/.:@]+/g, " ");
+async function loadModelPicker() {
+  const data = await api({ action: "model-picker-snapshot" });
+  if (!data || data.networkChecked !== false || !Array.isArray(data.items) || !Array.isArray(data.scoped)) throw new Error("Invalid model list");
+  modelCache.clear();
+  for (const model of data.items) {
+    if (typeof model?.reference !== "string" || typeof model.name !== "string" || typeof model.configured !== "boolean") throw new Error("Invalid model list entry");
+    modelCache.set(model.reference, { ...model, hay: modelNorm(`${model.reference} ${model.name}`) });
+  }
+  modelScoped = data.scoped.filter(reference => modelCache.get(reference)?.configured);
+}
+function modelButton(reference, disabled = false) {
+  const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
+  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
+}
+function modelPickerHtml(role, reference, unavailable) {
+  const configured = [...modelCache.values()].filter(model => model.configured).length;
+  return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable))}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
+}
+const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
+function modelGroups(query, value) {
+  const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
+  const configured = [...modelCache.values()].filter(model => model.configured), scoped = new Set(modelScoped), cap = (models, limit, label, extra = {}) => ({ label, models: models.slice(0, limit), more: Math.max(0, models.length - limit), ...extra });
+  if (!terms.length) {
+    const current = modelCache.get(value), groups = current && !scoped.has(value) ? [{ label: "Current", models: [current], more: 0 }] : [];
+    if (!scoped.size) return [...groups, cap(configured, MODEL_ROWS, "Configured models")];
+    return [...groups, { label: "Scoped models", models: modelScoped.map(reference => modelCache.get(reference)), more: 0 }, { label: "", models: [], more: 0, hint: `Type to search all ${configured.length} configured models.` }];
+  }
+  const groups = [], inScope = modelScoped.map(reference => modelCache.get(reference)).filter(hit);
+  if (inScope.length) groups.push({ label: "Scoped models", models: inScope, more: 0 });
+  const others = configured.filter(model => !scoped.has(model.reference) && hit(model));
+  if (others.length) groups.push(cap(others, MODEL_ROWS, scoped.size ? "Other configured models" : "Configured models"));
+  const missing = [...modelCache.values()].filter(model => !model.configured && hit(model));
+  if (missing.length) groups.push(cap(missing, MODEL_UNCONFIGURED_ROWS, "No credentials configured", { disabled: true }));
+  return groups.length ? groups : [{ label: "", models: [], more: 0, hint: `No model matches “${query.trim()}”.` }];
+}
+function renderModelList(mp) {
+  const search = mp.querySelector(".mp-search"), value = mp.dataset.value;
+  let index = 0;
+  mp.querySelector(".mp-list").innerHTML = modelGroups(search.value, value).map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
+    const context = compactTokens(model.contextWindow);
+    return `<div class="mp-row" role="option" id="mp-${mp.dataset.role}-${index++}" data-ref="${esc(model.reference)}" aria-selected="${model.reference === value}"${group.disabled ? ' aria-disabled="true" title="Add credentials to use this model"' : ' data-action="mp-pick"'}><span class="mp-main"><span class="mp-name">${esc(model.name)}</span><span class="mp-ref mono">${esc(model.reference)}</span></span><span class="mp-tags">${model.reasoning ? '<span class="mp-ctx" title="Supports reasoning">reasoning</span>' : ""}${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : ""}</span></div>`;
+  }).join("")}${group.more ? `<div class="mp-more">+${group.more} more. Keep typing to narrow the list.</div>` : ""}${group.hint ? `<div class="mp-more">${esc(group.hint)}</div>` : ""}`).join("");
+  const rows = [...mp.querySelectorAll(".mp-row:not([aria-disabled])")], selected = rows.findIndex(row => row.dataset.ref === value);
+  mpSetActive(mp, search.value.trim() || selected < 0 ? 0 : selected);
+}
+function mpSetActive(mp, index) {
+  const rows = [...mp.querySelectorAll(".mp-row:not([aria-disabled])")], search = mp.querySelector(".mp-search");
+  mp.dataset.active = rows.length ? String(Math.min(Math.max(index, 0), rows.length - 1)) : "";
+  rows.forEach((row, at) => row.classList.toggle("active", String(at) === mp.dataset.active));
+  const row = rows[Number(mp.dataset.active)];
+  if (row) { search.setAttribute("aria-activedescendant", row.id); row.scrollIntoView({ block: "nearest" }); } else search.removeAttribute("aria-activedescendant");
+}
+function mpClose(mp, refocus = false) {
+  mp.classList.remove("open"); mp.querySelector(".mp-pop").hidden = true;
+  const button = mp.querySelector(".mp-current"); button.setAttribute("aria-expanded", "false");
+  if (refocus) button.focus();
+}
+function mpOpen(mp) {
+  dialog.querySelectorAll(".mp.open").forEach(other => other !== mp && mpClose(other));
+  mp.classList.add("open"); mp.querySelector(".mp-pop").hidden = false; mp.querySelector(".mp-current").setAttribute("aria-expanded", "true");
+  const search = mp.querySelector(".mp-search"); search.value = ""; renderModelList(mp); search.focus();
+  mp.querySelector(".mp-pop").scrollIntoView({ block: "nearest" });
+}
+function mpPick(mp, reference) {
+  if (!modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
+  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference);
+  mpClose(mp, true); settingsSync();
+}
+function mpKey(event, mp) {
+  const search = mp.querySelector(".mp-search");
+  if (event.target === search) {
+    const count = mp.querySelectorAll(".mp-row:not([aria-disabled])").length, active = Number(mp.dataset.active || 0);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) mpSetActive(mp, (active + (event.key === "ArrowDown" ? 1 : count - 1)) % count); return true; }
+    if (event.key === "Enter") { event.preventDefault(); const row = mp.querySelectorAll(".mp-row:not([aria-disabled])")[active]; if (row) mpPick(mp, row.dataset.ref); return true; }
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); mpClose(mp, true); return true; }
+  } else if (event.target.matches(".mp-current") && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); mpOpen(mp); return true; }
+  return false;
 }
 function captureUploadDraft() {
   const form = dialog.querySelector("[data-upload-edit]");
@@ -2627,27 +2823,34 @@ function operationLetter(record) {
 }
 async function operationsDialog(offset = 0) {
   if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("A loaded Durable plan and valid approval page are required");
-  const id = projectId, current = generation, version = showDialog("All retained approvals", '<p>Reading bound operation records…</p>');
+  const id = projectId, current = generation, version = showDialog("Approvals", '<p class="note">Reading approval requests…</p>', "Every approval request recorded for this project. Decisions are final.");
   const page = await api({ action: "operation-snapshot", id, offset, limit: 100 });
   if (!dialog.open || version !== dialogVersion || current !== generation || id !== projectId) return;
   validateOperations(page, id, offset);
   for (const record of page.items) operationCache.set(record.id, record);
-  dialog.querySelector(".dialog-body").innerHTML = `<p>Records ${offset + (page.items.length ? 1 : 0)}-${offset + page.items.length}/${page.total}. Decisions are retained, not upgraded.</p><div class="row">${offset ? `<button data-action="operation-list" data-offset="${Math.max(0, offset - 100)}">Previous records</button>` : ""}${page.nextOffset !== null ? `<button data-action="operation-list" data-offset="${page.nextOffset}">Next records</button>` : ""}</div>${page.items.map(record => `<article class="task">${badge(record.status)}<strong>${esc(record.operation.provider)} ${esc(record.operation.kind)} · ${esc(record.operation.repositoryId)}</strong><p>${esc(record.id)} · ${record.scopeCurrent ? "current scope" : "scope changed"}</p><button data-action="operation-view" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}">Inspect exact binding</button></article>`).join("")}`;
+  setDialogBody(`${page.total ? `<div class="seg-row"><span class="note">${page.total} ${page.total === 1 ? "request" : "requests"}</span>${pager({ offset, count: page.items.length, total: page.total, size: 100, data: { action: "operation-list" } })}</div>` : ""}${page.items.map(record => `<div class="list-row"><div class="grow"><strong>${badge(record.status)} ${esc(humanKey(record.operation.kind))} · ${esc(record.operation.repositoryId)}</strong><span class="meta">${esc(record.operation.provider)} · ${record.scopeCurrent ? "scope still current" : "scope has changed"}</span></div><div class="row-actions">${dlgBtn("Details", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }, "small")}</div></div>`).join("") || '<p class="empty-state">No approval requests yet.</p>'}${dlgActions(dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
+const operationFacts = record => `<div class="kv tight"><span>Action</span><b>${esc(record.operation.provider)} · ${esc(humanKey(record.operation.kind))}</b>${record.operation.repositoryId ? `<span>Repository</span><b>${esc(record.operation.repositoryId)}</b>` : ""}<span>Status</span><b>${badge(record.status)}</b><span>Scope</span><b>${record.scopeCurrent ? "Still current" : "Changed since"}</b></div>`;
+const operationBinding = record => `<details class="raw"><summary>Exact binding</summary><div class="kv tight mt"><span>Project</span><b class="mono">${esc(record.projectId)}</b><span>Request</span><b class="mono">${esc(record.id)}</b><span>Fingerprint</span><b class="mono">${esc(record.fingerprint)}</b></div><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre></details>`;
 function operationView(id, fingerprint) {
   const record = operationCache.get(id);
   if (!record || record.projectId !== projectId || record.fingerprint !== fingerprint) throw new Error("Unknown owned operation record");
-  showDialog("Exact operation binding", operationLetter(record)); disableActions();
+  const attrs = { operation: record.id, fingerprint: record.fingerprint };
+  const buttons = record.status === "pending"
+    ? `${dlgBtn("Reject", { action: "operation-decision", ...attrs, decision: "reject" })}${dlgBtn("Approve, record only", { action: "operation-decision", ...attrs, decision: "plain" })}${executionConsentAvailable(record) ? dlgBtn("Allow exact executor…", { action: "operation-decision", ...attrs, decision: "execution" }, "primary") : ""}`
+    : `${mergeExecutionAvailable(record) ? `${dlgBtn("Check what happened to the merge…", { action: "operation-inspect", ...attrs })}${dlgBtn("Merge this exact commit…", { action: "operation-execute", ...attrs }, "danger")}` : ""}`;
+  showDialog("Approval request", `${operationFacts(record)}<p class="note-box">${record.status === "pending" ? "Approving only records your decision. Letting the executor act is a separate choice. Arcadia and auto-merge are not available here." : `Your decision is final. Executable approval: ${record.executionApproved === true ? "yes" : "no"}.`}</p>${operationBinding(record)}${dlgActions(dlgBtn("Back to approvals", { action: "operation-list" }), buttons)}`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function operationDecision(id, fingerprint, mode) {
   const record = ownedOperation(id, fingerprint);
   if (record.status !== "pending" || !["plain", "execution", "reject"].includes(mode) || mode === "execution" && !executionConsentAvailable(record)) throw new Error("This immutable/deferred operation cannot accept that decision");
-  showDialog(mode === "execution" ? "Permit exact executor?" : mode === "plain" ? "Approve record only?" : "Reject permanently?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${mode === "execution" ? "This permits the exact recorded executor, including its bound effect. It does not execute it here." : "This records a decision only. It does not authorize execution or perform a remote effect."}</p><form data-operation-decision data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}" data-decision="${esc(mode)}">${mode !== "reject" ? `<input type="hidden" name="confirm" value="${esc(projectId)}">` : ""}<button type="submit" class="danger">Confirm this exact decision</button></form>`); disableActions();
+  const copy = { execution: ["Allow this exact executor?", "Allow executor", "Lets the recorded executor act, including its bound effect. Nothing runs from this dialog."], plain: ["Approve, record only?", "Approve", "Records your decision. It does not allow execution or any remote effect."], reject: ["Reject this request?", "Reject request", "Records a rejection. This cannot be undone."] }[mode];
+  showDialog(copy[0], `${operationFacts(record)}<p class="note-box${mode === "execution" ? " warn" : ""}">${esc(copy[2])}</p>${operationBinding(record)}<form data-operation-decision data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}" data-decision="${esc(mode)}">${mode !== "reject" ? `<input type="hidden" name="confirm" value="${esc(projectId)}">` : ""}${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${mode === "plain" ? "" : " danger"}">${copy[1]}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function operationExecution(id, fingerprint, inspect = false) {
   const record = ownedOperation(id, fingerprint);
   if (!mergeExecutionAvailable(record)) throw new Error("Only a separately executable exact-head GitHub merge can run here");
-  showDialog(inspect ? "Inspect this original merge outcome?" : "Execute this exact-head merge?", `<pre>${esc(JSON.stringify(record, null, 2))}</pre><p>${inspect ? "Read the original bound outcome. Positive matching evidence may settle its journal; missing evidence remains uncertain. This does not merge, replay or grant another attempt." : "This can change the remote repository. The executor rechecks repository/scope/head. Uncertain effects are not replayed automatically."} No command, deployment, Arc or auto-merge execution through this control.</p><form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit" class="danger">${inspect ? "Inspect original outcome only" : "Execute bound merge"}</button></form>`); disableActions();
+  showDialog(inspect ? "Check what happened to this merge?" : "Merge this exact commit?", `${operationFacts(record)}<p class="note-box${inspect ? "" : " warn"}">${inspect ? "Reads the original merge outcome. Matching evidence can settle the record; if none is found it stays unknown. This does not merge or allow another attempt." : "This changes the remote repository. The executor rechecks repository, scope and commit first, and an unknown outcome is never retried automatically."}</p><p class="note">No command, deployment, Arcadia or auto-merge runs from here.</p>${operationBinding(record)}<form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${inspect ? "" : " danger"}">${inspect ? "Check outcome" : "Merge now"}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function uuid(value) { return typeof value === "string" && /^[a-f0-9-]{36}$/.test(value); }
 function requireProject(id) { if (id !== projectId) throw new Error("Selected project changed. Reopen the intended control."); }

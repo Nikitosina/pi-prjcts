@@ -28,7 +28,7 @@ import { arcQuickPreview, authorizeArcQuick, rebindArc } from "./arc-authorizati
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
-import { projectModelCatalog, validateProjectModelChanges } from "./project-models.ts";
+import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
@@ -233,6 +233,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return loadProject(project.id);
     }
     case "models-snapshot": return projectModelCatalog(input);
+    case "model-picker-snapshot": return projectModelPicker();
     case "usage-snapshot": return (await durable(input.id)).usageSnapshot(input);
     case "library-import": return withProjectLock(input.id, async () => {
       const project = loadProject(input.id);
