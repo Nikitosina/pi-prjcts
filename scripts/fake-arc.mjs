@@ -45,7 +45,7 @@ if (command === "log") {
   const revs = rest.filter((value, at) => !value.startsWith("-") && rest[at - 1] !== "-n" && rest[at - 1] !== "--max-count");
   const rev = revs[0] ?? "HEAD", resolved = rev === "trunk" ? "trunk" : rev.startsWith("users/") ? `refs/server/${rev}` : rev;
   if (s.trunkBroken && rev === "trunk") fail("trunk is unreachable");
-  const text = tryGit("log", `-n${n}`, "--format=%H %s", resolved);
+  const text = rev.startsWith("users/") ? (() => { try { return execFileSync("/usr/bin/git", ["--git-dir", join(dir, "server.git"), "log", `-n${n}`, "--format=%H %s", `refs/heads/${rev}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return null; } })() : tryGit("log", `-n${n}`, "--format=%H %s", resolved);
   if (text === null) fail(`unknown revision ${rev}`);
   out(text);
 }

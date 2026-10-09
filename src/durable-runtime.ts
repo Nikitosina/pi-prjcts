@@ -369,7 +369,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     stopCommands = () => commands.close();
     const binder = durableWorkspaceBinding({ project, configuredSkillLoader: input.configuredSkillLoader, projectStanding: standing, commands, commandApprovals: () => approvals, isClosed: () => closed, conversation: () => { if (!rootReference) throw new Error("Durable root is unavailable for workspace allocation"); return rootReference; }, controlRoot: dir });
     const prepareWorkerEnvironment = binder === undefined ? undefined : async (request: Readonly<{ conversationId: number; workId: string; threadId: string; role: "worker" | "scout" | "reviewer"; workspaceScopeId: string }>) => { const environment = await binder(request); await input.testAfterWorkerPreparation?.({ conversationId: request.conversationId, workId: request.workId, threadId: request.threadId, cwd: environment.cwd, bindingRevision: environment.bindingRevision }); return environment; };
-    const heads = readHeads(project.cwd, dir);
+    const heads = readHeads(project.cwd, dir, { projectId: project.id, project: () => loadProject(project.id) });
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
       const target = await planning.readTarget(api, context);
       if (!target) return undefined;

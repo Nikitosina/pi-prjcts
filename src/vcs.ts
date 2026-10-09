@@ -21,6 +21,8 @@ export function findVcsRoot(cwd: string): { kind: "git" | "arc"; root: string } 
   }
 }
 
+/** `arc-wt config` as key/value pairs (worktrees_base_path, object_store_path, default_repo, ...). */
+export const arcWtConfig = (cwd?: string): Record<string, string> => Object.fromEntries(run(cli.arcWt(), ["config"], cwd ?? process.cwd()).split("\n").flatMap(line => { const match = /^([a-z_]+):\s*(.+)$/.exec(line); return match ? [[match[1], match[2].trim()]] : []; }));
 export type ArcFacts = { root: string; subpath: string; repository: string; login: string; branch: string; trunkHead: string; dirty: boolean; worktreesBase: string; objectStore: string };
 const run = (file: string, args: string[], cwd: string) => execFileSync(file, args, { cwd, encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
 const home = (path: string) => resolve(path.replace(/^~(?=$|\/)/, process.env.HOME ?? ""));
@@ -34,7 +36,7 @@ export function arcFacts(cwd: string, walkedRoot: string): { ok: true; facts: Ar
     if (root !== walkedRoot) throw new Error(`arc reports root ${root}, not ${walkedRoot}`);
     const info = step("arc info", () => JSON.parse(run(cli.arc(), ["info", "--json"], root)) as { repository?: unknown; user_login?: unknown; branch?: unknown });
     if (typeof info.repository !== "string" || !info.repository) throw new Error("arc info did not name the repository");
-    const config = Object.fromEntries(step("arc-wt config", () => run(cli.arcWt(), ["config"], root)).split("\n").flatMap(line => { const match = /^([a-z_]+):\s*(.+)$/.exec(line); return match ? [[match[1], match[2].trim()]] : []; }));
+    const config = step("arc-wt config", () => arcWtConfig(root));
     if (!config.object_store_path || config.object_store_path === "null") throw new Error("arc-wt config has no object_store_path (shared object store)");
     if (!config.worktrees_base_path || config.worktrees_base_path === "null") throw new Error("arc-wt config has no worktrees_base_path");
     const worktreesBase = home(config.worktrees_base_path), objectStore = home(config.object_store_path);
