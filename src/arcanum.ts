@@ -3,7 +3,9 @@ import { cli } from "./vcs.ts";
 
 /** Failure of the Arcanum client: its closed error code, and whether the caller may retry later (exit 75, rate limited). */
 export class ArcanumError extends Error {
-  constructor(message: string, readonly code: string, readonly rateLimited = false) { super(message); }
+  readonly code: string;
+  readonly rateLimited: boolean;
+  constructor(message: string, code: string, rateLimited = false) { super(message); this.code = code; this.rateLimited = rateLimited; }
 }
 
 /** `ya tool arcanum <args> --json`: the typed payload, or an ArcanumError carrying the envelope's code. Reads and writes alike; callers decide. */

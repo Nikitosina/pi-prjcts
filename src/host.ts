@@ -476,6 +476,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "command-intents-snapshot": return (await durable(input.id)).commandIntentsSnapshot(input);
     case "github-read-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.githubReadSnapshot(input) });
     case "github-write-inspect": return (await durable(input.id)).githubWriteInspect(input);
+    case "arc-write-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.arcWriteSnapshot(input) });
     case "github-write-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.githubWriteSnapshot(input) });
     case "operation-execute": return (await durable(input.id)).operationExecute(input);
     case "operation-inspect": return (await durable(input.id)).operationInspect(input);

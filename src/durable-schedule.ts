@@ -3,6 +3,7 @@ import { defineDoc, type Conversation, type Tx } from "@earendil-works/pi-durabl
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DurablePlanning } from "./durable-planning.ts";
 import { hasUncertainGithubWrites } from "./github-worker.ts";
+import { hasUncertainArcWrites } from "./arc-worker.ts";
 import { hasUncertainGithubOperations } from "./github-operations.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
@@ -36,7 +37,7 @@ export const DurableSchedule = defineDoc<ScheduleState>({ kind: "projects.durabl
 class AdmissionMutex { private tail = Promise.resolve(); async run<T>(operation: () => Promise<T>): Promise<T> { const previous = this.tail; let release!: () => void; this.tail = new Promise<void>(resolve => { release = resolve; }); await previous; try { return await operation(); } finally { release(); } } }
 export function scheduleRuntime(root: Conversation, projectId: string, isClosed: () => boolean, hooks: { afterScheduleIntentRecorded?: (value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>) => Promise<void>; beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void> } = {}) {
   const mutex = new AdmissionMutex();
-  const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> => await hasUncertainGithubWrites(tx, root.id) || await hasUncertainGithubOperations(tx, root.id) ? "uncertain-provider-write" : await hasUncertainCommands(tx, root.id) ? "uncertain-command" : null;
+  const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> => await hasUncertainGithubWrites(tx, root.id) || await hasUncertainArcWrites(tx, root.id) || await hasUncertainGithubOperations(tx, root.id) ? "uncertain-provider-write" : await hasUncertainCommands(tx, root.id) ? "uncertain-command" : null;
   const uncertainEffects = async (tx: Tx) => await automaticBlocker(tx) !== null;
   const snapshot = (options: { includeHistory?: boolean } = {}): Promise<DurableScheduleSnapshot> => root.commit(async tx => snapshotCopy(await tx.doc(DurableSchedule, root.id), await automaticBlocker(tx), options.includeHistory ?? true), BACKGROUND_CONTEXT);
   const history = (kind: "events" | "intents", options: ScheduleHistoryOptions = {}): Promise<ScheduleHistoryPage> => {

@@ -48,6 +48,7 @@ import { searchKnowledge } from "./knowledge-search.ts";
 import { UPLOAD_IMAGE_INLINE_BYTES, listUploads, uploadBytes, uploadText } from "./uploads.ts";
 import { durableDecisions } from "./durable-decisions.ts";
 import { operationApprovals, type OperationApprovals } from "./operation-approvals.ts";
+import { arcWriteSnapshot } from "./arc-worker.ts";
 import { githubReadSnapshot, githubWriteSnapshot, githubWriteInspector, type GithubWriteInspectionInput } from "./github-worker.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -202,6 +203,7 @@ export type DurableProjectRuntime = {
   githubReadSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof githubReadSnapshot>;
   githubWriteInspect(input: GithubWriteInspectionInput): ReturnType<ReturnType<typeof githubWriteInspector>["inspect"]>;
   githubWriteSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof githubWriteSnapshot>;
+  arcWriteSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof arcWriteSnapshot>;
   /** Coordinator's in-flight generation, pushed on every Durable commit (partials land at most every 100 ms). */
   watchLive(onFrame: (frame: DurableLiveFrame) => void, onEnd: () => void, chatId?: string): Promise<() => void>;
   close(): Promise<void>;
@@ -732,6 +734,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       },
       githubReadSnapshot: options => githubReadSnapshot(root, options),
       githubWriteSnapshot: options => githubWriteSnapshot(root, options),
+      arcWriteSnapshot: options => arcWriteSnapshot(root, options),
       githubWriteInspect: value => { assertOpen(); return writeInspector.inspect(value); },
       snapshot: async id => { const selected = await resolveChat(id); return snapshot(openedHarness, openedStorage, root, selected.conversation, selected.chat.id, await chatList(), project, await planning.threadIdentities(root), { window: models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null, catalogWindow: catalogWindow() }); },
       threadHistory: async (id, options = {}) => {
