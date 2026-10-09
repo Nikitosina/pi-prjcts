@@ -1,14 +1,12 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promisify } from "node:util";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { DurablePlanning } from "./durable-planning.ts";
+import { changedFiles } from "./vcs.ts";
 import type { DurablePlanSnapshot, DurablePlanWorkSnapshot } from "./durable-plan-types.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { scheduleRuntime } from "./durable-schedule.ts";
 
-const run = promisify(execFile);
 /**
  * Durable watchdog clock on the root conversation. `armedAtMs` is set when workers start running (and cleared when none run), so an idle
  * project never ticks; a check is due at max(armedAtMs, lastTickAtMs) + everyMs, which survives restarts. `seq` makes each check's event ID
@@ -68,7 +66,8 @@ export async function workerDigest(work: DurablePlanWorkSnapshot, entries: reado
   const cwd = work.attempt?.cwd;
   if (cwd && work.role === "worker") {
     try {
-      const status = (await run("/usr/bin/git", ["-C", cwd, "status", "--porcelain", "--untracked-files=normal"], { timeout: 5000, maxBuffer: 1048576, encoding: "utf8" })).stdout.split("\n").filter(Boolean);
+      const status = await changedFiles(cwd);
+      if (!status) throw new Error("status unreadable");
       files = status.length ? `${status.length} (${status.slice(0, 6).map(line => clip(line, 80)).join(", ")}${status.length > 6 ? ", …" : ""})` : "none uncommitted";
     } catch { files = "unknown (worktree unreadable)"; }
   } else if (work.role !== "worker") files = "n/a (read-only role)";

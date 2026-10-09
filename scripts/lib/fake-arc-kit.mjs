@@ -29,12 +29,13 @@ export function fakeArcadia(root, { login = 'e2euser' } = {}) {
   writeFileSync(join(dir, 'state.json'), JSON.stringify({ login, repository: 'arcadia' }, null, 2));
   writeFileSync(join(dir, 'wt.json'), JSON.stringify({ config, entries: [], tick: 0 }, null, 2));
   writeFileSync(join(dir, 'calls.jsonl'), '');
+  git(dir, 'init', '--bare', '-q', join(dir, 'server.git'));
   const wrap = (name, script) => { const path = join(bin, name); writeFileSync(path, `#!/bin/sh\nFAKE_ARC_DIR='${dir}' exec '${process.execPath}' '${join(scripts, script)}' "$@"\n`); chmodSync(path, 0o755); return path; };
   const arc = wrap('arc', 'fake-arc.mjs'), arcWt = wrap('arc-wt', 'fake-arc-wt.mjs');
   const arcanum = existsSync(join(scripts, 'fake-arcanum.mjs')) ? wrap('arcanum-go', 'fake-arcanum.mjs') : null;
   const calls = () => readFileSync(join(dir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   return {
-    dir, bin, arcadia, subdir: join(arcadia, SUBPATH), wtBase, stores, objects, login, trunkHead, featureHead: git(arcadia, 'rev-parse', 'HEAD'), git, calls,
+    dir, bin, arcadia, serverRefs: () => execFileSync('/usr/bin/git', ['--git-dir', join(dir, 'server.git'), 'for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads/'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => line.split(' ')), subdir: join(arcadia, SUBPATH), wtBase, stores, objects, login, trunkHead, featureHead: git(arcadia, 'rev-parse', 'HEAD'), git, calls,
     wt: () => JSON.parse(readFileSync(join(dir, 'wt.json'), 'utf8')),
     // Environment seams for the host (and the PATH worker shells see): the fakes shadow any real arc.
     env: { PI_PROJECTS_ARC_CLI: arc, PI_PROJECTS_ARC_WT_CLI: arcWt, ...(arcanum ? { PI_PROJECTS_ARCANUM_CLI: arcanum } : {}), PATH: `${bin}:${process.env.PATH}` },

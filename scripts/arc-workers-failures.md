@@ -1,0 +1,17 @@
+# Arc projects, slice S2 (workers on arc-wt worktrees): failure cases (written before code)
+
+Scope: whole-repository workers of an Arc project run in leased arc-wt worktrees; naming from ticket/thread; base = trunk; cwd = worktree + project folder; standing from the project folder; Arc shell guard; lease renewal; watchdog digest via `arc status`. Fakes only (`fake-arc`, `fake-arc-wt`). E2E: `scripts/arc-workers-e2e.mjs`.
+
+1. Real Arcadia/arc-wt touched: asserted by the fake call log (every arc cwd and path argument under the temp root, no `--force`); the worker shell must resolve `arc` to the fake (`which arc`).
+2. Branch/worktree name: ticket key in the task gives `KEYBOARD-15934-<slug>` (slug from the first line, lowercase `[a-z0-9-]`, at most 40 chars), no ticket gives `pi-<8 hex of thread>-<slug>`; never prefixed with `users/` (arc adds it: doubled prefix on push); a name clash with another worktree/branch gets `-2`, `-3`; a failing listing must not be guessed around; the name is frozen with the receipt (follow-ups and restarts reuse it, no second `arc-wt add`).
+3. Base: new workers start from the trunk head, not the owner's checked-out feature branch, and keep their base on later dispatches.
+4. cwd: the worker's tools and shell run in `<worktree>/<subpath>` (not the worktree root, not the owner mount); a missing subpath in the worktree is an error; the setup command runs there with `PI_WORKTREE` = worktree root.
+5. Standing: the project folder's AGENTS.md reaches the worker prompt; the Arc root (no AGENTS.md) is never the standing root; a changed AGENTS.md freezes/blocks like git.
+6. Lease: owner `pi-projects:<projectId>`, reason names the project and thread; renewed on every dispatch/follow-up and while tools run (throttled); a lease that cannot be renewed (released, taken by someone else) blocks the dispatch with a clear message and stops further tools; foreign leases are never adopted; no `--force`.
+7. Shell guard (best effort): `git`, `gh`, any `arc-wt` except list/config, `arc submit`, mount/unmount, `arc pr merge|publish|discard`, `arc pr create` without `--publish=disabled`, `arcanum ... merge|publish|auto-merge`, `arc branch -d`, `arc push` with `-d`, `-u`, `--all`, to a non-project ref, or from a checked-out branch that is not one of the project's; `arc checkout -b`, checking out a non-project branch. Blocked commands never reach the fake (call log), the message tells the worker what to do, and the whole chained command is blocked.
+8. Allowed: `arc status/log/add/commit/diff/show`, bare `arc push` and `arc push -f` on the worker's own branch; the server ref is `users/<login>/<branch>` exactly once, pointing at the worktree HEAD.
+9. Other owner branches under `users/<login>/` are never pushed to (prefix is not ownership): only branches of this project's receipts.
+10. Restart: after a host restart a follow-up continues the same worktree and branch (receipt reuse), renews the lease, and does not allocate again.
+11. Watchdog: the digest's "files changed" uses `arc status --short` for an Arc worktree (git status would say "unreadable"), still git for git worktrees.
+12. GitHub projects unchanged: git binding, `pi/` branches, git guard, GitHub instructions (regression suites).
+13. Not covered by this slice (noted): lease loss in the middle of a long tool call without further tool calls; explicit `ticket` parameter on `projects_delegate` (host extraction only); PR creation (S3).

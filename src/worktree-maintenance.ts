@@ -33,12 +33,13 @@ export type SetupRecord = { command: string; workspacePath: string; exitCode: nu
 const setupFile = (controlRoot: string, intentId: string) => join(controlRoot, "worktree-setup", `${intentId}.json`);
 export function setupRecord(controlRoot: string, intentId: string): SetupRecord | null { try { return JSON.parse(readFileSync(setupFile(controlRoot, intentId), "utf8")) as SetupRecord; } catch { return null; } }
 /** Runs the project's setup command once per allocated worktree; the result is recorded and returned as worker instruction text. */
-export async function worktreeSetup(input: { command: string | undefined; controlRoot: string; intentId: string; workspacePath: string }): Promise<string> {
+/** `cwd` (default: the worktree root) is where the command runs; PI_WORKTREE is always the root. */
+export async function worktreeSetup(input: { command: string | undefined; controlRoot: string; intentId: string; workspacePath: string; cwd?: string }): Promise<string> {
   const command = input.command?.trim();
   let record = setupRecord(input.controlRoot, input.intentId);
   if (!record && command) {
     const startedAt = Date.now();
-    const result = await run("/bin/sh", ["-c", command], { cwd: input.workspacePath, env: { ...process.env, PI_WORKTREE: input.workspacePath }, timeoutMs: Number(process.env.PI_PROJECTS_SETUP_TIMEOUT_MS) || 900_000 });
+    const result = await run("/bin/sh", ["-c", command], { cwd: input.cwd ?? input.workspacePath, env: { ...process.env, PI_WORKTREE: input.workspacePath }, timeoutMs: Number(process.env.PI_PROJECTS_SETUP_TIMEOUT_MS) || 900_000 });
     record = { command, workspacePath: input.workspacePath, exitCode: result.code, ok: result.code === 0, output: `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.trim().slice(-4000), startedAt, endedAt: Date.now() };
     mkdirSync(join(input.controlRoot, "worktree-setup"), { recursive: true, mode: 0o700 });
     writeFileSync(setupFile(input.controlRoot, input.intentId), JSON.stringify(record, null, 2), { mode: 0o600 });

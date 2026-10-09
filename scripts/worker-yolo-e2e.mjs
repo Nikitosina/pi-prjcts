@@ -54,7 +54,7 @@ try {
   assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(repo, "rev-parse", "HEAD"));
   pass("push to the pi/* branch succeeds against the local bare remote", git(remote, "rev-parse", `refs/heads/${branch}`));
   const source = readFileSync(new URL("../src/durable-workspace-binding.ts", import.meta.url), "utf8");
-  assert.match(source, /createCodingTools\(receipt\.workspacePath/);
+  assert.match(source, /createCodingTools\(workDir/);
   assert.doesNotMatch(source, /configuredSkillInstructions|skillBinding/);
   assert.match(source, /const builtins: ToolRegistration\[\] = codingTools\.map/);
   pass("F1/F7 whole-scope built-ins are bound in the worktree; skills come from role profiles (index + projects_skill_file), not a full listing", true);

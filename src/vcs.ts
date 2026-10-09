@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -8,6 +8,8 @@ export const cli = {
   git: () => "/usr/bin/git",
   arc: () => process.env.PI_PROJECTS_ARC_CLI || "/opt/homebrew/bin/arc",
   arcWt: () => process.env.PI_PROJECTS_ARC_WT_CLI || "/usr/local/bin/arc-wt",
+  /** Argv prefix of the Arcanum client (`ya tool arcanum`); the test seam is a single fake executable. */
+  arcanum: (): string[] => process.env.PI_PROJECTS_ARCANUM_CLI ? [process.env.PI_PROJECTS_ARCANUM_CLI] : ["/usr/local/bin/ya", "tool", "arcanum"],
 };
 
 /** Nearest directory above `cwd` that is a checkout root. `.arc` wins over `.git` in the same directory; a git repository nested in an Arc mount is git. */
@@ -39,9 +41,32 @@ export function arcFacts(cwd: string, walkedRoot: string): { ok: true; facts: Ar
     if (!isAbsolute(worktreesBase) || inside(root, worktreesBase) || inside(worktreesBase, root)) throw new Error(`The arc-wt worktree folder ${worktreesBase} must be outside the Arc checkout ${root}`);
     if (!existsSync(objectStore)) throw new Error(`The arc-wt object store ${objectStore} does not exist`);
     // Trunk, not the owner's current branch: new workers start from trunk.
-    const trunkLine = step("arc log trunk", () => run(cli.arc(), ["log", "-n", "1", "--oneline", "--no-decorate", "trunk"], root)).split(/\s+/)[0] ?? "";
-    if (!/^[0-9a-f]{40,64}$/.test(trunkLine)) throw new Error("Could not read the trunk head with arc log (is trunk reachable?)");
+    const trunkLine = step("arc log trunk", () => arcTrunkHead(root));
     const dirty = step("arc status", () => run(cli.arc(), ["status", "--short", "."], cwd)).length > 0;
     return { ok: true, facts: { root, subpath: relative(root, realpathSync(cwd)), repository: info.repository, login: typeof info.user_login === "string" && info.user_login ? info.user_login : userInfo().username, branch: typeof info.branch === "string" ? info.branch : "", trunkHead: trunkLine, dirty, worktreesBase: existsSync(worktreesBase) ? realpathSync(worktreesBase) : worktreesBase, objectStore: realpathSync(objectStore) } };
   } catch (error) { return { ok: false, blocker: error instanceof Error ? error.message : String(error) }; }
+}
+
+export type CliResult = { code: number; stdout: string; stderr: string };
+/** Runs a VCS binary without throwing; the exit code is data. */
+export function runCli(file: string, args: string[], cwd?: string): Promise<CliResult> {
+  return new Promise(done => execFile(file, args, { cwd, encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr })));
+}
+/** Trunk head of an Arc checkout. */
+export const arcTrunkHead = (root: string): string => { const head = run(cli.arc(), ["log", "-n", "1", "--oneline", "--no-decorate", "trunk"], root).split(/\s+/)[0] ?? ""; if (!/^[0-9a-f]{40,64}$/.test(head)) throw new Error("Could not read the trunk head with arc log"); return head; };
+/** Uncommitted paths of a worktree (git or Arc, by what is found above it); null when the status cannot be read. */
+export async function changedFiles(cwd: string): Promise<string[] | null> {
+  const found = findVcsRoot(cwd);
+  const result = found?.kind === "arc" ? await runCli(cli.arc(), ["status", "--short"], cwd) : await runCli(cli.git(), ["-C", cwd, "status", "--porcelain", "--untracked-files=normal"]);
+  return result.code === 0 ? result.stdout.split("\n").filter(Boolean) : null;
+}
+
+/** Names already used by arc-wt entries and arc branches (local and fetched server branches, with and without users/<login>/). Throws when either listing fails: a clash must not be guessed around. */
+export async function arcTakenNames(root: string): Promise<Set<string>> {
+  const [worktrees, branches] = await Promise.all([runCli(cli.arcWt(), ["list", "--porcelain"]), runCli(cli.arc(), ["branch", "--list", "--all"], root)]);
+  if (worktrees.code || branches.code) throw new Error(`Could not list existing Arc worktrees and branches: ${(worktrees.stderr || branches.stderr).trim().slice(-300)}`);
+  const taken = new Set<string>();
+  for (const line of worktrees.stdout.split("\n")) { const match = /^(?:name|branch) (.+)$/.exec(line); if (match) taken.add(match[1]); }
+  for (const line of branches.stdout.split("\n")) { const name = line.replace(/^[*\s]+/, "").split(/\s+/)[0]; if (name) { taken.add(name); taken.add(name.replace(/^users\/[^/]+\//, "")); } }
+  return taken;
 }

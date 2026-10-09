@@ -46,4 +46,29 @@ if (command === "log") {
   if (text === null) fail(`unknown revision ${rev}`);
   out(text);
 }
+const author = ["-c", `user.name=${s.login}`, "-c", `user.email=${s.login}@example.invalid`];
+const bare = join(dir, "server.git");
+const positional = (list = rest) => list.filter((value, at) => !value.startsWith("-") && !["-m", "-F", "-n", "--max-count", "-u"].includes(list[at - 1]));
+if (command === "add") { git("add", ...(rest.length ? rest : ["-A"])); out(""); }
+if (command === "commit") { const message = flag("-m") ?? fail("commit needs -m"); git(...author, "commit", "-q", ...(has("-a") ? ["-a"] : []), "-m", message); out(git("rev-parse", "HEAD")); }
+if (command === "checkout" || command === "switch") {
+  if (has("-b")) { git("checkout", "-q", "-b", flag("-b")); out(`switched to new branch ${flag("-b")}`); }
+  const target = positional()[0] ?? fail("checkout needs a target");
+  git("checkout", "-q", target.replace(/^users\/[^/]+\//, "")); out(`switched to ${target}`);
+}
+if (command === "pull" || command === "rebase" || command === "fetch") out("Already up to date.");
+if (command === "branch") {
+  const local = git("branch", "--format=%(refname:short)").split("\n").filter(Boolean);
+  const remote = has("--all") || has("-a") ? (tryGit("--git-dir", bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/") ?? "") : "";
+  out([...local, ...(remote ? remote.split("\n") : [])].join("\n"));
+}
+if (command === "show") out(git("show", ...rest));
+if (command === "diff") out(git("diff", ...rest));
+// Server side: the remote name is users/<login>/<local>; a prefixed local name doubles it (the real double-prefix gotcha).
+if (command === "push") {
+  const current = branch() || fail("detached HEAD cannot be pushed"), name = positional()[0] ?? flag("-u") ?? current, remote = server(name);
+  if (has("-d") || has("--delete")) { execFileSync("/usr/bin/git", ["--git-dir", bare, "update-ref", "-d", `refs/heads/${remote}`]); out(`deleted ${remote}`); }
+  execFileSync("/usr/bin/git", ["-C", root, "push", ...(has("-f") || has("--force") ? ["--force"] : []), bare, `${current}:refs/heads/${remote}`], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });
+  out(`pushed ${current} -> ${remote}`);
+}
 fail(`unsupported fake command: ${args.join(" ")}`, 2);
