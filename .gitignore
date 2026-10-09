@@ -15,6 +15,7 @@ artifacts/
 !src/workspace-authorization.ts
 !src/github-authorization.ts
 !src/arc-authorization.ts
+!src/provider-extensions.ts
 
 # Local state and runtime output
 state/

@@ -1,8 +1,9 @@
-import { ModelRuntime, SettingsManager, getAgentDir, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, getAgentDir, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
+import { createModelRuntime, providerExtensionStatus } from "./provider-extensions.ts";
 import type { Request } from "./state.ts";
 
 type Changes = Extract<Request, { action: "settings-update" }>["changes"];
-const openRegistry = () => ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
+const openRegistry = () => createModelRuntime();
 
 export async function projectModelCatalog(options: { provider?: string; offset?: number; limit?: number }) {
   const offset = options.offset ?? 0, limit = options.limit ?? 100;
@@ -22,7 +23,7 @@ export async function projectModelPicker() {
     const patterns = SettingsManager.create(process.cwd(), getAgentDir()).getEnabledModels() ?? [];
     if (patterns.length) scoped = (await resolveModelScopeWithDiagnostics(patterns, registry)).scopedModels.map(entry => `${entry.model.provider}/${entry.model.id}`);
   } catch { scoped = []; }
-  return { items, scoped: [...new Set(scoped)], networkChecked: false };
+  return { items, scoped: [...new Set(scoped)], networkChecked: false, extensionErrors: (await providerExtensionStatus()).errors };
 }
 export async function validateProjectModelChanges(changes: Changes): Promise<void> {
   const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => value !== undefined);
@@ -32,6 +33,9 @@ export async function validateProjectModelChanges(changes: Changes): Promise<voi
     const slash = reference.indexOf("/");
     if (slash < 1 || slash === reference.length - 1) throw new Error("Model settings require a provider/model reference");
     const provider = reference.slice(0, slash), id = reference.slice(slash + 1);
-    if (!registry.getModel(provider, id) || !registry.getProviderAuthStatus(provider).configured) throw new Error(`Model settings require an installed model with configured credentials: ${reference}`);
+    if (!registry.getModel(provider, id) || !registry.getProviderAuthStatus(provider).configured) {
+      const broken = (await providerExtensionStatus()).errors;
+      throw new Error(`Model settings require an installed model with configured credentials: ${reference}${broken.length ? ` (provider extensions failed to load: ${broken.map(item => item.extension).join(", ")})` : ""}`);
+    }
   }
 }

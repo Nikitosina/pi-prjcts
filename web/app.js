@@ -2446,7 +2446,7 @@ const settingsAccess = {
   libraryAccess: ["Uploaded files and evidence", "Whether the coordinator may open the project library.", [["none", "Coordinator cannot open them"], ["coordinator", "Coordinator can open them"]]],
   decisionAccess: ["Questions for you", "Whether the coordinator may ask you to decide something.", [["none", "Coordinator cannot ask"], ["coordinator", "Coordinator can ask"]]],
 };
-let settingsPending = null, modelScoped = [];
+let settingsPending = null, modelScoped = [], modelExtensionErrors = [];
 const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker, scout: values.models.scout, reviewer: values.models.reviewer, knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
   const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
@@ -2546,6 +2546,7 @@ async function loadModelPicker() {
     modelCache.set(model.reference, { ...model, hay: modelNorm(`${model.reference} ${model.name}`) });
   }
   modelScoped = data.scoped.filter(reference => modelCache.get(reference)?.configured);
+  modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
 function modelButton(reference, disabled = false) {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
@@ -2575,7 +2576,7 @@ function modelGroups(query, value) {
 function renderModelList(mp) {
   const search = mp.querySelector(".mp-search"), value = mp.dataset.value;
   let index = 0;
-  mp.querySelector(".mp-list").innerHTML = modelGroups(search.value, value).map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
+  mp.querySelector(".mp-list").innerHTML = [...modelGroups(search.value, value), ...modelExtensionErrors.map(item => ({ label: "", models: [], more: 0, hint: `${item.extension} failed to load: ${item.error}` }))].map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
     const context = compactTokens(model.contextWindow);
     return `<div class="mp-row" role="option" id="mp-${mp.dataset.role}-${index++}" data-ref="${esc(model.reference)}" aria-selected="${model.reference === value}"${group.disabled ? ' aria-disabled="true" title="Add credentials to use this model"' : ' data-action="mp-pick"'}><span class="mp-main"><span class="mp-name">${esc(model.name)}</span><span class="mp-ref mono">${esc(model.reference)}</span></span><span class="mp-tags">${model.reasoning ? '<span class="mp-ctx" title="Supports reasoning">reasoning</span>' : ""}${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : ""}</span></div>`;
   }).join("")}${group.more ? `<div class="mp-more">+${group.more} more. Keep typing to narrow the list.</div>` : ""}${group.hint ? `<div class="mp-more">${esc(group.hint)}</div>` : ""}`).join("");

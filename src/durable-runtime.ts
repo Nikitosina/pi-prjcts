@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join, parse as parsePath, resolve } from "node:path";
-import { ModelRuntime, calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
+import { type ModelRuntime, calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { Context as ModelRequest, Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   AssistantEntry, GenerationTask, Harness, ToolTask, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
   type Conversation, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
 } from "@earendil-works/pi-durable";
+import { createModelRuntime } from "./provider-extensions.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
@@ -287,7 +288,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     catch (error) { throw new Error("Durable project storage is already owned by another process", { cause: error }); }
 
     await ensureKnowledge(dir);
-    const models = await ModelRuntime.create({ allowModelNetwork: false });
+    const models = await createModelRuntime();
     const dispatch = models.streamSimple.bind(models);
     models.streamSimple = (model, request, options) => {
       // Fail closed until reconciliation/guard installation has completed; hooks only observe.

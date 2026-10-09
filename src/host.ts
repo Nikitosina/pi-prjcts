@@ -28,6 +28,7 @@ import { arcQuickPreview, authorizeArcQuick, rebindArc } from "./arc-authorizati
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
+import { loadProviderExtensions } from "./provider-extensions.ts";
 import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
@@ -715,6 +716,7 @@ const server = createServer(async (request, response) => {
 server.requestTimeout = 120000;
 server.listen(socketPath(), () => {
   if (closing) return;
+  void loadProviderExtensions().then(({ status }) => process.stderr.write(JSON.stringify({ event: "provider-extensions", loaded: status.loaded, providers: status.providers, errors: status.errors }) + "\n"));
   chmodSync(socketPath(), 0o600);
   process.stderr.write(JSON.stringify({ event: "projects-host-started", pid: process.pid, socket: socketPath() }) + "\n");
   for (const id of legacyProjectIds()) process.stderr.write(JSON.stringify({ event: "legacy-project-refused", project: id, reason: "removed legacy runtime; not listed or opened" }) + "\n");

@@ -189,3 +189,15 @@ E2E scripts (`scripts/*-e2e.mjs`, run with `env -u PI_PACKAGE_DIR node scripts/<
 Each run creates an isolated disposable workspace and project store under `artifacts/<timestamp>/`. `report.json`, `assertions.json`, worker inspection reports, and generated verification files are repeatable evidence. See `VERIFY.md` for the failure cases.
 
 For an owner-authorized disposable review home only, uninstall by removing `./projects-mvp` from that review Pi package list and reloading its client; stop only that disposable host. Keep its state directory if you want to retain review history. Do not apply these instructions to production without explicit approval.
+
+## Model providers from Pi packages/extensions
+
+The host loads model providers contributed by the owner's Pi packages (settings `packages`) and agent-dir `extensions/` (never project-local `.pi/extensions`, never this repo). See `src/provider-extensions.ts`.
+
+- Loaded once at host start, each extension entry isolated (own runtime, timeout `PI_PROJECTS_EXTENSION_TIMEOUT_MS`, default 15000). Nothing is installed or downloaded. Restart the host to pick up extension changes.
+- Only provider, native-provider and virtual-model registrations are kept. Tools, commands, flags, shortcuts, event handlers and UI hooks an extension registers are discarded and never reach project agents. The extension's module and factory code does run in the host process (as in Pi); handlers such as `session_start` never fire, so providers that need lazy init from events or UI/OAuth login flows are not supported (stored credentials in `auth.json` are).
+- A failing extension is recorded (`extensionErrors` in `model-picker-snapshot`, shown at the bottom of the picker list, logged as `provider-extensions` at start); the host and other extensions continue. Models of a failed extension are unavailable.
+- One factory (`createModelRuntime`) builds every model runtime: the picker, settings validation and each project's running sessions. It registers extension providers and runs one offline availability pass, so `configured` means the same everywhere (api_key and oauth entries in `auth.json`, env keys, extension apiKey).
+- The skill catalog loader (`project-resources.ts`) no longer executes extensions (`noExtensions`), so a broken extension cannot block opening a project.
+
+E2E: `scripts/provider-extensions-e2e.mjs` (failure cases in `scripts/provider-extensions-failures.md`).

@@ -40,7 +40,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       const lastUser = msgs.findLastIndex(m => m.role === 'user'), user = contentText(msgs[lastUser]?.content);
       const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
       const system = contentText(msgs.find(m => m.role === 'system' || m.role === 'developer')?.content);
-      result.calls.push({ at: Date.now(), role, user: user.slice(0, 3000), results: results.map(r => r.slice(0, 4000)), resultLengths: results.map(r => r.length), tools, system });
+      result.calls.push({ at: Date.now(), model: input.model, url: req.url, role, user: user.slice(0, 3000), results: results.map(r => r.slice(0, 4000)), resultLengths: results.map(r => r.length), tools, system });
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const out = await handler({ role, user, results, tools, system, msgs });
       if (out !== undefined) return res.end(out);
