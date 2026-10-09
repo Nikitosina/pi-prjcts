@@ -1356,7 +1356,8 @@ function disableActions() {
     const record = operationCache.get(node.dataset.operation);
     node.disabled = busy || !view || view.project.archived || view.project.deleted || !record?.scopeCurrent;
   });
-  document.querySelectorAll('#dialog [data-thread-mutation], #inline-thread [data-thread-mutation], [data-inline-thread-send] button, [data-inline-thread-send] textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
+  // Stop stays available while paused (the host allows it); steer/send need an admitting project.
+  document.querySelectorAll('#dialog [data-thread-mutation], #inline-thread [data-thread-mutation], [data-inline-thread-send] button, [data-inline-thread-send] textarea').forEach(node => { node.disabled = busy || (node.dataset.action === "thread-stop" ? !view || view.project.archived || view.project.deleted : admissionBlocked()); });
   document.querySelector('#lifecycle').hidden = !view;
   document.querySelector('#lifecycle-state').textContent = !view ? '' : view.project.deleted ? 'Deleted' : view.project.archived ? 'Archived' : view.paused ? 'Paused' : view.busy || plan?.work.some(work => work.status === 'running') ? 'Working' : 'Idle';
   document.querySelector('#lifecycle-state').dataset.state = document.querySelector('#lifecycle-state').textContent.toLowerCase();
