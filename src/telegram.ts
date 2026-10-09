@@ -28,7 +28,7 @@ type Button = { text: string; callback_data: string };
 class TelegramError extends Error { code: number; retryAfter?: number; constructor(message: string, code: number, retryAfter?: number) { super(message); this.code = code; this.retryAfter = retryAfter; } }
 
 const PAIR_MS = 10 * 60_000, PAIR_TRIES = 5, KEEP = 500, LIMIT = 4000;
-const LABEL: Record<Notice["kind"], string> = { question: "Question", approval: "Approval", result: "Finished", error: "Error" };
+const LABEL: Record<Notice["kind"], string> = { question: "Question", approval: "Approval", result: "Finished", error: "Error", pr: "Pull request" };
 const clip = (text: string, max = LIMIT) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 const bounded = <T>(record: Record<string, T>) => { const keys = Object.keys(record); for (const key of keys.slice(0, Math.max(0, keys.length - KEEP))) delete record[key]; };
 /** Same update, same admission request ID: a replayed update cannot admit a second turn. */
@@ -209,7 +209,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
 
   /** Notice text is model Markdown, sent as Telegram HTML; the header and footer are ours, escaped. */
   function format(notice: Notice): { text: string; buttons: Button[][] } {
-    const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`)}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" ? "" : `: ${notice.title}`}`)}\n\n` + markdownToTelegramHtml(notice.text);
+    const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`)}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" || notice.kind === "pr" ? "" : `: ${notice.title}`}`)}\n\n` + markdownToTelegramHtml(notice.text);
     if (notice.kind === "question") return { text: head + "\n\n<i>Tap an answer, or reply to this message in your own words.</i>", buttons: (notice.choices ?? []).map(choice => [{ text: choice.slice(0, 60), callback_data: key({ t: "answer", projectId: notice.projectId, entryId: notice.entryId!, text: choice }) }]) };
     if (notice.kind === "approval") return { text: head, buttons: [[{ text: "Approve", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
     return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };

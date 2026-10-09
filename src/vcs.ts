@@ -9,6 +9,8 @@ export const cli = {
   arc: () => process.env.PI_PROJECTS_ARC_CLI || "/opt/homebrew/bin/arc",
   arcWt: () => process.env.PI_PROJECTS_ARC_WT_CLI || "/usr/local/bin/arc-wt",
   /** Argv prefix of the Arcanum client (`ya tool arcanum`); the test seam is a single fake executable. */
+  /** `ya` itself (only `ya whoami` is run through it); the test seam is a single fake executable. */
+  ya: () => process.env.PI_PROJECTS_YA_CLI || "/usr/local/bin/ya",
   arcanum: (): string[] => process.env.PI_PROJECTS_ARCANUM_CLI ? [process.env.PI_PROJECTS_ARCANUM_CLI] : ["/usr/local/bin/ya", "tool", "arcanum"],
 };
 

@@ -1,13 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
+import { loadAutomations } from "./project-automations.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 
 /** One thing the owner should hear about: a needs-you question or approval, a finished coordinator turn, or a failed one. */
 export type Notice = {
   seq: number; at: number; projectId: string; project: string; chatId: string; chat: string;
-  kind: "question" | "approval" | "result" | "error"; title: string; text: string;
+  kind: "question" | "approval" | "result" | "error" | "pr"; title: string; text: string;
   entryId?: string; choices?: string[]; operationId?: string; fingerprint?: string; workId?: string; threadId?: string;
 };
 /** `workBaselined`: failed work existing before worker-failure notices (or before the project was first scanned) was marked seen silently. */
@@ -52,6 +53,15 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       if (silent) continue;
       const op = record.operation, what = op.kind === "command" ? `command ${op.effect} in ${op.repositoryId}` : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
       push({ ...base, chatId: "main", chat: chats[0].title, kind: "approval", title: `${op.provider} ${what}`, text: `Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.`, operationId: record.id, fingerprint: record.fingerprint });
+    }
+    // CI failed / PR merged (Follow PRs, Arcadia monitor): one notice each, in the events chat.
+    const eventChat = loadAutomations(project.id).eventChat, eventTarget = chats.find(chat => chat.id === eventChat && !chat.archived) ?? chats[0];
+    for (const item of await owner.prNotices()) {
+      const key = `prnotice:${item.key}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (silent) continue;
+      push({ ...base, chatId: eventTarget.id, chat: eventTarget.title, kind: "pr", title: item.kind === "ci-failed" ? "CI failed" : "Merged", text: clip(item.text) });
     }
     // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
     const quietWork = silent || !entry.workBaselined;

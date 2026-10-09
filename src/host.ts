@@ -8,6 +8,7 @@ import { home, socketPath, Request, Project, errorText, jobs, legacyProjectIds, 
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
+import { arcProject, referencedPrBlock, referencedPrs } from "./arcanum-prs.ts";
 import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
@@ -578,6 +579,16 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       recordHostEvent("automations", `${input.id}:webhook-rotated`);
       return automationSnapshot(input.id);
     }
+    case "arc-prs": {
+      const project = loadProject(input.id);
+      if (project.archived || project.deleted || !arcProject(project.cwd)) return { arc: false };
+      return { arc: true, ...await (await durable(input.id)).arcPrs(input.refresh === true) };
+    }
+    case "arc-pr-watch": {
+      const project = loadProject(input.id);
+      if (project.archived || project.deleted || !arcProject(project.cwd)) throw new Error("Watching PRs needs an active project in an Arcadia checkout");
+      return { watched: await (await durable(input.id)).arcPrWatch(input.pr, input.watch) };
+    }
     case "follow-poll": { const result = await (await durable(input.id)).followPoll(); return { result, ...(await automationSnapshot(input.id)) }; }
     case "event-ingest": return withDurableOwner({ id: input.id, operation: owner => owner.ingestLocalEvent({ eventId: input.eventId, kind: input.kind, payload: input.payload }) });
     case "thread-steer": {
@@ -618,7 +629,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (prior) return prior;
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
-        const text = await expandSkillCommand(await configuredSkills(input.id), job.text);
+        // `#123` / `PR #123` in an Arcadia project: a compact untrusted block with the PRs' state follows the owner's words.
+        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + (arcProject(loadProject(input.id).cwd) ? await referencedPrBlock(referencedPrs(job.text)) : "");
         const invoked = SKILL_COMMAND.exec(job.text.trim())?.[1];
         if (invoked) recordInvokedSkill(ownedProjectDir(input.id), invoked);
         const plan = await owner.planSnapshot();

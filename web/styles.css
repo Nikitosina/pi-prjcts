@@ -765,3 +765,24 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 }
 .settings .card > *, #skills-picker, #mcp-picker, #skills-picker > *, #mcp-picker > * { min-width: 0; }
 #skills-picker, #mcp-picker { display: grid; gap: 12px; }
+
+/* Arcadia PR card: one glanceable row per PR (status icon, #id summary, counts and failing checks), failing first. */
+#prs-card .row small { margin-right: 6px; }
+.pr-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 0; border-top: 1px solid var(--line); }
+.pr-row:first-child { border-top: 0; }
+.pr-icon { font-weight: 700; line-height: 1.5; text-align: center; }
+.pr-icon.good, .pr-sub .good { color: var(--good, var(--k-067647)); }
+.pr-icon.bad, .pr-sub .bad { color: var(--bad, var(--k-b42318)); }
+.pr-icon.warn, .pr-sub .warn { color: var(--k-8a5a17); }
+.pr-icon.muted { color: var(--muted); }
+.pr-main { min-width: 0; display: grid; gap: 1px; }
+.pr-title { color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pr-title:hover { text-decoration: underline; }
+.pr-id { font: 600 12px/1.5 Menlo, Consolas, monospace; color: var(--muted); }
+.pr-sub { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-sub .pr-fails { color: var(--bad, var(--k-b42318)); }
+.pr-watch { padding: 2px 7px; font-size: 11px; color: var(--muted); }
+.pr-watch.on { color: var(--accent-ink); border-color: var(--accent); }
+.pr-error { color: var(--bad, var(--k-b42318)); }
+.pr-chip { text-decoration: none; color: var(--text); }
+.skill-option.pr-opt.active .skill-name { color: var(--accent-ink); }

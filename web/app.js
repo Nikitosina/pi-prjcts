@@ -311,6 +311,7 @@ function render() {
   document.querySelector("#needs-card").hidden = !entry;
   setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
   setHtml("#outcomes", plan ? durableResults() : "");
+  renderArcPrs(); void loadArcPrs();
   // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
   const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"));
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
@@ -329,7 +330,7 @@ function render() {
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
   const hint = document.querySelector("#compose-hint");
-  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills`; hint.title = view.project.model;
+  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills${arcPrNow()?.arc ? " · # for PRs" : ""}`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -710,7 +711,7 @@ async function saveEventsIn() {
 const notifyKey = "pi-projects-notify";
 let notifyCursor, notifyTimer = null, notifyPolling = false, notifyAway = false, notifyProblem = "", notifyNote = "";
 const notifyAwayNow = () => document.visibilityState === "hidden" || !document.hasFocus();
-const noticeLabels = { question: "Question", approval: "Approval", review: "Review", result: "Finished", error: "Error" };
+const noticeLabels = { question: "Question", approval: "Approval", review: "Review", result: "Finished", error: "Error", pr: "Pull request" };
 function notifyEnabled() { return localStorage.getItem(notifyKey) === "1" && "Notification" in window && Notification.permission === "granted"; }
 function renderNotify() {
   const box = document.querySelector("#notify-browser"), state = document.querySelector("#notify-browser-state");
@@ -959,12 +960,13 @@ function chatMessageHtml(message, assistant) {
   // The host shows an invoked skill as `/skill:<name> args`; render the command as a chip.
   const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
   const attached = message.role === "user" ? attachmentChips(message.text) : { text: message.text, chips: "" };
-  const body = (skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(attachmentChips(skill[2]).text) : ""}` : renderMarkdown(attached.text)) + attached.chips;
+  const prs = message.role === "user" ? prChips(attached.text) : { text: attached.text, chips: "" };
+  const body = (skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(prChips(attachmentChips(skill[2]).text).text) : ""}` : renderMarkdown(prs.text)) + prs.chips + attached.chips;
   return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
 // "/" skill picker in the coordinator composer. The catalog loads once per project on first use.
-let skillCatalog = null, skillMenu = null;
+let skillCatalog = null, skillMenu = null, prMenu = null;
 async function loadSkills() {
   const id = projectId;
   if (skillCatalog?.projectId === id) return skillCatalog.skills;
@@ -982,10 +984,10 @@ function rankSkills(skills, query) {
   const score = skill => { const name = skill.name.toLowerCase(); return name.startsWith(q) ? 0 : name.includes(q) ? 1 : skill.description.toLowerCase().includes(q) ? 2 : 3; };
   return skills.map(skill => [score(skill), skill]).filter(([rank]) => rank < 3).sort((a, b) => a[0] - b[0]).map(([, skill]) => skill);
 }
-function closeSkillMenu() { skillMenu = null; const node = document.querySelector("#skill-menu"); if (node) { node.hidden = true; node.innerHTML = ""; } document.querySelector("#compose textarea")?.removeAttribute("aria-activedescendant"); }
+function closeSkillMenu() { skillMenu = null; prMenu = null; const node = document.querySelector("#skill-menu"); if (node) { node.hidden = true; node.innerHTML = ""; } document.querySelector("#compose textarea")?.removeAttribute("aria-activedescendant"); }
 async function updateSkillMenu(textarea) {
   const query = skillQuery(textarea);
-  if (query === null) { closeSkillMenu(); return; }
+  if (query === null) { updatePrMenu(textarea); return; }
   const skills = await loadSkills();
   if (skillQuery(textarea) !== query) return;
   const items = rankSkills(skills, query).slice(0, 60);
@@ -1011,6 +1013,71 @@ function pickSkill(name) {
   textarea.setSelectionRange(caret, caret);
   drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
   closeSkillMenu(); textarea.focus();
+}
+// Arcadia PR card (Arc projects only) and the "#" PR menu. Rows come from the host's shared Arcanum cache; the browser asks at most every 20 s.
+let arcPrs = { projectId: null, data: null, at: 0, error: "" }, arcPrsLoading = false;
+const arcPrNow = () => (arcPrs.projectId === projectId ? arcPrs.data : null);
+async function loadArcPrs(force = false) {
+  const id = projectId;
+  if (!id || arcPrsLoading || (!force && arcPrs.projectId === id && Date.now() - arcPrs.at < 20000)) return;
+  arcPrsLoading = true;
+  try { const data = await api({ action: "arc-prs", id, ...(force ? { refresh: true } : {}) }); if (id === projectId) arcPrs = { projectId: id, data, at: Date.now(), error: "" }; }
+  catch (error) { if (id === projectId) arcPrs = { projectId: id, data: arcPrs.projectId === id ? arcPrs.data : null, at: Date.now(), error: error.message }; }
+  finally { arcPrsLoading = false; }
+  if (id === projectId) renderArcPrs();
+}
+const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
+function renderArcPrs() {
+  const card = document.querySelector("#prs-card"), data = arcPrNow(), hint = document.querySelector("#compose-hint");
+  hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (data?.arc ? " · # for PRs" : "");
+  card.hidden = !data?.arc;
+  if (!data?.arc) return;
+  const order = { failing: 0, running: 1, green: 2, none: 3 }, prs = [...data.prs].sort((a, b) => order[a.state] - order[b.state] || b.id - a.id), shown = prs.slice(0, 12), watched = new Set(data.watched ?? []);
+  const rows = shown.map(pr => {
+    const [glyph, tone, title] = prGlyph[pr.state] ?? prGlyph.none, counts = [["good", "✓", pr.counts.ok], ["bad", "✕", pr.counts.failed], ["warn", "●", pr.counts.running]].filter(([, , n]) => n).map(([cls, mark, n]) => `<span class="${cls}">${mark}${n}</span>`).join(" ");
+    const detail = [counts, pr.conflicts ? '<span class="bad">conflicts</span>' : "", pr.mergeFailed ? '<span class="bad">merge failed</span>' : pr.autoMerge ? '<span class="good">auto-merge</span>' : "", pr.failedChecks.length ? `<span class="pr-fails">${esc(pr.failedChecks.slice(0, 2).join(", "))}${pr.failedChecks.length > 2 ? ` +${pr.failedChecks.length - 2}` : ""}</span>` : `<span class="pr-branch">${esc(pr.branch.replace(/^users\/[^/]+\//, ""))}</span>`].filter(Boolean).join(" ");
+    return `<div class="pr-row ${esc(pr.state)}"><span class="pr-icon ${tone}" title="${esc(title)}" role="img" aria-label="${esc(title)}">${glyph}</span><div class="pr-main"><a class="pr-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.summary)}"><span class="pr-id">#${pr.id}</span> ${esc(pr.summary)}</a><small class="pr-sub">${detail}</small></div><button type="button" class="ghost small pr-watch${watched.has(pr.id) ? " on" : ""}" data-action="pr-watch" data-pr="${pr.id}" aria-pressed="${watched.has(pr.id)}" title="${watched.has(pr.id) ? "Watching: the coordinator is told when a check or merge fails. Click to stop." : "Watch: tell the coordinator when a check or merge fails"}">${watched.has(pr.id) ? "Watching" : "Watch"}</button></div>`;
+  }).join("");
+  const meta = data.rateLimitedUntilMs ? "rate limited" : data.fetchedAtMs ? ago(new Date(data.fetchedAtMs).toISOString()) : "";
+  const problem = arcPrs.error || data.error;
+  setHtml("#prs", `${problem ? `<p class="note pr-error">${esc(problem)}${prs.length ? " (showing the last list)" : ""}</p>` : ""}${rows || (problem ? "" : '<p class="note">No open PRs.</p>')}${prs.length > shown.length ? `<p class="note">+${prs.length - shown.length} more in Arcanum</p>` : ""}${data.monitoring ? "" : '<p class="note pr-off">Monitoring is off. Turn on Follow PRs in Settings to hear about failing checks.</p>'}`);
+  document.querySelector("#prs-meta").textContent = meta;
+}
+const prRefs = /(?:^|\s)#([^\s#]*)$/;
+function updatePrMenu(textarea) {
+  const query = textarea.selectionStart === textarea.selectionEnd ? prRefs.exec(textarea.value.slice(0, textarea.selectionStart))?.[1] ?? null : null, data = arcPrNow();
+  if (query === null || !data?.arc || !data.prs.length) { closeSkillMenu(); return; }
+  const q = query.toLowerCase(), items = [...data.prs].sort((a, b) => b.id - a.id).filter(pr => !q || String(pr.id).startsWith(q) || pr.summary.toLowerCase().includes(q)).slice(0, 30);
+  skillMenu = null; prMenu = { items, index: Math.min(prMenu?.query === query ? prMenu.index : 0, Math.max(0, items.length - 1)), query };
+  renderPrMenu();
+}
+function renderPrMenu() {
+  const node = document.querySelector("#skill-menu");
+  node.innerHTML = prMenu.items.length
+    ? prMenu.items.map((pr, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option pr-opt${index === prMenu.index ? " active" : ""}" aria-selected="${index === prMenu.index}" data-action="pr-pick" data-pr="${pr.id}"><span class="skill-name">#${pr.id}</span><span class="skill-desc">${esc(pr.summary)}</span><span class="skill-source pr-icon ${prGlyph[pr.state]?.[1] ?? "muted"}">${prGlyph[pr.state]?.[0] ?? "○"}</span></button>`).join("")
+    : `<p class="skill-empty">No open PR matches “${esc(prMenu.query)}”</p>`;
+  node.hidden = false;
+  document.querySelector("#compose textarea").setAttribute("aria-activedescendant", prMenu.items.length ? `skill-option-${prMenu.index}` : "");
+  node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
+}
+function pickPr(id) {
+  const textarea = document.querySelector("#compose textarea"), caret = textarea.selectionStart;
+  const before = textarea.value.slice(0, caret).replace(/(?:PR\s+)?#[^\s#]*$/, `PR #${id} `);
+  textarea.value = before + textarea.value.slice(caret);
+  textarea.setSelectionRange(before.length, before.length);
+  drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
+  closeSkillMenu(); textarea.focus();
+}
+// The host appends a "[Referenced Arcadia PRs …]" block to the coordinator message; show it as chips.
+const prBlock = /\n\n\[Referenced Arcadia PRs[^\]\n]*\]\n((?:- [^\n]*(?:\n|$))+)$/;
+function prChips(text) {
+  const match = prBlock.exec(text);
+  if (!match) return { text, chips: "" };
+  const chips = match[1].trim().split("\n").map(line => {
+    const known = /^- #(\d+)(?: “(.*?)”)? \((.*?)\)/.exec(line), gone = /^- #(\d+): could not be read/.exec(line);
+    return known ? `<a class="attach-chip pr-chip" href="https://a.yandex-team.ru/review/${known[1]}" target="_blank" rel="noopener noreferrer" title="${esc(`${known[2] ?? ""} (${known[3]})`)}"><span class="pr-id">#${known[1]}</span><span class="attach-name">${esc(known[2] ?? "")}</span></a>` : gone ? `<span class="attach-chip gone">#${gone[1]} unreadable</span>` : "";
+  }).join("");
+  return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>` };
 }
 // Folders the owner collapsed, shared by the rail and the Knowledge tab; raw legacy answers start collapsed.
 const closedFolders = new Set(["research/legacy"]);
@@ -1531,6 +1598,9 @@ async function action(node) {
     case "all-work": setTab("activity"); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickSkill(node.dataset.name); break;
+    case "pr-pick": pickPr(node.dataset.pr); break;
+    case "prs-refresh": await loadArcPrs(true); break;
+    case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "arc-pr-watch", id: projectId, pr: Number(node.dataset.pr), watch: on }); arcPrs.at = 0; await loadArcPrs(); break; }
     case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
@@ -1951,7 +2021,7 @@ document.addEventListener("input", event => {
   captureKnowledgeDraft(); captureUploadDraft(); captureSettingsDraft(); captureCreationDraft(); persistDraftsSafely();
 });
 // Clicking elsewhere closes the skill picker; moving the caret re-evaluates it.
-document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if (skillMenu && !event.target.closest("#compose")) closeSkillMenu(); });
+document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if ((skillMenu || prMenu) && !event.target.closest("#compose")) closeSkillMenu(); });
 document.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) && event.target.closest("#compose textarea")) void updateSkillMenu(event.target).catch(() => closeSkillMenu()); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
 document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
@@ -1999,6 +2069,12 @@ document.addEventListener("keydown", event => {
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) { event.preventDefault(); searchState.active = (searchState.active + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSearchResults(); }
     else if (event.key === "Enter") { event.preventDefault(); clearTimeout(searchTimer); if (searchState.query === event.target.value.trim() && count) void uiAction(() => openSearchHit(searchState.active)); else void runSearch(); }
     return;
+  }
+  if (prMenu && event.target.closest("#compose textarea") && !event.isComposing) {
+    const count = prMenu.items.length;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { prMenu.index = (prMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderPrMenu(); } return; }
+    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickPr(prMenu.items[prMenu.index].id); return; }
+    if (event.key === "Escape") { event.preventDefault(); closeSkillMenu(); return; }
   }
   if (skillMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = skillMenu.items.length;

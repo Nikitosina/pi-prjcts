@@ -32,20 +32,21 @@ export function fakeArcadia(root, { login = 'e2euser' } = {}) {
   git(dir, 'init', '--bare', '-q', join(dir, 'server.git'));
   const wrap = (name, script) => { const path = join(bin, name); writeFileSync(path, `#!/bin/sh\nFAKE_ARC_DIR='${dir}' exec '${process.execPath}' '${join(scripts, script)}' "$@"\n`); chmodSync(path, 0o755); return path; };
   const arc = wrap('arc', 'fake-arc.mjs'), arcWt = wrap('arc-wt', 'fake-arc-wt.mjs');
+  const ya = wrap('ya', 'fake-ya.mjs');
   const arcanum = existsSync(join(scripts, 'fake-arcanum.mjs')) ? wrap('arcanum-go', 'fake-arcanum.mjs') : null;
   const calls = () => readFileSync(join(dir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   return {
     dir, bin, arcadia, serverRefs: () => execFileSync('/usr/bin/git', ['--git-dir', join(dir, 'server.git'), 'for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/heads/'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => line.split(' ')), subdir: join(arcadia, SUBPATH), wtBase, stores, objects, login, trunkHead, featureHead: git(arcadia, 'rev-parse', 'HEAD'), git, calls,
     wt: () => JSON.parse(readFileSync(join(dir, 'wt.json'), 'utf8')),
     // Environment seams for the host (and the PATH worker shells see): the fakes shadow any real arc.
-    env: { PI_PROJECTS_ARC_CLI: arc, PI_PROJECTS_ARC_WT_CLI: arcWt, ...(arcanum ? { PI_PROJECTS_ARCANUM_CLI: arcanum } : {}), PATH: `${bin}:${process.env.PATH}` },
+    env: { PI_PROJECTS_ARC_CLI: arc, PI_PROJECTS_ARC_WT_CLI: arcWt, PI_PROJECTS_YA_CLI: ya, ...(arcanum ? { PI_PROJECTS_ARCANUM_CLI: arcanum } : {}), PATH: `${bin}:${process.env.PATH}` },
   };
 }
 /** Fails when any fake call touched a path outside `root` or forced a removal. */
 export function assertFakeOnly(fake, root, check) {
   const calls = fake.calls();
   // arc-wt runs without a cwd (the host's), so its safety is in the paths it was given; arc runs inside a checkout.
-  const outside = calls.filter(call => (call.tool === 'arc' && !call.cwd.startsWith(root)) || call.argv.some(arg => arg.startsWith('/') && !arg.startsWith(root)));
+  const outside = calls.filter(call => (call.tool === 'arc' && !call.cwd.startsWith(root)) || call.argv.some((arg, at) => arg.startsWith('/') && !arg.startsWith(root) && call.argv[at - 1] !== '--path'));
   check('fakes only: every arc call ran under the temp root and every path argument is inside it', outside.length === 0, outside.slice(0, 3));
   check('fakes only: no real Arcadia path was used', !JSON.stringify(calls).includes('/Users/nikitarat/arcadia'));
   check('arc-wt --force is never used', calls.every(call => !call.forced));

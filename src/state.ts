@@ -280,6 +280,8 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("automation-update"), id: Id, change: AutomationChange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("webhook-rotate"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("follow-poll"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("arc-prs"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("arc-pr-watch"), id: Id, pr: Type.Integer({ minimum: 1, maximum: 999999999 }), watch: Type.Boolean() }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("work-submit"), id: Id, threadId: Id, requestId: Id, workspaceScopeId: Id, text }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("notes"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("knowledge-list"), id: Id }, { additionalProperties: false }),
