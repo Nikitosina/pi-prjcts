@@ -294,7 +294,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
       // Fail closed until reconciliation/guard installation has completed; hooks only observe.
       if (!dispatchReady || closed) throw new Error("Durable model dispatch is not authorized during startup/close");
       memoryIndex(dir);
-      const stream = dispatch(model, request, options);
+      // Durable passes no session id, so providers such as openai-codex sent no prompt_cache_key and missed the
+      // cache on ~40% of input. The first message is the conversation's stored system entry: stable per conversation.
+      const first = request.messages[0];
+      const sessionId = options?.sessionId ?? (first ? `pi-projects-${createHash("sha256").update(`${project.id}\n${JSON.stringify(first)}`).digest("hex").slice(0, 32)}` : undefined);
+      const stream = dispatch(model, request, sessionId ? { ...options, sessionId } : options);
       if (input.onGenerationLifecycle) {
         // Durable 1.0 does not expose its IDs here. This trace is intentionally aggregate-only.
         const traceId = crypto.randomUUID();

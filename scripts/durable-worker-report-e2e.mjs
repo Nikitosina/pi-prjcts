@@ -28,7 +28,7 @@ const model = createServer((req, res) => {
     const coordinator = input.messages.some(m => /persistent coordinator/.test(m.content ?? ''));
     const marker = /MARK-[A-Z]+/.exec(body)?.[0] ?? 'none';
     const lastInput = input.messages.filter(m => m.role === 'user').at(-1)?.content ?? '';
-    result.modelCalls.push({ at: Date.now(), marker, coordinator, reporting: coordinator && lastInput.includes('[Durable work') });
+    result.modelCalls.push({ at: Date.now(), marker, coordinator, role: /ROLE (scout|reviewer)/.exec(body)?.[1] ?? null, session: req.headers.session_id ?? null, reporting: coordinator && lastInput.includes('[Durable work') });
     if (holdReports && coordinator && lastInput.includes('[Durable work')) { held.add(res); res.on('close', () => held.delete(res)); return; }
     if (marker === 'MARK-FAIL' && !coordinator) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Fixture worker failure', type: 'invalid_request_error' } })); return; }
     if (hold && marker === 'MARK-HOLD') { held.add(res); res.on('close', () => held.delete(res)); return; }
@@ -47,7 +47,7 @@ const model = createServer((req, res) => {
   });
 });
 await new Promise(ok => model.listen(0, '127.0.0.1', ok));
-writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: 'fake-key', api: 'openai-completions', models: [{ id: 'fake-model', name: 'Fake', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 }] } } }));
+writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: 'fake-key', api: 'openai-completions', compat: { sendSessionAffinityHeaders: true, sessionAffinityFormat: 'openai' }, models: [{ id: 'fake-model', name: 'Fake', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 }] } } }));
 
 const socket = join(tmpdir(), `pi-projects-${process.getuid?.() ?? 'user'}-${createHash('sha256').update(home).digest('hex').slice(0, 12)}.sock`);
 result.socket = socket;
@@ -133,6 +133,13 @@ try {
   for(let i=0;i<150;i++){ const p=await rpc({action:'plan-snapshot',id:project.id}); const v=await rpc({action:'show',id:project.id}); if(p.work.some(w=>w.threadId===failedThread&&w.status==='failed') && v.messages.filter(m=>m.role==='assistant'&&m.text.includes('SUMMARY')).length===6){result.messages=v.messages;result.plan=p;break;} await delay(100); }
   if(!result.plan.work.some(w=>w.threadId===failedThread&&w.status==='failed') || result.messages.filter(m=>m.role==='assistant'&&m.text.includes('SUMMARY')).length!==6) throw Error('Worker failure report missing');
   result.checks.push('R8 failed workers wake coordinator with failure');
+  const calls=result.modelCalls, coordIds=new Set(calls.filter(c=>c.coordinator).map(c=>c.session)), roleId=role=>new Set(calls.filter(c=>!c.coordinator&&c.role===role).map(c=>c.session));
+  if(calls.some(c=>!c.session)) throw Error('Model request without session id');
+  if(coordIds.size!==1) throw Error(`Coordinator session id not stable across turns/restarts: ${[...coordIds]}`);
+  const scout=roleId('scout'), reviewer=roleId('reviewer');
+  if(scout.size!==1||reviewer.size!==1) throw Error('Worker thread session id not stable');
+  if(new Set([...coordIds,...scout,...reviewer]).size!==3) throw Error('Coordinator/worker threads share a session id');
+  result.checks.push('R9 every request carries a per-conversation session id, stable across turns and restarts');
   result.status='passed';
 } catch (error) {
   result.status = 'failed'; result.failure = redact(error?.stack ?? error);
