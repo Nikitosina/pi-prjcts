@@ -112,7 +112,9 @@ async function pullStates(project: Project, branches: string[], signal?: AbortSi
 export async function worktreeInventory(input: { project: Project; root: Conversation; controlRoot: string; signal?: AbortSignal }): Promise<WorktreeInventory> {
   const plan = await input.root.commit(async tx => JSON.parse(JSON.stringify(await tx.doc(DurablePlanning, input.root.id))) as PlanningState, BACKGROUND_CONTEXT);
   const live = Object.values(plan.work).filter(work => work.status === "queued" || work.status === "running" || work.status === "interrupted");
-  const busy = (threadId: string) => live.some(work => work.threadId === threadId || work.parentThreadId === threadId) || plan.threads[threadId]?.activeWorkId != null;
+  const busyThread = (threadId: string) => live.some(work => work.threadId === threadId || work.parentThreadId === threadId) || plan.threads[threadId]?.activeWorkId != null;
+  // A worktree allocated by one thread may now belong to threads that took it over: they keep it busy too.
+  const busy = (threadId: string) => busyThread(threadId) || Object.entries(plan.threads).some(([id, thread]) => thread.workspaceFrom === threadId && busyThread(id));
   const items: WorktreeItem[] = [];
   for (const receipt of await workspaceReceipts(input.root)) {
     if (receipt.state !== "allocated" || !receipt.workspacePath || !existsSync(receipt.workspacePath)) continue;

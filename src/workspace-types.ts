@@ -23,6 +23,8 @@ export const WorkspaceScope = Type.Object({
   capabilityProfileRevision: Type.String({ minLength: 1, maxLength: 256 }),
   /** Whole-repository scopes start from owner HEAD and leave uncommitted owner edits behind. */
   allowDirtyOwner: Type.Optional(Type.Literal(true)),
+  /** Git: the branch already exists (an open PR's); the worktree starts on its tip instead of creating the branch from the owner HEAD. */
+  continueBranch: Type.Optional(Type.Literal(true)),
 }, { additionalProperties: false });
 export type WorkspaceScope = Static<typeof WorkspaceScope>;
 

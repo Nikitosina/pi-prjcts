@@ -109,7 +109,7 @@ export async function arcWorkerTools(input: { project: Project; root: Conversati
       if (pushed.code) throw new Error(`arc push failed: ${pushed.stderr.trim().slice(-300)}`);
     }
     const pr = await verify(prior.pullRequest!, head, prior.publish, prior.marker);
-    await api.commit(async tx => { const row = (await tx.doc(Writes, root.id)).items.find(item => item.key === prior.key); if (row) { row.head = head; row.verified = true; } }, context);
+    await api.commit(async tx => { const row = (await tx.doc(Writes, root.id)).items.find(item => item.key === prior.key); if (row) { row.head = head; row.verified = true; /* the thread now maintaining the PR receives its follow-ups */ row.conversationId = input.conversationId; row.workId = input.workId; } }, context);
     return { pullRequest: prior.pullRequest, updated: head !== prior.head, head, status: pr.status };
   }
   const prStatus = defineTool({

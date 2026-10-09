@@ -21,6 +21,10 @@ export type DurablePlanWork = Readonly<{
   /** Scout/reviewer code root chosen by the host (PR-head snapshot or parent worktree); never model-supplied paths. */
   readRoot?: string;
   readSha?: string;
+  /** Worker takeover (host-set): the thread whose worktree allocation this new thread inherits. */
+  workspaceFrom?: string;
+  /** Worker continuing an existing branch (host-resolved and authorized): its worktree starts on this branch at this tip. */
+  continueBranch?: Readonly<{ name: string; sha: string }>;
 }>;
 export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork[] }>;
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */

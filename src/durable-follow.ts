@@ -36,7 +36,7 @@ type Fixer = {
   planWork(input: { workId: string; threadId: string; text: string; requestId: string; workspaceScopeId: string }, chat: number): Promise<void>;
   planReview(input: { workId: string; threadId: string; text: string; requestId: string }, chat: number): Promise<void>;
   followUp(threadId: string, text: string, requestId: string, chat: number): Promise<string>;
-  threads(): Promise<Array<{ threadId: string; conversationId: number; stopping: boolean }>>;
+  threads(): Promise<Array<{ threadId: string; conversationId: number; stopping: boolean; transferredTo?: string }>>;
   workStatus(workId: string): Promise<string | null>;
   target(): Promise<Conversation>;
 };
@@ -133,7 +133,11 @@ export function followRuntime(root: Conversation, projectId: string, schedules: 
     const made = attempts.filter(item => item.mode !== "none").length;
     if (made >= cap) return `auto-fix cap reached (${made} of ${cap} attempts); needs you`;
     const published = await publishedPullRequests(failure), receipt = published.find(item => item.number === failure.number);
-    const thread = receipt && (await fixer.threads()).find(item => item.conversationId === receipt.conversationId && !item.stopping);
+    // A thread whose worktree was taken over hands its PRs to the new owner: follow the chain.
+    const all = await fixer.threads();
+    let thread = receipt && all.find(item => item.conversationId === receipt.conversationId);
+    for (let hops = 0; thread?.transferredTo && hops < 16; hops++) thread = all.find(item => item.threadId === thread!.transferredTo);
+    if (thread?.stopping) thread = undefined;
     const project = loadProject(projectId), scopes = catalog(project).filter(scope => scope.repositoryId === failure.repo.repositoryId);
     const scope = scopes.find(item => item.wholeRepository) ?? scopes[0];
     const attempt: FixAttempt = { sha: failure.head, at: Date.now(), mode: thread ? "follow-up" : scope ? "new-worker" : "none", workId: null, threadId: thread?.threadId ?? null, error: null };

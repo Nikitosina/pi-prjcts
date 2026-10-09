@@ -45,3 +45,19 @@ export async function codeDiff(root: string, base?: string): Promise<string> {
   const body = diff.length > CODE_DIFF_CAP ? `${diff.slice(0, CODE_DIFF_CAP)}\n[diff truncated at ${CODE_DIFF_CAP / 1024} KB of ${Math.ceil(diff.length / 1024)} KB; read the rest with code_read]` : diff;
   return `${head}\nChanged files:\n${changed.trim() || "(none tracked)"}\n\n${body}`;
 }
+
+/** Coordinator view of a worker's worktree: branch, head and status list (staged, unstaged, untracked), then the capped diff. Read-only like codeDiff. */
+export async function workerChanges(root: string, base?: string): Promise<string> {
+  const vcs = findVcsRoot(root);
+  if (!vcs) throw new Error(`${root} is not a git or Arc checkout; no diff is available`);
+  let branch = "", head = "", status = "";
+  if (vcs.kind === "git") {
+    const git = async (...args: string[]) => (await runCli(cli.git(), ["-C", vcs.root, ...args])).stdout;
+    [branch, head, status] = [(await git("rev-parse", "--abbrev-ref", "HEAD")).trim(), (await git("rev-parse", "HEAD")).trim(), await git("status", "--porcelain=v1", "--untracked-files=all")];
+  } else {
+    try { const info = JSON.parse((await runCli(cli.arc(), ["info", "--json"], vcs.root)).stdout) as { branch?: string; hash?: string }; branch = info.branch ?? ""; head = info.hash ?? ""; } catch { /* reported as unknown */ }
+    status = (await runCli(cli.arc(), ["status", "--short"], vcs.root)).stdout;
+  }
+  const lines = status.split("\n").filter(Boolean);
+  return `Worktree ${vcs.root} (${vcs.kind})\nBranch: ${branch || "unknown"}\nHead: ${head || "unknown"}\nStatus (${lines.length ? `${lines.length} path(s); XY codes: first column staged, second unstaged, ?? untracked` : "clean"}):\n${lines.slice(0, 200).join("\n")}${lines.length > 200 ? `\n... ${lines.length - 200} more` : ""}\n\n${await codeDiff(root, base)}`;
+}

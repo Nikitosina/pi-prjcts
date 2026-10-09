@@ -51,6 +51,9 @@ export function coordinatorWorkerTools(input: { root: () => Conversation | undef
   const archive = defineTool({ name: "projects_worker_archive", description: "Archive terminal work (completed, failed, stopped, blocked) so it leaves the owner's Workers panel. Pass workIds, or terminal: true for every unarchived terminal item. Completed work is already hidden from the panel; archive failed or stopped work once you have handled it. Running, queued or interrupted work is refused. Archiving keeps the record, thread conversation and report; projects_workers still lists it with archived: true.", parameters: Type.Object({ workIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 64 })), terminal: Type.Optional(Type.Boolean()) }, { additionalProperties: false }), replay: "safe", async execute(args, api) {
     return json(await authorize(api).archiveWork(args));
   } });
-  const tools = [list, read, control, plan, archive];
+  const diff = defineTool({ name: "projects_worker_diff", description: "Read-only view of what a worker thread changed in its worktree: branch, head, status (staged/unstaged/untracked paths) and the unified diff against the merge-base with trunk/default branch, including uncommitted and new files. Size-capped with a truncation note. Use it to review or hand over a worker's change; never move patches through artifacts. Only this project's worker thread UUIDs are accepted.", parameters: Type.Object({ threadId: Id, base: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Branch, tag or commit to diff against; default trunk / the default branch." })) }, { additionalProperties: false }), replay: "safe", async execute(args, api) {
+    return { content: [{ type: "text" as const, text: await authorize(api).workerDiff(args.threadId, args.base) }], details: undefined };
+  } });
+  const tools = [list, read, control, plan, archive, diff];
   return { tools, extension: defineExtension({ name: "projects.coordinator-workers", tools }) };
 }

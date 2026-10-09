@@ -215,7 +215,7 @@ try {
   check('G10/C11g YOLO text: no unconditional open_draft_pr; merge/rebase/continue-branch allowed; force-with-lease only on project branches', !/After pushing, call the GitHub open_draft_pr/.test(w1Calls[0].system) && /only when your task asks for a PR/.test(w1Calls[0].system) && /fetch, merge, rebase/.test(w1Calls[0].system) && /--force-with-lease, only on project branches/.test(w1Calls[0].system), w1Calls[0].system.slice(-1500));
   check('M1 attempt.toolNames records the tools actually bound (bash, open_draft_pr)', w1.attempt.toolNames.includes('bash') && w1.attempt.toolNames.some(name => name.endsWith('_open_draft_pr')), w1.attempt.toolNames);
   const coordSystem = result.calls.find(c => c.role === 'coordinator').system;
-  check('G11/C11a coordinator: any worker may continue a PR branch; no transfer/cherry-pick threads; PR-head ref for reviewers', /any worker may continue the PR branch/.test(coordSystem) && /Never split this into transfer or cherry-pick threads/.test(coordSystem) && /pass ref/.test(coordSystem), coordSystem.slice(0, 400));
+  check('G11/C11a coordinator: a new worker continues a PR branch via fromThread/branch (host-checked-out); no transfer/cherry-pick threads; PR-head ref for reviewers', /with branch \(the existing branch or PR number/.test(coordSystem) && /fromThread/.test(coordSystem) && /Never split this into transfer or cherry-pick threads/.test(coordSystem) && /threadId of the worker thread[^]*or ref \(/.test(coordSystem), coordSystem.slice(0, 400));
 
   // Base moves with a conflicting feature.txt.
   execFileSync('/usr/bin/git', ['clone', '-q', bare, clone]); git(clone, 'config', 'user.email', 'o@example.invalid'); git(clone, 'config', 'user.name', 'Owner');
