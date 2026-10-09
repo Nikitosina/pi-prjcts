@@ -3,6 +3,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { kit, delay } from './notify-kit.mjs';
+import { contrastLib } from './lib/contrast-scan.mjs';
 
 const MD = 'MD-START\n\n## Heading\n\nA paragraph with `inline code` and a [link](https://example.invalid).\n\n```js\nconst answer = 42;\n```\n\n| Name | Value |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |\n\n> quote text\n\n- item one\n- item two\n\nMD-END';
 const k = await kit('theme', {}, ({ coordinator, marker, results, say, call }) => {
@@ -17,30 +18,8 @@ const theme = s => evaluate(`document.documentElement.dataset.theme`, s);
 const reload = async s => { await send('Page.reload', {}, s); await waitFor(`document.readyState === 'complete' && !!document.querySelector('#title')?.innerText`, s, 'reload'); };
 const must = (cond, message) => { if (!cond) throw Error(message); };
 const ok = text => result.checks.push(text);
-// Page-side helpers: parse colors, composite backgrounds up the tree, WCAG contrast.
-const lib = `(() => {
-  const parse = c => { const m = c.match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,\\/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p[3] ?? 1 }; };
-  const over = (top, bottom) => { const a = top.a + bottom.a * (1 - top.a); return a === 0 ? { r: 0, g: 0, b: 0, a: 0 } : { r: (top.r * top.a + bottom.r * bottom.a * (1 - top.a)) / a, g: (top.g * top.a + bottom.g * bottom.a * (1 - top.a)) / a, b: (top.b * top.a + bottom.b * bottom.a * (1 - top.a)) / a, a }; };
-  const lum = ({ r, g, b }) => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-  const bgOf = el => { let color = { r: 0, g: 0, b: 0, a: 0 }; const chain = []; for (let n = el; n; n = n.parentElement) chain.push(n); for (const n of chain) { const bg = parse(getComputedStyle(n).backgroundColor); if (bg && bg.a > 0) { color = color.a === 0 ? bg : over(color, bg); if (color.a >= 0.999) break; } } return color.a >= 0.999 ? color : over(color, parse(getComputedStyle(document.documentElement).backgroundColor)); };
-  const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && +s.opacity > 0; };
-  const label = el => el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\\s+/).join('.') : '');
-  // Elements whose background is deliberately light in dark (toast / popups invert) are listed here.
-  const inverted = el => !!el.closest('#toast, .context-popup, img, video');
-  window.__scan = (dark, root = document.body) => {
-    const bright = [], low = []; let texts = 0;
-    for (const el of root.querySelectorAll('*')) {
-      if (!visible(el) || inverted(el)) continue;
-      const own = [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
-      const bg = bgOf(el);
-      if (dark && bg.a >= 0.999 && lum(bg) > 0.35 && el.getBoundingClientRect().width > 12) bright.push(label(el) + ' ' + Math.round(bg.r) + ',' + Math.round(bg.g) + ',' + Math.round(bg.b));
-      if (own) { texts++; const fg = parse(getComputedStyle(el).color); const r = ratio(over(fg, bg), bg); const size = parseFloat(getComputedStyle(el).fontSize); if (r < (size >= 18 ? 3 : 4.5)) low.push(label(el) + ' ' + r.toFixed(2) + ' "' + el.textContent.trim().slice(0, 24) + '"'); }
-    }
-    return { bright: [...new Set(bright)], low: [...new Set(low)], texts };
-  };
-  window.__color = sel => { const el = document.querySelector(sel); const s = getComputedStyle(el); return { bg: s.backgroundColor, color: s.color, scheme: s.colorScheme }; };
-})()`;
+// Page-side helpers (parse colors, composite backgrounds, WCAG contrast) live in lib/contrast-scan.mjs.
+const lib = contrastLib;
 const scan = (s, dark) => evaluate(`window.__scan(${dark})`, s);
 const open = async (tab, init = '') => {
   const web = new URL((await rpc({ action: 'web' })).url); web.searchParams.set('project', projectId); web.searchParams.set('tab', tab);
@@ -66,9 +45,9 @@ try {
 
   // T4 light look unchanged: original palette values.
   const lc = await evaluate(`({ root: getComputedStyle(document.documentElement).backgroundColor, card: __color('#skills-card').bg, side: __color('.side').bg, text: getComputedStyle(document.documentElement).color, primary: __color('button.primary').bg, line: getComputedStyle(document.querySelector('#skills-card')).borderTopColor, scheme: getComputedStyle(document.documentElement).colorScheme })`, s);
-  const expected = { root: 'rgb(248, 245, 238)', card: 'rgb(255, 253, 247)', side: 'rgb(241, 237, 226)', text: 'rgb(41, 38, 27)', primary: 'rgb(194, 101, 58)', line: 'rgb(232, 227, 213)', scheme: 'light' };
+  const expected = { root: 'rgb(248, 245, 238)', card: 'rgb(255, 253, 247)', side: 'rgb(241, 237, 226)', text: 'rgb(41, 38, 27)', primary: 'rgb(176, 90, 47)', line: 'rgb(232, 227, 213)', scheme: 'light' };
   must(JSON.stringify(lc) === JSON.stringify(expected), 'Light palette changed: ' + JSON.stringify(lc));
-  ok('T4 light palette is the original one (bg, card, sidebar, text, accent, borders)');
+  ok('T4 light palette is the expected one (original bg, card, sidebar, text, borders; accent solid darkened for contrast >= 4.5)');
   const lightScan = await scan(s, false);
   result.light = { lc, lowContrast: lightScan.low };
 
@@ -101,7 +80,6 @@ try {
   result.dark = darkReport; result.mdColors = mdColors;
   for (const [tab, r] of Object.entries(darkReport)) { must(!r.bright.length, `Bright surfaces in dark ${tab}: ${r.bright.slice(0, 8).join('; ')}`); must(!r.low.length, `Low contrast in dark ${tab}: ${r.low.slice(0, 8).join('; ')}`); must(r.texts > 5, `${tab} scan saw no text`); }
   ok('T5/T6 dark coordinator, knowledge, activity, observability and settings tabs: no light surfaces, all text contrast >= 4.5 (3 for large)');
-  ok('T4 light look kept as designed (muted-text contrast below 4.5 in light is recorded in report.json, not changed)');
 
   // Overlays in dark: search dialog, project dialog, toast, skill menu, native widgets.
   await evaluate(`document.querySelector('[data-tab=coordinator]').click()`, s); await delay(300);
@@ -149,7 +127,11 @@ try {
   ok('T3 an invalid stored value falls back to System');
 
   // Screenshots of the same tabs in light for the artifact.
-  for (const tab of ['coordinator', 'knowledge', 'activity', 'settings']) { await evaluate(`document.querySelector('[data-tab=${tab}]').click()`, s); await delay(700); await shot(`light-${tab}`, s); }
+  for (const tab of ['coordinator', 'knowledge', 'activity', 'observability', 'settings']) {
+    await evaluate(`document.querySelector('[data-tab=${tab}]').click()`, s); await delay(700); await shot(`light-${tab}`, s);
+    const light = await scan(s, false); must(!light.low.length, `Low contrast in light ${tab}: ${light.low.slice(0, 8).join('; ')}`);
+  }
+  ok('light coordinator, knowledge, activity, observability and settings tabs: all text contrast >= 4.5 (3 for large)');
 
   // T7 native widgets: scrollbars/checkbox follow color-scheme via the root.
   await scheme(s, 'dark'); await waitFor(`document.documentElement.dataset.theme === 'dark'`, s, 'dark for widgets');

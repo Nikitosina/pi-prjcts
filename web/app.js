@@ -429,26 +429,50 @@ async function loadSkillsPicker(force = false) {
     if (id !== projectId || current !== generation) return;
     const saved = settings.values.skills;
     const profiles = saved ?? { all: skills.filter(skill => skill.source === "repo").map(skill => skill.name), coordinator: [], worker: [], scout: [], reviewer: [] };
-    skillsPicker = { projectId: id, skills, isDefault: !saved, draft: structuredClone(profiles), saved: JSON.stringify(profiles), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
+    skillsPicker = { projectId: id, skills, isDefault: !saved, draft: sortedLists(profiles), saved: JSON.stringify(sortedLists(profiles)), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
     renderSkillsPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Skills unavailable: ${esc(error.message)}</p>`; }
 }
-function renderSkillsPicker() {
+// Pickers render in three parts so a toggle never moves anything: "all" = shell (tabs, search, list), "list" = rows only (search, bulk), "chrome" = counts and buttons only (a checkbox toggle).
+const sortedLists = value => Object.fromEntries(Object.entries(value).map(([key, list]) => [key, [...list].sort()])); // toggling re-sorts a list; a saved list in another order must not look dirty
+const profileTabsHtml = (action, tab, count) => `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === tab ? " on" : ""}" aria-selected="${role === tab}" data-action="${action}" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>`;
+const patchPickerChrome = (node, count, dirty) => {
+  for (const button of node.querySelectorAll(".skill-tabs [data-role]")) button.querySelector(".count").textContent = count(button.dataset.role);
+  const save = node.querySelector('[data-action$="-save"]'); if (save) { save.disabled = !dirty; save.toggleAttribute("data-off", !dirty); }
+  const bar = node.querySelector(".pick-state"); if (bar) bar.hidden = !dirty;
+};
+const bulkButtons = (action, source = "") => `<span class="pick-bulk"><button type="button" class="ghost small" data-action="${action}" data-source="${source}" data-mode="all">Select all</button><button type="button" class="ghost small" data-action="${action}" data-source="${source}" data-mode="none">Clear</button></span>`;
+function skillsShown(state) {
+  const q = state.query.trim().toLowerCase();
+  return state.skills.filter(skill => !q || skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q));
+}
+function skillsListHtml(state) {
+  const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]), shown = skillsShown(state);
+  const groups = Object.keys(skillSourceLabels).map(source => [source, shown.filter(skill => skill.source === source)]).filter(([, list]) => list.length);
+  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${inherited || picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
+  return groups.map(([source, list]) => `<fieldset class="events-group skill-group" data-source="${source}" aria-label="${skillSourceLabels[source]}"><div class="group-head"><b>${skillSourceLabels[source]} <span class="count">${list.length}</span></b>${bulkButtons("skills-select", source)}</div>${list.map(row).join("")}</fieldset>`).join("") || '<p class="note">No skill matches.</p>';
+}
+function renderSkillsPicker(part = "all") {
   const state = skillsPicker, node = document.querySelector("#skills-picker");
   if (!state || state.projectId !== projectId) return;
   const known = new Set(state.skills.map(skill => skill.name)), count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
   document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${state.isDefault && JSON.stringify(state.draft) === state.saved ? "default: repository skills" : `${count("all")} for every profile`}`;
-  const q = state.query.trim().toLowerCase(), all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
-  const shown = state.skills.filter(skill => !q || skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q));
-  const groups = Object.keys(skillSourceLabels).map(source => [source, shown.filter(skill => skill.source === source)]).filter(([, list]) => list.length);
-  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${inherited || picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
   const dirty = JSON.stringify(state.draft) !== state.saved;
-  node.innerHTML = `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === state.tab ? " on" : ""}" aria-selected="${role === state.tab}" data-action="skills-tab" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>
-    <p class="note">${state.tab === "all" ? "Every profile gets these." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the skills checked here.`}</p>
-    <input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">
-    <div class="skill-groups">${groups.map(([source, list]) => `<fieldset class="events-group skill-group" data-source="${source}"><legend>${skillSourceLabels[source]} · ${list.length}</legend>${list.map(row).join("")}</fieldset>`).join("") || '<p class="note">No skill matches.</p>'}</div>
+  if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
+  if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = skillsListHtml(state); node.querySelector(".pick-note").innerHTML = skillsNote(state); return patchPickerChrome(node, count, dirty); }
+  node.innerHTML = `${profileTabsHtml("skills-tab", state.tab, count)}
+    <p class="note pick-note">${skillsNote(state)}</p>
+    <div class="pick-tools"><input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">${bulkButtons("skills-select")}</div>
+    <div class="skill-groups">${skillsListHtml(state)}</div>
     ${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled" : ""}>Reset to default</button></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled data-off"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled data-off" : ""}>Reset to default</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+}
+const skillsNote = state => (state.tab === "all" ? "Every profile gets these." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the skills checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${skillsShown(state).length} shown.` : "");
+/** Bulk select or clear the skills currently shown (respecting search), optionally for one source. Inherited rows stay as they are. */
+function bulkSkills(source, mode) {
+  const state = skillsPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
+  for (const skill of skillsShown(state)) if ((!source || skill.source === source) && !inherited.has(skill.name)) { if (mode === "all") list.add(skill.name); else list.delete(skill.name); }
+  state.draft[state.tab] = [...list].sort(); state.note = ""; renderSkillsPicker("list");
 }
 async function saveSkillsPicker(reset) {
   const state = skillsPicker, id = projectId;
@@ -464,12 +488,11 @@ document.addEventListener("change", event => {
   const list = new Set(skillsPicker.draft[skillsPicker.tab]);
   if (box.checked) list.add(box.dataset.skillPick); else list.delete(box.dataset.skillPick);
   skillsPicker.draft[skillsPicker.tab] = [...list].sort();
-  skillsPicker.note = ""; renderSkillsPicker();
+  skillsPicker.note = ""; renderSkillsPicker("chrome");
 });
 document.addEventListener("input", event => {
   if (event.target.id !== "skills-search" || !skillsPicker) return;
-  skillsPicker.query = event.target.value; renderSkillsPicker();
-  const input = document.querySelector("#skills-search"); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+  skillsPicker.query = event.target.value; renderSkillsPicker("list");
 });
 
 // MCP servers (Settings): same profile model as skills, plus a per-server "Allow writes". Servers come from the owner's mcp.json; env and arguments never reach the browser.
@@ -482,26 +505,42 @@ async function loadMcpPicker(force = false) {
     const [settings, catalog] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "mcp-catalog", id })]);
     if (id !== projectId || current !== generation) return;
     const saved = settings.values.mcp ?? { all: [], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] };
-    mcpPicker = { projectId: id, catalog, isDefault: !settings.values.mcp, draft: structuredClone(saved), saved: JSON.stringify(saved), tab: mcpPicker?.projectId === id ? mcpPicker.tab : "all", note: "", probes: {} };
+    mcpPicker = { projectId: id, catalog, isDefault: !settings.values.mcp, draft: sortedLists(saved), saved: JSON.stringify(sortedLists(saved)), tab: mcpPicker?.projectId === id ? mcpPicker.tab : "all", note: "", probes: {}, query: mcpPicker?.projectId === id ? mcpPicker.query : "" };
     renderMcpPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">MCP unavailable: ${esc(error.message)}</p>`; }
 }
-function renderMcpPicker() {
-  const state = mcpPicker, node = document.querySelector("#mcp-picker");
-  if (!state || state.projectId !== projectId) return;
-  const servers = state.catalog.servers, known = new Set(servers.map(item => item.name)), all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
-  const count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
-  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} for every profile`;
+const mcpShown = state => { const q = state.query.trim().toLowerCase(); return state.catalog.servers.filter(item => !q || item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q)); };
+function mcpListHtml(state) {
+  const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
   const row = server => {
     const usable = server.status === "ready", inherited = state.tab !== "all" && all.has(server.name), probe = state.probes[server.name];
-    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${inherited || picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span>` : ""}</span></div>`;
+    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${inherited || picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<span class="mcp-actions"><label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span></span>` : ""}</span></div>`;
   };
+  const shown = mcpShown(state);
+  return shown.map(row).join("") || `<p class="note">${state.catalog.servers.length ? "No server matches." : `No servers in ${esc(state.catalog.path)}.`}</p>`;
+}
+const mcpNote = state => (state.tab === "all" ? "Every profile gets these servers." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the servers checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${mcpShown(state).length} shown.` : "");
+function renderMcpPicker(part = "all") {
+  const state = mcpPicker, node = document.querySelector("#mcp-picker");
+  if (!state || state.projectId !== projectId) return;
+  const servers = state.catalog.servers, known = new Set(servers.map(item => item.name));
+  const count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
+  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} for every profile`;
   const dirty = JSON.stringify(state.draft) !== state.saved;
-  node.innerHTML = `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === state.tab ? " on" : ""}" aria-selected="${role === state.tab}" data-action="mcp-tab" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>
-    <p class="note">${state.tab === "all" ? "Every profile gets these servers." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the servers checked here.`}</p>
-    <div class="skill-groups">${servers.map(row).join("") || `<p class="note">No servers in ${esc(state.catalog.path)}.</p>`}</div>
+  if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
+  if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = mcpListHtml(state); node.querySelector(".pick-note").innerHTML = mcpNote(state); return patchPickerChrome(node, count, dirty); }
+  node.innerHTML = `${profileTabsHtml("mcp-tab", state.tab, count)}
+    <p class="note pick-note">${mcpNote(state)}</p>
+    ${servers.length ? `<div class="pick-tools"><input type="search" id="mcp-search" placeholder="Search ${servers.length} servers" value="${esc(state.query)}" aria-label="Search MCP servers">${bulkButtons("mcp-select")}</div>` : ""}
+    <div class="skill-groups">${mcpListHtml(state)}</div>
     ${state.catalog.error ? `<p class="note bad">${esc(state.catalog.error)}</p>` : ""}${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled" : ""}>Remove all</button></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled data-off"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled data-off" : ""}>Remove all</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+}
+/** Bulk enable or clear the usable servers currently shown (respecting search). Inherited rows stay as they are. */
+function bulkMcp(mode) {
+  const state = mcpPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
+  for (const server of mcpShown(state)) if (server.status === "ready" && !inherited.has(server.name)) { if (mode === "all") list.add(server.name); else list.delete(server.name); }
+  state.draft[state.tab] = [...list].sort(); state.note = ""; renderMcpPicker("list");
 }
 async function saveMcpPicker(reset) {
   const state = mcpPicker, id = projectId;
@@ -512,8 +551,8 @@ async function saveMcpPicker(reset) {
   await loadMcpPicker(true);
 }
 async function testMcpServer(server) {
-  const state = mcpPicker; state.probes[server] = { ok: false, error: "Testing…" }; renderMcpPicker();
-  state.probes[server] = await api({ action: "mcp-probe", id: projectId, server }); renderMcpPicker();
+  const state = mcpPicker; state.probes[server] = { ok: false, error: "Testing…" }; renderMcpPicker("list");
+  state.probes[server] = await api({ action: "mcp-probe", id: projectId, server }); renderMcpPicker("list");
 }
 document.addEventListener("change", event => {
   const box = event.target.closest("[data-mcp-pick], [data-mcp-writes]");
@@ -521,7 +560,11 @@ document.addEventListener("change", event => {
   const key = box.dataset.mcpPick !== undefined ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
   if (box.checked) list.add(name); else list.delete(name);
   mcpPicker.draft[key] = [...list].sort();
-  mcpPicker.note = ""; renderMcpPicker();
+  mcpPicker.note = ""; renderMcpPicker("chrome");
+});
+document.addEventListener("input", event => {
+  if (event.target.id !== "mcp-search" || !mcpPicker) return;
+  mcpPicker.query = event.target.value; renderMcpPicker("list");
 });
 
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
@@ -1196,7 +1239,7 @@ function badge(value) { return `<span class="badge ${esc(value)}"><span class="d
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
 function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived); }
 function disableActions() {
-  document.querySelectorAll('#letter button, #letter textarea, .panel button').forEach(node => { node.disabled = busy || !view; });
+  document.querySelectorAll('#letter button, #letter textarea, .panel button').forEach(node => { node.disabled = busy || !view || node.hasAttribute('data-off'); }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
   document.querySelectorAll('#compose button, #compose textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
   document.querySelectorAll('#dialog button[type="submit"], #dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"], #create').forEach(node => { node.disabled = busy; });
   document.querySelectorAll('[data-action="operation-decision"], [data-action="operation-execute"], [data-action="operation-inspect"]').forEach(node => {
@@ -1503,6 +1546,8 @@ async function action(node) {
     case "context-reset": await saveContextSettings(true); break;
     case "compact-now": await compactNow(); break;
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
+    case "skills-select": bulkSkills(node.dataset.source, node.dataset.mode); break;
+    case "mcp-select": bulkMcp(node.dataset.mode); break;
     case "skills-save": await saveSkillsPicker(false); break;
     case "skills-reset": await saveSkillsPicker(true); break;
     case "mcp-tab": mcpPicker.tab = node.dataset.role; renderMcpPicker(); break;
@@ -2608,3 +2653,21 @@ function restoreBrowserDrafts() {
 restoreBrowserDrafts();
 window.addEventListener("pagehide", () => { captureDialogDraft(); persistDraftsSafely(); });
 void start();
+
+// Settings section nav: smooth-scroll to a section (no hash navigation) and highlight the section in view.
+document.addEventListener("click", event => {
+  const link = event.target.closest(".set-nav a");
+  if (!link) return;
+  event.preventDefault();
+  document.querySelector(link.getAttribute("href"))?.scrollIntoView({ block: "start", behavior: "smooth" });
+});
+const markSettingsNav = () => {
+  const sections = [...document.querySelectorAll(".set-section")], body = document.querySelector(".body");
+  if (!sections.length || document.querySelector('[data-panel="settings"]').hidden) return;
+  const line = body.getBoundingClientRect().top + 90;
+  const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 4;
+  const current = atEnd ? sections.at(-1) : sections.findLast(section => section.getBoundingClientRect().top <= line) ?? sections[0];
+  for (const link of document.querySelectorAll(".set-nav a")) link.classList.toggle("on", link.getAttribute("href") === `#${current.id}`);
+};
+document.querySelector(".body").addEventListener("scroll", markSettingsNav, { passive: true });
+new MutationObserver(markSettingsNav).observe(document.querySelector('[data-panel="settings"]'), { attributes: true, attributeFilter: ["hidden"] });
