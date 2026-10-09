@@ -20,7 +20,7 @@ const LIST_FIELDS = "+checks(type,status,system,required,satisfied),updated_at,a
 const DETAIL_FIELDS = "+merge_allowed,auto_merge,merge_commit";
 const BAD = /fail|error|cancel|time.?out|broken|reject/i;
 const PAGE_CAP = 10, DETAIL_CAP = 30, DETAIL_PARALLEL = 3;
-const ttlMs = () => Number(process.env.PI_PROJECTS_PR_TTL_MS) || 90_000;
+const ttlMs = () => Number(process.env.PI_PROJECTS_PR_TTL_MS) || 120_000;
 const backoffBaseMs = () => Number(process.env.PI_PROJECTS_PR_BACKOFF_MS) || 60_000;
 export const clip = (text: unknown, max: number) => { const value = String(text ?? "").replace(/\s+/g, " ").trim(); return value.length > max ? `${value.slice(0, max - 1)}…` : value; };
 export const reviewUrl = (id: number) => `https://a.yandex-team.ru/review/${id}`;
