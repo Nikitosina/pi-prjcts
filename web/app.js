@@ -890,10 +890,10 @@ function reportHtml(message, match) {
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
-  const github = kind === "github.follow", hook = kind.startsWith("webhook.");
+  const github = kind === "github.follow" || kind === "arc.follow", hook = kind.startsWith("webhook.");
   if (kind === "worker.watchdog") { const workers = (body.match(/^- \w+ thread /gm) ?? []).length; return `<details class="report event-card watchdog" data-kind="worker.watchdog"${indexAttr(message)}><summary><span class="event-mark">⏱</span><b>Watchdog check</b><span class="report-task">${workers} running worker${workers === 1 ? "" : "s"}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text"><pre class="mono">${esc(body)}</pre></div></details>`; }
   const changes = github ? (body.match(/^- /gm) ?? []).length : 0;
-  const title = github ? "GitHub activity" : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
+  const title = github ? (kind === "arc.follow" ? "Arcadia activity" : "GitHub activity") : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
   // Webhook bodies follow a fixed preamble line; summarize the body itself.
   const summary = github ? `${changes} change${changes === 1 ? "" : "s"}${/auto-fix (dispatched|sent)/.test(body) ? " · auto-fix sent" : ""}` : clip((hook ? body.slice(body.indexOf("\n\n") + 2) : body).replace(/\s+/g, " ").trim(), 120);
   return `<details class="report event-card ${github ? "github" : hook ? "webhook" : "event"}" data-kind="${esc(kind)}"${indexAttr(message)}><summary><span class="event-mark">${github ? "PR" : hook ? "↯" : "•"}</span><b>${esc(title)}</b><span class="report-task">${esc(summary)}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}</div></details>`;

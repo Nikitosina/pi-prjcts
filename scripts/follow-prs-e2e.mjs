@@ -162,7 +162,7 @@ try {
   // F2: a project without a GitHub authorization gets a readable blocker and no gh call.
   await rpc({ action: 'automation-update', id: plainId, change: { follow: { enabled: true } } });
   const blocked = await rpc({ action: 'follow-poll', id: plainId }).then(() => null, error => error.message);
-  if (!/needs a GitHub authorization/.test(blocked ?? '')) throw Error('No-GitHub blocker wrong: ' + blocked);
+  if (!/needs a GitHub or Arcadia authorization/.test(blocked ?? '')) throw Error('No-GitHub blocker wrong: ' + blocked);
   await rpc({ action: 'automation-update', id: plainId, change: { follow: { enabled: false } } });
   result.checks.push('F2 follow without a GitHub authorization reports "needs a GitHub authorization"');
 

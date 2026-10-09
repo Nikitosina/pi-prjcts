@@ -36,7 +36,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     let body = ''; req.on('data', part => { body += part; });
     req.on('end', async () => {
       const input = JSON.parse(body), msgs = input.messages, tools = (input.tools ?? []).map(t => t.function?.name).filter(Boolean);
-      const role = tools.includes('projects_delegate') ? 'coordinator' : tools.includes('code_read') ? 'scout' : tools.includes('bash') ? 'worker' : 'other';
+      const role = tools.includes('projects_delegate') ? 'coordinator' : tools.includes('projects_review_verdict') ? 'reviewer' : tools.includes('code_read') ? 'scout' : tools.includes('bash') ? 'worker' : 'other';
       const lastUser = msgs.findLastIndex(m => m.role === 'user'), user = contentText(msgs[lastUser]?.content);
       const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
       const system = contentText(msgs.find(m => m.role === 'system' || m.role === 'developer')?.content);
