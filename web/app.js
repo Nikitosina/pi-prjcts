@@ -21,7 +21,6 @@ const dialog = document.querySelector("#dialog");
 const html = new Map();
 const drafts = new Map();
 const answers = new Map();
-const customAnswers = new Set();
 let answerAdoption = null;
 let routineCache = null, routineConfirmation = null;
 function answerKey(project, entry) { return `${project}:${entry}`; }
@@ -236,7 +235,7 @@ function changeProject(id, chat = "main") {
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
   document.querySelector("#subtitle").textContent = id ? "Restoring the coordinator and worker controls…" : "Choose a trusted workspace. Then send the coordinator any request.";
   document.querySelector("#avatar").textContent = initials(p?.name);
-  for (const selector of ["#chat-bar", "#queue", "#letter", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
+  for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
   document.querySelector("#chat-bar").dataset.html = "";
   renderProjects();
   document.querySelector("#warning").hidden = true;
@@ -295,7 +294,9 @@ function render() {
   if (!view) return;
   const pending = [...view.inbox.filter(item => !item.result), ...(approvalPage?.items ?? []).filter(record => record.status === "pending").map(record => ({ kind: "approval", id: `operation:${record.id}`, title: `${record.operation.provider} ${record.operation.kind} · ${record.operation.repositoryId}`, record }))].sort((a, b) => (a.kind === "question" ? 0 : 1) - (b.kind === "question" ? 0 : 1));
   const pendingTotal = view.inbox.filter(item => !item.result).length + (approvalPage?.total ?? 0);
-  const entry = pending.find(item => item.id === selected) ?? pending[0];
+  // Questions live in the chat transcript; the sidebar card keeps operation approvals only.
+  const approvals = pending.filter(item => item.kind === "approval");
+  const entry = approvals.find(item => item.id === selected) ?? approvals[0];
   selected = entry?.id ?? null;
   const eyebrow = document.querySelector("#eyebrow");
   eyebrow.textContent = pendingTotal ? `${pendingTotal} ${pendingTotal === 1 ? "thing needs" : "things need"} your call` : ""; eyebrow.hidden = !pendingTotal;
@@ -306,9 +307,12 @@ function render() {
   renderProjects();
   renderChats();
   document.querySelector("#subtitle").textContent = pendingTotal && pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for the rest.` : view.project.objective ?? "";
-  setHtml("#queue", pending.length < 2 ? "" : pending.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`).join(""));
+  setHtml("#queue", approvals.length < 2 ? "" : approvals.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`).join(""));
   setHtml("#letter", entry ? letter(entry) : "");
-  document.querySelector("#needs-card").hidden = !entry;
+  const waiting = questionPlacement();
+  setHtml("#needs-questions", waiting.here.length || waiting.elsewhere.length ? `${waiting.here.length ? `<button type="button" class="ghost small" data-action="questions-jump">${waiting.here.length} ${waiting.here.length === 1 ? "question" : "questions"} in chat ↓</button>` : ""}${waiting.elsewhere.length ? `<button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(waiting.elsewhere[0].chat.id)}">${waiting.elsewhere.length} ${waiting.elsewhere.length === 1 ? "question" : "questions"} in other chats →</button>` : ""}` : "");
+  document.querySelector("#needs-card").hidden = !entry && !waiting.here.length && !waiting.elsewhere.length;
+  document.querySelector("#question-hint").hidden = !waiting.here.length;
   setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
   setHtml("#outcomes", plan ? durableResults() : "");
   renderArcPrs(); void loadArcPrs();
@@ -317,7 +321,8 @@ function render() {
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
   setHtml("#knowledge-inline", knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>');
   setHtml("#uploads-inline", uploadsHtml()); renderAttachments();
-  setHtml("#messages", view.messages.map(message => chatMessageHtml(message, "Coordinator")).join("") || `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`);
+  setHtml("#messages", transcriptHtml(waiting.answered) || `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`);
+  setHtml("#questions", waiting.here.map(questionCard).join("") + waiting.elsewhere.map(({ item, chat }) => `<p class="question-away"><span>Question waiting in chat <b>${esc(chat.title)}</b>: ${esc(clip(item.title, 90))}</span><button type="button" class="small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button></p>`).join(""));
   const reply = view.messages.findLast(message => message.role === "assistant" && message.text.trim());
   setHtml("#reply-summary", reply ? `<div class="reply-text">${renderMarkdown(reply.text.slice(0, 500))}</div><button type="button" class="ghost small" data-action="conversation">Read conversation ↗</button>` : "");
   document.querySelector("#approvals-button").hidden = !plan;
@@ -1118,12 +1123,40 @@ function clip(value, size) { return value.length > size ? `${value.slice(0, size
 
 function letter(entry) {
   if (entry.kind === "approval") return operationLetter(entry.record);
-  if (entry.kind === "question") return `<article class="letter"><h2>${esc(entry.title)}</h2>${entry.question.trim() !== entry.title ? `<p class="description">${esc(entry.question.startsWith(entry.title) ? entry.question.slice(entry.title.length).trim() : entry.question)}</p>` : ""}<div class="choices">${entry.choices.map((choice, index) => `<button data-action="answer" data-project="${esc(projectId)}" data-entry="${entry.id}" data-choice="${index}" data-choice-text="${esc(choice)}">${esc(choice)}</button>`).join("")}</div>${entry.choices.length && !customAnswers.has(answerKey(projectId, entry.id)) ? `<button class="ghost" data-action="custom-answer" data-project="${esc(projectId)}" data-entry="${entry.id}">Write a different answer…</button>` : answerForm(entry)}${answers.has(entry.id) && !answers.has(answerKey(projectId, entry.id)) ? `<p class="notice">An old UUID-only draft is retained without project ownership. It has not been filled into this question.</p><button data-action="answer-adopt" data-project="${esc(projectId)}" data-entry="${esc(entry.id)}">Inspect and explicitly adopt old draft</button>` : ""}<p class="signoff">Asked ${esc(ago(entry.at))}</p></article>`;
   return "";
 }
 
+// A question belongs to the chat whose conversation asked it; legacy entries without a native identity belong to Main.
+function questionChat(item) { return (view.chats ?? []).find(chat => item.native && chat.conversationId === item.native.conversationId) ?? (view.chats ?? []).find(chat => chat.id === "main"); }
+function questionPlacement() {
+  const here = [], elsewhere = [], answered = [];
+  for (const item of view.inbox.filter(entry => entry.kind === "question")) {
+    const chat = questionChat(item);
+    if (item.result) { if (!chat || chat.id === chatId) answered.push(item); }
+    else if (!chat || chat.id === chatId) here.push(item);
+    else elsewhere.push({ item, chat });
+  }
+  return { here, elsewhere, answered };
+}
+function questionCard(item) {
+  const rest = item.question.trim() !== item.title ? item.question.startsWith(item.title) ? item.question.slice(item.title.length).trim() : item.question : "";
+  const oldDraft = answers.has(item.id) && !answers.has(answerKey(projectId, item.id));
+  return `<article class="question-card" data-question="${esc(item.id)}" tabindex="-1" aria-label="Question from the coordinator"><div class="q-who">Coordinator asks <small class="inline">${esc(ago(item.at))}</small></div><h3 class="q-title">${esc(item.title)}</h3>${rest ? `<div class="q-body">${renderMarkdown(rest)}</div>` : ""}${item.choices.length ? `<div class="choices" role="group" aria-label="Choices">${item.choices.map((choice, index) => `<button type="button" data-action="answer" data-project="${esc(projectId)}" data-entry="${item.id}" data-choice="${index}" data-choice-text="${esc(choice)}"><kbd>${index + 1}</kbd><span>${esc(choice)}</span></button>`).join("")}</div>` : ""}${answerForm(item)}${oldDraft ? `<p class="notice">An old UUID-only draft is retained without project ownership. It has not been filled into this question.</p><button type="button" data-action="answer-adopt" data-project="${esc(projectId)}" data-entry="${esc(item.id)}">Inspect and explicitly adopt old draft</button>` : ""}</article>`;
+}
+function answeredCard(item) {
+  return `<article class="question-done" data-question="${esc(item.id)}"><span class="q-check" aria-hidden="true">✓</span><span class="q-done-body"><b>${esc(item.title)}</b><span>Answered: ${esc(clip(item.result.text, 300))}</span></span><small class="inline">${esc(when(Date.parse(item.result.at)))}</small></article>`;
+}
+// Answered questions stay where they were asked: before the first message sent after the question.
+function transcriptHtml(answered) {
+  const out = [], rest = answered.toSorted((a, b) => a.at.localeCompare(b.at));
+  for (const message of view.messages) {
+    while (rest.length && Number.isFinite(message.at) && message.at > Date.parse(rest[0].at)) out.push(answeredCard(rest.shift()));
+    out.push(chatMessageHtml(message, "Coordinator"));
+  }
+  return [...out, ...rest.map(answeredCard)].join("");
+}
 function answerForm(entry) {
-  return `<form data-answer data-project="${esc(projectId)}" data-entry="${entry.id}" class="stack"><textarea name="answer" aria-label="Answer coordinator" placeholder="Your answer… (Enter to send, Shift+Enter for a new line)" maxlength="24000" required>${esc(answers.get(answerKey(projectId, entry.id)) ?? "")}</textarea><div><button class="primary" type="submit">Send answer</button></div></form>`;
+  return `<form data-answer data-project="${esc(projectId)}" data-entry="${entry.id}" class="q-answer"><textarea name="answer" rows="1" aria-label="Answer the coordinator's question" placeholder="${entry.choices.length ? "Or write your own answer…" : "Your answer…"}" title="Enter to send, Shift+Enter for a new line" maxlength="24000" required>${esc(answers.get(answerKey(projectId, entry.id)) ?? "")}</textarea><button class="primary" type="submit">Send answer</button></form>`;
 }
 function artifactButton(file) { return `<button class="artifact" data-action="artifact" data-file="${file.id}"><strong>${esc(file.title)}</strong><small>${esc(file.filename)} · ${Math.ceil(file.size / 1024)} KiB · SHA-256 ${esc(file.sha256.slice(0, 12))}</small></button>`; }
 function duration(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`; }
@@ -1316,7 +1349,7 @@ function badge(value) { return `<span class="badge ${esc(value)}"><span class="d
 function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
 function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived); }
 function disableActions() {
-  document.querySelectorAll('#letter button, #letter textarea, .panel button').forEach(node => { node.disabled = busy || !view || node.hasAttribute('data-off'); }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
+  document.querySelectorAll('#letter button, #letter textarea, #questions textarea, .panel button').forEach(node => { node.disabled = busy || !view || node.hasAttribute('data-off'); }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
   document.querySelectorAll('#compose button, #compose textarea').forEach(node => { node.disabled = busy || admissionBlocked(); });
   document.querySelectorAll('#dialog button[type="submit"], #dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"], #create').forEach(node => { node.disabled = busy; });
   document.querySelectorAll('[data-action="operation-decision"], [data-action="operation-execute"], [data-action="operation-inspect"]').forEach(node => {
@@ -1355,7 +1388,7 @@ async function uiAction(action) {
 async function mutate(input, success) {
   if (busy) throw new Error("Another action is still pending. Your draft was kept.");
   busy = true; disableActions();
-  try { const result = await api(input); toast(success); if (input.id === projectId) { if (document.querySelector("#letter").contains(document.activeElement)) document.activeElement.blur(); await refresh(); } return result; }
+  try { const result = await api(input); toast(success); if (input.id === projectId) { if (document.querySelector("#letter").contains(document.activeElement) || document.querySelector("#questions").contains(document.activeElement)) document.activeElement.blur(); await refresh(); } return result; }
   finally { busy = false; disableActions(); }
 }
 
@@ -1530,7 +1563,7 @@ function textDialog(mode, id) {
 }
 
 async function action(node) {
-  if (["answer", "custom-answer", "answer-adopt"].includes(node.dataset.action)) requireProject(node.dataset.project);
+  if (["answer", "answer-adopt"].includes(node.dataset.action)) requireProject(node.dataset.project);
   const entry = view?.inbox.find(item => item.id === node.dataset.entry);
   switch (node.dataset.action) {
     case "select": selected = node.dataset.entry; document.activeElement.blur(); render(); break;
@@ -1557,10 +1590,7 @@ async function action(node) {
       const version = showDialog("Adopt this old answer draft?", `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Copy draft only, do not send</button></form>`);
       answerAdoption = { projectId, entryId: entry.id, text, version }; break;
     }
-    case "custom-answer": {
-      if (entry?.kind !== "question" || entry.result) throw new Error("Question is missing or already resolved; refresh before answering");
-      customAnswers.add(answerKey(projectId, entry.id)); document.activeElement.blur(); render(); document.querySelector("[data-answer] textarea").focus(); break;
-    }
+    case "questions-jump": document.querySelector("#questions").scrollIntoView({ block: "center", behavior: "smooth" }); document.querySelector("#questions .question-card textarea")?.focus({ preventScroll: true }); break;
     case "answer": {
       const index = Number(node.dataset.choice);
       if (entry?.kind !== "question" || entry.result || !Number.isSafeInteger(index) || index < 0 || index >= entry.choices.length || entry.choices[index] !== node.dataset.choiceText) throw new Error("Displayed choice changed or question is resolved; refresh and choose again");
@@ -1794,7 +1824,7 @@ async function submit(form) {
     const entry = view?.inbox.find(entry => entry.id === proposal.entryId && entry.kind === "question" && !entry.result);
     const key = answerKey(projectId, proposal.entryId);
     if (!entry || answers.has(key)) throw new Error("Target is resolved or has a newer draft; nothing overwritten");
-    answers.set(key, proposal.text); customAnswers.add(key); persistBrowserDrafts();
+    answers.set(key, proposal.text); persistBrowserDrafts();
     closeCurrentDialog(projectId, version); render(); toast("Old draft copied. No answer sent; original unbound draft retained.");
   } else if (form.matches("[data-answer]")) {
     requireProject(form.dataset.project);
@@ -2095,6 +2125,8 @@ document.addEventListener("keydown", event => {
     if (form && !submit?.disabled && !busy) { event.preventDefault(); form.requestSubmit(); }
     return;
   }
+  const card = /^[1-9]$/.test(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey && !dialog.open && !event.target.closest("input, textarea, select, [contenteditable]") ? event.target.closest?.(".question-card") : null;
+  if (card) { const choice = card.querySelectorAll(".choices button")[Number(event.key) - 1]; if (choice && !choice.disabled) { event.preventDefault(); choice.click(); } return; }
   if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || dialog.open || event.target.closest("input, textarea, select, [contenteditable]")) return;
   event.preventDefault(); setTab("coordinator"); document.querySelector("#compose textarea").focus();
 });

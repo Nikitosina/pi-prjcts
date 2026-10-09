@@ -77,9 +77,9 @@ try {
   await shot('01-activity-worker', s);
   await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
   await send('MARK-ASK pick one');
-  await waitFor(`!!document.querySelector('#letter [data-action="answer"][data-choice-text="blue"]')`, s, 'question card');
+  await waitFor(`!!document.querySelector('#questions [data-action="answer"][data-choice-text="blue"]')`, s, 'question card');
   await shot('02-question', s);
-  await evaluate(`document.querySelector('#letter [data-action="answer"][data-choice-text="blue"]').click()`, s);
+  await evaluate(`document.querySelector('#questions [data-action="answer"][data-choice-text="blue"]').click()`, s);
   await waitFor(`document.querySelector('#messages').innerText.includes('ANSWER-ACK blue')`, s, 'answer acknowledged');
   check('L21 answering a coordinator question in the browser wakes the coordinator', true);
   await shot('03-durable-chat', s);

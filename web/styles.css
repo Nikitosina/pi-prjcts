@@ -792,3 +792,30 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 .pr-error { color: var(--bad, var(--k-b42318)); }
 .pr-chip { text-decoration: none; color: var(--text); }
 .skill-option.pr-opt.active .skill-name { color: var(--accent-ink); }
+
+/* Coordinator questions live in the transcript (answered in place, never in the sidebar). */
+.questions:empty { display: none; }
+.question-card { margin: 14px 0 6px; padding: 16px 18px; border: 1px solid var(--accent); border-radius: 14px; background: var(--panel); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.question-card:focus-visible { outline-offset: 2px; }
+.question-card + .question-card { margin-top: 12px; }
+.q-who { font-size: 12px; font-weight: 600; color: var(--accent-ink); margin-bottom: 6px; }
+.q-title { font: 500 17px/1.4 Georgia, serif; margin: 0 0 6px; overflow-wrap: anywhere; }
+.q-body { font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; color: var(--text); }
+.q-body p { margin: 6px 0; }
+.question-card .choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 10px; }
+.question-card .choices button { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 99px; text-align: left; overflow-wrap: anywhere; }
+.question-card .choices kbd { font: 600 10.5px/1 Menlo, Consolas, monospace; min-width: 18px; padding: 3px 5px; text-align: center; border-radius: 6px; background: var(--chip); color: var(--muted); }
+.question-card .choices button:hover:not(:disabled) { border-color: var(--accent); }
+.q-answer { display: flex; gap: 8px; align-items: flex-end; margin-top: 10px; }
+.q-answer textarea { flex: 1; min-width: 0; min-height: 40px; max-height: 160px; resize: vertical; }
+.q-answer button { flex: none; }
+.question-card .notice { margin: 10px 0 6px; font-size: 12.5px; }
+.question-done { display: flex; gap: 10px; align-items: baseline; margin: 10px 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--chip); font-size: 13px; }
+.question-done .q-check { color: var(--accent-ink); font-weight: 700; }
+.question-done .q-done-body { flex: 1; min-width: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.question-done .q-done-body > span { color: var(--muted); white-space: pre-wrap; }
+.question-away { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 4px; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; font-size: 13px; background: var(--panel); }
+.question-hint { display: flex; align-items: center; gap: 8px; margin: 6px 4px; font-size: 12.5px; color: var(--accent-ink); }
+.question-hint[hidden] { display: none; }
+.needs-questions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.needs-questions:empty { display: none; }

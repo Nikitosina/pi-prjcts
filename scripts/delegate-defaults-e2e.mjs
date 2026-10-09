@@ -167,15 +167,15 @@ try {
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#needs-card')?.offsetParent && document.querySelector('#needs-card').innerText.includes('MARK-QTITLE') && document.querySelector('#needs-card').innerText.includes('MARK-RED') && /1 thing needs your call/i.test(document.querySelector('#eyebrow').innerText)`, s, 'question in Needs you');
+  await waitFor(`!!document.querySelector('#questions .question-card')?.offsetParent && document.querySelector('#questions').innerText.includes('MARK-QTITLE') && document.querySelector('#questions').innerText.includes('MARK-RED') && !document.querySelector('#letter').innerText && /1 thing needs your call/i.test(document.querySelector('#eyebrow').innerText)`, s, 'question in the chat');
   await shot('01-question', s);
   result.checks.push('D11 coordinator question shows in Needs you with choices and header count');
 
   // Answering wakes the coordinator with the question and the answer (12, 13); the raw note document stays out of the rail (15).
-  await evaluate(`[...document.querySelectorAll('#letter .choices button')].find(b => b.innerText === 'MARK-RED').click()`, s);
+  await evaluate(`[...document.querySelectorAll('#questions .choices button')].find(b => b.dataset.choiceText === 'MARK-RED').click()`, s);
   const delivered = await eventually(async () => (await rpc({ action: 'show', id })).messages.find(m => m.role === 'user' && m.text.includes('MARK-QTITLE') && m.text.includes('MARK-RED')), 'answer not delivered to coordinator');
   await eventually(async () => (await rpc({ action: 'show', id })).jobs.every(job => ['done', 'failed', 'interrupted'].includes(job.state)), 'answer turn did not settle');
-  await waitFor(`!document.querySelector('#needs-card').offsetParent && document.querySelector('#messages').innerText.includes('MARK-RED') && !document.querySelector('#notes').innerText.includes('research/legacy')`, s, 'answer delivered in UI');
+  await waitFor(`!document.querySelector('#questions .question-card') && document.querySelector('#messages .question-done')?.innerText.includes('MARK-RED') && document.querySelector('#messages').innerText.includes('MARK-RED') && !document.querySelector('#notes').innerText.includes('research/legacy')`, s, 'answer delivered in UI');
   await shot('02-answered', s);
   result.delivered = delivered.text;
   result.checks.push('D12/D13/D15 answering wakes the coordinator with question + answer; Needs you clears; no raw note doc in rail');
