@@ -57,6 +57,13 @@
         <section class="panel activity" data-panel="activity" hidden>
           <div class="work-pane"><div class="row between work-head"><b id="work-count">Work</b><label class="row archive-toggle"><input type="checkbox" id="show-archived"> Show archived</label></div><div id="work-list"></div></div>
           <section id="inline-thread" class="thread-pane" hidden></section><div id="thread-empty" class="thread-pane thread-empty"><p class="note">Select work to read its conversation, follow up or steer it.</p></div>
+          <aside id="artifact-pane" class="artifact-pane" aria-label="Worker artifacts">
+            <div class="artifact-head row between"><b>Artifacts</b><span class="row"><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button><button class="ghost small artifact-drawer-close" data-action="artifacts-toggle" aria-label="Close artifacts">✕</button></span></div>
+            <small id="artifact-summary" class="note"></small>
+            <input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off">
+            <div id="artifact-tree" class="artifact-tree"></div>
+            <div id="artifact-preview" class="artifact-preview" hidden></div>
+          </aside>
         </section>
 
         <section class="panel" data-panel="observability" hidden>

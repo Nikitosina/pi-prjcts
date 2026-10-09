@@ -136,10 +136,12 @@ try {
   await send('Page.navigate', { url: activity.toString() }, s);
   await waitFor(`!!document.querySelector('[data-action="thread"][data-thread="${thread}"]')`, s, 'thread button');
   await evaluate(`document.querySelector('[data-action="thread"][data-thread="${thread}"]').click()`, s);
-  await waitFor(`[...document.querySelectorAll('#worker-artifacts img.artifact-media')].some(i => i.naturalWidth === 320)`, s, 'thread pane image');
-  const pane = await evaluate(`document.querySelector('#worker-artifacts').innerText`, s);
-  check('A21 the thread pane lists files with sizes, the cap warning and skipped symlinks', /logs\/run\.log/.test(pane) && /600\.0 MB/.test(pane) && /over the 500\.0 MB cap/.test(pane) && /skipped/.test(pane), pane);
-  check('A20 HTML in a file name is escaped', await evaluate(`!window.__xss && !document.querySelector('#worker-artifacts img[src="x"]') && document.querySelector('#worker-artifacts').innerText.includes('<img src=x onerror')`, s));
+  await waitFor(`!!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]')`, s, 'artifact browser files');
+  await evaluate(`document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]').click()`, s);
+  await waitFor(`[...document.querySelectorAll('#artifact-preview img.artifact-media')].some(i => i.naturalWidth === 320)`, s, 'artifact browser image preview');
+  const pane = await evaluate(`document.querySelector('#artifact-pane').innerText`, s);
+  check('A21 the artifact browser lists files with sizes, the cap warning and skipped symlinks', /run\.log/.test(pane) && /600\.0 MB/.test(pane) && /over the 500\.0 MB cap/.test(pane) && /skipped/.test(pane), pane);
+  check('A20 HTML in a file name is escaped', await evaluate(`!window.__xss && !document.querySelector('#artifact-pane img[src="x"]') && document.querySelector('#artifact-pane').innerText.includes('<img src=x onerror')`, s));
   check('A22 artifacts of a completed thread stay visible', (await rpc({ action: 'artifacts-list', id, threadId: thread })).files.length >= 5);
   check('A11 artifacts-list refuses another project\'s thread', await rpc({ action: 'artifacts-list', id: other, threadId: thread }).then(() => false, error => /unknown thread/i.test(error.message)));
   await delay(300); await shot('02-thread-artifacts', s);
