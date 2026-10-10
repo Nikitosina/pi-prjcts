@@ -12,10 +12,10 @@ Data source
 7. PR without checks, with `null` statusCheckRollup, unknown conclusions/states, status contexts (not check runs), 100+ contexts: classified none/running, never throws.
 8. `mergeable: UNKNOWN` (GitHub still computing) is not a conflict and must not flap a conflict event.
 9. Project without a GitHub authorization, archived/deleted project: provider does not apply, zero gh calls.
-10. Project folder below the repo root: PRs touching it (files) are included, the file query only happens for such projects; a root-level project never fetches files.
+10. File-limited workspace grant (no whole-repository scope): PRs touching the granted files are listed and monitored even when someone else wrote them; the files query only happens for such projects; a whole-repository project never fetches files.
 
 Relevance (what the card lists)
-11. Authored by the gh viewer: listed. Authored by someone else: not listed unless watched, worker-published or touching the project folder.
+11. Authored by the gh viewer: listed. Authored by someone else: not listed unless watched, worker-published or touching the project's granted files.
 12. Worker-published PR by another login: listed and monitored (published receipt), and an explicitly watched foreign PR is listed even though it is not authored by me.
 13. Merged/closed PRs never appear on the card.
 
@@ -43,7 +43,7 @@ Coordinator tool
 28. Without a number: the owner's open PRs. With a number: state, checks (name, conclusion, summary, details_url), failed checks, unresolved review threads; unknown PR is a tool error, not a crash. Repository argument must be authorized.
 
 Follow PRs auto-fix brief
-29. Failed check detail (name, conclusion, title/summary, details_url, head sha) is in the fix task, flattened, clipped per field, http(s) links only, capped at ~4 KB with an untrusted marker; failing commit statuses included; a hostile summary cannot break out of the block.
+29. Failed check detail (name, conclusion, title/summary, details_url, head sha) is in the fix task, flattened, clipped per field, http(s) links only, capped at ~4 KB with an untrusted marker (check runs only; commit statuses are on the card and in the tool); a hostile summary cannot break out of the block.
 30. Detail building must not add calls to a green poll, must survive a missing `output`, and must not change when a fix is dispatched (cap, once per head, recorded before dispatch) or auto-merge behaviour.
 
 Regressions

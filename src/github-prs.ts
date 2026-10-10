@@ -1,12 +1,9 @@
 import { execFile } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { relative } from "node:path";
 import { githubCli } from "./github-authorization.ts";
 import { githubPublishedPullRequests } from "./github-worker.ts";
 import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
 import type { PrCardData, PrCounts, PrDetailData, PrProvider } from "./plugin-types.ts";
 import type { Project } from "./state.ts";
-import { findVcsRoot } from "./vcs.ts";
 
 /*
  * GitHub PR watching on the provider API: one `gh api graphql` call per list (open PRs with checks, reviews, mergeability), shared and cached
@@ -119,23 +116,25 @@ export function failedCheckDetail(runs: readonly RestRun[], head: string): strin
 const repoOf = (project: Project) => project.githubAuthorization?.[0]?.repositoryId;
 const PR_ID = /^[1-9][0-9]{0,8}$/;
 const urlOf = (repositoryId: string, id: string) => `https://github.com/${repositoryId}/pull/${id}`;
-/** The project's folder relative to the git root ("" at the root or when it cannot be told). */
-function subpathOf(project: Project): string {
-  try { const found = findVcsRoot(project.cwd); const rel = found?.kind === "git" ? relative(found.root, realpathSync(project.cwd)) : ""; return rel.startsWith("..") ? "" : rel; } catch { return ""; }
+/** Paths a file-limited workspace grant covers ([] for a whole-repository grant or none): PRs touching them are relevant to the project. */
+function scopePaths(project: Project): string[] {
+  const repo = repoOf(project), scopes = (project.workspaceAuthorization?.scopes ?? []).filter(scope => scope.repositoryId === repo);
+  return scopes.length && !scopes.some(scope => scope.wholeRepository) ? scopes.flatMap(scope => scope.files) : [];
 }
 const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 const cache = createListCache<Row>({
   label: "GitHub",
   async fetch(key) {
-    const [repositoryId = "", sub = ""] = key.split("\0"), data = await githubGraphql(listQuery(sub !== ""), split(repositoryId));
+    const [repositoryId = "", withFiles = ""] = key.split("\0"), data = await githubGraphql(listQuery(withFiles !== ""), split(repositoryId));
     if (!data?.repository) throw new Error(`GitHub repository ${repositoryId} was not found or is not readable`);
     const viewer = String(data.viewer?.login ?? ""), nodes: Node[] = (data.repository.pullRequests?.nodes ?? []).filter((item: Node | null) => item && Number.isSafeInteger(item.number));
-    return nodes.map(node => ({ card: card(node), mine: viewer !== "" && node.author?.login === viewer, ...(sub ? { paths: (node.files?.nodes ?? []).map(file => String(file?.path ?? "")) } : {}) }));
+    return nodes.map(node => ({ card: card(node), mine: viewer !== "" && node.author?.login === viewer, ...(withFiles ? { paths: (node.files?.nodes ?? []).map(file => String(file?.path ?? "")) } : {}) }));
   },
 });
-const touches = (row: Row, sub: string) => !!sub && !!row.paths?.some(path => path === sub || path.startsWith(`${sub}/`));
-const key = (project: Project) => { const repo = repoOf(project); return repo ? `${repo}\0${subpathOf(project)}` : null; };
+const touches = (row: Row, scope: readonly string[]) => scope.some(file => row.paths?.some(path => path === file || path.startsWith(`${file.replace(/\/$/, "")}/`)));
+/** Cache key: the repository, and whether the project needs the PRs' files (file-limited grant). */
+const key = (project: Project) => { const repo = repoOf(project); return repo ? `${repo}\0${scopePaths(project).length ? "files" : ""}` : null; };
 
 export const githubPrProvider: PrProvider = {
   id: "github", label: "GitHub", watchDocKind: "projects.github-pr-watch",
@@ -155,18 +154,18 @@ export const githubPrProvider: PrProvider = {
   async list(project, options) {
     const at = key(project);
     if (!at) return { prs: [], fetchedAtMs: null, error: null, rateLimitedUntilMs: null };
-    const out = await cache.list(at, { force: options.force }), include = new Set(options.include ?? []), sub = at.split("\0")[1] ?? "";
-    return { prs: out.items.filter(row => row.mine || include.has(row.card.id) || touches(row, sub)).map(row => row.card), fetchedAtMs: out.fetchedAtMs, error: out.error, rateLimitedUntilMs: out.rateLimitedUntilMs };
+    const out = await cache.list(at, { force: options.force }), include = new Set(options.include ?? []), scope = scopePaths(project);
+    return { prs: out.items.filter(row => row.mine || include.has(row.card.id) || touches(row, scope)).map(row => row.card), fetchedAtMs: out.fetchedAtMs, error: out.error, rateLimitedUntilMs: out.rateLimitedUntilMs };
   },
   async touching(project) {
-    const at = key(project), sub = at?.split("\0")[1] ?? "";
-    return at && sub ? (await cache.list(at)).items.filter(row => touches(row, sub)).map(row => row.card.id) : [];
+    const at = key(project), scope = scopePaths(project);
+    return at && scope.length ? (await cache.list(at)).items.filter(row => touches(row, scope)).map(row => row.card.id) : [];
   },
   async detail(project, id): Promise<PrDetailData> {
     const repo = repoOf(project);
     if (!repo) throw new Error("No GitHub repository");
     const found = await githubPrDetail(repo, Number(id));
-    return { id, title: found.title, status: found.status, url: found.url, conflicts: found.conflicts, counts: found.counts, failedChecks: found.failedChecks, draft: found.draft, review: found.review };
+    return { id, title: found.title, status: found.state, url: found.url, conflicts: found.conflicts, counts: found.counts, failedChecks: found.failedChecks, draft: found.draft, review: found.review };
   },
   parseRefs(text, max = 5, project) {
     const ids: string[] = [], repo = project && repoOf(project);
