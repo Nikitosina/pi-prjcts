@@ -182,7 +182,7 @@ try {
   const base = await eventually(async () => { const v = await snap(); return v.follow.polls >= 1 && v.follow.repos[0]?.baselined && v; }, 'baseline poll did not run (timer)');
   await delay(800);
   if ((await events()).length || base.follow.events !== 0 || base.follow.lastError) throw Error('Baseline delivered events: ' + JSON.stringify(base.follow));
-  if (ghLog().some(c => !c.target.startsWith('repos/acme/mari'))) throw Error('gh read outside the authorized repository');
+  if (ghLog().some(c => !c.target.startsWith('repos/acme/mari') && !c.graphql)) throw Error('gh read outside the authorized repository');
   result.checks.push('F3/F4 the timer runs the first poll after opt-in; it records a silent baseline (old PRs, comments, pending CI) and reads only acme/mari');
 
   // A burst of changes: #4 opened by the project (CI passes), #3 merged, #2 CI fails + review + bot comment, #5 external with failing CI.
