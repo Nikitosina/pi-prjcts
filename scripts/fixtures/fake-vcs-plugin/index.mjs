@@ -58,7 +58,7 @@ export default {
         },
         attach: async context => ({ workDir: context.receipt.workspacePath, start: async () => {}, tools: async () => [publish], guard: command => command, instructions: '\n\nFake mode: your worktree is a plain directory; publish with fake_publish.' }),
         workerFacts: async ({ receipt }) => ({ threadId: /thread (\S+)$/.exec(receipt.scope.leaseReason)?.[1] ?? null, branch: receipt.scope.branch, removable: true, reasons: [], pullRequests: [] }),
-        remove: async ({ entry }) => ({ ok: true, entry }),
+        remove: async ({ entry }) => { rmSync(join(data().worktreeRoot, entry), { recursive: true, force: true }); return { ok: true }; },
         readHeadEntry: (project, path) => ({ leaseOwner: `fake:${project.id}`, entry: path }),
         setupCards: project => {
           if (!isFake(project)) return [];

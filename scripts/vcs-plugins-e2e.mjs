@@ -31,7 +31,7 @@ const readData = () => JSON.parse(readFileSync(dataPath, 'utf8'));
 const patchData = change => { const value = readData(); change(value); writeData(value); };
 const writeConfig = value => writeFileSync(join(kit.home, 'plugins.json'), typeof value === 'string' ? value : JSON.stringify(value));
 const FAKE_PRS = [pr(11, 'Fix keyboard crash <img src=x onerror=alert(1)>', 'running'), pr(12, 'Add swipe typing', 'failed'), pr(21, 'Published by the project', 'running', { head: 'a'.repeat(40) })];
-writeData({ prs: FAKE_PRS, published: [{ number: 21, conversationId: 0 }], uncertainWrites: false });
+writeData({ prs: FAKE_PRS, published: [{ number: 21, conversationId: 0 }], uncertainWrites: false, worktreeRoot: '' });
 // Config: plugins.json is the primary source (fake + a missing path + five broken modules); the env list adds the second PR provider (and repeats fake, which must load once).
 writeConfig({ plugins: [fakePath, missingPath, ...badPaths] });
 
@@ -39,6 +39,7 @@ writeConfig({ plugins: [fakePath, missingPath, ...badPaths] });
 const checkout = join(kit.root, 'fakecheckout');
 mkdirSync(join(checkout, '.fakevcs'), { recursive: true }); writeFileSync(join(checkout, 'README.md'), 'fake checkout\n');
 kit.initRepo();
+patchData(data => { data.worktreeRoot = `${checkout}-worktrees`; });
 const events = () => result.calls.filter(item => item.role === 'coordinator' && item.user.startsWith('[Owner-local event fake.follow]'));
 const notices = async id => (await rpc({ action: 'notify-feed', after: 0 })).items.filter(item => item.kind === 'pr');
 const projectFile = id => JSON.parse(readFileSync(join(kit.home, id, 'project.json'), 'utf8'));
@@ -115,14 +116,15 @@ await kit.run(async () => {
   // ---- Monitor transitions, notices, events ----
   await rpc({ action: 'automation-update', id, change: { follow: { enabled: true } } });
   const eventsBefore = events().length;
+  await rpc({ action: 'pr-watch', id, provider: 'fake', pr: '11', watch: true });
   await rpc({ action: 'prs', id, refresh: true });
   await delay(400);
   check('14 first sight is a silent baseline (no event, no notice)', events().length === eventsBefore && (await notices(id)).length === 0, events().length - eventsBefore);
   patchData(data => { const target = data.prs.find(item => item.id === 11); target.ci = 'failed'; target.revision = 2; });
-  await rpc({ action: 'pr-watch', id, provider: 'fake', pr: '11', watch: true });
   await rpc({ action: 'prs', id, refresh: true });
   await rpc({ action: 'prs', id, refresh: true });
   await kit.eventually(async () => events().length > eventsBefore, 'a CI-failed event for the watched PR', 100);
+  await kit.eventually(async () => (await notices(id)).some(item => /CI failed/.test(item.text)), 'a CI-failed notice', 100);
   const ciNotices = (await notices(id)).filter(item => /CI failed/.test(item.text));
   check('14 CI failure of a watched PR: one event and exactly one notice despite repeated polls', events().length === eventsBefore + 1 && ciNotices.length >= 1 && new Set(ciNotices.map(item => item.text)).size === ciNotices.length && /PR #11/.test(events().at(-1).user) && /https:\/\/fake\.invalid\/pr\/11/.test(events().at(-1).user), { events: events().length - eventsBefore, notices: ciNotices });
   patchData(data => { data.prs.find(item => item.id === 11).merged = true; });
@@ -156,13 +158,13 @@ await kit.run(async () => {
   check('16 a plugin-owned uncertain write blocks automatic admission', blocked === 'uncertain-provider-write' && (await rpc({ action: 'schedule-snapshot', id })).automaticAdmissionBlocker === null, blocked);
 
   // ---- Browser: grouped card, # menu, plugin failure banner ----
-  const page = await kit.openPage(await kit.webUrl(id, 'chat'));
-  await page.waitFor(`!document.querySelector('#prs-card').hidden && document.querySelectorAll('#prs .pr-group').length === 2`, 'two provider groups in the PR card');
+  const page = await kit.openPage(await kit.webUrl(id, 'coordinator'));
+  await page.waitFor(`document.querySelector('#prs-card')?.hidden === false && document.querySelectorAll('#prs .pr-group').length === 2`, 'two provider groups in the PR card');
   const cardText = await page.evaluate(`document.querySelector('#prs-card').innerText`);
   check('11 the browser shows both provider groups, escaped hostile titles and per-provider actions', /Fake/.test(cardText) && /Second/.test(cardText) && /Second provider PR <b>x<\/b>/.test(cardText) && !await page.evaluate(`!!document.querySelector('#prs img, #prs b')`) && await page.evaluate(`document.querySelectorAll('#prs [data-action="pr-watch"][data-provider="fake"]').length > 0`), cardText);
   check('11/23 the composer hint announces # for PRs', /# for PRs/.test(await page.evaluate(`document.querySelector('#compose-hint').textContent`)));
   await page.evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.focus(); t.value = '#2'; t.setSelectionRange(2, 2); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-  await page.waitFor(`!document.querySelector('#skill-menu').hidden && document.querySelectorAll('#skill-menu .pr-opt').length >= 1`, '# menu');
+  await page.waitFor(`document.querySelector('#skill-menu')?.hidden === false && document.querySelectorAll('#skill-menu .pr-opt').length >= 1`, '# menu');
   check('11 the # menu lists provider PRs by their ref', /#21/.test(await page.evaluate(`document.querySelector('#skill-menu').innerText`)));
   await page.shot('01-pr-card-two-providers');
   check('9 the browser shows the failed plugins', await page.evaluate(`/Plugin not loaded/.test(document.body.innerText)`), await page.evaluate(`document.body.innerText.slice(0, 300)`));
@@ -191,14 +193,14 @@ await kit.run(async () => {
   await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ role: 'worker', task: 'no plugin worker' })}`);
   await delay(500); await kit.settle(id);
   const refused = (await kit.plan(id)).slice(planBefore).find(work => work.role === 'worker');
-  check('20 a worker dispatch fails naming the missing plugin instead of falling back to git', refused && refused.status !== 'completed' && /plugin "fake" is not loaded/.test(JSON.stringify(refused)), refused);
+  check('20 a worker dispatch fails naming the missing plugin instead of falling back to git', refused && refused.status === 'failed' && /plugin "fake" is not loaded/.test(refused.blocker), refused);
   check('20 Follow PRs does not pretend to follow (needs a connection)', /needs a GitHub authorization or a connected provider plugin/.test(await kit.rejects({ action: 'follow-poll', id }) ?? ''));
   const followSnap = (await rpc({ action: 'automation-snapshot', id })).follow;
   check('20/19 the Follow record is kept and flagged as an unloaded provider', followSnap.unloadedProviders.join() === 'fake' && !followSnap.repos.some(item => item.repositoryId === 'fake-repo'), followSnap);
   await kit.ask(id, 'MARK-LOOKUP 11 after unload');
   check('19 the coordinator still answers after the plugin tool vanished', Boolean(kit.lastCall('coordinator', 'MARK-LOOKUP 11 after unload')) && !kit.lastCall('coordinator', 'MARK-LOOKUP 11 after unload').tools.includes('fake_pr_lookup'), kit.lastCall('coordinator', 'MARK-LOOKUP 11 after unload')?.tools);
-  const page2 = await kit.openPage(await kit.webUrl(id, 'chat'));
-  await page2.waitFor(`!document.querySelector('#prs-card').hidden && /plugin is not loaded/.test(document.querySelector('#prs-card').innerText)`, 'unloaded note in the PR card');
+  const page2 = page; await page2.navigate(await kit.webUrl(id, 'coordinator'));
+  await page2.waitFor(`document.querySelector('#prs-card')?.hidden === false && /plugin is not loaded/.test(document.querySelector('#prs-card').innerText)`, 'unloaded note in the PR card');
   check('20 the browser says the provider plugin is not loaded', true);
   await page2.shot('03-plugin-not-loaded');
 
