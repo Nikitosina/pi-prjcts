@@ -6,6 +6,7 @@ import * as chord from "@earendil-works/chord/context";
 import * as durable from "@earendil-works/pi-durable";
 import type { Conversation, Tx } from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
+import { githubPrProvider } from "./github-prs.ts";
 import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
 import type { CoordinatorToolsProvider, FollowProvider, HostPluginApi, PluginCapabilities, PluginModule, PluginRpcHandler, PluginStatus, PrProvider, VcsProvider, WorkspaceProvider } from "./plugin-types.ts";
 import { home, loadProject } from "./state.ts";
@@ -25,7 +26,9 @@ const loaded: Loaded[] = [];
 const statuses: PluginStatus[] = [];
 let loading: Promise<PluginStatus[]> | undefined;
 
-const each = <T>(pick: (capabilities: PluginCapabilities) => T | undefined): T[] => loaded.flatMap(item => { const value = pick(item.capabilities); return value === undefined ? [] : [value]; });
+/** Built-in providers go through the same registry as loaded plugins (core ships Git and GitHub); built lazily because the provider modules import this one. */
+const builtins = (): Loaded[] => [{ plugin: "github", capabilities: { prs: githubPrProvider } }];
+const each = <T>(pick: (capabilities: PluginCapabilities) => T | undefined): T[] => [...builtins(), ...loaded].flatMap(item => { const value = pick(item.capabilities); return value === undefined ? [] : [value]; });
 export const plugins = {
   vcsProviders: (): VcsProvider[] => each(caps => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each(caps => caps.vcs).find(item => item.kind === kind),
@@ -90,7 +93,7 @@ function validate(caps: PluginCapabilities): void {
   for (const [method, handler] of Object.entries(caps.rpc ?? {})) if (!/^[a-z][a-z0-9-]{0,63}$/.test(method) || typeof handler !== "function") throw new Error(`rpc.${method} must be a function with a kebab-case name`);
 }
 function conflict(name: string, caps: PluginCapabilities): string | undefined {
-  if (loaded.some(item => item.plugin === name)) return `a plugin named "${name}" is already loaded`;
+  if (name === "github" || loaded.some(item => item.plugin === name)) return `a plugin named "${name}" is already loaded`;
   const clash = (what: string, id: string | undefined, existing: Array<string | undefined>) => id !== undefined && existing.includes(id) ? `${what} "${id}" is already provided by another plugin` : undefined;
   return clash("vcs kind", caps.vcs?.kind, each(c => c.vcs).map(item => item.kind)) ?? clash("workspace provider", caps.workspace?.id, each(c => c.workspace).map(item => item.id)) ?? clash("PR provider", caps.prs?.id, each(c => c.prs).map(item => item.id)) ?? clash("follow provider", caps.follow?.id, each(c => c.follow).map(item => item.id));
 }

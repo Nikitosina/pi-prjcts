@@ -7,10 +7,13 @@ import { loadProject, type Project } from "./state.ts";
 import { clip } from "./pr-cache.ts";
 import { prNoticeText, pushNotices, type PrNotice } from "./pr-notices.ts";
 import { plugins } from "./plugins.ts";
-import type { PrCardData, PrProvider } from "./plugin-types.ts";
+import type { PrCardData, PrProvider, PrTransition } from "./plugin-types.ts";
 import type { scheduleRuntime } from "./durable-schedule.ts";
 
-type Seen = { diff: number | string | null; summary?: string; failed: boolean; conflicts: boolean; mergeFailed: boolean };
+type Seen = { diff: number | string | null; summary?: string; failed: boolean; conflicts: boolean; mergeFailed: boolean; /** Review facts, for providers that report them; absent in older docs. */ review?: PrCardData["review"]; unresolved?: number };
+const DEFAULT_TRANSITIONS: readonly PrTransition[] = ["ci-failed", "conflicts", "merge-failed", "merged", "closed"], DEFAULT_NOTICES: readonly PrTransition[] = ["ci-failed", "merged"];
+/** Event ids keep their original spelling for transitions that existed before the generic list. */
+const EVENT_KEY: Partial<Record<PrTransition, string>> = { "ci-failed": "check-failed" };
 /** Ids are strings; documents written before ids were generic hold numbers and are read as strings. */
 type WatchState = { watched: Array<string | number>; prs: Record<string, Seen>; sent: string[]; lastPollAtMs: number | null; lastError: string | null; polls: number; events: number; /** PRs the owner hid: off the card and never monitored; absent in older docs. */ hidden?: Array<string | number>; /** Host notices (CI failed, merged) for the notifier; absent in older docs. */ notices?: PrNotice[] };
 const docs = new Map<string, ReturnType<typeof watchDoc>>();
@@ -31,30 +34,38 @@ export function prMonitorRuntime(provider: PrProvider, root: Conversation, proje
 
   async function pollOnce() {
     if (!active() || await paused()) return { skipped: true };
-    const project = loadProject(projectId);
-    const mine = await provider.list(project, {});
+    const project = loadProject(projectId), state = await read(), workers = new Set(await provider.published(root, project));
+    const hidden = new Set(state.hidden ?? []);
+    const mine = await provider.list(project, { include: [...state.watched, ...workers].filter(id => !hidden.has(id)) });
     if (mine.error && !mine.fetchedAtMs) throw new Error(mine.error);
-    const state = await read(), workers = new Set(await provider.published(root));
     const touching = new Set(provider.touching ? await provider.touching(project) : []);
-    const hidden = new Set(state.hidden ?? []), monitored = new Set<string>([...state.watched, ...touching, ...workers].filter(id => !hidden.has(id)));
+    const monitored = new Set<string>([...state.watched, ...touching, ...workers].filter(id => !hidden.has(id)));
     const byId = new Map<string, PrCardData>(mine.prs.map(pr => [pr.id, pr])), seen: Record<string, Seen> = {}, sent = new Set(state.sent), fresh: string[] = [], lines: string[] = [], notices: PrNotice[] = [], finished = new Set<string>();
-    const emit = (id: string, diff: Seen["diff"], kind: string, line: string) => { const key = `${id}:${diff ?? "-"}:${kind}`; if (sent.has(key)) return; sent.add(key); fresh.push(key); lines.push(`- ${line}`); };
+    const watching = new Set<PrTransition>(provider.transitions ?? DEFAULT_TRANSITIONS), noticing = new Set<PrTransition>(provider.noticeFor ?? DEFAULT_NOTICES);
+    const emit = (id: string, diff: Seen["diff"], kind: PrTransition, line: string, token = "") => { if (!watching.has(kind) || provider.followCovers?.events.includes(kind)) return; const key = `${id}:${diff ?? "-"}:${EVENT_KEY[kind] ?? kind}${token}`; if (sent.has(key)) return; sent.add(key); fresh.push(key); lines.push(`- ${line}`); };
     // A notice is raised for every monitored PR (worker PRs too); an event line only where Follow PRs does not already report it.
-    const notify = (id: string, diff: Seen["diff"], kind: PrNotice["kind"], text: string) => { const key = `notice:${id}:${diff ?? "-"}:${kind}`; if (sent.has(key)) return; sent.add(key); fresh.push(key); notices.push({ key: `${provider.id}:${key}`, kind, text, at: Date.now() }); };
+    const notify = (id: string, diff: Seen["diff"], kind: PrTransition & PrNotice["kind"], text: string, token = "") => { if (!watching.has(kind) || !noticing.has(kind) || provider.followCovers?.notices.includes(kind)) return; const key = `notice:${id}:${diff ?? "-"}:${kind}${token}`; if (sent.has(key)) return; sent.add(key); fresh.push(key); notices.push({ key: `${provider.id}:${key}`, kind, text, at: Date.now() }); };
     for (const id of monitored) {
       const pr = byId.get(id), was = state.prs[id], name = `PR ${pr?.ref ?? `#${id}`}${pr || was?.summary ? ` “${clip(pr?.title ?? was?.summary, 120)}”` : ""}`;
       if (pr) {
-        seen[id] = { diff: pr.revision, summary: pr.title, failed: pr.requiredFailed, conflicts: pr.conflicts, mergeFailed: pr.mergeFailed };
+        seen[id] = { diff: pr.revision, summary: pr.title, failed: pr.requiredFailed, conflicts: pr.conflicts, mergeFailed: pr.mergeFailed, ...(pr.review !== undefined ? { review: pr.review } : {}), ...(pr.unresolved !== undefined ? { unresolved: pr.unresolved } : {}) };
         if (!was) continue;
         // Worker PRs already get CI-failure and merge lines from Follow PRs.
         if (pr.requiredFailed && !was.failed) notify(id, pr.revision, "ci-failed", prNoticeText("ci-failed", id, pr.title, pr.failedChecks[0]));
-        if (pr.requiredFailed && !was.failed && !workers.has(id)) emit(id, pr.revision, "check-failed", `${name} required check failed (revision ${pr.revision}): ${pr.failedChecks.slice(0, 6).map(item => clip(item, 80)).join(", ") || "see the PR checks"} ${pr.url}`);
-        if (pr.conflicts && !was.conflicts) emit(id, pr.revision, "conflicts", `${name} has merge conflicts (revision ${pr.revision}) ${pr.url}`);
+        if (pr.requiredFailed && !was.failed && !workers.has(id)) emit(id, pr.revision, "ci-failed", `${name} required check failed (revision ${pr.revision}): ${pr.failedChecks.slice(0, 6).map(item => clip(item, 80)).join(", ") || "see the PR checks"} ${pr.url}`);
+        if (was.failed && pr.state === "green") { notify(id, pr.revision, "ci-recovered", prNoticeText("ci-recovered", id, pr.title)); emit(id, pr.revision, "ci-recovered", `${name} checks are green again (revision ${pr.revision}) ${pr.url}`); }
+        if (pr.conflicts && !was.conflicts) { notify(id, pr.revision, "conflicts", prNoticeText("conflicts", id, pr.title)); emit(id, pr.revision, "conflicts", `${name} has merge conflicts (revision ${pr.revision}) ${pr.url}`); }
         if (pr.mergeFailed && !was.mergeFailed) emit(id, pr.revision, "merge-failed", `${name} auto-merge is on but the merge failed (status ${clip(pr.status, 40)}) ${pr.url}`);
+        // Review changes: compared with the last poll; the update time keeps a repeated approve/changes round on one revision distinct.
+        if (was.review !== undefined && pr.review !== was.review) {
+          if (pr.review === "changes") { notify(id, pr.revision, "changes-requested", prNoticeText("changes-requested", id, pr.title), pr.updatedAt); emit(id, pr.revision, "changes-requested", `${name} has changes requested ${pr.url}`, pr.updatedAt); }
+          if (pr.review === "approved") { notify(id, pr.revision, "approved", prNoticeText("approved", id, pr.title), pr.updatedAt); emit(id, pr.revision, "approved", `${name} was approved ${pr.url}`, pr.updatedAt); }
+        }
+        if ((pr.unresolved ?? 0) > (was.unresolved ?? 0) && was.unresolved !== undefined) { notify(id, pr.revision, "review-comments", prNoticeText("review-comments", id, pr.title, `${pr.unresolved} unresolved`), `:${pr.unresolved}`); emit(id, pr.revision, "review-comments", `${name} has ${pr.unresolved} unresolved review thread${pr.unresolved === 1 ? "" : "s"} (was ${was.unresolved}) ${pr.url}`, `:${pr.unresolved}`); }
       } else if (was && !mine.error) {
         // Gone from the open list: merged or discarded, confirmed by a read; anything else is retried next poll.
         const gone = await provider.status(project, id).catch(() => null);
-        if (gone?.merged || gone?.closed) { finished.add(id); if (gone.merged) notify(id, was.diff, "merged", prNoticeText("merged", id, was.summary ?? "")); if (!workers.has(id)) emit(id, was.diff, gone.merged ? "merged" : "closed", `${name} ${gone.merged ? "was merged" : "was discarded"} ${provider.url(id)}`); }
+        if (gone?.merged || gone?.closed) { finished.add(id); if (gone.merged) notify(id, was.diff, "merged", prNoticeText("merged", id, was.summary ?? "")); if (!workers.has(id)) emit(id, was.diff, gone.merged ? "merged" : "closed", `${name} ${gone.merged ? "was merged" : "was discarded"} ${provider.url(id, project)}`); }
         else seen[id] = was;
       } else if (was) seen[id] = was;
     }
@@ -106,7 +117,12 @@ export function prMonitorRuntime(provider: PrProvider, root: Conversation, proje
     const state = await read();
     return { watched: state.watched, hidden: state.hidden ?? [], monitoring: active(), lastPollAtMs: state.lastPollAtMs, lastError: state.lastError, polls: state.polls, events: state.events };
   }
-  return { poll, tick, setWatch, setHidden, snapshot, notices: async () => (await read()).notices ?? [], kick: () => { nextAtMs = 0; } };
+  /** The card's rows: the provider's list plus the PRs this project watches or its workers opened, whoever wrote them. */
+  async function listing(project: Project, force: boolean) {
+    const state = await read(), hidden = new Set(state.hidden ?? []);
+    return provider.list(project, { force, include: [...state.watched, ...await provider.published(root, project).catch(() => [])].filter(id => !hidden.has(id)) });
+  }
+  return { poll, tick, setWatch, setHidden, snapshot, listing, notices: async () => (await read()).notices ?? [], kick: () => { nextAtMs = 0; } };
 }
 
 /** `#123`-style references in an owner message: the first provider serving the project that finds ids adds a compact, untrusted block with the PRs' state. An unreadable PR is a line, never an error. */
@@ -114,13 +130,13 @@ export const PR_BLOCK_HEADER = (label: string) => `[Referenced PRs (${label}): p
 export async function referencedPrBlock(project: Project, text: string): Promise<string> {
   for (const provider of plugins.prProviders()) {
     if (!provider.applies(project)) continue;
-    const ids = provider.parseRefs(text);
+    const ids = provider.parseRefs(text, undefined, project);
     if (!ids.length) continue;
     const known = new Map((await provider.list(project, {}).catch(() => ({ prs: [] as PrCardData[] }))).prs.map(pr => [pr.id, pr]));
     const lines = await Promise.all(ids.map(async id => {
       const pr = known.get(id);
-      if (pr) return `- ${pr.ref} “${pr.title}” (${pr.state}${pr.conflicts ? ", conflicts" : ""}${pr.autoMerge ? ", auto-merge on" : ""}; checks ok ${pr.counts.ok}, failed ${pr.counts.failed}, running ${pr.counts.running}${pr.failedChecks.length ? `; failing: ${pr.failedChecks.join(", ")}` : ""}) ${pr.url}`;
-      try { const found = await provider.detail(project, id); return `- #${id} “${found.title}” (${found.status}${found.conflicts ? ", conflicts" : ""}; checks ok ${found.counts.ok}, failed ${found.counts.failed}, running ${found.counts.running}${found.failedChecks.length ? `; failing: ${found.failedChecks.join(", ")}` : ""}) ${found.url}`; }
+      if (pr) return `- ${pr.ref} “${pr.title}” (${pr.state}${pr.draft ? ", draft" : ""}${pr.review ? `, review: ${pr.review}` : ""}${pr.conflicts ? ", conflicts" : ""}${pr.autoMerge ? ", auto-merge on" : ""}; checks ok ${pr.counts.ok}, failed ${pr.counts.failed}, running ${pr.counts.running}${pr.failedChecks.length ? `; failing: ${pr.failedChecks.join(", ")}` : ""}) ${pr.url}`;
+      try { const found = await provider.detail(project, id); return `- #${id} “${found.title}” (${found.status}${found.draft ? ", draft" : ""}${found.review ? `, review: ${found.review}` : ""}${found.conflicts ? ", conflicts" : ""}; checks ok ${found.counts.ok}, failed ${found.counts.failed}, running ${found.counts.running}${found.failedChecks.length ? `; failing: ${found.failedChecks.join(", ")}` : ""}) ${found.url}`; }
       catch (error) { return `- #${id}: could not be read (${clip((error as { code?: unknown } | null)?.code ?? "error", 40)})`; }
     }));
     return `\n\n${PR_BLOCK_HEADER(provider.label)}\n${lines.join("\n")}`;

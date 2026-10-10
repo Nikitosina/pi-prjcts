@@ -175,9 +175,16 @@ export type PrCardData = {
   /** Changes when new work lands (diff-set, head): transitions are reported once per revision. */
   revision: number | string | null;
   updatedAt: string;
+  /** Optional review facts (providers with reviews): the monitor reports changes-requested / approved / new unresolved threads. */
+  draft?: boolean;
+  review?: "approved" | "changes" | "required" | null;
+  /** Unresolved review threads. */
+  unresolved?: number;
 };
+/** Transitions the PR monitor can report. */
+export type PrTransition = "ci-failed" | "ci-recovered" | "conflicts" | "merge-failed" | "merged" | "closed" | "changes-requested" | "approved" | "review-comments";
 export type PrListing = { prs: PrCardData[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null };
-export type PrDetailData = { id: PrId; title: string; status: string; url: string; conflicts: boolean; counts: PrCounts; failedChecks: string[] };
+export type PrDetailData = { id: PrId; title: string; status: string; url: string; conflicts: boolean; counts: PrCounts; failedChecks: string[]; draft?: boolean; review?: PrCardData["review"] };
 export type PrProvider = {
   id: string;
   /** Shown as the card group and in events ("GitHub", or a plugin's label). */
@@ -187,25 +194,34 @@ export type PrProvider = {
   /** Throws for an id this provider cannot use (watch/hide requests are checked before they are stored). */
   validateId?(id: PrId): void;
   /** Link to a PR by id (also for PRs that left the open list). */
-  url(id: PrId): string;
+  url(id: PrId, project?: Project): string;
   /** Whether the provider serves this project at all. */
   applies(project: Project): boolean;
-  list(project: Project, options: { force?: boolean }): Promise<PrListing>;
+  /** `include`: ids the host monitors or shows regardless of authorship (watched, worker-published). */
+  list(project: Project, options: { force?: boolean; include?: readonly PrId[] }): Promise<PrListing>;
   /** PRs that touch the project's own folder (monitored without being watched). */
   touching?(project: Project): Promise<PrId[]>;
   detail(project: Project, id: PrId): Promise<PrDetailData>;
-  /** Ids written in an owner message (`#123`), distinct, in order, at most `max`. */
-  parseRefs(text: string, max?: number): PrId[];
+  /** Ids written in an owner message (`#123`), distinct, in order, at most `max`. `project` lets a provider tell its own PR URLs from others. */
+  parseRefs(text: string, max?: number, project?: Project): PrId[];
+  /** Turns what the owner typed to watch or hide (`123`, `#123`, a PR URL) into an id; throws when it is not a PR of this project. */
+  normalizeId?(project: Project, input: string): PrId;
+  /** Transitions the monitor reports (default: ci-failed, conflicts, merge-failed, merged, closed). */
+  transitions?: readonly PrTransition[];
+  /** Transitions that also raise a host notice, browser and Telegram (default: ci-failed, merged). */
+  noticeFor?: readonly PrTransition[];
+  /** Transitions Follow PRs already reports for this provider, so the monitor stays quiet about them: `events` are coordinator event lines, `notices` host notices. */
+  followCovers?: { events: readonly PrTransition[]; notices: readonly PrTransition[] };
   /** Current state of a PR that left the open list; never cached. */
   status(project: Project, id: PrId): Promise<{ status: string; merged: boolean; closed: boolean }>;
   /** PRs this project's workers opened (always monitored). */
-  published(root: Conversation): Promise<PrId[]>;
+  published(root: Conversation, project: Project): Promise<PrId[]>;
 };
 
 // ---- follow ----
 export type FollowPrState = { state: "open" | "closed" | "merged"; head: string; ref: string; title: string; updatedAt: string; ci: { sha: string; result: "failed" | "passed" } | null; lastReview: number; lastComment: number; lastLineComment: number };
 export type FollowItem = { id: string; line: string; notice?: Pick<PrNotice, "kind" | "text"> };
-export type FollowFailure = { repo: { repositoryId: string; numericId?: number }; number: number; title: string; head: string; ref: string; checks: string[]; /** Set by a plugin provider: the auto-fix task text for this failure. */ brief?: (input: { attempt: number; cap: number; hasThread: boolean }) => string; provider?: string };
+export type FollowFailure = { repo: { repositoryId: string; numericId?: number }; number: number; title: string; head: string; ref: string; checks: string[]; /** Failed-check detail for the built-in auto-fix brief (untrusted provider data, already capped). */ detail?: string; /** Set by a plugin provider: the auto-fix task text for this failure. */ brief?: (input: { attempt: number; cap: number; hasThread: boolean }) => string; provider?: string };
 export type FollowRepoState = { baselined: boolean; prs: Record<string, FollowPrState> };
 export type MergeReceipt = { sha: string; state: "uncertain" | "merged" | "failed"; at: number; marker: string; reviewerThreadId: string; mergeCommit: string | null; error: string | null; retryable?: boolean };
 /** Helpers the host gives a provider's auto-merge (same receipts, review requests and gates as GitHub's). */

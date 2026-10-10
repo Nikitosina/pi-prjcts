@@ -591,7 +591,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const project = loadProject(input.id), provider = plugins.prProvider(input.provider);
       if (project.archived || project.deleted || !provider?.applies(project)) throw new Error("Watching or hiding PRs needs an active project served by a loaded PR provider");
       const owner = await durable(input.id);
-      return input.action === "pr-watch" ? { watched: await owner.prWatch(input.provider, input.pr, input.watch) } : { hidden: await owner.prHide(input.provider, input.pr, input.hide) };
+      const pr = provider.normalizeId ? provider.normalizeId(project, input.pr) : input.pr;
+      return input.action === "pr-watch" ? { watched: await owner.prWatch(input.provider, pr, input.watch) } : { hidden: await owner.prHide(input.provider, pr, input.hide) };
     }
     case "follow-poll": { const result = await (await durable(input.id)).followPoll(); return { result, ...(await automationSnapshot(input.id)) }; }
     case "event-ingest": return withDurableOwner({ id: input.id, operation: owner => owner.ingestLocalEvent({ eventId: input.eventId, kind: input.kind, payload: input.payload }) });

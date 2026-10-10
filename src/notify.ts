@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
+import { PR_NOTICE_TITLE } from "./pr-notices.ts";
 import { loadAutomations } from "./project-automations.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
@@ -61,7 +62,7 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       if (seen.has(key)) continue;
       seen.add(key);
       if (silent) continue;
-      push({ ...base, chatId: eventTarget.id, chat: eventTarget.title, kind: "pr", title: item.kind === "ci-failed" ? "CI failed" : "Merged", text: clip(item.text) });
+      push({ ...base, chatId: eventTarget.id, chat: eventTarget.title, kind: "pr", title: PR_NOTICE_TITLE[item.kind] ?? "Pull request", text: clip(item.text) });
     }
     // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
     const quietWork = silent || !entry.workBaselined;

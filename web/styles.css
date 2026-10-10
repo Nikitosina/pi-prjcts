@@ -783,6 +783,8 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 .pr-sub .pr-fails { color: var(--bad, var(--k-b42318)); }
 .pr-watch { padding: 2px 7px; font-size: 11px; color: var(--muted); }
 .pr-watch.on { color: var(--accent-ink); border-color: var(--accent); }
+.pr-add { display: flex; gap: 6px; margin-top: 8px; }
+.pr-add input { flex: 1; min-width: 0; }
 .pr-actions { display: inline-flex; align-items: center; gap: 2px; }
 .pr-hide { display: none; padding: 2px 6px; font-size: 11px; color: var(--muted); border-color: transparent; }
 .pr-row:hover .pr-hide, .pr-row:focus-within .pr-hide, .hidden-pr .pr-hide { display: inline-flex; }
