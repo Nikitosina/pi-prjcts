@@ -1,16 +1,15 @@
 // E2E: continue a branch/worktree from a new worker thread (fromThread / branch) and the coordinator's projects_worker_diff.
-// Fake arc / arc-wt / arcanum / model, private HOME, git project with a local bare origin. Failure cases: worker-continuation-failures.md.
+// Fake model, private HOME, git project with a local bare origin. Failure cases: worker-continuation-failures.md. (Provider-plugin variants live in the plugin repositories.)
 // Artifact: artifacts/worker-continuation-<time>/report.json (+ summary.json with the key observed facts).
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createKit, call, say, randomUUID, delay } from './lib/e2e-kit.mjs';
-import { fakeArcadia, assertFakeOnly } from './lib/fake-arc-kit.mjs';
 
 // Coordinator: `MARK-J {args}` delegates with those projects_delegate arguments; `MARK-D <threadId>` reads projects_worker_diff.
-// Worker: RUN[cmd]RUN (bash) and PR[title|body]PR (open_draft_pr) steps in order of appearance.
+// Worker: RUN[cmd]RUN (bash) steps in order of appearance.
 const fullDiffs = [];
-const handler = ({ role, user, results, tools }) => {
+const handler = ({ role, user, results }) => {
   if (user.startsWith('[Durable work')) return say('Noted report.');
   if (role === 'coordinator') {
     if (results.length) { if (user.includes('MARK-D')) fullDiffs.push(results.at(-1)); return say('Noted.'); }
@@ -20,16 +19,11 @@ const handler = ({ role, user, results, tools }) => {
     return undefined;
   }
   if (role !== 'worker') return undefined;
-  const step = [...user.matchAll(/RUN\[([^\]]*)\]RUN|PR\[([^\]]*)\]PR/g)][results.length];
-  if (!step) return undefined;
-  if (step[1] !== undefined) return call('bash', { command: step[1] });
-  const [title, body = ''] = step[2].split('|');
-  return call(tools.find(name => /^projects_arc_.*_open_draft_pr$/.test(name)), { title, body });
+  const step = [...user.matchAll(/RUN\[([^\]]*)\]RUN/g)][results.length];
+  return step ? call('bash', { command: step[1] }) : undefined;
 };
 const kit = await createKit('worker-continuation', { handler });
 const { check, rpc, result, root } = kit;
-const fake = fakeArcadia(kit.root);
-Object.assign(kit.hostEnv, fake.env);
 kit.initRepo();
 const run = (...cmds) => cmds.map(cmd => `RUN[${cmd}]RUN`).join(' ');
 const git = (dir, ...args) => kit.git(dir, ...args);
@@ -52,14 +46,13 @@ const worktreeCount = dir => git(dir, 'worktree', 'list', '--porcelain').split('
 
 await kit.run(async () => {
   const projects = [];
-  for (const [title, cwd, arc] of [['GitProj', kit.workspace, false], ['ArcProj', fake.subdir, true]]) {
+  for (const [title, cwd] of [['GitProj', kit.workspace]]) {
     const id = await kit.createProject(title, { grant: false, cwd });
-    let snap = await rpc({ action: 'owner-setup-snapshot', id });
+    const snap = await rpc({ action: 'owner-setup-snapshot', id });
     await rpc({ action: 'workspace-quick-grant', id, confirm: id, expectedRevision: snap.workspaceRevision });
-    if (arc) { snap = await rpc({ action: 'owner-setup-snapshot', id }); await rpc({ action: 'arc-quick-authorize', id, confirm: id, expectedRevision: snap.arcRevision }); }
-    projects.push({ id, arc });
+    projects.push({ id });
   }
-  const [gp, ap] = projects;
+  const [gp] = projects;
   const delegate = async (project, args, tag) => { await kit.ask(project.id, `MARK-J ${JSON.stringify({ ...args, task: `${args.task ?? ''} ${tag}` })}`); const out = kit.result.calls.findLast(c => c.role === 'coordinator' && c.user.includes(tag) && c.results.length)?.results.at(-1) ?? ''; if (process.env.E2E_DEBUG) console.error(`[delegate ${tag}]`, out.slice(0, 500)); return out; };
   const work = async (project, tag) => (await kit.plan(project.id)).findLast(item => item.text.includes(tag));
   const workerRun = tag => kit.lastCall('worker', tag);
@@ -149,62 +142,6 @@ await kit.run(async () => {
   const b2 = workerRun('g-b2').results;
   check('F16 a local-only branch at its tip is continued without recreating it', b2[0].trim() === 'pi/local-only' && b2[1].trim() === localTip && git(kit.workspace, 'rev-parse', 'pi/local-only') === localTip, b2);
 
-  // ---- arc ----
-  const adds = () => fake.calls().filter(c => c.tool === 'arc-wt' && c.argv[0] === 'add');
-  const flag = (argv, name) => argv[argv.indexOf(name) + 1];
-  const store = () => JSON.parse(readFileSync(join(fake.dir, 'arcanum.json'), 'utf8'));
-  const patchStore = change => { const data = store(); change(data); writeFileSync(join(fake.dir, 'arcanum.json'), JSON.stringify(data)); };
-  const receipts = async () => (await rpc({ action: 'arc-write-snapshot', id: ap.id })).items;
-  const createCalls = () => fake.calls().filter(c => c.tool === 'arc' && c.argv[0] === 'pr' && c.argv[1] === 'create');
-
-  await delegate(ap, { role: 'worker', task: `KEYBOARD-7001 cont base ${run("echo 'let a1 = 1' >> Sources/Keys.swift", 'arc add Sources/Keys.swift', 'arc commit -m "KEYBOARD-7001: a1"')} PR[KEYBOARD-7001: a1|first body]PR ${run('echo dirty-a1 > Sources/Dirty.swift', 'pwd', 'arc info --json')}` }, 'a-w1');
-  const a1Plan = await work(ap, 'a-w1'), a1 = workerRun('a-w1').results;
-  const a1Path = a1[5].trim(), a1Branch = JSON.parse(a1[6]).branch, a1Rows = await receipts();
-  check('arc: worker 1 opened one PR from its branch and left an untracked file', a1Plan.status === 'completed' && store().prs.length === 1 && a1Rows.length === 1 && a1Rows[0].branch === a1Branch, { prs: store().prs.length, a1Rows });
-  const addsBefore = adds().length, a1Conversation = a1Rows[0].conversationId;
-
-  const ad1 = await diffOf(ap, a1Plan.threadId, 'ad1');
-  check('F21 arc: projects_worker_diff shows branch, head, status and the untracked file as an addition', ad1.includes(`Branch: ${a1Branch}`) && /^\?\? .*Dirty\.swift$/m.test(ad1) && ad1.includes('dirty-a1') && ad1.includes('+let a1 = 1'), ad1.slice(0, 900));
-
-  await delegate(ap, { role: 'worker', fromThread: a1Plan.threadId, task: run('pwd', 'arc info --json', 'arc status --short', 'cat Sources/Dirty.swift', "echo 'let a2 = 2' >> Sources/Keys.swift", 'arc add Sources/Keys.swift Sources/Dirty.swift', 'arc commit -m "KEYBOARD-7001: a2"') + ' PR[KEYBOARD-7001: a2|second body]PR' }, 'a-w2');
-  const a2Plan = await work(ap, 'a-w2'), a2 = workerRun('a-w2').results;
-  check('F1 arc fromThread: same worktree and branch, committed and untracked state present, no new arc-wt add', a2Plan.status === 'completed' && a2[0].trim() === a1Path && JSON.parse(a2[1]).branch === a1Branch && /Dirty\.swift/.test(a2[2]) && a2[3].includes('dirty-a1') && adds().length === addsBefore, { a2: a2.slice(0, 4), adds: [addsBefore, adds().length] });
-  const a2Rows = await receipts();
-  check('F20/F9 arc: the takeover updated the same PR (one PR, new head, no second create) and the receipt moved to the new thread conversation', store().prs.length === 1 && createCalls().length === 1 && a2Rows.length === 1 && a2Rows[0].head === fake.git(a1Path, 'rev-parse', 'HEAD') && a2Rows[0].head !== a1Rows[0].head && a2Rows[0].conversationId !== a1Conversation, { a1: a1Rows[0].head, a2: a2Rows[0] });
-  check('F20 arc: the PR active head is the new commit', store().prs[0].diffSets.at(-1).head === a2Rows[0].head, store().prs[0].diffSets);
-  const arcRefused = await kit.rejects({ action: 'thread-send', id: ap.id, threadId: a1Plan.threadId, text: `AFTER ${run('echo hacked > Sources/hacked.swift')}`, requestId: randomUUID() });
-  check('F5 arc: the old thread is refused', /handed to thread/.test(arcRefused ?? '') && !existsSync(join(a1Path, 'Sources/hacked.swift')), arcRefused);
-
-  // Arc branch continuation of a PR whose worktree and local branch are gone.
-  await delegate(ap, { role: 'worker', task: `KEYBOARD-7002 second pr ${run("echo 'let a3 = 3' >> Sources/Keys.swift", 'arc add Sources/Keys.swift', 'arc commit -m "KEYBOARD-7002: a3"')} PR[KEYBOARD-7002: a3|third body]PR ${run('arc info --json')}` }, 'a-w3');
-  const a3Plan = await work(ap, 'a-w3'), a3Branch = JSON.parse(workerRun('a-w3').results.at(-1)).branch, a3Row = (await receipts()).find(row => row.branch === a3Branch), pr2 = a3Row.pullRequest;
-  const a3Entry = fake.wt().entries.find(entry => entry.branch === a3Branch), a3Head = a3Row.head;
-  execFileSync(fake.env.PI_PROJECTS_ARC_WT_CLI, ['remove', a3Entry.name, '--lease-owner', `pi-projects:${ap.id}`]);
-  fake.git(fake.arcadia, 'branch', '-D', a3Branch);
-  check('arc: the second PR exists only on the server (worktree and local branch removed)', a3Plan.status === 'completed' && store().prs.length === 2 && !existsSync(a3Entry.path) && fake.serverRefs().some(([ref, sha]) => ref === `users/${fake.login}/${a3Branch}` && sha === a3Head), fake.serverRefs());
-
-  const rejectBefore = adds().length;
-  patchStore(data => { const copy = JSON.parse(JSON.stringify(data.prs[0])); copy.id = 99; copy.author = { name: 'someoneelse', uid: 'someoneelse' }; copy.from_branch = 'users/someoneelse/theirs'; data.prs.push(copy); });
-  await rejected(ap, { role: 'worker', branch: 'users/someoneelse/theirs', task: 'x' }, 'a-r1', /not under users\/e2euser\//, 'F13 arc: another user\'s branch rejected');
-  await rejected(ap, { role: 'worker', branch: '99', task: 'x' }, 'a-r2', /not authored by e2euser/, 'F13 arc: a PR authored by someone else rejected');
-  await rejected(ap, { role: 'worker', branch: 'KEYBOARD-9999-nope', task: 'x' }, 'a-r3', /not found in Arcadia/, 'F14 arc: unknown branch rejected, no trunk fallback');
-  await rejected(ap, { role: 'worker', branch: '--output=x', task: 'x' }, 'a-r4', /Invalid branch/, 'F15 arc: option-like branch rejected');
-  await rejected(ap, { role: 'worker', branch: 'trunk', task: 'x' }, 'a-r5', /not found in Arcadia|cannot be continued/, 'F13 arc: trunk is not continuable');
-  check('F13 arc: no worktree was added by any rejected branch', adds().length === rejectBefore, adds().slice(rejectBefore));
-
-  const prCreates = createCalls().length;
-  await delegate(ap, { role: 'worker', branch: String(pr2), task: run('pwd', 'arc info --json', 'cat Sources/Keys.swift', "echo 'let b1 = 4' >> Sources/Keys.swift", 'arc add Sources/Keys.swift', 'arc commit -m "KEYBOARD-7002: b1"', 'arc push') }, 'a-b1');
-  const ab1Plan = await work(ap, 'a-b1'), ab1 = workerRun('a-b1').results, addB1 = adds().at(-1);
-  check('F12 arc branch (by PR number): worktree added on the PR branch name at the PR tip', ab1Plan.status === 'completed' && addB1.argv[1] === a3Branch && flag(addB1.argv, '--base') === a3Head && JSON.parse(ab1[1]).branch === a3Branch && ab1[2].includes('let a3 = 3'), { add: addB1.argv, ab1: ab1.slice(0, 2) });
-  const ab1Head = fake.git(ab1[0].trim(), 'rev-parse', 'HEAD');
-  check('F12/F20 arc branch: the push advanced the server branch of the existing PR; no second PR for it', fake.serverRefs().some(([ref, sha]) => ref === `users/${fake.login}/${a3Branch}` && sha === ab1Head) && fake.git(fake.arcadia, 'rev-parse', `${ab1Head}^`) === a3Head && createCalls().length === prCreates && store().prs.find(pr => pr.id === pr2).diffSets.at(-1).head === ab1Head, { server: fake.serverRefs(), creates: createCalls().length });
-  check('F12 arc branch: the worker is told this is an existing PR and owned branches include it', /continues the existing branch/.test(workerRun('a-b1').system), workerRun('a-b1').system.slice(-500));
-
-  // Replay safety + default behaviour: a plain worker still starts a fresh trunk branch.
-  await delegate(ap, { role: 'worker', task: `KEYBOARD-7003 plain ${run('arc info --json')}` }, 'a-plain');
-  const plain = JSON.parse(workerRun('a-plain').results[0]);
-  check('F19 a plain delegation is unchanged: a fresh KEYBOARD-7003 branch from trunk', plain.branch.startsWith('KEYBOARD-7003') && flag(adds().at(-1).argv, '--base') === fake.trunkHead, { branch: plain.branch, base: flag(adds().at(-1).argv, '--base') });
-
   // F23 cap on a huge change.
   await delegate(gp, { role: 'worker', fromThread: b1Plan.threadId, task: run("yes 'BIG-LINE-0123456789012345678901234567890123456789' | head -n 12000 > big.txt") }, 'g-big');
   const bigPlan = await work(gp, 'g-big');
@@ -213,8 +150,6 @@ await kit.run(async () => {
   check('F23 an oversized worker diff is capped under the harness clip with a truncation note', big.length > 40 * 1024 && big.length < 50 * 1024 && /\[diff truncated at 46 KB of \d+ KB/.test(big), big.length);
 
   summary.git = { w1Path, w1Branch, w1Head, existingTip, localTip, originRefs: originRefs() };
-  summary.arc = { a1Branch, a3Branch, serverRefs: fake.serverRefs(), prs: store().prs.map(pr => ({ id: pr.id, from_branch: pr.from_branch, head: pr.diffSets.at(-1).head })) };
   summary.sampleDiff = d1;
   writeFileSync(join(kit.artifacts, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
-  assertFakeOnly(fake, root, check);
 });

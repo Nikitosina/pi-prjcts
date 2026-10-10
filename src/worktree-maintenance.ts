@@ -8,8 +8,8 @@ import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
 import { githubRead } from "./github-authorization.ts";
 import { retireWorkspaceReceipt, workspaceReceipts } from "./workspace-isolation.ts";
 import type { Project } from "./state.ts";
-import { arcLeaseOwner, arcReadHeadName, arcReadHeads, arcWorkerFacts, removeArcWorktree } from "./arc-worktrees.ts";
 import { findVcsRoot } from "./vcs.ts";
+import { plugins } from "./plugins.ts";
 
 /* Worktree lifecycle around the frozen isolation receipts: a per-project setup command after allocation (C4),
  * read-only PR-head snapshots for scouts/reviewers (C3), and safe cleanup of settled worktrees (C9).
@@ -53,9 +53,10 @@ export async function worktreeSetup(input: { command: string | undefined; contro
 // ---- C3: PR-head snapshots ----
 const REF = /^(?:pull\/[1-9][0-9]{0,8}|[0-9a-f]{7,40}|[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
 /** Fetches a branch, pull/<n> or SHA from origin into <controlRoot>/read-heads/<sha> (detached, deduplicated by commit). */
-export function readHeads(checkout: string, controlRoot: string, arc?: { projectId: string; project: () => Project }) {
-  // An Arc project reads PR heads from leased arc-wt worktrees instead of git fetch.
-  if (arc && existsSync(checkout) && findVcsRoot(checkout)?.kind === "arc") return arcReadHeads({ checkout, controlRoot, projectId: arc.projectId, project: arc.project });
+export function readHeads(checkout: string, controlRoot: string, owner?: { projectId: string; project: () => Project }) {
+  // A project in a plugin checkout kind reads PR heads through that kind's snapshots instead of git fetch.
+  const kind = owner && existsSync(checkout) ? findVcsRoot(checkout)?.kind : undefined, provider = kind && kind !== "git" ? plugins.vcsProvider(kind) : undefined;
+  if (owner && provider) return provider.readHeads({ checkout, controlRoot, projectId: owner.projectId, project: owner.project });
   let queue: Promise<unknown> = Promise.resolve();
   async function ensure(ref: string): Promise<{ root: string; sha: string }> {
     if (!REF.test(ref) || ref.includes("..") || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".lock") || ref.includes("@{")) throw new Error(`Invalid ref ${JSON.stringify(ref)}: use a branch name, pull/<number> or a commit SHA`);
@@ -85,12 +86,12 @@ export function readHeads(checkout: string, controlRoot: string, arc?: { project
 }
 
 // ---- C9: inventory and cleanup ----
-export type WorktreeItem = { kind: "worker" | "read-head"; path: string; threadId: string | null; branch: string | null; sizeKb: number; removable: boolean; reasons: string[]; setup: SetupRecord | null; pullRequests: Array<{ number: number; state: string }>; intentId?: string; checkout: string; /** Arc worktrees are removed with arc-wt, never git. */ provider?: "arc"; leaseOwner?: string; entry?: string };
+export type WorktreeItem = { kind: "worker" | "read-head"; path: string; threadId: string | null; branch: string | null; sizeKb: number; removable: boolean; reasons: string[]; setup: SetupRecord | null; pullRequests: Array<{ number: number; state: string }>; intentId?: string; checkout: string; /** Worktrees of a workspace plugin provider are removed through that provider, never git. */ provider?: string; leaseOwner?: string; entry?: string; mountLabel?: string };
 export type WorktreeInventory = { items: WorktreeItem[]; reclaimableKb: number; totalKb: number };
 
-/** Disk use of a git worktree; -1 when unknown. Arc worktrees are virtual mounts of all of Arcadia: `du` would walk (and fetch) the monorepo, so they are never measured. */
-async function sizeKb(path: string, arc = false): Promise<number> {
-  if (arc) return -1;
+/** Disk use of a git worktree; -1 when unknown. Virtual mounts of a plugin provider can be huge remote trees: `du` would walk (and fetch) them, so they are never measured. */
+async function sizeKb(path: string, virtualMount = false): Promise<number> {
+  if (virtualMount) return -1;
   const result = await run("/usr/bin/du", ["-sk", path], { timeoutMs: 30_000 });
   const kb = /^(\d+)/.exec(result.stdout)?.[1];
   return result.code === 0 && kb ? Number(kb) : -1;
@@ -118,12 +119,14 @@ export async function worktreeInventory(input: { project: Project; root: Convers
   const items: WorktreeItem[] = [];
   for (const receipt of await workspaceReceipts(input.root)) {
     if (receipt.state !== "allocated" || !receipt.workspacePath || !existsSync(receipt.workspacePath)) continue;
-    if (receipt.scope.provider === "arc") {
-      const facts = await arcWorkerFacts({ project: input.project, root: input.root, receipt, busy });
-      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath, true), removable: facts.removable, reasons: facts.reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: "arc", leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName });
+    if (receipt.scope.provider !== "git") {
+      // A plugin provider's worktree; without the plugin it is kept untouched and not listed.
+      const provider = plugins.workspaceProvider(receipt.scope.provider);
+      if (!provider) continue;
+      const facts = await provider.workerFacts({ project: input.project, root: input.root, receipt, busy });
+      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath, provider.virtualMount), removable: facts.removable, reasons: facts.reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: provider.id, leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName, ...(provider.mountLabel ? { mountLabel: provider.mountLabel } : {}) });
       continue;
     }
-    if (receipt.scope.provider !== "git") continue;
     const path = receipt.workspacePath, threadId = /^durable workspace (\S+)$/.exec(receipt.scope.leaseReason)?.[1] ?? null, reasons: string[] = [];
     if (!threadId) reasons.push("not a durable worker worktree");
     else if (busy(threadId)) reasons.push("its thread has queued, running or interrupted work");
@@ -147,8 +150,10 @@ export async function worktreeInventory(input: { project: Project; root: Convers
     const path = join(realpathSync(heads), name);
     const users = Object.entries(plan.threads).filter(([, thread]) => thread.readRoot === path).map(([id]) => id);
     const reasons = users.some(busy) ? ["a scout or reviewer reading it has queued or running work"] : [];
-    const arcHead = existsSync(join(path, ".arc"));
-    items.push({ kind: "read-head", path, threadId: users[0] ?? null, branch: null, sizeKb: await sizeKb(path, Boolean(arcHead)), removable: reasons.length === 0, reasons, setup: null, pullRequests: [], checkout: input.project.cwd, ...(arcHead ? { provider: "arc" as const, leaseOwner: arcLeaseOwner(input.project.id), entry: arcReadHeadName(path) } : {}) });
+    const pluginHead = plugins.vcsProviders().find(vcs => existsSync(join(path, vcs.readHeadMarker))), workspace = pluginHead && plugins.workspaceProvider(pluginHead.kind);
+    if (!workspace && !existsSync(join(path, ".git"))) continue; // a snapshot of a provider that is not loaded: kept, never measured or removed
+    const owned = workspace ? workspace.readHeadEntry(input.project, path) : undefined;
+    items.push({ kind: "read-head", path, threadId: users[0] ?? null, branch: null, sizeKb: await sizeKb(path, Boolean(workspace?.virtualMount)), removable: reasons.length === 0, reasons, setup: null, pullRequests: [], checkout: input.project.cwd, ...(workspace && owned ? { provider: workspace.id, leaseOwner: owned.leaseOwner, entry: owned.entry, ...(workspace.mountLabel ? { mountLabel: workspace.mountLabel } : {}) } : {}) });
   }
   return { items, reclaimableKb: items.filter(item => item.removable).reduce((sum, item) => sum + Math.max(0, item.sizeKb), 0), totalKb: items.reduce((sum, item) => sum + Math.max(0, item.sizeKb), 0) };
 }
@@ -161,8 +166,9 @@ export async function cleanupWorktrees(input: { project: Project; root: Conversa
     if (input.stillAllowed && !input.stillAllowed()) break;
     const again = (await worktreeInventory(input)).items.find(entry => entry.path === item.path);
     if (!again?.removable) continue;
-    if (item.provider === "arc") {
-      const gone = await removeArcWorktree(item.entry!, item.leaseOwner!);
+    if (item.provider) {
+      const provider = plugins.workspaceProvider(item.provider);
+      const gone = provider ? await provider.remove({ entry: item.entry!, leaseOwner: item.leaseOwner! }) : { ok: false as const, error: `workspace provider plugin "${item.provider}" is not loaded` };
       if (!gone.ok) { failed.push({ path: item.path, error: gone.error }); continue; }
       if (item.kind === "worker") await retireWorkspaceReceipt(input.root, item.intentId!, { remove: "cleanup-unforced", cleanedAt: new Date().toISOString(), branch: item.branch ?? "" });
     } else if (item.kind === "worker") {

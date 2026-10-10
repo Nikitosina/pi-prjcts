@@ -8,7 +8,8 @@ import { home, socketPath, Request, Project, errorText, jobs, legacyProjectIds, 
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
-import { arcProject, referencedPrBlock, referencedPrs } from "./arcanum-prs.ts";
+import { referencedPrBlock } from "./pr-monitor.ts";
+import { plugins } from "./plugins.ts";
 import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
@@ -24,7 +25,6 @@ import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
-import { arcQuickPreview, authorizeArcQuick, rebindArc } from "./arc-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
@@ -136,8 +136,8 @@ async function lifecycle<T>(id: string, validate: (project: ReturnType<typeof lo
   finally { lifecycleChanging.delete(id); }
 }
 
-/** One-click authorizations (GitHub, Arcadia) follow workspace grant changes. */
-const rebindAuthorizations = (project: ReturnType<typeof loadProject>) => rebindArc(rebindOneClickGithub(project));
+/** One-click authorizations (GitHub and provider plugins) follow workspace grant changes. */
+const rebindAuthorizations = (project: ReturnType<typeof loadProject>) => plugins.workspaceProviders().reduce((current, provider) => provider.rebind ? provider.rebind(current) : current, rebindOneClickGithub(project));
 /** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
 function workerWorktreeRoot(id: string): string { return join(projectDir(id), "worktrees"); }
 
@@ -419,7 +419,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const grants = project.workerSkillGrants ?? [];
       const grantsRevision = createHash("sha256").update(JSON.stringify(grants)).digest("hex");
       const profileSnapshot = commandProfilesSnapshot(project);
-      return { projectId: project.id, workspaceRevision, githubRevision, grantsRevision, profilesRevision: profileSnapshot.revision, workspace: project.workspaceAuthorization ? { version: project.workspaceAuthorization.version, provider: project.workspaceAuthorization.provider, owner: project.workspaceAuthorization.owner, repositories: project.workspaceAuthorization.repositories.map(repository => ({ repositoryId: repository.repositoryId, provider: repository.provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, fileOwnershipPrefix: repository.fileOwnershipPrefix, ...(repository.sharedObjectStore ? { sharedObjectStore: repository.sharedObjectStore } : {}), ...(repository.subpath ? { subpath: repository.subpath } : {}) })), scopes: project.workspaceAuthorization.scopes.map(scope => ({ id: scope.id, repositoryId: scope.repositoryId, fileCount: scope.files.length, baseRevision: scope.baseRevision, evidenceCapture: scope.evidenceCapture === true, wholeRepository: scope.wholeRepository === true })) } : null, quickGrant: quickWorkspacePreview(project, workerWorktreeRoot(project.id)), githubQuick: await githubQuickPreview(project), workspaceHistory: (project.workspaceAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.repositoryId, scopeId: item.scopeId, baseRevision: item.baseRevision, repositorySha256: item.repositorySha256, scopeSha256: item.scopeSha256 })), github: project.githubAuthorization ?? [], arc: project.arcAuthorization ?? null, arcRevision: createHash("sha256").update(JSON.stringify(project.arcAuthorization ?? null)).digest("hex"), arcQuick: arcQuickPreview(project), githubHistory: (project.githubAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.authorization.repositoryId, numericId: item.authorization.numericId, branchPrefix: item.authorization.branchPrefix, baseBranch: item.authorization.baseBranch, owner: item.authorization.owner })),  profiles: profileSnapshot.profiles.map(profile => ({ id: profile.id, label: profile.label, repositoryId: profile.repositoryId, scopeIds: profile.scopeIds, effect: profile.effect, enabled: profile.enabled, revision: profile.revision, executionAvailable: profile.executionAvailable, blocker: profile.blocker })), grants: grants.map(grant => ({ id: grant.id, revision: grant.revision, enabled: grant.enabled, scopeIds: grant.scopeIds, skills: grant.skills.map(skill => ({ catalogId: skill.catalogId, name: skill.name })) })), configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." } };
+      return { projectId: project.id, workspaceRevision, githubRevision, grantsRevision, profilesRevision: profileSnapshot.revision, workspace: project.workspaceAuthorization ? { version: project.workspaceAuthorization.version, provider: project.workspaceAuthorization.provider, owner: project.workspaceAuthorization.owner, repositories: project.workspaceAuthorization.repositories.map(repository => ({ repositoryId: repository.repositoryId, provider: repository.provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, fileOwnershipPrefix: repository.fileOwnershipPrefix, ...(repository.sharedObjectStore ? { sharedObjectStore: repository.sharedObjectStore } : {}), ...(repository.subpath ? { subpath: repository.subpath } : {}) })), scopes: project.workspaceAuthorization.scopes.map(scope => ({ id: scope.id, repositoryId: scope.repositoryId, fileCount: scope.files.length, baseRevision: scope.baseRevision, evidenceCapture: scope.evidenceCapture === true, wholeRepository: scope.wholeRepository === true })) } : null, quickGrant: quickWorkspacePreview(project, workerWorktreeRoot(project.id)), githubQuick: await githubQuickPreview(project), workspaceHistory: (project.workspaceAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.repositoryId, scopeId: item.scopeId, baseRevision: item.baseRevision, repositorySha256: item.repositorySha256, scopeSha256: item.scopeSha256 })), github: project.githubAuthorization ?? [], providerCards: plugins.workspaceProviders().flatMap(provider => provider.setupCards?.(project) ?? []), unloadedProvider: project.workspaceAuthorization && project.workspaceAuthorization.provider !== "github" && !plugins.workspaceProvider(project.workspaceAuthorization.provider) ? project.workspaceAuthorization.provider : null, githubHistory: (project.githubAuthorizationHistory ?? []).map(item => ({ revokedAt: item.revokedAt, repositoryId: item.authorization.repositoryId, numericId: item.authorization.numericId, branchPrefix: item.authorization.branchPrefix, baseBranch: item.authorization.baseBranch, owner: item.authorization.owner })),  profiles: profileSnapshot.profiles.map(profile => ({ id: profile.id, label: profile.label, repositoryId: profile.repositoryId, scopeIds: profile.scopeIds, effect: profile.effect, enabled: profile.enabled, revision: profile.revision, executionAvailable: profile.executionAvailable, blocker: profile.blocker })), grants: grants.map(grant => ({ id: grant.id, revision: grant.revision, enabled: grant.enabled, scopeIds: grant.scopeIds, skills: grant.skills.map(skill => ({ catalogId: skill.catalogId, name: skill.name })) })), configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." } };
     }
     case "github-repository-inspect": {
       const project = loadProject(input.id), revision = workspaceAuthorizationRevision(project);
@@ -454,18 +454,19 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       });
     }
-    case "arc-quick-authorize": {
-      if (input.confirm !== input.id) throw new Error("Arcadia authorization requires confirmation matching project id");
-      const revision = (project: ReturnType<typeof loadProject>) => createHash("sha256").update(JSON.stringify(project.arcAuthorization ?? null)).digest("hex");
-      const before = loadProject(input.id);
-      if (revision(before) !== input.expectedRevision) throw new Error("Arcadia authorization changed; refresh before authorizing");
-      const authorization = authorizeArcQuick(before, input);
-      const validate = (project: ReturnType<typeof loadProject>) => { if (revision(project) !== input.expectedRevision || authorizationFingerprint(project) !== authorizationFingerprint(before) || project.archived || project.deleted) throw new Error("Project authorization changed during Arcadia authorization"); };
-      return lifecycle(input.id, validate, async owner => {
-        const view = await owner.snapshot(), plan = await owner.planSnapshot();
-        if (view.coordinator.busy || view.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("Arcadia authorization requires no active project work");
-        await closeLifecycleOwner(input.id, owner);
-        return withProjectLock(input.id, async () => { const project = loadProject(input.id); validate(project); saveProject({ ...project, arcAuthorization: authorization }); return authorization; }, true);
+    case "plugins": return { plugins: plugins.status(), labels: plugins.labels() };
+    case "plugin": {
+      const handler = plugins.rpc(input.plugin, input.method);
+      if (!handler) throw new Error(`Plugin RPC ${input.plugin}.${input.method} is unavailable: the plugin is not loaded or has no such method`);
+      return handler({
+        params: input.params, projectId: input.id,
+        withRoot: (id, fn) => withDurableOwner({ id, operation: owner => owner.withRoot(fn) }),
+        mutateIdle: (id, change) => lifecycle(id, change.validate, async owner => {
+          const view = await owner.snapshot(), plan = await owner.planSnapshot();
+          if (view.coordinator.busy || view.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("This change requires no active project work");
+          await closeLifecycleOwner(id, owner);
+          return withProjectLock(id, async () => { const project = loadProject(id); change.validate(project); saveProject(change.apply(project)); }, true);
+        }),
       });
     }
     case "provider-pr-inspect": case "provider-ci-inspect": case "provider-review-inspect": case "provider-ci-detail": case "provider-conflict-inspect": case "provider-ci-job-inspect": {
@@ -479,7 +480,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "command-intents-snapshot": return (await durable(input.id)).commandIntentsSnapshot(input);
     case "github-read-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.githubReadSnapshot(input) });
     case "github-write-inspect": return (await durable(input.id)).githubWriteInspect(input);
-    case "arc-write-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.arcWriteSnapshot(input) });
     case "github-write-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.githubWriteSnapshot(input) });
     case "operation-execute": return (await durable(input.id)).operationExecute(input);
     case "operation-inspect": return (await durable(input.id)).operationInspect(input);
@@ -581,20 +581,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       recordHostEvent("automations", `${input.id}:webhook-rotated`);
       return automationSnapshot(input.id);
     }
-    case "arc-prs": {
+    case "prs": {
       const project = loadProject(input.id);
-      if (project.archived || project.deleted || !arcProject(project.cwd)) return { arc: false };
-      return { arc: true, ...await (await durable(input.id)).arcPrs(input.refresh === true) };
+      if (project.archived || project.deleted) return { providers: [], unloaded: [] };
+      const granted = project.workspaceAuthorization?.provider;
+      return { providers: await (await durable(input.id)).prs(input.refresh === true), unloaded: granted && granted !== "github" && !plugins.workspaceProvider(granted) ? [granted] : [] };
     }
-    case "arc-pr-watch": {
-      const project = loadProject(input.id);
-      if (project.archived || project.deleted || !arcProject(project.cwd)) throw new Error("Watching PRs needs an active project in an Arcadia checkout");
-      return { watched: await (await durable(input.id)).arcPrWatch(input.pr, input.watch) };
-    }
-    case "arc-pr-hide": {
-      const project = loadProject(input.id);
-      if (project.archived || project.deleted || !arcProject(project.cwd)) throw new Error("Hiding PRs needs an active project in an Arcadia checkout");
-      return { hidden: await (await durable(input.id)).arcPrHide(input.pr, input.hide) };
+    case "pr-watch": case "pr-hide": {
+      const project = loadProject(input.id), provider = plugins.prProvider(input.provider);
+      if (project.archived || project.deleted || !provider?.applies(project)) throw new Error("Watching or hiding PRs needs an active project served by a loaded PR provider");
+      const owner = await durable(input.id);
+      return input.action === "pr-watch" ? { watched: await owner.prWatch(input.provider, input.pr, input.watch) } : { hidden: await owner.prHide(input.provider, input.pr, input.hide) };
     }
     case "follow-poll": { const result = await (await durable(input.id)).followPoll(); return { result, ...(await automationSnapshot(input.id)) }; }
     case "event-ingest": return withDurableOwner({ id: input.id, operation: owner => owner.ingestLocalEvent({ eventId: input.eventId, kind: input.kind, payload: input.payload }) });
@@ -636,8 +633,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (prior) return prior;
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
-        // `#123` / `PR #123` in an Arcadia project: a compact untrusted block with the PRs' state follows the owner's words.
-        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + (arcProject(loadProject(input.id).cwd) ? await referencedPrBlock(referencedPrs(job.text)) : "");
+        // `#123` / `PR #123` in a project served by a PR provider: a compact untrusted block with the PRs' state follows the owner's words.
+        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + await referencedPrBlock(loadProject(input.id), job.text);
         const invoked = SKILL_COMMAND.exec(job.text.trim())?.[1];
         if (invoked) recordInvokedSkill(ownedProjectDir(input.id), invoked);
         const plan = await owner.planSnapshot();
@@ -702,7 +699,7 @@ const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
     if (request.method === "GET" && request.url === "/health") {
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data: { pid: process.pid, home: home() } }));
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data: { pid: process.pid, home: home(), plugins: plugins.status().map(({ source, name, state, error }) => ({ source, name, state, ...(error ? { error } : {}) })) } }));
       return;
     }
     if (request.method !== "POST" || request.url !== "/api") throw new Error("Unknown endpoint");
@@ -714,6 +711,8 @@ const server = createServer(async (request, response) => {
   }
 });
 server.requestTimeout = 120000;
+// Plugins load before the first request or project restore; a failing plugin is recorded, never fatal.
+for (const status of await plugins.load()) process.stderr.write(JSON.stringify({ event: status.state === "loaded" ? "plugin-loaded" : "plugin-failed", source: status.source, name: status.name, provides: status.provides, ...(status.error ? { error: status.error } : {}) }) + "\n");
 server.listen(socketPath(), () => {
   if (closing) return;
   void loadProviderExtensions().then(({ status }) => process.stderr.write(JSON.stringify({ event: "provider-extensions", loaded: status.loaded, providers: status.providers, errors: status.errors }) + "\n"));

@@ -12,7 +12,7 @@ import { workspaceIsolation } from "../src/workspace-isolation.ts";
 
 const id = randomUUID(), stamp = new Date().toISOString().replaceAll(":", "-");
 const evidence = join("/Users/nikitarat/.pi/agent/projects-mvp/artifacts", `workspace-allocation-${stamp}-${id}`); mkdirSync(evidence, { recursive: true, mode: 0o700 });
-const report = { failuresRecordedBeforeEffects: ["effect before receipt", "dirty/foreign/active cleanup", "provider/scope mismatch", "shared Arc store and lease drift (now in arc-isolation-e2e)"], checks: [], receipts: [], commands: [] };
+const report = { failuresRecordedBeforeEffects: ["effect before receipt", "dirty/foreign/active cleanup", "provider/scope mismatch", "shared object store and lease drift (provider plugins test their own backends)"], checks: [], receipts: [], commands: [] };
 const run = (file, args, cwd) => { report.commands.push({ file, args, cwd }); return execFileSync(file, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); };
 const check = (value, message) => { report.checks.push({ value, message }); if (!value) throw Error(message); };
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -24,6 +24,6 @@ try {
   const gitProject = randomUUID(), gitOwner = `agent-session-${id}`; let [h, root] = await durable(); let iso = workspaceIsolation({ conversation: root, authority: { projectId: gitProject, owner: gitOwner }, authorizedRepositories: [{ repositoryId: "git-e2e", provider: "git", approvedRoot: fixture, ownerCheckout: owner, fileOwnershipPrefix: "owned" }] });
   const gitIntent = { id: randomUUID(), attemptId: randomUUID(), action: "allocate", scope: { projectId: gitProject, repositoryId: "git-e2e", provider: "git", ownerCheckout: owner, approvedRoot: fixture, workspacePath: gitPath, workspaceName: "writer", branch: `writer-${id.slice(0,8)}`, baseRevision: gitHead, headRevision: gitHead, owner: gitOwner, leaseReason: "workspace allocation e2e", sharedObjectStore: null, fileOwnership: ["owned/a.txt"], capabilityProfileRevision: "e2e-1" } };
   let r = await iso.allocate(gitIntent); report.receipts.push(r); check(r.state === "allocated", "Git allocated from prepared Durable intent"); check(run("/usr/bin/git", ["status", "--porcelain=v1"], owner) === "", "Git owner unchanged"); writeFileSync(join(gitPath, "dirty.txt"), "preserve\n"); r = await iso.release(gitIntent); report.receipts.push(r); check(r.state === "preserved", "dirty Git workspace preserved"); const cleanIntent = { ...gitIntent, id: randomUUID(), attemptId: randomUUID(), scope: { ...gitIntent.scope, workspacePath: join(fixture, "clean"), workspaceName: "clean", branch: `clean-${id.slice(0,8)}` } }; r = await iso.allocate(cleanIntent); report.receipts.push(r); check(r.state === "allocated", "clean Git allocated"); r = await iso.release(cleanIntent); report.receipts.push(r); check(r.state === "released", "owned Git lock unlocked and unforced clean removal"); await h.close(BACKGROUND_CONTEXT);
-  save(); // The Arc half moved to arc-isolation-e2e.mjs (fake arc / arc-wt).
+  save(); // Provider-plugin backends are tested in their own repositories.
 } catch (error) { report.error = error instanceof Error ? error.message : String(error); save(); process.exitCode = 1; }
 console.log(JSON.stringify({ evidence, exitCode: process.exitCode ?? 0 }));

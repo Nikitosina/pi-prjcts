@@ -1,6 +1,6 @@
 # Coordinator questions in the chat: failure modes (recorded before implementation)
 
-Verify through an isolated host, fake model, browser. No real models, Arc, CI.
+Verify through an isolated host, fake model, browser. No real models, CI.
 
 - Q1 Question still appears in the sidebar "Needs you" card (#letter) instead of the transcript.
 - Q2 Question card is not after the latest message (above older messages, or hidden behind the live reply / composer).

@@ -17,7 +17,7 @@ Owner decision: Notification API for needs-you items, results and errors when th
 ## Live report: owner enabled notifications and got none (added before the fix)
 Live host evidence (read-only): `notifications.json` holds 66 notices since 07:15 (results, a worker failure, a coordinator error; Telegram delivered from the same feed), so the feed works and the browser side dropped them. Code paths that drop every notice:
 12. The window is on screen but another app is focused (owner working in a terminal/editor beside the browser): `visibilityState` stays `visible`, the poll takes the notices and discards them because only `hidden` counted. Most likely cause.
-13. The tab was hidden long enough to be throttled or frozen (Arc/Chrome energy saver): no poll ran while away; the first poll after returning sees the backlog while visible and discards it.
+13. The tab was hidden long enough to be throttled or frozen (browser energy saver): no poll ran while away; the first poll after returning sees the backlog while visible and discards it.
 14. The host restarted (the orchestrator restarts it after each task; 19 starts in `host.log`): each start minted a new token, so an open tab's `notify-feed` polls got 401 forever, swallowed by `catch {}` while Settings still said "On".
 15. Any other feed failure is silent too (no state, no retry message).
 16. The permission prompt was dismissed (answer `default`) or blocked quietly: the toggle flips back to "Off." with no reason.

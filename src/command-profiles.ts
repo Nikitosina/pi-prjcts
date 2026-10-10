@@ -5,6 +5,7 @@ import { basename, isAbsolute, relative, sep } from "node:path";
 import { parse, type Project, type Request } from "./state.ts";
 import { CommandProfileInput, type CommandProfile, type CommandProgram } from "./command-profile-types.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
+import { plugins } from "./plugins.ts";
 
 type Update = Extract<Request, { action: "command-profile-set" }>;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -77,7 +78,7 @@ export function commandProfilesSnapshot(project: Project) {
     scopeIds: [...profile.scopeIds], effect: profile.effect, enabled: profile.enabled,
     timeoutMs: profile.timeoutMs, maxOutputBytes: profile.maxOutputBytes, revision: profile.revision,
     executable: profile.executable, arguments: [...profile.arguments], program: { ...profile.program }, executionAvailable: riskBlocker(profile) === null && profile.enabled && profile.provider === "github" && !project.archived && !project.deleted && profile.owner === trustedOwner() && profile.workspaceRevision === authorizationFingerprint(project),
-    blocker: riskBlocker(profile) ?? (profile.provider === "arc" ? "Arc command execution is deferred; profiles cannot run" : profile.effect !== "workspace" ? "Separate exact owner approval with execution enabled is required" : !profile.enabled ? "Command profile is disabled" : profile.workspaceRevision !== authorizationFingerprint(project) ? "Command scope authorization changed; obtain a new grant" : null),
+    blocker: riskBlocker(profile) ?? (profile.provider !== "github" ? "Command execution is not available for this workspace provider; profiles cannot run" : profile.effect !== "workspace" ? "Separate exact owner approval with execution enabled is required" : !profile.enabled ? "Command profile is disabled" : profile.workspaceRevision !== authorizationFingerprint(project) ? "Command scope authorization changed; obtain a new grant" : null),
   })) };
 }
 
@@ -90,11 +91,11 @@ export async function prepareCommandProfile(project: Project, input: Update): Pr
   const grant = project.workspaceAuthorization;
   const repository = grant?.repositories.find(item => item.repositoryId === definition.repositoryId);
   if (!grant || grant.owner !== trustedOwner() || !repository || repository.provider !== grant.provider || definition.scopeIds.some(id => !grant.scopes.some(scope => scope.id === id && scope.repositoryId === repository.repositoryId))) throw new Error("Command profile requires exact authorized repository scopes");
-  if (grant.provider === "arc" && definition.enabled) throw new Error("Arc command execution is deferred; profiles cannot be enabled");
+  if (grant.provider !== "github" && definition.enabled) throw new Error("Command execution is not available for this workspace provider; profiles cannot be enabled");
   const program = await commandProgram(definition.executable);
   validateCommandRisk({ program, arguments: definition.arguments, effect: definition.effect });
   const executableName = basename(program.path);
-  if (grant.provider === "arc" && ["git", "gh"].includes(executableName) || grant.provider === "github" && ["arc", "arcanum"].includes(executableName)) throw new Error("Command executable does not match the selected VCS provider");
+  if (grant.provider !== "github" && ["git", "gh"].includes(executableName) || grant.provider === "github" && plugins.vcsExecutables().includes(executableName)) throw new Error("Command executable does not match the selected VCS provider");
   const roots = await Promise.all([realpath(project.cwd), ...grant.repositories.flatMap(item => [realpath(item.ownerCheckout), realpath(item.approvedRoot)])]);
   if (roots.some(root => within(root, program.path))) throw new Error("Command executable cannot reside in a mutable repository or workspace root");
   const identity = { ...definition, scopeIds: [...definition.scopeIds].sort(), program, provider: grant.provider, owner: grant.owner, workspaceRevision: authorizationFingerprint(project) };
@@ -104,7 +105,7 @@ export async function prepareCommandProfile(project: Project, input: Update): Pr
 export function applyCommandProfile(project: Project, input: Update, profile: CommandProfile): Project {
   if (input.id !== project.id || input.confirm !== project.id || project.archived || project.deleted) throw new Error("Command profile target is no longer authorized");
   if (input.expectedRevision !== commandProfilesSnapshot(project).revision || profile.workspaceRevision !== authorizationFingerprint(project) || profile.owner !== trustedOwner()) throw new Error("Command profile authorization changed; reread before updating");
-  if (profile.provider === "arc" && profile.enabled) throw new Error("Arc command execution is deferred; profiles cannot be enabled");
+  if (profile.provider !== "github" && profile.enabled) throw new Error("Command execution is not available for this workspace provider; profiles cannot be enabled");
   validateCommandRisk(profile);
   const profiles = project.commandProfiles ?? [], existing = profiles.find(item => item.id === profile.id);
   if (!existing && profiles.length >= 32) throw new Error("Command profile limit reached");

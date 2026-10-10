@@ -1,7 +1,7 @@
 const initial = new URL(location.href);
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(initial.hash.slice(1)).get("token");
-// localStorage, not sessionStorage: browsers such as Arc re-create tabs without the stripped #token fragment.
+// localStorage, not sessionStorage: some browsers re-create tabs without the stripped #token fragment.
 // Each host start uses a new port, so tokens stored for other origins are dead; drop them.
 if (supplied) {
   for (const stored of Object.keys(localStorage)) if (stored.startsWith("pi-projects-token:") && stored !== key) localStorage.removeItem(stored);
@@ -95,6 +95,7 @@ async function start() {
     }
     changeProject(projectId, chatId);
     if (refusal) { setError(refusal, "action"); refusal = null; }
+    else await loadPluginStatus();
   } catch (error) { if (current === generation) showError(error); }
 }
 
@@ -316,7 +317,7 @@ function render() {
   document.querySelector("#question-hint").hidden = !waiting.here.length;
   setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
   setHtml("#outcomes", plan ? durableResults() : "");
-  renderArcPrs(); void loadArcPrs();
+  renderPrs(); void loadPrs();
   // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
   const topics = knowledgeDocs.filter(doc => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"));
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
@@ -336,7 +337,7 @@ function render() {
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
   const hint = document.querySelector("#compose-hint");
-  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills${arcPrNow()?.arc ? " · # for PRs" : ""}`; hint.title = view.project.model;
+  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -419,10 +420,10 @@ function renderPanels() {
     const x = start === null ? 0 : Math.max(0, Math.min(100, (start - rangeStart) / span * 100)), width = start === null ? 0 : Math.max(1, Math.min(100 - x, ((end ?? start + 1) - start) / span * 100));
     return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
   }).join("") : '<p class="note">No worker timestamps recorded.</p>');
-  const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0, arcProject = p.workspaceAuthorization?.provider === "arc";
+  const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0, pluginProvider = p.workspaceAuthorization && p.workspaceAuthorization.provider !== "github" ? p.workspaceAuthorization.provider : null, providerCard = (view.providerCards ?? [])[0];
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
-  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), (arcProject ? step(!!p.arcAuthorization, "2. Arcadia", p.arcAuthorization ? `Draft PRs as ${p.arcAuthorization.login} against trunk` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !p.arcAuthorization ? '<li class="step-action"><button class="primary" data-action="arc-quick">Connect Arcadia</button></li>' : "") : step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
+  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `2. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `2. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
   if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
@@ -598,7 +599,7 @@ function renderWorktrees() {
   const removable = data.items.filter(item => item.removable);
   document.querySelector("#worktrees-summary").textContent = `${data.items.length} · ${sizeText(data.totalKb)} · ${sizeText(data.reclaimableKb)} reclaimable`;
   const setup = item => !item.setup ? "" : item.setup.ok ? `<span class="wt-setup ok">setup ok</span>` : `<details class="wt-setup bad"><summary>setup failed (exit ${esc(item.setup.exitCode)})</summary><pre>${esc(item.setup.output)}</pre></details>`;
-  const row = item => `<li class="wt-row${item.removable ? " removable" : ""}"><b class="mono">${esc(item.path.split("/").at(-1))}</b> <span class="note">${esc(item.kind === "read-head" ? "PR-head snapshot" : item.branch ?? "")}</span> <span>${esc(item.provider === "arc" ? "Arc virtual mount" : sizeText(item.sizeKb))}</span> ${item.pullRequests.map(pr => `<span class="wt-pr ${esc(pr.state)}">#${esc(pr.number)} ${esc(pr.state)}</span>`).join(" ")} ${setup(item)} <span class="${item.removable ? "good" : "note"}">${item.removable ? "can be removed" : esc(item.reasons.join("; "))}</span></li>`;
+  const row = item => `<li class="wt-row${item.removable ? " removable" : ""}"><b class="mono">${esc(item.path.split("/").at(-1))}</b> <span class="note">${esc(item.kind === "read-head" ? "PR-head snapshot" : item.branch ?? "")}</span> <span>${esc(item.provider && item.sizeKb < 0 ? item.mountLabel ?? "virtual mount" : sizeText(item.sizeKb))}</span> ${item.pullRequests.map(pr => `<span class="wt-pr ${esc(pr.state)}">#${esc(pr.number)} ${esc(pr.state)}</span>`).join(" ")} ${setup(item)} <span class="${item.removable ? "good" : "note"}">${item.removable ? "can be removed" : esc(item.reasons.join("; "))}</span></li>`;
   node.innerHTML = `<label class="field">Setup command <input id="worktree-setup" class="mono" maxlength="4000" placeholder="e.g. bun run worktree:setup" value="${esc(worktrees.setup)}"></label>
     <p class="note">Runs once with sh in each new coding worktree before the worker starts (15 min limit). The worker is told whether it failed.</p>
     <div class="row"><button data-action="worktree-setup-save">Save setup command</button></div>
@@ -945,10 +946,10 @@ function reportHtml(message, match) {
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
-  const github = kind === "github.follow" || kind === "arc.follow", hook = kind.startsWith("webhook.");
+  const github = kind.endsWith(".follow"), hook = kind.startsWith("webhook.");
   if (kind === "worker.watchdog") { const workers = (body.match(/^- \w+ thread /gm) ?? []).length; return `<details class="report event-card watchdog" data-kind="worker.watchdog"${indexAttr(message)}><summary><span class="event-mark">⏱</span><b>Watchdog check</b><span class="report-task">${workers} running worker${workers === 1 ? "" : "s"}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text"><pre class="mono">${esc(body)}</pre></div></details>`; }
   const changes = github ? (body.match(/^- /gm) ?? []).length : 0;
-  const title = github ? (kind === "arc.follow" ? "Arcadia activity" : "GitHub activity") : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
+  const title = github ? (kind === "github.follow" ? "GitHub activity" : `${providerLabels[kind.slice(0, -7)] ?? kind.slice(0, -7)} activity`) : hook ? `Webhook · ${kind.slice(8)}` : `Event · ${kind}`;
   // Webhook bodies follow a fixed preamble line; summarize the body itself.
   const summary = github ? `${changes} change${changes === 1 ? "" : "s"}${/auto-fix (dispatched|sent)/.test(body) ? " · auto-fix sent" : ""}` : clip((hook ? body.slice(body.indexOf("\n\n") + 2) : body).replace(/\s+/g, " ").trim(), 120);
   return `<details class="report event-card ${github ? "github" : hook ? "webhook" : "event"}" data-kind="${esc(kind)}"${indexAttr(message)}><summary><span class="event-mark">${github ? "PR" : hook ? "↯" : "•"}</span><b>${esc(title)}</b><span class="report-task">${esc(summary)}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}</div></details>`;
@@ -1020,73 +1021,89 @@ function pickSkill(name) {
   drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
   closeSkillMenu(); textarea.focus();
 }
-// Arcadia PR card (Arc projects only) and the "#" PR menu. Rows come from the host's shared Arcanum cache; the browser asks at most every 20 s.
-let arcPrs = { projectId: null, data: null, at: 0, error: "" }, arcPrsLoading = false, arcPrsShowHidden = false;
+// PR card (one group per PR provider serving the project) and the "#" PR menu. Rows come from the host's shared provider caches; the browser asks at most every 20 s.
+let prsState = { projectId: null, data: null, at: 0, error: "" }, prsLoading = false, prsShowHidden = false, providerLabels = {};
 // Show/hide the hidden-PR list: local view state, not an action, so it works while busy.
-document.addEventListener("click", event => { if (!event.target.closest("[data-pr-show-hidden]")) return; arcPrsShowHidden = !arcPrsShowHidden; renderArcPrs(); });
-const arcPrNow = () => (arcPrs.projectId === projectId ? arcPrs.data : null);
-async function loadArcPrs(force = false) {
+document.addEventListener("click", event => { if (!event.target.closest("[data-pr-show-hidden]")) return; prsShowHidden = !prsShowHidden; renderPrs(); });
+const prNow = () => (prsState.projectId === projectId ? prsState.data : null);
+const prMenuItems = () => (prNow()?.providers ?? []).flatMap(group => group.prs.map(pr => ({ ...pr, provider: group.provider })));
+// Provider labels for event titles; a plugin that failed to load is shown once as a banner (the host keeps running without it).
+async function loadPluginStatus() {
+  try {
+    const status = await api({ action: "plugins" });
+    providerLabels = status.labels ?? {};
+    const failed = (status.plugins ?? []).filter(item => item.state === "failed");
+    if (failed.length) setError(`Plugin not loaded: ${failed.map(item => `${item.name ?? item.source} (${item.error})`).join("; ")}`, "action");
+  } catch { /* cosmetic */ }
+}
+async function loadPrs(force = false) {
   const id = projectId;
-  if (!id || arcPrsLoading || (!force && arcPrs.projectId === id && Date.now() - arcPrs.at < 20000)) return;
-  arcPrsLoading = true;
-  try { const data = await api({ action: "arc-prs", id, ...(force ? { refresh: true } : {}) }); if (id === projectId) arcPrs = { projectId: id, data, at: Date.now(), error: "" }; }
-  catch (error) { if (id === projectId) arcPrs = { projectId: id, data: arcPrs.projectId === id ? arcPrs.data : null, at: Date.now(), error: error.message }; }
-  finally { arcPrsLoading = false; }
-  if (id === projectId) renderArcPrs();
+  if (!id || prsLoading || (!force && prsState.projectId === id && Date.now() - prsState.at < 20000)) return;
+  prsLoading = true;
+  try { const data = await api({ action: "prs", id, ...(force ? { refresh: true } : {}) }); if (id === projectId) prsState = { projectId: id, data, at: Date.now(), error: "" }; }
+  catch (error) { if (id === projectId) prsState = { projectId: id, data: prsState.projectId === id ? prsState.data : null, at: Date.now(), error: error.message }; }
+  finally { prsLoading = false; }
+  if (id === projectId) renderPrs();
 }
 const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
-function renderArcPrs() {
-  const card = document.querySelector("#prs-card"), data = arcPrNow(), hint = document.querySelector("#compose-hint");
-  hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (data?.arc ? " · # for PRs" : "");
-  card.hidden = !data?.arc;
-  if (!data?.arc) return;
-  // Hidden PRs leave the card and monitoring; "Show hidden" lists them dimmed with Unhide.
-  const hidden = new Set(data.hidden ?? []), all = [...data.prs], hiddenPrs = all.filter(pr => hidden.has(pr.id));
-  const order = { failing: 0, running: 1, green: 2, none: 3 }, prs = all.filter(pr => !hidden.has(pr.id)).sort((a, b) => order[a.state] - order[b.state] || b.id - a.id), shown = [...prs.slice(0, 12), ...(arcPrsShowHidden ? hiddenPrs : [])], watched = new Set(data.watched ?? []);
-  const rows = shown.map(pr => {
-    const isHidden = hidden.has(pr.id), hideButton = `<button type="button" class="ghost small pr-hide" data-action="pr-hide" data-pr="${pr.id}" data-hide="${!isHidden}" title="${isHidden ? "Show this PR on the card and monitor it again" : "Hide this PR from the card and stop monitoring it"}" aria-label="${isHidden ? `Unhide PR #${pr.id}` : `Hide PR #${pr.id}`}">${isHidden ? "Unhide" : "Hide"}</button>`;
-    const [glyph, tone, title] = prGlyph[pr.state] ?? prGlyph.none, counts = [["good", "✓", pr.counts.ok], ["bad", "✕", pr.counts.failed], ["warn", "●", pr.counts.running]].filter(([, , n]) => n).map(([cls, mark, n]) => `<span class="${cls}">${mark}${n}</span>`).join(" ");
-    const detail = [counts, pr.conflicts ? '<span class="bad">conflicts</span>' : "", pr.mergeFailed ? '<span class="bad">merge failed</span>' : pr.autoMerge ? '<span class="good">auto-merge</span>' : "", pr.failedChecks.length ? `<span class="pr-fails">${esc(pr.failedChecks.slice(0, 2).join(", "))}${pr.failedChecks.length > 2 ? ` +${pr.failedChecks.length - 2}` : ""}</span>` : `<span class="pr-branch">${esc(pr.branch.replace(/^users\/[^/]+\//, ""))}</span>`].filter(Boolean).join(" ");
-    return `<div class="pr-row ${esc(pr.state)}${isHidden ? " hidden-pr" : ""}"><span class="pr-icon ${tone}" title="${esc(title)}" role="img" aria-label="${esc(title)}">${glyph}</span><div class="pr-main"><a class="pr-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.summary)}"><span class="pr-id">#${pr.id}</span> ${esc(pr.summary)}</a><small class="pr-sub">${detail}</small></div><span class="pr-actions">${isHidden ? "" : `<button type="button" class="ghost small pr-watch${watched.has(pr.id) ? " on" : ""}" data-action="pr-watch" data-pr="${pr.id}" aria-pressed="${watched.has(pr.id)}" title="${watched.has(pr.id) ? "Watching: the coordinator is told when a check or merge fails. Click to stop." : "Watch: tell the coordinator when a check or merge fails"}">${watched.has(pr.id) ? "Watching" : "Watch"}</button>`}${hideButton}</span></div>`;
-  }).join("");
-  const meta = data.rateLimitedUntilMs ? "rate limited" : data.fetchedAtMs ? ago(new Date(data.fetchedAtMs).toISOString()) : "";
-  const problem = arcPrs.error || data.error;
-  setHtml("#prs", `${problem ? `<p class="note pr-error">${esc(problem)}${prs.length ? " (showing the last list)" : ""}</p>` : ""}${rows || (problem ? "" : '<p class="note">No open PRs.</p>')}${prs.length > 12 ? `<p class="note">+${prs.length - 12} more in Arcanum</p>` : ""}${hiddenPrs.length ? `<button type="button" class="ghost small pr-show-hidden" data-pr-show-hidden aria-expanded="${arcPrsShowHidden}">${arcPrsShowHidden ? "Hide" : "Show"} ${hiddenPrs.length} hidden</button>` : ""}${data.monitoring ? "" : '<p class="note pr-off">Monitoring is off. Turn on Follow PRs in Settings to hear about failing checks.</p>'}`);
-  document.querySelector("#prs-meta").textContent = meta;
+const byNewest = (a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
+function renderPrs() {
+  const card = document.querySelector("#prs-card"), data = prNow(), hint = document.querySelector("#compose-hint");
+  const groups = data?.providers ?? [], unloaded = data?.unloaded ?? [];
+  hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (prMenuItems().length ? " · # for PRs" : "");
+  card.hidden = !groups.length && !unloaded.length;
+  if (card.hidden) return;
+  const glyphs = prGlyph;
+  const group = data => {
+    // Hidden PRs leave the card and monitoring; "Show hidden" lists them dimmed with Unhide.
+    const hidden = new Set(data.hidden ?? []), all = [...data.prs], hiddenPrs = all.filter(pr => hidden.has(pr.id));
+    const order = { failing: 0, running: 1, green: 2, none: 3 }, prs = all.filter(pr => !hidden.has(pr.id)).sort((a, b) => order[a.state] - order[b.state] || byNewest(a, b)), shown = [...prs.slice(0, 12), ...(prsShowHidden ? hiddenPrs : [])], watched = new Set(data.watched ?? []);
+    const rows = shown.map(pr => {
+      const isHidden = hidden.has(pr.id), target = `data-provider="${esc(data.provider)}" data-pr="${esc(pr.id)}"`, hideButton = `<button type="button" class="ghost small pr-hide" data-action="pr-hide" ${target} data-hide="${!isHidden}" title="${isHidden ? "Show this PR on the card and monitor it again" : "Hide this PR from the card and stop monitoring it"}" aria-label="${isHidden ? `Unhide PR ${esc(pr.ref)}` : `Hide PR ${esc(pr.ref)}`}">${isHidden ? "Unhide" : "Hide"}</button>`;
+      const [glyph, tone, title] = glyphs[pr.state] ?? glyphs.none, counts = [["good", "✓", pr.counts.ok], ["bad", "✕", pr.counts.failed], ["warn", "●", pr.counts.running]].filter(([, , n]) => n).map(([cls, mark, n]) => `<span class="${cls}">${mark}${n}</span>`).join(" ");
+      const detail = [counts, pr.conflicts ? '<span class="bad">conflicts</span>' : "", pr.mergeFailed ? '<span class="bad">merge failed</span>' : pr.autoMerge ? '<span class="good">auto-merge</span>' : "", pr.failedChecks.length ? `<span class="pr-fails">${esc(pr.failedChecks.slice(0, 2).join(", "))}${pr.failedChecks.length > 2 ? ` +${pr.failedChecks.length - 2}` : ""}</span>` : `<span class="pr-branch">${esc(pr.branch)}</span>`].filter(Boolean).join(" ");
+      return `<div class="pr-row ${esc(pr.state)}${isHidden ? " hidden-pr" : ""}"><span class="pr-icon ${tone}" title="${esc(title)}" role="img" aria-label="${esc(title)}">${glyph}</span><div class="pr-main"><a class="pr-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.title)}"><span class="pr-id">${esc(pr.ref)}</span> ${esc(pr.title)}</a><small class="pr-sub">${detail}</small></div><span class="pr-actions">${isHidden ? "" : `<button type="button" class="ghost small pr-watch${watched.has(pr.id) ? " on" : ""}" data-action="pr-watch" ${target} aria-pressed="${watched.has(pr.id)}" title="${watched.has(pr.id) ? "Watching: the coordinator is told when a check or merge fails. Click to stop." : "Watch: tell the coordinator when a check or merge fails"}">${watched.has(pr.id) ? "Watching" : "Watch"}</button>`}${hideButton}</span></div>`;
+    }).join("");
+    const problem = (prsState.error && !prsState.data ? prsState.error : "") || data.error;
+    return `<div class="pr-group" data-provider="${esc(data.provider)}">${groups.length + unloaded.length > 1 ? `<small class="note pr-group-title">${esc(data.label)}</small>` : ""}${problem ? `<p class="note pr-error">${esc(problem)}${prs.length ? " (showing the last list)" : ""}</p>` : ""}${rows || (problem ? "" : '<p class="note">No open PRs.</p>')}${prs.length > 12 ? `<p class="note">+${prs.length - 12} more in ${esc(data.label)}</p>` : ""}${hiddenPrs.length ? `<button type="button" class="ghost small pr-show-hidden" data-pr-show-hidden aria-expanded="${prsShowHidden}">${prsShowHidden ? "Hide" : "Show"} ${hiddenPrs.length} hidden</button>` : ""}${data.monitoring ? "" : '<p class="note pr-off">Monitoring is off. Turn on Follow PRs in Settings to hear about failing checks.</p>'}</div>`;
+  };
+  setHtml("#prs", `${prsState.error && !prsState.data ? `<p class="note pr-error">${esc(prsState.error)}</p>` : ""}${groups.map(group).join("")}${unloaded.map(id => `<p class="note pr-error">${esc(id)} pull requests are unavailable: the provider plugin is not loaded (its watch and hide records are kept).</p>`).join("")}`);
+  const fetched = groups.map(item => item.rateLimitedUntilMs ? "rate limited" : item.fetchedAtMs ? ago(new Date(item.fetchedAtMs).toISOString()) : "").find(Boolean);
+  document.querySelector("#prs-meta").textContent = fetched ?? "";
 }
 const prRefs = /(?:^|\s)#([^\s#]*)$/;
 function updatePrMenu(textarea) {
-  const query = textarea.selectionStart === textarea.selectionEnd ? prRefs.exec(textarea.value.slice(0, textarea.selectionStart))?.[1] ?? null : null, data = arcPrNow();
-  if (query === null || !data?.arc || !data.prs.length) { closeSkillMenu(); return; }
-  const q = query.toLowerCase(), items = [...data.prs].sort((a, b) => b.id - a.id).filter(pr => !q || String(pr.id).startsWith(q) || pr.summary.toLowerCase().includes(q)).slice(0, 30);
+  const query = textarea.selectionStart === textarea.selectionEnd ? prRefs.exec(textarea.value.slice(0, textarea.selectionStart))?.[1] ?? null : null, all = prMenuItems();
+  if (query === null || !all.length) { closeSkillMenu(); return; }
+  const q = query.toLowerCase(), items = all.sort(byNewest).filter(pr => !q || pr.ref.slice(1).toLowerCase().startsWith(q) || pr.title.toLowerCase().includes(q)).slice(0, 30);
   skillMenu = null; prMenu = { items, index: Math.min(prMenu?.query === query ? prMenu.index : 0, Math.max(0, items.length - 1)), query };
   renderPrMenu();
 }
 function renderPrMenu() {
   const node = document.querySelector("#skill-menu");
   node.innerHTML = prMenu.items.length
-    ? prMenu.items.map((pr, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option pr-opt${index === prMenu.index ? " active" : ""}" aria-selected="${index === prMenu.index}" data-action="pr-pick" data-pr="${pr.id}"><span class="skill-name">#${pr.id}</span><span class="skill-desc">${esc(pr.summary)}</span><span class="skill-source pr-icon ${prGlyph[pr.state]?.[1] ?? "muted"}">${prGlyph[pr.state]?.[0] ?? "○"}</span></button>`).join("")
+    ? prMenu.items.map((pr, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option pr-opt${index === prMenu.index ? " active" : ""}" aria-selected="${index === prMenu.index}" data-action="pr-pick" data-provider="${esc(pr.provider)}" data-pr="${esc(pr.id)}"><span class="skill-name">${esc(pr.ref)}</span><span class="skill-desc">${esc(pr.title)}</span><span class="skill-source pr-icon ${prGlyph[pr.state]?.[1] ?? "muted"}">${prGlyph[pr.state]?.[0] ?? "○"}</span></button>`).join("")
     : `<p class="skill-empty">No open PR matches “${esc(prMenu.query)}”</p>`;
   node.hidden = false;
   document.querySelector("#compose textarea").setAttribute("aria-activedescendant", prMenu.items.length ? `skill-option-${prMenu.index}` : "");
   node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
 }
-function pickPr(id) {
+function pickPr(ref) {
   const textarea = document.querySelector("#compose textarea"), caret = textarea.selectionStart;
-  const before = textarea.value.slice(0, caret).replace(/(?:PR\s+)?#[^\s#]*$/, `PR #${id} `);
+  const before = textarea.value.slice(0, caret).replace(/(?:PR\s+)?#[^\s#]*$/, `PR ${ref} `);
   textarea.value = before + textarea.value.slice(caret);
   textarea.setSelectionRange(before.length, before.length);
   drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
   closeSkillMenu(); textarea.focus();
 }
-// The host appends a "[Referenced Arcadia PRs …]" block to the coordinator message; show it as chips.
-const prBlock = /\n\n\[Referenced Arcadia PRs[^\]\n]*\]\n((?:- [^\n]*(?:\n|$))+)$/;
+// The host appends a "[Referenced PRs (<provider>) …]" block to the coordinator message (older: "[Referenced <provider> PRs …]"); show it as chips linking to the PR URL at the end of each line.
+const prBlock = /\n\n\[Referenced [^\]\n]*PRs[^\]\n]*\]\n((?:- [^\n]*(?:\n|$))+)$/;
 function prChips(text) {
   const match = prBlock.exec(text);
   if (!match) return { text, chips: "" };
   const chips = match[1].trim().split("\n").map(line => {
-    const known = /^- #(\d+)(?: “(.*?)”)? \((.*?)\)/.exec(line), gone = /^- #(\d+): could not be read/.exec(line);
-    return known ? `<a class="attach-chip pr-chip" href="https://a.yandex-team.ru/review/${known[1]}" target="_blank" rel="noopener noreferrer" title="${esc(`${known[2] ?? ""} (${known[3]})`)}"><span class="pr-id">#${known[1]}</span><span class="attach-name">${esc(known[2] ?? "")}</span></a>` : gone ? `<span class="attach-chip gone">#${gone[1]} unreadable</span>` : "";
+    const known = /^- (\S+?)(?: “(.*?)”)? \((.*?)\) (https?:\/\/\S+)$/.exec(line), gone = /^- (\S+?): could not be read/.exec(line);
+    return known ? `<a class="attach-chip pr-chip" href="${esc(known[4])}" target="_blank" rel="noopener noreferrer" title="${esc(`${known[2] ?? ""} (${known[3]})`)}"><span class="pr-id">${esc(known[1])}</span><span class="attach-name">${esc(known[2] ?? "")}</span></a>` : gone ? `<span class="attach-chip gone">${esc(gone[1])} unreadable</span>` : "";
   }).join("");
   return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>` };
 }
@@ -1767,10 +1784,10 @@ async function action(node) {
     case "all-work": setTab("activity"); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickSkill(node.dataset.name); break;
-    case "pr-pick": pickPr(node.dataset.pr); break;
-    case "prs-refresh": await loadArcPrs(true); break;
-    case "pr-hide": { await api({ action: "arc-pr-hide", id: projectId, pr: Number(node.dataset.pr), hide: node.dataset.hide === "true" }); arcPrs.at = 0; await loadArcPrs(); break; }
-    case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "arc-pr-watch", id: projectId, pr: Number(node.dataset.pr), watch: on }); arcPrs.at = 0; await loadArcPrs(); break; }
+    case "pr-pick": pickPr(prMenu.items.find(item => item.provider === node.dataset.provider && String(item.id) === node.dataset.pr)?.ref ?? `#${node.dataset.pr}`); break;
+    case "prs-refresh": await loadPrs(true); break;
+    case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
+    case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
     case "artifacts-toggle": document.querySelector("#artifact-pane").classList.toggle("open"); break;
     case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
@@ -1824,8 +1841,8 @@ async function action(node) {
     case "owner-setup": await ownerSetupDialog(); break;
     case "workspace-quick": await workspaceQuickDialog(); break;
     case "workspace-quick-confirm": await workspaceQuickConfirm(node.dataset.project, node.dataset.revision); break;
-    case "arc-quick": await arcQuickDialog(); break;
-    case "arc-quick-confirm": await arcQuickConfirm(node.dataset.project, node.dataset.revision); break;
+    case "provider-connect": await providerConnectDialog(node.dataset.card); break;
+    case "provider-connect-confirm": await providerConnectConfirm(node.dataset.project, node.dataset.card, node.dataset.revision); break;
     case "github-quick": await githubQuickDialog(); break;
     case "github-quick-confirm": await githubQuickConfirm(node.dataset.project, node.dataset.revision); break;
     case "owner-setup-edit": await ownerSetupEdit(node.dataset.kind, node.dataset.payload || "{}"); break;
@@ -2244,7 +2261,7 @@ document.addEventListener("keydown", event => {
   if (prMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = prMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { prMenu.index = (prMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderPrMenu(); } return; }
-    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickPr(prMenu.items[prMenu.index].id); return; }
+    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickPr(prMenu.items[prMenu.index].ref); return; }
     if (event.key === "Escape") { event.preventDefault(); closeSkillMenu(); return; }
   }
   if (skillMenu && event.target.closest("#compose textarea") && !event.isComposing) {
@@ -2270,7 +2287,7 @@ setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
 function providerBinding(scopeId, repositoryId) {
   if (!view || view.project.archived || view.project.deleted) throw new Error("Restore the retained project before provider inspection");
   const p = view.project, scope = p.workspaceAuthorization?.scopes.find(scope => scope.id === scopeId), grant = p.githubAuthorization?.find(grant => grant.repositoryId === scope?.repositoryId);
-  if (p.workspaceAuthorization?.provider !== "github" || !scope || !grant || repositoryId !== undefined && grant.repositoryId !== repositoryId || !Number.isSafeInteger(grant.numericId)) throw new Error("Receipt has no matching current GitHub scope/repository grant. Arc remains deferred; retained metadata stays readable");
+  if (p.workspaceAuthorization?.provider !== "github" || !scope || !grant || repositoryId !== undefined && grant.repositoryId !== repositoryId || !Number.isSafeInteger(grant.numericId)) throw new Error("Receipt has no matching current GitHub scope/repository grant. Other workspace providers remain deferred; retained metadata stays readable");
   return grant;
 }
 async function providerList(kind = "reads", offset = 0) {
@@ -2287,7 +2304,7 @@ async function providerList(kind = "reads", offset = 0) {
     const meta = kind === "reads" ? `Commit ${esc(record.head.slice(0, 12))}${record.ci ? ` · CI ${esc(record.ci.statusState)}` : ""}` : record.source === "local-git-verification" ? "Checked locally only. Nothing was pushed or written remotely." : "Recorded result. It does not allow another attempt.";
     return `<div class="list-row"><div class="grow"><strong>${title}</strong><span class="meta">${meta}</span></div><div class="row-actions">${dlgBtn("Details", { action: "provider-record", project: id, record: cacheKey }, "small")}</div></div>`;
   });
-  setDialogBody(`<div class="seg-row">${segTabs([["Reads: PRs, CI, reviews", { action: "provider-list", kind: "reads", offset: 0 }, kind === "reads"], ["Changes sent to GitHub", { action: "provider-list", kind: "writes", offset: 0 }, kind === "writes"]])}${pager({ offset, count: page.items.length, total: page.total, size: 100, data: { action: "provider-list", kind } })}</div>${rows.join("") || `<p class="empty-state">Nothing recorded yet. An empty list does not prove that no remote work happened.</p>`}<p class="note">Records are snapshots from when the worker acted. Only GitHub is covered, not Arcadia.</p>${dlgActions(dlgBtn("Check a specific PR…", { action: "provider-known" }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
+  setDialogBody(`<div class="seg-row">${segTabs([["Reads: PRs, CI, reviews", { action: "provider-list", kind: "reads", offset: 0 }, kind === "reads"], ["Changes sent to GitHub", { action: "provider-list", kind: "writes", offset: 0 }, kind === "writes"]])}${pager({ offset, count: page.items.length, total: page.total, size: 100, data: { action: "provider-list", kind } })}</div>${rows.join("") || `<p class="empty-state">Nothing recorded yet. An empty list does not prove that no remote work happened.</p>`}<p class="note">Records are snapshots from when the worker acted. Only GitHub is covered.</p>${dlgActions(dlgBtn("Check a specific PR…", { action: "provider-known" }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function ownedProviderRecord(key) {
   const value = providerCache.get(key);
@@ -2320,7 +2337,7 @@ function providerInspect(key) {
   providerInspection = proposal; disableActions();
 }
 function providerKnown() {
-  if (!plan || view.project.workspaceAuthorization?.provider !== "github" || view.project.archived || view.project.deleted) throw new Error("A current active GitHub scope is required. Arc remains deferred");
+  if (!plan || view.project.workspaceAuthorization?.provider !== "github" || view.project.archived || view.project.deleted) throw new Error("A current active GitHub scope is required. Other workspace providers remain deferred");
   const scopes = view.project.workspaceAuthorization.scopes.filter(scope => view.project.githubAuthorization?.some(grant => grant.repositoryId === scope.repositoryId));
   if (!scopes.length) throw new Error("No explicit GitHub repository/scope grant is available");
   showDialog("Check a specific pull request", `<form data-provider-known data-project="${esc(projectId)}"><div class="field-grid"><div class="field"><label><span class="flabel">Repository</span><select name="scope">${scopes.map(scope => `<option value="${esc(scope.id)}">${esc(scope.repositoryId)}</option>`).join("")}</select></label></div><div class="field"><label><span class="flabel">What to read</span><select name="kind"><option value="pr">The PR itself</option><option value="ci">CI results</option><option value="review">Reviews and comments</option></select></label></div><div class="field"><label><span class="flabel">PR number</span><input name="pr" type="number" min="1" required autofocus></label></div><div class="field"><label><span class="flabel">Page</span><input name="page" type="number" min="1" max="1000000" value="1" required></label><span class="fhelp">Only used for CI and reviews.</span></div></div><div class="field"><label><span class="flabel">Commit (full SHA of the PR head)</span><input name="head" class="mono" minlength="40" maxlength="64" pattern="(?:[a-f0-9]{40}|[a-f0-9]{64})" required autocomplete="off" placeholder="40 hexadecimal characters"></label><span class="fhelp">The host checks repository, PR and commit together before reading.</span></div>${dlgActions(dlgBtn("Back", { action: "provider-list" }), '<button type="submit" class="primary">Read from GitHub</button>')}</form>`, "Read-only. It reads exactly what you name and grants nothing.");
@@ -2352,7 +2369,7 @@ async function routineList(lens = "schedules", offset = 0) {
   const tabs = segTabs([[`Schedules (${schedules.schedules.length})`, { action: "routine-list", project: id, lens: "schedules", offset: 0 }, lens === "schedules"], [`GitHub monitors (${monitors.items.length})`, { action: "routine-list", project: id, lens: "monitors", offset: 0 }, lens === "monitors"], [`History (${schedules.historyCounts.events + schedules.historyCounts.intents})`, { action: "routine-list", project: id, lens: "history" }, false]]);
   const toggle = (label, enabled, recordId = "", recordKind = kind) => dlgBtn(label, { action: "routine-confirm", project: id, kind: recordKind, record: recordId, enabled: !enabled }, "small");
   const rows = page.map(record => `<div class="list-row"><div class="grow"><strong>${lens === "schedules" ? esc(clip(record.text, 140)) : `${esc(record.repositoryId)} · PR #${record.pullRequest}`}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))}${lens === "monitors" ? " monitor" : " schedule"}</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`).join("") || `<p class="empty-state">No ${lens === "schedules" ? "schedules" : "monitors"} yet. They are created from the command line and start turned off.</p>`;
-  setDialogBody(`${policy.paused || policy.pausing || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused || policy.pausing ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. Arcadia monitoring is not available. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
+  setDialogBody(`${policy.paused || policy.pausing || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused || policy.pausing ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
 function validateRoutineRange(text, range, requested) {
   if (typeof text !== "string" || !range || ![range.offset, range.end, range.total].every(value => Number.isSafeInteger(value) && value >= 0) || !/^[a-f0-9]{64}$/.test(range.sha256) || range.offset !== Math.min(requested, range.total) || range.end < range.offset || range.end > range.total || range.end - range.offset !== Array.from(text).length || range.end - range.offset > 4000 || range.nextOffset !== (range.end < range.total ? range.end : null)) throw new Error("Routine history text range differs from its excerpt");
@@ -2446,9 +2463,10 @@ async function ownerSetupDialog(result = null) {
   const hist = `<p class="note">${esc((snapshot.configuredCatalog?.reason || "Configured skills unavailable").replace(/\.$/, ""))}. Registering a command profile does not run it or approve deployments or destructive actions.</p>${rawDetails({ workspaceRevision: snapshot.workspaceRevision, githubRevision: snapshot.githubRevision, profilesRevision: snapshot.profilesRevision }, "Revisions")}`;
   const whole = (snapshot.workspace?.scopes || []).find(scope => scope.wholeRepository);
   const connected = whole && (snapshot.github || []).find(auth => auth.repositoryId === whole.repositoryId);
-  const arcCard = !whole ? "" : snapshot.arc ? `<div class="card"><b>✓ Arcadia connected</b><p class="note">Workers push users/${esc(snapshot.arc.login)}/ branches and open draft PRs against ${esc(snapshot.arc.baseBranch)}. You approve merges.</p></div>` : snapshot.arcQuick?.available ? `<div class="card"><b>Arcadia</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="arc-quick">Connect Arcadia</button></div>` : `<div class="card"><b>Arcadia</b><p class="note">${esc(snapshot.arcQuick?.blocker || "One-click Arcadia is unavailable")}</p></div>`;
-  const githubCard = !whole ? "" : snapshot.workspace?.provider === "arc" ? arcCard : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
-  const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from ${snapshot.workspace?.provider === "arc" ? "trunk (arc-wt worktrees)" : "current HEAD"}.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
+  const providerCardHtml = card => `<div class="card"><b>${card.state === "connected" ? "✓ " : ""}${esc(card.title)}</b><p class="note">${esc(card.body)}</p>${card.state === "available" && card.connect ? `<button class="primary" data-action="provider-connect" data-card="${esc(card.id)}">${esc(card.connect.label)}</button>` : ""}</div>`;
+  const pluginCards = !whole ? "" : snapshot.unloadedProvider ? `<div class="card"><b>${esc(snapshot.unloadedProvider)}</b><p class="note">The provider plugin is not loaded, so workers cannot start here. Load it (see the plugin documentation) or remove the grant; its records are kept.</p></div>` : (snapshot.providerCards ?? []).map(providerCardHtml).join("");
+  const githubCard = !whole ? "" : snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? pluginCards : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
+  const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from ${snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? "the provider's base (see its card)" : "current HEAD"}.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
   setDialogBody(`${result ? `<p class="note-box ok">Change recorded. No command was run.</p>${rawDetails(result, "Host response")}` : ""}<div class="choice-list">${quick}</div><details class="advanced"><summary>Advanced: folder scopes, GitHub targets, command profiles</summary>${hist}<h3>Look up a GitHub repository</h3><form data-owner-github-inspect data-project="${esc(id)}" class="row"><label class="grow"><span class="sr-only">Repository, owner/name</span><input name="repositoryId" placeholder="owner/repository" aria-label="Repository, owner/name" required></label><button type="submit" class="small">Look up</button></form><p class="note">Reads its numeric ID and default branch. It must match the checkout's GitHub origin.</p><h3>Add or change</h3><div class="row">${actions}</div><h3>Folder scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Command profiles</h3>${profiles}</details>${dlgActions(dlgBtn("Refresh", { action: "owner-setup" }), dlgBtn("Done", { action: "close-dialog" }, "primary"))}`);
 }
 
@@ -2458,9 +2476,9 @@ async function workspaceQuickDialog() {
   if (!dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen) return;
   const quick = snapshot.quickGrant;
   if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click access is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
-  const arc = quick.provider === "arc";
-  dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>${arc ? "Arc checkout" : "Checkout"}</span><b class="mono">${esc(quick.ownerCheckout)}</b>${arc && quick.subpath ? `<span>Project folder</span><b class="mono">${esc(quick.subpath)}</b>` : ""}<span>Worker copies</span><b class="mono">${esc(quick.approvedRoot)}</b><span>${arc ? "Trunk head" : "Current HEAD"}</span><b class="mono">${esc(quick.head.slice(0, 12))}</b></div>
-${arc ? `<ul><li>Each worker gets its own arc-wt worktree of the Arc checkout, leased to this project and starting from trunk, not from your current branch.</li><li>Workers may read, edit and create any file except VCS metadata. Work happens in the project folder (${esc(quick.subpath || ".")}) of the worktree; your mount is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need Arcadia (step 2); merges always need your approval.</li></ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 2); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${arc ? "start from trunk and" : "will"} not see them.</p>` : ""}
+  const other = quick.provider !== "github", extra = quick.dialog;
+  dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>${other ? esc(extra?.checkoutLabel ?? "Checkout") : "Checkout"}</span><b class="mono">${esc(quick.ownerCheckout)}</b>${(extra?.rows ?? []).map(([label, value]) => `<span>${esc(label)}</span><b class="mono">${esc(value)}</b>`).join("")}<span>Worker copies</span><b class="mono">${esc(quick.approvedRoot)}</b><span>${other ? "Base head" : "Current HEAD"}</span><b class="mono">${esc(quick.head.slice(0, 12))}</b></div>
+${other ? `<ul>${(extra?.bullets ?? []).map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 2); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${other ? "start from the provider's base and" : "will"} not see them.</p>` : ""}
 ${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Allow workers to edit", { action: "workspace-quick-confirm", project: id, revision: snapshot.workspaceRevision }, "primary"))}`;
 }
 
@@ -2469,19 +2487,24 @@ async function workspaceQuickConfirm(target, revision) {
   await mutate({ action: "workspace-quick-grant", id: target, confirm: target, expectedRevision: revision }, "Workers can now edit this repository.");
   if (projectId === target && dialog.open) await ownerSetupDialog();
 }
-async function arcQuickDialog() {
-  const id = projectId, generationAtOpen = generation, version = showDialog("Connect Arcadia", '<p class="note">Reading the Arc checkout…</p>', "Let workers push branches and open draft pull requests.");
+// One-click connection of a workspace provider plugin: the plugin's setup card describes the dialog; the confirm calls its RPC with the card's revision.
+let connectDraft = null;
+async function providerConnectDialog(cardId) {
+  const id = projectId, generationAtOpen = generation, version = showDialog("Connect", '<p class="note">Reading the project…</p>', "");
   const snapshot = await api({ action: "owner-setup-snapshot", id });
   if (!dialog.open || version !== dialogVersion || projectId !== id || generation !== generationAtOpen) return;
-  const quick = snapshot.arcQuick;
-  if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click Arcadia is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
-  dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>Login</span><b class="mono">${esc(quick.login)}</b><span>Draft PRs target</span><b class="mono">${esc(quick.baseBranch)}</b><span>Worker branches</span><b class="mono">users/${esc(quick.login)}/…</b></div>
-<ul><li>Each worker commits and pushes only its own branch (arc adds the users/${esc(quick.login)}/ namespace).</li><li>The host checks the pushed branch against the worker's HEAD, then opens a draft PR against ${esc(quick.baseBranch)} and links the Tracker ticket named in the task.</li><li>Ticket statuses are never changed. Merges always need your approval.</li></ul>
-${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Connect Arcadia", { action: "arc-quick-confirm", project: id, revision: snapshot.arcRevision }, "primary"))}`;
+  const card = (snapshot.providerCards ?? []).find(item => item.id === cardId);
+  if (!card?.connect) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(card?.body || "This connection is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
+  const connect = card.connect;
+  dialog.querySelector("#dialog-title").textContent = connect.dialog.title; connectDraft = card;
+  dialog.querySelector(".dialog-body").innerHTML = `${connect.dialog.intro ? `<p>${esc(connect.dialog.intro)}</p>` : ""}<ul>${connect.dialog.bullets.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn(connect.dialog.confirmLabel, { action: "provider-connect-confirm", project: id, card: card.id, revision: card.revision }, "primary"))}`;
 }
-async function arcQuickConfirm(target, revision) {
+async function providerConnectConfirm(target, cardId, revision) {
   requireProject(target);
-  await mutate({ action: "arc-quick-authorize", id: target, confirm: target, expectedRevision: revision }, "Arcadia connected. Workers can open draft PRs.");
+  const connect = connectDraft?.id === cardId ? connectDraft.connect : null;
+  if (!connect) throw new Error("This connection is no longer available; refresh");
+  await mutate({ action: "plugin", plugin: connect.rpc.plugin, method: connect.rpc.method, id: target, params: { confirm: target, expectedRevision: revision } }, connect.success);
   if (projectId === target && dialog.open) await ownerSetupDialog();
 }
 async function githubQuickDialog() {
@@ -2934,7 +2957,7 @@ function executionConsentAvailable(record) { return record.status === "pending" 
 function mergeExecutionAvailable(record) { return record.status === "approved" && record.executionApproved === true && record.scopeCurrent && record.operation.provider === "github" && record.operation.kind === "merge"; }
 function operationLetter(record) {
   const attrs = `data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"`;
-  return `<article class="letter"><h2>${esc(record.operation.provider)} ${esc(record.operation.kind)}</h2>${badge(record.status)}<p>Project ${esc(record.projectId)}<br>ID ${esc(record.id)}<br>Fingerprint ${esc(record.fingerprint)}<br>Current scope: ${esc(record.scopeCurrent)}</p><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre><p>Plain approval does not authorize execution. Consent and execution are separate. Arc is deferred; auto-merge is unavailable; commands execute only through bound worker profiles.</p><div class="row">${record.status === "pending" ? `<button data-action="operation-decision" ${attrs} data-decision="plain">Approve record only</button>${executionConsentAvailable(record) ? `<button class="danger" data-action="operation-decision" ${attrs} data-decision="execution">Permit exact executor</button>` : ""}<button data-action="operation-decision" ${attrs} data-decision="reject">Reject</button>` : `<p>Decision is immutable. Executable approval: ${esc(record.executionApproved === true)}</p>${mergeExecutionAvailable(record) ? `<button class="danger" data-action="operation-execute" ${attrs}>Execute exact-head merge, separate confirmation</button><button data-action="operation-inspect" ${attrs}>Inspect original merge outcome, never replay</button>` : ""}`}</div></article>`;
+  return `<article class="letter"><h2>${esc(record.operation.provider)} ${esc(record.operation.kind)}</h2>${badge(record.status)}<p>Project ${esc(record.projectId)}<br>ID ${esc(record.id)}<br>Fingerprint ${esc(record.fingerprint)}<br>Current scope: ${esc(record.scopeCurrent)}</p><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre><p>Plain approval does not authorize execution. Consent and execution are separate. Other workspace providers are deferred; auto-merge is unavailable; commands execute only through bound worker profiles.</p><div class="row">${record.status === "pending" ? `<button data-action="operation-decision" ${attrs} data-decision="plain">Approve record only</button>${executionConsentAvailable(record) ? `<button class="danger" data-action="operation-decision" ${attrs} data-decision="execution">Permit exact executor</button>` : ""}<button data-action="operation-decision" ${attrs} data-decision="reject">Reject</button>` : `<p>Decision is immutable. Executable approval: ${esc(record.executionApproved === true)}</p>${mergeExecutionAvailable(record) ? `<button class="danger" data-action="operation-execute" ${attrs}>Execute exact-head merge, separate confirmation</button><button data-action="operation-inspect" ${attrs}>Inspect original merge outcome, never replay</button>` : ""}`}</div></article>`;
 }
 async function operationsDialog(offset = 0) {
   if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("A loaded Durable plan and valid approval page are required");
@@ -2954,7 +2977,7 @@ function operationView(id, fingerprint) {
   const buttons = record.status === "pending"
     ? `${dlgBtn("Reject", { action: "operation-decision", ...attrs, decision: "reject" })}${dlgBtn("Approve, record only", { action: "operation-decision", ...attrs, decision: "plain" })}${executionConsentAvailable(record) ? dlgBtn("Allow exact executor…", { action: "operation-decision", ...attrs, decision: "execution" }, "primary") : ""}`
     : `${mergeExecutionAvailable(record) ? `${dlgBtn("Check what happened to the merge…", { action: "operation-inspect", ...attrs })}${dlgBtn("Merge this exact commit…", { action: "operation-execute", ...attrs }, "danger")}` : ""}`;
-  showDialog("Approval request", `${operationFacts(record)}<p class="note-box">${record.status === "pending" ? "Approving only records your decision. Letting the executor act is a separate choice. Arcadia and auto-merge are not available here." : `Your decision is final. Executable approval: ${record.executionApproved === true ? "yes" : "no"}.`}</p>${operationBinding(record)}${dlgActions(dlgBtn("Back to approvals", { action: "operation-list" }), buttons)}`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
+  showDialog("Approval request", `${operationFacts(record)}<p class="note-box">${record.status === "pending" ? "Approving only records your decision. Letting the executor act is a separate choice. Auto-merge is not available here." : `Your decision is final. Executable approval: ${record.executionApproved === true ? "yes" : "no"}.`}</p>${operationBinding(record)}${dlgActions(dlgBtn("Back to approvals", { action: "operation-list" }), buttons)}`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function operationDecision(id, fingerprint, mode) {
   const record = ownedOperation(id, fingerprint);
@@ -2965,7 +2988,7 @@ function operationDecision(id, fingerprint, mode) {
 function operationExecution(id, fingerprint, inspect = false) {
   const record = ownedOperation(id, fingerprint);
   if (!mergeExecutionAvailable(record)) throw new Error("Only a separately executable exact-head GitHub merge can run here");
-  showDialog(inspect ? "Check what happened to this merge?" : "Merge this exact commit?", `${operationFacts(record)}<p class="note-box${inspect ? "" : " warn"}">${inspect ? "Reads the original merge outcome. Matching evidence can settle the record; if none is found it stays unknown. This does not merge or allow another attempt." : "This changes the remote repository. The executor rechecks repository, scope and commit first, and an unknown outcome is never retried automatically."}</p><p class="note">No command, deployment, Arcadia or auto-merge runs from here.</p>${operationBinding(record)}<form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${inspect ? "" : " danger"}">${inspect ? "Check outcome" : "Merge now"}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
+  showDialog(inspect ? "Check what happened to this merge?" : "Merge this exact commit?", `${operationFacts(record)}<p class="note-box${inspect ? "" : " warn"}">${inspect ? "Reads the original merge outcome. Matching evidence can settle the record; if none is found it stays unknown. This does not merge or allow another attempt." : "This changes the remote repository. The executor rechecks repository, scope and commit first, and an unknown outcome is never retried automatically."}</p><p class="note">No command, deployment or auto-merge runs from here.</p>${operationBinding(record)}<form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${inspect ? "" : " danger"}">${inspect ? "Check outcome" : "Merge now"}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function uuid(value) { return typeof value === "string" && /^[a-f0-9-]{36}$/.test(value); }
 function requireProject(id) { if (id !== projectId) throw new Error("Selected project changed. Reopen the intended control."); }

@@ -54,7 +54,7 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       const op = record.operation, what = op.kind === "command" ? `command ${op.effect} in ${op.repositoryId}` : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
       push({ ...base, chatId: "main", chat: chats[0].title, kind: "approval", title: `${op.provider} ${what}`, text: `Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.`, operationId: record.id, fingerprint: record.fingerprint });
     }
-    // CI failed / PR merged (Follow PRs, Arcadia monitor): one notice each, in the events chat.
+    // CI failed / PR merged (Follow PRs and the provider PR monitors): one notice each, in the events chat.
     const eventChat = loadAutomations(project.id).eventChat, eventTarget = chats.find(chat => chat.id === eventChat && !chat.archived) ?? chats[0];
     for (const item of await owner.prNotices()) {
       const key = `prnotice:${item.key}`;

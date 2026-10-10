@@ -1,10 +1,9 @@
-// Browser E2E: Settings polish (Track U). Isolated host, fake model, fake MCP servers, fake gh, fake Arcadia; ~90 skills. Failure cases: settings-polish-failures.md.
+// Browser E2E: Settings polish (Track U). Isolated host, fake model, fake MCP servers, fake gh; ~90 skills. Failure cases: settings-polish-failures.md.
 // ROUND=<n> only captures design-iteration screenshots into round-<n>/ (no assertions). No ROUND: asserts everything and writes final/ screenshots.
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createKit } from './lib/e2e-kit.mjs';
-import { fakeArcadia } from './lib/fake-arc-kit.mjs';
 import { contrastLib } from './lib/contrast-scan.mjs';
 
 const ROUND = process.env.ROUND, folder = ROUND ? `round-${ROUND}` : 'final';
@@ -24,24 +23,19 @@ const server = tag => ({ command: process.execPath, args: [join(repo, 'scripts/f
 const mcpConfig = join(root, 'fake-mcp.json');
 writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { 'fake-ci': server('ci'), 'fake-tracker': server('tracker'), 'fake-xcode': server('xcode'), 'fake-docs': server('docs'), 'fake-off': { ...server('off'), enabled: false }, 'fake-oauth': { url: 'http://127.0.0.1:9/mcp', oauth: {}, description: 'Needs a browser sign-in' } } }));
 
-// GitHub: fake gh + bare remote. Arc: fake Arcadia mount.
+// GitHub: fake gh + bare remote.
 const bare = join(root, 'remote.git'), fakeGh = join(root, 'fake-gh'), ghState = join(root, 'fake-gh-state.json');
 writeFileSync(fakeGh, `#!/bin/sh\nexec "${process.execPath}" "${join(repo, 'scripts/fake-gh.mjs')}" "$@"\n`); chmodSync(fakeGh, 0o755);
 writeFileSync(ghState, JSON.stringify({ repo: { id: 4242, full_name: 'acme/mari', default_branch: 'main' }, issues: [], checks: {}, pulls: [] })); writeFileSync(join(root, 'gh-calls.jsonl'), '');
 execFileSync('/usr/bin/git', ['init', '--bare', '-b', 'main', bare], { stdio: 'ignore' });
-const fake = fakeArcadia(root);
-Object.assign(kit.hostEnv, fake.env, { PI_PROJECTS_MCP_CONFIG: mcpConfig, PI_PROJECTS_GH_CLI: fakeGh, FAKE_GH_STATE: ghState, FAKE_GH_BARE: bare, FAKE_GH_CALLS: join(root, 'gh-calls.jsonl') });
+Object.assign(kit.hostEnv, { PI_PROJECTS_MCP_CONFIG: mcpConfig, PI_PROJECTS_GH_CLI: fakeGh, FAKE_GH_STATE: ghState, FAKE_GH_BARE: bare, FAKE_GH_CALLS: join(root, 'gh-calls.jsonl') });
 kit.initRepo();
 kit.git(kit.workspace, 'remote', 'add', 'origin', 'https://github.com/acme/mari.git'); kit.git(kit.workspace, 'config', 'remote.origin.pushurl', bare); kit.git(kit.workspace, 'push', '-q', 'origin', 'main');
 
 await kit.run(async () => {
-  const gh = await kit.createProject('Mari (GitHub)'), arc = await kit.createProject('Keyboard (Arcadia)', { grant: false, cwd: fake.subdir });
+  const gh = await kit.createProject('Mari (GitHub)');
   const second = await rpc({ action: 'owner-setup-snapshot', id: gh });
   await rpc({ action: 'github-quick-authorize', id: gh, confirm: gh, expectedRevision: second.githubRevision });
-  const first = await rpc({ action: 'owner-setup-snapshot', id: arc });
-  await rpc({ action: 'workspace-quick-grant', id: arc, confirm: arc, expectedRevision: first.workspaceRevision });
-  const arcSnap = await rpc({ action: 'owner-setup-snapshot', id: arc });
-  await rpc({ action: 'arc-quick-authorize', id: arc, confirm: arc, expectedRevision: arcSnap.arcRevision });
   // Some skills and MCP servers already picked so the pickers show real state.
   await kit.updateSettings(gh, { skills: { all: ['repo-ios', 'repo-swift', 'ios-00'], coordinator: ['review-03'], worker: ['test-09', 'git-12'], scout: [], reviewer: ['review-03'] }, mcp: { all: ['fake-ci'], coordinator: [], worker: ['fake-tracker'], scout: [], reviewer: [], writes: ['fake-tracker'] } });
 
@@ -55,10 +49,8 @@ await kit.run(async () => {
   const shot = async name => { const width = await ev('innerWidth'), tall = await ev(`Math.min(9000, Math.ceil(document.querySelector('.body').scrollHeight + document.querySelector('.body').getBoundingClientRect().top))`); await page.viewport(width, Math.max(tall, 1000), width < 600); await kit.delay(300); await page.shot(`${folder}/${name}`); await page.viewport(width, 1000, width < 600); await kit.delay(200); };
   const gotoProject = async id => { await page.navigate(await kit.webUrl(id, 'settings')); await kit.delay(1500); await page.waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length > 0 && !/Reading/.test(document.querySelector('#worktrees').innerText + document.querySelector('#events-in').innerText)`, 'project settings'); await page.evaluate(contrastLib); };
 
-  // Design-iteration screenshots: desktop and 420 px, light and dark; GitHub and Arc variants.
+  // Design-iteration screenshots: desktop and 420 px, light and dark; GitHub variant.
   for (const [width, theme] of [[1440, 'light'], [1440, 'dark'], [420, 'light'], [420, 'dark']]) { await view(width, theme); await shot(`github-${width}-${theme}`); }
-  await gotoProject(arc);
-  for (const [width, theme] of [[1440, 'light'], [420, 'dark']]) { await view(width, theme); await shot(`arc-${width}-${theme}`); }
   await gotoProject(gh); await view(1440, 'light');
   if (ROUND) { check(`round ${ROUND} screenshots captured`, true); return; }
 
@@ -135,12 +127,9 @@ await kit.run(async () => {
     }
   }
 
-  // 4. No horizontal overflow at 420 px, both themes, both projects; long lists scroll inside their card.
+  // 4. No horizontal overflow at 420 px, both themes; long lists scroll inside their card.
   for (const theme of ['light', 'dark']) { await view(420, theme); check(`420px ${theme}: no horizontal overflow (GitHub project)`, await ev(`document.documentElement.scrollWidth <= innerWidth + 1 && document.body.scrollWidth <= innerWidth + 1`), await ev(`[document.documentElement.scrollWidth, innerWidth]`)); }
   check('long skill list scrolls inside its card', await ev(`(() => { const l = document.querySelector('#skills-picker .skill-groups'); return l.scrollHeight > l.clientHeight && l.clientHeight < 700; })()`));
-  await gotoProject(arc); await view(420, 'dark');
-  check('420px dark: no horizontal overflow (Arc project)', await ev(`document.documentElement.scrollWidth <= innerWidth + 1`));
-  check('Arc project shows Arcadia in setup', /Arcadia/.test(await ev(`document.querySelector('#owner-steps').innerText`)));
 
   // 5. Contrast >= 4.5 in light and dark across the Settings panel.
   await gotoProject(gh);

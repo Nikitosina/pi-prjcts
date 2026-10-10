@@ -1,6 +1,6 @@
 # Failure modes: continue a branch/worktree from a new worker thread; coordinator reads worker diffs
 
-Written before the code. E2E: scripts/worker-continuation-e2e.mjs (fake model, fake arc / arc-wt / arcanum, git project with a bare local origin).
+Written before the code. E2E: scripts/worker-continuation-e2e.mjs (fake model, git project with a bare local origin). Provider plugins repeat the provider-specific cases in their own repository.
 
 ## fromThread (take over another thread's worktree)
 1. New thread starts from trunk and silently loses the source's committed + uncommitted state: it MUST run in the source's worktree (same path, same branch, dirty file visible).
@@ -17,17 +17,17 @@ Written before the code. E2E: scripts/worker-continuation-e2e.mjs (fake model, f
 
 ## branch (continue an existing branch / PR)
 12. New worker starts a fresh `pi/...` / task-named branch and opens a second PR: the worktree MUST be on the existing branch at its tip, branch name unchanged, so pushes update the PR.
-13. Branch the owner does not own: git branch outside the project prefix or a protected branch (main/master/base); Arc branch under another user's `users/<other>/`, or a PR authored by someone else. Reject at delegate time, create no worktree, run no fetch/worktree command.
+13. Branch the owner does not own: git branch outside the project prefix or a protected branch (main/master/base); a branch another user owns, or a PR authored by someone else (provider plugins define their ownership rules). Reject at delegate time, create no worktree, run no fetch/worktree command.
 14. Unresolvable branch / PR number: reject (never fall back to trunk).
 15. Option-like or traversal refs (`--upload-pack=x`, `a..b`, `refs/heads/../x`): rejected before any command; shell metacharacters rejected.
 16. Local branch already exists (git, kept after cleanup) at the tip: reuse it without `-b`; existing at a different commit: blocked with the git message, never reset.
 17. Non-whole-repository scope: reject (fixed file ownership cannot move onto an existing branch).
 18. A thread that already allocated its worktree is not re-pointed: the branch is frozen with the receipt (later dispatches reuse it).
-19. Defaults: delegation without fromThread/branch behaves exactly as before (covered by arc-workers, durable-workspace regressions).
-20. Arc: second `open_draft_pr` on the continued branch must update the existing PR receipt (record the new conversation), not create another PR.
+19. Defaults: delegation without fromThread/branch behaves exactly as before (covered by durable-workspace regressions).
+20. Provider plugins: a second publication on the continued branch must update the existing PR receipt (record the new conversation), not create another PR (plugin repository suites).
 
 ## coordinator diff tool (projects_worker_diff)
 21. Coordinator cannot read a worker's change without artifact copy: tool returns branch, head, status list (staged/unstaged/untracked) and a capped diff.
 22. Not coordinator-only / unknown thread / thread without worktree / cleaned-up worktree: clear error.
 23. Diff floods context: capped at the code_diff cap (46 KB; harness clips at 50 KB) with truncation note.
-24. Tool must stay read-only: no writes, no mutating arc/git calls; thread id is a UUID (schema), never a path.
+24. Tool must stay read-only: no writes, no mutating VCS calls; thread id is a UUID (schema), never a path.

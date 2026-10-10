@@ -1,5 +1,6 @@
 // Shared harness for the fake-model E2Es (private HOME, owned host on a private socket, local fake model, raw-CDP Chrome).
-// Used by the MCP and Arc suites; older suites keep their inline copies. Never reaches real providers, Arcadia, Arcanum, CI or Tracker.
+// Used by the MCP and plugin suites; older suites keep their inline copies. Never reaches real providers, CI or trackers.
+// PI_PROJECTS_CORE (default: the working directory) is the core checkout whose host is started; artifacts always go under the working directory, so a plugin repository can run its suites against a core checkout.
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -17,14 +18,14 @@ export { delay, randomUUID };
 /** `handler({ role, user, results, tools, system, msgs })` returns a response string (say/call) or nothing (default: "DONE <role>"). */
 export async function createKit(name, { env: extraEnv = {}, handler = () => undefined } = {}) {
   if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
-  const repo = process.cwd();
+  const repo = process.cwd(), core = process.env.PI_PROJECTS_CORE || repo;
   const artifacts = join(repo, 'artifacts', `${name}-${new Date().toISOString().replaceAll(':', '-')}`);
   const root = join(realpathSync(tmpdir()), `${name}-${randomUUID()}`);
   const dirs = { home: join(root, 'home'), workspace: join(root, 'workspace'), agentDir: join(root, 'agent'), userHome: join(root, 'userhome') };
   for (const dir of [artifacts, root, ...Object.values(dirs)]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
   const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
-  const kit = { repo, artifacts, root, ...dirs, result, delay, call, say, redact };
+  const kit = { repo, core, artifacts, root, ...dirs, result, delay, call, say, redact };
   kit.save = () => writeFileSync(join(artifacts, 'report.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
   kit.check = (label, ok, detail) => { if (!ok) throw Error(`${label}: ${JSON.stringify(detail ?? null).slice(0, 3000)}`); result.checks.push(label); };
   kit.git = (dir, ...args) => execFileSync('/usr/bin/git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
@@ -58,7 +59,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
   let host, hostEnded = false, hostExit, hostRun = 0;
   kit.startHost = () => {
     const log = createWriteStream(join(artifacts, `host-${++hostRun}.log`), { flags: 'wx', mode: 0o600 });
-    host = spawn(process.execPath, [join(repo, 'src/host.ts')], { cwd: repo, env: kit.hostEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    host = spawn(process.execPath, [join(core, 'src/host.ts')], { cwd: core, env: kit.hostEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     host.stdout.pipe(log); host.stderr.pipe(log);
     hostEnded = false; hostExit = new Promise(ok => host.once('exit', () => { hostEnded = true; ok(); }));
   };

@@ -19,7 +19,7 @@ for(const dir of [good,foreign]){mkdirSync(join(dir,"owned"),{recursive:true});w
 const base={projectId:"root-e2e",repositoryId:"repo",provider:"git",workspaceId:"scope",receiptId:"receipt",attemptId:"attempt",leaseRevision:"lease",workspaceRoot:good,files:["owned/cas.txt"],expiresAt:new Date(Date.now()+120000).toISOString()};
 const cases=[
  ["foreign-root",base,{...base,workspaceRoot:foreign}], ["missing-root",base,{...base,workspaceRoot:missing}], ["final-symlink",{...base,workspaceRoot:`${link}/`},base],
- ["receipt",base,{...base,receiptId:"changed"}], ["lease",base,{...base,leaseRevision:"changed"}], ["provider",base,{...base,provider:"arc"}], ["files",base,{...base,files:["owned/other.txt"]}]
+ ["receipt",base,{...base,receiptId:"changed"}], ["lease",base,{...base,leaseRevision:"changed"}], ["provider",base,{...base,provider:"other"}], ["files",base,{...base,files:["owned/other.txt"]}]
 ];
 const [provider,...parts]=FAKE_MODEL.split("/"),modelId=parts.join("/");
 const report={sourceBefore:sha(readFileSync(source)),cases:[]}; let harness;

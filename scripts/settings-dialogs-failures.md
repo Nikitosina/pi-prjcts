@@ -11,7 +11,7 @@ Shell
 6. Jargon copy returns: "offline catalog", "Review this single change", "Explicit grants and hard concurrency", "Retained Durable routines", "Exact operation binding" as visible title, field names like `knowledgeAccess`.
 7. Raw paging buttons ("Previous records"/"Next records") without a range label, or paging controls shown when there is one page.
 8. Contrast below 4.5 (3 for large) in any Settings dialog, light or dark; bright light surfaces in dark.
-9. Existing hooks lost: `[data-action=close-dialog]`, `workspace-quick-confirm`, `github-quick-confirm`, `arc-quick-confirm`, `details.advanced`, `form[data-owner-write][data-kind]`, no typed-project-id input.
+9. Existing hooks lost: `[data-action=close-dialog]`, `workspace-quick-confirm`, `github-quick-confirm`, `provider-connect-confirm`, `details.advanced`, `form[data-owner-write][data-kind]`, no typed-project-id input.
 
 Project settings
 10. One button per field: name/objective/models/grants/concurrency cannot be edited together; user must run N review flows.
@@ -37,7 +37,7 @@ Model picker
 
 Other dialogs
 28. Owner setup: revoke/authorize actions without confirmation; advanced forms visible by default; JSON-only editing of grants (must remain reachable under Advanced but described in plain words).
-29. Connect GitHub/Arcadia/workspace dialogs lose their Confirm; a stale snapshot confirm succeeds.
+29. Connect GitHub/provider/workspace dialogs lose their Confirm; a stale snapshot confirm succeeds.
 30. Routines: enable/disable confirm lacks a before -> after state; the toggle applies without confirmation; lens tabs lack a selected state.
 31. Lifecycle: archive/delete/restore button label ambiguous; state not shown; confirmation missing.
 32. Approvals: decision buttons lose the fingerprint binding; exact operation dialog hides identity (project, id, fingerprint) completely.

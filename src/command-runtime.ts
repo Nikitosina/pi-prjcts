@@ -13,6 +13,8 @@ import type { CommandProfile } from "./command-profile-types.ts";
 import { commandProgram, validateCommandRisk } from "./command-profiles.ts";
 import { DurablePlanning } from "./durable-planning.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
+import { plugins } from "./plugins.ts";
+import { isolationProvider } from "./workspace-types.ts";
 import { withWorkspaceMutationLock, type WorkspaceAuthority, type WorkspaceWriteLock } from "./workspace-capabilities.ts";
 
 type Output = { bytes: number; capturedBytes: number; sha256: string; capturedSha256?: string };
@@ -200,12 +202,12 @@ export async function commandWorkerTools(input: { executor: ReturnType<typeof co
   async function active(profile: CommandProfile, api: ToolExecutionApi, context: Context) {
     context.abortSignal?.throwIfAborted();
     validateCommandRisk(profile);
-    if (profile.provider === "arc" || input.authority.provider === "arc") throw new Error("Arc command execution is deferred; no command will run");
-    if (["arc", "arcanum"].includes(basename(profile.program.path))) throw new Error("Command executable does not match the selected VCS provider");
+    if (profile.provider !== "github" || input.authority.provider !== "git") throw new Error("Command execution is available only for GitHub workspaces; no command will run");
+    if (plugins.vcsExecutables().includes(basename(profile.program.path))) throw new Error("Command executable does not match the selected VCS provider");
     const expires = Date.parse(input.authority.expiresAt);
     if (Number(api.conversationId) !== input.conversationId || input.authority.projectId !== input.project.id || !Number.isFinite(expires) || expires <= Date.now()) throw new Error("Command worker/lease identity does not match");
     const current = loadProject(input.project.id), configured = current.commandProfiles?.find(item => item.id === profile.id);
-    if (current.archived || current.deleted || profile.owner !== trustedOwner() || !configured?.enabled || configured.revision !== profile.revision || configured.workspaceRevision !== authorizationFingerprint(current) || authorizationFingerprint(current) !== authorizationFingerprint(input.project) || configured.repositoryId !== input.authority.repositoryId || !configured.scopeIds.includes(input.scopeId) || (configured.provider === "github" ? "git" : "arc") !== input.authority.provider) throw new Error("Command authorization changed");
+    if (current.archived || current.deleted || profile.owner !== trustedOwner() || !configured?.enabled || configured.revision !== profile.revision || configured.workspaceRevision !== authorizationFingerprint(current) || authorizationFingerprint(current) !== authorizationFingerprint(input.project) || configured.repositoryId !== input.authority.repositoryId || !configured.scopeIds.includes(input.scopeId) || isolationProvider(configured.provider) !== input.authority.provider) throw new Error("Command authorization changed");
     const lexical = await lstat(input.authority.workspaceRoot, { bigint: true }), now = await lstat(path, { bigint: true });
     if (lexical.isSymbolicLink() || !lexical.isDirectory() || await realpath(input.authority.workspaceRoot) !== path || now.dev !== pin.dev || now.ino !== pin.ino) throw new Error("Command workspace physical identity changed");
     await api.commit(async tx => { await assertWork(tx); }, context);

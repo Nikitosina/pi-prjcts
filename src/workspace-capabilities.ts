@@ -14,7 +14,7 @@ const listLimit = 1000;
 const vcsDirectories = [".git", ".hg", ".svn"];
 const revision = Type.String({ pattern: "^[a-f0-9]{64}$" });
 
-export type WorkspaceProvider = "git" | "arc";
+export type WorkspaceProvider = string; // "git" or the id of a workspace plugin provider
 
 /** Host-persisted allocation facts; this module neither creates nor verifies the allocation. */
 export type WorkspaceAuthority = {

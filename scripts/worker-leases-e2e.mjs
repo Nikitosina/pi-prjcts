@@ -1,5 +1,5 @@
 // E2E: host-wide resource leases, background commands and runbook instructions for workers.
-// Fake model, git project, private HOME, no real arc/arcanum/CI. Failure cases: worker-leases-failures.md.
+// Fake model, git project, private HOME, no real CI. Failure cases: worker-leases-failures.md.
 // Artifact: artifacts/worker-leases-<time>/report.json (+ summary.json with the key observed facts).
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';

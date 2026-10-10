@@ -766,7 +766,7 @@ input[type="checkbox"] { accent-color: var(--accent-solid); }
 .settings .card > *, #skills-picker, #mcp-picker, #skills-picker > *, #mcp-picker > * { min-width: 0; }
 #skills-picker, #mcp-picker { display: grid; gap: 12px; }
 
-/* Arcadia PR card: one glanceable row per PR (status icon, #id summary, counts and failing checks), failing first. */
+/* PR card: one glanceable row per PR (status icon, #id summary, counts and failing checks), failing first. */
 #prs-card .row small { margin-right: 6px; }
 .pr-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 0; border-top: 1px solid var(--line); }
 .pr-row:first-child { border-top: 0; }

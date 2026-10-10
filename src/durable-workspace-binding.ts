@@ -11,7 +11,7 @@ import { captureEvidenceBytes } from "./evidence.ts";
 import { DurablePlanning } from "./durable-planning.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
 import { workspaceCapabilities, workspacePhysicalLockPath, type WorkspaceAuthority } from "./workspace-capabilities.ts";
-import type { WorkspaceIntent } from "./workspace-types.ts";
+import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { githubWorkerTools } from "./github-worker.ts";
 import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
@@ -19,12 +19,10 @@ import type { OperationApprovals } from "./operation-approvals.ts";
 import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
 import { worktreeSetup } from "./worktree-maintenance.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
-import { arcBranchName, arcTicket, arcWorkerInstructions, freeName, guardWorkerArcCommand } from "./arc-worker-policy.ts";
-import { arcWorkerTools } from "./arc-worker.ts";
+import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
-import { arcFetchedTrunkHead, arcTakenNames, cli, runCli } from "./vcs.ts";
 
 const ENVIRONMENT_NOTE = "\n\nShared resources and long commands: bash calls time out, so start builds, test runs, dev servers and other long commands with projects_bg_start (returns an id; the output goes to a log artifact), poll with projects_bg_status and end them with projects_bg_stop; they keep running across your turns and stop with the thread. Simulators, devices and other machine-global resources are shared with other workers: take a lease with projects_lease_acquire {resource, ttlMinutes, waitSeconds?} before using one, keep to a neutral name others also use, and release it with projects_lease_release when done (it also frees itself when your work ends). If it is held, you are told by whom and until when: do other work, wait with waitSeconds, or report the blocker; never stop the other worker's use of it. Before building or using simulators read the runbooks/ project knowledge for a known working method.";
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
@@ -42,60 +40,50 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const selectedRepository = repository;
     const selectedScope = scope;
     if (scope.files.some(file => file.includes("\\") || file.split("/").some(part => !part || part === "." || part === "..") || !(file === repository.fileOwnershipPrefix || file.startsWith(`${repository.fileOwnershipPrefix}/`)))) throw new Error("Workspace scope files escape the host ownership prefix");
-    const arc = authorization.provider === "arc";
-    // The Arc root has no standing instructions of its own: the project folder (subpath) is the standing root.
-    const repositoryRoot = arc ? projectRoot : realpathSync(selectedRepository.ownerCheckout);
+    const plug = authorization.provider === "github" ? undefined : plugins.workspaceProvider(authorization.provider);
+    if (authorization.provider !== "github" && !plug) throw new Error(`The workspace provider plugin "${authorization.provider}" is not loaded, so workers cannot start in this project; load it or remove the grant`);
+    // Some checkout roots have no standing instructions of their own: the project folder is then the standing root.
+    const repositoryRoot = plug?.standingAtProjectRoot ? projectRoot : realpathSync(selectedRepository.ownerCheckout);
     const selectedStanding = repositoryRoot === projectRoot ? projectStanding : loadDurableStanding(repositoryRoot);
     const repositoryStanding = repositoryRoot !== projectRoot ? selectedStanding : undefined;
     function assertStanding() {
-      if ((arc ? projectRoot : realpathSync(selectedRepository.ownerCheckout)) !== repositoryRoot) throw new Error("Selected repository standing root changed");
+      if ((plug?.standingAtProjectRoot ? projectRoot : realpathSync(selectedRepository.ownerCheckout)) !== repositoryRoot) throw new Error("Selected repository standing root changed");
       const current = loadDurableStanding(repositoryRoot);
       if (current.revision !== selectedStanding.revision || current.text !== selectedStanding.text) throw new Error("Selected repository standing instructions changed; frozen thread will not be retargeted");
     }
     assertStanding();
-    const provider = authorization.provider === "github" ? "git" : "arc";
+    const provider = isolationProvider(authorization.provider);
     // A thread that took over another's worktree uses that allocation's identity (same receipt, path and branch); the previous thread may not run again.
     const thread = await input.conversation().commit(async tx => { const item = (await tx.doc(DurablePlanning, input.conversation().id)).threads[request.threadId]; return { workspaceFrom: item?.workspaceFrom, transferredTo: item?.transferredTo, continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined }; }, BACKGROUND_CONTEXT);
     if (thread.transferredTo) throw new Error(`This thread's worktree was handed to thread ${thread.transferredTo}; it can no longer run work. Send follow-ups to that thread.`);
     const allocationThread = thread.workspaceFrom ?? request.threadId;
     const intentId = stableUuid(`${input.project.id}:${allocationThread}:${scope.id}`), attemptId = stableUuid(`${intentId}:allocation`);
     const whole = scope.wholeRepository === true;
-    const arcAuthorization = arc ? input.project.arcAuthorization : undefined;
-    const subpath = repository.subpath ?? "";
-    // The lease owner names the project (distinguishable from the owner's own agent sessions in arc-wt list).
-    const leaseOwner = arc ? `pi-projects:${input.project.id}` : authorization.owner;
+    const leaseOwner = plug ? plug.leaseOwner(input.project) : authorization.owner;
     const githubAuthorization = input.project.githubAuthorization?.find(item => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(input.project));
     const publication = githubAuthorization;
     const isolation = workspaceIsolation({ conversation: input.conversation(), authority: { projectId: input.project.id, owner: leaseOwner }, authorizedRepositories: [{ repositoryId: repository.repositoryId, provider, approvedRoot: repository.approvedRoot, ownerCheckout: repository.ownerCheckout, fileOwnershipPrefix: repository.fileOwnershipPrefix }] });
     const taskText = (workId: string) => input.conversation().commit(async tx => (await tx.doc(DurablePlanning, input.conversation().id)).work[workId]?.text ?? "", BACKGROUND_CONTEXT);
-    const freeArcName = async (task: string, threadId: string) => freeName(arcBranchName(task, threadId), await arcTakenNames(repository.ownerCheckout));
     // A whole-repository thread starts from owner HEAD at its first allocation and keeps that base and branch on later dispatches.
     const receipts = whole ? (await isolation.snapshot()).receipts : [], allocated = receipts.find(item => item.intentId === intentId)?.scope;
-    // Arc: the worktree and branch are named from the task (ticket key or thread) on first allocation, then frozen with the receipt.
     const continued = allocated ? undefined : thread.continueBranch;
-    const arcName = arc && !allocated ? continued ? freeName(continued.name, await arcTakenNames(repository.ownerCheckout)) : await freeArcName(await taskText(request.workId), request.threadId) : undefined;
-    const name = allocated?.workspaceName ?? arcName ?? `durable-${intentId.slice(0, 12)}`, workspacePath = allocated?.workspacePath ?? join(repository.approvedRoot, name);
-    const baseRevision = !whole ? scope.baseRevision : allocated?.baseRevision ?? (continued ? continued.sha : arc ? await arcFetchedTrunkHead(repository.ownerCheckout) : ownerHead(repository.ownerCheckout));
-    const branch = allocated?.branch ?? (continued ? continued.name : arc ? name : publication ? `${publication.branchPrefix}${name}` : whole ? `pi/${name}` : name);
-    const intent: WorkspaceIntent = { id: intentId, attemptId, action: "allocate", scope: { projectId: input.project.id, repositoryId: repository.repositoryId, provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, workspacePath, workspaceName: name, branch, baseRevision, headRevision: allocated?.headRevision ?? (continued && !arc ? ownerHead(repository.ownerCheckout) : baseRevision), owner: leaseOwner, leaseReason: arc ? `pi project ${input.project.name} thread ${allocationThread}` : `durable workspace ${allocationThread}`, sharedObjectStore: provider === "arc" ? repository.sharedObjectStore ?? null : null, fileOwnership: scope.files, capabilityProfileRevision: hash(JSON.stringify({ authorization, scope })), ...(whole ? { allowDirtyOwner: true as const } : {}), ...(allocated?.continueBranch || continued && !arc ? { continueBranch: true as const } : {}) } };
+    const bindContext = { project: input.project, repository, scopeId: scope.id, whole, scopeBaseRevision: scope.baseRevision, threadId: request.threadId, workId: request.workId, conversationId: request.conversationId, allocationThread, allocated, continued, root: input.conversation(), controlRoot: input.controlRoot, isClosed: () => input.isClosed?.() ?? false, taskText: () => taskText(request.workId) };
+    // A provider plugin names the worktree and branch (frozen with the receipt); git derives them here.
+    const plan = plug ? await plug.plan(bindContext) : undefined;
+    const name = plan?.name ?? allocated?.workspaceName ?? `durable-${intentId.slice(0, 12)}`, workspacePath = allocated?.workspacePath ?? join(repository.approvedRoot, name);
+    const baseRevision = plan?.baseRevision ?? (!whole ? scope.baseRevision : allocated?.baseRevision ?? (continued ? continued.sha : ownerHead(repository.ownerCheckout)));
+    const branch = plan?.branch ?? allocated?.branch ?? (continued ? continued.name : publication ? `${publication.branchPrefix}${name}` : whole ? `pi/${name}` : name);
+    const intent: WorkspaceIntent = { id: intentId, attemptId, action: "allocate", scope: { projectId: input.project.id, repositoryId: repository.repositoryId, provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, workspacePath, workspaceName: name, branch, baseRevision, headRevision: plan?.headRevision ?? allocated?.headRevision ?? (continued ? ownerHead(repository.ownerCheckout) : baseRevision), owner: leaseOwner, leaseReason: plan?.leaseReason ?? `durable workspace ${allocationThread}`, sharedObjectStore: plan ? plan.sharedObjectStore : null, fileOwnership: scope.files, capabilityProfileRevision: hash(JSON.stringify({ authorization, scope })), ...(whole ? { allowDirtyOwner: true as const } : {}), ...(plan ? plan.continueBranch ? { continueBranch: true as const } : {} : allocated?.continueBranch || continued ? { continueBranch: true as const } : {}) } };
     let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent);
     if (receipt.state === "released" && receipt.providerFacts.remove === "cleanup-unforced") throw new Error(`This thread's worktree was cleaned up after its work settled; branch ${branch} is kept. Delegate a new worker and tell it to continue branch ${branch} (fetch it and push to it).`);
     if (receipt.state !== "allocated" || !receipt.workspacePath) throw new Error(`Workspace allocation is ${receipt.state}: ${receipt.reason ?? "no exact receipt"}`);
     if (JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope)) throw new Error("Frozen workspace allocation receipt differs from current host scope; refusing registry publication");
+    const attachment = plug ? await plug.attach({ ...bindContext, receipt, receipts, plan: plan! }) : undefined;
     // Setup runs once, for worktrees this dispatch created; its recorded result reaches the worker's frozen instructions and Settings.
-    // Arc: the project folder inside the worktree is where workers (and the setup command) run.
-    const workDir = subpath ? join(receipt.workspacePath, subpath) : receipt.workspacePath;
-    if (arc && !existsSync(workDir)) throw new Error(`The project folder ${subpath} does not exist in the worktree ${receipt.workspacePath}`);
+    // A provider may run workers in a folder inside the worktree.
+    const workDir = attachment ? attachment.workDir : receipt.workspacePath;
     const setup = whole ? await worktreeSetup({ command: allocated ? undefined : loadProject(input.project.id).worktreeSetup, controlRoot: input.controlRoot, intentId, workspacePath: receipt.workspacePath, cwd: workDir }) : "";
-    // Arc worktrees are leased: renew on every dispatch, and again while tools run; a lost lease stops all further tool calls.
-    let leaseLost: string | undefined, lastRenew = Date.now();
-    const renewLease = async () => {
-      const renewed = await runCli(cli.arcWt(), ["lease", "renew", name, "--owner", leaseOwner]);
-      lastRenew = Date.now();
-      leaseLost = renewed.code ? `The Arc worktree lease for ${name} could not be renewed (${renewed.stderr.trim().slice(-200) || `exit ${renewed.code}`}). Stop writing and report that this worktree needs the owner; do not retry.` : undefined;
-    };
-    if (arc) { await renewLease(); if (leaseLost) throw new Error(leaseLost); }
-    const ownedBranches = new Set(receipts.filter(item => item.scope.provider === "arc").map(item => item.scope.branch));
+    await attachment?.start();
     const authority: WorkspaceAuthority = { projectId: input.project.id, repositoryId: repository.repositoryId, provider, workspaceId: `${scope.id}:${receipt.intentId}:${request.conversationId}`, receiptId: receipt.intentId, attemptId: receipt.attemptId, leaseRevision: receipt.lease?.renewedAt ?? receipt.providerFacts.head ?? scope.baseRevision, workspaceRoot: receipt.workspacePath, files: scope.files, ...(whole ? { wholeRepository: true } : {}), expiresAt: "2099-01-01T00:00:00.000Z" };
     const commandProfiles = (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.repositoryId === repository.repositoryId && profile.scopeIds.includes(scope.id));
     if (commandProfiles.length && !input.commands) throw new Error("Host command executor is unavailable");
@@ -123,13 +111,12 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     } : undefined, writeLock: lock });
     if (input.commands) tools.push(...await commandWorkerTools({ executor: input.commands, approvals: input.commandApprovals, project: input.project, root: input.conversation(), authority, scopeId: scope.id, conversationId: request.conversationId, workId: request.workId, lock }));
     if (publication) tools.push(...await githubWorkerTools({ project: input.project, root: input.conversation(), authority, conversationId: request.conversationId, branch, scopeId: scope.id, workId: request.workId, baseRevision, publication, isClosed: input.isClosed }));
-    const arcPublication = arcAuthorization && arcAuthorization.workspaceRevision === authorizationFingerprint(input.project) ? arcAuthorization : undefined;
-    if (arcPublication) tools.push(...await arcWorkerTools({ project: input.project, root: input.conversation(), workDir, branch, controlRoot: input.controlRoot, workspaceId: authority.workspaceId, conversationId: request.conversationId, scopeId: scope.id, workId: request.workId, authorization: arcPublication, isClosed: input.isClosed }));
+    if (attachment) tools.push(...await attachment.tools(authority));
     const gitPolicy = { prefix: publication?.branchPrefix ?? "pi/", protected: publication ? [publication.baseBranch] : [] };
     // Evidence folder per thread, in the project home (survives worktree cleanup); path in the instructions and $PI_ARTIFACTS_DIR.
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
     if (whole) {
-      const guard = (command: string) => arc ? guardWorkerArcCommand(command, { branch, owned: ownedBranches }) : guardWorkerGitCommand(command, branch, gitPolicy);
+      const guard = (command: string) => attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy);
       const codingTools = createCodingTools(workDir, { bash: { spawnHook: ({ command, env, ...context }) => ({ ...context, env: { ...env, PI_ARTIFACTS_DIR: artifacts! }, command: guard(command) }) } });
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {
         return tool.execute(api.callId, args, context.abortSignal, update => api.output(update.content.map(item => item.type === "text" ? item.text : "").join("")));
@@ -143,11 +130,11 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const extension = defineExtension({ name: `projects.workspace.${scope.id}.${intentId}.${request.conversationId}`, tools, hooks: [hook(ToolTask, { beforeTool: (_call, api) => {
       if (Number(api.conversationId) !== request.conversationId) return;
       try { assertStanding(); } catch (error) { return { block: error instanceof Error ? error.message : "Selected repository standing resources are unavailable" }; }
-      if (arc) return (async () => { if (!leaseLost && Date.now() - lastRenew > 60_000) await renewLease(); return leaseLost ? { block: leaseLost } : undefined; })();
+      if (attachment?.beforeTool) return attachment.beforeTool();
     } })] });
     // Skills now come from the role profile (instructions + projects_skill_file). The retired grant fingerprint stays in the hash so existing threads keep their binding revision.
     const handover = `${thread.workspaceFrom ? "\n\nThis worktree was taken over from an earlier worker thread: its branch, commits and uncommitted changes are already here. Check the status first and continue from there; the earlier thread can no longer work." : ""}${thread.continueBranch ? `\n\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)} when it was created), which belongs to an existing PR. Commit on top and push to that branch so the PR is updated; never open a second PR for this work.` : ""}`;
-    return { cwd: workDir, tools, extension, repositoryStanding, workerInstructions: `${handover}${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. ${arc ? arcWorkerInstructions({ branch, login: arcAuthorization?.login, subpath, ticket: arcTicket(branch), baseRevision, pr: arcPublication !== undefined }) : `Your branch is ${branch}. You may fetch, merge, rebase, cherry-pick and resolve conflicts. Push to your branch, or to another existing project branch (${gitPolicy.prefix}*) when your task says to continue it (for example an open project PR): fetch it, work on top of it, and push with git push origin HEAD:<that branch>. After a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other non-project branches, never plain --force, delete branches or merge PRs; the owner approves merges.${publication ? ` Open or update a draft PR (GitHub open_draft_pr tool, after pushing your own branch, against ${publication.baseBranch}) only when your task asks for a PR; when you continue an existing PR branch, pushing updates that PR.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${input.environment ? ENVIRONMENT_NOTE : ""}` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
+    return { cwd: workDir, tools, extension, repositoryStanding, workerInstructions: `${handover}${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. ${attachment ? attachment.instructions : `Your branch is ${branch}. You may fetch, merge, rebase, cherry-pick and resolve conflicts. Push to your branch, or to another existing project branch (${gitPolicy.prefix}*) when your task says to continue it (for example an open project PR): fetch it, work on top of it, and push with git push origin HEAD:<that branch>. After a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other non-project branches, never plain --force, delete branches or merge PRs; the owner approves merges.${publication ? ` Open or update a draft PR (GitHub open_draft_pr tool, after pushing your own branch, against ${publication.baseBranch}) only when your task asks for a PR; when you continue an existing PR branch, pushing updates that PR.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${input.environment ? ENVIRONMENT_NOTE : ""}` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
   };
 }
 /** Pushes may target this worker's branch or any other project branch (the publication prefix); never the base/default branch. */

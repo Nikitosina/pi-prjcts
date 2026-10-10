@@ -24,18 +24,20 @@ const revision = Type.String({ minLength: 1, maxLength: 128 });
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
-export const WorkspaceRepositoryAuthorization = Type.Object({ repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), ownerCheckout: Type.String({ minLength: 1, maxLength: 4096 }), approvedRoot: Type.String({ minLength: 1, maxLength: 4096 }), fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), sharedObjectStore: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 4096 }), Type.Null()])), /** Arc: the project folder below the Arc root (empty or absent = the root). */ subpath: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false });
+/** "github" or the id of a provider plugin. */
+export const Provider = Type.String({ minLength: 1, maxLength: 64 });
+export const WorkspaceRepositoryAuthorization = Type.Object({ repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Provider, ownerCheckout: Type.String({ minLength: 1, maxLength: 4096 }), approvedRoot: Type.String({ minLength: 1, maxLength: 4096 }), fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), sharedObjectStore: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 4096 }), Type.Null()])), /** Checkout providers whose project folder sits below the checkout root: that folder (empty or absent = the root). */ subpath: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false });
 export const WorkspaceScopeAuthorization = Type.Object({ id: Id, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), files: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { maxItems: 1024, uniqueItems: true }), baseRevision: Type.String({ pattern: "^[0-9a-f]{40,64}$" }), evidenceCapture: Type.Optional(Type.Literal(true)), wholeRepository: Type.Optional(Type.Literal(true)) }, { additionalProperties: false });
-export const WorkspaceAuthorization = Type.Object({ version: Type.Literal(1), provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), owner: Type.String({ minLength: 1, maxLength: 512 }), repositories: Type.Array(WorkspaceRepositoryAuthorization, { minItems: 1, maxItems: 64 }), scopes: Type.Array(WorkspaceScopeAuthorization, { minItems: 1, maxItems: 1024 }) }, { additionalProperties: false });
+export const WorkspaceAuthorization = Type.Object({ version: Type.Literal(1), provider: Provider, owner: Type.String({ minLength: 1, maxLength: 512 }), repositories: Type.Array(WorkspaceRepositoryAuthorization, { minItems: 1, maxItems: 64 }), scopes: Type.Array(WorkspaceScopeAuthorization, { minItems: 1, maxItems: 1024 }) }, { additionalProperties: false });
 export type WorkspaceAuthorization = Static<typeof WorkspaceAuthorization>;
 export const WorkspaceAuthorizationHistory = Type.Array(Type.Object({ revokedAt: Type.String(), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), repositorySha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), scopeId: Id, scopeSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), baseRevision: Type.String({ pattern: "^[0-9a-f]{40,64}$" }) }, { additionalProperties: false }), { maxItems: 2048 });
 export const OperationSpec = Type.Union([Type.Object({
-  provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]),
+  provider: Provider,
   kind: Type.Union([Type.Literal("merge"), Type.Literal("auto-merge")]),
   repositoryId: Type.String({ minLength: 1, maxLength: 256 }), scopeId: Id,
   pullRequest: Type.Integer({ minimum: 1 }), expectedHead: Type.String({ pattern: "^[a-f0-9]{40,64}$" }),
 }, { additionalProperties: false }), Type.Object({
-  provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), kind: Type.Literal("command"),
+  provider: Provider, kind: Type.Literal("command"),
   repositoryId: Type.String({ minLength: 1, maxLength: 256 }), scopeId: Id, threadId: Id,
   profileId: Id, profileRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   effect: Type.Union([Type.Literal("destructive"), Type.Literal("deployment")]),
@@ -53,12 +55,6 @@ export const GithubAuthorization = Type.Object({
 }, { additionalProperties: false });
 export type GithubAuthorization = Static<typeof GithubAuthorization>;
 export const GithubAuthorizationHistory = Type.Array(Type.Object({ revokedAt: Type.String(), authorization: GithubAuthorization }, { additionalProperties: false }), { maxItems: 64 });
-/** Arcadia counterpart of GithubAuthorization: who pushes (login), where PRs go (trunk), bound to the workspace grant revision. */
-export const ArcAuthorization = Type.Object({
-  repositoryId: Type.String({ minLength: 1, maxLength: 256 }), login: Type.String({ minLength: 1, maxLength: 128 }), baseBranch: Type.Literal("trunk"),
-  owner: Type.String({ minLength: 1, maxLength: 512 }), workspaceRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), at: Type.String(),
-}, { additionalProperties: false });
-export type ArcAuthorization = Static<typeof ArcAuthorization>;
 export const Project = Type.Object({
   version: Type.Literal(1), id: Id, name: text, cwd: text, objective: Type.String({ maxLength: 32000 }),
   runtime: Type.Literal("durable"),
@@ -73,7 +69,6 @@ export const Project = Type.Object({
   workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
   githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
   githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
-  arcAuthorization: Type.Optional(ArcAuthorization),
   workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
   commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
   /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
@@ -92,7 +87,8 @@ export const Project = Type.Object({
   runs: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 0 })),
   phase: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("attention")]),
   problem: Type.Union([Type.String(), Type.Null()]),
-}, { additionalProperties: false });
+  // Top-level records owned by provider plugins (e.g. a publication authorization) are kept verbatim, also while no plugin understands them.
+}, { additionalProperties: Type.Unknown() });
 export type Project = Static<typeof Project>;
 export const Note = Type.Object({ id: Id, at: text, author: text, text }, { additionalProperties: false });
 export type Note = Static<typeof Note>;
@@ -175,6 +171,8 @@ export const Snapshot = Type.Object({
   chatId: Type.Optional(ChatId),
   /** Owner uploads (metadata, newest first) and failed/interrupted jobs across every chat. */
   uploads: Type.Optional(Type.Array(Type.Unknown())), failedJobs: Type.Optional(Type.Integer({ minimum: 0 })),
+  /** Setup cards of workspace provider plugins (Owner setup steps) and the provider id of a grant whose plugin is not loaded. */
+  providerCards: Type.Optional(Type.Array(Type.Unknown())), unloadedProvider: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
@@ -233,16 +231,15 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("github-repository-inspect"), id: Id, repositoryId: Type.String({ minLength: 1, maxLength: 256 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-authorize"), id: Id, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), branchPrefix: Type.String({ minLength: 1, maxLength: 128 }), confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), reviewReplies: Type.Optional(Type.Boolean()), localPublication: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-revoke"), id: Id, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("provider-pr-inspect"), id: Id, provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("provider-pr-inspect"), id: Id, provider: Provider, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("provider-conflict-inspect"), id: Id, provider: Type.Literal("github"), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }), expectedBase: Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("provider-ci-job-inspect"), id: Id, provider: Type.Literal("github"), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }), jobId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("provider-ci-detail"), id: Id, provider: Type.Literal("github"), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }), checkRunId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("provider-review-inspect"), id: Id, provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("provider-ci-inspect"), id: Id, provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("provider-review-inspect"), id: Id, provider: Provider, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("provider-ci-inspect"), id: Id, provider: Provider, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), expectedHead: Type.Optional(Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" })), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("operation-request"), id: Id, requestId: Id, operation: OperationSpec }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-read-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-write-inspect"), id: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), page: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000000 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("arc-write-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-write-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("operation-execute"), id: Id, operationId: Id, fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }), confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("operation-inspect"), id: Id, operationId: Id, fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }), confirm: Id }, { additionalProperties: false }),
@@ -251,7 +248,6 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("operation-decide"), id: Id, operationId: Id, fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }), decision: Type.Literal("reject") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-catalog"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("github-quick-authorize"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("arc-quick-authorize"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-quick-grant"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-grant"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider: Type.Literal("github"), ownerCheckout: text, approvedRoot: text, fileOwnershipPrefix: Type.String({ minLength: 1, maxLength: 1024 }), files: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { minItems: 1, maxItems: 1024, uniqueItems: true }), baseRevision: Type.String({ pattern: "^[0-9a-f]{40}$" }), evidenceCapture: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("workspace-revoke"), id: Id, confirm: Id, scopeId: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
@@ -281,9 +277,11 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("automation-update"), id: Id, change: AutomationChange }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("webhook-rotate"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("follow-poll"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("arc-prs"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("arc-pr-watch"), id: Id, pr: Type.Integer({ minimum: 1, maximum: 999999999 }), watch: Type.Boolean() }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("arc-pr-hide"), id: Id, pr: Type.Integer({ minimum: 1, maximum: 999999999 }), hide: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("prs"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-watch"), id: Id, provider: Provider, pr: Type.String({ minLength: 1, maxLength: 200 }), watch: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("pr-hide"), id: Id, provider: Provider, pr: Type.String({ minLength: 1, maxLength: 200 }), hide: Type.Boolean() }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugins") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("plugin"), plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), method: Type.String({ pattern: "^[a-z][a-z0-9-]{0,63}$" }), id: Type.Optional(Id), params: Type.Optional(Type.Unknown()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("work-submit"), id: Id, threadId: Id, requestId: Id, workspaceScopeId: Id, text }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("notes"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("knowledge-list"), id: Id }, { additionalProperties: false }),

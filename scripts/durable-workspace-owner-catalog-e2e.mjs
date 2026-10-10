@@ -64,9 +64,9 @@ try {
   assert.equal(project.runtime, "durable");
   beforeGrant = await api({ action: "show", id: project.id }); assert.equal(beforeGrant.project.id, project.id); assert.equal(beforeGrant.jobs.length, 0); pass("show opened an idle Durable coordinator");
 
-  // Fresh-provider refusal is exercised at the public parser before any Arc command/SDK call.
-  const arc = await expectHostReject({ action: "workspace-grant", id: project.id, confirm: project.id, expectedRevision: await revision(), repositoryId: "arc-refused", provider: "arc", ownerCheckout: workspace, approvedRoot: approved, fileOwnershipPrefix: "owned", files: ["owned/assigned.txt"], baseRevision }, /Invalid data|github|provider/);
-  assert.match(arc, /Invalid data|github|provider/); pass("fresh Arc provider refused by public parser before Arc");
+  // Fresh-provider refusal is exercised at the public parser before any provider command/SDK call.
+  const other = await expectHostReject({ action: "workspace-grant", id: project.id, confirm: project.id, expectedRevision: await revision(), repositoryId: "other-refused", provider: "other", ownerCheckout: workspace, approvedRoot: approved, fileOwnershipPrefix: "owned", files: ["owned/assigned.txt"], baseRevision }, /Invalid data|github|provider/);
+  assert.match(other, /Invalid data|github|provider/); pass("fresh non-GitHub provider refused by public parser before any provider call");
   const file = join(base, "not-a-directory"); writeFileSync(file, "x");
   const fileRoot = await expectHostReject({ action: "workspace-grant", id: project.id, confirm: project.id, expectedRevision: await revision(), repositoryId: "file-root", provider: "github", ownerCheckout: workspace, approvedRoot: file, fileOwnershipPrefix: "owned", files: ["owned/assigned.txt"], baseRevision }, /directory/);
   assert.match(fileRoot, /directory/); pass("ordinary-file approved root denied");

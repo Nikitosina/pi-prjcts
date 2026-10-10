@@ -14,7 +14,7 @@ Written before the code. E2E: scripts/worker-leases-e2e.mjs (fake model, git pro
 9. Workers not offered the lease tools in the scopes that have no worktree is acceptable; coordinator must NOT be offered them.
 
 ## Background commands (per thread, in the worktree)
-10. Command that policy denies (git push to main, arc submit...) MUST be rejected at start, nothing spawned, no id.
+10. Command that policy denies (git push to main, publishing commands...) MUST be rejected at start, nothing spawned, no id.
 11. Over the per-thread cap (3 running): rejected with a clear message; finished ones do not count.
 12. Output unbounded: goes to a log file under the thread artifacts (not host memory); status returns only a capped tail (lines and chars); log growth is capped (process killed past the limit).
 13. status/stop for an unknown id or another thread's id: error, never touches the other thread's process.

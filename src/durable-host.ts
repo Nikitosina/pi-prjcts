@@ -3,6 +3,7 @@ import { evidence } from "./evidence.ts";
 import { openDurableProject, type DurableCoordinatorMessage, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
 import { compactSkillText } from "./coordinator-skills.ts";
 import { attachmentContent, listUploads } from "./uploads.ts";
+import { plugins } from "./plugins.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(project: Project, configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader): Promise<DurableProjectRuntime> {
@@ -61,6 +62,8 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     durableInspection: view.durableInspection,
     context: view.coordinator.context,
     chatId: view.chatId, chats, uploads: listUploads(dir), failedJobs: all.filter(job => job.state === "failed" || job.state === "interrupted").length,
+    providerCards: plugins.workspaceProviders().flatMap(provider => provider.setupCards?.(project) ?? []),
+    unloadedProvider: project.workspaceAuthorization && project.workspaceAuthorization.provider !== "github" && !plugins.workspaceProvider(project.workspaceAuthorization.provider) ? project.workspaceAuthorization.provider : null,
   };
 }
 

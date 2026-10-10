@@ -3,7 +3,8 @@ import { Type, type Static } from "typebox";
 const uuid = Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$" });
 const path = Type.String({ minLength: 1, maxLength: 4096 });
 const revision = Type.String({ pattern: "^[0-9a-f]{40,64}$" });
-const provider = Type.Union([Type.Literal("git"), Type.Literal("arc")]);
+/** "git" or the id of a workspace plugin provider. */
+const provider = Type.String({ minLength: 1, maxLength: 64 });
 
 /** Host configuration, never model input. Empty authorization grants nothing. */
 export const AuthorizedRepository = Type.Object({
@@ -13,6 +14,8 @@ export const AuthorizedRepository = Type.Object({
 export type AuthorizedRepository = Static<typeof AuthorizedRepository>;
 
 /** Frozen by Durable attempt admission before a provider effect. */
+/** The isolation provider of a workspace grant provider: "github" grants allocate git worktrees; plugin providers use their own id. */
+export const isolationProvider = (grantProvider: string): string => grantProvider === "github" ? "git" : grantProvider;
 export const WorkspaceScope = Type.Object({
   projectId: uuid, repositoryId: Type.String({ minLength: 1, maxLength: 256 }), provider,
   ownerCheckout: path, approvedRoot: path, workspacePath: path, workspaceName: Type.String({ minLength: 1, maxLength: 512 }),

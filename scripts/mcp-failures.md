@@ -2,7 +2,7 @@
 
 Scope: host-owned MCP pool (`src/mcp-servers.ts`), two stable gateway tools `projects_mcp_tools` / `projects_mcp_call` (`src/mcp-tools.ts`), per-profile picker (Settings), per-server "allow writes". Fakes only: `scripts/fake-mcp-server.mjs`, temp mcp.json via `PI_PROJECTS_MCP_CONFIG`, fake model. E2E: `scripts/mcp-e2e.mjs`.
 
-1. Real `~/.pi/agent/mcp.json` is read or a real server (ci, tracker, npx, ya) is spawned in a test. Guard: config path comes only from `PI_PROJECTS_MCP_CONFIG`; E2E asserts the catalog path, private HOME, and that every logged server cwd is under the temp root.
+1. Real `~/.pi/agent/mcp.json` is read or a real server (ci, tracker, npx) is spawned in a test. Guard: config path comes only from `PI_PROJECTS_MCP_CONFIG`; E2E asserts the catalog path, private HOME, and that every logged server cwd is under the temp root.
 2. A server not selected for the caller's role is callable (coordinator calls a worker-only server; scout calls worker server).
 3. Default (nothing saved) exposes a server.
 4. Settings change needs a reopen or idle queue to take effect (must apply live; MCP-only changes skip the idle requirement).

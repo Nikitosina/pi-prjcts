@@ -78,7 +78,7 @@ try {
   assert.equal(report.cases.at(-1).terminal?.status, "failed");
   assert.equal(report.cases.at(-1).terminal?.blocker, "Unknown host workspace scope");
   await run("scout-unknown-scope", base(auth), randomUUID(), "scout");
-  const mismatch = { ...auth, repositories: [{ ...auth.repositories[0], provider: "arc" }] };
+  const mismatch = { ...auth, repositories: [{ ...auth.repositories[0], provider: "other" }] };
   await run("provider-mismatch", base(mismatch), scope);
   assert.equal(report.cases.at(-1).terminal?.status, "failed");
   assert.equal(report.cases.at(-1).terminal?.blocker, "Workspace scope repository/provider is not host-authorized");

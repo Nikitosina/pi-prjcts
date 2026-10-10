@@ -1,6 +1,6 @@
 # Failure modes: scout/reviewer review targets (threadId, ref) and code_diff
 
-Written before the code. E2E: scripts/review-target-e2e.mjs (fake model, fake arc, git project).
+Written before the code. E2E: scripts/review-target-e2e.mjs (fake model, git project). Checkout-provider plugins repeat the relevant cases in their own repository.
 
 1. Reviewer delegated without a target silently reads trunk/owner checkout when the coordinator meant a worker's edits: instructions must name `threadId`; with it the root MUST be that worker's worktree (content of the unpushed edit visible).
 2. Unknown threadId falls back to the project checkout: the delegate call must fail with a clear error and admit no work.
@@ -8,8 +8,8 @@ Written before the code. E2E: scripts/review-target-e2e.mjs (fake model, fake ar
 4. threadId + ref both given: ambiguous; reject.
 5. threadId on a worker delegation: meaningless; reject (like ref).
 6. threadId pointing at a non-UUID / injection string: schema rejects.
-7. Ref that does not resolve (git and arc) must fail, never trunk (already covered by worktree-lifecycle / arc-heads-cleanup; re-checked here for git).
-8. code_diff must not be a write path: no shell, ref arguments cannot be options (`--output=/x`, `--ext-diff`), base must not smuggle flags; no files written, no arc mutation (only diff/log/status/merge-base).
+7. Ref that does not resolve must fail, never the default branch (also covered by worktree-lifecycle).
+8. code_diff must not be a write path: no shell, ref arguments cannot be options (`--output=/x`, `--ext-diff`), base must not smuggle flags; no files written, no VCS mutation (only diff/log/status/merge-base).
 9. code_diff on huge diffs floods the context: capped at 46 KB (the harness clips any tool result at 50 KB) with a truncation note.
 10. code_diff misses a worker's brand-new uncommitted file: untracked files are listed and their content included.
 11. code_diff on a root without VCS or with an unresolvable base: clear error text, not a crash or empty "no changes".

@@ -3,6 +3,7 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse } from "./state.ts";
+import { plugins } from "./plugins.ts";
 import { WorkerSkillDocument, type WorkerSkillDocument as Document } from "./worker-skill-types.ts";
 
 const maxBytes = 65536;
@@ -25,7 +26,7 @@ async function readSelectedDocument(input: ReadOptions) {
   const root = resolve(input.root);
   if (!isAbsolute(input.root) || root !== input.root || await realpath(root) !== root) throw new Error("Skill directory must be its captured canonical absolute path");
   const path = join(root, relativePath), suffix = relative(root, path);
-  const privateDirectory = path.split(sep).some(part => [".git", ".arc", ".ssh", ".aws", ".gnupg", "sessions"].includes(part.toLowerCase()));
+  const privateDirectory = path.split(sep).some(part => [".git", ...plugins.privateDirs(), ".ssh", ".aws", ".gnupg", "sessions"].includes(part.toLowerCase()));
   if (!suffix || suffix !== relativePath || isAbsolute(suffix) || suffix === ".." || suffix.startsWith(`..${sep}`) || backingFile(path) || privateDirectory) throw new Error("Skill document is outside its approved directory or names a backing file");
   const directories: Array<{ path: string; facts: FileFacts }> = [];
   let current = root;

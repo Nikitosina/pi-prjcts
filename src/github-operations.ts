@@ -50,7 +50,7 @@ export function githubOperations(root: Conversation, projectId: string, approval
   async function target(input: ExecutionInput) {
     const approval = await approvals.approved(input), project = loadProject(projectId);
     if (approval.operation.kind === "command") throw new Error("Approved commands execute only through their scoped worker tool");
-    if (approval.operation.provider !== "github") throw new Error("Arc operation execution remains unavailable");
+    if (approval.operation.provider !== "github") throw new Error("Only GitHub operations can be executed");
     if (approval.operation.kind !== "merge") throw new Error("Auto-merge cannot enforce the approved head atomically; execution unavailable");
     const publication = project.githubAuthorization?.find(item => item.repositoryId === approval.operation.repositoryId && item.owner === trustedOwner() && item.workspaceRevision === authorizationFingerprint(project));
     if (!publication) throw new Error("Operation requires the current immutable GitHub publication binding");

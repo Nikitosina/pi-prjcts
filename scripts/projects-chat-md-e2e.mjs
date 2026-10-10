@@ -102,7 +102,7 @@ try {
   await waitFor(`document.querySelector('#title')?.textContent === 'UI Review Alpha' && document.querySelector('#lifecycle') && !document.querySelector('#lifecycle').hidden`, s, 'project render');
   await waitFor(`location.hash === ''`, s, 'token fragment removed');
   result.checks.push('project rendered in headless Chrome; token fragment stripped from address bar');
-  // A browser that re-creates the tab (e.g. Arc moving Little Arc into a window) loads the stripped URL in a fresh tab.
+  // A browser that re-creates the tab (e.g. a browser moving a tab into a new window) loads the stripped URL in a fresh tab.
   const strippedUrl = await evaluate('location.href', s);
   const { targetId: tab2 } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId: s2 } = await send('Target.attachToTarget', { targetId: tab2, flatten: true });

@@ -21,7 +21,7 @@ export const CommandProgram = Type.Object({
 export type CommandProgram = Static<typeof CommandProgram>;
 export const CommandProfile = Type.Object({
   ...CommandProfileInput.properties, program: CommandProgram,
-  provider: Type.Union([Type.Literal("github"), Type.Literal("arc")]),
+  provider: Type.String({ minLength: 1, maxLength: 64 }),
   owner: Type.String({ minLength: 1, maxLength: 512 }),
   workspaceRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   revision: Type.String({ pattern: "^[a-f0-9]{64}$" }), grantedAt: Type.String(),

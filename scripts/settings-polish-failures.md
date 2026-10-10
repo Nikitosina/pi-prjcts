@@ -1,6 +1,6 @@
 # Settings polish: failure cases
 
-Owner feedback (handoff 7, Track U). `scripts/settings-polish-e2e.mjs` checks these in headless Chrome with a fake model, ~90 skills, 5 MCP servers, GitHub and Arc projects.
+Owner feedback (handoff 7, Track U). `scripts/settings-polish-e2e.mjs` checks these in headless Chrome with a fake model, ~90 skills, 5 MCP servers, a GitHub project.
 
 1. Checking or unchecking a skill/MCP row re-renders the picker: list scroll resets, focus is lost, rows reorder, the page jumps.
 2. Typing in a search box re-renders the input (focus/caret lost) or resets the other state.

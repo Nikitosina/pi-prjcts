@@ -31,7 +31,7 @@ export function readOnlyCodeTools(cwd: string, resolveRoot?: (api: ToolExecution
   tools.push(defineTool({
     name: "code_diff",
     description: `Read-only list of changed files and unified diff of this thread's code root (a PR head or worker worktree, including uncommitted work) against its merge-base with the default branch or the given base. Capped at 46 KB.`,
-    parameters: Type.Object({ base: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Branch, tag or commit to diff against; default: origin default branch (git) or trunk (Arc)." })) }),
+    parameters: Type.Object({ base: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Branch, tag or commit to diff against; default: the checkout's default branch." })) }),
     replay: "safe",
     async execute(args, api, context) {
       return { content: [{ type: "text", text: await codeDiff(await rootOf(api, context), args.base) }], details: undefined };
