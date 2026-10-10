@@ -157,7 +157,7 @@ The host can record proposed merge/auto-merge decisions with `operation-request`
 and the exact intent fingerprint. Plain records remain non-executable. New exact approvals with `execution: true` are consumed only by their bound executor; old records gain no execution authority. Merge execution/inspection and fixed worker deployment/destructive approvals are implemented but unverified. `operation-inspect` or native effect inspection does not grant replay permission. Auto-merge remains blocked. `provider-pr-inspect` can separately read an authorized GitHub PR, check
 its numeric repository identity and require an expected live head SHA. This
 read-only inspection does not link the local checkout to the remote repository
-or turn decision records into executable grants. Arc inspection remains pending.
+or turn decision records into executable grants. provider plugin inspection remains pending.
 
 ## Security limits
 
@@ -201,3 +201,5 @@ The host loads model providers contributed by the owner's Pi packages (settings 
 - The skill catalog loader (`project-resources.ts`) no longer executes extensions (`noExtensions`), so a broken extension cannot block opening a project.
 
 E2E: `scripts/provider-extensions-e2e.mjs` (failure cases in `scripts/provider-extensions-failures.md`).
+
+Provider plugins (non-GitHub checkouts and PR services): see PLUGINS.md.

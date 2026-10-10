@@ -23,11 +23,11 @@ Current implementation is unverified. Focused historical GREENs elsewhere in `PA
 
 ## Correct authorization distinctions and blockers
 
-Owner setup UI/CLI and revision-checked workspace/GitHub authorization and revocation, fixed-profile operations, and repository-skill grants are implemented but unverified. Workspace/GitHub revocation retains identity history; it does not delete repository data or remote objects. Repository skill selection and worker document reads are implemented but unverified. Configured Pi skills remain unavailable without a trusted already-loaded public catalog snapshot. No Arc adapter/setup/commands exist.
+Owner setup UI/CLI and revision-checked workspace/GitHub authorization and revocation, fixed-profile operations, and repository-skill grants are implemented but unverified. Workspace/GitHub revocation retains identity history; it does not delete repository data or remote objects. Repository skill selection and worker document reads are implemented but unverified. Configured Pi skills remain unavailable without a trusted already-loaded public catalog snapshot. No provider plugin adapter/setup/commands exist.
 
 Provider write workflows are implemented, not categorically excluded; they require their own scoped authority and approvals. Exact-head GitHub merge execution is implemented but unverified, guarded by a separately executable approval and explicit execution confirmation. This review authorized/performed no merge or other external effect. Auto-merge is unavailable. Deployment/destructive execution is not authorized here. Owner grants configure authority; they are not themselves approval or execution of an effect.
 
-Copy-only maintenance handles acknowledged owned disposable copies; it is not migration, does not import/start/open a copy, and preserves archive/marker/rollback evidence. Configured skills and Arc remain blockers/exclusions. Five verification contracts remain pending; this document does not advance the 5/10 accepted status.
+Copy-only maintenance handles acknowledged owned disposable copies; it is not migration, does not import/start/open a copy, and preserves archive/marker/rollback evidence. Configured skills and provider plugin remain blockers/exclusions. Five verification contracts remain pending; this document does not advance the 5/10 accepted status.
 
 ## Safe sequence
 

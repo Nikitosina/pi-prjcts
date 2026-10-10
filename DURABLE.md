@@ -89,7 +89,7 @@ Scoped first configuration now builds worker instruction text from the selected 
 
 Standing resources now read at most 64,001 bytes per file and reject files above 64,000 bytes or 16,000 UTF-16 code units instead of truncating. The loader rejects invalid UTF-8, dangling/final symlinks, a symlinked `.pi` parent and nonregular resources. It uses a captured no-follow/nonblocking descriptor, checks file/directory identity and sampled file metadata, and preserves read plus cleanup failures. These checks do not establish a race-free filesystem snapshot. Valid unchanged text retains the existing revision formula and BOM handling. This change is unverified; no standing reads, workers or tests ran.
 
-Coordinator/new-worker instruction text now describes frozen workspace tools and owner-enabled fixed profiles instead of claiming all worker execution is unavailable. It still requires actual offered tools, provider/workspace bindings and separate executable approvals. It leaves Arc execution deferred and does not change grants or execution checks. Existing frozen worker instruction text is not rewritten. This change is unverified; no workers or models ran.
+Coordinator/new-worker instruction text now describes frozen workspace tools and owner-enabled fixed profiles instead of claiming all worker execution is unavailable. It still requires actual offered tools, provider/workspace bindings and separate executable approvals. It leaves provider plugin execution deferred and does not change grants or execution checks. Existing frozen worker instruction text is not rewritten. This change is unverified; no workers or models ran.
 
 ## Current scope
 
@@ -496,63 +496,6 @@ The owner's pi `mcp.json` (`~/.pi/agent/mcp.json`; `PI_PROJECTS_MCP_CONFIG` over
 - RPC: `mcp-catalog`, `mcp-probe` (Test button: connects and counts tools).
 - Existing worker threads created before this feature keep their frozen tool list (no MCP until a new thread).
 - E2E: `scripts/mcp-e2e.mjs` (fake stdio server `scripts/fake-mcp-server.mjs`, shared harness `scripts/lib/e2e-kit.mjs`), failures `scripts/mcp-failures.md`. Artifacts under `artifacts/mcp-<timestamp>/` (report.json + screenshots).
-
-## Arc projects: detect, grant, seams (S1)
-
-A project whose folder sits in an Arc mount (nearest `.arc` above the cwd; `.arc` wins over `.git` in one directory, a git repo nested in the mount is git) gets the Arc variant of the one-click grant; git projects spawn no arc process.
-
-- Seams (`src/vcs.ts` `cli`): `PI_PROJECTS_ARC_CLI`, `PI_PROJECTS_ARC_WT_CLI` (and later `PI_PROJECTS_ARCANUM_CLI`) replace `/opt/homebrew/bin/arc` and `/usr/local/bin/arc-wt` everywhere, including `src/workspace-isolation.ts`.
-- Preview (`arcFacts`, read-only commands): `arc root` must equal the walked root, `arc info --json` (`repository`, `user_login`), `arc-wt config` (`worktrees_base_path`, `object_store_path` required), trunk head from `arc log -n 1 --oneline --no-decorate trunk`, `arc status --short .`. Any failure is a blocker message, no grant. Worktrees live in arc-wt's `worktrees_base_path` (`~/arcadia-wt`), never in the project home, and must be outside the Arc root.
-- Grant: same `workspace-quick-grant` action. `provider: "arc"`, `ownerCheckout` = Arc root, `approvedRoot` = arc-wt worktree folder, `sharedObjectStore` = arc-wt object store, `subpath` = project folder below the root (new optional `WorkspaceRepositoryAuthorization.subpath`; part of the repository fingerprint only when set), whole-repository scope with `baseRevision` = trunk head (not the owner's branch). GitHub grants are unchanged.
-- "Connect Arcadia" (`arc-quick-authorize`, `Project.arcAuthorization` = repository, login, `baseBranch: "trunk"`, workspace revision): offline, needs the Arc grant, follows grant changes like one-click GitHub (`rebindAuthorizations`). Used by the PR/follow slices.
-- UI: step 2 is "Arcadia" for Arc projects; dialogs say arc-wt/trunk/project folder.
-- Skills: `~/.agents/skills` is a pi skill source (arc, arc-wt, arcanum-go, arcadia-ci show in the picker and the / menu; arc-wt is `disable-model-invocation`, so it is listed but not in the prompt index). `~/.claude/skills` is NOT a pi source: skills only there do not appear.
-- Fakes: `scripts/fake-arc.mjs`, `scripts/fake-arc-wt.mjs` (git-backed, leases, porcelain format, `--force` logged and refused), fixture `scripts/lib/fake-arc-kit.mjs`. The four scripts that used the real Arcadia are gone (`durable-workspace-arc-e2e`, `durable-workspace-arc-existing-thread-e2e`, `durable-workspace-original-intent-reconcile`; `workspace-allocation-e2e` keeps its git half).
-- E2E: `scripts/arc-detect-grant-e2e.mjs` (UI, grant, blockers, skills), `scripts/arc-isolation-e2e.mjs` (allocation, crash reconcile, foreign lease, blockers, release). Failures: `scripts/arc-detect-grant-failures.md`.
-- Known unrelated failure: `durable-workspace-admission-negatives-e2e` (project fixture lacks `runtime: "durable"`), fails before this slice too.
-
-## Arc workers (S2)
-
-Whole-repository workers of an Arc project run in arc-wt worktrees (`src/durable-workspace-binding.ts` Arc branches, `src/arc-worker-policy.ts`).
-
-- Naming: the first line of the task gives `KEYBOARD-15934-<slug>` when it names a Tracker key (`[A-Z][A-Z0-9]+-\d+`), else `pi-<8 hex of the thread id>-<slug>` (slug: lowercase `[a-z0-9-]`, 40 chars). The local name is never prefixed (arc adds `users/<login>/` on push; `-u users/...` would double it). A clash with an arc-wt entry or an arc branch (local or fetched server branch) gets `-2`, `-3`; a failing listing aborts. The worktree is `<arc-wt worktrees_base_path>/<name>`; name, branch, path and base are frozen with the receipt (follow-ups and restarts reuse them, no second `arc-wt add`).
-- Base: trunk head at first allocation after `arc fetch trunk` (once per checkout per 60 s, 90 s timeout; a failed/timed-out fetch fails the dispatch visibly, nothing cached), read with `arc log -n 1 --oneline --no-decorate trunk`, never the owner's current branch. Lease owner `pi-projects:<projectId>`, reason `pi project <name> thread <id>`.
-- cwd: `<worktree>/<subpath>` for tools, shell and the worktree setup command (`PI_WORKTREE` = worktree root). Standing instructions come from the project folder (the Arc root has none).
-- Lease: renewed on every dispatch (a failed renew refuses the dispatch with a clear error) and again from the tool hook at most every 60 s; once lost, every further tool call is blocked. Not covered: loss in the middle of one long tool call.
-- Shell guard (best effort, `guardWorkerArcCommand`): blocks git/gh, arc-wt (except list/config), `arc submit`, mount/unmount, `arc pr merge|publish|discard`, `arc pr create` without `--publish=disabled`, arcanum merge/publish/auto-merge, branch deletes, `arc push` with delete/upstream/all/non-project refs, new branches (`checkout -b`) and checking out non-project branches. A bare `arc push` first checks that the checked-out branch is one of this project's receipts (all owner branches share `users/<login>/`; the prefix is not ownership).
-- Instructions: Arc paragraph (arc only, branch and server ref, bare push, ticket in commit messages, no PR merge/publish; the host opens draft PRs in S3).
-- Watchdog digest: "files changed" via `changedFiles` (`arc status --short` in an Arc worktree, git otherwise).
-- Deviation from the design: no explicit `ticket` parameter on `projects_delegate` yet (host extraction from the task's first line only).
-- E2E: `scripts/arc-workers-e2e.mjs` (naming, trunk base, lease owner/reason, cwd, standing, guard, push to `users/<login>/<branch>`, follow-up, lost lease, restart, watchdog), failures `scripts/arc-workers-failures.md`. Fakes `scripts/fake-arc.mjs` now also implement add, commit, push (server ref and the double-prefix behaviour), checkout, branch, show, diff against a bare server repo.
-
-## Arc draft PRs (S3)
-
-With Arcadia connected (`Project.arcAuthorization`) each Arc worker gets two host tools (`src/arc-worker.ts`, key = hash of the workspace id):
-
-- `projects_arc_<key>_open_draft_pr({ title, body, publish? })`: the worktree must be on the worker's branch and clean. The host writes `<title>\n\n<body>\n\n<!-- marker -->` to `<projectHome>/arc-pr/<key>.md` (real line breaks; title one line, at most 200 chars) and runs `arc pr create --publish=disabled --no-commits -F <file> --json` in the worktree (`--publish` only when `publish: true`, i.e. the task asked; `arc pr create` pushes by itself, so no separate push). It then verifies through Arcanum (`ya tool arcanum`, seam `PI_PROJECTS_ARCANUM_CLI`): author = Arc login, `vcs.from_branch` = `users/<login>/<branch>` (once), marker in the description, active diff-set `commit_ids.head` = worktree HEAD, draft stays unpublished unless asked. The ticket key in the branch is linked with `pr link-tickets` (failure recorded, not fatal; no ticket status change). A later call after new commits pushes, re-verifies and updates the same PR; it never creates a second one.
-- `projects_arc_<key>_pr_status`: read-only PR status, merge readiness, checks of the active diff-set (capped) and comment count.
-- Receipts: doc `projects.arc-writes` (`uncertain` before the create, then `done` with `verified`); only verified receipts count as project PRs (`arcPublishedPullRequests`, used by the follow slice). An uncertain receipt is never repeated, is found again by its marker via `pr list --from-branch`, and raises the `uncertain-provider-write` admission blocker. RPC `arc-write-snapshot`.
-- Not in the design but needed: Node's type stripping forbids TS parameter properties (`src/arcanum.ts` uses explicit fields). Arcanum JSON shapes come from the real `--json-schema` of pr get / pr list / pr active-diff / checks / comment list (`ya tool arcanum <cmd> --json-schema`, offline); `arc pr create --json` output is unknown, so the PR id is read tolerantly (JSON `id`, else regex) with a `pr list --from-branch` + marker fallback.
-- E2E: `scripts/arc-pr-e2e.mjs`, failures `scripts/arc-pr-failures.md`; fakes `scripts/fake-arcanum.mjs` and `arc pr create|status|merge|discard` in `scripts/fake-arc.mjs` (shared store `scripts/lib/fake-pr-state.mjs`).
-
-## Arc follow PRs, auto-fix, auto-merge (S4)
-
-`src/durable-follow.ts` handles an Arc project next to GitHub (same Settings, same `Follow` doc keyed by repository id `arcadia`):
-
-- Scope: only the PRs in this project's verified `projects.arc-writes` receipts (the owner's other PRs are never read). Per PR each poll reads `pr get`, `pr active-diff` (head), `checks --diff-id <active>` and `comment list` through `ya tool arcanum` (`src/arcanum.ts`, seam `PI_PROJECTS_ARCANUM_CLI`); sequential, no `pr changelist`.
-- Events: opened (project PR), merged/closed/reopened, new head, CI failed/passed at the head (failed on any failing check; passed when something ran and every required check is satisfied), new non-draft comments (bot-marked via `review_system.is_ai`). Batched per poll into one event to the events chat: kind `arc.follow`, header "Arcadia activity (Follow PRs)", card title "Arcadia activity". First poll baselines silently; a rate-limited (exit 75) or failed poll commits nothing, shows `lastError`, backs off, and the next good poll delivers each change once.
-- Auto-fix: same rules (once per failing head, cap, verified receipt only), sent as a follow-up to the thread that opened the PR with Arc wording (update through `open_draft_pr`, never a new PR).
-- Auto-merge (opt-in): CI green at the head, reviewer approval of exactly that head (reviewer gets the `arc diff base head` in the task; the verdict tool accepts repository `arcadia`; the arc head snapshot for reviewers comes in S5), current Arcadia authorization, Arcanum `merge_allowed` true (otherwise a note and no call), head and checks re-read immediately before `arc pr merge --now --json <id>` (no server-side head pin exists: a residual race remains and is documented), receipt `uncertain` before the call, then merged/failed; a pending request is re-inspected, not repeated; a refusal is reported as needs-you. `arc pr merge --now` only enables auto-merge when Arcanum's requirements already hold.
-- E2E: `scripts/arc-follow-e2e.mjs` (baseline, foreign PR invisible, CI failed/passed, fix to the opening thread, comments, rate limit exactly-once, auto-merge gates, head moved), failures `scripts/arc-follow-failures.md`. Reviewer role detection in the kit now keys on `projects_review_verdict`.
-
-## Arc PR-head reads and worktree cleanup (S5)
-
-`src/arc-worktrees.ts`, used from `src/worktree-maintenance.ts` when the project folder is in an Arc mount:
-
-- Heads for scouts/reviewers (`projects_delegate` `ref`): a PR number or `pull/<n>` resolves through Arcanum's active diff `commit_ids.head`; a branch (`users/<login>/<name>` or `<name>`) or a full SHA through `arc log -n 1 --oneline --no-decorate`. Refs pass the same strict pattern as git refs first (option-like refs are refused before any command). The head is mounted as a leased arc-wt worktree `pi-read-<sha12>` at `<projectHome>/read-heads/<sha>` (`--base <sha>`, lease owner `pi-projects:<id>`), deduplicated by commit; the reviewer's code tools read that root. The auto-merge reviewer of S4 gets this snapshot too.
-- Inventory of Arc worker worktrees: kept (with a reason) for running/queued threads, an arc-wt lease not held by this project, uncommitted changes, commits not on the server (server head `users/<login>/<branch>` compared with HEAD; no commits means nothing to push), an open PR, an unknown PR state (Arcanum failing), or Arcadia not connected. PR state comes from this project's receipts plus `pr get` (Arcanum's `pr list` only returns PRs under review). Removable: clean and pushed, or any merged/closed PR.
-- Cleanup: `arc-wt lease renew` then `remove --lease-owner --lease-renewed <exact>`; never `--force`; a refusal keeps the worktree and reports it; the receipt is retired as `cleanup-unforced` (a follow-up then gets the continue-the-branch message); branches are kept; idle read-head worktrees are removed the same way; foreign or unleased entries are never touched.
-- E2E: `scripts/arc-heads-cleanup-e2e.mjs`, failures `scripts/arc-heads-cleanup-failures.md`.
 
 ## Settings UI polish (web)
 

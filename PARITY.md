@@ -16,13 +16,13 @@ Implement local equivalents. Exclude cloud hosting, remote/local routing, Slack 
 
 Five goal milestones are accepted: parity contract, Durable foundation, knowledge, persistent threads/planning, and workspace isolation. Later changes to those components remain unverified. Focused historical GREENs are not acceptance of the remaining provider, scheduling, lifecycle, UI or final-report milestones. Failed/UNKNOWN attempts and original artifacts remain retained.
 
-The owner suspended all verification. Native/browser implementation has now begun after the backend batches, but no new walkthrough, typecheck, model/provider probe or E2E has run. No production host restart/migration or additional provider effect is authorized by this implementation. Current development-write authority remains limited to the previously authorized GitHub scratch branch/commit/publication/PR/comment scope. Historical Arc provisioning permissions below are not current Arc command/write/cleanup authority; the adapter and commands are deferred. Actual merge, auto-merge, deployment, destruction and production writes remain unauthorized.
+The owner suspended all verification. Native/browser implementation has now begun after the backend batches, but no new walkthrough, typecheck, model/provider probe or E2E has run. No production host restart/migration or additional provider effect is authorized by this implementation. Current development-write authority remains limited to the previously authorized GitHub scratch branch/commit/publication/PR/comment scope. Historical provider plugin provisioning permissions below are not current provider plugin command/write/cleanup authority; the adapter and commands are deferred. Actual merge, auto-merge, deployment, destruction and production writes remain unauthorized.
 
 | Workflow | Current implementation | Evidence boundary |
 | --- | --- | --- |
 | Persistent coordinator, reusable threads, DAG and isolated scopes | Official Durable owner, scoped admission and frozen execution identity | Accepted foundation; later admission/history/steering changes unverified |
 | Knowledge | Bounded index, on-demand topics, CAS/history/migration; native `K` and browser managed editor | Accepted knowledge foundation; new editors/topic creation/draft persistence unverified |
-| Provider selection and multiple scopes | Explicit immutable workspace bindings; Git/Arc allocation | Accepted isolation foundation; Arc adapter/commands deferred |
+| Provider selection and multiple scopes | Explicit immutable workspace bindings; Git/provider plugin allocation | Accepted isolation foundation; provider plugin adapter/commands deferred |
 | GitHub publication | Native intents and scoped Git-data PR/comment workflows; optional local-publication bridge | Earlier focused scratch GREENs retained; local command/base-integration workflows and complete provider parity unverified |
 | CI/review fixes and conflicts | Scoped diagnostics/base reads/replies, fixed worker commands and exact-head publication checks | No complete nonempty CI-fix/conflict workflow evidence |
 | Execution approvals | Plain records remain non-executable; exact executable merge/command approval, separate execution and inspection | Record foundation has focused evidence; new executors/process/artifact recovery and UI unverified; auto-merge blocked |
@@ -73,7 +73,7 @@ The user suspended E2Es, typechecks, and other verification. The additions below
 | Coordinator evidence access | Confirmed settings `libraryAccess: coordinator` enables project-bound `projects_library_list`/`projects_library_read`; `none` revokes access. Existing projects receive no grant automatically. Caller identity and current authorization are rechecked around reads. Workers receive neither tool. |
 | Captured-file library | `library-list`, revision-checked `library-read`; paged metadata, bounded base64 chunks and SHA-256 checks. Owner-confirmed `library-import` accepts canonical base64 up to 32 KiB within the existing 64 KiB request limit, with an expected SHA-256 and stable import UUID. Exact completed retries reuse the original record; conflicting UUIDs and incomplete captures remain blocked and retained. It accepts supplied bytes, never local paths, and adds no agent import tool. Large/chunked uploads remain unimplemented. |
 
-Arc/Arcanum inspection adapter remains deferred by the user. The native/browser controls listed above are now implemented but unverified. Full provider parity, conflict/CI-fix acceptance, lifecycle acceptance, scheduling acceptance and UI acceptance remain outstanding.
+provider plugin inspection adapter remains deferred by the user. The native/browser controls listed above are now implemented but unverified. Full provider parity, conflict/CI-fix acceptance, lifecycle acceptance, scheduling acceptance and UI acceptance remain outstanding.
 
 ## Frozen baseline checklist
 
@@ -88,7 +88,7 @@ This table records the original native MVP baseline, not current implementation 
 | Hard concurrency limits | One writer per owner checkout; partial | Configurable enforced project limits; unrelated isolated writers run concurrently |
 | Multi-repository projects | Single `cwd`; missing | Several repositories/scopes use one explicit project provider; mismatches fail before mutation |
 | Git writer isolation | Missing | Owned worktrees preserve the owner checkout and other writers; safe cleanup retains dirty work |
-| Arc writer isolation | Missing | Documented Arc worktrees use a shared object store and bounded scope; preserve dirty work and obey disk safety checks |
+| provider plugin writer isolation | Missing | Documented provider plugin worktrees use a shared object store and bounded scope; preserve dirty work and obey disk safety checks |
 | File-based knowledge | `knowledge.ts`, typed host/model APIs; 38-check E2E passed; final startup rerun blocked | `knowledge/MEMORY.md` indexes preferences and topic documents; agent and human tools edit them safely |
 | Bounded memory injection | Index-only coordinator/worker prompts; real-model E2E passed | Index has at most 3,000 Unicode characters; topics and old logs are not automatically injected |
 | On-demand knowledge | Paginated project-bound model tools; real coordinator/worker E2E passed | A real coordinator and worker retrieve an older topic when needed, without dumping the knowledge tree |
@@ -97,7 +97,7 @@ This table records the original native MVP baseline, not current implementation 
 | Per-role models and effort | Stored models; partial | Editable validated project settings apply to new work and preserve already resolved thread models |
 | Local tools and MCP | Local coding tools; MCP missing | Workers receive applicable skills/instructions and only explicitly permitted tools; missing access becomes a blocker |
 | GitHub PR lifecycle | Publication blocked; missing | Authorized scratch PR demonstrates branch, commit, push, PR update, comments, checks, fixes, and conflicts |
-| Arc/Arcanum PR lifecycle | Publication blocked; missing | Same lifecycle through the arc/arcanum-go split, respecting skill publication, title, ownership, and read-recovery gates |
+| provider plugin PR lifecycle | Publication blocked; missing | Same lifecycle through the provider-plugin-go split, respecting skill publication, title, ownership, and read-recovery gates |
 | Enforced approvals | Pattern guards and fail-closed dialogs; partial | Authorized projects may publish ordinary work; merge/auto-merge, destruction, and deployment need explicit approval |
 | PR/review/CI monitoring | Missing | Opt-in monitoring persists cursors, deduplicates events, backs off on failure, and never blindly repeats uncertain writes |
 | Scheduled routines | Missing | Due work survives restart, obeys pause and limits, and does not duplicate runs |
@@ -124,7 +124,7 @@ The checklist above describes the native baseline. New projects use Durable; unc
 | Usage | Prototype recorded usage; host/UI attribution and settings remain pending |
 | Durable planning threads | `artifacts/durable-threads/2026-10-02T14-56-03.351Z-22001-5b369cd3-7d92-4105-8c78-4308ec22ec11/report.json` passed real-model planner checks: strict UUID/DAG validation, actual worker cap and coordinator-overlap measurement, configured worker/scout/reviewer model streams, frozen standing/tool/profile settings, SDK child-conversation reuse across follow-up/reopen, dependency failure blocking, detached snapshots, usage, and pause unsafe no-replay. This is evidence for those local contracts only, not full thread/workflow parity or production migration acceptance. |
 | Public idle lifecycle, Pi 1.0.2 | Pause, idle resume, pause persistence after an owned host restart, archive, paused restore and confirmed retained deletion are implemented. Focused public-host E2Es passed; full lifecycle acceptance remains pending. Evidence and limits are below. |
-| Other checklist features | Multiple repositories, Git/Arc isolation, provider workflows, monitoring, schedules, active-work lifecycle/recovery and expanded UI require their separate acceptance evidence |
+| Other checklist features | Multiple repositories, Git/provider plugin isolation, provider workflows, monitoring, schedules, active-work lifecycle/recovery and expanded UI require their separate acceptance evidence |
 
 Typecheck passes. Repeat commands and dependency pinning are in `DURABLE.md`. Failed native startup, archive counting, dangling-storage symlink and completed-job projection runs are retained. These reports do not establish full parity or permission to migrate production.
 
@@ -209,7 +209,7 @@ Frontend work is deferred until the remaining backend work is implemented, as th
 
 GitHub workspace grants now keep each repository ID bound to its original provider, owner checkout, approved root, ownership prefix and shared-store identity. A changed root or prefix is refused without changing persisted authorization/catalog. The same binding can add another file scope while retaining the original repository and scope. The public-host E2E used this checkout only for read-only metadata, fresh project state and fresh approved roots; no models, VCS writes or provider calls ran. Read-only Git subprocesses receive command-scoped configuration isolation; Node/global settings remain unchanged.
 
-Evidence: `artifacts/repository-binding-public-contract-d189869d-d51f-494a-97b0-5ddbfb0018ae/summary.json`. V1/V2 copied-fixture identity failures are retained. V3 observed RED, then the unchanged V3 test passed GREEN after the binding guard; typecheck passed. This is authorization groundwork, not proof of executable operation approvals, Arc grants, provider workflows or provider milestone acceptance.
+Evidence: `artifacts/repository-binding-public-contract-d189869d-d51f-494a-97b0-5ddbfb0018ae/summary.json`. V1/V2 copied-fixture identity failures are retained. V3 observed RED, then the unchanged V3 test passed GREEN after the binding guard; typecheck passed. This is authorization groundwork, not proof of executable operation approvals, provider plugin grants, provider workflows or provider milestone acceptance.
 
 ## Backend operation approval records
 
@@ -221,7 +221,7 @@ These are decision records, not executable grants. No provider executor consumes
 
 ## Authorized GitHub scratch resource
 
-The owner explicitly authorized GitHub scratch branch/commit/push/PR/comment writes in `Nikitosina/pi-projects-e2e` under `pi-projects-e2e/*`. Arc writes, merge/auto-merge, deployment, destruction and production writes remain excluded.
+The owner explicitly authorized GitHub scratch branch/commit/push/PR/comment writes in `Nikitosina/pi-projects-e2e` under `pi-projects-e2e/*`. provider plugin writes, merge/auto-merge, deployment, destruction and production writes remain excluded.
 
 A retained draft PR was provisioned with GitHub Git-object requests: `https://github.com/Nikitosina/pi-projects-e2e/pull/1`, expected head `3ddd3a14f6482a8fc31824c468143b40f6dfc49c`, repository ID `1402157054`. Its base tree had no GitHub workflow files; this is not proof about arbitrary external integrations. Every write intent was saved before its one invocation. No retry, local checkout change or frontend work occurred. Read-only verification passed twice.
 
@@ -233,7 +233,7 @@ Evidence: `artifacts/github-scratch-pr-provision-851fba69-6c4d-4210-a5db-bac2d20
 
 Evidence: `artifacts/github-pr-inspection-public-contract-7523b524-3322-4fec-8aa3-bb9bd668242e/summary.json`. The real owned draft PR1 was inspected through a fresh owned host. RED then unchanged-test GREEN and typecheck passed. The project remained paused with zero jobs/generations; source/index/HEAD/shared backing files and GitHub config hashes were preserved. No provider write or frontend work ran.
 
-This proves read-only inspection, not local checkout-to-remote matching, executable approvals, write workflows, Arc inspection or provider parity. Active provider-child cancellation/drain, authorization-change races and timeout/auth/malformed-response branches remain unverified. Provider milestone acceptance remains pending.
+This proves read-only inspection, not local checkout-to-remote matching, executable approvals, write workflows, provider plugin inspection or provider parity. Active provider-child cancellation/drain, authorization-change races and timeout/auth/malformed-response branches remain unverified. Provider milestone acceptance remains pending.
 
 ## Backend live GitHub CI inspection
 
@@ -249,10 +249,7 @@ Read-only checks completed on 2026-10-02:
 
 - Node `v26.8.2`, installed Pi `1.0.0`, and `tsc` are available.
 - Git and `gh` are installed. `gh api user --jq .login` returned `Nikitosina`.
-- Arc `21203362 (2026-09-25)` and `ya` are installed. `ya whoami` resolved `nikitarat`; existing Arc mounts were listed without changing them.
-- GitHub identity is verified, not authorization to mutate any repository. Arc/ya identity does not prove all Arcanum service permissions.
 - User authorized creation of private `Nikitosina/pi-projects-e2e` for test branches, PRs, comments, and CI. No merge, auto-merge, or deletion without approval.
-- User authorized `junk/nikitarat/pi-projects-e2e` in a new isolated Arc worktree with a shared object store. Allow scoped test commits, pushes, unpublished PRs, and test comments. No publication to review, merge, deployment, discard, or unsafe cleanup.
 - These permissions are scratch-target verification permissions, not permission to modify production repositories. Confirm actual service access and target state before each mutation. Missing service access blocks the affected provider verification, not local memory development.
 
 Publication policy: after project authorization, ordinary commits, pushes, PR creation/update, review responses, and CI fixes may run automatically. Merge/auto-merge, destructive actions, and deployment still require explicit approval. Existing projects keep their old publication restrictions until their owner opts in.
@@ -289,7 +286,7 @@ Threads/planning/settings:
 
 Isolation/providers/approvals:
 - A writer changes the owner's checkout, another worker, or a mismatched provider repository.
-- Cleanup discards dirty files, unmounts an active consumer, or creates a separate Arc cache unnecessarily.
+- Cleanup discards dirty files, unmounts an active consumer, or creates a separate provider plugin cache unnecessarily.
 - A denied operation bypasses approvals; existing projects silently gain publication authority.
 - An uncertain external write is repeated and creates a duplicate PR/comment/publication.
 - Wrong PR content, revision, ownership, or provider is used for review or auto-merge.

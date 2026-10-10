@@ -1,6 +1,6 @@
 # Locally pushed Git task heads
 
-Implementation scope: explicitly enabled fixed worker profiles may perform Git work in their allocated checkout. A separate opt-in `localPublication` inspection bridge verifies a pushed head before PR tools can use it. The bridge performs fixed read-only Git commands and GitHub GETs only: no commit, fetch, push, merge or force update. Existing grants gain no bridge permission. Arc remains deferred/read-only.
+Implementation scope: explicitly enabled fixed worker profiles may perform Git work in their allocated checkout. A separate opt-in `localPublication` inspection bridge verifies a pushed head before PR tools can use it. The bridge performs fixed read-only Git commands and GitHub GETs only: no commit, fetch, push, merge or force update. Existing grants gain no bridge permission. provider plugin remains deferred/read-only.
 
 ## Failure cases recorded before implementation
 
