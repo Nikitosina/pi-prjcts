@@ -16,6 +16,8 @@ export const contrastLib = `(() => {
       const own = [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
       const bg = bgOf(el);
       if (dark && bg.a >= 0.999 && lum(bg) > 0.35 && el.getBoundingClientRect().width > 12) bright.push(label(el) + ' ' + Math.round(bg.r) + ',' + Math.round(bg.g) + ',' + Math.round(bg.b));
+      // Fully transparent text is a mirror layer (the composer's highlight backdrop), not readable text.
+      if (own && parse(getComputedStyle(el).color)?.a === 0) continue;
       if (own) { texts++; const fg = parse(getComputedStyle(el).color); const r = ratio(over(fg, bg), bg); const size = parseFloat(getComputedStyle(el).fontSize); if (r < (size >= 18 ? 3 : 4.5)) low.push(label(el) + ' ' + r.toFixed(2) + ' "' + el.textContent.trim().slice(0, 24) + '"'); }
     }
     return { bright: [...new Set(bright)], low: [...new Set(low)], texts };

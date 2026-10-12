@@ -220,7 +220,8 @@ try {
 
   // Filter, arrow keys, Esc; Enter picks instead of sending (failures 8, 9).
   await typeText(s, 'zz-global-0');
-  await waitFor(`document.querySelectorAll('#skill-menu .skill-option').length === 10`, s, 'filtered menu');
+  // Fuzzy filter: the ten prefix matches rank first, in catalog order.
+  await waitFor(`[...document.querySelectorAll('#skill-menu .skill-option .skill-name')].slice(0, 10).map(n => n.innerText).join() === Array.from({ length: 10 }, (_, i) => '/zz-global-0' + i).join()`, s, 'filtered menu');
   await key(s, 'ArrowDown', 'ArrowDown', 40); await key(s, 'ArrowDown', 'ArrowDown', 40); await key(s, 'ArrowUp', 'ArrowUp', 38);
   if ((await menu(s)).active !== '/zz-global-01') throw Error('Arrow keys do not move the selection: ' + JSON.stringify(await menu(s)));
   await key(s, 'Escape', 'Escape', 27);
@@ -236,12 +237,12 @@ try {
   if ((await rpc({ action: 'show', id })).jobs.length !== jobsBefore) throw Error('Enter in the picker sent a message');
   result.checks.push('S8/S9 the picker filters, ↑/↓ move, Esc closes, Enter inserts /skill:<name> without sending');
 
-  // "/" mid-text does not open the picker (failure 10).
-  await typeText(s, 'and then /');
-  if ((await menu(s)).open) throw Error('Picker opened mid-text');
+  // "/" inside a word or path does not open the picker (failure 10); after whitespace it does (inline skills, inline-refs-e2e covers picking there).
+  await typeText(s, 'and then src/');
+  if ((await menu(s)).open) throw Error('Picker opened inside a path');
   await evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.value = '/skill:e2e-grill MARK-SKILL focus on flows'; t.dispatchEvent(new Event('input', { bubbles: true })); })()`, s);
   if ((await menu(s)).open) throw Error('Picker open after the command has args');
-  result.checks.push('S10 a slash after other text never opens the picker');
+  result.checks.push('S10 a slash inside a word or path never opens the picker');
 
   // Send: the model gets the expanded skill; the transcript shows a chip (failures 11, 13, 14).
   await key(s, 'Enter', 'Enter', 13, { text: '\r' });
@@ -251,7 +252,7 @@ try {
   const [guide, escape] = turn('MARK-SKILL').at(-1).results;
   if (!guide.includes('GUIDE-REFERENCE-MARK') || !/escapes the skill directory/.test(escape)) throw Error('Skill file reads wrong: ' + JSON.stringify({ guide, escape }));
   result.checks.push('S11/S14 the model receives the pi skill block (no frontmatter) plus args, and reads a reference file but nothing outside the skill');
-  const chip = await evaluate(`(() => { const you = [...document.querySelectorAll('#messages .msg.you')].at(-1); return { chip: you.querySelector('.skill-chip')?.innerText, text: you.querySelector('.text').innerText }; })()`, s);
+  const chip = await evaluate(`(() => { const you = [...document.querySelectorAll('#messages .msg.you')].at(-1); return { chip: you.querySelector('.ref-chip.ref-skill')?.innerText, text: you.querySelector('.text').innerText }; })()`, s);
   if (chip.chip !== 'e2e-grill' || !chip.text.includes('MARK-SKILL focus on flows') || chip.text.includes('SKILL-BODY-MARK')) throw Error('Skill chip wrong: ' + JSON.stringify(chip));
   const job = (await rpc({ action: 'show', id })).jobs.at(-1);
   if (job.text !== '/skill:e2e-grill MARK-SKILL focus on flows') throw Error('Job text is not what the owner typed');

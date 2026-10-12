@@ -290,7 +290,7 @@ h3.section { font-size: 11.5px; color: var(--muted); text-transform: uppercase; 
 .empty-chat h2 { font: 400 24px Georgia, serif; margin-bottom: 10px; }
 .empty-chat p { color: var(--muted); }
 .composer { border: 1px solid var(--line); background: var(--panel); border-radius: 18px; padding: 12px 16px; box-shadow: 0 6px 24px #0000000f; }
-.composer textarea { border: 0; background: transparent; padding: 4px 0; min-height: 52px; max-height: 220px; outline: none; font-size: 14.5px; resize: none; overflow-y: auto; }
+.composer textarea { border: 0; background: transparent; padding: 4px 0; min-height: 52px; max-height: 220px; outline: none; font-size: 15px; resize: none; overflow-y: auto; }
 .composer textarea:disabled { background: transparent; }
 
 #queue .inbox-item { padding: 10px 6px; gap: 10px; }
@@ -532,7 +532,7 @@ pre.diff .del { color: var(--k-a3301f); background: var(--k-f9e3df); display: in
 
 /* "/" skill picker above the composer, and the skill chip on sent messages. */
 .composer { position: relative; }
-.skill-menu { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); max-height: 320px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px #0000001f; padding: 6px; z-index: 30; }
+.skill-menu { position: absolute; left: 8px; width: min(600px, calc(100% - 16px)); bottom: calc(100% + 6px); max-height: 320px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px #0000001f; padding: 6px; z-index: 30; }
 .skill-option { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto; align-items: baseline; gap: 10px; width: 100%; border: 0; background: transparent; border-radius: 7px; padding: 7px 10px; text-align: left; }
 .skill-option:hover, .skill-option.active { background: var(--chip); }
 .skill-name { font: 600 12.5px/1.5 Menlo, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
@@ -942,3 +942,55 @@ button.primary.danger:hover { background: #8f1d17; border-color: #8f1d17; }
   .artifact-pane.open { transform: none; visibility: visible; }
 }
 @media (max-width: 820px) { .activity { grid-template-columns: minmax(0, 1fr); } .artifact-pane { width: 100vw; border-radius: 0; } }
+
+/* Coordinator chat text, a little larger than the rest of the UI. */
+[data-panel="coordinator"] .msg .text { font-size: 15px; }
+[data-panel="coordinator"] .msg .text code, [data-panel="coordinator"] .msg .text pre { font-size: 13px; }
+
+/* Collapsible project sidebar (wide layouts only; narrow layouts use the top bar). */
+.brand-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.side-toggle, .side-open { padding: 5px 6px; line-height: 0; color: var(--muted); border-color: transparent; background: transparent; }
+.side-toggle:hover, .side-open:hover { color: var(--text); background: var(--hover-strong); }
+.side-toggle { margin: -8px 0 4px; }
+.side-open { margin-right: 4px; flex: none; }
+.app.side-collapsed { grid-template-columns: minmax(0, 1fr); background: none; }
+.app.side-collapsed > .side { display: none; }
+.app.side-collapsed .body { max-width: 1490px; }
+@media (max-width: 820px) { .side-toggle, .side-open { display: none; } .app.side-collapsed > .side { display: flex; } }
+
+/* Composer reference highlighting: a mirror layer behind the transparent textarea paints the tokens. Metrics must match the textarea exactly. */
+.compose-field { position: relative; }
+.compose-field textarea, .compose-backdrop { font-family: inherit; font-size: 15px; line-height: 1.6; letter-spacing: normal; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; tab-size: 8; padding: 4px 0; margin: 0; border: 0; box-sizing: border-box; }
+.compose-field textarea { position: relative; z-index: 1; display: block; width: 100%; scrollbar-gutter: stable; }
+.compose-backdrop { position: absolute; inset: 0; overflow: hidden; color: transparent; pointer-events: none; scrollbar-gutter: stable; }
+.compose-backdrop mark.ref { color: transparent; border-radius: 4px; background: var(--ref-bg); box-shadow: 0 0 0 1px var(--ref-line); }
+.caret-mark { display: inline-block; width: 0; }
+.ref-skill, mark.ref-skill { --ref-hue: var(--accent); }
+.ref-pr, mark.ref-pr { --ref-hue: #2f9e6a; }
+.ref-issue, mark.ref-issue { --ref-hue: #8b5cf6; }
+.ref-doc, mark.ref-doc { --ref-hue: #d4a017; }
+.ref-upload, mark.ref-upload { --ref-hue: #0ea5a4; }
+.ref-file, mark.ref-file { --ref-hue: #3b82f6; }
+mark.ref, .ref-chip { --ref-bg: color-mix(in srgb, var(--ref-hue) 16%, transparent); --ref-line: color-mix(in srgb, var(--ref-hue) 38%, transparent); }
+
+/* "@" menu: sections per kind, icons, fuzzy-matched characters in bold. */
+.ref-group { padding: 8px 10px 3px; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.ref-group:first-child { padding-top: 4px; }
+.skill-option.ref-opt { grid-template-columns: 16px minmax(0, max-content) minmax(0, 1fr) auto; }
+.ref-icon { display: inline-flex; align-self: center; color: var(--ref-hue); }
+.ref-icon svg, .ref-chip svg { width: 14px; height: 14px; }
+.ref-opt .skill-name { font-weight: 500; }
+.ref-opt .skill-name b { font-weight: 700; color: var(--accent-ink); }
+.ref-note { font-size: 12px; }
+.ref-hint { margin: 4px 0 0; padding: 6px 10px 2px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11.5px; }
+
+/* References in sent messages: inline, clickable. */
+.ref-chip { display: inline-flex; align-items: center; gap: 4px; vertical-align: baseline; max-width: 100%; margin: 0 1px; padding: 0 6px 0 4px; border: 1px solid var(--ref-line); border-radius: 6px; background: var(--ref-bg); color: var(--text); font: inherit; font-size: .93em; line-height: 1.45; text-decoration: none; cursor: pointer; }
+.ref-chip:hover { background: color-mix(in srgb, var(--ref-hue) 26%, transparent); }
+.ref-chip svg { flex: none; color: var(--ref-hue); fill: none; }
+.ref-chip.ref-skill svg { fill: currentColor; }
+.ref-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref-chip.gone { text-decoration: line-through; opacity: .75; }
+.ref-file.upload-text { max-height: 65vh; font-size: 12.5px; }
+a.button-link { display: inline-block; padding: 9px 13px; border: 1px solid var(--line); border-radius: 5px; color: inherit; text-decoration: none; }
+a.button-link:hover { background: var(--hover); }

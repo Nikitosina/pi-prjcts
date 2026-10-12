@@ -121,6 +121,8 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       navigate: next => send('Page.navigate', { url: next }, s),
       reload: () => send('Page.reload', {}, s),
       viewport: (width, height, mobile = false) => send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile }, s),
+      /** Raw CDP call on this page (trusted input: Input.insertText, Input.dispatchKeyEvent). */
+      cdp: (method, params = {}) => send(method, params, s),
     };
     page.waitFor = async (expression, label, tries = 240) => { for (let i = 0; i < tries; i++) { if (await page.evaluate(expression)) return; await delay(250); } throw Error(`Timed out waiting for ${label}`); };
     return page;

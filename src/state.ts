@@ -180,6 +180,8 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ref-candidates"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ref-preview"), id: Id, kind: Type.Union([Type.Literal("file"), Type.Literal("issue"), Type.Literal("skill")]), value: Type.String({ minLength: 1, maxLength: 1024 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("mcp-catalog"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("mcp-probe"), id: Id, server: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worker-skills-catalog"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })) }, { additionalProperties: false }),

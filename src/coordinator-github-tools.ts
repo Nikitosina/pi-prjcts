@@ -20,7 +20,7 @@ const clip = (value: unknown, limit: number) => { const text = typeof value === 
 type Issue = { number: number; title: string; body: string | null; state: string; state_reason?: string | null; html_url: string; user?: { login: string } | null; labels?: ({ name?: string } | string)[]; assignees?: { login: string }[]; milestone?: { number: number; title: string } | null; comments?: number; created_at?: string; updated_at?: string; closed_at?: string | null; pull_request?: unknown };
 
 /** Runs one `gh api` call. Errors keep gh's own one-line reason (status and message) so the coordinator can tell 404 from 422. */
-function gh(method: "GET" | "POST" | "PATCH", path: string, body: object | undefined, signal?: AbortSignal): Promise<unknown> {
+export function gh(method: "GET" | "POST" | "PATCH", path: string, body: object | undefined, signal?: AbortSignal): Promise<unknown> {
   return new Promise((accept, reject) => {
     const args = ["api", "--hostname", "github.com", "--method", method, path, ...(body ? ["--input", "-"] : [])];
     const child = execFile(githubCli(), args, { encoding: "utf8", timeout: 20000, maxBuffer: 4 * 1048576, signal }, (error, stdout, stderr) => {

@@ -337,7 +337,7 @@ function render() {
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
   const hint = document.querySelector("#compose-hint");
-  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
+  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills · @ for files, docs, issues${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -964,16 +964,17 @@ function chatMessageHtml(message, assistant) {
   const event = message.role === "user" && /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text);
   if (event) return eventHtml(message, event[1], event[2]);
   const label = message.role === "user" ? "You" : message.role === "assistant" ? assistant : message.role;
-  // The host shows an invoked skill as `/skill:<name> args`; render the command as a chip.
-  const skill = message.role === "user" && /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message.text.trim());
-  const attached = message.role === "user" ? attachmentChips(message.text) : { text: message.text, chips: "" };
-  const prs = message.role === "user" ? prChips(attached.text) : { text: attached.text, chips: "" };
-  const body = (skill ? `<span class="skill-chip" title="Skill /skill:${esc(skill[1])}">${skillIcon}${esc(skill[1])}</span>${skill[2] ? renderMarkdown(prChips(attachmentChips(skill[2]).text).text) : ""}` : renderMarkdown(prs.text)) + prs.chips + attached.chips;
+  // Owner references (/skill:, @…, #PR) render inline as clickable chips; the host's appended blocks are stripped from the bubble.
+  const user = message.role === "user";
+  const attached = user ? attachmentChips(message.text) : { text: message.text, chips: "" };
+  const prs = user ? prChips(attached.text) : { text: attached.text, chips: "", urls: new Map() };
+  const refs = user ? refsSplit(prs.text) : { text: prs.text, gone: new Map() };
+  const body = renderMarkdown(refs.text, user ? { refs: { prs: prs.urls, gone: refs.gone } } : {}) + prs.chips + attached.chips;
   return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
 // "/" skill picker in the coordinator composer. The catalog loads once per project on first use.
-let skillCatalog = null, skillMenu = null, prMenu = null;
+let skillCatalog = null, skillMenu = null, prMenu = null, refMenu = null;
 async function loadSkills() {
   const id = projectId;
   if (skillCatalog?.projectId === id) return skillCatalog.skills;
@@ -981,24 +982,43 @@ async function loadSkills() {
   if (id === projectId) skillCatalog = { projectId: id, skills };
   return skills;
 }
+// Inline triggers anywhere in the text: "/" skills, "@" issues/docs/uploads/files, "#" PRs. A trigger counts at the start or after whitespace or an opening bracket.
+const triggerBefore = (textarea, pattern) => textarea.selectionStart === textarea.selectionEnd ? pattern.exec(textarea.value.slice(0, textarea.selectionStart)) : null;
 function skillQuery(textarea) {
-  const before = textarea.value.slice(0, textarea.selectionStart);
-  return textarea.selectionStart === textarea.selectionEnd ? /^\/(?:skill:)?(\S*)$/.exec(before)?.[1] ?? null : null;
+  const match = triggerBefore(textarea, /(^|[\s(\[])\/(?:skill:)?([\w.-]*)$/);
+  return match ? { query: match[2], atStart: match.index + match[1].length === 0 } : null;
 }
 function rankSkills(skills, query) {
   const q = query.toLowerCase();
   if (!q) return skills;
-  const score = skill => { const name = skill.name.toLowerCase(); return name.startsWith(q) ? 0 : name.includes(q) ? 1 : skill.description.toLowerCase().includes(q) ? 2 : 3; };
-  return skills.map(skill => [score(skill), skill]).filter(([rank]) => rank < 3).sort((a, b) => a[0] - b[0]).map(([, skill]) => skill);
+  return skills.map(skill => [Math.max(fuzzyScore(q, skill.name) * 1.5 + (skill.name.toLowerCase().startsWith(q) ? 40 : 0), fuzzyScore(q, skill.description) * 0.4), skill]).filter(([score]) => score > 0).sort((a, b) => b[0] - a[0]).map(([, skill]) => skill);
 }
-function closeSkillMenu() { skillMenu = null; prMenu = null; const node = document.querySelector("#skill-menu"); if (node) { node.hidden = true; node.innerHTML = ""; } document.querySelector("#compose textarea")?.removeAttribute("aria-activedescendant"); }
+/** Cursor-style fuzzy match: query characters in order; consecutive runs and word/path-segment starts score high, late and long targets lower. -1 when not a subsequence. */
+function fuzzyScore(query, target) {
+  const text = String(target ?? ""), lower = text.toLowerCase();
+  let from = 0, score = 0, previous = -2, first = -1;
+  for (const char of query) {
+    const at = lower.indexOf(char, from);
+    if (at < 0) return -1;
+    if (first < 0) first = at;
+    const boundary = at === 0 || /[\s/\\._:#-]/.test(lower[at - 1]) || (text[at] !== lower[at] && text[at - 1] === lower[at - 1]);
+    score += 1 + (at === previous + 1 ? 6 : 0) + (boundary ? 8 : 0);
+    previous = at; from = at + 1;
+  }
+  return score + 10 - Math.min(first, 40) * 0.25 - Math.min(lower.length, 200) * 0.02;
+}
+function closeSkillMenu() { skillMenu = null; prMenu = null; refMenu = null; const node = document.querySelector("#skill-menu"); if (node) { node.hidden = true; node.innerHTML = ""; } document.querySelector("#compose textarea")?.removeAttribute("aria-activedescendant"); }
 async function updateSkillMenu(textarea) {
-  const query = skillQuery(textarea);
-  if (query === null) { updatePrMenu(textarea); return; }
+  renderBackdrop(textarea);
+  const found = skillQuery(textarea);
+  if (!found) { if (!(await updateRefMenu(textarea))) updatePrMenu(textarea); return; }
   const skills = await loadSkills();
-  if (skillQuery(textarea) !== query) return;
-  const items = rankSkills(skills, query).slice(0, 60);
-  skillMenu = { items, index: Math.min(skillMenu?.query === query ? skillMenu.index : 0, Math.max(0, items.length - 1)), query };
+  if (skillQuery(textarea)?.query !== found.query) return;
+  const items = rankSkills(skills, found.query).slice(0, 60);
+  // Mid-text, a "/" that matches no skill is just a slash.
+  if (!items.length && !found.atStart) { closeSkillMenu(); return; }
+  prMenu = null; refMenu = null;
+  skillMenu = { items, index: Math.min(skillMenu?.query === found.query ? skillMenu.index : 0, Math.max(0, items.length - 1)), query: found.query };
   renderSkillMenu();
 }
 function renderSkillMenu() {
@@ -1008,18 +1028,161 @@ function renderSkillMenu() {
   node.innerHTML = skillMenu.items.length
     ? skillMenu.items.map((skill, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option${index === skillMenu.index ? " active" : ""}" aria-selected="${index === skillMenu.index}" data-action="skill-pick" data-name="${esc(skill.name)}"><span class="skill-name">/${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description)}</span><span class="skill-source">${esc(source[skill.source] ?? skill.source)}</span></button>`).join("")
     : `<p class="skill-empty">No skill matches “${esc(skillMenu.query)}”</p>`;
-  node.hidden = false;
+  showMenu(node);
   document.querySelector("#compose textarea").setAttribute("aria-activedescendant", skillMenu.items.length ? `skill-option-${skillMenu.index}` : "");
   node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
 }
-function pickSkill(name) {
-  const textarea = document.querySelector("#compose textarea");
-  const rest = textarea.value.slice(textarea.selectionStart).replace(/^\S*\s*/, "");
-  textarea.value = `/skill:${name} ${rest}`;
-  const caret = name.length + 8;
-  textarea.setSelectionRange(caret, caret);
+/** Opens the shared menu next to the caret (clamped to the composer). */
+function showMenu(node) {
+  node.hidden = false;
+  const composer = document.querySelector("#compose"), marker = composer.querySelector(".compose-backdrop .caret-mark"), field = composer.querySelector(".compose-field");
+  if (!marker || !field) return;
+  const left = field.offsetLeft + marker.offsetLeft - 12, room = composer.clientWidth - node.offsetWidth - 8;
+  node.style.left = `${Math.max(8, Math.min(left, room))}px`;
+}
+/** Replaces the trigger text before the caret (and the rest of that word) with `insert`; keeps undo history where the browser allows it. */
+function replaceBeforeCaret(pattern, insert) {
+  const textarea = document.querySelector("#compose textarea"), caret = textarea.selectionStart, before = textarea.value.slice(0, caret);
+  const match = pattern.exec(before);
+  if (!match) return;
+  const start = match.index + (match[1]?.length ?? 0), wordEnd = caret + (/^\S*/.exec(textarea.value.slice(caret))?.[0].length ?? 0);
+  const end = insert.endsWith(" ") && textarea.value[wordEnd] === " " ? wordEnd + 1 : wordEnd;
+  textarea.focus(); textarea.setSelectionRange(start, end);
+  if (!document.execCommand("insertText", false, insert)) { textarea.setRangeText(insert, start, end, "end"); }
+  const at = start + insert.length;
+  textarea.setSelectionRange(at, at);
   drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
   closeSkillMenu(); textarea.focus();
+}
+function pickSkill(name) { rememberPick(`/skill:${name}`); replaceBeforeCaret(/(^|[\s(\[])\/(?:skill:)?[\w.-]*$/, `/skill:${name} `); }
+
+// "@" references: GitHub issues, knowledge documents, uploads and project files. Candidates load per project (host caches them) and refresh after 30 s.
+let refCatalog = null, refLoading = null;
+async function loadRefCatalog() {
+  const id = projectId;
+  if (refCatalog?.projectId === id && Date.now() - refCatalog.at < 30000) return refCatalog;
+  refLoading ??= api({ action: "ref-candidates", id }).then(data => {
+    if (id === projectId) refCatalog = { projectId: id, at: Date.now(), data, items: refItems(data) };
+    return refCatalog;
+  }).finally(() => { refLoading = null; });
+  return refLoading;
+}
+const quoteRef = value => /\s/.test(value) ? `"${value}"` : value;
+const refKinds = { recent: "Recent", issue: "Issues", doc: "Knowledge", upload: "Uploads", file: "Files" };
+function refItems(data) {
+  const base = path => { const parts = path.split("/"); return { name: parts.at(-1), folder: parts.slice(0, -1).join("/") }; };
+  const ok = value => !/["\n]/.test(value);
+  return [
+    ...data.issues.map(issue => ({ kind: "issue", token: `@issue:${issue.number}`, label: `#${issue.number}`, detail: issue.title, search: `${issue.number} ${issue.title}`, meta: issue.state, at: issue.updatedAt })),
+    ...data.docs.map(doc => ({ kind: "doc", token: `@doc:${doc.path}`, label: base(doc.path).name, detail: base(doc.path).folder || "knowledge", search: doc.path, meta: ago(doc.updatedAt), at: doc.updatedAt })),
+    ...data.uploads.filter(item => ok(item.filename)).map(item => ({ kind: "upload", token: `@upload:${quoteRef(item.filename)}`, label: item.filename, detail: `${item.kind} · ${size(item.size)}`, search: item.filename, meta: ago(item.at), at: item.at })),
+    ...data.files.filter(ok).map(path => ({ kind: "file", token: `@file:${quoteRef(path)}`, label: base(path).name, detail: base(path).folder, search: path, recent: data.recentFiles.indexOf(path) })),
+  ];
+}
+const pickedKey = () => `pi-projects:picked:${projectId}`;
+function recentPicks() { try { return JSON.parse(localStorage.getItem(pickedKey()) ?? "[]"); } catch { return []; } }
+function rememberPick(token) { try { localStorage.setItem(pickedKey(), JSON.stringify([token, ...recentPicks().filter(item => item !== token)].slice(0, 20))); } catch { /* storage full or blocked */ } }
+function refQuery(textarea) {
+  const match = triggerBefore(textarea, /(^|[\s(\[])@(?:(issue|doc|upload|file):)?([^\s@"]*)$/);
+  return match ? { kind: match[2] ?? null, query: match[3] } : null;
+}
+function rankRefs(items, kind, query) {
+  const q = query.toLowerCase(), picks = recentPicks(), pool = kind ? items.filter(item => item.kind === kind) : items;
+  if (!q) {
+    // Nothing typed yet: recent picks, then the newest of each kind (recently changed files first).
+    const picked = picks.map(token => pool.find(item => item.token === token)).filter(Boolean).slice(0, 5);
+    const newest = (list, count) => list.filter(item => !picked.includes(item)).sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? ""))).slice(0, count);
+    const files = pool.filter(item => item.kind === "file" && !picked.includes(item)), recent = files.filter(item => item.recent >= 0).sort((a, b) => a.recent - b.recent);
+    const each = kind ? 30 : 4;
+    return [...picked.map(item => ({ ...item, section: "recent" })), ...newest(pool.filter(item => item.kind === "issue"), each), ...newest(pool.filter(item => item.kind === "doc"), each), ...newest(pool.filter(item => item.kind === "upload"), kind ? each : 3), ...[...recent, ...files.filter(item => item.recent < 0)].slice(0, kind ? each : 5)];
+  }
+  const scored = [];
+  for (const item of pool) {
+    const label = fuzzyScore(q, item.label), path = fuzzyScore(q, item.search), detail = item.kind === "issue" ? fuzzyScore(q, item.detail) : -1;
+    let score = Math.max(label > 0 ? label * 1.6 + (item.label.toLowerCase().startsWith(q) ? 30 : 0) + (item.label.toLowerCase() === q ? 40 : 0) : -1, path, detail);
+    if (score <= 0) continue;
+    if (picks.includes(item.token)) score += 15;
+    if (item.recent >= 0) score += 6 - item.recent * 0.3;
+    scored.push([score, item]);
+  }
+  return scored.sort((a, b) => b[0] - a[0]).slice(0, 40).map(([, item]) => item);
+}
+/** Returns true when an "@" query is active (the menu is shown or loading). */
+async function updateRefMenu(textarea) {
+  const found = refQuery(textarea);
+  if (!found) { refMenu = null; return false; }
+  const catalog = await loadRefCatalog();
+  const now = refQuery(textarea);
+  if (!catalog || now?.query !== found.query || now?.kind !== found.kind) return true;
+  const ranked = rankRefs(catalog.items, found.kind, found.query);
+  // Group by kind, groups ordered by their best match (Cursor-style sections).
+  const groups = [];
+  for (const item of ranked) { const section = item.section ?? item.kind; let group = groups.find(entry => entry.kind === section); if (!group) groups.push(group = { kind: section, items: [] }); if (group.items.length < (found.kind ? 40 : 12)) group.items.push(item); }
+  const items = groups.flatMap(group => group.items), key = `${found.kind}:${found.query}`;
+  skillMenu = null; prMenu = null;
+  refMenu = { items, groups, index: Math.min(refMenu?.key === key ? refMenu.index : 0, Math.max(0, items.length - 1)), key, query: found.query, kind: found.kind, data: catalog.data };
+  renderRefMenu();
+  return true;
+}
+const refIcons = {
+  issue: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="1.6" fill="currentColor"/></svg>',
+  doc: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h6l3 3v8h-9z M9.5 2.5v3h3 M5.5 8.5h5 M5.5 11h5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+  upload: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 4.5 5.8 9.2a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4.2-4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.75h5.25L12.5 5v9.25H4z M9.25 1.75V5h3.25" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+  pr: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 5.1v5.8 M11.5 10.9V6.5c0-1.4-1-2.5-2.5-2.5H7.5" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
+};
+function highlightMatch(text, query) {
+  // Bold the characters the fuzzy match used.
+  const q = query.toLowerCase(), lower = String(text).toLowerCase();
+  if (!q) return esc(text);
+  let at = 0, out = "";
+  for (const [index, char] of [...String(text)].entries()) { if (at < q.length && lower[index] === q[at]) { out += `<b>${esc(char)}</b>`; at++; } else out += esc(char); }
+  return at === q.length ? out : esc(text);
+}
+function renderRefMenu() {
+  const node = document.querySelector("#skill-menu"), menu = refMenu;
+  if (!node || !menu) return;
+  let index = -1;
+  const rows = menu.groups.map(group => `<div class="ref-group" role="presentation">${esc(refKinds[group.kind])}</div>${group.items.map(item => { index++; return `<button type="button" role="option" id="skill-option-${index}" class="skill-option ref-opt ref-${item.kind}${index === menu.index ? " active" : ""}" aria-selected="${index === menu.index}" data-action="ref-pick" data-index="${index}"><span class="ref-icon">${refIcons[item.kind]}</span><span class="skill-name">${highlightMatch(item.label, menu.query)}</span><span class="skill-desc">${esc(item.detail ?? "")}</span><span class="skill-source">${esc(item.meta ?? "")}</span></button>`; }).join("")}`).join("");
+  const notes = [menu.data.issuesError && (!menu.kind || menu.kind === "issue") ? `GitHub issues unavailable: ${menu.data.issuesError}` : "", menu.data.filesError && (!menu.kind || menu.kind === "file") ? `Project files unavailable: ${menu.data.filesError}` : "", menu.data.filesTruncated && (!menu.kind || menu.kind === "file") ? `Only the first ${menu.data.files.length.toLocaleString()} project files are searchable.` : "", !menu.data.repository && menu.kind === "issue" ? "Connect GitHub in Settings to reference issues." : ""].filter(Boolean);
+  node.innerHTML = (rows || `<p class="skill-empty">Nothing matches “${esc(menu.query)}”</p>`) + notes.map(text => `<p class="skill-empty ref-note">${esc(text)}</p>`).join("") + `<p class="ref-hint">↑↓ move · Enter or Tab insert · Esc close${menu.kind ? "" : " · @file: @doc: @issue: @upload: narrow"}</p>`;
+  showMenu(node);
+  document.querySelector("#compose textarea").setAttribute("aria-activedescendant", menu.items.length ? `skill-option-${menu.index}` : "");
+  node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
+}
+function pickRef(item) { rememberPick(item.token); replaceBeforeCaret(/(^|[\s(\[])@(?:(?:issue|doc|upload|file):)?[^\s@"]*$/, `${item.token} `); }
+
+// Composer highlighting: a mirror layer behind the transparent textarea paints each reference token; the caret marker positions the menu.
+// Same grammar as the host (src/coordinator-skills.ts SKILL_TOKEN, src/inline-refs.ts REF_TOKEN, PR refs in src/github-prs.ts).
+const refTokenPattern = () => /(?<![^\s([])(?:\/skill:([A-Za-z0-9](?:[\w.-]*[\w-])?)|@(issue|doc|upload|file):(?:"([^"\n]{1,1024})"|([^\s"]+?))|(?:PR\s+)?#(\d{1,9}))(?=[.,;:!?)\]]*(?:\s|$))/g;
+function refTokens(text) {
+  const tokens = [];
+  for (const match of text.matchAll(refTokenPattern())) tokens.push({ start: match.index, end: match.index + match[0].length, kind: match[1] ? "skill" : match[2] ?? "pr", value: match[1] ?? match[3] ?? match[4] ?? match[5] });
+  return tokens;
+}
+function renderBackdrop(textarea) {
+  const backdrop = textarea?.closest?.("#compose")?.querySelector(".compose-backdrop");
+  if (!backdrop) return;
+  const text = textarea.value, caret = textarea.selectionEnd, prs = prMenuItems().length > 0;
+  let html = "", at = 0;
+  const plain = (from, to) => { if (caret >= from && caret <= to && !html.includes("caret-mark")) return esc(text.slice(from, caret)) + '<span class="caret-mark"></span>' + esc(text.slice(caret, to)); return esc(text.slice(from, to)); };
+  for (const token of refTokens(text)) {
+    if (token.kind === "pr" && !prs) continue;
+    html += plain(at, token.start) + `<mark class="ref ref-${token.kind}">${plain(token.start, token.end)}</mark>`;
+    at = token.end;
+  }
+  html += plain(at, text.length);
+  backdrop.innerHTML = `${html}\u200b`;
+  backdrop.scrollTop = textarea.scrollTop;
+}
+/** Backspace right after a reference removes the whole token. */
+function deleteTokenBefore(textarea) {
+  if (textarea.selectionStart !== textarea.selectionEnd) return false;
+  const caret = textarea.selectionStart, token = refTokens(textarea.value).find(item => item.end === caret && (item.kind !== "pr" || prMenuItems().length));
+  if (!token) return false;
+  textarea.setSelectionRange(token.start, token.end);
+  if (!document.execCommand("delete")) { textarea.setRangeText("", token.start, token.end, "end"); textarea.dispatchEvent(new Event("input", { bubbles: true })); }
+  return true;
 }
 // PR card (one group per PR provider serving the project) and the "#" PR menu. Rows come from the host's shared provider caches; the browser asks at most every 20 s.
 let prsState = { projectId: null, data: null, at: 0, error: "" }, prsLoading = false, prsShowHidden = false, providerLabels = {};
@@ -1071,12 +1234,12 @@ function renderPrs() {
   const fetched = groups.map(item => item.rateLimitedUntilMs ? "rate limited" : item.fetchedAtMs ? ago(new Date(item.fetchedAtMs).toISOString()) : "").find(Boolean);
   document.querySelector("#prs-meta").textContent = fetched ?? "";
 }
-const prRefs = /(?:^|\s)#([^\s#]*)$/;
+const prRefs = /(?:^|[\s(\[])#([^\s#]*)$/;
 function updatePrMenu(textarea) {
   const query = textarea.selectionStart === textarea.selectionEnd ? prRefs.exec(textarea.value.slice(0, textarea.selectionStart))?.[1] ?? null : null, all = prMenuItems();
   if (query === null || !all.length) { closeSkillMenu(); return; }
   const q = query.toLowerCase(), items = all.sort(byNewest).filter(pr => !q || pr.ref.slice(1).toLowerCase().startsWith(q) || pr.title.toLowerCase().includes(q)).slice(0, 30);
-  skillMenu = null; prMenu = { items, index: Math.min(prMenu?.query === query ? prMenu.index : 0, Math.max(0, items.length - 1)), query };
+  skillMenu = null; refMenu = null; prMenu = { items, index: Math.min(prMenu?.query === query ? prMenu.index : 0, Math.max(0, items.length - 1)), query };
   renderPrMenu();
 }
 function renderPrMenu() {
@@ -1084,28 +1247,66 @@ function renderPrMenu() {
   node.innerHTML = prMenu.items.length
     ? prMenu.items.map((pr, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option pr-opt${index === prMenu.index ? " active" : ""}" aria-selected="${index === prMenu.index}" data-action="pr-pick" data-provider="${esc(pr.provider)}" data-pr="${esc(pr.id)}"><span class="skill-name">${esc(pr.ref)}</span><span class="skill-desc">${esc(pr.title)}</span><span class="skill-source pr-icon ${prGlyph[pr.state]?.[1] ?? "muted"}">${prGlyph[pr.state]?.[0] ?? "○"}</span></button>`).join("")
     : `<p class="skill-empty">No open PR matches “${esc(prMenu.query)}”</p>`;
-  node.hidden = false;
+  showMenu(node);
   document.querySelector("#compose textarea").setAttribute("aria-activedescendant", prMenu.items.length ? `skill-option-${prMenu.index}` : "");
   node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
 }
-function pickPr(ref) {
-  const textarea = document.querySelector("#compose textarea"), caret = textarea.selectionStart;
-  const before = textarea.value.slice(0, caret).replace(/(?:PR\s+)?#[^\s#]*$/, `PR ${ref} `);
-  textarea.value = before + textarea.value.slice(caret);
-  textarea.setSelectionRange(before.length, before.length);
-  drafts.set(draftKey(), textarea.value); autosize(textarea); persistDraftsSafely();
-  closeSkillMenu(); textarea.focus();
-}
+function pickPr(ref) { replaceBeforeCaret(/()(?:PR\s+)?#[^\s#]*$/, `PR ${ref} `); }
 // The host appends a "[Referenced PRs (<provider>) …]" block to the coordinator message (older: "[Referenced <provider> PRs …]"); show it as chips linking to the PR URL at the end of each line.
 const prBlock = /\n\n\[Referenced [^\]\n]*PRs[^\]\n]*\]\n((?:- [^\n]*(?:\n|$))+)$/;
 function prChips(text) {
   const match = prBlock.exec(text);
-  if (!match) return { text, chips: "" };
+  if (!match) return { text, chips: "", urls: new Map() };
+  const urls = new Map();
   const chips = match[1].trim().split("\n").map(line => {
     const known = /^- (\S+?)(?: “(.*?)”)? \((.*?)\) (https?:\/\/\S+)$/.exec(line), gone = /^- (\S+?): could not be read/.exec(line);
+    if (known) urls.set(known[1], known[4]);
     return known ? `<a class="attach-chip pr-chip" href="${esc(known[4])}" target="_blank" rel="noopener noreferrer" title="${esc(`${known[2] ?? ""} (${known[3]})`)}"><span class="pr-id">${esc(known[1])}</span><span class="attach-name">${esc(known[2] ?? "")}</span></a>` : gone ? `<span class="attach-chip gone">${esc(gone[1])} unreadable</span>` : "";
   }).join("");
-  return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>` };
+  return { text: text.slice(0, match.index), chips: `<div class="attach-row">${chips}</div>`, urls };
+}
+// The host appends a "[Referenced items …]" block after the owner's words (src/inline-refs.ts); the bubble shows only the words, with the tokens as chips. Unreadable items are marked.
+const refsBlock = /\n\n\[Referenced items: [^\]\n]*\]\n[\s\S]*$/;
+function refsSplit(text) {
+  const match = refsBlock.exec(text);
+  if (!match) return { text, gone: new Map() };
+  const gone = new Map([...match[0].matchAll(/^- (@\w+:(?:"[^"\n]*"|\S+?)): could not be read \((.*)\)$/gm)].map(found => [found[1], found[2]]));
+  return { text: text.slice(0, match.index), gone };
+}
+const unesc = value => value.replace(/&(amp|quot|#39|lt|gt);/g, (_, name) => ({ amp: "&", quot: '"', "#39": "'", lt: "<", gt: ">" })[name]);
+// Same grammar as refTokenPattern, on already-escaped text.
+const refHtmlPattern = /(?<![^\s([])(?:\/skill:([A-Za-z0-9](?:[\w.-]*[\w-])?)|@(issue|doc|upload|file):(?:&quot;((?:(?!&quot;)[^\n]){1,1024}?)&quot;|((?:(?!&quot;)\S)+?))|(?:PR\s+)?#(\d{1,9}))(?=(?:[.,;:!?)\]]|&#39;)*(?:\s|$))/g;
+function refChipHtml(all, skill, kind, quoted, bare, pr, refs) {
+  const value = unesc(skill ?? quoted ?? bare ?? pr), type = skill ? "skill" : kind ?? "pr", token = unesc(all);
+  if (type === "pr") {
+    const ref = `#${pr}`, url = refs.prs?.get(ref) ?? prMenuItems().find(item => item.ref === ref)?.url;
+    return /^https?:\/\//.test(url ?? "") ? `<a class="ref-chip ref-pr" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(`Open ${ref}`)}">${refIcons.pr}<span>${all}</span></a>` : all;
+  }
+  const label = type === "issue" ? `#${value}` : ["doc", "file"].includes(type) ? value.split("/").at(-1) : value, problem = refs.gone?.get(token);
+  return `<button type="button" class="ref-chip ref-${type}${problem ? " gone" : ""}" data-action="ref-open" data-kind="${type}" data-value="${esc(value)}" title="${esc(problem ? `${token}: could not be read (${problem})` : `${token} · click to preview`)}">${type === "skill" ? skillIcon : refIcons[type]}<span>${esc(label)}</span></button>`;
+}
+async function refOpen(kind, value) {
+  const id = projectId;
+  if (kind === "doc") { await knowledgeRead(value); return; }
+  if (kind === "upload") {
+    const record = (view?.uploads ?? []).find(item => item.filename === value);
+    if (!record) throw new Error(`No upload named ${value} in this project`);
+    await uploadOpen(record.id); return;
+  }
+  if (!["file", "issue", "skill"].includes(kind)) return;
+  const version = showDialog(kind === "issue" ? `Issue #${value}` : value, '<p class="note">Reading…</p>');
+  const found = await api({ action: "ref-preview", id, kind, value });
+  if (version !== dialogVersion || id !== projectId) return;
+  if (found.kind === "issue") {
+    dialog.querySelector("#dialog-title").textContent = `#${found.number} ${found.title}`;
+    const link = /^https:\/\//.test(found.url) ? `<a class="button-link" href="${esc(found.url)}" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>` : "";
+    setDialogBody(`<p class="note">${esc(found.repository)} · ${esc(found.state)}${found.author ? ` · by ${esc(found.author)}` : ""}${found.comments ? ` · ${found.comments} comment${found.comments === 1 ? "" : "s"}` : ""}${found.labels.length ? ` · ${found.labels.map(esc).join(", ")}` : ""}</p><div class="doc-view text">${found.body ? renderMarkdown(found.body) : '<p class="note">No description.</p>'}</div>${dlgActions(link)}`);
+  } else if (found.kind === "skill") {
+    dialog.querySelector("#dialog-title").textContent = `/skill:${found.name}`;
+    setDialogBody(`<p class="note">${esc(found.description)}</p><p class="note mono">${esc(found.path)}</p><div class="doc-view text">${renderMarkdown(found.text)}</div>${found.truncated ? '<p class="note">Showing the first 64,000 characters.</p>' : ""}`);
+  } else {
+    setDialogBody(`<p class="note">Project folder · ${esc(size(found.size))}${found.truncated ? " · showing the first 64 KB" : ""}</p>${found.binary ? '<p class="note">Binary file; not shown.</p>' : `<pre class="upload-text ref-file">${esc(found.text)}</pre>`}`);
+  }
 }
 // Folders the owner collapsed, shared by the rail and the Knowledge tab; raw legacy answers start collapsed.
 const closedFolders = new Set(["research/legacy"]);
@@ -1432,7 +1633,8 @@ document.addEventListener("click", event => {
 });
 function toast(text) { clearTimeout(toastTimer); const node = document.querySelector("#toast"); node.textContent = text; node.classList.add("visible"); toastTimer = setTimeout(() => node.classList.remove("visible"), 4500); }
 function esc(value) { return String(value).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]); }
-function renderMarkdown(value) {
+function renderMarkdown(value, options = {}) {
+  const inlineMarkdown = text => inlineRefsMarkdown(text, options.refs);
   const blocks = String(value ?? "").split(/```([^\n]*)\n([\s\S]*?)```/g);
   return blocks.map((part, index) => {
     if (index % 3 === 1) return "";
@@ -1618,7 +1820,7 @@ function artifactAction(action, node) {
   }
   renderArtifactBrowser();
 }
-function inlineMarkdown(value) {
+function inlineRefsMarkdown(value, refs) {
   const code = [];
   let text = esc(value).replace(/`([^`]+)`/g, (_, body) => { const key = `\u0000${code.length}\u0000`; code.push(`<code>${body}</code>`); return key; });
   // Worker artifacts: ![caption](artifact:<thread>/<path>) inline (images, videos), [name](artifact:…) as a download; hydrated by hydrateArtifacts().
@@ -1629,6 +1831,7 @@ function inlineMarkdown(value) {
     code.push(`<span class="artifact-ref" data-artifact-thread="${thread}" data-artifact-path="${esc(path)}" data-inline="${bang ? "1" : ""}">${label || esc(path)}</span>`);
     return key;
   });
+  if (refs) text = text.replace(refHtmlPattern, (all, skill, kind, quoted, bare, pr) => { const key = `\u0000${code.length}\u0000`; code.push(refChipHtml(all, skill, kind, quoted, bare, pr, refs)); return key; });
   text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (all, label, escapedHref) => {
     const href = escapedHref.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
     try { const url = new URL(href); return ["http:", "https:", "mailto:"].includes(url.protocol) ? `<a href="${esc(url.href)}" rel="noopener noreferrer" target="_blank">${label}</a>` : label; } catch { return label; }
@@ -1784,6 +1987,8 @@ async function action(node) {
     case "all-work": setTab("activity"); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickSkill(node.dataset.name); break;
+    case "ref-pick": { const item = refMenu?.items[Number(node.dataset.index)]; if (item) pickRef(item); break; }
+    case "ref-open": await refOpen(node.dataset.kind, node.dataset.value); break;
     case "pr-pick": pickPr(prMenu.items.find(item => item.provider === node.dataset.provider && String(item.id) === node.dataset.pr)?.ref ?? `#${node.dataset.pr}`); break;
     case "prs-refresh": await loadPrs(true); break;
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
@@ -2187,7 +2392,7 @@ function report(error, frame = error instanceof UiRequestError ? error.frame : u
 }
 document.addEventListener("click", event => { const node = event.target.closest("[data-action]"); if (node && !node.disabled) void uiAction(() => action(node)); });
 document.addEventListener("submit", event => { if (!event.target.matches("#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-form], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create], [data-pr-add]")) return; event.preventDefault(); void uiAction(() => submit(event.target)); });
-function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; }
+function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; if (textarea.closest("#compose")) renderBackdrop(textarea); }
 document.addEventListener("change", event => { if (event.target.closest("[data-settings-form]")) settingsSync(); });
 document.addEventListener("input", event => {
   if (event.target.matches(".mp-search")) { renderModelList(event.target.closest(".mp")); return; }
@@ -2208,8 +2413,22 @@ document.addEventListener("input", event => {
   if (event.target.closest("[data-settings-form]")) settingsSync();
 });
 // Clicking elsewhere closes the skill picker; moving the caret re-evaluates it.
-document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if ((skillMenu || prMenu) && !event.target.closest("#compose")) closeSkillMenu(); });
+document.addEventListener("mousedown", event => { if (event.target.closest(".skill-option")) event.preventDefault(); else if ((skillMenu || prMenu || refMenu) && !event.target.closest("#compose")) closeSkillMenu(); });
 document.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) && event.target.closest("#compose textarea")) void updateSkillMenu(event.target).catch(() => closeSkillMenu()); });
+{
+  const composeText = document.querySelector("#compose textarea");
+  composeText.addEventListener("scroll", () => { const backdrop = document.querySelector("#compose .compose-backdrop"); if (backdrop) backdrop.scrollTop = composeText.scrollTop; }, { passive: true });
+  composeText.addEventListener("mouseup", () => void updateSkillMenu(composeText).catch(() => closeSkillMenu()));
+}
+// Collapsible project sidebar (wide layouts): toggle buttons and ⌘B / Ctrl+B; remembered per browser.
+function setSidebar(collapsed, persist = true) {
+  document.querySelector(".app").classList.toggle("side-collapsed", collapsed);
+  for (const button of document.querySelectorAll("[data-side-toggle]")) button.setAttribute("aria-expanded", String(!collapsed));
+  document.querySelector("#side-open").hidden = !collapsed;
+  if (persist) { try { localStorage.setItem("pi-projects:side-collapsed", collapsed ? "1" : "0"); } catch { /* storage blocked */ } }
+}
+try { setSidebar(localStorage.getItem("pi-projects:side-collapsed") === "1", false); } catch { setSidebar(false, false); }
+document.addEventListener("click", event => { if (!event.target.closest("[data-side-toggle]")) return; const collapsed = !document.querySelector(".app").classList.contains("side-collapsed"); setSidebar(collapsed); document.querySelector(collapsed ? "#side-open" : "#side-toggle").focus(); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
 document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
 for (const id of ["attach-input", "upload-input"]) document.querySelector(`#${id}`).addEventListener("change", event => {
@@ -2264,6 +2483,14 @@ document.addEventListener("keydown", event => {
     else if (event.key === "Enter") { event.preventDefault(); clearTimeout(searchTimer); if (searchState.query === event.target.value.trim() && count) void uiAction(() => openSearchHit(searchState.active)); else void runSearch(); }
     return;
   }
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "b" && !event.isComposing && !dialog.open) { event.preventDefault(); setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); return; }
+  if (refMenu && event.target.closest("#compose textarea") && !event.isComposing) {
+    const count = refMenu.items.length;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { refMenu.index = (refMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderRefMenu(); } return; }
+    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickRef(refMenu.items[refMenu.index]); return; }
+    if (event.key === "Escape") { event.preventDefault(); closeSkillMenu(); return; }
+  }
+  if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.isComposing && event.target.closest?.("#compose textarea") && deleteTokenBefore(event.target)) { event.preventDefault(); return; }
   if (prMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = prMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { prMenu.index = (prMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderPrMenu(); } return; }

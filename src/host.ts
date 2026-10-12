@@ -10,7 +10,8 @@ import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
 import { referencedPrBlock } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
-import { expandSkillCommand, listSkills, SKILL_COMMAND } from "./coordinator-skills.ts";
+import { expandSkillCommand, listSkills, skillNames, skillPreview } from "./coordinator-skills.ts";
+import { refCandidates, referencedItemsBlock, refPreview } from "./inline-refs.ts";
 import { recordInvokedSkill } from "./skill-profiles.ts";
 import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
@@ -252,6 +253,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
+    case "ref-candidates": return refCandidates(loadProject(input.id), await knowledgeDir(input.id), { refresh: input.refresh });
+    case "ref-preview": return input.kind === "skill" ? skillPreview(await configuredSkills(input.id), input.value) : refPreview(loadProject(input.id), { kind: input.kind, value: input.value });
     case "mcp-catalog": loadProject(input.id); return mcpCatalog();
     case "mcp-probe": {
       const project = loadProject(input.id), info = mcpCatalog().servers.find(item => item.name === input.server);
@@ -634,10 +637,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (prior) return prior;
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
-        // `#123` / `PR #123` in a project served by a PR provider: a compact untrusted block with the PRs' state follows the owner's words.
-        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + await referencedPrBlock(loadProject(input.id), job.text);
-        const invoked = SKILL_COMMAND.exec(job.text.trim())?.[1];
-        if (invoked) recordInvokedSkill(ownedProjectDir(input.id), invoked);
+        // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
+        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text) + await referencedPrBlock(loadProject(input.id), job.text);
+        if (text.length > 120_000) throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
+        for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
         const plan = await owner.planSnapshot();
         if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
         // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
