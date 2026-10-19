@@ -23,7 +23,7 @@ Verified by `scripts/watchdog-e2e.mjs` unless marked (inspection).
 - D14 Watchdog turns write to the owner (essay per tick) or notify ("Finished" in the feed / Telegram).
 - D15 Watchdog turns count as worker reports or trigger the quiet-coordinator "final summary".
 - D16 The coordinator is not told the escalation policy: steer first with a concrete nudge, stop + redispatch/rescope if still unproductive at the next check, leave healthy workers alone, tell the owner only in the final report or via needs-you.
-- D17 Watchdog turns go to a random chat instead of Main / the events chat; an archived events chat breaks delivery.
+- D17 Watchdog turns for a chat's workers go to a different chat. Each check goes to the chat that admitted those workers (Main when that chat is Main). The events chat does not receive other chats' workers. An archived owning chat is not retargeted onto Main.
 - D18 A tick while the coordinator is busy interrupts (steers) the owner's turn instead of queueing behind it.
 
 ## End-to-end

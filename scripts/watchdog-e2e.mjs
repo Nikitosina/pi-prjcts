@@ -91,11 +91,12 @@ try {
   check('D13 the second check says the run is already a steer', /STEER you sent/.test(secondLoop), secondLoop);
   check('D16 the check carries the escalation policy and asks for no text', /steer it once with a concrete nudge/.test(firstCheck.text) && /stop it .* redispatch/.test(firstCheck.text) && /leave it alone/.test(firstCheck.text) && /End this turn with no text/.test(firstCheck.text) && /final report or through a needs-you/.test(firstCheck.text));
   check('D8 the digest is bounded (≤ 7 lines per worker, < 32 KB)', brain.turns.every(t => t.text.length < 32000 && blocks(t.text).every(b => b.text.split('\n').length <= 7)));
+  check('D7b an unproductive verdict is explicit and file changes do not cancel it', /verdict: unproductive: repeated identical calls/.test(lb) && /verdict: healthy/.test(hb) && /do not override an unproductive verdict/.test(firstCheck.text), { lb: lb.slice(0, 400), hb: hb.slice(0, 200) });
 
-  // Delivery: the events chat (Ops), never Main; quiet; no "Finished" notice.
+  // Delivery: the chat that started the workers (Main here), never the events chat; quiet; no "Finished" notice.
   const opsView = await rpc({ action: 'show', id, chatId: ops.id }), mainView = await rpc({ action: 'show', id });
   const isCheck = m => m.role === 'user' && /^\[Owner-local event worker\.watchdog\]/.test(m.text ?? '');
-  check('D17 checks go to the events chat, not Main', opsView.messages.filter(isCheck).length >= 2 && !mainView.messages.some(isCheck), { ops: opsView.messages.filter(isCheck).length });
+  check('D17 checks for Main workers go to Main, not the events chat', mainView.messages.filter(isCheck).length >= 2 && !opsView.messages.some(isCheck), { main: mainView.messages.filter(isCheck).length, ops: opsView.messages.filter(isCheck).length });
   await delay(1500);
   const feed = existsSync(join(k.home, 'notifications.json')) ? JSON.parse(readFileSync(join(k.home, 'notifications.json'), 'utf8')).feed : [];
   check('D14 watchdog turns never notify ("Finished"), even when the coordinator wrote text', !feed.some(n => /WD-QUIET-TEXT/.test(n.text)) && brain.turns.length >= 2, feed.map(n => `${n.kind}:${n.title}:${n.text.slice(0, 60)}`));
@@ -110,9 +111,9 @@ try {
   check('D1 no checks while no worker runs (disarmed)', afterIdle.ticks === idleTicks && afterIdle.armedAtMs === null, afterIdle);
 
   // D3: one check per interval: no duplicates, consecutive checks ≥ 0.9 interval apart.
-  const checks = (await rpc({ action: 'show', id, chatId: ops.id })).messages.filter(isCheck);
+  const checks = (await rpc({ action: 'show', id })).messages.filter(isCheck);
   const gaps = checks.slice(1).map((m, i) => m.at - checks[i].at);
-  check('D3 one check per interval, none duplicated', checks.length === afterIdle.ticks && new Set(checks.map(m => m.text)).size === checks.length && gaps.every(g => g >= EVERY * 0.9), { ticks: afterIdle.ticks, checks: checks.length, gaps });
+  check('D3 visible checks are unique and at least one interval apart', checks.length >= 2 && checks.length <= afterIdle.ticks && new Set(checks.map(m => m.text)).size === checks.length && gaps.every(g => g >= EVERY * 0.9), { ticks: afterIdle.ticks, checks: checks.length, gaps });
 
   // D2: paused project does not tick.
   await rpc({ action: 'message', id, text: 'MARK-WD2 one more' });

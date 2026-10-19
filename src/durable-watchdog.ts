@@ -20,7 +20,8 @@ type Sources = {
   plan(): Promise<DurablePlanSnapshot>;
   /** Model entries of a worker thread's conversation, or null when it is gone. */
   entries(threadId: string): Promise<readonly Entry[] | null>;
-  target(): Promise<Conversation>;
+  /** The chat that admitted this work. Null is Main. Missing chats are skipped, not sent to Main. */
+  chat(chatConversationId: number | null): Promise<Conversation | null>;
 };
 const clip = (text: string, max: number) => { const value = text.replace(/\s+/g, " ").trim(); return value.length > max ? `${value.slice(0, max - 1)}…` : value; };
 const minutes = (ms: number) => ms < 90_000 ? `${Math.max(0, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`;
@@ -37,7 +38,7 @@ function usageTokens(usage: unknown): number {
 }
 
 /** Bounded per-worker digest: runtime, steering, last tool calls, repeats and errors since the last check, tokens since the last check, changed files. */
-export async function workerDigest(work: DurablePlanWorkSnapshot, entries: readonly Entry[] | null, since: number, now: number, parent: string | null): Promise<string> {
+export async function workerDigest(work: DurablePlanWorkSnapshot, entries: readonly Entry[] | null, since: number, now: number, parent: string | null, everyMs: number): Promise<string> {
   const calls: Array<{ name: string; args: string; at: number; error: boolean; result: string }> = [];
   let tokens = 0, total = 0;
   const results = new Map<string, { error: boolean; text: string }>();
@@ -72,26 +73,51 @@ export async function workerDigest(work: DurablePlanWorkSnapshot, entries: reado
     } catch { files = "unknown (worktree unreadable)"; }
   } else if (work.role !== "worker") files = "n/a (read-only role)";
   const started = work.startedAt ?? now;
+  const errorRepeats = new Map<string, number>();
+  for (const call of errors) errorRepeats.set(`${call.name}\0${call.args}`, (errorRepeats.get(`${call.name}\0${call.args}`) ?? 0) + 1);
+  const repeatedErrors = [...errorRepeats.values()].some(count => count >= 2) || errors.length >= 3;
+  const noFiles = files === "none uncommitted";
+  const stalled = now - started >= everyMs * 2 && tokens > 0 && noFiles;
+  const verdict = repeated.length ? "unproductive: repeated identical calls" : repeatedErrors ? "unproductive: repeated errors" : stalled ? "unproductive: tokens spent with no file changes" : "healthy";
   return [
     `- ${work.role} thread ${work.threadId}${parent ? ` (sub-agent of ${parent})` : ""}, work ${work.id}: "${clip(work.text, 160)}"`,
     `  running ${minutes(now - started)}${work.steering ? `; this run is a STEER you sent ${minutes(now - started)} ago (steered since an earlier check)` : "; not steered"}`,
     `  last tool calls (oldest first): ${last.length ? last.join(" | ") : "none"}; ${recent.length} call(s) since the last check`,
     `  repeated identical calls since the last check: ${repeated.length ? repeated.map(item => `${item.label} ×${item.count}`).join("; ") : "none"}`,
-    `  errors since the last check: ${errors.length}${errors.length ? ` (latest: ${errors.at(-1)!.name}: ${clip(errors.at(-1)!.result, 160)})` : ""}`,
+    `  errors since the last check: ${errors.length}${errors.length ? ` (latest: ${errors.at(-1)!.name}: ${clip(errors.at(-1)!.result, 160)})` : ""}; verdict: ${verdict}`,
     `  tokens since the last check: ${tokens.toLocaleString("en-US")} (thread total ${total.toLocaleString("en-US")})`,
     `  files changed in its worktree: ${files}`,
   ].join("\n");
 }
 
 export function watchdogText(everyMs: number, digests: string[]): string {
-  return `Worker watchdog check (automatic, every ${minutes(everyMs)}; not from the owner). Do not write to the owner about this check.
-For each running worker below:
-- Healthy (new calls, files changing, no loop): leave it alone.
-- Unproductive (repeated identical calls, repeated errors, no file changes, tokens without progress) and "not steered": steer it once with a concrete nudge (projects_worker_control action steer: name the exact next step or the wrong assumption; read it with projects_worker_read first if unsure).
-- Unproductive and its run is already a STEER from an earlier check: stop it (projects_worker_control action stop) and redispatch a rescoped task (projects_delegate, or follow_up on the thread when its context is still useful).
-Tell the owner only in your final report or through a needs-you question. End this turn with no text.
+  return `Worker watchdog check (automatic, every ${minutes(everyMs)}; not from the owner). Do not write to the owner about this check. These are only the workers this chat started.
+For each running worker below, follow its verdict line:
+- verdict healthy: leave it alone. New calls or files changing do not override an unproductive verdict.
+- verdict unproductive and "not steered": steer it once with a concrete nudge (projects_worker_control action steer: name the exact next step or the wrong assumption; read it with projects_worker_read first if unsure).
+- verdict unproductive and its run is already a STEER from an earlier check: stop it (projects_worker_control action stop) and redispatch a rescoped task (projects_delegate, or follow_up on the thread when its context is still useful).
+Tell the owner only in your final report or through a needs-you question. End this turn with no text. A check that does not steer or stop is hidden.
 
 ${digests.join("\n")}`;
+}
+
+/** Owner-visible messages. A watchdog check that never steered, stopped or redispatched is omitted, including its user event. */
+export function omitIdleWatchdogTurns<T extends { role?: string; text?: string; name?: string; argsPreview?: string }>(messages: T[]): T[] {
+  const hidden = new Set<number>();
+  let index = 0;
+  while (index < messages.length) {
+    const message = messages[index];
+    if (!(message.role === "user" && message.text?.startsWith("[Owner-local event worker.watchdog]"))) { index++; continue; }
+    let end = index + 1, acted = false;
+    while (end < messages.length && messages[end].role !== "user") {
+      const item = messages[end];
+      if (item.name === "projects_delegate" || (item.name === "projects_worker_control" && /"action"\s*:\s*"(steer|stop)"/.test(item.argsPreview ?? ""))) acted = true;
+      end++;
+    }
+    if (!acted) for (let cursor = index; cursor < end; cursor++) hidden.add(cursor);
+    index = end;
+  }
+  return messages.filter((_, cursor) => !hidden.has(cursor));
 }
 
 export function watchdogRuntime(root: Conversation, projectId: string, schedules: ReturnType<typeof scheduleRuntime>, sources: Sources, isClosed: () => boolean, onError: (error: unknown) => void) {
@@ -113,15 +139,37 @@ export function watchdogRuntime(root: Conversation, projectId: string, schedules
     if (doc.armedAtMs === null) { await root.commit(async tx => { const value = await tx.doc(Watchdog, root.id); value.armedAtMs ??= now; }, BACKGROUND_CONTEXT); return { armed: true }; }
     const since = Math.max(doc.armedAtMs, doc.lastTickAtMs ?? 0);
     if (now < since + config.everyMs) return { skipped: "not-due" };
-    const digests: string[] = [];
-    for (const work of running.slice(0, 12)) digests.push(await workerDigest(work, await sources.entries(work.threadId).catch(() => null), since, now, work.parentThreadId));
-    if (running.length > 12) digests.push(`- …and ${running.length - 12} more running workers (inspect with projects_workers)`);
-    const seq = doc.seq + 1, payload = watchdogText(config.everyMs, digests).slice(0, 32000);
-    await schedules.ingest({ eventId: `watchdog:${projectId.slice(0, 8)}:${seq}`, kind: "worker.watchdog", payload }, async tx => {
+    const groups = new Map<number | null, DurablePlanWorkSnapshot[]>();
+    for (const work of running) {
+      const key = work.chatConversationId;
+      groups.set(key, [...(groups.get(key) ?? []), work]);
+    }
+    const prepared: Array<{ key: number | null; conversation: Conversation; payload: string }> = [];
+    for (const [key, works] of groups) {
+      const conversation = await sources.chat(key);
+      if (!conversation) continue;
+      const digests: string[] = [];
+      for (const work of works.slice(0, 12)) digests.push(await workerDigest(work, await sources.entries(work.threadId).catch(() => null), since, now, work.parentThreadId, config.everyMs));
+      if (works.length > 12) digests.push(`- …and ${works.length - 12} more running workers from this chat (inspect with projects_workers)`);
+      prepared.push({ key, conversation, payload: watchdogText(config.everyMs, digests).slice(0, 32000) });
+    }
+    if (!prepared.length) return { skipped: "no-chat" };
+    const seq = doc.seq + 1;
+    const claimed = await root.commit(async tx => {
       const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
-      return !isClosed() && !planning.paused && !planning.pausing && value.seq === seq - 1 && watchdogConfig(projectId).enabled;
-    }, async tx => { const value = await tx.doc(Watchdog, root.id); if (value.seq === seq - 1) { value.seq = seq; value.ticks++; value.lastTickAtMs = now; value.lastWorkers = running.length; value.lastError = null; } }, { target: await sources.target(), automation: true });
-    return { ticked: seq, workers: running.length };
+      if (isClosed() || planning.paused || planning.pausing || value.seq !== seq - 1 || !watchdogConfig(projectId).enabled) return false;
+      value.seq = seq; value.ticks++; value.lastTickAtMs = now; value.lastWorkers = running.length; value.lastError = null;
+      return true;
+    }, BACKGROUND_CONTEXT);
+    if (!claimed) return { skipped: "superseded" };
+    for (const item of prepared) {
+      const chatKey = item.key ?? "main";
+      await schedules.ingest({ eventId: `watchdog:${projectId.slice(0, 8)}:${seq}:${chatKey}`, kind: "worker.watchdog", payload: item.payload }, async tx => {
+        const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
+        return !isClosed() && !planning.paused && !planning.pausing && value.seq === seq && watchdogConfig(projectId).enabled;
+      }, undefined, { target: item.conversation, automation: true });
+    }
+    return { ticked: seq, workers: running.length, chats: prepared.length };
   }
   const tick = () => {
     if (current || isClosed()) return;
