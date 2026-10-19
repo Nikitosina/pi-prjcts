@@ -197,6 +197,8 @@ export type PrProvider = {
   validateId?(id: PrId): void;
   /** Link to a PR by id (also for PRs that left the open list). */
   url(id: PrId, project?: Project): string;
+  /** Link to an issue-tracker ticket key (ABC-123) mentioned next to this provider's PRs. */
+  ticketUrl?(key: string): string;
   /** Whether the provider serves this project at all. */
   applies(project: Project): boolean;
   /** `include`: ids the host monitors or shows regardless of authorship (watched, worker-published). */

@@ -208,7 +208,7 @@ function renderLive() {
   if (!frame?.running) { node.hidden = true; node.innerHTML = ""; renderWorkingPill(); return; }
   // Once text streams, the reasoning summary steps aside into a quiet line above it, as in the transcript.
   const status = liveStatus(frame), thought = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
-  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${thought ? `<p class="thought live"><span class="thought-mark">Thinking</span>${esc(thought)}</p>` : ""}${frame.text ? `<div class="text">${renderMarkdown(frame.text)}</div>` : ""}<p class="live-status"><span class="live-dot"></span><span>${esc(status)}</span></p>`;
+  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${thought ? `<p class="thought live"><span class="thought-mark">Thinking</span>${esc(thought)}</p>` : ""}${frame.text ? `<div class="text">${renderMarkdown(frame.text, { refs: {} })}</div>` : ""}<p class="live-status"><span class="live-dot"></span><span>${esc(status)}</span></p>`;
   node.hidden = false;
   followTranscript();
   renderWorkingPill();
@@ -217,7 +217,7 @@ function renderLive() {
 function changeProject(id, chat = "main") {
   generation++;
   workerChat = null; searchFocus = null; workerFocus = null;
-  projectId = id; chatId = chat;
+  projectId = id; chatId = chat; linksReady = false;
   captureDialogDraft();
   liveStream?.controller.abort(); liveStream = null; liveFrame = null; renderLive(); knowledgeDocs = []; stickToBottom = true;
   view = null; plan = null; observability = null; observabilityLoading = false; eventOffset = 0; approvalPage = null; operationCache.clear(); knowledgeCache.clear(); libraryCache.clear(); libraryPayload = null; settingsCache = null; modelCache.clear(); providerCache.clear(); routineCache = null; selected = null;
@@ -969,7 +969,7 @@ function chatMessageHtml(message, assistant) {
   const attached = user ? attachmentChips(message.text) : { text: message.text, chips: "" };
   const prs = user ? prChips(attached.text) : { text: attached.text, chips: "", urls: new Map() };
   const refs = user ? refsSplit(prs.text) : { text: prs.text, gone: new Map() };
-  const body = renderMarkdown(refs.text, user ? { refs: { prs: prs.urls, gone: refs.gone } } : {}) + prs.chips + attached.chips;
+  const body = renderMarkdown(refs.text, { refs: { prs: prs.urls, gone: refs.gone } }) + prs.chips + attached.chips;
   return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
@@ -1185,10 +1185,15 @@ function deleteTokenBefore(textarea) {
   return true;
 }
 // PR card (one group per PR provider serving the project) and the "#" PR menu. Rows come from the host's shared provider caches; the browser asks at most every 20 s.
-let prsState = { projectId: null, data: null, at: 0, error: "" }, prsLoading = false, prsShowHidden = false, providerLabels = {};
+let prsState = { projectId: null, data: null, at: 0, error: "" }, linksReady = false, prsLoading = false, prsShowHidden = false, providerLabels = {};
 // Show/hide the hidden-PR list: local view state, not an action, so it works while busy.
 document.addEventListener("click", event => { if (!event.target.closest("[data-pr-show-hidden]")) return; prsShowHidden = !prsShowHidden; renderPrs(); });
 const prNow = () => (prsState.projectId === projectId ? prsState.data : null);
+// Any #<id> or ticket key links through the project's PR provider (one provider: an ambiguous mix stays plain text).
+const prTemplateUrl = id => { const groups = prNow()?.providers ?? []; return groups.length === 1 && groups[0].urlTemplate?.includes("{id}") ? groups[0].urlTemplate.replace("{id}", id) : undefined; };
+const ticketTemplate = () => { const templates = (prNow()?.providers ?? []).map(group => group.ticketTemplate).filter(Boolean); return templates.length === 1 ? templates[0] : null; };
+// Standards and encodings that look like ticket keys.
+const NOT_TICKETS = new Set(["UTF", "SHA", "ISO", "RFC", "CVE", "AES", "RSA", "IPV", "TLS", "HTTP", "GPT", "MD", "EC", "ES", "UTC", "GMT"]);
 const prMenuItems = () => (prNow()?.providers ?? []).flatMap(group => group.prs.map(pr => ({ ...pr, provider: group.provider })));
 // Provider labels for event titles; a plugin that failed to load is shown once as a banner (the host keeps running without it).
 async function loadPluginStatus() {
@@ -1206,7 +1211,10 @@ async function loadPrs(force = false) {
   try { const data = await api({ action: "prs", id, ...(force ? { refresh: true } : {}) }); if (id === projectId) prsState = { projectId: id, data, at: Date.now(), error: "" }; }
   catch (error) { if (id === projectId) prsState = { projectId: id, data: prsState.projectId === id ? prsState.data : null, at: Date.now(), error: error.message }; }
   finally { prsLoading = false; }
-  if (id === projectId) renderPrs();
+  if (id !== projectId) return;
+  renderPrs();
+  // The first listing brings the link templates for #<id> and ticket keys in the transcript.
+  if (!linksReady && prsState.data) { linksReady = true; if (view) render(); }
 }
 const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
 const byNewest = (a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
@@ -1279,7 +1287,7 @@ const refHtmlPattern = /(?<![^\s([])(?:\/skill:([A-Za-z0-9](?:[\w.-]*[\w-])?)|@(
 function refChipHtml(all, skill, kind, quoted, bare, pr, refs) {
   const value = unesc(skill ?? quoted ?? bare ?? pr), type = skill ? "skill" : kind ?? "pr", token = unesc(all);
   if (type === "pr") {
-    const ref = `#${pr}`, url = refs.prs?.get(ref) ?? prMenuItems().find(item => item.ref === ref)?.url;
+    const ref = `#${pr}`, url = refs.prs?.get(ref) ?? prMenuItems().find(item => item.ref === ref)?.url ?? (pr.length >= 3 ? prTemplateUrl(pr) : undefined);
     return /^https?:\/\//.test(url ?? "") ? `<a class="ref-chip ref-pr" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(`Open ${ref}`)}">${refIcons.pr}<span>${all}</span></a>` : all;
   }
   const label = type === "issue" ? `#${value}` : ["doc", "file"].includes(type) ? value.split("/").at(-1) : value, problem = refs.gone?.get(token);
@@ -1831,11 +1839,18 @@ function inlineRefsMarkdown(value, refs) {
     code.push(`<span class="artifact-ref" data-artifact-thread="${thread}" data-artifact-path="${esc(path)}" data-inline="${bang ? "1" : ""}">${label || esc(path)}</span>`);
     return key;
   });
-  if (refs) text = text.replace(refHtmlPattern, (all, skill, kind, quoted, bare, pr) => { const key = `\u0000${code.length}\u0000`; code.push(refChipHtml(all, skill, kind, quoted, bare, pr, refs)); return key; });
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (all, label, escapedHref) => {
-    const href = escapedHref.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-    try { const url = new URL(href); return ["http:", "https:", "mailto:"].includes(url.protocol) ? `<a href="${esc(url.href)}" rel="noopener noreferrer" target="_blank">${label}</a>` : label; } catch { return label; }
+  const hold = html => { const key = `\u0000${code.length}\u0000`; code.push(html); return key; };
+  // External images are links, never loaded: a prompt-injected image URL must not leak data by being fetched.
+  text = text.replace(/!?\[([^\]]+)\]\(([^)]+)\)/g, (all, label, escapedHref) => {
+    try { const url = new URL(unesc(escapedHref)); return ["http:", "https:", "mailto:"].includes(url.protocol) ? hold(`<a href="${esc(url.href)}" rel="noopener noreferrer" target="_blank">${label}</a>`) : label; } catch { return label; }
   });
+  text = text.replace(/https?:\/\/(?:(?!&quot;|&#39;|&lt;|&gt;)[^\s\u0000])+/g, all => {
+    const href = all.replace(/[.,;:!?)\]]+$/, ""), tail = all.slice(href.length);
+    try { const url = new URL(unesc(href)); return hold(`<a href="${esc(url.href)}" rel="noopener noreferrer" target="_blank">${href}</a>`) + tail; } catch { return all; }
+  });
+  if (refs) text = text.replace(refHtmlPattern, (all, skill, kind, quoted, bare, pr) => hold(refChipHtml(all, skill, kind, quoted, bare, pr, refs)));
+  const ticket = ticketTemplate();
+  if (ticket) text = text.replace(/(?<![\w/.-])([A-Z][A-Z0-9]{1,15})-([1-9]\d{0,7})(?![\w-])/g, (all, queue) => NOT_TICKETS.has(queue) ? all : hold(`<a class="ref-chip ref-ticket" href="${esc(ticket.replace("{key}", all))}" target="_blank" rel="noopener noreferrer" title="Open ${all}">${refIcons.issue}<span>${all}</span></a>`));
   text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>");
   return text.replace(/\u0000(\d+)\u0000/g, (_, index) => code[Number(index)]);
 }

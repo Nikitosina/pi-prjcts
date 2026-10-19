@@ -204,7 +204,7 @@ export type DurableProjectRuntime = {
   /** CI-failed and merged notices raised by Follow PRs and the provider PR monitors; the notifier turns each into one host notice. */
   prNotices(): Promise<PrNotice[]>;
   /** PR cards of every provider serving this project (cached, shared across projects) plus this project's watch state; `refresh` bypasses the cache and runs one monitor poll per provider. */
-  prs(refresh: boolean): Promise<Array<{ provider: string; label: string; prs: PrCardData[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null; watched: string[]; hidden: string[]; monitoring: boolean; lastPollAtMs: number | null; lastError: string | null; polls: number; events: number }>>;
+  prs(refresh: boolean): Promise<Array<{ provider: string; label: string; prs: PrCardData[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null; urlTemplate: string; ticketTemplate: string | null; watched: string[]; hidden: string[]; monitoring: boolean; lastPollAtMs: number | null; lastError: string | null; polls: number; events: number }>>;
   prWatch(provider: string, id: string, watch: boolean): Promise<string[]>;
   prHide(provider: string, id: string, hide: boolean): Promise<string[]>;
   /** Runs `fn` with the Durable root conversation (plugin RPCs). */
@@ -793,7 +793,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
         return Promise.all(prMonitors.filter(monitor => monitor.provider.applies(current)).map(async monitor => {
           const listing = await monitor.runtime.listing(current, refresh);
           if (refresh) await monitor.runtime.poll(true).catch(() => {});
-          return { provider: monitor.provider.id, label: monitor.provider.label, ...listing, ...(await monitor.runtime.snapshot()) };
+          // "{id}" / "{key}" templates let the browser link any #<id> or ticket key a message mentions.
+          return { provider: monitor.provider.id, label: monitor.provider.label, urlTemplate: monitor.provider.url("{id}", current), ticketTemplate: monitor.provider.ticketUrl?.("{key}") ?? null, ...listing, ...(await monitor.runtime.snapshot()) };
         }));
       },
       prWatch: (providerId, id, watch) => { assertOpen(); return monitorOf(providerId).setWatch(id, watch); },

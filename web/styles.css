@@ -968,6 +968,7 @@ button.primary.danger:hover { background: #8f1d17; border-color: #8f1d17; }
 .ref-skill, mark.ref-skill { --ref-hue: var(--accent); }
 .ref-pr, mark.ref-pr { --ref-hue: #2f9e6a; }
 .ref-issue, mark.ref-issue { --ref-hue: #8b5cf6; }
+.ref-ticket { --ref-hue: #d97706; }
 .ref-doc, mark.ref-doc { --ref-hue: #d4a017; }
 .ref-upload, mark.ref-upload { --ref-hue: #0ea5a4; }
 .ref-file, mark.ref-file { --ref-hue: #3b82f6; }
