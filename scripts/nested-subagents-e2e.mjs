@@ -38,7 +38,7 @@ const model = createServer((req, res) => {
     if (role === 'coordinator') {
       const owner = !userText.startsWith('[Durable work') && !userText.startsWith('[Owner-local event'), tag = owner && /MARK-NEST-(\w+)/.exec(userText)?.[1];
       if (tag && results.length === 0) return res.end(call('projects_delegate', { role: 'worker', task: `PARENT-TASK-${tag} do the job, use children` }));
-      if (owner && /MARK-WORKERS/.test(userText) && results.length === 0) return res.end(call('projects_workers', { limit: 100 }));
+      if (owner && /MARK-WORKERS/.test(userText) && results.length === 0) return res.end(call('projects_workers', { limit: 100, all: true }));
       return res.end(say(userText.startsWith('[Durable work') ? `COORD-NOTED ${/PARENT-CONCLUSION \S+/.exec(userText)?.[0] ?? 'other'}` : 'Noted.'));
     }
     if (role === 'parent') {

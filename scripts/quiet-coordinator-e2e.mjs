@@ -51,7 +51,7 @@ const model = createServer((req, res) => {
         await gates.ownerTurn?.();
         return res.end(say('PLAN-LINE parent implements, two scouts map the code.'));
       }
-      if (!report && /MARK-WORKERS/.test(userText) && results.length === 0) return res.end(call('projects_workers', { limit: 100 }));
+      if (!report && /MARK-WORKERS/.test(userText) && results.length === 0) return res.end(call('projects_workers', { limit: 100, all: true }));
       if (report) {
         const final = newUsers.some(u => u.includes('Nothing else for this chat is queued or running'));
         if (!final) { await gates.children?.(); releaseChildren(); }

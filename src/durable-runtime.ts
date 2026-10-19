@@ -169,7 +169,7 @@ export type DurableProjectRuntime = {
   archiveWork(selection: { workIds?: readonly string[]; terminal?: boolean }): Promise<{ archived: string[] }>;
   prioritizeWorker(workId: string, priority: number): Promise<{ workId: string; priority: number }>;
   configureWorkerCap(cap: number): Promise<{ workerCap: number }>;
-  workerSnapshot(options?: { offset?: number; limit?: number }): ReturnType<ReturnType<typeof planningRuntime>["workerSnapshot"]>;
+  workerSnapshot(options?: { offset?: number; limit?: number; all?: boolean }): ReturnType<ReturnType<typeof planningRuntime>["workerSnapshot"]>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string): Promise<string>;
   /** One page (JSON) of a work item's complete result; chat reports are capped. */

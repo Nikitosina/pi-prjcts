@@ -606,15 +606,16 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (Object.values(state.work).some(work => work.status === "queued")) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
     }, BACKGROUND_CONTEXT);
   }
-  async function workerSnapshot(root: Conversation, pageOptions: { offset?: number; limit?: number } = {}) {
+  /** Open work by default (completed and archived work is reported already); `all` lists the whole history. */
+  async function workerSnapshot(root: Conversation, pageOptions: { offset?: number; limit?: number; all?: boolean } = {}) {
     const offset = pageOptions.offset ?? 0, limit = pageOptions.limit ?? 30;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid worker list page");
     return root.commit(async tx => {
-      const state = await tx.doc(DurablePlanning, root.id), all = Object.values(state.work), page = all.slice(offset, offset + limit);
+      const state = await tx.doc(DurablePlanning, root.id), all = Object.values(state.work).filter(work => pageOptions.all || work.status !== "completed" && work.archivedAt === undefined), page = all.slice(offset, offset + limit);
       const threadIds = [...new Set(page.map(work => work.threadId))];
       return {
         projectId: options.projectId, paused: state.paused, pausing: state.pausing, workerCap: state.workerCap,
-        work: page.map(work => ({ ...workReceipt(work), id: work.id, role: work.role, text: work.text.slice(0, 1000), dependsOn: [...work.dependsOn], priority: work.priority ?? 0, workspaceScopeId: work.workspaceScopeId, model: work.attempt?.model ?? null, toolNames: [...(work.attempt?.toolNames ?? [])], startedAt: work.startedAt ?? null, endedAt: work.endedAt ?? null, archived: work.archivedAt !== undefined, parentThreadId: work.parentThreadId ?? null, report: work.report ? work.report.delivered ? work.report.requestId.startsWith("held:") ? "held until children finish" : work.parentThreadId && work.report.requestId.startsWith("child-report:") ? "delivered to parent" : "delivered" : "pending" : "none" })),
+        work: page.map(work => ({ ...workReceipt(work), id: work.id, role: work.role, text: work.text.slice(0, 240), dependsOn: [...work.dependsOn], priority: work.priority ?? 0, workspaceScopeId: work.workspaceScopeId, model: work.attempt?.model ?? null, toolNames: [...(work.attempt?.toolNames ?? [])], startedAt: work.startedAt ?? null, endedAt: work.endedAt ?? null, archived: work.archivedAt !== undefined, parentThreadId: work.parentThreadId ?? null, report: work.report ? work.report.delivered ? work.report.requestId.startsWith("held:") ? "held until children finish" : work.parentThreadId && work.report.requestId.startsWith("child-report:") ? "delivered to parent" : "delivered" : "pending" : "none" })),
         threads: threadIds.flatMap(threadId => { const thread = state.threads[threadId]; return thread ? [{ threadId, paused: Boolean(thread.paused), stopping: Boolean(thread.stopping), activeWorkId: thread.activeWorkId, workspaceScopeId: thread.workspaceScopeId, parentThreadId: thread.parentThreadId ?? null }] : []; }),
         offset, total: all.length, nextOffset: offset + page.length < all.length ? offset + page.length : null, observedAtMs: Date.now(),
       };
