@@ -1,8 +1,10 @@
 import { DefaultPackageManager, ModelRuntime, SettingsManager, discoverAndLoadExtensions, getAgentDir, type CreateModelRuntimeOptions } from "@earendil-works/pi-coding-agent";
 import { contentText, getCurrentSystemMessage, type Context } from "@earendil-works/pi-ai";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { home } from "./state.ts";
 
 /**
  * Model providers contributed by the owner's Pi packages and agent-dir extensions.
@@ -65,17 +67,44 @@ export function loadProviderExtensions(): Promise<Loaded> { return loading ??= l
  * providers all count as configured, exactly as running sessions resolve auth. Registration failures are recorded, never thrown.
  */
 export async function createModelRuntime(options: Omit<CreateModelRuntimeOptions, "refreshOnCreate" | "allowModelNetwork"> = {}): Promise<ModelRuntime> {
-  const [runtime, loaded] = await Promise.all([ModelRuntime.create({ ...options, allowModelNetwork: false, refreshOnCreate: false }), loadProviderExtensions()]);
+  const modelsStorePath = options.modelsStorePath ?? await projectModelsStore();
+  const [runtime, loaded] = await Promise.all([ModelRuntime.create({ ...options, modelsStorePath, allowModelNetwork: false, refreshOnCreate: false }), loadProviderExtensions()]);
   const { registrations, status } = observed = loaded;
   const record = (extension: string, text: string) => { if (!status.errors.some(item => item.extension === extension && item.error === text)) status.errors.push({ extension, error: text }); };
-  for (const entry of registrations) {
-    const attempt = (what: string, apply: () => void) => { try { apply(); } catch (error) { record(entry.extension, `${what}: ${message(error)}`); } };
-    for (const item of entry.providers) attempt(`provider ${item.name}`, () => runtime.registerProvider(item.name, item.config));
-    for (const item of entry.native) attempt(`provider ${item.id}`, () => runtime.registerNativeProvider(item));
-    for (const item of entry.virtual) attempt(`virtual model ${item.id}`, () => runtime.registerVirtualModel(item));
-  }
+  // SDK registrations start unawaited refreshes. Drain them before the final pass so a late one cannot invalidate its availability snapshot.
+  const refresh = runtime.refresh, registrationRefreshes: ReturnType<ModelRuntime["refresh"]>[] = [];
+  runtime.refresh = options => {
+    const pending = refresh.call(runtime, options);
+    registrationRefreshes.push(pending);
+    return pending;
+  };
+  try {
+    for (const entry of registrations) {
+      const attempt = (what: string, apply: () => void) => { try { apply(); } catch (error) { record(entry.extension, `${what}: ${message(error)}`); } };
+      for (const item of entry.providers) attempt(`provider ${item.name}`, () => runtime.registerProvider(item.name, item.config));
+      for (const item of entry.native) attempt(`provider ${item.id}`, () => runtime.registerNativeProvider(item));
+      for (const item of entry.virtual) attempt(`virtual model ${item.id}`, () => runtime.registerVirtualModel(item));
+    }
+  } finally { runtime.refresh = refresh; }
+  await Promise.allSettled(registrationRefreshes);
   try { await runtime.refresh({ allowNetwork: false }); } catch (error) { record("model availability", message(error)); }
   return runtime;
+}
+
+/** Seed once from Pi's catalog, then keep every SDK refresh write in the Projects home. */
+async function projectModelsStore(): Promise<string> {
+  const path = join(home(), "models-store.json");
+  await mkdir(home(), { recursive: true, mode: 0o700 });
+  if (!existsSync(path)) {
+    try {
+      const seed = await readFile(join(getAgentDir(), "models-store.json"), "utf8");
+      JSON.parse(seed);
+      await writeFile(path, seed, { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && !(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "EEXIST"))) throw error;
+    }
+  }
+  return path;
 }
 
 export async function providerExtensionStatus(): Promise<ProviderExtensionStatus> { const { status } = await loadProviderExtensions(); return { loaded: [...status.loaded], errors: status.errors.map(item => ({ ...item })), providers: [...status.providers] }; }

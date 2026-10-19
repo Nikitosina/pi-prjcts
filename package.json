@@ -9,15 +9,29 @@
     "e2e:durable-runtime": "node scripts/durable-runtime-e2e.mjs",
     "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
     "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",
-    "setup": "node scripts/link-host.mjs && node scripts/link-durable.mjs",
-    "link:durable": "node scripts/link-durable.mjs",
+    "setup": "npm ci",
     "e2e:legacy-removal": "node scripts/legacy-removal-e2e.mjs",
     "projects": "node src/cli.ts"
   },
   "pi": { "extensions": [] },
-  "dependencies": { "@earendil-works/pi-durable": "1.0.0", "unpdf": "1.8.1" },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.2",
+    "@earendil-works/pi-ai": "1.0.2",
+    "@earendil-works/pi-coding-agent": "1.0.2",
+    "@earendil-works/pi-durable": "1.0.0",
+    "@earendil-works/pi-mcp": "1.0.2",
+    "typebox": "1.3.27",
+    "unpdf": "1.8.1"
+  },
+  "overrides": {
+    "@earendil-works/pi-agent-core": "1.0.2",
+    "@earendil-works/pi-codemode": "1.0.2",
+    "@earendil-works/pi-telemetry": "1.0.2",
+    "@earendil-works/pi-tui": "1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "typescript": "5.9.3"
   }
 }
