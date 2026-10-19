@@ -15,8 +15,8 @@ const handler = ({ role, user, results }) => {
   if (results.length > 0) return undefined;
   const run = /MCP-CALL (\S+) (\S+)(?: (\{[^\n]*\}))?/.exec(user);
   if (run) return call('projects_mcp_call', { server: run[1], tool: run[2], arguments: run[3] ? JSON.parse(run[3]) : {} });
-  const list = /MCP-TOOLS(?: ([A-Za-z][\w-]*))?/.exec(user);
-  if (list) return call('projects_mcp_tools', list[1] ? { server: list[1] } : {});
+  const list = /MCP-TOOLS(?: ([A-Za-z][\w-]*))?(?: (\w+))?/.exec(user);
+  if (list) return call('projects_mcp_tools', list[1] ? { server: list[1], ...(list[2] ? { tool: list[2] } : {}) } : {});
   return undefined;
 };
 const kit = await createKit('mcp', { handler });
@@ -87,7 +87,8 @@ await kit.run(async () => {
   const toolInfo = JSON.parse(tools);
   const flag = name => toolInfo.tools.find(item => item.name === name)?.write;
   check('F7 tool listing marks writes by annotation and heuristic', flag('ChangeIssueStatus') === true && flag('start_launch') === true && flag('purge') === true && flag('get_settings') === false && flag('list_hints') === false && flag('launch_status') === false, toolInfo.tools.map(item => [item.name, item.write]));
-  check('F22 the listing carries input schemas on demand', toolInfo.tools.find(item => item.name === 'launch_status').inputSchema?.type === 'object');
+  const schema = JSON.parse(await coord('MCP-TOOLS fake-tracker launch_status'));
+  check('F22 the listing omits input schemas; one tool carries its schema on demand', toolInfo.tools.every(item => item.inputSchema === undefined) && schema.tool.inputSchema?.type === 'object', schema);
   const ok = await coord('MCP-CALL fake-ci launch_status {"id":"L1"}');
   check('coordinator reads through fake-ci', /launch L1: PASSED/.test(ok), ok);
   const deniedX = await coord('MCP-CALL fake-xcode whoami');
