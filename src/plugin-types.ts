@@ -123,7 +123,7 @@ export type SetupCard = {
   revision: string;
   connect?: { label: string; dialog: { title: string; subtitle?: string; intro?: string; bullets: string[]; confirmLabel: string }; rpc: { plugin: string; method: string }; success: string };
 };
-export type WorkerFacts = { threadId: string | null; branch: string | null; removable: boolean; reasons: string[]; pullRequests: Array<{ number: number; state: string }> };
+export type WorkerFacts = { threadId: string | null; branch: string | null; removable: boolean; reasons: string[]; pullRequests: Array<{ number: number; state: string }>; /** Clean checkout still at the commit it was created from. */ atBase?: boolean };
 export type WorkspaceProvider = {
   /** workspaceAuthorization.provider value and checkout kind (matches a VcsProvider.kind). */
   id: string;

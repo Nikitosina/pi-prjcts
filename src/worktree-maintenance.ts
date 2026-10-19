@@ -110,7 +110,7 @@ async function pullStates(project: Project, branches: string[], signal?: AbortSi
   } catch { return null; }
 }
 
-export async function worktreeInventory(input: { project: Project; root: Conversation; controlRoot: string; signal?: AbortSignal }): Promise<WorktreeInventory> {
+export async function worktreeInventory(input: { project: Project; root: Conversation; controlRoot: string; signal?: AbortSignal; /** A stopped thread that never produced an assistant turn. Its checkout at the base commit is not kept just because the branch has an open PR. */ untouched?: (threadId: string) => Promise<boolean> }): Promise<WorktreeInventory> {
   const plan = await input.root.commit(async tx => JSON.parse(JSON.stringify(await tx.doc(DurablePlanning, input.root.id))) as PlanningState, BACKGROUND_CONTEXT);
   const live = Object.values(plan.work).filter(work => work.status === "queued" || work.status === "running" || work.status === "interrupted");
   const busyThread = (threadId: string) => live.some(work => work.threadId === threadId || work.parentThreadId === threadId) || plan.threads[threadId]?.activeWorkId != null;
@@ -124,7 +124,8 @@ export async function worktreeInventory(input: { project: Project; root: Convers
       const provider = plugins.workspaceProvider(receipt.scope.provider);
       if (!provider) continue;
       const facts = await provider.workerFacts({ project: input.project, root: input.root, receipt, busy });
-      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath, provider.virtualMount), removable: facts.removable, reasons: facts.reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: provider.id, leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName, ...(provider.mountLabel ? { mountLabel: provider.mountLabel } : {}) });
+      const reasons = facts.atBase && facts.threadId && input.untouched && await input.untouched(facts.threadId) ? facts.reasons.filter(reason => !reason.startsWith("open PR")) : facts.reasons;
+      items.push({ kind: "worker", path: receipt.workspacePath, threadId: facts.threadId, branch: facts.branch, sizeKb: await sizeKb(receipt.workspacePath, provider.virtualMount), removable: reasons.length === 0, reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: facts.pullRequests, intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout, provider: provider.id, leaseOwner: receipt.scope.owner, entry: receipt.scope.workspaceName, ...(provider.mountLabel ? { mountLabel: provider.mountLabel } : {}) });
       continue;
     }
     const path = receipt.workspacePath, threadId = /^durable workspace (\S+)$/.exec(receipt.scope.leaseReason)?.[1] ?? null, reasons: string[] = [];
@@ -141,6 +142,11 @@ export async function worktreeInventory(input: { project: Project; root: Convers
     const prs = await pullStates(input.project, branches.filter(name => name !== "main" && name !== "master"), input.signal);
     if (prs === null) reasons.push("PR state unknown (GitHub read failed)");
     else if (prs.some(pr => pr.state === "open")) reasons.push(`open PR #${prs.filter(pr => pr.state === "open").map(pr => pr.number).join(", #")}`);
+    const head = (await git(path, "rev-parse", "HEAD")).stdout.trim();
+    if (status.code === 0 && !status.stdout.trim() && head === receipt.scope.baseRevision && threadId && input.untouched && await input.untouched(threadId)) {
+      const inherited = reasons.findIndex(reason => reason.startsWith("open PR"));
+      if (inherited >= 0) reasons.splice(inherited, 1);
+    }
     const finished = (prs ?? []).some(pr => pr.state !== "open");
     if (!finished && !(ahead === 0)) reasons.push(Number.isNaN(ahead) ? "unpushed commits unknown" : `${ahead} commit(s) not on any remote`);
     items.push({ kind: "worker", path, threadId, branch: current || receipt.scope.branch, sizeKb: await sizeKb(path), removable: reasons.length === 0, reasons, setup: setupRecord(input.controlRoot, receipt.intentId), pullRequests: prs ?? [], intentId: receipt.intentId, checkout: receipt.scope.ownerCheckout });
@@ -159,7 +165,7 @@ export async function worktreeInventory(input: { project: Project; root: Convers
 }
 
 /** Removes every removable worktree after re-checking it; unforced for worker worktrees, branches are kept. */
-export async function cleanupWorktrees(input: { project: Project; root: Conversation; controlRoot: string; signal?: AbortSignal; stillAllowed?: () => boolean }): Promise<{ removed: Array<{ path: string; sizeKb: number }>; kept: WorktreeItem[]; failed: Array<{ path: string; error: string }>; reclaimedKb: number }> {
+export async function cleanupWorktrees(input: { project: Project; root: Conversation; controlRoot: string; signal?: AbortSignal; stillAllowed?: () => boolean; untouched?: (threadId: string) => Promise<boolean> }): Promise<{ removed: Array<{ path: string; sizeKb: number }>; kept: WorktreeItem[]; failed: Array<{ path: string; error: string }>; reclaimedKb: number }> {
   const before = await worktreeInventory(input);
   const removed: Array<{ path: string; sizeKb: number }> = [], failed: Array<{ path: string; error: string }> = [];
   for (const item of before.items.filter(entry => entry.removable)) {

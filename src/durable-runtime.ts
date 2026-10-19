@@ -529,8 +529,16 @@ export async function openDurableProject(input: { project: Project; dir: string;
     watchdogWake.unref();
     // Settled worktrees are removed automatically (same safe rule as the Settings action); paused or closing projects are left alone.
     let cleaning: Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> | undefined;
+    const untouchedThread = async (threadId: string) => {
+      const owned = (await planning.threadIdentities(root)).find(thread => thread.threadId === threadId);
+      const child = owned ? await openedHarness.conversation(owned.conversationId, context) : undefined;
+      if (!child) return false;
+      const view = await child.viewState(context);
+      try { return !view.value.entries.some(entry => entry.model?.some(message => message.role === "assistant")); }
+      finally { view.dispose(); }
+    };
     cleanup = () => cleaning ??= (async () => {
-      try { return await cleanupWorktrees({ project: loadProject(project.id), root, controlRoot: dir, stillAllowed: () => !closed }); }
+      try { return await cleanupWorktrees({ project: loadProject(project.id), root, controlRoot: dir, stillAllowed: () => !closed, untouched: untouchedThread }); }
       finally { cleaning = undefined; }
     })();
     const cleanupWake = setInterval(() => { void (async () => { if (closed || (await planning.snapshot(root)).paused) return; await cleanup(); })().catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_WORKTREE_CLEANUP_MS) || 1_800_000);
@@ -624,6 +632,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       await Promise.all(stopped.taskIds.map(id => openedHarness.abortTask(id, context)));
       await Promise.all(stopped.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true })));
       if (!closed) await schedules.mutex.run(() => planning.completeStop(root, threadId, stopped.stopId));
+      if (!closed) await cleanup().catch(error => report(input.onReport, project.id, error));
     }
 
     async function chatList(): Promise<DurableChat[]> {
