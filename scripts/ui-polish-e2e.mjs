@@ -170,9 +170,9 @@ try {
   result.checks.push('L1 1440x900: no page scroll, header visible, composer in viewport, transcript scrolls on its own');
 
   // Header and composer
-  const life = await evaluate(`({ pause: !!document.querySelector('#project-pause')?.offsetParent, resume: !!document.querySelector('#project-resume')?.offsetParent, eyebrow: document.querySelector('#eyebrow').offsetParent ? document.querySelector('#eyebrow').innerText : '' })`, s);
-  if (!life.pause || life.resume || /nothing needs/i.test(life.eyebrow)) throw Error('Header controls wrong: ' + JSON.stringify(life));
-  result.checks.push('H1 only Pause shows while ready; no "Nothing needs your call" eyebrow');
+  const life = await evaluate(`({ pause: !!document.querySelector('#project-pause')?.offsetParent, resume: !!document.querySelector('#project-resume')?.offsetParent, height: document.querySelector('.phead').getBoundingClientRect().height })`, s);
+  if (!life.pause || life.resume || life.height > 56) throw Error('Header controls wrong: ' + JSON.stringify(life));
+  result.checks.push('H1 only Pause shows while ready; header is one compact row');
   const comp = await evaluate(`({ placeholder: document.querySelector('#compose textarea').placeholder, hint: document.querySelector('#compose-hint').innerText, resize: getComputedStyle(document.querySelector('#compose textarea')).resize })`, s);
   if (/enter/i.test(comp.placeholder) || !comp.hint.includes('fake-model') || comp.resize !== 'none') throw Error('Composer copy wrong: ' + JSON.stringify(comp));
   const grow = await evaluate(`(async () => { const t = document.querySelector('#compose textarea'); const before = t.offsetHeight; t.focus(); t.value = 'line\\n'.repeat(6); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const mid = t.offsetHeight; t.value = 'line\\n'.repeat(200); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const big = t.offsetHeight; t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return { before, mid, big, after: t.offsetHeight }; })()`, s);

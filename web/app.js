@@ -233,9 +233,7 @@ function changeProject(id, chat = "main") {
   const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
   renderArtifactBrowser();
   const p = projects.find(p => p.id === id);
-  document.querySelector("#eyebrow").hidden = true;
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
-  document.querySelector("#subtitle").textContent = id ? "Restoring the coordinator and worker controls…" : "Choose a trusted workspace. Then send the coordinator any request.";
   document.querySelector("#avatar").textContent = initials(p?.name);
   for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
   document.querySelector("#chat-bar").dataset.html = "";
@@ -275,7 +273,7 @@ function renderProjects() {
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';
   node.value = projectId ?? "";
   const list = document.querySelector("#project-list");
-  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
+  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
   if (list.dataset.html !== next) { list.innerHTML = next; list.dataset.html = next; }
 }
 function initials(name) { return String(name ?? "π").trim().split(/\s+/).slice(0, 2).map(word => [...word][0] ?? "").join("").toUpperCase() || "π"; }
@@ -300,15 +298,12 @@ function render() {
   const approvals = pending.filter(item => item.kind === "approval");
   const entry = approvals.find(item => item.id === selected) ?? approvals[0];
   selected = entry?.id ?? null;
-  const eyebrow = document.querySelector("#eyebrow");
-  eyebrow.textContent = pendingTotal ? `${pendingTotal} ${pendingTotal === 1 ? "thing needs" : "things need"} your call` : ""; eyebrow.hidden = !pendingTotal;
   document.title = `${view.project.name} · Pi Projects`;
   document.querySelector("#title").textContent = view.project.name;
   document.querySelector("#avatar").textContent = initials(view.project.name);
   for (const selector of ["#needs-count"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
   renderProjects();
   renderChats();
-  document.querySelector("#subtitle").textContent = pendingTotal && pending.length < pendingTotal ? `Showing ${pending.length}/${pendingTotal} pending decisions. Open all approvals for the rest.` : view.project.objective ?? "";
   setHtml("#queue", approvals.length < 2 ? "" : approvals.map((item, i) => `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`).join(""));
   setHtml("#letter", entry ? letter(entry) : "");
   const waiting = questionPlacement();
@@ -638,14 +633,28 @@ function renderContextSettings() {
   node.innerHTML = `<div class="context-form">
     <label class="field">Context window (tokens) <input type="number" id="context-window" min="4096" max="10000000" step="1000" placeholder="${catalog ? `${catalog} (model default)` : "model default"}" value="${esc(v?.contextWindow ?? "")}"></label>
     <label class="check"><input type="checkbox" id="context-auto" ${!v || v.autoCompact ? "checked" : ""}> Compact automatically</label>
-    <label class="field">Compact at (% of window) <input type="number" id="context-threshold" min="10" max="95" placeholder="${defaultPct ? `${defaultPct} (default)` : "default"}" value="${esc(v?.thresholdPercent ?? "")}"></label>
+    <label class="field context-threshold">Compact at <output id="context-threshold-value"></output><input type="range" id="context-threshold" min="10" max="95" step="1" value="${esc(v?.thresholdPercent ?? defaultPct ?? 80)}" ${v?.thresholdPercent === undefined ? "data-default" : ""}></label>
     <label class="field">Keep recent (tokens) <input type="number" id="context-keep" min="1000" max="1000000" step="1000" placeholder="20000 (default)" value="${esc(v?.keepRecentTokens ?? "")}"></label>
   </div>
   <div class="row"><button class="primary" data-action="context-save">Save</button><button class="ghost" data-action="context-reset" ${v ? "" : "disabled"}>Reset to defaults</button><button class="ghost" data-action="compact-now">Compact this chat now</button></div>`;
+  renderContextThreshold();
 }
+// Slider label: share and token count of the effective window; untouched it stays on the pi-durable default and is not saved.
+function renderContextThreshold() {
+  const slider = document.querySelector("#context-threshold"), output = document.querySelector("#context-threshold-value");
+  if (!slider || !output) return;
+  const typed = Number(document.querySelector("#context-window").value.trim()), window = typed > 0 ? typed : view?.context?.catalogWindow ?? null;
+  slider.disabled = !document.querySelector("#context-auto").checked;
+  output.textContent = `${slider.value}%${window ? ` · ${Math.floor(window * slider.value / 100).toLocaleString()} tokens` : ""}${slider.hasAttribute("data-default") ? " (default)" : ""}`;
+}
+document.addEventListener("input", event => {
+  if (event.target.id === "context-threshold") event.target.removeAttribute("data-default");
+  if (["context-threshold", "context-window", "context-auto"].includes(event.target.id)) renderContextThreshold();
+});
 async function saveContextSettings(reset) {
   const id = projectId, number = selector => { const raw = document.querySelector(selector).value.trim(); if (!raw) return undefined; const value = Number(raw); if (!Number.isSafeInteger(value)) throw new Error("Context settings must be whole numbers"); return value; };
-  const context = reset ? null : { autoCompact: document.querySelector("#context-auto").checked, ...Object.fromEntries([["contextWindow", number("#context-window")], ["thresholdPercent", number("#context-threshold")], ["keepRecentTokens", number("#context-keep")]].filter(([, value]) => value !== undefined)) };
+  const slider = document.querySelector("#context-threshold"), threshold = slider.hasAttribute("data-default") ? undefined : Number(slider.value);
+  const context = reset ? null : { autoCompact: document.querySelector("#context-auto").checked, ...Object.fromEntries([["contextWindow", number("#context-window")], ["thresholdPercent", threshold], ["keepRecentTokens", number("#context-keep")]].filter(([, value]) => value !== undefined)) };
   const settings = await api({ action: "settings-snapshot", id });
   await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { context } }, reset ? "Context settings reset to defaults." : "Context settings saved; they apply from the next step.");
   await loadContextSettings(true);
@@ -1651,7 +1660,21 @@ function renderMarkdown(value, options = {}) {
     let list = null, quote = [];
     const flushList = () => { if (list) { out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ""}>${list.items.map(item => `<li>${inlineMarkdown(item)}</li>`).join("")}</${list.tag}>`); list = null; } };
     const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${quote.map(inlineMarkdown).join("<br>")}</blockquote>`); quote = []; } };
-    for (const line of lines) {
+    const cells = row => row.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "").split(/(?<!\\)\|/).map(cell => cell.trim().replaceAll("\\|", "|"));
+    const separator = row => /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(row ?? "");
+    for (let at = 0; at < lines.length; at++) {
+      const line = lines[at];
+      // GFM table: a header row with pipes, then a --- separator row; body rows run until a line without a pipe.
+      if (line.includes("|") && separator(lines[at + 1])) {
+        flushList(); flushQuote();
+        const head = cells(line), align = cells(lines[at + 1]).map(cell => cell.endsWith(":") ? cell.startsWith(":") ? "center" : "right" : "");
+        const cell = (tag, text, index) => `<${tag}${align[index] ? ` class="align-${align[index]}"` : ""}>${inlineMarkdown(text ?? "")}</${tag}>`;
+        const body = [];
+        for (at += 2; at < lines.length && lines[at].includes("|") && lines[at].trim(); at++) body.push(cells(lines[at]));
+        at--;
+        out.push(`<div class="table-wrap"><table><thead><tr>${head.map((text, index) => cell("th", text, index)).join("")}</tr></thead><tbody>${body.map(row => `<tr>${head.map((_, index) => cell("td", row[index], index)).join("")}</tr>`).join("")}</tbody></table></div>`);
+        continue;
+      }
       const ordered = /^\s*(\d+)[.)]\s+(.+)$/.exec(line), unordered = /^\s*[-*]\s+(.+)$/.exec(line);
       if (ordered || unordered) { flushQuote(); const tag = ordered ? "ol" : "ul"; if (list?.tag !== tag) flushList(); if (!list) list = { tag, items: [], start: ordered ? Number(ordered[1]) : 1 }; list.items.push(ordered ? ordered[2] : unordered[1]); continue; }
       // Blank lines between items keep one list; indented lines continue the last item.
@@ -2435,15 +2458,17 @@ document.addEventListener("keyup", event => { if (["ArrowLeft", "ArrowRight", "H
   composeText.addEventListener("scroll", () => { const backdrop = document.querySelector("#compose .compose-backdrop"); if (backdrop) backdrop.scrollTop = composeText.scrollTop; }, { passive: true });
   composeText.addEventListener("mouseup", () => void updateSkillMenu(composeText).catch(() => closeSkillMenu()));
 }
-// Collapsible project sidebar (wide layouts): toggle buttons and ⌘B / Ctrl+B; remembered per browser.
+// Collapsible project sidebar (wide layouts): collapses to an icon rail; toggle button and ⌘B / Ctrl+B; remembered per browser.
 function setSidebar(collapsed, persist = true) {
   document.querySelector(".app").classList.toggle("side-collapsed", collapsed);
-  for (const button of document.querySelectorAll("[data-side-toggle]")) button.setAttribute("aria-expanded", String(!collapsed));
-  document.querySelector("#side-open").hidden = !collapsed;
+  const toggle = document.querySelector("#side-toggle"), label = `${collapsed ? "Expand" : "Collapse"} sidebar`;
+  toggle.setAttribute("aria-expanded", String(!collapsed)); toggle.setAttribute("aria-label", label); toggle.title = `${label} (⌘B / Ctrl+B)`;
   if (persist) { try { localStorage.setItem("pi-projects:side-collapsed", collapsed ? "1" : "0"); } catch { /* storage blocked */ } }
 }
 try { setSidebar(localStorage.getItem("pi-projects:side-collapsed") === "1", false); } catch { setSidebar(false, false); }
-document.addEventListener("click", event => { if (!event.target.closest("[data-side-toggle]")) return; const collapsed = !document.querySelector(".app").classList.contains("side-collapsed"); setSidebar(collapsed); document.querySelector(collapsed ? "#side-open" : "#side-toggle").focus(); });
+// The width animates only for toggles, not for the restored state on load.
+requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector(".app").classList.add("side-animate")));
+document.addEventListener("click", event => { if (!event.target.closest("[data-side-toggle]")) return; setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
 document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
 for (const id of ["attach-input", "upload-input"]) document.querySelector(`#${id}`).addEventListener("change", event => {
@@ -3397,3 +3422,4 @@ const markSettingsNav = () => {
 };
 document.querySelector(".body").addEventListener("scroll", markSettingsNav, { passive: true });
 new MutationObserver(markSettingsNav).observe(document.querySelector('[data-panel="settings"]'), { attributes: true, attributeFilter: ["hidden"] });
+

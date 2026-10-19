@@ -31,7 +31,7 @@ try {
   url.searchParams.set('project', id); url.searchParams.set('tab', 'settings');
   const s = await openPage(url.toString());
   await waitFor(`!!document.querySelector('#context-settings #context-window')`, s, 'context card');
-  await evaluate(`(() => { const set = (q, v) => { document.querySelector(q).value = v; }; set('#context-window', '20000'); set('#context-threshold', '50'); set('#context-keep', '2000'); document.querySelector('#context-auto').checked = true; document.querySelector('[data-action="context-save"]').click(); })()`, s);
+  await evaluate(`(() => { const set = (q, v) => { document.querySelector(q).value = v; }; set('#context-window', '20000'); set('#context-threshold', '50'); document.querySelector('#context-threshold').dispatchEvent(new Event('input', { bubbles: true })); set('#context-keep', '2000'); document.querySelector('#context-auto').checked = true; document.querySelector('[data-action="context-save"]').click(); })()`, s);
   await eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.context?.contextWindow === 20000, 'context settings not saved from the UI');
   const saved = (await rpc({ action: 'settings-snapshot', id })).values.context;
   check('X1 Settings card saves window, auto-compact, threshold and keep-recent', JSON.stringify(saved) === JSON.stringify({ autoCompact: true, contextWindow: 20000, thresholdPercent: 50, keepRecentTokens: 2000 }), saved);
