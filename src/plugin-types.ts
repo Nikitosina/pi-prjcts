@@ -58,6 +58,8 @@ export type VcsProvider = {
   workerRule?: string;
   /** Executable names a GitHub command profile must not run (this kind's own tools). */
   executables?: readonly string[];
+  /** Executables the coordinator's VCS shell may run, and why a call (arguments after the executable) is refused; undefined allows it. */
+  coordinatorShell?: { executables: readonly string[]; blocked(executable: string, args: string): string | undefined };
 };
 
 // ---- workspace ----
