@@ -35,6 +35,7 @@ import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } f
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
+import { actOnSimulator, closeSimulators, configureSimulator, pauseSimulatorManagement, recoverSimulator, simulatorSnapshot } from "./simulator.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -129,12 +130,14 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
 }
 
 async function lifecycle<T>(id: string, validate: (project: ReturnType<typeof loadProject>) => void, operation: (owner: DurableProjectRuntime) => Promise<T>): Promise<T> {
+  let resumeSimulator = () => {};
   await withProjectLock(id, async () => {
     validate(loadProject(id));
+    resumeSimulator = pauseSimulatorManagement(id);
     lifecycleChanging.add(id);
   });
   try { return await operation(await durable(id, true)); }
-  finally { lifecycleChanging.delete(id); }
+  finally { lifecycleChanging.delete(id); resumeSimulator(); }
 }
 
 /** One-click authorizations (GitHub and provider plugins) follow workspace grant changes. */
@@ -252,6 +255,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "upload-delete": return withProjectLock(input.id, async () => deleteUpload(ownedProjectDir(input.id), input.uploadId));
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
+    case "simulator-snapshot": ownedProjectDir(input.id); return simulatorSnapshot(input.id);
+    case "simulator-configure": return withProjectLock(input.id, () => configureSimulator(input.id, input));
+    case "simulator-recover": return withProjectLock(input.id, () => recoverSimulator(input.id, input));
+    case "simulator-action": {
+      ownedProjectDir(input.id);
+      return withProjectLock(input.id, () => actOnSimulator(input.id, input.operation, input.requestId, { udid: input.udid, sourceUdid: input.sourceUdid }));
+    }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
     case "ref-candidates": return refCandidates(loadProject(input.id), await knowledgeDir(input.id), { refresh: input.refresh });
     case "ref-preview": return input.kind === "skill" ? skillPreview(await configuredSkills(input.id), input.value) : refPreview(loadProject(input.id), { kind: input.kind, value: input.value });
@@ -742,6 +752,7 @@ function shutdown(): Promise<void> {
     try { webhooks.close(); } catch (error) { report(error); }
     try { telegram.close(); await notifier.close(); } catch (error) { report(error); }
     try { server.close(); } catch (error) { report(error); }
+    try { await closeSimulators(); } catch (error) { report(error); }
     try { await githubInspection.close(); } catch (error) { report(error); }
     try { await mcpPool.close(); } catch (error) { report(error); }
     for (const pending of durableRuntimes.values()) {

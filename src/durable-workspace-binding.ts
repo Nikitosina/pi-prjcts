@@ -23,8 +23,10 @@ import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
+import { workerSimulatorTools } from "./simulator-tools.ts";
+import { simulatorEnabled } from "./simulator.ts";
 
-const ENVIRONMENT_NOTE = "\n\nShared resources and long commands: bash calls time out, so start builds, test runs, dev servers and other long commands with projects_bg_start (returns an id; the output goes to a log artifact), poll with projects_bg_status and end them with projects_bg_stop; they keep running across your turns and stop with the thread. Simulators, devices and other machine-global resources are shared with other workers: take a lease with projects_lease_acquire {resource, ttlMinutes, waitSeconds?} before using one, keep to a neutral name others also use, and release it with projects_lease_release when done (it also frees itself when your work ends). If it is held, you are told by whom and until when: do other work, wait with waitSeconds, or report the blocker; never stop the other worker's use of it. Before building or using simulators read the runbooks/ project knowledge for a known working method.";
+const ENVIRONMENT_NOTE = "\n\nShared resources and long commands: bash calls time out, so start builds, test runs, dev servers and other long commands with projects_bg_start (returns an id; the output goes to a log artifact), poll with projects_bg_status and end them with projects_bg_stop; they keep running across your turns and stop with the thread. Simulators, devices and other machine-global resources are shared with other workers: take a lease with projects_lease_acquire {resource, ttlMinutes, waitSeconds?} before using one, keep to a neutral name others also use, and release it with projects_lease_release when done (it also frees itself when your work ends). If it is held, you are told by whom and until when: do other work, wait with waitSeconds, or report the blocker; never stop the other worker's use of it. For the project's managed iOS simulators, call projects_worker_simulator_status to get the clone your task names (exact UDID and canonical simulator:UDID lease resource). Acquire that exact resource before build/install/launch or projects_worker_simulator_screenshot. Only use project clones, never a source simulator; ask the coordinator to create, boot, reset or delete one (for example when you need an iPad and only an iPhone clone exists). Slimming disables some app services, so check status before feature-specific tests. Before building or using simulators read the runbooks/ project knowledge for a known working method.";
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export function durableWorkspaceBinding(input: { project: Project; configuredSkillLoader?: Pick<ResourceLoader, "getSkills">; conversation: () => Conversation; controlRoot: string; projectStanding?: DurableStanding; commands?: ReturnType<typeof commandExecution>; commandApprovals?: () => OperationApprovals; isClosed?: () => boolean; /** Whole-repository workers get lease and background-command tools when present. */ environment?: { leases: ResourceLeases; background: BackgroundCommands } }): DurablePrepareWorkerEnvironment | undefined {
   const authorization = input.project.workspaceAuthorization;
@@ -54,7 +56,12 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     assertStanding();
     const provider = isolationProvider(authorization.provider);
     // A thread that took over another's worktree uses that allocation's identity (same receipt, path and branch); the previous thread may not run again.
-    const thread = await input.conversation().commit(async tx => { const item = (await tx.doc(DurablePlanning, input.conversation().id)).threads[request.threadId]; return { workspaceFrom: item?.workspaceFrom, transferredTo: item?.transferredTo, continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined }; }, BACKGROUND_CONTEXT);
+    const thread = await input.conversation().commit(async tx => {
+      const state = await tx.doc(DurablePlanning, input.conversation().id), item = state.threads[request.threadId];
+      const bound = Object.values(state.work).findLast(work => work.threadId === request.threadId && work.attempt?.boundTools)?.attempt?.boundTools;
+      return { workspaceFrom: item?.workspaceFrom, transferredTo: item?.transferredTo, continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined,
+        simulatorTools: bound ? bound.includes("projects_worker_simulator_status") : !item?.workspaceConfigured && simulatorEnabled(input.project.id) };
+    }, BACKGROUND_CONTEXT);
     if (thread.transferredTo) throw new Error(`This thread's worktree was handed to thread ${thread.transferredTo}; it can no longer run work. Send follow-ups to that thread.`);
     const allocationThread = thread.workspaceFrom ?? request.threadId;
     const intentId = stableUuid(`${input.project.id}:${allocationThread}:${scope.id}`), attemptId = stableUuid(`${intentId}:allocation`);
@@ -116,6 +123,7 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     // Evidence folder per thread, in the project home (survives worktree cleanup); path in the instructions and $PI_ARTIFACTS_DIR.
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
     if (whole) {
+      if (thread.simulatorTools) tools.push(...workerSimulatorTools({ projectId: input.project.id, threadId: request.threadId, conversationId: request.conversationId }));
       const guard = (command: string) => attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy);
       const codingTools = createCodingTools(workDir, { bash: { spawnHook: ({ command, env, ...context }) => ({ ...context, env: { ...env, PI_ARTIFACTS_DIR: artifacts! }, command: guard(command) }) } });
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {

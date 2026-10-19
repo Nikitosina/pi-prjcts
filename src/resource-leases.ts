@@ -4,6 +4,10 @@ export type LeaseAnswer = { acquired: true; resource: string; until: string } | 
 type Held = { holder: LeaseHolder; until: number; timer: ReturnType<typeof setTimeout> };
 type Waiter = { holder: LeaseHolder; ttlMs: number; settle: (answer: LeaseAnswer) => void };
 const same = (a: LeaseHolder, b: LeaseHolder) => a.projectId === b.projectId && a.threadId === b.threadId;
+function canonicalResource(resource: string): string {
+  const uuid = /^(?:simulator:)?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.exec(resource)?.[1];
+  return uuid ? `simulator:${uuid.toUpperCase()}` : resource;
+}
 
 export class ResourceLeases {
   readonly #held = new Map<string, Held>();
@@ -27,6 +31,7 @@ export class ResourceLeases {
   }
   /** Takes the resource, renews it for the current holder, or answers who holds it; with waitMs queues FIFO for at most that long. */
   async acquire(resource: string, holder: LeaseHolder, ttlMs: number, waitMs = 0, signal?: AbortSignal): Promise<LeaseAnswer> {
+    resource = canonicalResource(resource);
     const held = this.#held.get(resource);
     if (!held || same(held.holder, holder)) return this.#grant(resource, holder, ttlMs);
     const denied = (waitedMs: number): LeaseAnswer => { const now = this.#held.get(resource) ?? held; return { acquired: false, resource, heldBy: now.holder, until: new Date(now.until).toISOString(), waitedMs }; };
@@ -51,6 +56,7 @@ export class ResourceLeases {
   }
   /** Only the holder can release. */
   release(resource: string, holder: LeaseHolder): boolean {
+    resource = canonicalResource(resource);
     const held = this.#held.get(resource);
     if (!held || !same(held.holder, holder)) return false;
     this.#free(resource);

@@ -10,6 +10,7 @@ import { openArtifact } from "./artifacts.ts";
 import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
+import { simulatorFrame } from "./simulator.ts";
 
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
@@ -77,6 +78,17 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         const input = parse(Request, JSON.parse(await body(request)));
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/simulator-frame") {
+        const id = url.searchParams.get("project") ?? "";
+        if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
+        loadProject(id);
+        status = 409;
+        const udid = url.searchParams.get("udid") ?? undefined;
+        if (udid !== undefined && !/^[a-fA-F0-9-]{36}$/.test(udid)) throw new Error("Invalid simulator UDID");
+        const frame = await simulatorFrame(id, udid);
+        response.writeHead(200, { ...headers, "content-type": frame.mime, "content-length": frame.bytes.length }).end(frame.bytes);
         return;
       }
       if (request.method === "GET" && url.pathname === "/live") {

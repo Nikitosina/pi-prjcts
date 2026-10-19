@@ -169,6 +169,16 @@ Decision inbox is the chosen default. The browser client lives in `web/`; the te
 Trial screenshots under `artifacts/ui-prototype/` show the earlier simulated app,
 not either live client.
 
+## Optional project simulator
+
+The coordinator screen has an optional Simulator card above Workers. Choose a shut-down iOS simulator as a clone source, enable management, then create the project's simulator. The source is not changed. The host uses `simslim` to slim and boot the clone, and XcodeBuildMCP to capture its screen. Both commands and Xcode must be installed on the Mac; missing tools do not prevent ordinary projects from working.
+
+The card shows polled screenshots, not video, and can expand the image. It never sends taps, gestures or keyboard input. Screenshot fetching pauses when the page is hidden or another project/tab is selected. Screenshots use the existing browser authentication.
+
+Owner enablement grants coordinators `projects_simulator_status`, `projects_simulator_action` and `projects_simulator_screenshot`. Coordinators can create, boot, shut down, reset or delete only their project's recorded clones. Shutdown frees simulator resources without erasing app data. Reset erases that clone's apps and data; deletion permanently removes the clone. New whole-repository worker threads created after enablement can discover the assigned device and inspect screenshots with the worker simulator tools, and must acquire its `simulator:<UDID>` lease before use. Existing threads retain their frozen tool bindings. Worker activity and held leases block destructive maintenance. Existing devices, source simulators, shared runtimes and global caches are outside this grant.
+
+Ownership and request receipts persist in the project's `simulator.json`. Disabling management keeps the clone and its data; deleting a clone keeps enablement so the coordinator can create a replacement. Uncertain or interrupted effects block further management instead of replaying operations. The owner can use **Inspect / acknowledge** after checking the simulator list. Acknowledgement retains matching recorded ownership, never adopts unknown devices or retries effects, and saves the previous receipt for inspection. Agents cannot acknowledge unknown outcomes. Project archive/deletion and host shutdown do not automatically erase simulators. Default slimming disables services that some app tests require, including push and iCloud; do not treat a slim-device run as verification of those features.
+
 ## Verify and maintain
 
 General verification remains suspended. The pi-subagent-manager migration has owner approval for an isolated Durable-host E2E only. Commands below are otherwise reference, not permission to run unrelated checks/E2Es or restart production. Historical/frozen fixtures and evidence must remain unchanged.
