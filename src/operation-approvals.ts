@@ -22,7 +22,7 @@ const Records = defineDoc<{ items: OperationRecord[] }>({
 const context = BACKGROUND_CONTEXT;
 
 // Native document values can be proxies. Detach both object levels before leaving a commit.
-function copy(record: OperationRecord): OperationRecord { return { ...record, operation: { ...record.operation } }; }
+function copy(record: OperationRecord): OperationRecord { return { ...record, operation: record.operation.kind === "vcs" ? { ...record.operation, risks: [...record.operation.risks] } : { ...record.operation } }; }
 
 export function operationApprovals({ root, harness, project }: { root: Conversation; harness: Harness; project: Project }) {
   function owned(id: string): void {
@@ -47,6 +47,9 @@ export function operationApprovals({ root, harness, project }: { root: Conversat
     const operation: OperationSpec = source.kind === "command" ? {
       provider: source.provider, kind: source.kind, repositoryId: source.repositoryId, scopeId: source.scopeId, threadId: source.threadId,
       profileId: source.profileId, profileRevision: source.profileRevision, effect: source.effect, receiptId: source.receiptId, allocationAttemptId: source.allocationAttemptId, requestId: source.requestId,
+    } : source.kind === "vcs" ? {
+      provider: source.provider, kind: source.kind, repositoryId: source.repositoryId, scopeId: source.scopeId,
+      action: source.action, checkout: source.checkout, target: source.target, expectedState: source.expectedState, state: source.state, risks: [...source.risks],
     } : { provider: source.provider, kind: source.kind, repositoryId: source.repositoryId, scopeId: source.scopeId, pullRequest: source.pullRequest, expectedHead: source.expectedHead };
     const fingerprint = createHash("sha256").update(JSON.stringify({ id: input.requestId, projectId: project.id, bindingRevision, operation })).digest("hex");
     return root.commit(async tx => {

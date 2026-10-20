@@ -148,6 +148,14 @@ export type WorkspaceProvider = {
   attach(context: AttachContext): Promise<WorkerAttachment>;
   /** Cleanup inventory: facts of one allocated worker worktree and the removal. */
   workerFacts(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; busy(threadId: string): boolean }): Promise<WorkerFacts>;
+  /** Exact facts for owner-approved worker cleanup. Unknown, dirty or unpublished work must refuse. */
+  removalSnapshot?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt }): Promise<{ state: string; risks: string[] }>;
+  /** Rechecks the snapshot and removes under its exact lease fence, without force or lease handoff. */
+  removeApproved?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; state: string }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
+  /** Exact registered mount and storage facts; local work may be unreadable until remount. */
+  remountSnapshot?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt }): Promise<{ state: string; risks: string[] }>;
+  /** Restores the approved mount without retiring its receipt or authorizing removal. */
+  remountApproved?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; state: string }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
   /** Removes a worker worktree or read-head snapshot (unforced, fenced). */
   remove(input: { entry: string; leaseOwner: string }): Promise<{ ok: true } | { ok: false; error: string }>;
   readHeadEntry(project: Project, path: string): { leaseOwner: string; entry: string };

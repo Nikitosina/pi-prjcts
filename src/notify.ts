@@ -52,8 +52,9 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
       if (seen.has(key)) continue;
       seen.add(key);
       if (silent) continue;
-      const op = record.operation, what = op.kind === "command" ? `command ${op.effect} in ${op.repositoryId}` : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
-      push({ ...base, chatId: "main", chat: chats[0].title, kind: "approval", title: `${op.provider} ${what}`, text: `Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.`, operationId: record.id, fingerprint: record.fingerprint });
+      const op = record.operation, what = op.kind === "vcs" ? `${op.action} ${op.target}` : op.kind === "command" ? `command ${op.effect} in ${op.repositoryId}` : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
+      const detail = op.kind === "vcs" ? `\nCheckout: ${op.checkout}\n${op.risks.join("\n")}\nReview the exact state and permit execution in the browser approval inbox.` : "";
+      push({ ...base, chatId: "main", chat: chats[0].title, kind: "approval", title: clip(`${op.provider} ${what}`, 300), text: clip(`Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.${detail}`), operationId: record.id, fingerprint: record.fingerprint });
     }
     // CI failed / PR merged (Follow PRs and the provider PR monitors): one notice each, in the events chat.
     const eventChat = loadAutomations(project.id).eventChat, eventTarget = chats.find(chat => chat.id === eventChat && !chat.archived) ?? chats[0];

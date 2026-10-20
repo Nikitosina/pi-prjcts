@@ -57,7 +57,7 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const thread = await input.conversation().commit(async tx => {
       const state = await tx.doc(DurablePlanning, input.conversation().id), item = state.threads[request.threadId];
       const bound = Object.values(state.work).findLast(work => work.threadId === request.threadId && work.attempt?.boundTools)?.attempt?.boundTools;
-      return { workspaceFrom: item?.workspaceFrom, transferredTo: item?.transferredTo, continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined, bound, workspaceConfigured: Boolean(item?.workspaceConfigured) };
+      return { workspaceFrom: item?.workspaceFrom, transferredTo: item?.transferredTo, continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined, bound: bound ? [...bound] : undefined, workspaceConfigured: Boolean(item?.workspaceConfigured) };
     }, BACKGROUND_CONTEXT);
     if (thread.transferredTo) throw new Error(`This thread's worktree was handed to thread ${thread.transferredTo}; it can no longer run work. Send follow-ups to that thread.`);
     const allocationThread = thread.workspaceFrom ?? request.threadId;

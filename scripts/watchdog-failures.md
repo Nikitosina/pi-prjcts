@@ -36,3 +36,7 @@ Verified by `scripts/watchdog-e2e.mjs` unless marked (inspection).
 - D22a The E2E waits only for `running` to clear, so queued work survives into the restart (fixed: wait for no queued/running).
 - D22b Settled work + resume + restart must always admit a send (looped 3x, deterministic).
 - D22c Work still active at the restart must come back paused with a denied send (by design), and an explicit resume must admit again.
+
+## Blocked delivery (found live: an uncertain Arc PR receipt silenced every check)
+- D23 An uncertain write receipt (Arc, GitHub, VCS shell, command) blocks watchdog checks. Checks never write; the gate exists so automatic turns do not repeat an uncertain write, and the write tools refuse retries on their own. Pause still blocks checks (D2). (inspection)
+- D24 A check that reached no chat counts as a check in Settings (`ticks`), and one failing chat drops the checks for the other chats. (inspection)

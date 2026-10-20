@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { hasUncertainVcsOperations } from "./vcs-operation-state.ts";
 import { existsSync } from "node:fs";
 import { AssistantEntry, configure, defineDoc, defineExtension, defineTask, defineTool, UsageDoc, type Conversation, type ConversationId, type ModelRef, type TaskId, type ToolRegistration, type ToolExecutionApi, type Tx } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -375,6 +376,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   }
   async function admit(tx: Tx, parent: ConversationId, work: DurablePlanWork, kick: boolean, chat?: ConversationId): Promise<StoredWork> {
     const state = await tx.doc(DurablePlanning, parent);
+    if (await hasUncertainVcsOperations(tx, parent)) throw new Error("A VCS operation has an uncertain outcome; worker admission is denied");
     if (state.paused) throw new Error("Project plan is paused; new worker admission is denied");
     if (state.workerCap === null) state.workerCap = options.workerCap;
     const same = state.work[work.id];
@@ -498,7 +500,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       for (const work of Object.values(state.work)) if (work.status === "blocked" && work.blocker === PREDECESSOR_BLOCKER && work.dependsOn.every(id => ["queued", "running", "completed"].includes(state.work[id]?.status ?? ""))) { requeue(work); changed = true; }
     }
   }
-  async function resume(root: Conversation): Promise<DurablePlanSnapshot> { await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (state.pausing) throw new Error("Project pause is still aborting background work"); state.paused = false; requeuePauseInterrupted(state); for (const work of Object.values(state.work)) if (work.report && !work.report.delivered) await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true }); state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true })); }, BACKGROUND_CONTEXT); return snapshot(root); }
+  async function resume(root: Conversation): Promise<DurablePlanSnapshot> { await root.commit(async tx => { if (await hasUncertainVcsOperations(tx, root.id)) throw new Error("A VCS operation has an uncertain outcome; resume is denied"); const state = await tx.doc(DurablePlanning, root.id); if (state.pausing) throw new Error("Project pause is still aborting background work"); state.paused = false; requeuePauseInterrupted(state); for (const work of Object.values(state.work)) if (work.report && !work.report.delivered) await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true }); state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true })); }, BACKGROUND_CONTEXT); return snapshot(root); }
   async function stop(root: Conversation, threadId: string): Promise<{ stopId: string; taskIds: TaskId[]; conversationIds: ConversationId[] }> {
     return root.commit(async tx => {
       const state = await tx.doc(DurablePlanning, root.id), thread = state.threads[threadId];
@@ -553,6 +555,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   }
   async function resumeWorker(root: Conversation, threadId: string): Promise<void> {
     await root.commit(async tx => {
+      if (await hasUncertainVcsOperations(tx, root.id)) throw new Error("A VCS operation has an uncertain outcome; worker resume is denied");
       const state = await tx.doc(DurablePlanning, root.id), thread = state.threads[threadId];
       if (!thread) throw new Error("Unknown durable thread UUID");
       if (state.paused || state.pausing) throw new Error("Project plan is paused; worker resume is denied");

@@ -159,6 +159,42 @@ its numeric repository identity and require an expected live head SHA. This
 read-only inspection does not link the local checkout to the remote repository
 or turn decision records into executable grants. provider plugin inspection remains pending.
 
+### Approved coordinator VCS operations
+
+`projects_vcs_operation` previews or requests a named operation with `method`,
+`scopeId`, `action` and `target`. Requests also need a stable `requestId` UUID.
+Supported actions are `worktree-remove` for one host-owned Git or Arc worktree,
+`worktree-remount` for one registered provider mount, and `branch-delete` for one
+local Git branch. Arc removal and remount require the provider's matching hooks. Resets, cleaning, arbitrary shell commands and publication
+remain unavailable through this tool.
+
+Review the exact target, state and risks in the approval inbox. Choose **Allow
+exact executor**, then confirm **Execute once**, or let the coordinator execute
+using that approval's ID and fingerprint. Plain approval and Telegram's **Approve
+record only** button grant no execution permission. State changes require a fresh
+request and approval. All workers must be settled; dirty, local-only, active or
+unknown work remains protected. Approved cleanup may remove a safely retained
+worktree with an open PR. Git cleanup keeps its branch and commits. Arc cleanup
+forgets that worktree's store and local refs: stashes block removal, and every
+local branch tip must match the retained base/current head or its published
+remote tip. Unknown inventories or more than 32 local branches also block it.
+
+Execution records uncertainty before changing VCS state. Completed retries return
+the original receipt; uncertain attempts never run again. Inspecting a receipt
+neither retries nor clears uncertainty. An uncertain attempt blocks new workers
+and automatic worktree cleanup pending manual investigation. There is no VCS
+uncertainty recovery control yet; inspection cannot unblock that project.
+For an unmounted Arc worktree, request `worktree-remount` first. Its approval
+binds the registered mount, backing storage and host lease, not local cleanliness
+or permission to delete. Remount uses the registered Arc mount configuration;
+it does not transfer ownership or retire the allocation. Arc's named remount
+checks the owner under its registry lock, but has no atomic renewal-timestamp
+flag; the provider rechecks the exact snapshot before calling it. Afterward,
+inspect actual local changes and unpublished commits, then request a separate
+`worktree-remove` approval if safe. Fetching a PR head cannot establish that an
+unmounted worktree has no local work. Dirty or unreadable state still blocks
+removal.
+
 ## Security limits
 
 Run only against trusted workspaces. Extensions execute with your account's permissions. File-tool and shell-pattern checks are operational guardrails, not confinement: shell scripts, generated programs, and ambient trusted extensions can access files or services outside the workspace. Keep production credentials away from unattended workers. SDK extension dialogs are recorded as questions and fail closed. Answer in the decision inbox or perform the approved action yourself. An answer cannot bypass publishing or destructive-command checks.

@@ -366,7 +366,7 @@ function render() {
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
   const hint = document.querySelector("#compose-hint");
-  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for skills · @ for files, docs, issues${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
+  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for commands, skills · @ for files, docs, issues${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -1016,7 +1016,43 @@ function chatMessageHtml(message, assistant) {
   return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
 }
 const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg>';
-// "/" skill picker in the coordinator composer. The catalog loads once per project on first use.
+// Pi-style commands: a whole composer message "/name [argument]" runs here instead of reaching the coordinator.
+const chatArgs = () => chatId === "main" ? {} : { chatId };
+const slashCommands = [
+  { name: "new", description: "Clear this chat's context; earlier messages stay stored", run: () => mutate({ action: "chat-reset", id: projectId, ...chatArgs() }, "New context started.") },
+  { name: "compact", description: "Compact this chat's context now", run: compactNow },
+  { name: "name", description: "Rename this chat", argument: "<title>", run: async title => {
+    if (!title) return document.querySelector('#chat-bar [data-action="chat-rename"]')?.click();
+    await mutate({ action: "chat-update", id: projectId, chatId, title: title.slice(0, 120) }, "Chat renamed.");
+  } },
+  { name: "resume", description: "Switch to another chat", run: chatPickerDialog },
+  { name: "session", description: "Show this chat's model, context and usage", run: sessionDialog },
+  { name: "copy", description: "Copy the last reply to the clipboard", run: async () => {
+    const reply = view?.messages.findLast(message => message.role === "assistant" && message.text?.trim());
+    if (!reply) throw new Error("No reply to copy yet");
+    await navigator.clipboard.writeText(reply.text); toast("Last reply copied.");
+  } },
+  { name: "settings", description: "Open project settings", run: () => settingsList() },
+];
+function slashCommand(text) {
+  const match = /^\/([\w-]+)(?:\s+([\s\S]*))?$/.exec(text);
+  const command = match && slashCommands.find(item => item.name === match[1]);
+  return command ? { command, argument: match[2]?.trim() ?? "" } : null;
+}
+function chatPickerDialog() {
+  const chats = view?.chats ?? [];
+  showDialog("Resume a chat", chats.map(chat => `<button type="button" class="ghost" data-action="chat-select" data-chat="${esc(chat.id)}" ${chat.id === chatId ? "disabled" : ""}>${esc(chat.title)}${chat.archived ? " (archived)" : ""}${chat.busy ? " · working" : ""}</button>`).join("") || '<p class="note">No chats yet.</p>');
+}
+async function sessionDialog() {
+  const id = projectId, chat = currentChat(), context = view?.context;
+  const version = showDialog("Session", '<p class="note">Reading usage…</p>', chat?.title ?? "Main");
+  const page = await api({ action: "usage-snapshot", id, offset: 0, limit: 1 });
+  if (!dialog.open || version !== dialogVersion || id !== projectId) return;
+  const usage = chatId === "main" ? page.coordinator : page.chats?.find(item => item.chatId === chatId);
+  const rows = [["Chat", chat?.title ?? "Main"], ["Chat ID", chatId], ["Conversation", chat?.conversationId ?? "—"], ["Model", view.project.model], ["Context", context?.window ? `${context.tokens.toLocaleString()} / ${context.window.toLocaleString()} tokens` : "unknown"], ["Messages shown", view.messages.length], ["Tokens used", usage ? usage.total.totalTokens.toLocaleString() : "—"], ["Cost (SDK estimate)", usage ? `$${usage.total.cost.total.toFixed(2)}` : "—"]];
+  setDialogBody(`<div class="kv">${rows.map(([key, value]) => `<span>${esc(key)}</span><b>${esc(value)}</b>`).join("")}</div>`);
+}
+// "/" picker in the coordinator composer: commands (at the start of the message), then skills. The skill catalog loads once per project on first use.
 let skillCatalog = null, skillMenu = null, prMenu = null, refMenu = null;
 async function loadSkills() {
   const id = projectId;
@@ -1057,7 +1093,8 @@ async function updateSkillMenu(textarea) {
   if (!found) { if (!(await updateRefMenu(textarea))) updatePrMenu(textarea); return; }
   const skills = await loadSkills();
   if (skillQuery(textarea)?.query !== found.query) return;
-  const items = rankSkills(skills, found.query).slice(0, 60);
+  const commands = found.atStart ? rankSkills(slashCommands.map(command => ({ ...command, source: "command" })), found.query) : [];
+  const items = [...commands, ...rankSkills(skills, found.query)].slice(0, 60);
   // Mid-text, a "/" that matches no skill is just a slash.
   if (!items.length && !found.atStart) { closeSkillMenu(); return; }
   prMenu = null; refMenu = null;
@@ -1067,10 +1104,10 @@ async function updateSkillMenu(textarea) {
 function renderSkillMenu() {
   const node = document.querySelector("#skill-menu");
   if (!node || !skillMenu) return;
-  const source = { repo: "Repository", global: "Yours", package: "Package" };
+  const source = { repo: "Repository", global: "Yours", package: "Package", command: "Command" };
   node.innerHTML = skillMenu.items.length
-    ? skillMenu.items.map((skill, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option${index === skillMenu.index ? " active" : ""}" aria-selected="${index === skillMenu.index}" data-action="skill-pick" data-name="${esc(skill.name)}"><span class="skill-name">/${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description)}</span><span class="skill-source">${esc(source[skill.source] ?? skill.source)}</span></button>`).join("")
-    : `<p class="skill-empty">No skill matches “${esc(skillMenu.query)}”</p>`;
+    ? skillMenu.items.map((skill, index) => `<button type="button" role="option" id="skill-option-${index}" class="skill-option${index === skillMenu.index ? " active" : ""}" aria-selected="${index === skillMenu.index}" data-action="skill-pick" data-name="${esc(skill.name)}" data-source="${esc(skill.source)}"><span class="skill-name">/${esc(skill.name)}${skill.argument ? ` <small>${esc(skill.argument)}</small>` : ""}</span><span class="skill-desc">${esc(skill.description)}</span><span class="skill-source">${esc(source[skill.source] ?? skill.source)}</span></button>`).join("")
+    : `<p class="skill-empty">No command or skill matches “${esc(skillMenu.query)}”</p>`;
   showMenu(node);
   document.querySelector("#compose textarea").setAttribute("aria-activedescendant", skillMenu.items.length ? `skill-option-${skillMenu.index}` : "");
   node.querySelector(".skill-option.active")?.scrollIntoView({ block: "nearest" });
@@ -1098,6 +1135,12 @@ function replaceBeforeCaret(pattern, insert) {
   closeSkillMenu(); textarea.focus();
 }
 function pickSkill(name) { rememberPick(`/skill:${name}`); replaceBeforeCaret(/(^|[\s(\[])\/(?:skill:)?[\w.-]*$/, `/skill:${name} `); }
+// Enter on a command without an argument runs it; Tab, or a command taking an argument, only fills the composer.
+function pickMenuItem(item, run = true) {
+  if (item.source !== "command") return pickSkill(item.name);
+  replaceBeforeCaret(/(^|[\s(\[])\/(?:skill:)?[\w.-]*$/, `/${item.name} `);
+  if (run && !item.argument) document.querySelector("#compose").requestSubmit();
+}
 
 // "@" references: GitHub issues, knowledge documents, uploads and project files. Candidates load per project (host caches them) and refresh after 30 s.
 let refCatalog = null, refLoading = null;
@@ -2038,7 +2081,7 @@ async function action(node) {
       node.disabled = true; // a second click must not resend
       await mutate({ action: "message", id: projectId, text: job.text, ...(chatId === "main" ? {} : { chatId }) }, "Message resent to the coordinator."); break;
     }
-    case "chat-select": changeChat(node.dataset.chat); break;
+    case "chat-select": if (dialog.contains(node)) closeDialog(); changeChat(node.dataset.chat); break;
     case "chat-new": {
       const id = projectId, created = await mutate({ action: "chat-create", id }, "New chat opened. It shares this project's workers and knowledge.");
       if (id === projectId) changeChat(created.id);
@@ -2063,7 +2106,7 @@ async function action(node) {
     case "thread-list": threadList(); break;
     case "all-work": setTab("activity"); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
-    case "skill-pick": pickSkill(node.dataset.name); break;
+    case "skill-pick": pickMenuItem(skillMenu?.items.find(item => item.name === node.dataset.name && item.source === node.dataset.source) ?? { name: node.dataset.name }); break;
     case "ref-pick": { const item = refMenu?.items[Number(node.dataset.index)]; if (item) pickRef(item); break; }
     case "ref-open": await refOpen(node.dataset.kind, node.dataset.value); break;
     case "pr-pick": pickPr(prMenu.items.find(item => item.provider === node.dataset.provider && String(item.id) === node.dataset.pr)?.ref ?? `#${node.dataset.pr}`); break;
@@ -2216,6 +2259,14 @@ async function action(node) {
 }
 
 async function submit(form) {
+  const slash = form.id === "compose" ? slashCommand(new FormData(form).get("message").trim()) : null;
+  if (slash) {
+    closeSkillMenu();
+    const textarea = form.querySelector("textarea"), key = draftKey(projectId, chatId), typed = textarea.value;
+    await slash.command.run(slash.argument);
+    if (textarea.value === typed) { drafts.delete(key); persistBrowserDrafts(); form.reset(); autosize(textarea); }
+    return;
+  }
   if (form.id === "compose" && (busy || admissionBlocked())) throw new Error("This project cannot accept a request now. Your draft was kept.");
   const data = new FormData(form);
   const id = projectId, version = dialogVersion;
@@ -2421,8 +2472,8 @@ async function submit(form) {
   } else if (form.matches("[data-operation-execute]")) {
     const target = form.dataset.project; requireProject(target);
     const record = ownedOperation(form.dataset.operation, form.dataset.fingerprint);
-    if (!mergeExecutionAvailable(record) || data.get("confirm") !== target) throw new Error("Exact executable merge approval and project confirmation are required");
-    if (!["execute", "inspect"].includes(form.dataset.mode)) throw new Error("Unknown bound merge control");
+    if (!operationExecutionAvailable(record) || data.get("confirm") !== target) throw new Error("Exact executable approval and project confirmation are required");
+    if (!["execute", "inspect"].includes(form.dataset.mode)) throw new Error("Unknown bound operation control");
     const result = await mutate({ action: form.dataset.mode === "inspect" ? "operation-inspect" : "operation-execute", id: target, operationId: record.id, fingerprint: record.fingerprint, confirm: target }, form.dataset.mode === "inspect" ? "Bound outcome inspected. No replay/retry permission inferred." : "Executor responded. Inspect its receipt; no new retry permission inferred.");
     if (target === projectId && dialogVersion === version) showDialog("Bound executor response", `<p>Approval is not effect verification. Uncertain effects must be inspected, never replayed automatically.</p><pre>${esc(JSON.stringify(result, null, 2) ?? "No readable receipt returned; outcome remains unproven.")}</pre>`);
   } else if (form.matches("[data-create]")) {
@@ -2579,7 +2630,7 @@ document.addEventListener("keydown", event => {
   if (skillMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = skillMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { skillMenu.index = (skillMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSkillMenu(); } return; }
-    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickSkill(skillMenu.items[skillMenu.index].name); return; }
+    if ((event.key === "Enter" && !event.shiftKey || event.key === "Tab") && count) { event.preventDefault(); pickMenuItem(skillMenu.items[skillMenu.index], event.key === "Enter"); return; }
     if (event.key === "Escape") { event.preventDefault(); closeSkillMenu(); return; }
   }
   const textarea = event.target.closest("#compose textarea, [data-answer] textarea, [data-task-message] textarea, [data-inline-thread-send] textarea");
@@ -3260,7 +3311,7 @@ async function knowledgeHistory(path, offset = 0) {
   dialog.querySelector(".dialog-body").innerHTML = `<p>Showing ${offset + (page.length ? 1 : 0)}-${offset + page.length}/${records.length}, newest first. The host returns complete history; this view pages 20 revisions. History is read-only, not an automatic rollback.</p><div class="row">${offset ? button("Previous revisions", Math.max(0, offset - 20)) : ""}${offset + page.length < records.length ? button("Next revisions", offset + 20) : ""}</div>${page.map(record => `<details><summary>${esc(record.updatedAt)} · ${esc(record.author)} · ${esc(record.revision)}</summary><p>Revision ID ${esc(record.id)}<br>Prior revision ${esc(record.priorRevision)}</p><h3>Saved text</h3><pre>${esc(record.text)}</pre><h3>Retained preimage</h3><pre>${esc(record.priorText ?? "No prior document")}</pre></details>`).join("")}`;
 }
 function validateOperations(page, id, offset) {
-  if (!page || page.offset !== offset || !Array.isArray(page.items) || page.items.length > 100 || !Number.isSafeInteger(page.total) || page.total < 0 || page.nextOffset !== null && (!Number.isSafeInteger(page.nextOffset) || page.nextOffset !== offset + page.items.length || !page.items.length) || page.items.some(record => !uuid(record.id) || record.projectId !== id || !/^[a-f0-9]{64}$/.test(record.fingerprint) || typeof record.scopeCurrent !== "boolean" || !["pending", "approved", "rejected"].includes(record.status) || !record.operation || !["merge", "auto-merge", "command"].includes(record.operation.kind))) throw new Error("Invalid owned operation page");
+  if (!page || page.offset !== offset || !Array.isArray(page.items) || page.items.length > 100 || !Number.isSafeInteger(page.total) || page.total < 0 || page.nextOffset !== null && (!Number.isSafeInteger(page.nextOffset) || page.nextOffset !== offset + page.items.length || !page.items.length) || page.items.some(record => !uuid(record.id) || record.projectId !== id || !/^[a-f0-9]{64}$/.test(record.fingerprint) || typeof record.scopeCurrent !== "boolean" || !["pending", "approved", "rejected"].includes(record.status) || !record.operation || !["merge", "auto-merge", "command", "vcs"].includes(record.operation.kind))) throw new Error("Invalid owned operation page");
 }
 function ownedOperation(id, fingerprint) {
   const record = operationCache.get(id);
@@ -3268,11 +3319,12 @@ function ownedOperation(id, fingerprint) {
   if (view.project.archived || view.project.deleted || !record.scopeCurrent) throw new Error("Restore the project/use a current scope before changing this operation");
   return record;
 }
-function executionConsentAvailable(record) { return record.status === "pending" && record.scopeCurrent && record.operation.provider === "github" && ["merge", "command"].includes(record.operation.kind); }
+function executionConsentAvailable(record) { return record.status === "pending" && record.scopeCurrent && (record.operation.kind === "vcs" || record.operation.provider === "github" && ["merge", "command"].includes(record.operation.kind)); }
 function mergeExecutionAvailable(record) { return record.status === "approved" && record.executionApproved === true && record.scopeCurrent && record.operation.provider === "github" && record.operation.kind === "merge"; }
+function operationExecutionAvailable(record) { return mergeExecutionAvailable(record) || record.status === "approved" && record.executionApproved === true && record.scopeCurrent && record.operation.kind === "vcs"; }
 function operationLetter(record) {
   const attrs = `data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"`;
-  return `<article class="letter"><h2>${esc(record.operation.provider)} ${esc(record.operation.kind)}</h2>${badge(record.status)}<p>Project ${esc(record.projectId)}<br>ID ${esc(record.id)}<br>Fingerprint ${esc(record.fingerprint)}<br>Current scope: ${esc(record.scopeCurrent)}</p><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre><p>Plain approval does not authorize execution. Consent and execution are separate. Other workspace providers are deferred; auto-merge is unavailable; commands execute only through bound worker profiles.</p><div class="row">${record.status === "pending" ? `<button data-action="operation-decision" ${attrs} data-decision="plain">Approve record only</button>${executionConsentAvailable(record) ? `<button class="danger" data-action="operation-decision" ${attrs} data-decision="execution">Permit exact executor</button>` : ""}<button data-action="operation-decision" ${attrs} data-decision="reject">Reject</button>` : `<p>Decision is immutable. Executable approval: ${esc(record.executionApproved === true)}</p>${mergeExecutionAvailable(record) ? `<button class="danger" data-action="operation-execute" ${attrs}>Execute exact-head merge, separate confirmation</button><button data-action="operation-inspect" ${attrs}>Inspect original merge outcome, never replay</button>` : ""}`}</div></article>`;
+  return `<article class="letter"><h2>${esc(record.operation.provider)} ${esc(record.operation.kind)}</h2>${badge(record.status)}<p>Project ${esc(record.projectId)}<br>ID ${esc(record.id)}<br>Fingerprint ${esc(record.fingerprint)}<br>Current scope: ${esc(record.scopeCurrent)}</p><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre><p>Plain approval does not authorize execution. VCS execution is limited to the exact recorded action and state. Auto-merge is unavailable; commands execute only through bound worker profiles.</p><div class="row">${record.status === "pending" ? `<button data-action="operation-decision" ${attrs} data-decision="plain">Approve record only</button>${executionConsentAvailable(record) ? `<button class="danger" data-action="operation-decision" ${attrs} data-decision="execution">Permit exact executor</button>` : ""}<button data-action="operation-decision" ${attrs} data-decision="reject">Reject</button>` : `<p>Decision is immutable. Executable approval: ${esc(record.executionApproved === true)}</p>${operationExecutionAvailable(record) ? `<button class="danger" data-action="operation-execute" ${attrs}>${record.operation.kind === "vcs" ? "Execute exact VCS operation" : "Execute exact-head merge"}, separate confirmation</button><button data-action="operation-inspect" ${attrs}>Inspect original outcome, never replay</button>` : ""}`}</div></article>`;
 }
 async function operationsDialog(offset = 0) {
   if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) throw new Error("A loaded Durable plan and valid approval page are required");
@@ -3283,7 +3335,7 @@ async function operationsDialog(offset = 0) {
   for (const record of page.items) operationCache.set(record.id, record);
   setDialogBody(`${page.total ? `<div class="seg-row"><span class="note">${page.total} ${page.total === 1 ? "request" : "requests"}</span>${pager({ offset, count: page.items.length, total: page.total, size: 100, data: { action: "operation-list" } })}</div>` : ""}${page.items.map(record => `<div class="list-row"><div class="grow"><strong>${badge(record.status)} ${esc(humanKey(record.operation.kind))} · ${esc(record.operation.repositoryId)}</strong><span class="meta">${esc(record.operation.provider)} · ${record.scopeCurrent ? "scope still current" : "scope has changed"}</span></div><div class="row-actions">${dlgBtn("Details", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }, "small")}</div></div>`).join("") || '<p class="empty-state">No approval requests yet.</p>'}${dlgActions(dlgBtn("Close", { action: "close-dialog" }, "primary"))}`);
 }
-const operationFacts = record => `<div class="kv tight"><span>Action</span><b>${esc(record.operation.provider)} · ${esc(humanKey(record.operation.kind))}</b>${record.operation.repositoryId ? `<span>Repository</span><b>${esc(record.operation.repositoryId)}</b>` : ""}<span>Status</span><b>${badge(record.status)}</b><span>Scope</span><b>${record.scopeCurrent ? "Still current" : "Changed since"}</b></div>`;
+const operationFacts = record => `<div class="kv tight"><span>Action</span><b>${esc(record.operation.provider)} · ${esc(humanKey(record.operation.kind === "vcs" ? record.operation.action : record.operation.kind))}</b>${record.operation.repositoryId ? `<span>Repository</span><b>${esc(record.operation.repositoryId)}</b>` : ""}<span>Status</span><b>${badge(record.status)}</b><span>Scope</span><b>${record.scopeCurrent ? "Still current" : "Changed since"}</b>${record.operation.kind === "vcs" ? `<span>Checkout</span><b class="mono">${esc(record.operation.checkout)}</b><span>Target</span><b class="mono">${esc(record.operation.target)}</b><span>Expected state</span><b class="mono">${esc(record.operation.expectedState)}</b>` : ""}</div>${record.operation.kind === "vcs" ? `<p class="note-box warn">Approval applies once, to this target and state only. Changed state requires a new request. Active-worker protections remain in force.</p><ul>${record.operation.risks.map(risk => `<li>${esc(risk)}</li>`).join("")}</ul><h3>State reviewed for approval</h3><pre>${esc(typeof record.operation.state === "string" ? record.operation.state : JSON.stringify(record.operation.state, null, 2))}</pre>` : ""}`;
 const operationBinding = record => `<details class="raw"><summary>Exact binding</summary><div class="kv tight mt"><span>Project</span><b class="mono">${esc(record.projectId)}</b><span>Request</span><b class="mono">${esc(record.id)}</b><span>Fingerprint</span><b class="mono">${esc(record.fingerprint)}</b></div><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre></details>`;
 function operationView(id, fingerprint) {
   const record = operationCache.get(id);
@@ -3291,7 +3343,7 @@ function operationView(id, fingerprint) {
   const attrs = { operation: record.id, fingerprint: record.fingerprint };
   const buttons = record.status === "pending"
     ? `${dlgBtn("Reject", { action: "operation-decision", ...attrs, decision: "reject" })}${dlgBtn("Approve, record only", { action: "operation-decision", ...attrs, decision: "plain" })}${executionConsentAvailable(record) ? dlgBtn("Allow exact executor…", { action: "operation-decision", ...attrs, decision: "execution" }, "primary") : ""}`
-    : `${mergeExecutionAvailable(record) ? `${dlgBtn("Check what happened to the merge…", { action: "operation-inspect", ...attrs })}${dlgBtn("Merge this exact commit…", { action: "operation-execute", ...attrs }, "danger")}` : ""}`;
+    : `${operationExecutionAvailable(record) ? `${dlgBtn("Inspect original outcome…", { action: "operation-inspect", ...attrs })}${dlgBtn(record.operation.kind === "vcs" ? "Execute this exact VCS operation…" : "Merge this exact commit…", { action: "operation-execute", ...attrs }, "danger")}` : ""}`;
   showDialog("Approval request", `${operationFacts(record)}<p class="note-box">${record.status === "pending" ? "Approving only records your decision. Letting the executor act is a separate choice. Auto-merge is not available here." : `Your decision is final. Executable approval: ${record.executionApproved === true ? "yes" : "no"}.`}</p>${operationBinding(record)}${dlgActions(dlgBtn("Back to approvals", { action: "operation-list" }), buttons)}`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function operationDecision(id, fingerprint, mode) {
@@ -3302,8 +3354,9 @@ function operationDecision(id, fingerprint, mode) {
 }
 function operationExecution(id, fingerprint, inspect = false) {
   const record = ownedOperation(id, fingerprint);
-  if (!mergeExecutionAvailable(record)) throw new Error("Only a separately executable exact-head GitHub merge can run here");
-  showDialog(inspect ? "Check what happened to this merge?" : "Merge this exact commit?", `${operationFacts(record)}<p class="note-box${inspect ? "" : " warn"}">${inspect ? "Reads the original merge outcome. Matching evidence can settle the record; if none is found it stays unknown. This does not merge or allow another attempt." : "This changes the remote repository. The executor rechecks repository, scope and commit first, and an unknown outcome is never retried automatically."}</p><p class="note">No command, deployment or auto-merge runs from here.</p>${operationBinding(record)}<form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${inspect ? "" : " danger"}">${inspect ? "Check outcome" : "Merge now"}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
+  if (!operationExecutionAvailable(record)) throw new Error("Exact executable approval with a current scope is required");
+  const vcs = record.operation.kind === "vcs";
+  showDialog(inspect ? "Inspect original outcome?" : vcs ? "Execute this exact VCS operation?" : "Merge this exact commit?", `${operationFacts(record)}<p class="note-box${inspect ? "" : " warn"}">${inspect ? "Reads the original execution receipt. This does not execute, retry, or grant permission to replay an uncertain outcome." : vcs ? "The host rechecks the target and expected state before running this operation once. Changed state requires fresh approval. An uncertain outcome is never retried automatically." : "This changes the remote repository. The executor rechecks repository, scope and commit first, and an unknown outcome is never retried automatically."}</p><p class="note">No deployment or auto-merge runs from here.</p>${operationBinding(record)}<form data-operation-execute data-mode="${inspect ? "inspect" : "execute"}" data-project="${esc(projectId)}" data-operation="${esc(record.id)}" data-fingerprint="${esc(record.fingerprint)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back", { action: "operation-view", operation: record.id, fingerprint: record.fingerprint }), `<button type="submit" class="primary${inspect ? "" : " danger"}">${inspect ? "Check outcome" : vcs ? "Execute once" : "Merge now"}</button>`)}</form>`, `${record.operation.provider} · ${humanKey(record.operation.kind)}`); disableActions();
 }
 function uuid(value) { return typeof value === "string" && /^[a-f0-9-]{36}$/.test(value); }
 function requireProject(id) { if (id !== projectId) throw new Error("Selected project changed. Reopen the intended control."); }

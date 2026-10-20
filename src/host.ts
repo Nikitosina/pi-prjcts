@@ -375,6 +375,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { threads: [...new Set(threads)].flatMap(threadId => { const { dir: _, ...listing } = listArtifacts(dir, threadId); return listing.files.length ? [listing] : []; }) };
     }
     case "compact": return withDurableOwner({ id: input.id, operation: owner => owner.compact(input.chatId) });
+    case "chat-reset": return withDurableOwner({ id: input.id, operation: owner => owner.reset(input.chatId) });
     case "worktrees-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.worktrees() });
     case "worktrees-cleanup": if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id"); return withDurableOwner({ id: input.id, operation: owner => owner.cleanupWorktrees() });
     case "work-archive": return withDurableOwner({ id: input.id, operation: owner => owner.archiveWork({ workIds: input.workIds, terminal: input.terminal }) });

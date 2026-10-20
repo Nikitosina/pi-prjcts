@@ -158,18 +158,26 @@ export function watchdogRuntime(root: Conversation, projectId: string, schedules
     const claimed = await root.commit(async tx => {
       const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
       if (isClosed() || planning.paused || planning.pausing || value.seq !== seq - 1 || !watchdogConfig(projectId).enabled) return false;
-      value.seq = seq; value.ticks++; value.lastTickAtMs = now; value.lastWorkers = running.length; value.lastError = null;
+      value.seq = seq; value.lastTickAtMs = now; value.lastWorkers = running.length;
       return true;
     }, BACKGROUND_CONTEXT);
     if (!claimed) return { skipped: "superseded" };
+    // Each chat is delivered on its own; `ticks` counts only checks that reached at least one chat.
+    let delivered = 0;
+    const failures: string[] = [];
     for (const item of prepared) {
       const chatKey = item.key ?? "main";
-      await schedules.ingest({ eventId: `watchdog:${projectId.slice(0, 8)}:${seq}:${chatKey}`, kind: "worker.watchdog", payload: item.payload }, async tx => {
-        const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
-        return !isClosed() && !planning.paused && !planning.pausing && value.seq === seq && watchdogConfig(projectId).enabled;
-      }, undefined, { target: item.conversation, automation: true });
+      try {
+        const intent = await schedules.ingest({ eventId: `watchdog:${projectId.slice(0, 8)}:${seq}:${chatKey}`, kind: "worker.watchdog", payload: item.payload }, async tx => {
+          const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
+          return !isClosed() && !planning.paused && !planning.pausing && value.seq === seq && watchdogConfig(projectId).enabled;
+        }, undefined, { target: item.conversation, automation: true, effectFree: true });
+        if (intent.status !== "submitted") throw new Error(intent.outcome ?? `check ${intent.status}`);
+        delivered++;
+      } catch (error) { onError(error); failures.push(`${chatKey}: ${error instanceof Error ? error.message : String(error)}`); }
     }
-    return { ticked: seq, workers: running.length, chats: prepared.length };
+    await root.commit(async tx => { const value = await tx.doc(Watchdog, root.id); if (delivered) value.ticks++; value.lastError = failures.length ? clip(failures.join("; "), 300) : null; }, BACKGROUND_CONTEXT);
+    return { ticked: seq, workers: running.length, chats: delivered, failed: failures.length };
   }
   const tick = () => {
     if (current || isClosed()) return;

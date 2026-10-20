@@ -42,6 +42,13 @@ export const OperationSpec = Type.Union([Type.Object({
   profileId: Id, profileRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   effect: Type.Union([Type.Literal("destructive"), Type.Literal("deployment")]),
   receiptId: Id, allocationAttemptId: Id, requestId: Id,
+}, { additionalProperties: false }), Type.Object({
+  provider: Provider, kind: Type.Literal("vcs"),
+  repositoryId: Type.String({ minLength: 1, maxLength: 256 }), scopeId: Id,
+  action: Type.Union([Type.Literal("worktree-remove"), Type.Literal("worktree-remount"), Type.Literal("branch-delete")]),
+  checkout: Type.String({ minLength: 1, maxLength: 4096 }), target: Type.String({ minLength: 1, maxLength: 4096 }),
+  expectedState: Type.String({ pattern: "^[a-f0-9]{64}$" }), state: Type.String({ minLength: 1, maxLength: 16000 }),
+  risks: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { minItems: 1, maxItems: 8 }),
 }, { additionalProperties: false })]);
 export type OperationSpec = Static<typeof OperationSpec>;
 export const GithubAuthorization = Type.Object({
@@ -215,6 +222,7 @@ export const Request = Type.Union([
     context: Type.Optional(Type.Union([ContextSettings, Type.Null()]))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("compact"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("chat-reset"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),

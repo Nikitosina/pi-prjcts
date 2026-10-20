@@ -2,7 +2,7 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { plugins } from "./plugins.ts";
 
-export const VCS_SHELL_NOTE = "\n\nprojects_vcs_shell runs a shell command in the project checkout to prepare the environment for workers: fetch and inspect branches, PRs and history, create or check out a branch, and list, add, take over, remount or remove worktrees (git worktree, and arc-wt in Arcadia). Only VCS executables and read-only helpers (ls, cat, grep, head, tail, wc, find, jq, echo, cd) are accepted; command substitution and file redirects are refused. Pushing, submitting, merging or publishing PRs, renaming or deleting branches, forced removal, hard resets and cleaning are refused: publication stays with workers and the owner. The checkout belongs to the owner, so leave it on the branch it was on unless the owner asked otherwise. Hand a prepared branch to a worker with the branch field of projects_delegate; the host still allocates each worker's own worktree. Never edit files through this shell.";
+export const VCS_SHELL_NOTE = "\n\nprojects_vcs_shell runs a shell command in the project checkout to prepare the environment for workers: fetch and inspect branches, PRs and history, create or check out a branch, and inspect or prepare worktrees (git worktree, and arc-wt in Arcadia). Git worktree removal uses projects_vcs_operation; direct pruning and unlocking are unavailable. Only VCS executables and read-only helpers (ls, cat, grep, head, tail, wc, find, jq, echo, cd) are accepted; command substitution and file redirects are refused. Pushing, submitting, merging or publishing PRs, renaming or deleting branches, forced removal, hard resets and cleaning are refused: publication stays with workers and the owner. The checkout belongs to the owner, so leave it on the branch it was on unless the owner asked otherwise. Hand a prepared branch to a worker with the branch field of projects_delegate; the host still allocates each worker's own worktree. Never edit files through this shell.";
 
 // None of these can write files or run other programs (find is checked separately; rg --pre and sort -o could, so they are absent).
 const HELPERS = new Set(["ls", "pwd", "cat", "head", "tail", "grep", "wc", "find", "jq", "echo", "printf", "cd", "test", "true", "which", "basename", "dirname", "realpath", "stat", "du", "df", "date"]);
@@ -28,7 +28,7 @@ function gitBlocked(args: string): boolean {
   if (/^(?:reset)\s+.*--(?:hard|merge|keep)(?:\s|$)/.test(sub)) return true;
   if (/^(?:checkout|switch|restore)\s/.test(sub) && /\s(?:--|-f|--force|--discard-changes|\.)(?:\s|$)/.test(` ${sub}`)) return true;
   if (/^stash\s+(?:drop|clear|pop)(?:\s|$)/.test(sub)) return true;
-  if (/^worktree\s+(?:remove|prune).*(?:\s-f|--force)/.test(sub)) return true;
+  if (/^worktree\s+(?:remove|prune|unlock)(?:\s|$)/.test(sub)) return true;
   if (/^(?:tag)\s+.*-d(?:\s|$)/.test(sub)) return true;
   return false;
 }
