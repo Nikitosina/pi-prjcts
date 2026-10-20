@@ -6,10 +6,12 @@ import * as chord from "@earendil-works/chord/context";
 import * as durable from "@earendil-works/pi-durable";
 import type { Conversation, Tx } from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
+import * as value from "typebox/value";
 import { githubPrProvider } from "./github-prs.ts";
 import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
-import type { CoordinatorToolsProvider, FollowProvider, HostPluginApi, PluginCapabilities, PluginModule, PluginRpcHandler, PluginStatus, PrProvider, VcsProvider, WorkspaceProvider } from "./plugin-types.ts";
-import { home, loadProject } from "./state.ts";
+import type { CoordinatorToolsProvider, FollowProvider, HostPluginApi, PluginCapabilities, PluginModule, PluginRoute, PluginRpcHandler, PluginStatus, PrProvider, VcsProvider, WebContribution, WorkerToolsProvider, WorkspaceProvider } from "./plugin-types.ts";
+import { hostLeases } from "./resource-leases.ts";
+import { home, loadProject, projectDir } from "./state.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import { authorizationFingerprint, trustedOwner, WHOLE_REPOSITORY_PREFIX, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { command } from "./workspace-isolation.ts";
@@ -38,6 +40,26 @@ export const plugins = {
   prProvider: (id: string): PrProvider | undefined => each(caps => caps.prs).find(item => item.id === id),
   followProviders: (): FollowProvider[] => each(caps => caps.follow),
   coordinatorTools: (): CoordinatorToolsProvider[] => each(caps => caps.coordinatorTools),
+  workerTools: (): WorkerToolsProvider[] => each(caps => caps.workerTools),
+  /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
+  pauseLifecycle: (projectId: string): (() => void) => {
+    const resumes: Array<() => void> = [];
+    const resumeAll = () => { for (const resume of resumes.splice(0).reverse()) { try { resume(); } catch { /* resuming never blocks the host */ } } };
+    try { for (const hooks of each(caps => caps.lifecycle)) if (hooks.pause) resumes.push(hooks.pause(projectId)); }
+    catch (error) { resumeAll(); throw error; }
+    return resumeAll;
+  },
+  close: async (): Promise<void> => { await Promise.allSettled(each(caps => caps.lifecycle).map(hooks => hooks.close?.())); },
+  /** Browser contributions of loaded plugins (asset URLs only). */
+  web: (): Array<{ plugin: string; script: string | null; style: string | null }> => loaded.filter(item => item.capabilities.web?.script || item.capabilities.web?.style).map(item => ({ plugin: item.plugin, script: item.capabilities.web?.script ? `/plugins/${item.plugin}/ui.js` : null, style: item.capabilities.web?.style ? `/plugins/${item.plugin}/ui.css` : null })),
+  /** The declared browser file for /plugins/<name>/ui.js|ui.css; nothing else below a plugin is served. */
+  webAsset: (plugin: string, file: string): { path: string; mime: string } | undefined => {
+    const web: WebContribution | undefined = loaded.find(item => item.plugin === plugin)?.capabilities.web;
+    if (file === "ui.js" && web?.script) return { path: web.script, mime: "text/javascript; charset=utf-8" };
+    if (file === "ui.css" && web?.style) return { path: web.style, mime: "text/css; charset=utf-8" };
+    return undefined;
+  },
+  route: (plugin: string, name: string): PluginRoute | undefined => { const routes = loaded.find(item => item.plugin === plugin)?.capabilities.web?.routes; return routes && Object.hasOwn(routes, name) ? routes[name] : undefined; },
   rpc: (plugin: string, method: string): PluginRpcHandler | undefined => loaded.find(item => item.plugin === plugin)?.capabilities.rpc?.[method],
   /** True when any plugin reports a write whose outcome is unknown (blocks automatic admission). */
   anyUncertainWrites: async (tx: Tx, root: Conversation["id"]): Promise<boolean> => { for (const check of each(caps => caps.uncertainWrites)) if (await check(tx, root)) return true; return false; },
@@ -90,6 +112,11 @@ function validate(caps: PluginCapabilities): void {
   if (caps.follow) { requireStrings("follow", caps.follow, ["id", "eventKind", "label"]); requireFunctions("follow", caps.follow, ["repository", "observe", "published", "autoMerge"]); }
   if (caps.coordinatorTools) requireFunctions("coordinatorTools", caps.coordinatorTools, ["create", "applies"]);
   if (caps.uncertainWrites !== undefined && typeof caps.uncertainWrites !== "function") throw new Error("uncertainWrites must be a function");
+  if (caps.workerTools) requireFunctions("workerTools", caps.workerTools, ["offered", "create"]);
+  if (caps.leaseName !== undefined && typeof caps.leaseName !== "function") throw new Error("leaseName must be a function");
+  for (const hook of ["pause", "close"] as const) if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function") throw new Error(`lifecycle.${hook} must be a function`);
+  for (const file of ["script", "style"] as const) { const path = caps.web?.[file]; if (path !== undefined && (typeof path !== "string" || !isAbsolute(path) || !existsSync(path))) throw new Error(`web.${file} must be an absolute path to an existing file`); }
+  for (const [route, handler] of Object.entries(caps.web?.routes ?? {})) if (!/^[a-z][a-z0-9-]{0,63}$/.test(route) || route === "ui.js" || route === "ui.css" || typeof handler !== "function") throw new Error(`web.routes.${route} must be a function with a kebab-case name`);
   for (const [method, handler] of Object.entries(caps.rpc ?? {})) if (!/^[a-z][a-z0-9-]{0,63}$/.test(method) || typeof handler !== "function") throw new Error(`rpc.${method} must be a function with a kebab-case name`);
 }
 function conflict(name: string, caps: PluginCapabilities): string | undefined {
@@ -105,18 +132,23 @@ async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPlu
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   return {
     name, stateDir,
-    lib: { durable, typebox, chord, docs: { planning: DurablePlanning } },
+    lib: { durable, typebox, value, chord, docs: { planning: DurablePlanning } },
     provide(capabilities) {
       for (const key of Object.keys(capabilities) as Array<keyof PluginCapabilities>) {
         if (stage[key] !== undefined) throw new Error(`capability "${key}" was provided twice`);
         (stage as Record<string, unknown>)[key] = capabilities[key];
       }
     },
-    projects: { load: loadProject, record: <T,>(project: object, key: string) => (project as Record<string, unknown>)[key] as T | undefined, authorizationFingerprint, trustedOwner },
+    projects: { load: loadProject, dir: projectDir, record: <T,>(project: object, key: string) => (project as Record<string, unknown>)[key] as T | undefined, authorizationFingerprint, trustedOwner },
     exec: {
       run: runCli,
       runSync: (file, args, cwd) => execFileSync(file, args, { cwd, encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim(),
       command,
+    },
+    leases: {
+      acquire: (resource, holder, ttlMs) => hostLeases.acquire(resource, { projectId: holder.projectId, threadId: `plugin:${name}:${holder.owner}` }, ttlMs),
+      release: (resource, holder) => hostLeases.release(resource, { projectId: holder.projectId, threadId: `plugin:${name}:${holder.owner}` }),
+      held: match => hostLeases.held(match),
     },
     vcs: { findRoot: findVcsRoot },
     workspace: { WHOLE_REPOSITORY_PREFIX, repositoryFingerprint: workspaceRepositoryFingerprint },
@@ -144,6 +176,7 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
     const clash = conflict(module.name, stage);
     if (clash) throw new Error(clash);
     loaded.push({ plugin: module.name, capabilities: stage });
+    if (stage.leaseName) hostLeases.addNaming(stage.leaseName);
     status.state = "loaded"; status.provides = provides(stage);
   } catch (error) { status.error = message(error); }
   return status;

@@ -3,6 +3,7 @@ import type { Context } from "@earendil-works/chord";
 export type { Conversation, ToolExecutionApi, ToolRegistration, Tx, Context };
 import type * as Durable from "@earendil-works/pi-durable";
 import type * as Typebox from "typebox";
+import type * as TypeboxValue from "typebox/value";
 import type * as ChordContext from "@earendil-works/chord/context";
 import type { DurablePlanning } from "./durable-planning.ts";
 import type { Project, WorkspaceAuthorization } from "./state.ts";
@@ -24,10 +25,14 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.
  *  - uncertainWrites  durable "an outcome is unknown" check that blocks automatic admission.
+ *  - workerTools  tools (and an instruction snippet) for whole-repository workers; frozen per thread like every worker tool.
+ *  - leaseName  canonical name for host lease resources the plugin owns (aliases share one lease).
+ *  - lifecycle  pause around project lifecycle changes; close at host shutdown.
+ *  - web        browser script/style for the project screen and authenticated GET routes.
  */
 
 /** Libraries the plugin must use instead of importing its own copies (Durable docs and tools only work with the host's instances). */
-export type PluginLib = { durable: typeof Durable; typebox: typeof Typebox; chord: typeof ChordContext; docs: { planning: typeof DurablePlanning } };
+export type PluginLib = { durable: typeof Durable; typebox: typeof Typebox; value: typeof TypeboxValue; chord: typeof ChordContext; docs: { planning: typeof DurablePlanning } };
 export type Extension = ReturnType<typeof defineExtension>;
 export type PrId = string;
 
@@ -279,6 +284,28 @@ export type PluginRpcContext = {
 };
 export type PluginRpcHandler = (context: PluginRpcContext) => Promise<unknown>;
 
+export type WorkerToolsProvider = {
+  /** Whether a new thread of this project gets the tools. Threads keep the tool set they were first bound with. */
+  offered(projectId: string): boolean;
+  create(input: { projectId: string; threadId: string; conversationId: number }): ToolRegistration[];
+  /** Appended to the instructions of workers that have the tools. */
+  instructions?: string;
+};
+export type LifecycleHooks = {
+  /** Called before a project lifecycle change (pause, resume, archive, delete); throw to refuse it. Returns the resume callback. */
+  pause?(projectId: string): () => void;
+  /** Host shutdown: abort outstanding work. */
+  close?(): Promise<void>;
+};
+export type PluginRoute = (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>;
+export type WebContribution = {
+  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css. */
+  script?: string;
+  style?: string;
+  /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */
+  routes?: Record<string, PluginRoute>;
+};
+
 export type PluginCapabilities = {
   vcs?: VcsProvider;
   workspace?: WorkspaceProvider;
@@ -287,7 +314,14 @@ export type PluginCapabilities = {
   coordinatorTools?: CoordinatorToolsProvider;
   rpc?: Record<string, PluginRpcHandler>;
   uncertainWrites?: (tx: Tx, root: Conversation["id"]) => Promise<boolean>;
+  workerTools?: WorkerToolsProvider;
+  /** Canonical lease name for a resource the plugin owns, or undefined to leave it to others. */
+  leaseName?: (resource: string) => string | undefined;
+  lifecycle?: LifecycleHooks;
+  web?: WebContribution;
 };
+export type LeaseHolder = { projectId: string; threadId: string };
+export type LeaseAnswer = { acquired: true; resource: string; until: string } | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
 
 export type HostPluginApi = {
   /** The plugin's own name. */
@@ -298,6 +332,8 @@ export type HostPluginApi = {
   provide(capabilities: PluginCapabilities): void;
   projects: {
     load(id: string): Project;
+    /** The project's state directory (`$PI_PROJECTS_HOME/<id>`), for per-project plugin files. */
+    dir(id: string): string;
     /** Provider-owned top-level project records (kept verbatim by the host even when no plugin understands them). */
     record<T = unknown>(project: Project, key: string): T | undefined;
     /** Digest of the project's workspace grant; provider authorizations bind to it. */
@@ -311,6 +347,12 @@ export type HostPluginApi = {
     runSync(file: string, args: string[], cwd: string): string;
     /** Spawn with the host's sanitized environment (workspace allocation commands). */
     command(file: string, args: string[], cwd?: string): Promise<CliResult>;
+  };
+  /** Host-wide advisory leases shared with workers. The plugin's own holds use `plugin:<name>:<owner>` thread ids: project stops do not release them and worker cards do not list them. */
+  leases: {
+    acquire(resource: string, holder: { projectId: string; owner: string }, ttlMs: number): Promise<LeaseAnswer>;
+    release(resource: string, holder: { projectId: string; owner: string }): boolean;
+    held(match?: (holder: LeaseHolder) => boolean): Array<{ resource: string; projectId: string; threadId: string; until: string }>;
   };
   vcs: {
     /** Walks up from `dir` for a checkout root of any kind. */

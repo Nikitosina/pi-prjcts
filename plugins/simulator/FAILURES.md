@@ -20,3 +20,18 @@ Checks that must disprove an unsafe implementation:
 - Host stop aborts outstanding simulator commands and retains uncertainty without automatic cleanup or prolonged shutdown.
 
 Proof stays in disposable local artifacts. Never restart the production host or mutate its project state to verify this feature.
+
+## Plugin extraction failure cases
+
+Written before the move out of core. The behavior above must survive unchanged; these cover the plugin seam.
+
+- Not configured: the host starts; no simulator RPCs, card, coordinator or worker simulator tools, or `/plugins/simulator/*` routes; a project's `simulator.json` is never read or changed.
+- Loaded: existing `simulator.json` (v1 and v2) is read in place; coordinator tool names and the extension name `projects.coordinator-simulator` stay identical, so recorded calls and recovered coordinators still resolve.
+- Worker binding: a thread already bound with the worker simulator tools keeps them; a thread bound without them never gains them; only new whole-repository threads of enabled projects get them.
+- Leases: a bare clone UUID and `simulator:<uuid>` in any case still name the same lease while the plugin is loaded; other resource names are unchanged.
+- Maintenance leases belong to the plugin: a project stop does not release them and the worker card does not list them as worker holds.
+- Lifecycle: archive, delete, pause and resume are refused while a simulator operation runs; simulator management is refused while the lifecycle changes, and resumes after it, also when the change fails.
+- Host shutdown aborts outstanding simulator commands and captures through the plugin close hook.
+- RPCs: management goes through `{ action: "plugin", plugin: "simulator" }` with the existing bearer authentication; host-rejected requests still reach the browser as rejected (no "response unconfirmed" retry state).
+- Routes: the screenshot route needs the bearer token and a valid project id; only the plugin's declared browser files are served, never another path below the plugin directory.
+- Browser: a plugin script that fails to load or throws leaves the app working; the card stays hidden; polling and captures stop on project change, another tab or a hidden page.

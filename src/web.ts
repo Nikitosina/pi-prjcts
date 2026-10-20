@@ -10,7 +10,7 @@ import { openArtifact } from "./artifacts.ts";
 import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
-import { simulatorFrame } from "./simulator.ts";
+import { plugins } from "./plugins.ts";
 
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
@@ -70,6 +70,10 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         response.writeHead(200, { ...headers, "content-type": asset.mime }).end(await readFile(fileURLToPath(new URL(`../web/${asset.path}`, import.meta.url))));
         return;
       }
+      // Only the files a plugin declared (web.script, web.style); never another path below the plugin.
+      const pluginFile = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/(ui\.js|ui\.css)$/.exec(url.pathname) : null;
+      const pluginAsset = pluginFile ? plugins.webAsset(pluginFile[1]!, pluginFile[2]!) : undefined;
+      if (pluginAsset) { response.writeHead(200, { ...headers, "content-type": pluginAsset.mime }).end(await readFile(pluginAsset.path)); return; }
       if (url.pathname === "/favicon.ico") { response.writeHead(204, headers).end(); return; }
       const supplied = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
       if (!/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { status = 401; throw new Error("Open this inbox through /projects-ui or the CLI to authenticate"); }
@@ -80,15 +84,16 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
         return;
       }
-      if (request.method === "GET" && url.pathname === "/simulator-frame") {
+      const pluginRoute = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/([a-z][a-z0-9-]{0,63})$/.exec(url.pathname) : null;
+      const route = pluginRoute ? plugins.route(pluginRoute[1]!, pluginRoute[2]!) : undefined;
+      if (route) {
         const id = url.searchParams.get("project") ?? "";
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         loadProject(id);
         status = 409;
-        const udid = url.searchParams.get("udid") ?? undefined;
-        if (udid !== undefined && !/^[a-fA-F0-9-]{36}$/.test(udid)) throw new Error("Invalid simulator UDID");
-        const frame = await simulatorFrame(id, udid);
-        response.writeHead(200, { ...headers, "content-type": frame.mime, "content-length": frame.bytes.length }).end(frame.bytes);
+        const result = await route({ projectId: id, query: url.searchParams });
+        if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
+        response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;
       }
       if (request.method === "GET" && url.pathname === "/live") {

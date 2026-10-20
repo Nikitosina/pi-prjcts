@@ -39,16 +39,7 @@
           <aside class="col">
             <div id="needs-card" class="card"><b>Needs you</b><span id="needs-badge" hidden></span><nav id="queue" aria-label="Pending decisions"></nav><div id="letter"></div><div id="needs-questions" class="needs-questions"></div></div>
             <div class="card" id="prs-card" hidden><div class="row between"><b>Pull requests</b><span class="row"><small id="prs-meta" class="note"></small><button type="button" class="ghost small" data-action="prs-refresh" title="Refresh from the PR providers" aria-label="Refresh pull requests">↻</button></span></div><div id="prs"></div></div>
-            <section id="simulator-card" class="card simulator-card" aria-label="Project simulator" hidden>
-              <div class="row between"><b>Simulator</b><span id="simulator-status" class="chip">Loading</span></div>
-              <p id="simulator-description" class="note"></p>
-              <div id="simulator-devices" class="row simulator-devices" role="group" aria-label="Project simulators" hidden></div>
-              <div id="simulator-screen" class="simulator-screen" hidden><img id="simulator-image" alt="Current project simulator screenshot" draggable="false"></div>
-              <p id="simulator-caption" class="note" hidden></p>
-              <div id="simulator-actions" class="row simulator-actions"></div>
-              <p id="simulator-error" class="simulator-error" role="status" hidden></p>
-              <details id="simulator-facts" hidden><summary>Details</summary><div id="simulator-details"></div></details>
-            </section>
+            <div id="plugin-cards"></div>
             <div class="card"><b>Workers</b><div id="activity"></div></div>
             <div class="card"><div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div><div id="notes"></div></div>
             <div class="card"><b>Recent results</b><div id="outcomes"></div></div>

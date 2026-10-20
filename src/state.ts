@@ -9,8 +9,6 @@ import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
 
-export const SimulatorAction = Type.Union([Type.Literal("create"), Type.Literal("boot"), Type.Literal("shutdown"), Type.Literal("reset"), Type.Literal("delete")]);
-
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 /** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
 export const ContextSettings = Type.Object({
@@ -203,10 +201,6 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("library-list"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("library-read"), id: Id, evidenceId: Id, expectedSha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10485760 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 131072 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("settings-snapshot"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("simulator-snapshot"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("simulator-configure"), id: Id, enabled: Type.Boolean(), sourceUdid: Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" })), requestId: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("simulator-action"), id: Id, operation: SimulatorAction, requestId: Id, udid: Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" })), sourceUdid: Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$" })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("simulator-recover"), id: Id, confirm: Id, requestId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("settings-update"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), changes: Type.Object({
     name: Type.Optional(text), objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text),
     models: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }, { additionalProperties: false })),

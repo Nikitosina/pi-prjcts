@@ -1,0 +1,19 @@
+/* The project simulator is a read-only screenshot, not a remote input surface. */
+.simulator-card { flex: none; }
+.simulator-card > .note { margin-bottom: 10px !important; }
+.simulator-screen { display: flex; justify-content: center; margin: 12px 0; }
+.simulator-screen img { display: block; max-width: 100%; max-height: 300px; width: auto; height: auto; border: 7px solid var(--text); border-radius: 24px; background: var(--text); user-select: none; }
+.simulator-actions { flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.simulator-devices { flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; }
+.chip-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 99px; background: transparent; font-size: 12px; }
+.chip-toggle small { color: var(--muted); font-size: 10.5px; }
+.chip-toggle.on { background: var(--panel); border-color: var(--text); font-weight: 600; }
+.simulator-card details { margin-top: 10px; }
+.simulator-card summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.simulator-error { color: var(--k-a3301f); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; margin: 10px 0 0; }
+.simulator-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; font-size: 11px; margin-bottom: 0; }
+.simulator-facts dt { color: var(--muted); }
+.simulator-facts dd { margin: 0; overflow-wrap: anywhere; }
+.simulator-expanded { display: flex; justify-content: center; margin: 6px 0 14px; }
+.simulator-expanded img { display: block; max-width: 100%; max-height: 70dvh; width: auto; height: auto; border-radius: 16px; user-select: none; }
+@media (max-width: 820px) { .simulator-screen img { max-height: 360px; } }

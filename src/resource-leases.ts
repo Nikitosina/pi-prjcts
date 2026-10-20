@@ -4,13 +4,12 @@ export type LeaseAnswer = { acquired: true; resource: string; until: string } | 
 type Held = { holder: LeaseHolder; until: number; timer: ReturnType<typeof setTimeout> };
 type Waiter = { holder: LeaseHolder; ttlMs: number; settle: (answer: LeaseAnswer) => void };
 const same = (a: LeaseHolder, b: LeaseHolder) => a.projectId === b.projectId && a.threadId === b.threadId;
-function canonicalResource(resource: string): string {
-  const uuid = /^(?:simulator:)?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.exec(resource)?.[1];
-  return uuid ? `simulator:${uuid.toUpperCase()}` : resource;
-}
-
 export class ResourceLeases {
   readonly #held = new Map<string, Held>();
+  readonly #namings: Array<(resource: string) => string | undefined> = [];
+  /** Plugins name their own resources canonically (aliases share one lease); the first answer wins. */
+  addNaming(naming: (resource: string) => string | undefined) { this.#namings.push(naming); }
+  #canonical(resource: string): string { for (const naming of this.#namings) { const name = naming(resource); if (name) return name; } return resource; }
   readonly #queues = new Map<string, Waiter[]>();
 
   #grant(resource: string, holder: LeaseHolder, ttlMs: number): LeaseAnswer {
@@ -31,7 +30,7 @@ export class ResourceLeases {
   }
   /** Takes the resource, renews it for the current holder, or answers who holds it; with waitMs queues FIFO for at most that long. */
   async acquire(resource: string, holder: LeaseHolder, ttlMs: number, waitMs = 0, signal?: AbortSignal): Promise<LeaseAnswer> {
-    resource = canonicalResource(resource);
+    resource = this.#canonical(resource);
     const held = this.#held.get(resource);
     if (!held || same(held.holder, holder)) return this.#grant(resource, holder, ttlMs);
     const denied = (waitedMs: number): LeaseAnswer => { const now = this.#held.get(resource) ?? held; return { acquired: false, resource, heldBy: now.holder, until: new Date(now.until).toISOString(), waitedMs }; };
@@ -56,7 +55,7 @@ export class ResourceLeases {
   }
   /** Only the holder can release. */
   release(resource: string, holder: LeaseHolder): boolean {
-    resource = canonicalResource(resource);
+    resource = this.#canonical(resource);
     const held = this.#held.get(resource);
     if (!held || !same(held.holder, holder)) return false;
     this.#free(resource);

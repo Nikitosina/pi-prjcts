@@ -25,6 +25,16 @@ Export `{ name, register(api) }` (default or named). `register` calls `api.provi
 | `coordinatorTools` | tools and an instruction snippet for matching projects |
 | `rpc` | namespaced host RPCs: `{ action: "plugin", plugin, method, id?, params? }`; context offers `withRoot`, `mutateIdle` |
 | `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
+| `workerTools` | tools and an instruction snippet for whole-repository workers; offered to new threads, frozen with each thread's tool set |
+| `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |
+| `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
+| `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
+
+Host API extras: `api.leases` (host-wide advisory leases; the plugin's own holds are not released by project stops), `api.projects.dir(id)`, `api.lib.value` (typebox `Value`).
+
+Browser plugins call `window.piProjects.register({ name, mount(slot), projectChanged, render, tick, hide, action(name, node) })`. `data-action` names starting with `<name>-` go to the plugin. `piProjects` offers `state()`, `rpc(plugin, method, id, params)`, authenticated `fetch`, and the dialog, toast and escaping helpers. A failing browser plugin is logged and skipped.
+
+Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
 
 State: `api.stateDir` = `$PI_PROJECTS_HOME/plugins/<name>/`; provider-owned top-level project records (`project.json` keys such as `<x>Authorization`) and Durable documents are kept verbatim by core even when the plugin is not loaded. Without the plugin the UI says "provider plugin not loaded", workers do not start, cleanup leaves the plugin's worktrees alone, and everything returns when the plugin is loaded again.
 

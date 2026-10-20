@@ -35,7 +35,6 @@ import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } f
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
-import { actOnSimulator, closeSimulators, configureSimulator, pauseSimulatorManagement, recoverSimulator, simulatorSnapshot } from "./simulator.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -130,14 +129,14 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
 }
 
 async function lifecycle<T>(id: string, validate: (project: ReturnType<typeof loadProject>) => void, operation: (owner: DurableProjectRuntime) => Promise<T>): Promise<T> {
-  let resumeSimulator = () => {};
+  let resumePlugins = () => {};
   await withProjectLock(id, async () => {
     validate(loadProject(id));
-    resumeSimulator = pauseSimulatorManagement(id);
+    resumePlugins = plugins.pauseLifecycle(id);
     lifecycleChanging.add(id);
   });
   try { return await operation(await durable(id, true)); }
-  finally { lifecycleChanging.delete(id); resumeSimulator(); }
+  finally { lifecycleChanging.delete(id); resumePlugins(); }
 }
 
 /** One-click authorizations (GitHub and provider plugins) follow workspace grant changes. */
@@ -255,13 +254,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "upload-delete": return withProjectLock(input.id, async () => deleteUpload(ownedProjectDir(input.id), input.uploadId));
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
-    case "simulator-snapshot": ownedProjectDir(input.id); return simulatorSnapshot(input.id);
-    case "simulator-configure": return withProjectLock(input.id, () => configureSimulator(input.id, input));
-    case "simulator-recover": return withProjectLock(input.id, () => recoverSimulator(input.id, input));
-    case "simulator-action": {
-      ownedProjectDir(input.id);
-      return withProjectLock(input.id, () => actOnSimulator(input.id, input.operation, input.requestId, { udid: input.udid, sourceUdid: input.sourceUdid }));
-    }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
     case "ref-candidates": return refCandidates(loadProject(input.id), await knowledgeDir(input.id), { refresh: input.refresh });
     case "ref-preview": return input.kind === "skill" ? skillPreview(await configuredSkills(input.id), input.value) : refPreview(loadProject(input.id), { kind: input.kind, value: input.value });
@@ -467,7 +459,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       });
     }
-    case "plugins": return { plugins: plugins.status(), labels: plugins.labels() };
+    case "plugins": return { plugins: plugins.status(), labels: plugins.labels(), web: plugins.web() };
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
       if (!handler) throw new Error(`Plugin RPC ${input.plugin}.${input.method} is unavailable: the plugin is not loaded or has no such method`);
@@ -752,7 +744,7 @@ function shutdown(): Promise<void> {
     try { webhooks.close(); } catch (error) { report(error); }
     try { telegram.close(); await notifier.close(); } catch (error) { report(error); }
     try { server.close(); } catch (error) { report(error); }
-    try { await closeSimulators(); } catch (error) { report(error); }
+    try { await plugins.close(); } catch (error) { report(error); }
     try { await githubInspection.close(); } catch (error) { report(error); }
     try { await mcpPool.close(); } catch (error) { report(error); }
     for (const pending of durableRuntimes.values()) {
