@@ -346,7 +346,8 @@ type Orientation = Static<typeof Orientation>;
   async function ownedDevice(owned: Owned, devices: Device[]): Promise<Device> {
     const actual = devices.find(item => item.udid === owned.udid && item.name === owned.name && item.set === "default");
     const physical = physicalDevice(owned.udid);
-    if (!actual || JSON.stringify(physical) !== JSON.stringify({ directory: owned.directory, device: owned.device, inode: owned.inode, born: owned.born })) throw Error("Owned simulator identity changed; refusing simulator access");
+    // The volume's device number is not stable across reboots and remounts, so it is recorded but not compared.
+    if (!actual || physical.directory !== owned.directory || physical.inode !== owned.inode || physical.born !== owned.born) throw Error("Owned simulator identity changed; refusing simulator access");
     return actual;
   }
   function physicalDevice(udid: string) {

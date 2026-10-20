@@ -7,7 +7,7 @@ Behavior: optional owner opt-in, owned clone receipts, async lifecycle, agent-sc
 Checks that must disprove an unsafe implementation:
 - Disabled/default project cannot create, boot, capture, reset or delete; coordinator cannot opt itself in or choose a new source.
 - Source must exist in the default device set and be shut down; never shut down or slim the source.
-- No caller can adopt a pre-existing UDID; ownership requires a successful recorded clone result and matching device identity.
+- No caller can adopt a pre-existing UDID; ownership requires a successful recorded clone result and matching device identity. Identity is the real directory path, inode and birth time; the volume device number changes across reboots and remounts and is ignored.
 - A repeated request ID must not create another clone or replay another destructive operation. Same ID with different intent must fail.
 - Clone command timeout, invalid result, crash between intent and receipt, and interrupted reset/delete remain uncertain. Never auto-adopt by name or automatically retry effects.
 - Missing, renamed, replaced, wrong-set or wrong-project owned device must refuse effects and capture.
