@@ -27,7 +27,11 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
     const screenshot = defineTool({ name: "projects_simulator_screenshot", description: "Capture and inspect the actual current screen of one booted, owned simulator (udid; default the first owned clone). Read-only, no taps or text input. Screenshots may be cached for four seconds.", parameters: Type.Object({ udid: Udid("Owned clone to capture") }, { additionalProperties: false }), replay: "safe", async execute(args, api) {
       authorize(api); return image(input.projectId, args.udid);
     } });
-    const tools = [status, action, screenshot];
+    const rotate = defineTool({ name: "projects_simulator_rotate", description: "Rotate one booted, owned simulator (udid; default the first owned clone) to an orientation, like Simulator's rotate menu. Refused while a worker leases that clone. The iPhone home screen stays portrait; apps that support landscape rotate. Check the result with projects_simulator_screenshot.", parameters: Type.Object({ orientation: simulators.Orientation, udid: Udid("Owned clone to rotate") }, { additionalProperties: false }), replay: "safe", async execute(args, api) {
+      authorize(api);
+      return json(await simulators.rotate(input.projectId, args.udid, args.orientation, udid => { if (host.leases.held(holder => !holder.threadId.startsWith("plugin:")).some(lease => lease.resource === simulatorResource(udid))) throw Error("A worker leases this simulator; ask it to rotate, or wait for the lease"); }));
+    } });
+    const tools = [status, action, screenshot, rotate];
     return { tools, extension: defineExtension({ name: "projects.coordinator-simulator", tools }) };
   }
 
@@ -44,7 +48,14 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
       if (!target) throw Error("Acquire the simulator's canonical lease before inspecting it");
       return image(input.projectId, target.udid);
     } });
-    return [status, screenshot];
+    const rotate = defineTool({ name: "projects_worker_simulator_rotate", description: "Rotate a project simulator whose canonical lease you hold (udid; default the clone you lease) to an orientation. The iPhone home screen stays portrait; apps that support landscape rotate.", parameters: Type.Object({ orientation: simulators.Orientation, udid: Udid("Leased clone to rotate") }, { additionalProperties: false }), replay: "safe", async execute(args, api) {
+      authorize(api);
+      const leased = new Set(host.leases.held(holder => holder.projectId === input.projectId && holder.threadId === input.threadId).map(lease => lease.resource));
+      const udid = args.udid?.toUpperCase() ?? (await simulators.snapshot(input.projectId)).devices.find(device => leased.has(simulatorResource(device.udid)))?.udid;
+      if (!udid || !leased.has(simulatorResource(udid))) throw Error("Acquire the simulator's canonical lease before rotating it");
+      return json(await simulators.rotate(input.projectId, udid, args.orientation, () => {}));
+    } });
+    return [status, screenshot, rotate];
   }
   async function image(id: string, udid?: string) {
     const frame = await simulators.frame(id, udid);

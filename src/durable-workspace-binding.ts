@@ -124,7 +124,8 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
       // Plugin worker tools freeze with the thread: a bound thread keeps exactly what it had; only new threads follow the plugin's offer.
       for (const provider of plugins.workerTools()) {
         const offered = provider.create({ projectId: input.project.id, threadId: request.threadId, conversationId: request.conversationId });
-        if (thread.bound ? offered.some(tool => thread.bound!.includes(tool.name)) : !thread.workspaceConfigured && provider.offered(input.project.id)) { tools.push(...offered); pluginNotes += provider.instructions ?? ""; }
+        const kept = thread.bound ? offered.filter(tool => thread.bound!.includes(tool.name)) : !thread.workspaceConfigured && provider.offered(input.project.id) ? offered : [];
+        if (kept.length) { tools.push(...kept); pluginNotes += provider.instructions ?? ""; }
       }
       const guard = (command: string) => attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy);
       const codingTools = createCodingTools(workDir, { bash: { spawnHook: ({ command, env, ...context }) => ({ ...context, env: { ...env, PI_ARTIFACTS_DIR: artifacts! }, command: guard(command) }) } });

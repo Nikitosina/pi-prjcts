@@ -35,3 +35,17 @@ Written before the move out of core. The behavior above must survive unchanged; 
 - RPCs: management goes through `{ action: "plugin", plugin: "simulator" }` with the existing bearer authentication; host-rejected requests still reach the browser as rejected (no "response unconfirmed" retry state).
 - Routes: the screenshot route needs the bearer token and a valid project id; only the plugin's declared browser files are served, never another path below the plugin directory.
 - Browser: a plugin script that fails to load or throws leaves the app working; the card stays hidden; polling and captures stop on project change, another tab or a hidden page.
+
+## Rotation failure cases
+
+Written before the rotation code. Rotation sends the GSEvent device-orientation message to the clone's `PurpleWorkspacePort` through a small Swift helper compiled from `rotate.swift`.
+
+- Targeting: only a booted, owned, identity-checked clone of an enabled, settled, active project rotates; a source simulator, another project's clone or an unknown UDID is refused before the helper runs.
+- Lifecycle: rotation is refused while the clone has a pending operation, while a project lifecycle change runs and after host shutdown starts.
+- Leases: a worker rotates only a clone whose canonical lease it holds; the coordinator is refused while any worker holds that clone's lease. The plugin's own maintenance holds do not count as worker holds.
+- Orientation: only portrait, portrait-upside-down, landscape-left and landscape-right are accepted.
+- Helper build: a missing Swift toolchain or a compile error is reported as a rotation error; no partial binary is ever executed (build into a temporary name, then rename). Concurrent first calls share one build. A source change rebuilds (binary name carries the source hash).
+- Helper run: a missing PurpleWorkspacePort, a send timeout or a non-booted device fails with the helper's message; the call is bounded by a timeout and aborted at host shutdown.
+- Screenshots: the cached frame of the rotated clone is dropped, so the next screenshot shows the new orientation.
+- Worker binding: worker threads bound before rotation existed keep exactly their bound simulator tools; only new threads get the rotate tool.
+- Known limit: an iPhone home screen stays portrait; apps that support landscape rotate.

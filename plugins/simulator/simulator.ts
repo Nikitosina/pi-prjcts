@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, basename, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi } from "../../src/plugin-types.ts";
 
@@ -33,6 +34,8 @@ export function createSimulators(api: HostPluginApi) {
   }
   const SimulatorAction = Type.Union([Type.Literal("create"), Type.Literal("boot"), Type.Literal("shutdown"), Type.Literal("reset"), Type.Literal("delete")]);
   type SimulatorAction = Static<typeof SimulatorAction>;
+const Orientation = Type.Union([Type.Literal("portrait"), Type.Literal("portrait-upside-down"), Type.Literal("landscape-left"), Type.Literal("landscape-right")]);
+type Orientation = Static<typeof Orientation>;
   const Uuid = Type.String({ pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" });
   const Device = Type.Object({ udid: Uuid, name: Type.String(), state: Type.String(), osVersion: Type.String(), set: Type.String() });
   const Slim = Type.Object({ managedDisabled: Type.Integer(), managedTotal: Type.Integer(), booted: Type.Boolean(), persistent: Type.Boolean(), verdict: Type.String() });
@@ -189,6 +192,39 @@ export function createSimulators(api: HostPluginApi) {
     const pending = capture(id, device.udid, abort.signal).finally(() => { captures.delete(key); captureControllers.delete(abort); });
     captures.set(key, pending);
     return pending;
+  }
+
+  /** Rotates a booted owned clone. `allow` sees the resolved UDID first and throws to refuse (lease rules live with the tools). */
+  async function rotateSimulator(id: string, udid: string | undefined, orientation: Orientation, allow: (udid: string) => void) {
+    activeProject(id);
+    const store = readStore(id);
+    if (!store.enabled || store.uncertain) throw Error("No enabled, settled simulator is available");
+    const owned = targetOf(store, udid?.toUpperCase() ?? null, true);
+    if (store.pending?.udid === owned.udid || store.pending?.operation === "create") throw Error("Simulator operation is running");
+    allow(owned.udid);
+    const device = await ownedDevice(owned, await inventory());
+    if (device.state !== "Booted") throw Error("Project simulator is not booted");
+    const abort = new AbortController();
+    captureControllers.add(abort);
+    try { await command(await rotateHelper(), [device.udid, orientation], abort.signal, 15000); }
+    finally { captureControllers.delete(abort); }
+    frames.delete(frameKey(id, owned.udid));
+    return { udid: owned.udid, orientation };
+  }
+  let helper: Promise<string> | undefined;
+  /** Compiles rotate.swift once per source version into .build/; a failed build is retried on the next call. */
+  function rotateHelper(): Promise<string> {
+    helper ??= (async () => {
+      const source = fileURLToPath(new URL("rotate.swift", import.meta.url));
+      const binary = join(dirname(source), ".build", `rotate-${createHash("sha256").update(readFileSync(source)).digest("hex").slice(0, 12)}`);
+      if (existsSync(binary)) return binary;
+      mkdirSync(dirname(binary), { recursive: true, mode: 0o700 });
+      const temp = `${binary}.${randomUUID()}.tmp`;
+      try { await command("/usr/bin/xcrun", ["swiftc", "-O", "-o", temp, source], undefined, 300000); renameSync(temp, binary); }
+      finally { rmSync(temp, { force: true }); }
+      return binary;
+    })().catch(error => { helper = undefined; throw error; });
+    return helper;
   }
 
   async function closeSimulators(): Promise<void> {
@@ -376,5 +412,5 @@ export function createSimulators(api: HostPluginApi) {
     }));
   }
   function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
-  return { SimulatorAction, MAX_OWNED, enabled: simulatorEnabled, configure: configureSimulator, recover: recoverSimulator, act: actOnSimulator, snapshot: simulatorSnapshot, frame: simulatorFrame, pause: pauseSimulatorManagement, close: closeSimulators };
+  return { SimulatorAction, Orientation, MAX_OWNED, rotate: rotateSimulator, enabled: simulatorEnabled, configure: configureSimulator, recover: recoverSimulator, act: actOnSimulator, snapshot: simulatorSnapshot, frame: simulatorFrame, pause: pauseSimulatorManagement, close: closeSimulators };
 }

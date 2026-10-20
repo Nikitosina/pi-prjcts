@@ -18,11 +18,13 @@ Ownership and request receipts persist in the project's `simulator.json`. Disabl
 
 ## Plugin seams
 
-- `coordinatorTools`: `projects_simulator_status`, `projects_simulator_action`, `projects_simulator_screenshot` (extension `projects.coordinator-simulator`).
-- `workerTools`: `projects_worker_simulator_status`, `projects_worker_simulator_screenshot` for new whole-repository threads of enabled projects.
+- `coordinatorTools`: `projects_simulator_status`, `projects_simulator_action`, `projects_simulator_screenshot`, `projects_simulator_rotate` (extension `projects.coordinator-simulator`).
+- `workerTools`: `projects_worker_simulator_status`, `projects_worker_simulator_screenshot`, `projects_worker_simulator_rotate` (lease holders only) for new whole-repository threads of enabled projects.
 - `leaseName`: bare clone UUIDs and `simulator:<uuid>` share one lease.
 - `lifecycle`: refuses project lifecycle changes during an operation, pauses management during them, aborts commands at host shutdown.
 - `rpc`: `snapshot`, `configure`, `action`, `recover`.
 - `web`: the card (`web/ui.js`, `web/ui.css`) and the authenticated screenshot route `/plugins/simulator/frame`.
+
+Rotation: `rotate.swift` sends the device-orientation event to the clone (headless, no Simulator.app window); it is compiled with `xcrun swiftc` on first use into the ignored `.build/`.
 
 Failure cases: `FAILURES.md`. Card design notes: `NOTES.md`.

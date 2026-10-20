@@ -35,6 +35,7 @@ logs/
 **/.dependencies/
 dist/
 build/
+plugins/*/.build/
 out/
 coverage/
 generated/
