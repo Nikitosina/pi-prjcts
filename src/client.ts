@@ -57,7 +57,8 @@ export async function ensureRemoteHost(): Promise<void> {
   let running: { pid?: number } | null = null;
   try { running = await health() as { pid?: number }; } catch {}
   if (running) {
-    const status = await request({ action: "remote-status" }, false) as { launchd?: boolean };
+    // A host from before remote access rejects remote-status; it is detached by definition.
+    const status = await request({ action: "remote-status" }, false).catch(() => ({})) as { launchd?: boolean };
     if (status.launchd) { await request({ action: "remote-reload" }, false); return; }
     const pid = running.pid;
     if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error("Invalid running host PID");
