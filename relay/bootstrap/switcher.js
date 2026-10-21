@@ -58,9 +58,38 @@ async function check(host) {
 
 // Pairing
 
-async function showPairing() {
+// Home Screen apps may not share Safari's identity. Pair inside this app,
+// without navigating a credential-bearing link back into Safari.
+// An older cached index can briefly run the new module during a worker upgrade.
+const addHostButton = $("#add-host") ?? $(".top").appendChild(el("button", { id: "add-host", type: "button", textContent: "Add host" }));
+addHostButton.onclick = () => {
+  const input = el("input", { className: "pair-link", type: "url", required: true, autocomplete: "off", spellcheck: false, placeholder: `${location.origin}/#pair=…` });
+  input.setAttribute("autocapitalize", "off");
+  const error = el("p", { className: "pair-error", role: "alert" });
+  const cancel = el("button", { type: "button", textContent: "Cancel" });
+  cancel.onclick = () => { $("#pair").replaceChildren(); $("#pair").hidden = true; };
+  const form = el("form", {}, el("label", {}, "Pairing link", input),
+    el("div", { className: "row" }, el("button", { type: "submit", className: "primary", textContent: "Continue" }), cancel), error);
+  form.onsubmit = event => {
+    event.preventDefault();
+    let url;
+    try { url = new URL(input.value.trim()); }
+    catch { error.textContent = "Paste a valid pairing link copied from your host."; return; }
+    if (url.origin !== location.origin) { error.textContent = "Use a pairing link for this relay, copied from your host."; return; }
+    try {
+      if (url.username || url.password || url.pathname !== "/" || url.search || !parsePairFragment(url.hash)) throw new Error("Invalid link");
+    } catch { error.textContent = "Paste a valid pairing link copied from your host."; return; }
+    input.value = "";
+    void showPairing(url.hash);
+  };
+  pairCard(el("h2", { textContent: "Add a host" }),
+    el("p", { className: "empty", textContent: "On your Mac, open Settings → Remote access → Pair a device, then Copy link. Paste the fresh link here to pair this app, not Safari. Each link works once." }), form);
+  input.focus();
+};
+
+async function showPairing(hash = location.hash) {
   let link;
-  try { link = parsePairFragment(location.hash); }
+  try { link = parsePairFragment(hash); }
   catch (error) { history.replaceState(null, "", "/"); pairCard(el("p", { textContent: error.message })); return; }
   if (!link) return;
   // The code must not stay in the address bar or history.

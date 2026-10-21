@@ -1,7 +1,7 @@
 // Bootstrap service worker (REMOTE_SPEC.md "Browser client"). It holds no socket and no key:
 // requests from a host's inbox page go back to that same page, whose tunnel carries them to the host.
 
-const VERSION = "2";
+const VERSION = "4";
 const BOOT = `boot-${VERSION}`;
 /** Every bootstrap file as served; the fingerprint covers exactly this list (relay/relay.ts `fingerprint`). */
 const FILES = ["/", "/sw.js", "/manifest.webmanifest", "/boot/host-page.js", "/boot/host.html", "/boot/icon-180.png", "/boot/icon-512.png", "/boot/store.js", "/boot/styles.css", "/boot/switcher.js", "/boot/tunnel.js", "/boot/wire.js"];
