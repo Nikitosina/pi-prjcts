@@ -15,7 +15,7 @@
       <nav id="project-list"></nav>
       <select id="projects" aria-label="Select project" hidden><option>Loading…</option></select>
       <button class="ghost small quiet" data-action="open-retained">Open project by ID…</button>
-      <div class="side-foot"><span id="connection" role="status">Connecting…</span><button id="refresh" class="ghost small">Refresh</button></div>
+      <div class="side-foot"><span id="connection" role="status">Connecting…</span><a id="remote-hosts" class="ghost small" href="/" hidden>Hosts</a><button id="refresh" class="ghost small">Refresh</button></div>
     </aside>
     <main class="main">
       <header class="phead">
@@ -105,6 +105,8 @@
               <fieldset class="events-group"><legend>This browser</legend><label class="check"><input type="checkbox" id="notify-browser"> Notify me while I'm away from this tab</label><p id="notify-browser-state" class="note"></p><div class="row"><button class="small" id="notify-test" type="button">Send a test notification</button></div></fieldset>
               <fieldset class="events-group"><legend>Telegram</legend><div id="telegram"><p class="note">Reading…</p></div></fieldset>
             </div></section>
+          <section class="set-section" id="set-remote"><header class="set-head"><div><h2>Remote access</h2><p class="note">Open this host's inbox from your phone or another computer through your relay. Traffic is end-to-end encrypted; the relay only forwards it.</p></div></header>
+            <div class="card" id="remote-card"><div id="remote"><p class="note">Reading…</p></div></div></section>
           <section class="set-section" id="set-appearance"><header class="set-head"><div><h2>Appearance</h2><p class="note">Theme for this browser. System follows your OS light/dark setting.</p></div></header>
             <div class="card" id="appearance-card"><div class="row seg" role="radiogroup" aria-label="Theme"><label class="check"><input type="radio" name="theme" value="system"> System</label><label class="check"><input type="radio" name="theme" value="light"> Light</label><label class="check"><input type="radio" name="theme" value="dark"> Dark</label></div></div></section>
           <section class="set-section" id="set-approvals"><header class="set-head"><div><h2>Approvals and providers</h2><p id="approval-page-note" class="note"></p></div><span class="row"><button id="approvals-button" data-action="operation-list" hidden>All retained approvals ↗</button><button id="provider-button" data-action="provider-list" hidden>GitHub PR/CI/review receipts ↗</button></span></header></section>

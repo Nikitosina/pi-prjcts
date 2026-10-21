@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { home, socketPath, parse, Reply, WebInfo, Id, type Request } from "./state.ts";
 import { once } from "node:events";
+import { remoteConfig, kickstartRemoteHost } from "./remote.ts";
 
 export async function request(input: Request, start = true): Promise<unknown> {
   if (start) await ensureHost();
@@ -30,6 +31,11 @@ export async function openInbox(id?: string): Promise<string> {
 export async function ensureHost(): Promise<void> {
   try { await health(); return; } catch { /* A missing socket is normal before the first project. */ }
   mkdirSync(home(), { recursive: true, mode: 0o700 });
+  if (remoteConfig()?.enabled) {
+    kickstartRemoteHost();
+    for (let attempt = 0; attempt < 100; attempt++) { await sleep(100); try { await health(); return; } catch {} }
+    throw new Error(`Remote host did not start. Read ${join(home(), "host.log")}`);
+  }
   const log = openSync(join(home(), "host.log"), "a", 0o600);
   const env: NodeJS.ProcessEnv = { ...process.env, PI_PROJECTS_HOST: "1" };
   for (const key of Object.keys(env)) {

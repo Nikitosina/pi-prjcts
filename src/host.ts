@@ -17,6 +17,7 @@ import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
+import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
 import { startTelegram } from "./telegram.ts";
@@ -190,6 +191,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
     case "web": return { url: web.url };
+    case "remote-reload": await remote!.reload(); return remote!.status();
+    case "remote-status": return remote!.status();
+    case "remote-devices": return remote!.devices();
+    case "remote-pair-start": return remote!.pairStart();
+    case "remote-pair-cancel": await remote!.pairCancel(); return { cancelled: true };
+    case "remote-revoke": await remote!.revoke(input.deviceId, input.confirm); return { revoked: true };
+    case "remote-rename": remote!.rename(input.deviceId, input.name); return { renamed: true };
     case "answer": {
       const entry = await withProjectLock(input.id, async () => {
         const project = loadProject(input.id);
@@ -681,11 +689,24 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
   }
 }
 
+let remote: RemoteAccess | null = null;
 const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId), (id, filename, bytes) => withProjectLock(id, async () => {
   const project = loadProject(id);
   if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");
   return saveUpload(ownedProjectDir(id), { filename, bytes });
-}));
+}), () => notifier.seq(), () => remote);
+remote = createRemote({ webUrl: web.url, report: detail => recordHostEvent("remote", detail), summary: async () => {
+  let needs = 0;
+  for (const project of listProjects().filter(project => !project.deleted && !project.archived)) {
+    needs += inbox(projectDir(project.id)).filter(item => !item.result).length;
+    const opening = durableRuntimes.get(project.id);
+    if (opening && !lifecycleChanging.has(project.id) && !settingsUpdating.has(project.id) && !ownerCloseFailed.has(project.id)) {
+      needs += (await (await opening).operationSnapshot({ action: "operation-snapshot", id: project.id, status: "pending", offset: 0, limit: 1 })).total;
+    }
+  }
+  return { needs };
+} });
+try { await remote.reload(); } catch { recordHostEvent("remote", "Remote access could not start; inspect local configuration"); }
 const webhooks = await startWebhooks(async (id, event) => {
   if (closing) throw new Error("Host is stopping");
   const result = await (await durable(id)).ingestAutomationEvent(event);
@@ -694,8 +715,13 @@ const webhooks = await startWebhooks(async (id, event) => {
 // Notices for the browser and Telegram come from open Durable owners only; a project in a lifecycle or settings transition is skipped for that scan.
 const notifier = startNotifier({
   owner: project => closing || lifecycleChanging.has(project.id) || settingsUpdating.has(project.id) || ownerCloseFailed.has(project.id) ? null : durableRuntimes.get(project.id) ?? null,
-  tickMs: Number(process.env.PI_PROJECTS_NOTIFY_TICK_MS ?? 3000), onNotice: () => { void telegram?.flush(); }, report: detail => recordHostEvent("notify", detail),
+  tickMs: Number(process.env.PI_PROJECTS_NOTIFY_TICK_MS ?? 3000), onNotice: () => {
+    web.noticesChanged(notifier.seq());
+    remote?.notices(notifier.feed(pushCursor).items); pushCursor = notifier.seq();
+    void telegram?.flush();
+  }, report: detail => recordHostEvent("notify", detail),
 });
+let pushCursor = notifier.seq();
 const telegram = startTelegram({ dispatch: input => dispatch(parse(Request, input)), chats: async id => (await durable(id)).chats(), notifier, report: detail => recordHostEvent("telegram", detail) });
 void telegram.flush();
 async function automationSnapshot(id: string) {
@@ -741,6 +767,7 @@ function shutdown(): Promise<void> {
   shutdownOperation = Promise.resolve().then(async () => {
     let failed = ownerCloseFailed.size !== 0;
     const report = (error: unknown) => { failed = true; process.stderr.write(errorText(error) + "\n"); };
+    try { await remote?.close(); } catch (error) { report(error); }
     try { web.close(); } catch (error) { report(error); }
     try { webhooks.close(); } catch (error) { report(error); }
     try { telegram.close(); await notifier.close(); } catch (error) { report(error); }

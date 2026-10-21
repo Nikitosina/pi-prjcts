@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
+import type { RemoteAccess } from "./remote.ts";
 
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
@@ -42,7 +43,52 @@ async function serveLive(response: ServerResponse, headers: Record<string, strin
   heartbeat = setInterval(() => response.write(": ping\n\n"), 15000);
 }
 
-export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch, upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>) {
+export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch, upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>, noticeSeq: () => number = () => 0, remoteAccess: () => RemoteAccess | null = () => null) {
+  type Subscriber = { frame: (value: unknown) => void; end: () => void };
+  type Changes = { subscribers: Set<Subscriber>; timer: NodeJS.Timeout; running: boolean; fingerprint: string | null };
+  const changes = new Map<string, Changes>();
+  let closing = false;
+  const stopChanges = () => {
+    closing = true;
+    for (const watcher of changes.values()) { clearInterval(watcher.timer); for (const subscriber of watcher.subscribers) subscriber.end(); }
+    changes.clear();
+  };
+  const watchChanges: LiveWatch = async (id, frame, end, chat = "main") => {
+    if (closing) throw new Error("Browser listener is stopping");
+    const key = `${id}:${chat}`;
+    let watcher = changes.get(key);
+    if (!watcher) {
+      const tick = async () => {
+        if (watcher!.running || changes.get(key) !== watcher) return;
+        watcher!.running = true;
+        try {
+          const values = await Promise.allSettled([
+            dispatch({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) }),
+            dispatch({ action: "plan-snapshot", id }),
+            dispatch({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
+            dispatch({ action: "knowledge-list", id }),
+          ]);
+          if (changes.get(key) !== watcher) return;
+          const fingerprint = createHash("sha256").update(JSON.stringify(values.map(value => value.status === "fulfilled" ? { value: value.value } : { error: errorText(value.reason) }))).digest("hex");
+          if (watcher!.fingerprint !== fingerprint) {
+            watcher!.fingerprint = fingerprint;
+            for (const subscriber of watcher!.subscribers) subscriber.frame({ t: "project" });
+          }
+        } finally { watcher!.running = false; }
+      };
+      watcher = { subscribers: new Set(), timer: setInterval(() => { void tick().catch(() => { for (const subscriber of watcher!.subscribers) subscriber.end(); }); }, 2000), running: false, fingerprint: null };
+      watcher.timer.unref();
+      changes.set(key, watcher);
+    }
+    const subscriber = { frame, end };
+    watcher.subscribers.add(subscriber);
+    frame({ t: "notices", seq: noticeSeq() });
+    frame({ t: "project" });
+    return () => {
+      watcher!.subscribers.delete(subscriber);
+      if (!watcher!.subscribers.size) { clearInterval(watcher!.timer); if (changes.get(key) === watcher) changes.delete(key); }
+    };
+  };
   // Reuse the previous token (and below, port) when present: a tab left open across a host restart keeps its session and its notifications.
   let saved: URL | null = null;
   try { saved = new URL(JSON.parse(readFileSync(join(home(), "web.json"), "utf8")).url); } catch {}
@@ -65,21 +111,42 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
       if (request.headers.host !== new URL(origin).host) { status = 403; throw new Error("Invalid Host header"); }
       if (request.headers.origin && request.headers.origin !== origin) { status = 403; throw new Error("Cross-origin request denied"); }
       const url = new URL(request.url ?? "/", origin);
+      const sendAsset = async (path: string, mime: string) => {
+        const content = await readFile(path), etag = `"${createHash("sha256").update(content).digest("hex")}"`;
+        const assetHeaders = { ...headers, "cache-control": "no-cache", "content-type": mime, etag };
+        const matches = request.headers["if-none-match"]?.split(",").some(value => value.trim() === "*" || value.trim().replace(/^W\//, "") === etag);
+        if (matches) response.writeHead(304, assetHeaders).end();
+        else response.writeHead(200, assetHeaders).end(content);
+      };
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
-        response.writeHead(200, { ...headers, "content-type": asset.mime }).end(await readFile(fileURLToPath(new URL(`../web/${asset.path}`, import.meta.url))));
+        await sendAsset(fileURLToPath(new URL(`../web/${asset.path}`, import.meta.url)), asset.mime);
         return;
       }
       // Only the files a plugin declared (web.script, web.style); never another path below the plugin.
       const pluginFile = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/(ui\.js|ui\.css)$/.exec(url.pathname) : null;
       const pluginAsset = pluginFile ? plugins.webAsset(pluginFile[1]!, pluginFile[2]!) : undefined;
-      if (pluginAsset) { response.writeHead(200, { ...headers, "content-type": pluginAsset.mime }).end(await readFile(pluginAsset.path)); return; }
+      if (pluginAsset) { await sendAsset(pluginAsset.path, pluginAsset.mime); return; }
       if (url.pathname === "/favicon.ico") { response.writeHead(204, headers).end(); return; }
       const supplied = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
-      if (!/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { status = 401; throw new Error("Open this inbox through /projects-ui or the CLI to authenticate"); }
+      const remote = remoteAccess(), device = typeof request.headers["x-pi-device"] === "string" ? request.headers["x-pi-device"] : "";
+      const equalToken = (expected: string) => /^[a-f0-9]{64}$/.test(supplied) && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+      const local = equalToken(token), paired = !!remote && equalToken(remote.token) && remote.deviceActive(device);
+      if (!local && !paired) { status = 401; throw new Error("Open this inbox through /projects-ui or the CLI to authenticate"); }
       if (request.headers["sec-fetch-site"] === "cross-site") { status = 403; throw new Error("Cross-site request denied"); }
+      if (url.pathname === "/remote/summary" && request.method === "GET" && remote?.status().enabled) {
+        response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data: await remote.summary() })); return;
+      }
+      if (url.pathname === "/remote/push" && request.method === "POST" && remote?.status().enabled) {
+        if (!paired) { status = 403; throw new Error("Push subscriptions require a paired device"); }
+        const input = JSON.parse(await body(request));
+        if (!input || !("subscription" in input)) throw new Error("Missing push subscription");
+        const data = remote.setPush(device, input.subscription);
+        response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data })); return;
+      }
       if (request.method === "POST" && url.pathname === "/api") {
         const input = parse(Request, JSON.parse(await body(request)));
+        if (!local && input.action === "remote-reload") { status = 403; throw new Error("Relay configuration requires the local inbox or CLI"); }
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
         return;
@@ -96,13 +163,14 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
         return;
       }
-      if (request.method === "GET" && url.pathname === "/live") {
+      if (request.method === "GET" && (url.pathname === "/live" || url.pathname === "/changes")) {
         const id = url.searchParams.get("project") ?? "";
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         const chat = url.searchParams.get("chat") ?? "main";
         if (!/^(main|[a-f0-9-]{36})$/.test(chat)) throw new Error("Invalid chat ID");
         loadProject(id);
-        await serveLive(response, headers, (onFrame, onEnd) => watchLive(id, onFrame, onEnd, chat));
+        const watch = url.pathname === "/changes" ? watchChanges : watchLive;
+        await serveLive(response, headers, (onFrame, onEnd) => watch(id, onFrame, onEnd, chat));
         return;
       }
       // Raw file body (≤ 20 MiB); the display name travels URI-encoded in x-filename.
@@ -156,7 +224,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     }
   });
   server.requestTimeout = 120000;
-  server.on("close", () => { for (const end of liveStreams) end(); });
+  server.on("close", () => { stopChanges(); for (const end of liveStreams) end(); });
   // Reuse the previous port when it is free: browser notification permission and the notifications toggle are per origin.
   const port = Number(saved?.port) || 0;
   const listen = (port: number) => new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
@@ -167,5 +235,9 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
   origin = `http://127.0.0.1:${address.port}`;
   const url = `${origin}/#token=${token}`;
   saveJson(join(home(), "web.json"), { url, pid: process.pid });
-  return { url, close: () => server.close() };
+  return {
+    url,
+    noticesChanged: (seq: number) => { for (const watcher of changes.values()) for (const subscriber of watcher.subscribers) subscriber.frame({ t: "notices", seq }); },
+    close: () => { stopChanges(); for (const end of liveStreams) end(); server.close(); },
+  };
 }
