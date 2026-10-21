@@ -1,11 +1,12 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as signJwt, type KeyObject } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
+import { bootstrapAssets, fingerprint, pushServiceAllowed } from "./shared.ts";
 import { clientAuthText, devicesText, fromB64u, hostAuthText, isId, MAX_FRAME, splitChannel, verify, withChannel } from "./bootstrap/wire.js";
 
 // ws has no bundled types. Keep its small used surface here, without a second package dependency.
@@ -27,7 +28,6 @@ const dataDir = resolve(process.env.RELAY_DATA ?? join(root, "state"));
 const allowFile = join(dataDir, "hosts.json");
 const OPEN = 1, BUFFER_LIMIT = 4 * 1024 * 1024, AUTH_MS = 10_000;
 type Hosts = Record<string, { name: string }>;
-type Asset = { bytes: Buffer; mime: string; etag: string };
 type Peer = { socket: Socket; ip: string; nonce: string; role: "pending" | "host" | "client" | "pair"; id?: string; host?: Host; channel?: number; pairId?: string; authTimer: NodeJS.Timeout; closeTimer?: NodeJS.Timeout; missedPongs: number; closed: boolean; queued: number; queuedMessages: number; queue: Promise<void> };
 type Host = { id: string; peer: Peer; channels: Map<number, Peer>; devices: Set<string>; pairing: Set<string>; nextChannel: number };
 type PushRate = { since: number; count: number; running: number };
@@ -49,9 +49,7 @@ function pushEndpoint(value: unknown): URL | null {
   try {
     if (typeof value !== "string" || value.length > 4096) return null;
     const url = new URL(value);
-    const suffixes = ["push.apple.com", "push.services.mozilla.com", "notify.windows.com"];
-    if (url.protocol !== "https:" || url.username || url.password || url.hash || (url.port && url.port !== "443")) return null;
-    if (url.hostname !== "fcm.googleapis.com" && !suffixes.some(suffix => url.hostname === suffix || url.hostname.endsWith(`.${suffix}`))) return null;
+    if (!pushServiceAllowed(url)) return null;
     return url;
   } catch { return null; }
 }
@@ -80,24 +78,6 @@ function saveHosts(hosts: Hosts) {
   chmodSync(temporary, 0o600); renameSync(temporary, allowFile);
 }
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-
-/** Exact fingerprint input: each served URL (sorted lexically), then LF, then its raw file bytes; no trailing delimiter. */
-export function bootstrapAssets(): Map<string, Asset> {
-  const mime: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", webmanifest: "application/manifest+json", svg: "image/svg+xml", png: "image/png" };
-  const entries: [string, Asset][] = [];
-  for (const entry of readdirSync(join(root, "bootstrap"), { withFileTypes: true })) {
-    if (!entry.isFile() || entry.name.startsWith(".") || entry.name.endsWith(".d.ts")) continue;
-    const path = entry.name === "index.html" ? "/" : ["sw.js", "manifest.webmanifest"].includes(entry.name) ? `/${entry.name}` : `/boot/${entry.name}`;
-    const bytes = readFileSync(join(root, "bootstrap", entry.name));
-    entries.push([path, { bytes, mime: mime[entry.name.split(".").at(-1)!] ?? "application/octet-stream", etag: `"${hash(bytes)}"` }]);
-  }
-  return new Map(entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
-}
-export function fingerprint(): string {
-  const digest = createHash("sha256");
-  for (const [path, asset] of bootstrapAssets()) digest.update(path + "\n").update(asset.bytes);
-  return digest.digest("hex");
-}
 
 function clientIp(request: IncomingMessage): string {
   const address = request.socket.remoteAddress ?? "unknown";

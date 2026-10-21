@@ -1,4 +1,4 @@
-import { request, inboxUrl, openInbox } from "./client.ts";
+import { request, inboxUrl, openInbox, ensureRemoteHost } from "./client.ts";
 import { parse, errorText, Request } from "./state.ts";
 import { enableRemote, disableRemote, remoteServiceStatus } from "./remote.ts";
 
@@ -20,7 +20,7 @@ if (command === "remote") {
     if (first === "enable") {
       if (!second || rest.length && (rest.length !== 2 || rest[0] !== "--name")) throw new Error("Usage: remote enable <relay-origin> [--name <host name>]");
       const configured = await enableRemote(second, rest[1]);
-      await request({ action: "remote-reload" });
+      await ensureRemoteHost();
       process.stdout.write(JSON.stringify(configured, null, 2) + "\n");
     } else if (first === "disable" && !second) {
       // Turn the connection off before booting out the launchd-owned process.

@@ -16,6 +16,8 @@ import type { RemoteAccess } from "./remote.ts";
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
 const liveStreams = new Set<() => void>();
+/** Actions a paired device may not call through the tunnel (REMOTE_SPEC.md: pairing approval from a paired device comes later). */
+const LOCAL_ONLY = new Set(["remote-reload", "remote-pair-start", "remote-pair-cancel", "remote-revoke", "remote-rename"]);
 
 /** Server-sent events: one `data:` frame per live change, comment heartbeats so idle proxies keep the stream. */
 async function serveLive(response: ServerResponse, headers: Record<string, string>, watch: (onFrame: (frame: unknown) => void, onEnd: () => void) => Promise<() => void>) {
@@ -45,7 +47,7 @@ async function serveLive(response: ServerResponse, headers: Record<string, strin
 
 export async function startWeb(dispatch: (input: RequestData) => Promise<unknown>, watchLive: LiveWatch, upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>, noticeSeq: () => number = () => 0, remoteAccess: () => RemoteAccess | null = () => null) {
   type Subscriber = { frame: (value: unknown) => void; end: () => void };
-  type Changes = { subscribers: Set<Subscriber>; timer: NodeJS.Timeout; running: boolean; fingerprint: string | null };
+  type Changes = { subscribers: Set<Subscriber>; timer: NodeJS.Timeout; running: boolean; fingerprint: string | null; threadTotal: number };
   const changes = new Map<string, Changes>();
   let closing = false;
   const stopChanges = () => {
@@ -53,9 +55,10 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     for (const watcher of changes.values()) { clearInterval(watcher.timer); for (const subscriber of watcher.subscribers) subscriber.end(); }
     changes.clear();
   };
-  const watchChanges: LiveWatch = async (id, frame, end, chat = "main") => {
+  // `thread` is the worker conversation open in the inbox; its message count and newest message join the fingerprint.
+  const watchChanges = async (id: string, frame: (frame: unknown) => void, end: () => void, chat: string, thread: string) => {
     if (closing) throw new Error("Browser listener is stopping");
-    const key = `${id}:${chat}`;
+    const key = `${id}:${chat}:${thread}`;
     let watcher = changes.get(key);
     if (!watcher) {
       const tick = async () => {
@@ -67,7 +70,11 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
             dispatch({ action: "plan-snapshot", id }),
             dispatch({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
             dispatch({ action: "knowledge-list", id }),
+            ...thread ? [dispatch({ action: "thread-history", id, threadId: thread, offset: Math.max(0, watcher!.threadTotal - 1), limit: 1, textLimit: 1 })] : [],
           ]);
+          const history = values[4];
+          // observedAtMs changes on every read; only the count and the newest message mark a change.
+          if (history?.status === "fulfilled") { const { total, items } = history.value as { total: number; items: unknown[] }; watcher!.threadTotal = total; history.value = { total, items }; }
           if (changes.get(key) !== watcher) return;
           const fingerprint = createHash("sha256").update(JSON.stringify(values.map(value => value.status === "fulfilled" ? { value: value.value } : { error: errorText(value.reason) }))).digest("hex");
           if (watcher!.fingerprint !== fingerprint) {
@@ -76,7 +83,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
           }
         } finally { watcher!.running = false; }
       };
-      watcher = { subscribers: new Set(), timer: setInterval(() => { void tick().catch(() => { for (const subscriber of watcher!.subscribers) subscriber.end(); }); }, 2000), running: false, fingerprint: null };
+      watcher = { subscribers: new Set(), timer: setInterval(() => { void tick().catch(() => { for (const subscriber of watcher!.subscribers) subscriber.end(); }); }, 2000), running: false, fingerprint: null, threadTotal: 0 };
       watcher.timer.unref();
       changes.set(key, watcher);
     }
@@ -146,7 +153,7 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
       }
       if (request.method === "POST" && url.pathname === "/api") {
         const input = parse(Request, JSON.parse(await body(request)));
-        if (!local && input.action === "remote-reload") { status = 403; throw new Error("Relay configuration requires the local inbox or CLI"); }
+        if (!local && LOCAL_ONLY.has(input.action)) { status = 403; throw new Error("Pairing, device management and relay configuration require the local inbox or CLI"); }
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
         return;
@@ -168,9 +175,10 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         const chat = url.searchParams.get("chat") ?? "main";
         if (!/^(main|[a-f0-9-]{36})$/.test(chat)) throw new Error("Invalid chat ID");
+        const thread = url.searchParams.get("thread") ?? "";
+        if (!/^([a-f0-9-]{36})?$/.test(thread)) throw new Error("Invalid thread ID");
         loadProject(id);
-        const watch = url.pathname === "/changes" ? watchChanges : watchLive;
-        await serveLive(response, headers, (onFrame, onEnd) => watch(id, onFrame, onEnd, chat));
+        await serveLive(response, headers, (onFrame, onEnd) => url.pathname === "/changes" ? watchChanges(id, onFrame, onEnd, chat, thread) : watchLive(id, onFrame, onEnd, chat));
         return;
       }
       // Raw file body (≤ 20 MiB); the display name travels URI-encoded in x-filename.

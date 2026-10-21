@@ -1,7 +1,7 @@
 // Bootstrap service worker (REMOTE_SPEC.md "Browser client"). It holds no socket and no key:
 // requests from a host's inbox page go back to that same page, whose tunnel carries them to the host.
 
-const VERSION = "1";
+const VERSION = "2";
 const BOOT = `boot-${VERSION}`;
 /** Every bootstrap file as served; the fingerprint covers exactly this list (relay/relay.ts `fingerprint`). */
 const FILES = ["/", "/sw.js", "/manifest.webmanifest", "/boot/host-page.js", "/boot/host.html", "/boot/icon-180.png", "/boot/icon-512.png", "/boot/store.js", "/boot/styles.css", "/boot/switcher.js", "/boot/tunnel.js", "/boot/wire.js"];
@@ -22,7 +22,8 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   if (url.origin !== location.origin || url.pathname === "/ws" || url.pathname === "/vapid") return;
-  if (FILES.includes(url.pathname)) { event.respondWith(boot(url.pathname)); return; }
+  // A host page's own fetch of "/" is its inbox HTML, not the switcher.
+  if (FILES.includes(url.pathname) && !(url.pathname === "/" && event.request.mode !== "navigate")) { event.respondWith(boot(url.pathname)); return; }
   event.respondWith(event.request.mode === "navigate" ? navigate(event, url) : forward(event, url));
 });
 

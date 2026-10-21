@@ -91,18 +91,26 @@ class Tunnel {
     if (this.#closed) throw this.#closed;
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const id = this.#next++, bytes = body ? new Uint8Array(body) : new Uint8Array(0);
-    let controller = null, settle;
+    let controller = null, settle, demand = false, finished = false;
+    const queued = [];
+    const deliver = () => {
+      if (demand && queued.length) {
+        const data = queued.shift(); demand = false; controller.enqueue(data);
+        void this.#session.write({ t: "ack", id, bytes: data.length }).catch(error => this.#end(error));
+      }
+      if (finished && !queued.length) { try { controller?.close(); } catch {} this.#forget(id); }
+    };
     const head = new Promise((resolve, reject) => { settle = { resolve, reject }; });
     const entry = {
       response: header => {
         const status = header.status;
-        const stream = NULL_BODY.has(status) ? null : new ReadableStream({ start: c => { controller = c; }, cancel: () => this.#cancel(id) });
+        const stream = NULL_BODY.has(status) ? null : new ReadableStream({ start: c => { controller = c; }, pull: () => { demand = true; deliver(); }, cancel: () => { queued.length = 0; this.#cancel(id); } }, { highWaterMark: 0 });
         settle.resolve(new Response(stream, { status, headers: header.headers ?? {} }));
         return stream !== null;
       },
-      chunk: data => { if (data.length) controller?.enqueue(data.slice()); },
-      finish: () => { try { controller?.close(); } catch {} this.#forget(id); },
-      fail: error => { settle.reject(error); try { controller?.error(error); } catch {} this.#forget(id); },
+      chunk: data => { if (data.length) { queued.push(data.slice()); deliver(); } },
+      finish: () => { finished = true; deliver(); },
+      fail: error => { queued.length = 0; settle.reject(error); try { controller?.error(error); } catch {} this.#forget(id); },
     };
     this.#requests.set(id, entry);
     signal?.addEventListener("abort", () => { entry.fail(new DOMException("Aborted", "AbortError")); void this.#session.write({ t: "cancel", id }).catch(() => {}); }, { once: true });

@@ -1,3 +1,4 @@
+import { pushServiceAllowed } from "../relay/shared.ts";
 import { createCipheriv, createECDH, createHmac, randomBytes } from "node:crypto";
 
 export type PushSubscription = { endpoint: string; keys: { p256dh: string; auth: string } };
@@ -12,8 +13,7 @@ export function pushSubscription(value: unknown): PushSubscription {
   if (!input || typeof input.endpoint !== "string" || input.endpoint.length > 2048) throw new Error("Invalid push subscription");
   const url = new URL(input.endpoint);
   // Browser-selected push services only; never let a device turn the host into an arbitrary HTTP client.
-  const allowed = url.hostname === "web.push.apple.com" || url.hostname.endsWith(".push.apple.com") || url.hostname === "fcm.googleapis.com" || url.hostname === "updates.push.services.mozilla.com";
-  if (url.protocol !== "https:" || url.port || url.username || url.password || !allowed) throw new Error("Unsupported push service");
+  if (!pushServiceAllowed(url)) throw new Error("Unsupported push service");
   decode(input.keys?.p256dh, 65); decode(input.keys?.auth, 16);
   return { endpoint: url.href, keys: { p256dh: input.keys.p256dh, auth: input.keys.auth } };
 }

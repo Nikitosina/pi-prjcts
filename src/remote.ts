@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import qrcode from "qrcode-generator";
 import { home, saveJson } from "./state.ts";
 import { encryptWebPush, pushSubscription, type PushSubscription } from "./web-push.ts";
+import { fingerprint } from "../relay/shared.ts";
 import type { Notice } from "./notify.ts";
 import { b64u, fromB64u, generateSigningKey, keyId, importSigningKey, sign, hostAuthText, devicesText, newPairCode, pairId, pairLink, readHello, verifyPairMac, hostWelcome, text, utf8, withChannel, splitChannel, isId, CHUNK, MAX_FRAME, MAX_IN_FLIGHT, PAIR_MS, type Hello, type Session, type TunnelHeader } from "../relay/bootstrap/wire.js";
 
@@ -17,12 +18,13 @@ type RemoteConfig = { enabled: boolean; relay: string; hostName: string };
 type Device = { id: string; name: string; pairedAt: number; lastSeenAt: number; revokedAt?: number; push?: PushSubscription };
 type Registry = { seq: number; devices: Device[] };
 type Pair = { code: string; id: string; expiresAt: number; attempts: number; timer: NodeJS.Timeout };
-type PendingRequest = { call: ClientRequest; bytes: number; ended: boolean; responseEnded: boolean };
+type PendingRequest = { call: ClientRequest; bytes: number; ended: boolean; responseEnded: boolean; unacked: number; wake?: () => void };
 type Channel = { ch: number; relayDevice: string | null; pair: boolean; deviceId: string | null; session?: Session; handshakeTimer: NodeJS.Timeout; requests: Map<number, PendingRequest>; seen: Set<number>; chain: Promise<void>; queuedBytes: number; queuedFrames: number; stopped: boolean };
+type PushJob = { deviceId: string; endpoint: string; body: string; urgency: string; retried: boolean; readyAt: number };
 type Options = { webUrl: string; report: (detail: string) => void; summary: () => Promise<{ hostName?: string; needs: number }> };
 const directory = () => join(home(), "remote");
 const configPath = () => join(directory(), "config.json");
-const REQUEST_LIMIT = 20 * 1024 * 1024;
+const REQUEST_LIMIT = 20 * 1024 * 1024, RESPONSE_WINDOW = 1024 * 1024;
 const requestHeaders = new Set(["content-type", "x-filename", "if-none-match", "accept"]);
 const responseHeaders = new Set(["content-type", "content-disposition", "etag", "cache-control", "content-length"]);
 
@@ -47,7 +49,7 @@ function launchctl(args: string[]): string {
 }
 const xml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 
-/** Configure remote mode and install its opt-in per-user host service. Does not restart a running host. */
+/** Configure remote mode and install its opt-in per-user host service; the caller transfers any running host to launchd. */
 export async function enableRemote(relayOrigin: string, name = hostname()): Promise<{ hostId: string; relay: string; allowCommand: string }> {
   if (process.platform !== "darwin") throw new Error("Remote host service installation requires macOS");
   const relay = new URL(relayOrigin);
@@ -58,7 +60,7 @@ export async function enableRemote(relayOrigin: string, name = hostname()): Prom
   saveJson(configPath(), { enabled: true, relay: relay.origin, hostName: name });
   if (!existsSync(join(directory(), "devices.json"))) saveJson(join(directory(), "devices.json"), { seq: 0, devices: [] });
   const root = fileURLToPath(new URL("..", import.meta.url)), host = fileURLToPath(new URL("./host.ts", import.meta.url));
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(remoteAgentLabel())}</string><key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(host)}</string></array><key>WorkingDirectory</key><string>${xml(root)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>EnvironmentVariables</key><dict><key>PI_PROJECTS_HOME</key><string>${xml(home())}</string><key>PI_PROJECTS_HOST</key><string>1</string><key>PATH</key><string>${xml(process.env.PATH ?? "/usr/bin:/bin")}</string></dict><key>StandardOutPath</key><string>${xml(join(home(), "host.log"))}</string><key>StandardErrorPath</key><string>${xml(join(home(), "host.log"))}</string></dict></plist>\n`;
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${xml(remoteAgentLabel())}</string><key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(host)}</string></array><key>WorkingDirectory</key><string>${xml(root)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>EnvironmentVariables</key><dict><key>PI_PROJECTS_HOME</key><string>${xml(home())}</string><key>PI_PROJECTS_HOST</key><string>1</string><key>PI_PROJECTS_LAUNCHD</key><string>1</string><key>PATH</key><string>${xml(process.env.PATH ?? "/usr/bin:/bin")}</string></dict><key>StandardOutPath</key><string>${xml(join(home(), "host.log"))}</string><key>StandardErrorPath</key><string>${xml(join(home(), "host.log"))}</string></dict></plist>\n`;
   mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
   if (existsSync(agentPath()) && readFileSync(agentPath(), "utf8") !== plist) throw new Error("Remote service configuration changed; disable it before installing a new service configuration");
   writeFileSync(agentPath(), plist, { mode: 0o600 });
@@ -102,13 +104,8 @@ async function hostIdentity(): Promise<{ id: string; privateKey: CryptoKey }> {
   return { id, privateKey: pair.privateKey };
 }
 
-/** SHA-256 of sorted served paths followed by newline and file bytes; shared with the relay fingerprint CLI. */
-export function bootstrapFingerprint(): string {
-  const base = fileURLToPath(new URL("../relay/bootstrap/", import.meta.url));
-  const files = readdirSync(base, { withFileTypes: true }).filter(file => file.isFile() && file.name !== "wire.d.ts").map(file => ({ name: file.name, path: file.name === "index.html" ? "/" : file.name === "sw.js" || file.name === "manifest.webmanifest" ? `/${file.name}` : `/boot/${file.name}` })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  const hash = createHash("sha256"); for (const file of files) hash.update(`${file.path}\n`).update(readFileSync(join(base, file.name)));
-  return hash.digest("hex");
-}
+/** Expected bootstrap fingerprint, from the same served asset set as the relay CLI. */
+export function bootstrapFingerprint(): string { return fingerprint(); }
 
 /** One opt-in relay connection and device registry per running Projects host. */
 export function createRemote(options: Options) {
@@ -119,7 +116,9 @@ export function createRemote(options: Options) {
   let stopped = true, generation = 0, backoff = 1000, connection: "off" | "connecting" | "connected" | "error" = "off", lastError: string | null = null;
   let controls = Promise.resolve(), reloadOperation = Promise.resolve();
   let pairGeneration = 0;
-  const channels = new Map<number, Channel>(), pendingPushes = new Map<string, { deviceId: string; endpoint: string; timer: NodeJS.Timeout }>();
+  const channels = new Map<number, Channel>(), pendingPushes = new Map<string, { job: PushJob; timer: NodeJS.Timeout }>();
+  const pushQueue: PushJob[] = [];
+  let pushRetry: NodeJS.Timeout | null = null;
   const persist = () => saveJson(join(directory(), "devices.json"), registry);
   const deviceActive = (id: string) => !stopped && !!registry.devices.find(device => device.id === id && !device.revokedAt);
   const control = (value: unknown) => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
@@ -127,12 +126,25 @@ export function createRemote(options: Options) {
   const stopChannel = (channel: Channel, notify = true) => {
     if (channel.stopped) return;
     channel.stopped = true; clearTimeout(channel.handshakeTimer); channels.delete(channel.ch);
-    for (const request of channel.requests.values()) request.call.destroy();
+    for (const request of channel.requests.values()) { request.wake?.(); request.call.destroy(); }
     channel.requests.clear(); channel.session?.close();
     if (notify) control({ t: "close", ch: channel.ch });
   };
   const clearChannels = () => { for (const channel of channels.values()) stopChannel(channel, false); };
-  const clearPushes = () => { for (const push of pendingPushes.values()) clearTimeout(push.timer); pendingPushes.clear(); };
+  const clearPushes = () => { clearTimeout(pushRetry ?? undefined); pushRetry = null; pushQueue.length = 0; for (const push of pendingPushes.values()) clearTimeout(push.timer); pendingPushes.clear(); };
+  function drainPushes() {
+    clearTimeout(pushRetry ?? undefined); pushRetry = null;
+    if (stopped || connection !== "connected" || socket?.readyState !== WebSocket.OPEN) return;
+    while (pendingPushes.size < 4 && pushQueue.length) {
+      const index = pushQueue.findIndex(job => job.readyAt <= Date.now());
+      if (index === -1) { pushRetry = setTimeout(drainPushes, Math.max(1, Math.min(...pushQueue.map(job => job.readyAt)) - Date.now())); break; }
+      const job = pushQueue.splice(index, 1)[0];
+      if (!registry.devices.some(device => device.id === job.deviceId && !device.revokedAt && device.push?.endpoint === job.endpoint)) continue;
+      const id = randomUUID();
+      pendingPushes.set(id, { job, timer: setTimeout(() => { pendingPushes.delete(id); options.report("Push delivery timed out"); drainPushes(); }, 30000) });
+      control({ t: "push", id, endpoint: job.endpoint, body: job.body, ttl: 86400, urgency: job.urgency });
+    }
+  }
   const sendList = () => {
     controls = controls.then(async () => {
       if (!identity || !socket || socket.readyState !== WebSocket.OPEN || connection !== "connected") return;
@@ -170,16 +182,25 @@ export function createRemote(options: Options) {
         }
       } finally { draining = false; }
     }
+    const wakeResponses = () => { for (const request of channel.requests.values()) request.wake?.(); };
+    const outstanding = () => { let bytes = 0; for (const request of channel.requests.values()) bytes += request.unacked; return bytes; };
     function finishRequest(id: number) {
       const request = channel.requests.get(id);
-      if (request?.ended && request.responseEnded) channel.requests.delete(id);
+      if (request?.ended && request.responseEnded && request.unacked === 0) channel.requests.delete(id);
     }
     return async (header: TunnelHeader, body: Uint8Array) => {
       if (!deviceActive(channel.deviceId!)) { stopChannel(channel); return; }
       const id = header.id;
       if (!Number.isSafeInteger(id) || (id as number) < 0 || body.length > CHUNK) throw new Error("Invalid remote request");
       const requestId = id as number;
-      if (header.t === "cancel") { channel.requests.get(requestId)?.call.destroy(); channel.requests.delete(requestId); return; }
+      if (header.t === "cancel") { const request = channel.requests.get(requestId); channel.requests.delete(requestId); request?.wake?.(); wakeResponses(); request?.call.destroy(); return; }
+      if (header.t === "ack") {
+        const request = channel.requests.get(requestId);
+        if (!Number.isSafeInteger(header.bytes) || (header.bytes as number) <= 0 || body.length) throw new Error("Invalid response acknowledgement");
+        if (!request) { if (channel.seen.has(requestId)) return; throw new Error("Unknown remote request"); }
+        if ((header.bytes as number) > request.unacked) throw new Error("Invalid response acknowledgement");
+        request.unacked -= header.bytes as number; wakeResponses(); finishRequest(requestId); return;
+      }
       if (header.t !== "req" && header.t !== "data" || typeof header.fin !== "boolean") throw new Error("Invalid remote request");
       let pending = channel.requests.get(requestId);
       if (header.t === "req") {
@@ -192,10 +213,12 @@ export function createRemote(options: Options) {
           for (const [name, value] of Object.entries(header.headers)) if (requestHeaders.has(name.toLowerCase()) && typeof value === "string" && value.length <= 8192 && !/[\r\n]/.test(value)) headers[name.toLowerCase()] = value;
         }
         const call = httpRequest(destination, { method: header.method, headers, timeout: 120000 });
-        pending = { call, bytes: 0, ended: false, responseEnded: false };
+        pending = { call, bytes: 0, ended: false, responseEnded: false, unacked: 0 };
         channel.requests.set(requestId, pending); channel.seen.add(requestId);
         call.on("timeout", () => call.destroy(new Error("Remote HTTP timeout")));
-        call.on("error", () => { channel.requests.delete(requestId); void emit({ t: "err", id: requestId, error: "Host request failed" }).catch(() => {}); });
+        const current = pending;
+        const abandon = () => { if (channel.requests.get(requestId) === current) channel.requests.delete(requestId); current.wake?.(); wakeResponses(); };
+        call.on("error", () => { abandon(); void emit({ t: "err", id: requestId, error: "Host request failed" }).catch(() => {}); });
         call.on("response", response => {
           void (async () => {
             const headers: Record<string, string> = {};
@@ -203,17 +226,24 @@ export function createRemote(options: Options) {
             await emit({ t: "res", id: requestId, status: response.statusCode ?? 502, headers, fin: false });
             for await (const raw of response) {
               const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-              for (let at = 0; at < bytes.length; at += CHUNK) await emit({ t: "data", id: requestId, fin: false }, bytes.subarray(at, at + CHUNK));
+              for (let at = 0; at < bytes.length; at += CHUNK) {
+                const chunk = bytes.subarray(at, at + CHUNK);
+                while ((current.unacked + chunk.length > RESPONSE_WINDOW || outstanding() + chunk.length > 3 * RESPONSE_WINDOW) && channel.requests.get(requestId) === current && !channel.stopped) await new Promise<void>(resolve => { current.wake = resolve; });
+                current.wake = undefined;
+                if (channel.stopped || channel.requests.get(requestId) !== current) return;
+                current.unacked += chunk.length;
+                await emit({ t: "data", id: requestId, fin: false }, chunk);
+              }
             }
             await emit({ t: "data", id: requestId, fin: true });
             const request = channel.requests.get(requestId); if (request) request.responseEnded = true;
             finishRequest(requestId);
-          })().catch(() => { call.destroy(); channel.requests.delete(requestId); void emit({ t: "err", id: requestId, error: "Host response interrupted" }).catch(() => {}); });
+          })().catch(() => { abandon(); call.destroy(); void emit({ t: "err", id: requestId, error: "Host response interrupted" }).catch(() => {}); });
         });
       }
-      if (!pending || pending.ended) throw new Error("Unknown or finished remote request");
+      if (!pending || pending.ended) { if (header.t === "data" && channel.seen.has(requestId)) return; throw new Error("Unknown remote request"); }
       pending.bytes += body.length;
-      if (pending.bytes > REQUEST_LIMIT) { pending.call.destroy(); channel.requests.delete(requestId); await emit({ t: "err", id: requestId, error: "Request exceeds 20 MiB" }); return; }
+      if (pending.bytes > REQUEST_LIMIT) { channel.requests.delete(requestId); pending.wake?.(); wakeResponses(); pending.call.destroy(); await emit({ t: "err", id: requestId, error: "Request exceeds 20 MiB" }); return; }
       if (body.length && !pending.call.write(body)) await once(pending.call, "drain");
       if (header.fin) { pending.ended = true; pending.call.end(); finishRequest(requestId); }
     };
@@ -288,10 +318,12 @@ export function createRemote(options: Options) {
         } else if (message.t === "push-result") {
           const push = pendingPushes.get(message.id); if (!push) return;
           clearTimeout(push.timer); pendingPushes.delete(message.id);
-          if (message.status === 404 || message.status === 410) {
-            const device = registry.devices.find(device => device.id === push.deviceId);
-            if (device?.push?.endpoint === push.endpoint) { delete device.push; persist(); }
+          if (message.status === 429 && !push.job.retried) pushQueue.push({ ...push.job, retried: true, readyAt: Date.now() + 2000 });
+          else if (message.status === 404 || message.status === 410) {
+            const device = registry.devices.find(device => device.id === push.job.deviceId);
+            if (device?.push?.endpoint === push.job.endpoint) { delete device.push; persist(); }
           } else if (message.status < 200 || message.status >= 300) options.report("Push delivery failed");
+          drainPushes();
         }
       }).catch(() => { fail("Relay protocol error"); ws.close(); });
     };
@@ -329,7 +361,7 @@ export function createRemote(options: Options) {
       reloadOperation = operation.catch(() => {}); return operation;
     },
     close: async () => { await reloadOperation; await stop(); },
-    status() { return { enabled: !stopped, relay: config?.relay ?? null, hostId: identity?.id ?? null, hostName: config?.hostName ?? hostname(), connection, lastError, fingerprint: bootstrapFingerprint() }; },
+    status() { return { launchd: process.env.PI_PROJECTS_LAUNCHD === "1", enabled: !stopped, relay: config?.relay ?? null, hostId: identity?.id ?? null, hostName: config?.hostName ?? hostname(), connection, lastError, fingerprint: bootstrapFingerprint() }; },
     devices() { return registry.devices.map(({ push, ...device }) => ({ ...device, push: !!push, online: [...channels.values()].some(channel => channel.deviceId === device.id && !channel.stopped) })); },
     async pairStart() {
       if (stopped || !identity || !config || connection !== "connected") throw new Error("Connect this host to its relay before pairing");
@@ -365,13 +397,13 @@ export function createRemote(options: Options) {
     notices(notices: Notice[]) {
       if (connection !== "connected" || !config || !identity) return;
       for (const notice of notices) for (const device of registry.devices) {
-        if (device.revokedAt || !device.push || pendingPushes.size >= 256) continue;
+        if (device.revokedAt || !device.push || pendingPushes.size + pushQueue.length >= 256) continue;
         try {
           const body = encryptWebPush(device.push, { h: identity.id, hn: config.hostName, p: notice.projectId, pn: notice.project, k: notice.kind, s: notice.seq });
-          const id = randomUUID(); pendingPushes.set(id, { deviceId: device.id, endpoint: device.push.endpoint, timer: setTimeout(() => pendingPushes.delete(id), 30000) });
-          control({ t: "push", id, endpoint: device.push.endpoint, body: body.toString("base64url"), ttl: 86400, urgency: notice.kind === "question" || notice.kind === "approval" ? "high" : "normal" });
+          pushQueue.push({ deviceId: device.id, endpoint: device.push.endpoint, body: body.toString("base64url"), urgency: notice.kind === "question" || notice.kind === "approval" ? "high" : "normal", retried: false, readyAt: 0 });
         } catch { options.report("Push encryption failed"); }
       }
+      drainPushes();
     },
   };
 }

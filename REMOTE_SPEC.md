@@ -83,6 +83,7 @@ host UI document  ──fetch──▶ service worker
 |---|---|
 | `relay/bootstrap/wire.js` | Shared protocol module: encoding, key derivation, handshake, framing. Plain ES module using only WebCrypto, imported by the browser bootstrap and by `src/remote.ts`. |
 | `relay/bootstrap/` | The PWA: `index.html` (host switcher, pairing), `sw.js`, `boot.js`, `tunnel.js`, `host.html` (first-load loader), `manifest.webmanifest`, icons, styles. Served by the relay as static files. |
+| `relay/shared.ts` | Dependency-free served-bootstrap asset set, fingerprint and push-service allowlist, used by relay and host. |
 | `relay/relay.ts`, `relay/package.json` | The relay server and its CLI (`allow`, `deny`, `hosts`, `fingerprint`). Dependency: `ws`. |
 | `relay/deploy/` | nginx location snippet, LaunchDaemon plist for a dedicated user, deployment README. |
 | `src/remote.ts` | Host side: host key, device registry, pairing, signed device list, tunnel sessions, forwarding to `web.ts`. |
@@ -144,12 +145,13 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 | C→H | `{"t":"req","id","method","path","headers","fin"}` | first chunk of request body |
 | C→H | `{"t":"data","id","fin"}` | next chunk |
 | C→H | `{"t":"cancel","id"}` | none |
+| C→H | `{"t":"ack","id","bytes"}` | none; consumed response bytes |
 | H→C | `{"t":"res","id","status","headers","fin"}` | first chunk of response body |
 | H→C | `{"t":"data","id","fin"}` | next chunk |
 | H→C | `{"t":"err","id","error"}` | none |
 
 - `id` is a client-chosen integer, unique within the session. At most 32 requests in flight per session.
-- Body chunks are at most 256 KiB. The host interleaves response chunks of concurrent requests round-robin and waits for the WebSocket to drain, so one download cannot starve `/live` or `/api`.
+- Body chunks are at most 256 KiB. The host interleaves response chunks of concurrent requests round-robin and waits for the WebSocket to drain, so one download cannot starve `/live` or `/api`. Each response has a 1 MiB unacknowledged-byte window, with at most 3 MiB outstanding across the session (below the relay’s 4 MiB last-resort buffer guard); the host pauses that response when the window is full, and the client acknowledges body bytes only as its response stream is consumed. Cancellation, channel close and HTTP failure wake any blocked producer. Acknowledgements for finished requests and late upload chunks for previously seen, refused/finished requests are ignored; unknown IDs remain protocol errors.
 - Request headers passed to `web.ts`: only `content-type`, `x-filename`, `if-none-match`, `accept`. `src/remote.ts` sets `host`, `authorization: Bearer <remote token>` and `x-pi-device: <deviceId>` itself. Anything else the client sends is dropped.
 - Response headers returned: `content-type`, `content-disposition`, `etag`, `cache-control`, `content-length`.
 - Request bodies over 20 MiB are refused when the running total crosses the limit, without buffering the rest.
@@ -173,19 +175,19 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 ### `src/web-push.ts`
 - RFC 8291 `aes128gcm` payload encryption with `node:crypto` only. No VAPID: the relay signs.
 - Payload: `{"h":hostId,"hn":hostName,"p":projectId,"pn":projectName,"k":kind,"s":seq}`. No title, question, result or error text.
-- TTL 24 h; urgency `high` for question and approval, `normal` otherwise. A `push-result` of 404 or 410 drops the subscription; other failures are logged and not retried. Pushes are skipped while the relay is disconnected.
+- TTL 24 h; urgency `high` for question and approval, `normal` otherwise. A `push-result` of 404 or 410 drops the subscription; 429 is retried once after 2 s; other failures are logged and not retried. The host queues up to 256 deliveries, sends at most four concurrently, and discards queued work when the relay disconnects. Pushes are skipped while the relay is disconnected.
 
 ### API actions (`/api`, owner UI)
 `remote-status`, `remote-pair-start`, `remote-pair-cancel`, `remote-devices`, `remote-revoke` (`deviceId`, `confirm` equal to the device ID), `remote-rename` (`deviceId`, `name`). `remote-pair-start` also returns a QR code SVG of the link, generated on the host (*proposal:* the `qrcode-generator` npm package, no transitive dependencies).
 
 ### CLI (`src/cli.ts`)
-- `remote enable <relay-origin> [--name <host name>]`: writes the config, creates the host and VAPID keys, prints `hostId` and the exact relay command to allowlist it, installs and bootstraps the LaunchAgent, and tells a running host to start remote mode.
+- `remote enable <relay-origin> [--name <host name>]`: writes the config, creates the host key, prints `hostId` and the exact relay command to allowlist it, installs and bootstraps the LaunchAgent, and transfers a running CLI-spawned host to launchd via graceful shutdown and a bounded wait for process exit. A host already owned by launchd only reloads its remote configuration.
 - `remote disable`: stops remote mode in the running host, boots out and deletes the LaunchAgent. Keeps the keys and the device registry, so re-enabling needs no re-pairing.
 - `remote status`: config, relay connection, devices, LaunchAgent state.
 - When remote mode is enabled, `ensureHost()` starts the host with `launchctl kickstart gui/<uid>/<label>` instead of spawning it, so launchd owns the single instance.
 
 ### LaunchAgent and power
-- Label `dev.pi-projects.host.<first 8 hex of SHA-256(home)>`, so separate `PI_PROJECTS_HOME`s never collide. `RunAtLoad` true, `KeepAlive` `{SuccessfulExit: false}`, output to `<home>/host.log`, environment `PI_PROJECTS_HOME` and `PI_PROJECTS_HOST=1`.
+- Label `dev.pi-projects.host.<first 8 hex of SHA-256(home)>`, so separate `PI_PROJECTS_HOME`s never collide. `RunAtLoad` true, `KeepAlive` `{SuccessfulExit: false}`, output to `<home>/host.log`, environment `PI_PROJECTS_HOME`, `PI_PROJECTS_HOST=1` and `PI_PROJECTS_LAUNCHD=1`. `remote-status` reports launchd ownership.
 - While remote mode is on, the host runs `caffeinate -s -w <host pid>`. `-s` only holds while on AC power. It ends when remote mode is disabled or the host exits.
 
 ## Browser client (PWA)

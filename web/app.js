@@ -217,16 +217,17 @@ async function settledRefresh() {
   await refresh();
 }
 
-// Host-pushed changes (/changes): refresh when the open project and chat change, read the notice feed when it advances.
-// A hidden tab only remembers that something changed. While the stream is down, the 30 s poll below keeps the view current.
-let changeStream = null, changeRetryMs = 1000, staleWhileHidden = false;
+// Host-pushed changes (/changes): refresh when the open project, chat or worker conversation changes, read the notice feed when it advances.
+// A hidden tab closes the stream so the host stops watching for it; showing the tab refreshes and reopens it. While the stream is down, the 30 s poll below keeps the view current.
+let changeStream = null, changeRetryMs = 1000;
 const POLL_MS = 30000;
+const watchedThread = () => tab === "activity" && workerChat?.id === projectId ? workerChat.threadId : "";
 function ensureChanges() {
-  if (changeStream?.id === projectId && changeStream.chat === chatId) return;
+  if (changeStream?.id === projectId && changeStream.chat === chatId && changeStream.thread === watchedThread()) return;
   changeStream?.controller.abort();
   changeStream = null;
-  if (!projectId) return;
-  const stream = { id: projectId, chat: chatId, controller: new AbortController(), up: false };
+  if (!projectId || document.hidden) return;
+  const stream = { id: projectId, chat: chatId, thread: watchedThread(), controller: new AbortController(), up: false };
   changeStream = stream;
   void readChanges(stream).finally(() => {
     stream.up = false;
@@ -238,7 +239,7 @@ function ensureChanges() {
 }
 async function readChanges(stream) {
   try {
-    const response = await fetch(`/changes?project=${encodeURIComponent(stream.id)}&chat=${encodeURIComponent(stream.chat)}`, { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal });
+    const response = await fetch(`/changes?project=${encodeURIComponent(stream.id)}&chat=${encodeURIComponent(stream.chat)}${stream.thread ? `&thread=${encodeURIComponent(stream.thread)}` : ""}`, { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal });
     if (!response.ok || !response.body) return;
     stream.up = true; changeRetryMs = 1000;
     scheduleNotify();
@@ -254,14 +255,14 @@ async function readChanges(stream) {
         const data = event.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
         if (!data || changeStream !== stream) continue;
         const change = JSON.parse(data);
-        if (change.t === "project") { if (document.hidden) staleWhileHidden = true; else void refresh(); }
+        if (change.t === "project") void refresh();
         else if (change.t === "notices" && notifyEnabled() && change.seq !== notifyCursor) { clearTimeout(notifyTimer); notifyTimer = setTimeout(() => void pollNotify(), 0); }
       }
     }
   } catch (error) { if (error?.name !== "AbortError") console.warn("Change stream ended", error); }
   finally { stream.up = false; }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && staleWhileHidden) { staleWhileHidden = false; void refresh(); } });
+document.addEventListener("visibilitychange", () => { if (document.hidden) { changeStream?.controller.abort(); changeStream = null; scheduleNotify(); } });
 
 function thoughtText(text) { return text.replace(/\*\*/g, "").split(/\n\s*\n/).map(line => line.trim()).filter(Boolean).join(" · "); }
 function liveStatus(frame) {
@@ -367,6 +368,7 @@ function setTab(next) {
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
+  ensureChanges();
   if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
 }
 
@@ -911,15 +913,17 @@ function renderRemote() {
   else {
     const qr = remotePairing && /^<svg[\s>]/.test(remotePairing.qrSvg) && !/<script|\bon\w+=/i.test(remotePairing.qrSvg) ? remotePairing.qrSvg : "";
     const devices = remoteDevices.filter(device => !device.revokedAt);
+    // Pairing and device management stay on the host itself (web.ts LOCAL_ONLY); a paired device only sees the list.
+    const local = document.documentElement.dataset.remoteHost === undefined;
     next = `<div class="remote">
       <div class="kv"><span>Relay</span><b>${esc(r.relay)}</b><span>Connection</span><b class="remote-state" data-state="${esc(r.connection)}">${esc(remoteConnection[r.connection] ?? r.connection)}${r.connection === "error" && r.lastError ? ` · ${esc(r.lastError)}` : ""}</b><span>Host</span><b>${esc(r.hostName)} <code class="remote-id">${esc(r.hostId)}</code></b><span>App fingerprint</span><b><code class="remote-id">${esc(r.fingerprint ?? "unknown")}</code></b></div>
-      ${remotePairing ? `<div class="remote-pair">${qr ? `<div class="remote-qr" aria-label="Pairing QR code">${qr}</div>` : ""}<div><p>Scan with the device's camera, or open the link on it. It works once, until ${esc(new Date(remotePairing.expiresAt).toLocaleTimeString())}.</p><p class="pair-code"><code>${esc(remotePairing.link)}</code></p><div class="row"><button class="small" data-action="remote-copy-link">Copy link</button><button class="ghost small" data-action="remote-pair-cancel">Cancel</button></div></div></div>` : `<div class="row"><button data-action="remote-pair">Pair a device</button></div>`}
+      ${remotePairing ? `<div class="remote-pair">${qr ? `<div class="remote-qr" aria-label="Pairing QR code">${qr}</div>` : ""}<div><p>Scan with the device's camera, or open the link on it. It works once, until ${esc(new Date(remotePairing.expiresAt).toLocaleTimeString())}.</p><p class="pair-code"><code>${esc(remotePairing.link)}</code></p><div class="row"><button class="small" data-action="remote-copy-link">Copy link</button><button class="ghost small" data-action="remote-pair-cancel">Cancel</button></div></div></div>` : local ? `<div class="row"><button data-action="remote-pair">Pair a device</button></div>` : `<p class="note">Pair, rename and revoke devices in the inbox on this host.</p>`}
       <h3 class="card-title">Devices</h3>
       ${devices.length ? `<div class="remote-devices">${devices.map(device => `<div class="remote-device">
         <span class="remote-dot" data-online="${device.online ? "1" : "0"}" title="${device.online ? "Connected now" : "Not connected"}"></span>
         ${remoteRenaming === device.id ? `<span class="row remote-name"><input id="remote-rename" maxlength="80" value="${esc(device.name)}" aria-label="Device name"><button class="small" data-action="remote-rename-save" data-device="${esc(device.id)}">Save</button><button class="ghost small" data-action="remote-rename-cancel">Cancel</button></span>` : `<b class="remote-name">${esc(device.name)}</b>`}
         <span class="note">Paired ${esc(ago(device.pairedAt))} · seen ${device.lastSeenAt ? esc(ago(device.lastSeenAt)) : "never"}${device.push ? " · notifications on" : ""}</span>
-        <span class="row remote-actions">${remoteRenaming === device.id ? "" : `<button class="ghost small" data-action="remote-rename" data-device="${esc(device.id)}">Rename</button>`}<button class="${remoteRevokeArmed === device.id ? "danger" : "ghost"} small" data-action="remote-revoke" data-device="${esc(device.id)}">${remoteRevokeArmed === device.id ? "Revoke now" : "Revoke"}</button></span></div>`).join("")}</div>` : `<p class="note">No paired devices.</p>`}
+        ${local ? `<span class="row remote-actions">${remoteRenaming === device.id ? "" : `<button class="ghost small" data-action="remote-rename" data-device="${esc(device.id)}">Rename</button>`}<button class="${remoteRevokeArmed === device.id ? "danger" : "ghost"} small" data-action="remote-revoke" data-device="${esc(device.id)}">${remoteRevokeArmed === device.id ? "Revoke now" : "Revoke"}</button></span>` : ""}</div>`).join("")}</div>` : `<p class="note">No paired devices.</p>`}
       ${remoteError ? `<p class="note bad">${esc(remoteError)}</p>` : ""}
       <p class="note">A revoked device is cut off at once. Compare the app fingerprint with the one shown on your phone when the app warns that it changed.</p>
     </div>`;
@@ -2216,7 +2220,7 @@ async function action(node) {
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
     case "artifacts-toggle": document.querySelector("#artifact-pane").classList.toggle("open"); break;
-    case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
+    case "thread-close": workerChat = null; ensureChanges(); document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
