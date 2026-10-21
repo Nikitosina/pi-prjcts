@@ -21,9 +21,18 @@ async function ensure() {
   return connecting;
 }
 
+// The service worker acknowledges bytes its reader consumed; past this many unread bytes the page stops reading the tunnel,
+// so the tunnel's own credits reach the host instead of a download piling up in the worker.
+const PORT_WINDOW = 1 << 20;
+
 async function serve({ method, path, headers, body }, port) {
   const abort = new AbortController();
-  port.onmessage = ({ data }) => { if (data?.t === "cancel") abort.abort(); };
+  let sent = 0, acked = 0, wakeUp = null;
+  port.onmessage = ({ data }) => {
+    if (data?.t === "cancel") abort.abort();
+    else if (data?.t === "ack" && Number.isSafeInteger(data.bytes)) acked += data.bytes;
+    wakeUp?.(); wakeUp = null;
+  };
   try {
     const response = await (await ensure()).request({ method, path, headers, body, signal: abort.signal });
     port.postMessage({ t: "head", status: response.status, headers: Object.fromEntries(response.headers) });
@@ -33,7 +42,10 @@ async function serve({ method, path, headers, body }, port) {
         const { value, done } = await reader.read();
         if (done) break;
         const copy = value.slice();
+        sent += copy.byteLength;
         port.postMessage({ t: "chunk", bytes: copy.buffer }, [copy.buffer]);
+        while (sent - acked > PORT_WINDOW && !abort.signal.aborted) await new Promise(resolve => { wakeUp = resolve; });
+        if (abort.signal.aborted) { await reader.cancel().catch(() => {}); return; }
       }
       port.postMessage({ t: "end" });
     }

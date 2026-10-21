@@ -108,16 +108,17 @@ async function revalidate(clientId, hostId) {
 function request(client, { method, path, headers, body = null }) {
   const channel = new MessageChannel(), port = channel.port1;
   return new Promise(resolve => {
-    let controller = null, answered = false;
+    let controller = null, answered = false, unread = 0;
     const timer = setTimeout(() => { if (!answered) { answered = true; port.close(); resolve(new Response("The host did not answer.", { status: 504 })); } }, HEAD_MS);
     port.onmessage = ({ data }) => {
       if (data.t === "head") {
         answered = true; clearTimeout(timer);
         const empty = [101, 103, 204, 205, 304].includes(data.status) || method === "HEAD";
-        const stream = empty ? null : new ReadableStream({ start: c => { controller = c; }, cancel: () => { port.postMessage({ t: "cancel" }); port.close(); } });
+        // pull runs once the reader has drained the queue: acknowledge what it took so the page reads more.
+        const stream = empty ? null : new ReadableStream({ start: c => { controller = c; }, pull: () => { if (unread) { port.postMessage({ t: "ack", bytes: unread }); unread = 0; } }, cancel: () => { port.postMessage({ t: "cancel" }); port.close(); } });
         resolve(new Response(stream, { status: data.status, headers: data.headers }));
         if (empty) port.close();
-      } else if (data.t === "chunk") controller?.enqueue(new Uint8Array(data.bytes));
+      } else if (data.t === "chunk") { unread += data.bytes.byteLength; controller?.enqueue(new Uint8Array(data.bytes)); }
       else if (data.t === "end") { try { controller?.close(); } catch {} port.close(); }
       else if (data.t === "error") {
         if (!answered) { answered = true; clearTimeout(timer); resolve(new Response(JSON.stringify({ ok: false, error: data.message }), { status: 502, headers: { "content-type": "application/json" } })); }
