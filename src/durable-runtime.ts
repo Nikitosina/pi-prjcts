@@ -191,7 +191,7 @@ export type DurableProjectRuntime = {
   reset(chatId?: string): Promise<{ chatId: string }>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
   snapshot(chatId?: string): Promise<DurableProjectSnapshot>;
-  threadHistory(threadId: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }): ReturnType<typeof threadHistory>;
+  threadHistory(threadId: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number; context?: boolean }): ReturnType<typeof threadHistory>;
   legacyThreadHistory(name: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }): ReturnType<typeof threadHistory>;
   scheduleCreate(input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule }): Promise<unknown>;
   scheduleSetEnabled(id: string, enabled: boolean): Promise<unknown>;
@@ -863,7 +863,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         assertOpen();
         const owned = (await planning.threadIdentities(root)).find(thread => thread.threadId === id);
         if (!owned) throw new Error("Unknown durable thread UUID");
-        return threadHistory(openedHarness, { kind: "thread", threadId: owned.threadId, conversationId: owned.conversationId }, options);
+        return threadHistory(openedHarness, { kind: "thread", threadId: owned.threadId, conversationId: owned.conversationId }, options, options.context ? model => catalogModel(model.provider, model.modelId)?.contextWindow ?? null : undefined);
       },
       legacyThreadHistory: async (name, options = {}) => {
         assertOpen();
@@ -1075,8 +1075,14 @@ function contextTokens(messages: readonly Message[]): number {
   return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 }
 
+async function workerContext(child: Conversation, view: Parameters<typeof liveFrame>[0], windowOf: (model: { provider: string; modelId: string }) => number | null): Promise<{ tokens: number; window: number | null; compacting: boolean; model: string | null }> {
+  const model = (await child.agent(context)).model;
+  return { tokens: contextTokens((await child.context(context)).messages), window: model ? windowOf(model) : null, compacting: liveFrame(view).compacting, model: model ? `${model.provider}/${model.modelId}` : null };
+}
+
 type HistoryIdentity = { conversationId: Conversation["id"] } & ({ kind: "thread"; threadId: string } | { kind: "legacy"; name: string });
-async function threadHistory(harness: Harness, thread: HistoryIdentity, options: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }) {
+/** `windowOf` (set only when the caller asked for `context`) maps the worker's own model to its catalog window; the project contextWindow override is coordinator-only and never applies here. */
+async function threadHistory(harness: Harness, thread: HistoryIdentity, options: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }, windowOf?: (model: { provider: string; modelId: string }) => number | null) {
   const offset = options.offset ?? 0, requestedLimit = options.limit ?? 30;
   const textOffset = options.textOffset ?? 0, textLimit = options.textLimit ?? 4000;
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100 || !Number.isSafeInteger(textOffset) || textOffset < 0 || !Number.isSafeInteger(textLimit) || textLimit < 1 || textLimit > 16000) throw new Error("Invalid thread history page");
@@ -1091,7 +1097,8 @@ async function threadHistory(harness: Harness, thread: HistoryIdentity, options:
       const range = textPage(message.text, textOffset, textLimit);
       return { ...message, text: range.text, textOffset: range.offset, nextTextOffset: range.nextOffset, totalTextCharacters: range.totalCharacters };
     });
-    return { ...thread, conversationId: Number(child.id), items, offset, limit, textLimit, total: messages.length, nextOffset: offset + items.length < messages.length ? offset + items.length : null, observedAtMs: Date.now() };
+    const context = windowOf ? await workerContext(child, view.value, windowOf) : undefined;
+    return { ...thread, conversationId: Number(child.id), items, offset, limit, textLimit, total: messages.length, nextOffset: offset + items.length < messages.length ? offset + items.length : null, observedAtMs: Date.now(), ...context ? { context } : {} };
   } finally { view.dispose(); }
 }
 

@@ -343,17 +343,40 @@ function currentChat() { return view?.chats?.find(chat => chat.id === chatId) ??
 function renderChats() {
   const node = document.querySelector("#chat-bar"), chats = view?.chats ?? [];
   const current = currentChat(), archived = chats.filter(chat => chat.archived && chat.id !== chatId);
-  const button = chat => `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.attention ? "attention" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : chat.attention ? " · needs attention" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span></button>`;
+  const button = chat => { const badge = workBadge(chat); return `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.attention ? "attention" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : chat.attention ? " · needs attention" : ""}${badge.waiting ? ` · ${badge.waiting} waiting` : badge.done ? " · worker finished" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span>${workBadgeHtml(badge)}</button>`; };
   const next = !view?.chats ? "" : `<nav id="chat-list" class="chat-list" aria-label="Chats">${chats.filter(chat => !chat.archived || chat.id === chatId).map(button).join("")}</nav><button type="button" class="ghost small" data-action="chat-new" title="Start a chat that shares this project's workers and knowledge">＋ New chat</button><span class="chat-tools">${current ? `<button type="button" class="ghost small" data-action="chat-rename">Rename</button>` : ""}${current && current.id !== "main" ? current.archived ? `<button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(current.id)}">Restore</button>` : `<button type="button" class="ghost small" data-action="chat-archive">Archive</button>` : ""}${archived.length ? `<details id="chat-archived" class="chat-archived"><summary>Archived (${archived.length})</summary><div class="archived-list">${archived.map(chat => `<div class="archived-row"><span>${esc(chat.title)}</span><span><button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button> <button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(chat.id)}">Restore</button></span></div>`).join("")}</div></details>` : ""}</span>`;
   if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
 
+// Worker badges (current project only; the plan is per project). Waiting = blocked or interrupted work admitted by a chat. Done = a completed worker whose endedAt is newer than the last time this browser had the chat open.
+const seenKey = (project, chat) => `pi-projects-seen:${project}:${chat}`;
+function seenAt(project, chat) { try { const value = Number(localStorage.getItem(seenKey(project, chat))); return value > 0 ? value : null; } catch { return null; } }
+function markSeen(project, chat) { try { localStorage.setItem(seenKey(project, chat), String(Date.now())); } catch {} }
+function chatWork(chat) { return plan ? plan.work.filter(work => !work.archived && workChatId(work) === chat.id) : []; }
+const completedSince = (work, seen) => work.status === "completed" && (work.endedAt ?? 0) > seen;
+// First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its done mark.
+function syncSeen() {
+  if (!view?.chats || !plan) return;
+  for (const chat of view.chats) {
+    const seen = seenAt(projectId, chat.id);
+    if (seen === null || chat.id === chatId && chatWork(chat).some(work => completedSince(work, seen))) markSeen(projectId, chat.id);
+  }
+}
+function workBadge(chat) {
+  const work = chatWork(chat), seen = seenAt(projectId, chat.id);
+  return { waiting: work.filter(item => item.status === "blocked" || item.status === "interrupted").length, done: chat.id !== chatId && seen !== null && work.some(item => completedSince(item, seen)) };
+}
+const workBadgeHtml = badge => badge.waiting ? `<span class="work-badge" aria-label="${badge.waiting} waiting">${badge.waiting}</span>` : badge.done ? '<span class="work-badge done" aria-label="Worker finished">✓</span>' : "";
+function projectWorkBadge() {
+  const badges = (view?.chats ?? []).filter(chat => !chat.archived).map(workBadge);
+  return { waiting: badges.reduce((sum, badge) => sum + badge.waiting, 0), done: badges.some(badge => badge.done) };
+}
 function renderProjects() {
   const node = document.querySelector("#projects");
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';
   node.value = projectId ?? "";
   const list = document.querySelector("#project-list");
-  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
+  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}${p.id === projectId ? workBadgeHtml(projectWorkBadge()) : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
   if (list.dataset.html !== next) { list.innerHTML = next; list.dataset.html = next; }
 }
 function initials(name) { return String(name ?? "π").trim().split(/\s+/).slice(0, 2).map(word => [...word][0] ?? "").join("").toUpperCase() || "π"; }
@@ -384,6 +407,7 @@ function render() {
   document.querySelector("#title").textContent = view.project.name;
   document.querySelector("#avatar").textContent = initials(view.project.name);
   for (const selector of ["#needs-count"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
+  syncSeen();
   renderProjects();
   renderChats();
   uiPluginCall("render");
@@ -1840,6 +1864,7 @@ function renderMarkdown(value, options = {}) {
   const blocks = String(value ?? "").split(/```([^\n]*)\n([\s\S]*?)```/g);
   return blocks.map((part, index) => {
     if (index % 3 === 1) return "";
+    if (index % 3 === 2 && /^(mermaid|flowchart)$/.test(blocks[index - 1].trim())) return `<pre class="mermaid-src" data-mermaid="${esc(blocks[index - 1].trim() === "flowchart" && !/^\s*(flowchart|graph)\b/.test(part) ? `flowchart TD\n${part}` : part)}"><code>${esc(part)}</code></pre>`;
     if (index % 3 === 2) return blocks[index - 1].trim() === "diff" ? `<pre class="diff"><code>${part.split("\n").map(line => `<span class="${line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : ""}">${esc(line)}</span>`).join("\n")}</code></pre>` : `<pre><code>${esc(part)}</code></pre>`;
     const lines = part.split("\n"), out = [];
     let list = null, quote = [];
@@ -1877,6 +1902,42 @@ function renderMarkdown(value, options = {}) {
   }).join("");
 }
 if (initial.searchParams.get("e2e") === "1") window.__projectsRenderMarkdown = renderMarkdown;
+// Mermaid fences first render as plain code blocks. The same-origin build loads on first use and swaps in the diagram; any failure leaves the code block.
+const mermaidSvgs = new Map();
+let mermaidLoad = null;
+function loadMermaid() {
+  mermaidLoad ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/mermaid.min.js";
+    script.onload = () => { const api = globalThis.__esbuild_esm_mermaid_nm?.mermaid; resolve(api?.default ?? api); };
+    script.onerror = () => { mermaidLoad = null; reject(new Error("Mermaid failed to load")); };
+    document.head.append(script);
+  });
+  return mermaidLoad;
+}
+let mermaidSeq = 0, mermaidQueue = Promise.resolve();
+function hydrateMermaid(root = document) {
+  for (const node of root.querySelectorAll("pre[data-mermaid]:not([data-state])")) {
+    const source = node.dataset.mermaid, dark = document.documentElement.dataset.theme === "dark", key = `${dark ? "d" : "l"}:${source}`;
+    const show = svg => { if (!node.isConnected) return; const box = document.createElement("div"); box.className = "mermaid-diagram"; box.innerHTML = svg; node.replaceWith(box); };
+    node.dataset.state = "pending";
+    if (mermaidSvgs.has(key)) { const cached = mermaidSvgs.get(key); if (cached) show(cached); else node.dataset.state = "failed"; continue; }
+    // Renders run one at a time: mermaid keeps global state while it lays out.
+    mermaidQueue = mermaidQueue.then(async () => {
+      try {
+        const mermaid = await loadMermaid();
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral", suppressErrorRendering: true });
+        const id = `mermaid-${++mermaidSeq}`;
+        // Mermaid parks its work in <div id="d…"> (and the svg itself on a parse error); clear both before the diagram takes the svg's id.
+        let svg = null;
+        try { ({ svg } = await mermaid.render(id, source)); }
+        finally { document.getElementById(`d${id}`)?.remove(); document.getElementById(id)?.remove(); }
+        mermaidSvgs.set(key, svg); show(svg);
+      } catch { mermaidSvgs.set(key, null); node.dataset.state = "failed"; }
+    });
+  }
+}
+new MutationObserver(() => hydrateMermaid()).observe(document.body, { childList: true, subtree: true });
 // Artifact references become <img>/<video>/download links. Bytes are fetched once per page (token header, so no plain URLs) and cached as blob URLs.
 const artifactBlobs = new Map();
 const artifactKindOf = path => /\.(png|jpe?g|webp|gif)$/i.test(path) ? "image" : /\.(webm|mp4)$/i.test(path) ? "video" : "other";
@@ -3489,13 +3550,22 @@ function holdsBadge(holds) {
   return ` · <span class="worker-holds" title="${esc(title)}">${esc(parts.join(", "))}</span>`;
 }
 const finished = work => ["completed", "failed", "stopped"].includes(work.status);
+// The chat that admitted a work item (null chatConversationId means Main). Child work keeps the admitting chat, so parentThreadId plays no part.
+function workChatId(work) {
+  const chats = view?.chats ?? [];
+  const main = chats.find(chat => chat.id === "main")?.conversationId ?? null;
+  return (chats.find(chat => chat.conversationId === (work.chatConversationId ?? main)) ?? chats[0])?.id ?? "main";
+}
+const inSelectedChat = work => !view?.chats || workChatId(work) === chatId;
 function durableActivity() {
   const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
   // Finished and archived work leave this panel for Recent results; Activity keeps the full list.
-  const shown = plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
+  const active = plan.work.filter(work => !finished(work) && !work.archived);
+  const shown = active.filter(inSelectedChat).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
+  const elsewhere = active.length - active.filter(inSelectedChat).length;
   const detail = work => work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
   const total = plan.work.length;
-  return (shown.map(work => workLine(work, detail(work))).join("") || `<p class="note">${total ? "No active workers." : "No workers yet."}</p>`) + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
+  return (shown.map(work => workLine(work, detail(work))).join("") || '<p class="note">No active workers from this chat.</p>') + (elsewhere ? `<p class="note other-chats">${elsewhere} active in other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
 }
 function durableResults() {
   const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);

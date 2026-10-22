@@ -107,11 +107,16 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     ["/theme.js", { path: "theme.js", mime: "text/javascript; charset=utf-8" }],
     ["/app.js", { path: "app.js", mime: "text/javascript; charset=utf-8" }],
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
+    // THROWAWAY activity prototype; delete with web/activity-prototype.*.
+    ["/activity-prototype.js", { path: "activity-prototype.js", mime: "text/javascript; charset=utf-8" }],
+    ["/activity-prototype.css", { path: "activity-prototype.css", mime: "text/css; charset=utf-8" }],
+    ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
   ]);
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
-      "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      // style-src 'unsafe-inline': Mermaid's SVG carries a <style> element and style="" attributes (sanitized, securityLevel strict), which style-src 'self' blocks. Scripts stay 'self' only.
+      "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     };
     let status = 400;
     try {
