@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.pi-projects.relay</string>
+  <key>UserName</key><string>_pirelay</string>
+  <key>GroupName</key><string>_pirelay</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/usr/local/lib/pi-relay/relay/relay.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>/usr/local/lib/pi-relay/relay</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>RELAY_PORT</key><string>8790</string>
+    <key>RELAY_DATA</key><string>/var/db/pi-relay</string>
+    <key>RELAY_ORIGIN</key><string>https://relay.example.com</string>
+    <key>HOME</key><string>/var/empty</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>/var/log/pi-relay/relay.log</string>
+  <key>StandardErrorPath</key><string>/var/log/pi-relay/relay-error.log</string>
+</dict></plist>

@@ -156,6 +156,7 @@ async function refresh() {
     const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
     ensureLive();
+    ensureChanges();
     if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
   } catch (error) { if (current === generation) showError(error); }
   finally {
@@ -215,6 +216,53 @@ async function settledRefresh() {
   while (polling === generation) await new Promise(resolve => setTimeout(resolve, 30));
   await refresh();
 }
+
+// Host-pushed changes (/changes): refresh when the open project, chat or worker conversation changes, read the notice feed when it advances.
+// A hidden tab closes the stream so the host stops watching for it; showing the tab refreshes and reopens it. While the stream is down, the 30 s poll below keeps the view current.
+let changeStream = null, changeRetryMs = 1000;
+const POLL_MS = 30000;
+const watchedThread = () => tab === "activity" && workerChat?.id === projectId ? workerChat.threadId : "";
+function ensureChanges() {
+  if (changeStream?.id === projectId && changeStream.chat === chatId && changeStream.thread === watchedThread()) return;
+  changeStream?.controller.abort();
+  changeStream = null;
+  if (!projectId || document.hidden) return;
+  const stream = { id: projectId, chat: chatId, thread: watchedThread(), controller: new AbortController(), up: false };
+  changeStream = stream;
+  void readChanges(stream).finally(() => {
+    stream.up = false;
+    if (changeStream !== stream || stream.controller.signal.aborted) return;
+    changeStream = null;
+    setTimeout(() => { if (!changeStream) { ensureChanges(); void refresh(); } }, changeRetryMs);
+    changeRetryMs = Math.min(changeRetryMs * 2, POLL_MS);
+  });
+}
+async function readChanges(stream) {
+  try {
+    const response = await fetch(`/changes?project=${encodeURIComponent(stream.id)}&chat=${encodeURIComponent(stream.chat)}${stream.thread ? `&thread=${encodeURIComponent(stream.thread)}` : ""}`, { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal });
+    if (!response.ok || !response.body) return;
+    stream.up = true; changeRetryMs = 1000;
+    scheduleNotify();
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffered = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffered += value;
+      let end;
+      while ((end = buffered.indexOf("\n\n")) >= 0) {
+        const event = buffered.slice(0, end); buffered = buffered.slice(end + 2);
+        const data = event.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+        if (!data || changeStream !== stream) continue;
+        const change = JSON.parse(data);
+        if (change.t === "project") void refresh();
+        else if (change.t === "notices" && notifyEnabled() && change.seq !== notifyCursor) { clearTimeout(notifyTimer); notifyTimer = setTimeout(() => void pollNotify(), 0); }
+      }
+    }
+  } catch (error) { if (error?.name !== "AbortError") console.warn("Change stream ended", error); }
+  finally { stream.up = false; }
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) { changeStream?.controller.abort(); changeStream = null; scheduleNotify(); } });
 
 function thoughtText(text) { return text.replace(/\*\*/g, "").split(/\n\s*\n/).map(line => line.trim()).filter(Boolean).join(" · "); }
 function liveStatus(frame) {
@@ -320,7 +368,8 @@ function setTab(next) {
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
+  ensureChanges();
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -779,7 +828,7 @@ async function toggleNotify(on) {
   notifyCursor = undefined; window.__notifyCursor = undefined; notifyProblem = "";
   renderNotify(); scheduleNotify();
 }
-function scheduleNotify() { clearTimeout(notifyTimer); notifyTimer = notifyEnabled() ? setTimeout(() => void pollNotify(), notifyCursor === undefined ? 0 : 3000) : null; }
+function scheduleNotify() { clearTimeout(notifyTimer); notifyTimer = notifyEnabled() ? setTimeout(() => void pollNotify(), notifyCursor === undefined ? 0 : changeStream?.up ? POLL_MS : 3000) : null; }
 async function pollNotify() {
   if (!notifyEnabled() || notifyPolling) return;
   notifyPolling = true;
@@ -840,6 +889,62 @@ async function telegramAction(input, done) {
   catch (error) { telegramError = error.message; }
   renderTelegram();
 }
+
+// Remote access (host-wide): relay state, device pairing by QR, paired devices with rename and revoke.
+let remoteView = null, remoteDevices = [], remotePairing = null, remoteError = "", remoteRevokeArmed = null, remoteRenaming = null, remoteTimer = null;
+async function loadRemote() {
+  try {
+    remoteView = await api({ action: "remote-status" });
+    remoteDevices = remoteView.enabled ? await api({ action: "remote-devices" }) : [];
+    remoteError = "";
+  } catch (error) { remoteError = error.message; }
+  if (remotePairing && remotePairing.expiresAt <= Date.now()) remotePairing = null;
+  renderRemote();
+  clearTimeout(remoteTimer);
+  if (tab === "settings") remoteTimer = setTimeout(() => void loadRemote(), remotePairing ? 2000 : 10000);
+}
+const remoteConnection = { off: "Off", connecting: "Connecting to the relay…", connected: "Connected to the relay", error: "Relay unreachable" };
+function renderRemote() {
+  const node = document.querySelector("#remote"), r = remoteView;
+  if (!r) { if (remoteError) node.innerHTML = `<p class="note bad">${esc(remoteError)}</p>`; return; }
+  const typed = document.querySelector("#remote-rename")?.value, focused = document.activeElement?.id === "remote-rename";
+  let next;
+  if (!r.enabled) next = `<p class="note">Off for this host. To turn it on, deploy the relay (<code>relay/deploy/README.md</code>), then run <code>npm run projects -- remote enable https://relay.&lt;your-domain&gt;</code> on this Mac.</p>`;
+  else {
+    const qr = remotePairing && /^<svg[\s>]/.test(remotePairing.qrSvg) && !/<script|\bon\w+=/i.test(remotePairing.qrSvg) ? remotePairing.qrSvg : "";
+    const devices = remoteDevices.filter(device => !device.revokedAt);
+    // Pairing and device management stay on the host itself (web.ts LOCAL_ONLY); a paired device only sees the list.
+    const local = document.documentElement.dataset.remoteHost === undefined;
+    next = `<div class="remote">
+      <div class="kv"><span>Relay</span><b>${esc(r.relay)}</b><span>Connection</span><b class="remote-state" data-state="${esc(r.connection)}">${esc(remoteConnection[r.connection] ?? r.connection)}${r.connection === "error" && r.lastError ? ` · ${esc(r.lastError)}` : ""}</b><span>Host</span><b>${esc(r.hostName)} <code class="remote-id">${esc(r.hostId)}</code></b><span>App fingerprint</span><b><code class="remote-id">${esc(r.fingerprint ?? "unknown")}</code></b></div>
+      ${remotePairing ? `<div class="remote-pair">${qr ? `<div class="remote-qr" aria-label="Pairing QR code">${qr}</div>` : ""}<div><p>Scan with the device's camera, or open the link on it. It works once, until ${esc(new Date(remotePairing.expiresAt).toLocaleTimeString())}.</p><p class="pair-code"><code>${esc(remotePairing.link)}</code></p><div class="row"><button class="small" data-action="remote-copy-link">Copy link</button><button class="ghost small" data-action="remote-pair-cancel">Cancel</button></div></div></div>` : local ? `<div class="row"><button data-action="remote-pair">Pair a device</button></div>` : `<p class="note">Pair, rename and revoke devices in the inbox on this host.</p>`}
+      <h3 class="card-title">Devices</h3>
+      ${devices.length ? `<div class="remote-devices">${devices.map(device => `<div class="remote-device">
+        <span class="remote-dot" data-online="${device.online ? "1" : "0"}" title="${device.online ? "Connected now" : "Not connected"}"></span>
+        ${remoteRenaming === device.id ? `<span class="row remote-name"><input id="remote-rename" maxlength="80" value="${esc(device.name)}" aria-label="Device name"><button class="small" data-action="remote-rename-save" data-device="${esc(device.id)}">Save</button><button class="ghost small" data-action="remote-rename-cancel">Cancel</button></span>` : `<b class="remote-name">${esc(device.name)}</b>`}
+        <span class="note">Paired ${esc(ago(device.pairedAt))} · seen ${device.lastSeenAt ? esc(ago(device.lastSeenAt)) : "never"}${device.push ? " · notifications on" : ""}</span>
+        ${local ? `<span class="row remote-actions">${remoteRenaming === device.id ? "" : `<button class="ghost small" data-action="remote-rename" data-device="${esc(device.id)}">Rename</button>`}<button class="${remoteRevokeArmed === device.id ? "danger" : "ghost"} small" data-action="remote-revoke" data-device="${esc(device.id)}">${remoteRevokeArmed === device.id ? "Revoke now" : "Revoke"}</button></span>` : ""}</div>`).join("")}</div>` : `<p class="note">No paired devices.</p>`}
+      ${remoteError ? `<p class="note bad">${esc(remoteError)}</p>` : ""}
+      <p class="note">A revoked device is cut off at once. Compare the app fingerprint with the one shown on your phone when the app warns that it changed.</p>
+    </div>`;
+  }
+  if (node.dataset.html === next) return;
+  node.innerHTML = next; node.dataset.html = next;
+  const input = document.querySelector("#remote-rename");
+  if (input) { if (typed !== undefined) input.value = typed; if (focused || typed === undefined) input.focus(); }
+}
+async function remoteAction(input, done) {
+  try { const result = await api(input); remoteError = ""; if (done) toast(done); return result; }
+  catch (error) { remoteError = error.message; renderRemote(); return null; }
+}
+// Inside the remote app, name the host this inbox belongs to and link back to the host list.
+function renderRemoteHost() {
+  const name = document.documentElement.dataset.remoteHost;
+  if (name === undefined) return;
+  document.querySelector(".brand .local").textContent = name || "REMOTE";
+  document.querySelector("#remote-hosts").hidden = false;
+}
+document.addEventListener("pi-remote-host", renderRemoteHost); renderRemoteHost();
 document.querySelector("#notify-browser").addEventListener("change", event => void toggleNotify(event.target.checked));
 // Appearance (per browser). /theme.js applies it before first paint and tracks the OS setting for System.
 const renderTheme = () => { for (const radio of document.querySelectorAll("#appearance-card input[name=theme]")) radio.checked = radio.value === window.piTheme.get(); };
@@ -2115,7 +2220,7 @@ async function action(node) {
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
     case "artifacts-toggle": document.querySelector("#artifact-pane").classList.toggle("open"); break;
-    case "thread-close": workerChat = null; document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
+    case "thread-close": workerChat = null; ensureChanges(); document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
@@ -2137,6 +2242,17 @@ async function action(node) {
     case "telegram-remove": {
       if (!telegramRemoveArmed) { telegramRemoveArmed = true; renderTelegram(); setTimeout(() => { if (telegramRemoveArmed) { telegramRemoveArmed = false; renderTelegram(); } }, 6000); break; }
       telegramRemoveArmed = false; await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed."); break;
+    }
+    case "remote-pair": { const pairing = await remoteAction({ action: "remote-pair-start" }); if (pairing) remotePairing = pairing; await loadRemote(); break; }
+    case "remote-pair-cancel": await remoteAction({ action: "remote-pair-cancel" }); remotePairing = null; await loadRemote(); break;
+    case "remote-copy-link": if (remotePairing) { await navigator.clipboard.writeText(remotePairing.link); toast("Pairing link copied. It works once."); } break;
+    case "remote-rename": remoteRenaming = node.dataset.device; renderRemote(); break;
+    case "remote-rename-cancel": remoteRenaming = null; renderRemote(); break;
+    case "remote-rename-save": { const name = document.querySelector("#remote-rename").value.trim(); if (!name) throw new Error("Name the device first"); remoteRenaming = null; await remoteAction({ action: "remote-rename", deviceId: node.dataset.device, name }); await loadRemote(); break; }
+    case "remote-revoke": {
+      const id = node.dataset.device;
+      if (remoteRevokeArmed !== id) { remoteRevokeArmed = id; renderRemote(); setTimeout(() => { if (remoteRevokeArmed === id) { remoteRevokeArmed = null; renderRemote(); } }, 6000); break; }
+      remoteRevokeArmed = null; await remoteAction({ action: "remote-revoke", deviceId: id, confirm: id }, "Device revoked."); await loadRemote(); break;
     }
     case "automation-save": await saveEventsIn(); break;
     case "worktree-setup-save": await saveWorktreeSetup(); break;
@@ -2646,7 +2762,7 @@ document.addEventListener("keydown", event => {
   event.preventDefault(); setTab("coordinator"); document.querySelector("#compose textarea").focus();
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
-setInterval(() => { if (!document.hidden) void refresh(); }, 2000);
+setInterval(() => { if (!document.hidden) void refresh(); }, POLL_MS);
 setInterval(() => uiPluginCall("tick"), 500);
 document.addEventListener("visibilitychange", () => uiPluginCall("tick"));
 window.addEventListener("pagehide", () => uiPluginCall("hide"));

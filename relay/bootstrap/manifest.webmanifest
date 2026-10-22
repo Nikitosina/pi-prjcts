@@ -1,0 +1,13 @@
+{
+  "name": "Pi Projects",
+  "short_name": "Pi Projects",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f5ee",
+  "theme_color": "#c2653a",
+  "icons": [
+    { "src": "/boot/icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/boot/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

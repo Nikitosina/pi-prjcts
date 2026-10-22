@@ -1,0 +1,12 @@
+{
+  "name": "pi-projects-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "start": "node relay.ts",
+    "check": "../node_modules/.bin/tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": { "ws": "8.22.0" }
+}

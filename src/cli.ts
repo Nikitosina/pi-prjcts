@@ -1,5 +1,6 @@
-import { request, inboxUrl, openInbox } from "./client.ts";
+import { request, inboxUrl, openInbox, ensureRemoteHost } from "./client.ts";
 import { parse, errorText, Request } from "./state.ts";
+import { enableRemote, disableRemote, remoteServiceStatus } from "./remote.ts";
 
 const args = process.argv.slice(2);
 const startHost = args[0] !== "--no-start";
@@ -10,6 +11,31 @@ if (command === "ui" || command === "ui-url") {
     if (!startHost) throw new Error("--no-start is only supported for API commands");
     const url = command === "ui" ? await openInbox(first) : await inboxUrl(first);
     process.stdout.write((command === "ui" ? `Opened ${new URL(url).origin}` : url) + "\n");
+  } catch (error) { process.stderr.write(errorText(error) + "\n"); process.exitCode = 1; }
+  process.exit(process.exitCode ?? 0);
+}
+if (command === "remote") {
+  try {
+    if (!startHost) throw new Error("--no-start is not supported for remote service commands");
+    if (first === "enable") {
+      if (!second || rest.length && (rest.length !== 2 || rest[0] !== "--name")) throw new Error("Usage: remote enable <relay-origin> [--name <host name>]");
+      const configured = await enableRemote(second, rest[1]);
+      await ensureRemoteHost();
+      process.stdout.write(JSON.stringify(configured, null, 2) + "\n");
+    } else if (first === "disable" && !second) {
+      // Turn the connection off before booting out the launchd-owned process.
+      if (remoteServiceStatus().config) {
+        disableRemote({ keepService: true });
+        try { await request({ action: "remote-reload" }, false); } catch {}
+      }
+      disableRemote();
+      process.stdout.write("Remote mode disabled; device identities retained.\n");
+    } else if (first === "status" && !second) {
+      const service = remoteServiceStatus();
+      let host: unknown = null, devices: unknown = null;
+      try { host = await request({ action: "remote-status" }, false); devices = await request({ action: "remote-devices" }, false); } catch {}
+      process.stdout.write(JSON.stringify({ ...service, host, devices }, null, 2) + "\n");
+    } else throw new Error("Usage: remote <enable|disable|status>");
   } catch (error) { process.stderr.write(errorText(error) + "\n"); process.exitCode = 1; }
   process.exit(process.exitCode ?? 0);
 }

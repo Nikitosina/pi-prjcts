@@ -31,6 +31,12 @@ launch links or `web.json`. The host rejects foreign origins and Host headers.
 Closing the tab does not stop work. After a host restart, run `npm run inbox`
 again because the port and token change. For an owner-authorized review in a fresh disposable home only, load host-side updates after active work finishes by stopping that disposable host and reopening a project. This is not advice to stop or restart the production host.
 
+## Remote access
+
+Remote mode is opt-in: `npm run projects -- remote enable https://relay.example.com --name "Home Mac"` installs the per-user macOS host service and prints its relay allowlist command. `remote status` inspects it; `remote disable` removes the service and retains paired identities. Enable keeps the Mac awake only on AC power. It does not restart an already-running host to load new code.
+
+A private relay behind your own nginx joins outbound WSS connections; devices pair from the local inbox's Remote access settings. See [REMOTE_SPEC.md](REMOTE_SPEC.md) for the protocol, security limits and staged verification, and [relay deployment](relay/deploy/README.md) for operator setup. Deployment and cellular/VPN verification have not run.
+
 ## Use
 
 The terminal UI (Pi extension, `/projects*` and `/project-*` slash commands) was removed. Use the browser client (`npm run inbox`) and the CLI (`npm run projects -- <command>`).

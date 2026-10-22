@@ -184,6 +184,13 @@ export const Snapshot = Type.Object({
 });
 export type Snapshot = Static<typeof Snapshot>;
 export const Request = Type.Union([
+  Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-devices") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-pair-start") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-pair-cancel") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-revoke"), deviceId: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }), confirm: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("remote-rename"), deviceId: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }), name: Type.String({ minLength: 1, maxLength: 80 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),

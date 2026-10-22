@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { home, socketPath, parse, Reply, WebInfo, Id, type Request } from "./state.ts";
 import { once } from "node:events";
+import { remoteConfig, kickstartRemoteHost } from "./remote.ts";
 
 export async function request(input: Request, start = true): Promise<unknown> {
   if (start) await ensureHost();
@@ -30,11 +31,16 @@ export async function openInbox(id?: string): Promise<string> {
 export async function ensureHost(): Promise<void> {
   try { await health(); return; } catch { /* A missing socket is normal before the first project. */ }
   mkdirSync(home(), { recursive: true, mode: 0o700 });
+  if (remoteConfig()?.enabled) {
+    kickstartRemoteHost();
+    for (let attempt = 0; attempt < 100; attempt++) { await sleep(100); try { await health(); return; } catch {} }
+    throw new Error(`Remote host did not start. Read ${join(home(), "host.log")}`);
+  }
   const log = openSync(join(home(), "host.log"), "a", 0o600);
   const env: NodeJS.ProcessEnv = { ...process.env, PI_PROJECTS_HOST: "1" };
   for (const key of Object.keys(env)) {
     // Kept after the legacy runtime removal: the host loads global extensions, and pi-subagent-manager reads PI_SUBAGENT_*.
-    if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE") delete env[key];
+    if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE" || key === "PI_PROJECTS_LAUNCHD") delete env[key];
   }
   const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], { detached: true, stdio: ["ignore", log, log], env, cwd: fileURLToPath(new URL("..", import.meta.url)) });
   child.on("error", () => {});
@@ -44,6 +50,36 @@ export async function ensureHost(): Promise<void> {
     try { await health(); return; } catch { /* The host may still be loading the SDK. */ }
   }
   throw new Error(`Projects host did not start. Read ${join(home(), "host.log")}`);
+}
+
+/** Transfer an already-running detached host before starting the remote LaunchAgent. */
+export async function ensureRemoteHost(): Promise<void> {
+  let running: { pid?: number } | null = null;
+  try { running = await health() as { pid?: number }; } catch {}
+  if (running) {
+    // A host from before remote access rejects remote-status; it is detached by definition.
+    const status = await request({ action: "remote-status" }, false).catch(() => ({})) as { launchd?: boolean };
+    if (status.launchd) { await request({ action: "remote-reload" }, false); return; }
+    const pid = running.pid;
+    if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error("Invalid running host PID");
+    await request({ action: "shutdown" }, false);
+    const deadline = Date.now() + 120000;
+    for (;;) {
+      try { process.kill(pid!, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") break; throw error; }
+      if (Date.now() >= deadline) throw new Error("Existing host did not stop; remote LaunchAgent has not taken ownership");
+      await sleep(100);
+    }
+  }
+  kickstartRemoteHost();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await sleep(100);
+    try {
+      await health();
+      const status = await request({ action: "remote-status" }, false) as { launchd?: boolean };
+      if (status.launchd) return;
+    } catch {}
+  }
+  throw new Error(`LaunchAgent host did not start. Read ${join(home(), "host.log")}`);
 }
 
 export function health(): Promise<unknown> {
