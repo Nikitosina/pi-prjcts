@@ -215,7 +215,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       catch (error) { recordHostEvent("answer-delivery-deferred", errorText(error)); }
       return entry;
     }
-    case "list": return listProjects().filter(project => !project.deleted);
+    // `notice` is read from disk only (no runtime is opened per project): unanswered questions in the inbox.
+    case "list": return listProjects().filter(project => !project.deleted).map(project => {
+      let questions = 0;
+      try { questions = inbox(projectDir(project.id)).filter(item => item.kind === "question" && !item.result).length; } catch {}
+      return { ...project, notice: { questions } };
+    });
     case "create": {
       if (!isAbsolute(input.cwd)) throw new Error("Workspace path must be absolute");
       const cwd = await realpath(input.cwd);

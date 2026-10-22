@@ -155,6 +155,7 @@ async function refresh() {
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
+    if (Date.now() - projectListAt > 10000) void reloadProjects();
     ensureLive();
     ensureChanges();
     if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
@@ -348,13 +349,13 @@ function renderChats() {
   if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
 
-// Worker badges (current project only; the plan is per project). Waiting = blocked or interrupted work admitted by a chat. Done = a completed worker whose endedAt is newer than the last time this browser had the chat open.
+// Chat and project marks. Waiting (a count): an unanswered question or a blocked worker admitted by the chat; pending approvals count on the project row only. Done (a mark): a completed worker whose endedAt is newer than the last time this browser had the chat open.
 const seenKey = (project, chat) => `pi-projects-seen:${project}:${chat}`;
 function seenAt(project, chat) { try { const value = Number(localStorage.getItem(seenKey(project, chat))); return value > 0 ? value : null; } catch { return null; } }
 function markSeen(project, chat) { try { localStorage.setItem(seenKey(project, chat), String(Date.now())); } catch {} }
 function chatWork(chat) { return plan ? plan.work.filter(work => !work.archived && workChatId(work) === chat.id) : []; }
 const completedSince = (work, seen) => work.status === "completed" && (work.endedAt ?? 0) > seen;
-// First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its done mark.
+// First sight of a chat starts its clock; the open chat is always up to date, so selecting a chat clears its done mark.
 function syncSeen() {
   if (!view?.chats || !plan) return;
   for (const chat of view.chats) {
@@ -363,20 +364,30 @@ function syncSeen() {
   }
 }
 function workBadge(chat) {
+  const questions = view.inbox.filter(item => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === chat.id).length;
   const work = chatWork(chat), seen = seenAt(projectId, chat.id);
-  return { waiting: work.filter(item => item.status === "blocked" || item.status === "interrupted").length, done: chat.id !== chatId && seen !== null && work.some(item => completedSince(item, seen)) };
+  const waiting = questions + work.filter(item => item.status === "blocked").length;
+  return { waiting, done: !waiting && chat.id !== chatId && seen !== null && work.some(item => completedSince(item, seen)) };
 }
 const workBadgeHtml = badge => badge.waiting ? `<span class="work-badge" aria-label="${badge.waiting} waiting">${badge.waiting}</span>` : badge.done ? '<span class="work-badge done" aria-label="Worker finished">✓</span>' : "";
-function projectWorkBadge() {
-  const badges = (view?.chats ?? []).filter(chat => !chat.archived).map(workBadge);
-  return { waiting: badges.reduce((sum, badge) => sum + badge.waiting, 0), done: badges.some(badge => badge.done) };
+// The open project aggregates its chats plus pending approvals; other projects only have the host's on-disk notice (unanswered questions, or the attention phase).
+function projectWorkBadge(project) {
+  if (project.id !== projectId || !view?.chats) { const questions = project.notice?.questions ?? 0; return { waiting: questions || (project.phase === "attention" ? 1 : 0), done: false }; }
+  const badges = view.chats.filter(chat => !chat.archived).map(workBadge);
+  return { waiting: badges.reduce((sum, badge) => sum + badge.waiting, 0) + (approvalPage?.total ?? 0), done: badges.some(badge => badge.done) };
+}
+let projectListAt = 0;
+async function reloadProjects() {
+  projectListAt = Date.now();
+  const loaded = await api({ action: "list" }).catch(() => null);
+  if (Array.isArray(loaded)) { projects = loaded; renderProjects(); }
 }
 function renderProjects() {
   const node = document.querySelector("#projects");
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';
   node.value = projectId ?? "";
   const list = document.querySelector("#project-list");
-  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}${p.id === projectId ? workBadgeHtml(projectWorkBadge()) : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
+  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${workBadgeHtml(projectWorkBadge(p))}</button>`).join("") || '<p class="note">No projects yet.</p>';
   if (list.dataset.html !== next) { list.innerHTML = next; list.dataset.html = next; }
 }
 function initials(name) { return String(name ?? "π").trim().split(/\s+/).slice(0, 2).map(word => [...word][0] ?? "").join("").toUpperCase() || "π"; }
