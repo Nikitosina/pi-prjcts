@@ -4,8 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pi Projects</title>
   <meta name="color-scheme" content="light dark"><script src="/theme.js"></script>
-  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script><!-- THROWAWAY activity prototype (loads its own CSS); remove with web/activity-prototype.* -->
-  <script defer src="/activity-prototype.js"></script>
+  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
 </head>
 <body>
   <div class="app">
@@ -21,7 +20,7 @@
     <main class="main">
       <header class="phead">
         <div class="row"><span id="avatar" class="avatar">π</span><h1 id="title">Opening your projects.</h1></div>
-        <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="activity">Activity</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
+        <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
         <button id="search-button" class="ghost small search-button" data-action="search" title="Search chats, workers, knowledge and files (⌘K / Ctrl+K)" aria-label="Search" aria-keyshortcuts="Meta+K Control+K"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.4 10.4 3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="search-label">Search</span><kbd class="search-kbd"></kbd></button>
         <div id="lifecycle" class="row" aria-label="Project lifecycle" hidden><span id="lifecycle-state" class="chip" role="status"></span><button id="project-pause" data-action="pause-project">❚❚ Pause</button><button id="project-resume" data-action="resume-project">▶ Resume</button><button class="ghost" data-action="lifecycle-more" title="Archive, delete or restore" aria-label="More project actions">⋯</button></div>
       </header>
@@ -41,7 +40,7 @@
             <div id="needs-card" class="card"><b>Needs you</b><span id="needs-badge" hidden></span><nav id="queue" aria-label="Pending decisions"></nav><div id="letter"></div><div id="needs-questions" class="needs-questions"></div></div>
             <div class="card" id="prs-card" hidden><div class="row between"><b>Pull requests</b><span class="row"><small id="prs-meta" class="note"></small><button type="button" class="ghost small" data-action="prs-refresh" title="Refresh from the PR providers" aria-label="Refresh pull requests">↻</button></span></div><div id="prs"></div></div>
             <div id="plugin-cards"></div>
-            <div class="card"><b>Workers</b><div id="activity"></div></div>
+            <div class="card" id="workers-card"><div class="row between"><b>Workers</b><label class="row archive-toggle" id="archive-toggle" hidden><input type="checkbox" id="show-archived"> Show archived</label></div><div id="activity"></div></div>
             <div class="card"><div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div><div id="notes"></div></div>
             <div class="card"><b>Recent results</b><div id="outcomes"></div></div>
           </aside>
@@ -54,18 +53,6 @@
           <div class="row between"><h3 class="section">Uploads</h3><small class="note">Drop files anywhere on this tab · up to 20 MB each</small></div><div id="uploads-inline" class="uploads"></div><input type="file" id="upload-input" multiple hidden>
           <div class="row between"><h3 class="section">Evidence</h3><button class="ghost small" data-action="evidence-list">All evidence</button></div><div id="evidence-inline"></div>
           <h3 class="section">Workspace</h3><p id="workspace" class="note mono"></p><p id="workspace-policy" class="note">Your Mac must stay awake. Workspace scope and isolation require explicit authorization.</p>
-        </section>
-
-        <section class="panel activity" data-panel="activity" hidden>
-          <div class="work-pane"><div class="row between work-head"><b id="work-count">Work</b><label class="row archive-toggle"><input type="checkbox" id="show-archived"> Show archived</label></div><div id="work-list"></div></div>
-          <section id="inline-thread" class="thread-pane" hidden></section><div id="thread-empty" class="thread-pane thread-empty"><p class="note">Select work to read its conversation, follow up or steer it.</p></div>
-          <aside id="artifact-pane" class="artifact-pane" aria-label="Worker artifacts">
-            <div class="artifact-head row between"><b>Artifacts</b><span class="row"><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button><button class="ghost small artifact-drawer-close" data-action="artifacts-toggle" aria-label="Close artifacts">✕</button></span></div>
-            <small id="artifact-summary" class="note"></small>
-            <input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off">
-            <div id="artifact-tree" class="artifact-tree"></div>
-            <div id="artifact-preview" class="artifact-preview" hidden></div>
-          </aside>
         </section>
 
         <section class="panel" data-panel="observability" hidden>

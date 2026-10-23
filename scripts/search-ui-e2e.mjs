@@ -142,7 +142,7 @@ try {
   await evaluate(`document.querySelector('#search-results .search-row[data-source="worker"]').click()`, s);
   await waitFor(`!!document.querySelector('#worker-messages .search-focus mark')`, s, 'worker message highlighted');
   await waitFor(inView('#worker-messages', '#worker-messages .search-focus'), s, 'worker message visible');
-  check('S9 a worker hit opens Activity on that thread and highlights the message', await evaluate(`new URL(location.href).searchParams.get('tab') === 'activity' && document.querySelector('#worker-messages .search-focus').innerText.includes('ibexvortex')`, s));
+  check('S9 a worker hit expands that worker in the Workers card and highlights the message', await evaluate(`new URL(location.href).searchParams.get('tab') === 'coordinator' && !!document.querySelector('#activity #worker-messages') && document.querySelector('#worker-messages .search-focus').innerText.includes('ibexvortex')`, s));
   await shot('03-worker-hit', s);
 
   // S10: knowledge and upload hits.

@@ -224,9 +224,10 @@ try {
   await waitFor(`document.querySelector('#messages')?.innerText.includes('FINAL-SUMMARY')`, s, 'final summary in transcript');
   await delay(400);
   await shot('01-main-transcript', s);
-  const activity = new URL(launch); activity.searchParams.set('tab', 'activity');
+  const activity = new URL(launch); activity.searchParams.set('tab', 'coordinator');
   await send('Page.navigate', { url: activity.toString() }, s);
-  await waitFor(`!!document.querySelector('#work-list .work-children')`, s, 'activity tree');
+  // The card lists active work only; "View all work" is clicked while it still says so, until the nested rows show.
+  await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('#activity .work-children'); })()`, s, 'activity tree');
   await delay(300);
   await shot('02-activity', s);
   result.errors = result.errors.filter(e => !/Failed to load resource/.test(e));

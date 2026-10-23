@@ -76,17 +76,17 @@ try {
   const dirA = join(k.home, id, 'artifacts', threadA);
   check('setup: fake worker saved nested, unicode, large and hostile files', listingA.files.length === 11 && listingA.files.some(f => f.path === 'a/b/c/deep.txt') && listingA.files.some(f => f.path === 'my notes/résumé 日本.txt'), listingA.files.map(f => f.path));
 
-  const url = new URL(web.url); url.searchParams.set('project', id); url.searchParams.set('tab', 'activity');
+  const url = new URL(web.url); url.searchParams.set('project', id); url.searchParams.set('tab', 'coordinator');
   await send('Page.navigate', { url: url.toString() }, s);
-  await waitFor(`!!document.querySelector('[data-action="thread"][data-thread="${threadA}"]')`, s, 'worker A in the list');
+  // The card lists active work only; "View all work" is clicked while it still says so, until the finished worker shows.
+  await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('[data-action="thread"][data-thread="${threadA}"]'); })()`, s, 'worker A in the list');
 
-  check('F12 no worker selected: browser column shows an empty state', await evaluate(`document.querySelector('#artifact-pane').innerText.includes('Select a worker') && !document.querySelector('#artifact-filter').offsetParent`, s));
+  check('F12 no worker expanded: there is no artifact browser', await evaluate(`!document.querySelector('#artifact-pane')`, s));
   await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 5`, s, 'artifact tree');
-  const layout = await evaluate(`(() => { const r = sel => document.querySelector(sel).getBoundingClientRect(); const w = r('.work-pane'), c = r('#inline-thread'), a = r('#artifact-pane'); return { w: [w.x, w.width, w.top], c: [c.x, c.width, c.top], a: [a.x, a.width, a.top, a.bottom], vh: innerHeight, vw: innerWidth, overflow: ['#work-list', '#worker-messages', '#artifact-tree'].map(sel => getComputedStyle(document.querySelector(sel)).overflowY) }; })()`, s);
+  const layout = await evaluate(`(() => { const row = document.querySelector('#activity .worker-item.on'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inRow: row.contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`, s);
   result.layout = layout;
-  check('F1 three columns left to right: workers (280) | chat | artifacts (340), same top', layout.w[0] < layout.c[0] && layout.c[0] < layout.a[0] && Math.abs(layout.w[1] - 280) < 4 && Math.abs(layout.a[1] - 340) < 4 && layout.c[1] > 450 && Math.abs(layout.w[2] - layout.a[2]) < 2, layout);
-  check('F1 columns scroll independently and the pane fits the viewport', layout.overflow.every(v => v === 'auto' || v === 'scroll') && layout.a[3] <= layout.vh + 1, layout);
+  check('F1 the artifact browser sits inside the expanded row and fits the card; its tree scrolls', layout.inRow && layout.width < 360 && layout.treeOverflow === 'auto' && layout.treeMax, layout);
 
   const tree = await evaluate(`({ dirs: [...document.querySelectorAll('#artifact-tree .artifact-dir > button')].map(b => b.dataset.dir), summary: document.querySelector('#artifact-summary').innerText, rootFiles: [...document.querySelectorAll('#artifact-tree > .artifact-file')].map(b => b.dataset.path) })`, s);
   result.tree = tree;
@@ -180,31 +180,17 @@ try {
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length === 1 && !!${file('second.txt')}`, s, 'worker B files');
   check('F11 switching workers swaps the browser (no files or selection from worker A)', await evaluate(`!${file('shot.png')} && document.querySelector('#artifact-preview').hidden && document.querySelector('#artifact-summary').innerText.includes('1 file')`, s));
   await click(`[data-action="thread"][data-thread="${threadC}"]`, s);
-  await waitFor(`document.querySelector('#artifact-tree').innerText.includes('No artifacts yet')`, s, 'worker C empty state');
+  await waitFor(`document.querySelector('#artifact-tree')?.innerText.includes('No artifacts yet')`, s, 'worker C empty state');
   check('F12 a worker without artifacts shows an empty state', true);
   await click('[data-action="thread-close"]', s);
-  check('F12 closing the worker resets the browser', await evaluate(`document.querySelector('#artifact-pane').innerText.includes('Select a worker')`, s));
+  check('F12 closing the worker removes the browser', await evaluate(`!document.querySelector('#artifact-pane')`, s));
   await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s, 'worker A again');
 
-  await viewport(1000, 900, false, s);
-  await delay(400);
-  const narrow = await evaluate(`(() => { const a = document.querySelector('#artifact-pane'); return { hidden: getComputedStyle(a).visibility === 'hidden', toggle: !!document.querySelector('.artifact-toggle').offsetParent, chatW: document.querySelector('#inline-thread').getBoundingClientRect().width }; })()`, s);
-  check('F13 <1200px: the browser leaves the grid (hidden drawer) and the chat keeps its width', narrow.hidden && narrow.toggle && narrow.chatW > 300, narrow);
-  await click('.artifact-toggle', s);
-  await delay(400);
-  const open = await evaluate(`(() => { const p = document.querySelector('#artifact-pane'); return { visible: getComputedStyle(p).visibility === 'visible', right: Math.round(p.getBoundingClientRect().right), vw: innerWidth, files: document.querySelectorAll('#artifact-tree .artifact-file').length }; })()`, s);
-  check('F13 the toggle opens the drawer on the right edge with the file list', open.visible && open.right === open.vw && open.files >= 10, open);
-  await shot('04-drawer-1000px', s);
-  await click('.artifact-drawer-close', s);
-  await delay(400);
-  check('F13 the drawer closes', await evaluate(`getComputedStyle(document.querySelector('#artifact-pane')).visibility === 'hidden'`, s));
   await viewport(390, 844, true, s);
   await delay(400);
-  await click('.artifact-toggle', s);
-  await delay(400);
-  check('F13 390px: single column, drawer opens full width', await evaluate(`Math.round(document.querySelector('#artifact-pane').getBoundingClientRect().width) === innerWidth && getComputedStyle(document.querySelector('#artifact-pane')).visibility === 'visible' && document.documentElement.scrollWidth <= innerWidth + 1`, s));
-  await shot('05-mobile-drawer', s);
+  check('F13 390px: the expanded row fits the screen with the file list', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1 && document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s));
+  await shot('04-mobile-expanded', s);
   check('F15 no browser console or HTTP errors', result.errors.length === 0 && result.httpErrors.length === 0, { errors: result.errors, http: result.httpErrors });
   result.status = 'passed';
 } catch (error) {

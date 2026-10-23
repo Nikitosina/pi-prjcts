@@ -73,7 +73,9 @@ try {
   // code block + table + inline code + bubble colors must be dark surfaces
   const mdColors = await evaluate(`({ pre: __color('#messages pre').bg, bubble: __color('.msg.you .text').bg, textarea: __color('#compose textarea').bg, composer: __color('#compose').bg })`, s);
   await sweep('knowledge', async () => { await waitFor(`!!document.querySelector('#knowledge-inline')`, s, 'knowledge'); });
-  await sweep('activity', async () => { await evaluate(`document.querySelector('.work-open')?.click()`, s); await delay(800); });
+  await evaluate(`document.querySelector('[data-tab=coordinator]').click()`, s); await delay(500);
+  await evaluate(`(document.querySelector('#activity .worker-line') ?? document.querySelector('#outcomes .worker-line'))?.click()`, s); await delay(800);
+  darkReport.workerOpen = await scan(s, true); await shot('dark-worker-open', s);
   await sweep('observability', async () => { await delay(800); });
   await sweep('settings', async () => { await waitFor(`!!document.querySelector('#skills-picker') && !/Reading/.test(document.querySelector('#skills-picker').innerText)`, s, 'skills picker').catch(() => {}); await delay(600); });
   await evaluate(`document.querySelector('#appearance-card').scrollIntoView()`, s); await shot('dark-settings-appearance', s);
@@ -127,11 +129,11 @@ try {
   ok('T3 an invalid stored value falls back to System');
 
   // Screenshots of the same tabs in light for the artifact.
-  for (const tab of ['coordinator', 'knowledge', 'activity', 'observability', 'settings']) {
+  for (const tab of ['coordinator', 'knowledge', 'observability', 'settings']) {
     await evaluate(`document.querySelector('[data-tab=${tab}]').click()`, s); await delay(700); await shot(`light-${tab}`, s);
     const light = await scan(s, false); must(!light.low.length, `Low contrast in light ${tab}: ${light.low.slice(0, 8).join('; ')}`);
   }
-  ok('light coordinator, knowledge, activity, observability and settings tabs: all text contrast >= 4.5 (3 for large)');
+  ok('light coordinator, knowledge, observability and settings tabs: all text contrast >= 4.5 (3 for large)');
 
   // T7 native widgets: scrollbars/checkbox follow color-scheme via the root.
   await scheme(s, 'dark'); await waitFor(`document.documentElement.dataset.theme === 'dark'`, s, 'dark for widgets');

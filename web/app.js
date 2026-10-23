@@ -59,7 +59,10 @@ let liveFrame = null;
 let liveRetryMs = 1000;
 // Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
 let stickToBottom = true;
-let showArchived = false;
+let showArchived = false, allWork = false;
+// The open worker's conversation; it is mounted in the Workers card row of that worker.
+const threadPane = Object.assign(document.createElement("div"), { id: "inline-thread", className: "worker-pane", hidden: true });
+function closeWorkerDetail() { workerChat = null; threadPane.hidden = true; threadPane.replaceChildren(); threadPane.remove(); }
 function followTranscript() { if (stickToBottom) { const node = document.querySelector("#transcript"); node.scrollTop = node.scrollHeight; } }
 let selected = null;
 let generation = 0;
@@ -71,7 +74,7 @@ let toastTimer;
 // Dismissed notices: an ✕ hides a warning or error until its text changes; remembered for this tab session.
 const dismissKey = "pi-projects-dismissed";
 const dismissed = new Set((() => { try { return JSON.parse(sessionStorage.getItem(dismissKey) ?? "[]"); } catch { return []; } })());
-const tabs = ["coordinator", "knowledge", "activity", "observability", "settings"];
+const tabs = ["coordinator", "knowledge", "observability", "settings"];
 let tab = tabs.includes(initial.searchParams.get("tab")) ? initial.searchParams.get("tab") : "coordinator";
 // Observability usage is pinned to the project/generation that requested it.
 let usageObs = null, usageLoading = false;
@@ -158,7 +161,7 @@ async function refresh() {
     if (Date.now() - projectListAt > 10000) void reloadProjects();
     ensureLive();
     ensureChanges();
-    if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
+    if (workerChat && tab === "coordinator") await refreshWorkerChat(workerChat);
   } catch (error) { if (current === generation) showError(error); }
   finally {
     if (polling === current) polling = null;
@@ -222,7 +225,7 @@ async function settledRefresh() {
 // A hidden tab closes the stream so the host stops watching for it; showing the tab refreshes and reopens it. While the stream is down, the 30 s poll below keeps the view current.
 let changeStream = null, changeRetryMs = 1000;
 const POLL_MS = 30000;
-const watchedThread = () => tab === "activity" && workerChat?.id === projectId ? workerChat.threadId : "";
+const watchedThread = () => tab === "coordinator" && workerChat?.id === projectId ? workerChat.threadId : "";
 function ensureChanges() {
   if (changeStream?.id === projectId && changeStream.chat === chatId && changeStream.thread === watchedThread()) return;
   changeStream?.controller.abort();
@@ -311,12 +314,12 @@ function changeProject(id, chat = "main") {
   document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? ""; autosize(document.querySelector("#compose textarea")); renderAttachments();
   document.querySelector("#compose button").disabled = !id || busy;
   html.clear(); usageObs = null;
-  const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
+  closeWorkerDetail();
   renderArtifactBrowser();
   const p = projects.find(p => p.id === id);
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
   document.querySelector("#avatar").textContent = initials(p?.name);
-  for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
+  for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
   document.querySelector("#chat-bar").dataset.html = "";
   renderProjects();
   document.querySelector("#warning").hidden = true;
@@ -428,7 +431,7 @@ function render() {
   setHtml("#needs-questions", waiting.here.length || waiting.elsewhere.length ? `${waiting.here.length ? `<button type="button" class="ghost small" data-action="questions-jump">${waiting.here.length} ${waiting.here.length === 1 ? "question" : "questions"} in chat ↓</button>` : ""}${waiting.elsewhere.length ? `<button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(waiting.elsewhere[0].chat.id)}">${waiting.elsewhere.length} ${waiting.elsewhere.length === 1 ? "question" : "questions"} in other chats →</button>` : ""}` : "");
   document.querySelector("#needs-card").hidden = !entry && !waiting.here.length && !waiting.elsewhere.length;
   document.querySelector("#question-hint").hidden = !waiting.here.length;
-  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  renderWorkers();
   setHtml("#outcomes", plan ? durableResults() : "");
   renderPrs(); void loadPrs();
   // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
@@ -498,19 +501,6 @@ function renderPanels() {
   }
   followTranscript();
   setHtml("#evidence-inline", view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
-  const archivable = item => ["completed", "failed", "stopped", "blocked"].includes(item.status) && !item.archived;
-  const workRow = item => {
-    const when = item.status === "running" && item.startedAt ? `running ${duration(Date.now() - item.startedAt)}` : item.endedAt ? `${item.status} ${duration(Date.now() - item.endedAt)} ago` : item.status;
-    const meta = [item.role, item.attempt?.model?.split("/").at(-1), when, item.archived ? "archived" : "", item.dependsOn.length ? `after ${item.dependsOn.length} item(s)` : ""].filter(Boolean).join(" · ");
-    const child = item.parentThreadId ? ` child" data-parent="${esc(item.parentThreadId)}` : "";
-    return `<div class="work ${esc(item.status)} ${item.archived ? "archived" : ""} ${workerChat?.threadId === item.threadId ? "on" : ""}${child}"><button class="work-open" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(item.threadId)}" title="${esc(item.text)}"><span class="dot"></span><strong>${item.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(item.text.replace(/\s+/g, " ").trim().slice(0, 240))}</strong><small>${esc(meta)}</small>${item.blocker ? `<small class="work-blocker">${esc(item.blocker)}</small>` : ""}</button>${archivable(item) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(item.id)}">Archive</button>` : ""}</div>`;
-  };
-  const listed = work.filter(item => showArchived || !item.archived);
-  document.querySelector("#work-count").textContent = plan ? `Work · ${listed.length}` : "Workers";
-  // One level of nesting: a parent worker's children sit under its newest row; orphans (parent hidden) stay top level.
-  const newest = listed.toReversed(), shownThreads = new Set(newest.map(item => item.threadId));
-  const treeRows = () => { const placed = new Set(); return newest.filter(item => !item.parentThreadId || !shownThreads.has(item.parentThreadId) || item.parentThreadId === item.threadId).map(item => { const first = !placed.has(item.threadId); placed.add(item.threadId); const kids = first ? newest.filter(candidate => candidate.parentThreadId === item.threadId && candidate.threadId !== item.threadId) : []; return workRow(item) + (kids.length ? `<div class="work-children" data-parent="${esc(item.threadId)}">${kids.map(workRow).join("")}</div>` : ""); }).join(""); };
-  setHtml("#work-list", plan ? treeRows() || '<p class="note">No work yet. Message the coordinator to start.</p>' : '<p class="note">No workers are running.</p>');
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
   setHtml("#obs-kpis", [kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""), kpi("Running", count("running")), kpi("Queued", count("queued")), kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""), kpi("Work items", work.length), kpi("Worker cap", plan?.workerCap ?? "—")].join(""));
   renderHealth(p);
@@ -2042,7 +2032,7 @@ function renderArtifactBrowser() {
   document.querySelector("#artifact-sort").textContent = artifactSort === "name" ? "Name" : "Newest";
   const count = document.querySelector("#artifact-count"); if (count) count.textContent = b?.files?.length ? `(${b.files.length})` : "";
   filter.hidden = !b?.files?.length;
-  if (!b) { summary.textContent = ""; set(tree, '<p class="note artifact-empty">Select a worker to browse the files it saved.</p>'); renderArtifactPreview(null); return; }
+  if (!b) { summary.textContent = ""; set(tree, '<p class="note artifact-empty">Loading artifacts…</p>'); renderArtifactPreview(null); return; }
   const listing = b.listing;
   summary.textContent = b.files?.length ? `${b.files.length} file(s) · ${fmtBytes(listing.totalBytes)}${listing.overCap ? ` · over the ${fmtBytes(listing.capBytes)} cap` : ""}${listing.truncated ? " · list truncated" : ""}${listing.skipped?.length ? ` · ${listing.skipped.length} skipped (symlinks)` : ""}` : "";
   set(tree, b.error ? `<p class="note">Artifacts unavailable: ${esc(b.error)}</p>` : !b.files ? '<p class="note">Loading artifacts…</p>' : !b.files.length ? '<p class="note artifact-empty">No artifacts yet. Files this worker saves to its artifacts folder appear here.</p>' : artifactTreeHtml(b));
@@ -2281,7 +2271,7 @@ async function action(node) {
       changeChat(target); break;
     }
     case "thread-list": threadList(); break;
-    case "all-work": setTab("activity"); break;
+    case "all-work": allWork = !allWork; render(); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickMenuItem(skillMenu?.items.find(item => item.name === node.dataset.name && item.source === node.dataset.source) ?? { name: node.dataset.name }); break;
     case "ref-pick": { const item = refMenu?.items[Number(node.dataset.index)]; if (item) pickRef(item); break; }
@@ -2291,8 +2281,7 @@ async function action(node) {
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
-    case "artifacts-toggle": document.querySelector("#artifact-pane").classList.toggle("open"); break;
-    case "thread-close": workerChat = null; ensureChanges(); document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
+    case "thread-close": closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
@@ -2401,7 +2390,7 @@ async function action(node) {
     case "operation-decision": operationDecision(node.dataset.operation, node.dataset.fingerprint, node.dataset.decision); break;
     case "operation-execute": operationExecution(node.dataset.operation, node.dataset.fingerprint); break;
     case "operation-inspect": operationExecution(node.dataset.operation, node.dataset.fingerprint, true); break;
-    case "thread": requireProject(node.dataset.project); await inspectThread(node.dataset.thread); break;
+    case "thread": requireProject(node.dataset.project); if (node.classList.contains("worker-line") && workerChat?.threadId === node.dataset.thread) { closeWorkerDetail(); ensureChanges(); dialogVersion++; render(); } else await inspectThread(node.dataset.thread); break;
     case "thread-history-page": requireProject(node.dataset.project); await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset)); break;
     case "thread-send": requireProject(node.dataset.project); requireThread(node.dataset.thread); textDialog("thread-send", node.dataset.thread); break;
     case "thread-steer":
@@ -3551,7 +3540,7 @@ function requireProject(id) { if (id !== projectId) throw new Error("Selected pr
 function closeCurrentDialog(id, version) { if (projectId === id && dialogVersion === version) closeDialog(); }
 function requireThread(id) { if (!uuid(id) || !plan?.work.some(work => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan"); }
 function workLine(work, detail) {
-  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small></button>`;
+  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small></button>`;
 }
 // Shared resources a running worker holds: leases by resource name, and its running background commands.
 function holdsBadge(holds) {
@@ -3568,15 +3557,36 @@ function workChatId(work) {
   return (chats.find(chat => chat.conversationId === (work.chatConversationId ?? main)) ?? chats[0])?.id ?? "main";
 }
 const inSelectedChat = work => !view?.chats || workChatId(work) === chatId;
+const archivable = work => ["completed", "failed", "stopped", "blocked"].includes(work.status) && !work.archived;
 function durableActivity() {
   const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
-  // Finished and archived work leave this panel for Recent results; Activity keeps the full list.
-  const active = plan.work.filter(work => !finished(work) && !work.archived);
-  const shown = active.filter(inSelectedChat).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
-  const elsewhere = active.length - active.filter(inSelectedChat).length;
-  const detail = work => work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
-  const total = plan.work.length;
-  return (shown.map(work => workLine(work, detail(work))).join("") || '<p class="note">No active workers from this chat.</p>') + (elsewhere ? `<p class="note other-chats">${elsewhere} active in other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
+  // Finished and archived work leave this card for Recent results; "View all work" lists every item of this chat.
+  const pool = allWork ? plan.work.filter(work => showArchived || !work.archived).toReversed() : plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  const mine = pool.filter(inSelectedChat), shown = allWork ? mine : mine.slice(0, 12);
+  const open = workerChat?.id === projectId ? plan.work.findLast(work => work.threadId === workerChat.threadId) : null;
+  if (open && !shown.some(work => work.threadId === open.threadId)) shown.unshift(open);
+  let slotted = false;
+  const detail = work => work.archived ? "archived" : work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
+  const item = work => {
+    const here = !slotted && open?.threadId === work.threadId; slotted ||= here;
+    return `<div class="worker-item${here ? " on" : ""}${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}${here ? '<div data-slot="thread"></div>' : ""}</div>`;
+  };
+  const elsewhere = pool.length - mine.length, total = plan.work.length;
+  // One level of nesting: a parent's sub-agents sit under its newest row; orphans (parent not listed) stay top level.
+  const threads = new Set(shown.map(work => work.threadId)), placed = new Set();
+  const tree = work => {
+    const first = !placed.has(work.threadId); placed.add(work.threadId);
+    const kids = first ? shown.filter(child => child.parentThreadId === work.threadId && child.threadId !== work.threadId) : [];
+    return item(work) + (kids.length ? `<div class="work-children" data-parent="${esc(work.threadId)}">${kids.map(item).join("")}</div>` : "");
+  };
+  return (shown.filter(work => !work.parentThreadId || !threads.has(work.parentThreadId) || work.parentThreadId === work.threadId).map(tree).join("") || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) + (elsewhere ? `<p class="note other-chats">${elsewhere} ${allWork ? "in" : "active in"} other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${total}) →`}</button>` : "");
+}
+// Re-rendering the card replaces its rows; the open worker's pane is moved back into its row.
+function renderWorkers() {
+  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  document.querySelector("#archive-toggle").hidden = !allWork;
+  const slot = document.querySelector('#activity [data-slot="thread"]');
+  if (slot && threadPane.parentNode !== slot) slot.append(threadPane);
 }
 function durableResults() {
   const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);
@@ -3586,36 +3596,46 @@ function threadList() {
   if (!plan) throw new Error("Durable plan is not loaded");
   showDialog("Durable work and reusable threads", `<p>Work items sharing a thread UUID reuse its conversation. Status is not verification evidence.</p>${plan.work.toReversed().map(work => `<article class="task">${badge(work.status)}<strong>${esc(work.text)}</strong><p>Role ${esc(work.role)} · Work ${esc(work.id)}<br>Thread ${esc(work.threadId)}<br>${esc(work.blocker ?? "")}</p><button data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}">Read owned history</button></article>`).join("") || '<p>No retained work items.</p>'}`);
 }
+function workerDetailHtml(chat, page, work) {
+  const threadId = chat.threadId, draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`), role = work?.role ?? "worker";
+  const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
+  return `<div class="row between"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><button class="ghost small" data-action="thread-close" aria-label="Collapse worker">✕</button></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><p class="worker-context" id="worker-context"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><div class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></div><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
+}
 async function inspectThread(threadId, offset = null, textOffset = 0) {
   requireThread(threadId);
   if (workerFocus?.threadId !== threadId) workerFocus = null;
   if (![offset ?? 0, textOffset].every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)) throw new Error("Invalid thread history page");
   const chat = { id: projectId, generation, threadId, offset, textOffset };
   workerChat = chat;
-  setTab("activity");
-  const target = document.querySelector("#inline-thread");
-  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>'; document.querySelector("#thread-empty").hidden = true;
+  setTab("coordinator");
+  const target = threadPane;
+  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>';
+  render();
+  target.scrollIntoView({ block: "nearest" });
   const version = ++dialogVersion;
   const page = await workerChatPage(chat);
   if (workerChat !== chat || version !== dialogVersion || chat.generation !== generation || target.hidden) return;
   const work = plan.work.findLast(item => item.threadId === threadId);
   const draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`);
   const role = work?.role ?? "worker";
-  target.innerHTML = `<div class="thread-head"><div class="grow"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p></div><button class="ghost small artifact-toggle" data-action="artifacts-toggle">Artifacts <span id="artifact-count"></span></button><button class="ghost small" data-action="thread-close" aria-label="Close thread">✕</button></div><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><details class="worker-controls"><summary>Evidence, changes and controls</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop…</button></div></details>`;
-  document.querySelector("#thread-empty").hidden = true;
+  target.innerHTML = workerDetailHtml(chat, page, work);
   renderWorkerChat(chat, page, true);
   render();
 }
 async function workerChatPage(chat) {
-  const read = offset => api({ action: "thread-history", id: chat.id, threadId: chat.threadId, offset, limit: 30, textOffset: chat.textOffset, textLimit: 4000 });
+  const read = offset => api({ action: "thread-history", id: chat.id, threadId: chat.threadId, offset, limit: 30, textOffset: chat.textOffset, textLimit: 4000, context: true });
   let page = await read(chat.offset ?? 0);
   if (chat.offset === null && page.total > 30) page = await read(Math.max(0, page.total - 30));
   if (page.threadId !== chat.threadId || !Array.isArray(page.items) || chat.offset !== null && page.offset !== chat.offset) throw new Error("History does not match its owned thread/page");
   return page;
 }
+function contextLine({ tokens, window }) {
+  const k = n => n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
+  return tokens == null ? "" : window ? `Context ${k(tokens)} / ${k(window)} · ${Math.round(tokens / window * 100)}%` : `Context ${k(tokens)} · window unknown`;
+}
 async function refreshWorkerChat(chat) {
   const page = await workerChatPage(chat);
-  if (workerChat !== chat || chat.generation !== generation || projectId !== chat.id || document.querySelector("#inline-thread").hidden) return;
+  if (workerChat !== chat || chat.generation !== generation || projectId !== chat.id || threadPane.hidden) return;
   if (document.querySelector("#worker-messages")) renderWorkerChat(chat, page);
 }
 function renderWorkerChat(chat, page, opening = false) {
@@ -3626,6 +3646,9 @@ function renderWorkerChat(chat, page, opening = false) {
     transcript.innerHTML = messages; transcript.dataset.content = messages;
     if (atEnd) transcript.scrollTop = transcript.scrollHeight;
   }
+  const lastTool = page.items.findLast(item => item.kind === "tool");
+  document.querySelector("#worker-latest").innerHTML = lastTool ? `Latest: <code>${esc(lastTool.name)}</code> ${esc(clip(lastTool.argsPreview ?? "", 90))}` : "";
+  document.querySelector("#worker-context").textContent = page.context ? contextLine(page.context) : "";
   if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id) focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
   document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;

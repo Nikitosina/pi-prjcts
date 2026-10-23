@@ -186,25 +186,25 @@ try {
   if (!rail.results.includes('MARK-SCOUTTASK') || !/scout/i.test(rail.results) || !rail.results.includes('MARK-FAILTASK') || !rail.workers.includes('MARK-HOLDTASK') || /work items/.test(rail.workers)) throw Error('Rail content wrong: ' + JSON.stringify(rail));
   result.checks.push('R2 Recent results lists completed and failed durable work; Workers shows running; no "work items" grammar');
   await evaluate(`[...document.querySelectorAll('#outcomes [data-action="thread"]')].find(n => n.innerText.includes('MARK-SCOUTTASK')).click()`, s);
-  await waitFor(`!document.querySelector('[data-panel="activity"]').hidden && !document.querySelector('#inline-thread').hidden && document.querySelector('#inline-thread').innerText.includes('REPORT-BODY')`, s, 'result opens thread');
-  result.checks.push('R3 clicking a recent result opens its worker thread');
+  await waitFor(`!!document.querySelector('#activity .worker-item.on #inline-thread') && document.querySelector('#inline-thread').innerText.includes('REPORT-BODY')`, s, 'result opens thread');
+  result.checks.push('R3 clicking a recent result expands its worker in the Workers card');
   await shot('02-thread', s);
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
   await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
-  await waitFor(`!document.querySelector('[data-panel="activity"]').hidden && !document.querySelector('#dialog').open`, s, 'view all goes to Activity');
-  result.checks.push('R4 "View all work" switches to Activity instead of a dialog');
+  await waitFor(`document.querySelector('#activity').innerText.includes('Show active only') && document.querySelector('#activity').innerText.includes('MARK-FAILTASK') && !document.querySelector('#dialog').open`, s, 'view all lists every item in the card');
+  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
+  result.checks.push('R4 "View all work" lists finished work in the card instead of a dialog or tab');
 
   // Round 2
   const list = await evaluate(`(() => { const ol = [...document.querySelectorAll('#messages .report ol')]; return ol.map(n => n.children.length); })()`, s);
   if (!list.includes(3)) throw Error('Blank-line separated numbered list split: ' + JSON.stringify(list));
   result.checks.push('M1 numbered list with blank lines stays one list');
-  await evaluate(`document.querySelector('[data-tab="activity"]').click()`, s);
-  await evaluate(`document.querySelector('#work-list [data-action="thread"]').click()`, s);
+  await evaluate(`document.querySelector('#activity [data-action="thread-close"]')?.click()`, s);
+  await evaluate(`document.querySelector('#activity [data-action="thread"]').click()`, s);
   await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, 'thread pane');
-  const panes = await evaluate(`(() => { const a = document.querySelector('.work-pane').getBoundingClientRect(), b = document.querySelector('#inline-thread').getBoundingClientRect(); return { side: b.left >= a.right - 1 && Math.abs(a.top - b.top) < 4, page: document.scrollingElement.scrollHeight <= innerHeight + 1, selected: !!document.querySelector('#work-list .work.on'), bottom: b.bottom <= innerHeight + 1 }; })()`, s);
-  if (!panes.side || !panes.page || !panes.selected || !panes.bottom) throw Error('Activity is not master-detail: ' + JSON.stringify(panes));
-  result.checks.push('A1 Activity: work list and thread side by side, selected row marked, no page scroll');
-  await shot('04-activity', s);
+  const panes = await evaluate(`(() => { const row = document.querySelector('#activity .worker-item.on'), detail = document.querySelector('#inline-thread'); return { inRow: !!row && row.contains(detail), card: document.querySelector('#workers-card').contains(detail), latest: !!document.querySelector('#worker-context') }; })()`, s);
+  if (!panes.inRow || !panes.card || !panes.latest) throw Error('Worker did not expand in its card row: ' + JSON.stringify(panes));
+  result.checks.push('A1 Workers card: the selected row expands in place with its conversation');
+  await shot('04-worker-expanded', s);
   await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
   await waitFor(`document.querySelectorAll('#knowledge-inline .tree-file').length >= 2`, s, 'doc rows');
   const knowledge = await evaluate(`({ tiles: document.querySelectorAll('[data-panel="knowledge"] .tile').length, text: document.querySelector('#knowledge-inline').innerText })`, s);

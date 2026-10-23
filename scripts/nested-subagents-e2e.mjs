@@ -165,28 +165,30 @@ try {
   check('N5 the child worker shares the parent\'s workspace scope; the scout child has none', wParent.workspaceScopeId && wWorker.workspaceScopeId === wParent.workspaceScopeId && wScout.workspaceScopeId === null, { wParent, wScout, wWorker });
   check('N17 projects_workers shows parentThreadId on child work and threads, and child reports as delivered to parent', wScout.parentThreadId === parentA.threadId && wWorker.report === 'delivered to parent' && listed.threads.find(t => t.threadId === scoutA.threadId)?.parentThreadId === parentA.threadId && wParent.parentThreadId === null, { wScout, wWorker, threads: listed.threads });
 
-  // UI: Activity tree and Observability trace.
+  // UI: Workers tree and Observability trace.
   const web = await rpc({ action: 'web' });
-  const launch = new URL(web.url); launch.searchParams.set('project', id); launch.searchParams.set('tab', 'activity');
+  const launch = new URL(web.url); launch.searchParams.set('project', id); launch.searchParams.set('tab', 'coordinator'); launch.searchParams.set('chat', ops.id);
   startChrome();
   const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
   const { sessionId: s } = await send('Target.attachToTarget', { targetId, flatten: true });
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-  const treeState = `(() => { const group = document.querySelector('#work-list .work-children[data-parent="${parentA.threadId}"]'); const rows = [...document.querySelectorAll('#work-list > .work')]; const parentRows = rows.filter(r => r.querySelector('[data-thread="${parentA.threadId}"]')); return { kids: group ? [...group.querySelectorAll('.work.child')].map(r => ({ thread: r.querySelector('.work-open').dataset.thread, label: !!r.querySelector('.sub-label'), parent: r.dataset.parent })) : [], topChildRows: rows.filter(r => r.classList.contains('child')).length, prevIsParent: !!group && group.previousElementSibling?.querySelector('.work-open')?.dataset.thread === "${parentA.threadId}", parentRows: parentRows.length }; })()`;
+  const treeState = `(() => { const group = document.querySelector('#activity .work-children[data-parent="${parentA.threadId}"]'); const rows = [...document.querySelectorAll('#activity > .worker-item')]; const parentRows = rows.filter(r => r.querySelector('.worker-line[data-thread="${parentA.threadId}"]')); return { kids: group ? [...group.querySelectorAll('.worker-item.child')].map(r => ({ thread: r.querySelector('.worker-line').dataset.thread, label: !!r.querySelector('.sub-label'), parent: r.dataset.parent })) : [], topChildRows: rows.filter(r => r.classList.contains('child')).length, prevIsParent: !!group && group.previousElementSibling?.querySelector('.worker-line')?.dataset.thread === "${parentA.threadId}", parentRows: parentRows.length }; })()`;
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#work-list .work-children')`, s, 'activity tree');
+  // The card lists active work only; "View all work" is clicked while it still says so, until the nested rows show.
+  await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('#activity .work-children'); })()`, s, 'workers tree');
   const tree = await evaluate(treeState, s);
   check('N14 Activity nests both children under the parent\'s newest row, labelled sub-agent; none at top level', tree.kids.length === 2 && tree.kids.every(k => k.label && k.parent === parentA.threadId) && new Set(tree.kids.map(k => k.thread)).size === 2 && tree.kids.some(k => k.thread === workerA.threadId) && tree.topChildRows === 0 && tree.prevIsParent, tree);
   await shot('01-activity-tree', s);
-  await evaluate(`document.querySelector('#work-list .work-children [data-thread="${workerA.threadId}"]').click()`, s);
-  await waitFor(`!!document.querySelector('#work-list .work.child.on [data-thread="${workerA.threadId}"]')`, s, 'child thread opened');
+  await evaluate(`document.querySelector('#activity .work-children [data-thread="${workerA.threadId}"]').click()`, s);
+  await waitFor(`!!document.querySelector('#activity .worker-item.child.on [data-thread="${workerA.threadId}"]')`, s, 'child thread opened');
   await delay(500);
-  check('N16 clicking a child row opens that child\'s thread', await evaluate(`!!document.querySelector('#work-list .work.child.on [data-thread="${workerA.threadId}"]')`, s));
+  check('N16 clicking a child row opens that child\'s thread', await evaluate(`!!document.querySelector('#activity .worker-item.child.on [data-thread="${workerA.threadId}"]')`, s));
   await shot('02-child-thread-open', s);
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#work-list .work-children')`, s, 'mobile tree');
+  // The card lists active work only; "View all work" is clicked while it still says so, until the nested rows show.
+  await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('#activity .work-children'); })()`, s, 'mobile tree');
   await delay(300);
   check('N16 the tree fits a 390 px screen', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s));
   await shot('03-activity-tree-mobile', s);
@@ -206,10 +208,11 @@ try {
   await delay(1500);
   work = await plan();
   check('N13/N10 after pause/resume and a restart, links survive and no child report is delivered twice', [scoutA.id, workerA.id].every(childId => work.find(w => w.id === childId).parentThreadId === parentA.threadId) && work.filter(w => w.threadId === parentA.threadId && w.text.startsWith('[Child work')).length === 2 && result.calls.filter(c => c.role === 'parent' && c.user.startsWith('[Child work')).length === 2, work);
-  const relaunch = new URL((await rpc({ action: 'web' })).url); relaunch.searchParams.set('project', id); relaunch.searchParams.set('tab', 'activity');
+  const relaunch = new URL((await rpc({ action: 'web' })).url); relaunch.searchParams.set('project', id); relaunch.searchParams.set('tab', 'coordinator'); relaunch.searchParams.set('chat', ops.id); launch.searchParams.set('chat', ops.id);
   await send('Page.navigate', { url: relaunch.toString() }, s);
-  await waitFor(`!!document.querySelector('#work-list .work-children')`, s, 'tree after restart');
-  check('N13 the Activity tree is the same after the restart', (await evaluate(treeState, s)).kids.length === 2);
+  // The card lists active work only; "View all work" is clicked while it still says so, until the nested rows show.
+  await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('#activity .work-children'); })()`, s, 'tree after restart');
+  check('N13 the Workers tree is the same after the restart', (await evaluate(treeState, s)).kids.length === 2);
 
   // N11/N9: stopping a parent stops its running child; nothing wakes the parent.
   await rpc({ action: 'message', id, text: 'MARK-NEST-STOP please' });

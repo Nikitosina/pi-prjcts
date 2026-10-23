@@ -72,8 +72,8 @@ try {
   check('L20 the delegated worker ran on the Durable runtime and returned its report', JSON.stringify(history).includes('Worker MARK-WJOB'), JSON.stringify(history).slice(0, 600));
   await eventually(async () => result.calls.some(c => c.coordinator && /Worker MARK-WJOB/.test(c.user)), 'worker report never woke the coordinator');
   check('L20 the worker report woke the coordinator', true);
-  await evaluate(`document.querySelector('[data-tab="activity"]').click()`, s);
-  await waitFor(`document.querySelector('#work-list').innerText.includes('MARK-WJOB')`, s, 'activity lists the worker');
+  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
+  await waitFor(`document.querySelector('#activity').innerText.includes('MARK-WJOB')`, s, 'activity lists the worker');
   await shot('01-activity-worker', s);
   await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
   await send('MARK-ASK pick one');

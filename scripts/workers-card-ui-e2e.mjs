@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const artifacts = join(repo, 'artifacts', `workers-card-ui-${stamp}`), root = join(realpathSync(tmpdir()), `workers-card-ui-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
