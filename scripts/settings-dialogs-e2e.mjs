@@ -35,6 +35,8 @@ await kit.run(async () => {
   const snap = await rpc({ action: 'owner-setup-snapshot', id });
   await rpc({ action: 'github-quick-authorize', id, confirm: id, expectedRevision: snap.githubRevision });
   const bare2 = await kit.createProject('Fresh', { grant: false });
+  // Projects get a whole-repository scope automatically; the owner revokes it here to exercise the re-grant dialog.
+  { const first = await rpc({ action: 'owner-setup-snapshot', id: bare2 }); await rpc({ action: 'workspace-revoke', id: bare2, confirm: bare2, scopeId: first.workspace.scopes[0].id, expectedRevision: first.workspaceRevision }); }
 
   // Host: scoped list = Pi enabledModels resolved by Pi, configured only, deduped; missing/corrupt settings.json degrades to no scope.
   const picker = await rpc({ action: 'model-picker-snapshot' });
@@ -152,7 +154,7 @@ await kit.run(async () => {
   await open(`document.querySelector('#dialog [data-action=workspace-quick]').click()`, `!!document.querySelector('#dialog [data-action=workspace-quick-confirm]')`, 'workspace dialog');
   check('workspace dialog: facts, no typed project id', await dlg(`/uncommitted|Checkout/.test(d.innerText) && !d.querySelector('input[name=confirm]')`));
   await capture('workspace-quick');
-  await ev(`document.querySelector('#dialog [data-action=workspace-quick-confirm]').click()`); await page.waitFor(`/Workers can edit this repository/.test(document.querySelector('#dialog').innerText)`, 'granted');
+  await ev(`document.querySelector('#dialog [data-action=workspace-quick-confirm]').click()`); await page.waitFor(`!!document.querySelector('#dialog [data-kind=workspace-revoke]')`, 'granted');
   await ev(`document.querySelector('#dialog details.advanced').open = true`);
   await capture('owner-setup-advanced');
   await ev(`document.querySelector('#dialog [data-kind=workspace-revoke]').click()`); await page.waitFor(`!!document.querySelector('#dialog form[data-owner-write][data-kind=workspace-revoke]')`, 'revoke form');

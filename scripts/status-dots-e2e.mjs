@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, realpathSync, writeFileSync, createWriteStream } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync, createWriteStream, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,7 +13,7 @@ const artifacts = process.env.ARTIFACT_DIR || join(repo, 'artifacts', `status-do
 const root = join(realpathSync(tmpdir()), `status-dots-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
 if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
-for (const dir of [artifacts, root, home, workspace, agentDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+for (const dir of [artifacts, root, home, workspace, agentDir, join(root, 'userhome')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 const fixtureAt = Date.now();
 const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
@@ -52,7 +52,18 @@ const model = createServer((req, res) => {
 await new Promise(ok => model.listen(0, '127.0.0.1', ok));
 writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: 'fake', api: 'openai-completions', models: [{ id: 'fake-model', name: 'Fake', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 }] } } }));
 const socket = join(tmpdir(), `pi-projects-${process.getuid?.() ?? 'user'}-${createHash('sha256').update(home).digest('hex').slice(0, 12)}.sock`);
-const env = { ...process.env, PI_PROJECTS_HOME: home, PI_PROJECTS_HOST: '1', PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_PROJECTS_LIMITS_FIXTURE: join(root, 'limits.json') };
+// Fake Cursor: the browser-login poll answers 404 once, then hands out a session token; the dashboard serves a usage summary.
+const cursorJwt = `x.${Buffer.from(JSON.stringify({ sub: 'auth0|e2e', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.y`;
+const cursorSeen = { polls: [], summary: [] };
+const cursor = createServer((req, res) => {
+  const url = new URL(req.url, 'http://x');
+  res.setHeader('content-type', 'application/json');
+  if (url.pathname === '/auth/poll') { cursorSeen.polls.push(Object.fromEntries(url.searchParams)); if (cursorSeen.polls.length < 2) { res.statusCode = 404; return res.end('{}'); } return res.end(JSON.stringify({ accessToken: cursorJwt, refreshToken: 'refresh-e2e' })); }
+  if (url.pathname === '/api/usage-summary') { cursorSeen.summary.push(req.headers.cookie ?? ''); return res.end(JSON.stringify({ billingCycleEnd: new Date(Date.now() + 9 * 86400_000).toISOString(), individualUsage: { plan: { enabled: true, totalPercentUsed: 61.5 } } })); }
+  res.statusCode = 404; res.end('{}');
+});
+await new Promise(ok => cursor.listen(0, '127.0.0.1', ok));
+const env = { ...process.env, PI_PROJECTS_CURSOR_DASHBOARD: `http://127.0.0.1:${cursor.address().port}`, PI_PROJECTS_CURSOR_API: `http://127.0.0.1:${cursor.address().port}`, HOME: join(root, 'userhome'), PI_PROJECTS_HOME: home, PI_PROJECTS_HOST: '1', PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_PROJECTS_LIMITS_FIXTURE: join(root, 'limits.json') };
 for (const key of Object.keys(env)) if (key.startsWith('PI_SUBAGENT') || key === 'PI_SESSION_FILE') delete env[key];
 const log = createWriteStream(join(artifacts, 'host.log'), { flags: 'wx', mode: 0o600 });
 const host = spawn(process.execPath, [join(repo, 'src/host.ts')], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -236,6 +247,27 @@ try {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((cursor.left + cursor.right) / 2), y: Math.round((cursor.top + cursor.bottom) / 2) }, s);
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`, s, 'cursor details');
   await shot('07-limits-bar-unavailable', s);
+  // Connect Cursor from the page: the app builds the login link, the host polls Cursor and keeps the tokens.
+  await evaluate(`(window.__opened = [], window.open = url => { window.__opened.push(String(url)); return null; })`, s);
+  await waitFor(`!!document.querySelector('.lim[data-provider="cursor"] [data-action="cursor-connect"]')`, s, 'Connect Cursor button');
+  await shot('07b-cursor-connect', s);
+  await click('.lim[data-provider="cursor"] [data-action="cursor-connect"]', s);
+  await waitFor(`window.__opened.length === 1`, s, 'login page opened');
+  const login = new URL(await evaluate(`window.__opened[0]`, s));
+  if (!login.pathname.endsWith('/loginDeepControl') || !login.searchParams.get('challenge') || !login.searchParams.get('uuid') || login.searchParams.get('verifier')) throw Error('Login URL wrong: ' + login);
+  await waitFor(`/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /61/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`, s, 'waiting state');
+  await waitFor(`/61\.?5?%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText) || /62%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText)`, s, 'Cursor usage after login');
+  const poll = cursorSeen.polls.at(-1);
+  if (createHash('sha256').update(poll.verifier).digest('base64url') !== login.searchParams.get('challenge') || poll.uuid !== login.searchParams.get('uuid')) throw Error('PKCE verifier does not match the challenge: ' + JSON.stringify(poll));
+  const stored = JSON.parse(readFileSync(join(agentDir, 'auth.json'), 'utf8'));
+  if (stored.cursor?.access !== cursorJwt || (statSync(join(agentDir, 'auth.json')).mode & 0o777) !== 0o600) throw Error('Cursor login not stored in auth.json at 0600');
+  if (!cursorSeen.summary.at(-1)?.startsWith('WorkosCursorSessionToken=auth0%7Ce2e%3A%3A')) throw Error('Usage request lacked the session cookie');
+  const afterBar = await evaluate(`document.querySelector('.lim[data-provider="cursor"]').innerText.replace(/\s+/g, ' ')`, s);
+  if (!/month/.test(afterBar) && !/mo/.test(afterBar)) throw Error('Cursor window label missing: ' + afterBar);
+  const page = await evaluate(`document.documentElement.outerHTML`, s);
+  if (page.includes(cursorJwt) || page.includes('refresh-e2e')) throw Error('A Cursor token reached the page');
+  await shot('07c-cursor-connected', s);
+  result.checks.push('C1 Connect Cursor: PKCE login link opened, host polled with the matching verifier, tokens stored in auth.json at 0600, usage appears as a monthly percentage, no token reaches the page');
   const raw = JSON.stringify(await rpc({ action: 'limits-snapshot' }));
   if (/token|bearer|access|authorization|cookie/i.test(raw)) throw Error('Limits snapshot leaks credential-like fields: ' + raw);
   result.checks.push('B3 the browser payload is normalized samples only; no tokens or raw provider responses');
@@ -266,7 +298,7 @@ try {
   if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(500); if (!cdpEnded) chrome.kill('SIGTERM'); }
   try { if (!hostEnded) { await rpc({ action: 'shutdown' }); await Promise.race([hostExit, delay(10000)]); } } catch { host.kill('SIGKILL'); }
   if (!hostEnded) host.kill('SIGKILL');
-  model.closeAllConnections(); model.close(); log.end(); save();
+  model.closeAllConnections(); model.close(); cursor.closeAllConnections(); cursor.close(); log.end(); save();
 }
 console.log(JSON.stringify({ status: result.status, checks: result.checks, failure: result.failure, artifact: artifacts }, null, 2));
 if (result.status !== 'passed') process.exitCode = 1;

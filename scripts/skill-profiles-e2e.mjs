@@ -50,7 +50,7 @@ const model = createServer((req, res) => {
       if (read && results.length === 0) return res.end(call('projects_skill_file', { skill: read[1], ...(read[2] ? { path: read[2] } : {}) }));
       return res.end(say('Noted.'));
     }
-    if (role === 'worker' && /W-TASK child/.test(userText) && results.length === 0) return res.end(call('projects_delegate_child', { role: 'worker', task: 'CHILD-W SKILL-READ glob-alpha' }));
+    if (role === 'worker' && /W-TASK child/.test(userText) && results.length === 0) return res.end(call('projects_delegate_child', { role: 'worker', task: 'CHILD-W SKILL-READ glob-gamma' }));
     if (read && results.length === 0) return res.end(call('projects_skill_file', { skill: read[1], ...(read[2] ? { path: read[2] } : {}) }));
     res.end(say(`DONE ${role}`));
   });
@@ -136,12 +136,12 @@ try {
   const lastCall = (role, marker) => result.calls.findLast(c => c.role === role && c.user.includes(marker));
   const toolResult = (role, marker) => result.calls.findLast(c => c.role === role && c.user.includes(marker) && c.results.length === 1)?.results[0] ?? '';
 
-  // Defaults: repository skills only, names and descriptions only.
+  // Defaults: every installed skill is on for every profile; names and descriptions only.
   await ask('MARK-W pre');
   await ask('MARK-S pre');
   const coord0 = lastCall('coordinator', 'MARK-W pre'), worker0 = lastCall('worker', 'W-TASK pre'), scout0 = lastCall('scout', 'S-TASK pre');
   for (const [role, call0] of [['coordinator', coord0], ['worker', worker0], ['scout', scout0]]) {
-    check(`S1/S2/S8/S9 default ${role} index lists only the repository skills, without bodies`, JSON.stringify(index(call0.system)) === '["repo-one","repo-two"]' && !bodies(call0.system) && /Skills for your role/.test(call0.system), { index: index(call0.system), body: bodies(call0.system) });
+    check(`S1/S2/S8/S9 default ${role} index lists every installed skill, without bodies`, index(call0.system).join() === 'glob-alpha,glob-beta,glob-delta,glob-gamma,repo-one,repo-two' && !bodies(call0.system) && /Skills for your role/.test(call0.system), { index: index(call0.system), body: bodies(call0.system) });
   }
   check('S10 no worker prompt carries the old "Configured Pi skills" list', !result.calls.some(c => /Configured Pi skills/.test(c.system)));
   check('S13/S21 workers and scouts get projects_skill_file and no projects_skill_read', [worker0, scout0].every(c => c.tools.includes('projects_skill_file') && !c.tools.includes('projects_skill_read')), [worker0.tools, scout0.tools]);
@@ -161,7 +161,7 @@ try {
   result.groups = groups;
   const groupOf = name => groups.find(g => g[1].some(([n]) => n === name))?.[0];
   check('S17 the picker lists all six loaded skills grouped by source (repository vs global)', groupOf('repo-one') === groupOf('repo-two') && groupOf('glob-alpha') === groupOf('glob-delta') && groupOf('repo-one') !== groupOf('glob-alpha') && groups.length === 2, groups);
-  check('S1 the default "All profiles" tab has exactly the repository skills checked', groups.flatMap(g => g[1]).filter(([, on]) => on).map(([n]) => n).sort().join() === 'repo-one,repo-two', groups);
+  check('S1 the default "All profiles" tab has every skill checked (on)', groups.flatMap(g => g[1]).filter(([, on]) => on).map(([n]) => n).sort().join() === 'glob-alpha,glob-beta,glob-delta,glob-gamma,repo-one,repo-two', groups);
   await evaluate(`(() => { const i = document.querySelector('#skills-search'); i.value = 'gamma'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`, s);
   await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 1`, s, 'search filter');
   check('S17 search narrows the list', await evaluate(`document.querySelector('#skills-picker [data-skill-pick]').dataset.skillPick`, s) === 'glob-gamma');
@@ -172,12 +172,12 @@ try {
     await waitFor(`document.querySelector('[data-action="skills-tab"][data-role="${role}"]').classList.contains('on')`, s, `${role} tab`);
     await evaluate(`document.querySelector('[data-skill-pick="${name}"]').click()`, s);
   };
-  await pick('all', 'repo-two');       // drop repo-two from every profile
+  await pick('all', 'repo-two');       // switch repo-two off for every profile
   await pick('worker', 'glob-alpha');
   await pick('scout', 'glob-beta');
   await pick('coordinator', 'glob-gamma');
-  const inherited = await evaluate(`(() => { const i = document.querySelector('[data-skill-pick="repo-one"]'); return { checked: i.checked, disabled: i.disabled }; })()`, s);
-  check('S5 "All profiles" skills show as inherited (checked, locked) in a role tab', inherited.checked && inherited.disabled, inherited);
+  const inherited = await evaluate(`(() => { const i = document.querySelector('[data-skill-pick="repo-two"]'); return { checked: i.checked, disabled: i.disabled }; })()`, s);
+  check('S5 a skill switched off for "All profiles" shows as off and locked in a role tab', !inherited.checked && inherited.disabled, inherited);
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await delay(300);
   await evaluate(`document.querySelector('#skills-card').scrollIntoView()`, s);
@@ -188,49 +188,49 @@ try {
   await evaluate(`document.querySelector('[data-action="skills-save"]').click()`, s);
   await eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.skills !== null, 'skills not saved', 100);
   settings = await rpc({ action: 'settings-snapshot', id });
-  const want = { all: ['repo-one'], coordinator: ['glob-gamma'], worker: ['glob-alpha'], scout: ['glob-beta'], reviewer: [] };
+  const want = { off: { all: ['repo-two'], coordinator: ['glob-gamma'], worker: ['glob-alpha'], scout: ['glob-beta'], reviewer: [] } };
   check('S18 saving the picker persists the profiles', JSON.stringify(settings.values.skills) === JSON.stringify(want), settings.values.skills);
   await send('Page.reload', {}, s);
   await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 6`, s, 'picker after reload');
   await evaluate(`document.querySelector('[data-action="skills-tab"][data-role="worker"]').click()`, s);
   await delay(200);
   const afterReload = await evaluate(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].filter(i => i.checked).map(i => i.dataset.skillPick).sort().join()`, s);
-  check('S18 after a reload the worker tab shows repo-one (inherited) and glob-alpha', afterReload === 'glob-alpha,repo-one', afterReload);
+  check('S18 after a reload the worker tab shows what is on for workers', afterReload === 'glob-beta,glob-delta,glob-gamma,repo-one', afterReload);
   await shot('02-skills-picker-worker', s);
 
   // Effective sets per role, including a child worker.
   await ask('MARK-W child');
-  await ask('MARK-S post SKILL-READ glob-alpha');
-  await ask('MARK-S post2 SKILL-READ glob-beta');
-  await ask('MARK-W post SKILL-READ glob-alpha ../../../etc/hosts');
+  await ask('MARK-S post SKILL-READ glob-beta');
+  await ask('MARK-S post2 SKILL-READ glob-alpha');
+  await ask('MARK-W post SKILL-READ glob-beta ../../../etc/hosts');
   const coord1 = lastCall('coordinator', 'MARK-W child'), parent1 = lastCall('worker', 'W-TASK child'), child1 = lastCall('worker', 'CHILD-W'), scout1 = lastCall('scout', 'S-TASK post');
   result.indexes = { coordinator: index(coord1.system), worker: index(parent1.system), child: index(child1?.system ?? ''), scout: index(scout1.system) };
-  check('S4/S5/S8 coordinator index = all + coordinator additions', result.indexes.coordinator.join() === 'glob-gamma,repo-one' && !bodies(coord1.system), result.indexes);
-  check('S4/S5 worker index = all + worker additions', result.indexes.worker.join() === 'glob-alpha,repo-one' && !bodies(parent1.system), result.indexes);
-  check('S6 a child worker gets the worker set', result.indexes.child.join() === 'glob-alpha,repo-one', result.indexes);
-  check('S4 scout index = all + scout additions', result.indexes.scout.join() === 'glob-beta,repo-one', result.indexes);
+  check('S4/S5/S8 coordinator index = everything minus its opt-outs', result.indexes.coordinator.join() === 'glob-alpha,glob-beta,glob-delta,repo-one' && !bodies(coord1.system), result.indexes);
+  check('S4/S5 worker index = everything minus its opt-outs', result.indexes.worker.join() === 'glob-beta,glob-delta,glob-gamma,repo-one' && !bodies(parent1.system), result.indexes);
+  check('S6 a child worker gets the worker set', result.indexes.child.join() === 'glob-beta,glob-delta,glob-gamma,repo-one', result.indexes);
+  check('S4 scout index = everything minus its opt-outs', result.indexes.scout.join() === 'glob-alpha,glob-delta,glob-gamma,repo-one', result.indexes);
   const childRead = result.calls.findLast(c => c.role === 'worker' && c.user.includes('CHILD-W') && c.results.length === 1)?.results[0] ?? '';
-  check('S6/S13 the child worker reads its role skill on demand', childRead.includes('BODY-glob-alpha'), childRead.slice(0, 300));
+  check('S6/S13 the child worker reads its role skill on demand', childRead.includes('BODY-glob-gamma'), childRead.slice(0, 300));
   const scoutDenied = toolResult('scout', 'S-TASK post SKILL-READ'), scoutAllowed = toolResult('scout', 'S-TASK post2');
-  check('S11 a scout cannot read a worker-only skill', /not in your role's skill set/.test(scoutDenied) && !scoutDenied.includes('BODY-'), scoutDenied.slice(0, 300));
-  check('S13 a scout reads its own skill', scoutAllowed.includes('BODY-glob-beta'), scoutAllowed.slice(0, 300));
+  check('S11 a scout cannot read a skill it is switched off for', /not in your role's skill set/.test(scoutDenied) && !scoutDenied.includes('BODY-'), scoutDenied.slice(0, 300));
+  check('S13 a scout reads its own skill', scoutAllowed.includes('BODY-glob-alpha'), scoutAllowed.slice(0, 300));
   const escape = toolResult('worker', 'W-TASK post');
   check('S12 a path outside the skill directory is refused', !/localhost/.test(escape) && /outside|escape|not allowed|invalid|within/i.test(escape), escape.slice(0, 300));
 
   // S15: a worker thread created before the settings change still accepts follow-ups.
-  await rpc({ action: 'thread-send', id, threadId: preThread, text: 'FOLLOW SKILL-READ glob-alpha ref.md', requestId: randomUUID() });
+  await rpc({ action: 'thread-send', id, threadId: preThread, text: 'FOLLOW SKILL-READ glob-gamma ref.md', requestId: randomUUID() });
   await delay(300); await settleAll();
   const follow = (await plan()).filter(w => w.threadId === preThread).at(-1);
   const followRead = result.calls.findLast(c => c.role === 'worker' && c.user.includes('FOLLOW SKILL-READ') && c.results.length === 1)?.results[0] ?? '';
-  check('S15 a thread created before the change takes a follow-up and reads a reference of its role skill', follow.text.includes('FOLLOW') && follow.status === 'completed' && followRead.includes('REF-glob-alpha'), { follow, followRead: followRead.slice(0, 200) });
+  check('S15 a thread created before the change takes a follow-up and reads a reference of its role skill', follow.text.includes('FOLLOW') && follow.status === 'completed' && followRead.includes('REF-glob-gamma'), { follow, followRead: followRead.slice(0, 200) });
 
   // S14: owner-invoked skills stay readable by the coordinator.
-  await ask('SKILL-READ glob-delta');
-  const before = toolResult('coordinator', 'SKILL-READ glob-delta');
+  await ask('SKILL-READ glob-gamma');
+  const before = toolResult('coordinator', 'SKILL-READ glob-gamma');
   check('S11 the coordinator cannot read a skill outside its profile', /not in your role's skill set/.test(before), before.slice(0, 200));
-  await ask('/skill:glob-delta SKILL-READ glob-delta ref.md');
-  const after = result.calls.findLast(c => c.role === 'coordinator' && c.user.includes('BODY-glob-delta') && c.results.length === 1)?.results[0] ?? '';
-  check('S14 after the owner invoked /skill:glob-delta the coordinator reads its reference', after.includes('REF-glob-delta'), after.slice(0, 200));
+  await ask('/skill:glob-gamma SKILL-READ glob-gamma ref.md');
+  const after = result.calls.findLast(c => c.role === 'coordinator' && c.user.includes('BODY-glob-gamma') && c.results.length === 1)?.results[0] ?? '';
+  check('S14 after the owner invoked /skill:glob-gamma the coordinator reads its reference', after.includes('REF-glob-gamma'), after.slice(0, 200));
 
   // S19: the owner / picker still lists everything.
   const catalog = await rpc({ action: 'coordinator-skills', id });
@@ -249,20 +249,26 @@ try {
   // S16/S21: validation and the retired grant RPCs.
   settings = await rpc({ action: 'settings-snapshot', id });
   const rejects = async input => { try { await rpc(input); return false; } catch { return true; } };
-  check('S16 settings-update rejects an unknown role', await rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { ...want, admin: [] } } }));
-  check('S16 settings-update rejects non-string names', await rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { ...want, worker: [42] } } }));
+  check('S16 settings-update rejects an unknown role', await rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { off: { ...want.off, admin: [] } } } }));
+  check('S16 settings-update rejects non-string names', await rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { off: { ...want.off, worker: [42] } } } }));
   check('S21 the old grant RPC is gone', await rejects({ action: 'worker-skills-grant-set', id, confirm: id }));
   check('S16 a rejected update leaves the saved profiles alone', JSON.stringify((await rpc({ action: 'settings-snapshot', id })).values.skills) === JSON.stringify(want));
   // S7: a saved name that no longer loads is ignored.
-  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { ...want, scout: ['glob-beta', 'gone-skill'] } } });
+  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: { off: { ...want.off, scout: ['glob-beta', 'gone-skill'] } } } });
   await ask('MARK-S stale');
   const stale = lastCall('scout', 'S-TASK stale');
-  check('S7 a stale saved name is ignored', stale && index(stale.system).join() === 'glob-beta,repo-one', stale && index(stale.system));
+  check('S7 a stale saved name is ignored', stale && index(stale.system).join() === 'glob-alpha,glob-delta,glob-gamma,repo-one', stale && index(stale.system));
+  // A skill installed later is on without touching the profiles (opt-outs are stored, not the list of what is on).
+  skill(join(agentDir, 'skills', 'glob-late'), 'glob-late', 'Global skill installed after the profiles were saved.');
+  settings = await rpc({ action: 'settings-snapshot', id });
+  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { workerCap: 2 } });
+  await ask('MARK-W late');
+  check('S22 a skill installed later is on for workers while the saved opt-outs still apply', index(lastCall('worker', 'W-TASK late').system).join() === 'glob-beta,glob-delta,glob-gamma,glob-late,repo-one', index(lastCall('worker', 'W-TASK late').system));
   settings = await rpc({ action: 'settings-snapshot', id });
   await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { skills: null } });
   check('S18 reset returns to the default', (await rpc({ action: 'settings-snapshot', id })).values.skills === null);
   await ask('MARK-W reset');
-  check('S1 after reset the worker index is the repository skills again', index(lastCall('worker', 'W-TASK reset').system).join() === 'repo-one,repo-two');
+  check('S1 after reset every skill is on again', index(lastCall('worker', 'W-TASK reset').system).join() === 'glob-alpha,glob-beta,glob-delta,glob-gamma,glob-late,repo-one,repo-two');
 
   result.errors = result.errors.filter(e => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter(e => !e.url.endsWith('/api'));

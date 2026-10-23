@@ -16,7 +16,7 @@ export function mcpGatewayTools(input: { pool: McpPool; settings: () => McpSetti
   const enabled = async (api: ToolExecutionApi, context: Context) => {
     const caller = await input.caller(api, context);
     if (!caller) throw new Error("MCP is unavailable to this conversation");
-    return { caller, saved: input.settings(), servers: mcpServersFor(input.settings(), caller.role) };
+    return { caller, saved: input.settings(), servers: mcpServersFor(input.settings(), caller.role, mcpCatalog().servers) };
   };
   const need = (servers: ReadonlySet<string>, server: string) => { if (!servers.has(server)) throw new Error(`MCP server ${server} is not enabled for your role; the owner enables servers per profile in Settings`); };
 
@@ -30,7 +30,7 @@ export function mcpGatewayTools(input: { pool: McpPool; settings: () => McpSetti
       if (!args.server) {
         if (!servers.size) return { content: text("No MCP servers are enabled for your role (the owner enables them in Settings).") };
         const known = new Map(mcpCatalog().servers.map(item => [item.name, item]));
-        return json({ servers: [...servers].sort().map(name => { const item = known.get(name); return item ? { name, description: item.description, status: item.status, writes: saved?.writes.includes(name) ?? false } : { name, status: "unknown", description: "Not in the owner's mcp.json" }; }) });
+        return json({ servers: [...servers].sort().map(name => { const item = known.get(name); return item ? { name, description: item.description, status: item.status, writes: saved?.writes?.includes(name) ?? false } : { name, status: "unknown", description: "Not in the owner's mcp.json" }; }) });
       }
       need(servers, args.server);
       const available = await input.pool.tools(args.server, caller.cwd);
@@ -56,7 +56,7 @@ export function mcpGatewayTools(input: { pool: McpPool; settings: () => McpSetti
       need(servers, args.server);
       const tool = (await input.pool.tools(args.server, caller.cwd)).find(item => item.name === args.tool);
       if (!tool) throw new Error(`MCP server ${args.server} has no tool ${args.tool}; list its tools with projects_mcp_tools`);
-      if (isWriteTool(tool) && !saved?.writes.includes(args.server)) throw new Error(`Blocked: ${args.tool} on ${args.server} changes things, and writes are off for this server. Ask the owner to turn on "Allow writes" for ${args.server} in Settings (MCP), or do the read-only part and report what needs the owner.`);
+      if (isWriteTool(tool) && !saved?.writes?.includes(args.server)) throw new Error(`Blocked: ${args.tool} on ${args.server} changes things, and writes are off for this server. Ask the owner to turn on "Allow writes" for ${args.server} in Settings (MCP), or do the read-only part and report what needs the owner.`);
       let result;
       try { result = await input.pool.call(args.server, caller.cwd, args.tool, args.arguments ?? {}, context.abortSignal); }
       catch (error) { throw new Error(`MCP ${args.server}/${args.tool} failed: ${error instanceof Error ? error.message : String(error)}`); }

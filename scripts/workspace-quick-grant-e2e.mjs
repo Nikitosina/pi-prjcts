@@ -60,6 +60,11 @@ try {
 
   const project = await request({ action: "create", name: "Demo", cwd: repo });
   const id = project.id;
+  // New projects with a Git checkout are granted automatically (the default). Revoke it so the explicit one-click grant below is what is tested.
+  const auto = await request({ action: "owner-setup-snapshot", id });
+  assert.equal(auto.workspace.scopes.length, 1); assert.equal(auto.workspace.scopes[0].wholeRepository, true);
+  await request({ action: "workspace-revoke", id, confirm: id, scopeId: auto.workspace.scopes[0].id, expectedRevision: auto.workspaceRevision });
+  pass("F2a a new Git project starts with the whole-repository scope; revoked here for the explicit-grant checks");
   let snap = await request({ action: "owner-setup-snapshot", id });
   const expectedRoot = join(realpathSync(process.env.PI_PROJECTS_HOME), id, "worktrees");
   assert.deepEqual({ ...snap.quickGrant }, { available: true, provider: "github", repositoryId: "acme/demo", ownerCheckout: realpathSync(repo), approvedRoot: expectedRoot, head: c1, dirty: false });
@@ -82,8 +87,9 @@ try {
   assert.ok(statSync(expectedRoot).isDirectory()); assert.equal(statSync(expectedRoot).mode & 0o077, 0); assert.ok(!expectedRoot.startsWith(realpathSync(repo)));
   pass("F5 grant persisted; worktree root exists, 0700, outside checkout", { scope: snap.workspace.scopes[0], root: expectedRoot });
   assert.equal(snap.quickGrant.available, false);
-  await rejects(request({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: snap.workspaceRevision }), /already/);
-  pass("F4 second click rejected", snap.quickGrant);
+  const regrant = await request({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: snap.workspaceRevision });
+  assert.equal(regrant.id, snap.workspace.scopes[0].id); assert.equal((await request({ action: "owner-setup-snapshot", id })).workspace.scopes.length, 1);
+  pass("F4 a second grant is a no-op that returns the existing scope (the default already granted it)", snap.quickGrant);
 
   // F14 browser view carries the flag the stepper reads.
   const shown = await request({ action: "show", id });

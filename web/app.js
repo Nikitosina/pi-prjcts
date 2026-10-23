@@ -439,7 +439,7 @@ function setTab(next) {
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
   ensureChanges();
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -486,7 +486,7 @@ function render() {
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
   const hint = document.querySelector("#compose-hint");
-  hint.textContent = `${view.project.model.split("/").at(-1)} · Enter to send · Shift+Enter for a new line · / for commands, skills · @ for files, docs, issues${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
+  hint.textContent = view.project.model.split("/").at(-1); hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -559,8 +559,8 @@ function renderPanels() {
   const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0, pluginProvider = p.workspaceAuthorization && p.workspaceAuthorization.provider !== "github" ? p.workspaceAuthorization.provider : null, providerCard = (view.providerCards ?? [])[0];
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
-  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `2. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `2. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); void loadContextSettings(); }
+  setHtml("#owner-steps", [...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `1. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `1. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "1. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
@@ -577,8 +577,8 @@ async function loadSkillsPicker(force = false) {
     const [settings, { skills }] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "coordinator-skills", id })]);
     if (id !== projectId || current !== generation) return;
     const saved = settings.values.skills;
-    const profiles = saved ?? { all: skills.filter(skill => skill.source === "repo").map(skill => skill.name), coordinator: [], worker: [], scout: [], reviewer: [] };
-    skillsPicker = { projectId: id, skills, isDefault: !saved, draft: sortedLists(profiles), saved: JSON.stringify(sortedLists(profiles)), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
+    const profiles = { ...{ all: [], coordinator: [], worker: [], scout: [], reviewer: [] }, ...(saved?.off ?? {}) };
+    skillsPicker = { projectId: id, skills, isDefault: !saved?.off || !Object.values(saved.off).some(list => list.length), draft: sortedLists(profiles), saved: JSON.stringify(sortedLists(profiles)), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
     renderSkillsPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Skills unavailable: ${esc(error.message)}</p>`; }
 }
@@ -598,14 +598,14 @@ function skillsShown(state) {
 function skillsListHtml(state) {
   const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]), shown = skillsShown(state);
   const groups = Object.keys(skillSourceLabels).map(source => [source, shown.filter(skill => skill.source === source)]).filter(([, list]) => list.length);
-  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${inherited || picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
+  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${!inherited && !picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">off for all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
   return groups.map(([source, list]) => `<fieldset class="events-group skill-group" data-source="${source}" aria-label="${skillSourceLabels[source]}"><div class="group-head"><b>${skillSourceLabels[source]} <span class="count">${list.length}</span></b>${bulkButtons("skills-select", source)}</div>${list.map(row).join("")}</fieldset>`).join("") || '<p class="note">No skill matches.</p>';
 }
 function renderSkillsPicker(part = "all") {
   const state = skillsPicker, node = document.querySelector("#skills-picker");
   if (!state || state.projectId !== projectId) return;
-  const known = new Set(state.skills.map(skill => skill.name)), count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
-  document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${state.isDefault && JSON.stringify(state.draft) === state.saved ? "default: repository skills" : `${count("all")} for every profile`}`;
+  const known = new Set(state.skills.map(skill => skill.name)), count = role => state.skills.length - new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
+  document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${count("all")} on for every profile`;
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = skillsListHtml(state); node.querySelector(".pick-note").innerHTML = skillsNote(state); return patchPickerChrome(node, count, dirty); }
@@ -614,20 +614,20 @@ function renderSkillsPicker(part = "all") {
     <div class="pick-tools"><input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">${bulkButtons("skills-select")}</div>
     <div class="skill-groups">${skillsListHtml(state)}</div>
     ${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row pick-actions"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled data-off"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled data-off" : ""}>Reset to default</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled data-off"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled data-off" : ""}>Turn all on</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
 }
-const skillsNote = state => (state.tab === "all" ? "Every profile gets these." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the skills checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${skillsShown(state).length} shown.` : "");
+const skillsNote = state => (state.tab === "all" ? "All installed skills are on, including ones installed later. Uncheck to switch one off for every profile." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} uses every skill that is on. Uncheck to switch one off for this profile only.`) + (state.query.trim() ? ` Select all and Clear apply to the ${skillsShown(state).length} shown.` : "");
 /** Bulk select or clear the skills currently shown (respecting search), optionally for one source. Inherited rows stay as they are. */
 function bulkSkills(source, mode) {
   const state = skillsPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
-  for (const skill of skillsShown(state)) if ((!source || skill.source === source) && !inherited.has(skill.name)) { if (mode === "all") list.add(skill.name); else list.delete(skill.name); }
+  for (const skill of skillsShown(state)) if ((!source || skill.source === source) && !inherited.has(skill.name)) { if (mode === "all") list.delete(skill.name); else list.add(skill.name); }
   state.draft[state.tab] = [...list].sort(); state.note = ""; renderSkillsPicker("list");
 }
 async function saveSkillsPicker(reset) {
   const state = skillsPicker, id = projectId;
   if (!state || state.projectId !== id) throw new Error("Reload Settings before saving skills");
   const settings = await api({ action: "settings-snapshot", id });
-  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: reset ? null : state.draft } }, reset ? "Skills reset to repository skills." : "Skills saved. New threads use them; running threads keep theirs."); }
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: reset ? null : { off: state.draft } } }, reset ? "All skills are on again." : "Skills saved. New threads use them; running threads keep theirs."); }
   catch (error) { state.note = error.message; renderSkillsPicker(); throw error; }
   await loadSkillsPicker(true);
 }
@@ -635,7 +635,7 @@ document.addEventListener("change", event => {
   const box = event.target.closest("[data-skill-pick]");
   if (!box || !skillsPicker) return;
   const list = new Set(skillsPicker.draft[skillsPicker.tab]);
-  if (box.checked) list.add(box.dataset.skillPick); else list.delete(box.dataset.skillPick);
+  if (box.checked) list.delete(box.dataset.skillPick); else list.add(box.dataset.skillPick);
   skillsPicker.draft[skillsPicker.tab] = [...list].sort();
   skillsPicker.note = ""; renderSkillsPicker("chrome");
 });
@@ -653,7 +653,7 @@ async function loadMcpPicker(force = false) {
   try {
     const [settings, catalog] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "mcp-catalog", id })]);
     if (id !== projectId || current !== generation) return;
-    const saved = settings.values.mcp ?? { all: [], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] };
+    const saved = { ...{ all: [], coordinator: [], worker: [], scout: [], reviewer: [] }, ...(settings.values.mcp?.off ?? {}), writes: settings.values.mcp?.writes ?? [] };
     mcpPicker = { projectId: id, catalog, isDefault: !settings.values.mcp, draft: sortedLists(saved), saved: JSON.stringify(sortedLists(saved)), tab: mcpPicker?.projectId === id ? mcpPicker.tab : "all", note: "", probes: {}, query: mcpPicker?.projectId === id ? mcpPicker.query : "" };
     renderMcpPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">MCP unavailable: ${esc(error.message)}</p>`; }
@@ -663,18 +663,18 @@ function mcpListHtml(state) {
   const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
   const row = server => {
     const usable = server.status === "ready", inherited = state.tab !== "all" && all.has(server.name), probe = state.probes[server.name];
-    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${inherited || picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<span class="mcp-actions"><label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span></span>` : ""}</span></div>`;
+    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${usable && !inherited && !picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">off for all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<span class="mcp-actions"><label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span></span>` : ""}</span></div>`;
   };
   const shown = mcpShown(state);
   return shown.map(row).join("") || `<p class="note">${state.catalog.servers.length ? "No server matches." : `No servers in ${esc(state.catalog.path)}.`}</p>`;
 }
-const mcpNote = state => (state.tab === "all" ? "Every profile gets these servers." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the servers checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${mcpShown(state).length} shown.` : "");
+const mcpNote = state => (state.tab === "all" ? "All servers in mcp.json are on, including ones added later. Uncheck to switch one off for every profile. Write tools stay blocked unless “Allow writes” is checked." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} uses every server that is on. Uncheck to switch one off for this profile only.`) + (state.query.trim() ? ` Select all and Clear apply to the ${mcpShown(state).length} shown.` : "");
 function renderMcpPicker(part = "all") {
   const state = mcpPicker, node = document.querySelector("#mcp-picker");
   if (!state || state.projectId !== projectId) return;
   const servers = state.catalog.servers, known = new Set(servers.map(item => item.name));
-  const count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
-  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} for every profile`;
+  const ready = servers.filter(item => item.status === "ready").length, count = role => ready - new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name) && servers.find(item => item.name === name).status === "ready")).size;
+  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} on for every profile`;
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = mcpListHtml(state); node.querySelector(".pick-note").innerHTML = mcpNote(state); return patchPickerChrome(node, count, dirty); }
@@ -683,19 +683,19 @@ function renderMcpPicker(part = "all") {
     ${servers.length ? `<div class="pick-tools"><input type="search" id="mcp-search" placeholder="Search ${servers.length} servers" value="${esc(state.query)}" aria-label="Search MCP servers">${bulkButtons("mcp-select")}</div>` : ""}
     <div class="skill-groups">${mcpListHtml(state)}</div>
     ${state.catalog.error ? `<p class="note bad">${esc(state.catalog.error)}</p>` : ""}${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row pick-actions"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled data-off"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled data-off" : ""}>Remove all</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled data-off"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled data-off" : ""}>Turn all on</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
 }
 /** Bulk enable or clear the usable servers currently shown (respecting search). Inherited rows stay as they are. */
 function bulkMcp(mode) {
   const state = mcpPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
-  for (const server of mcpShown(state)) if (server.status === "ready" && !inherited.has(server.name)) { if (mode === "all") list.add(server.name); else list.delete(server.name); }
+  for (const server of mcpShown(state)) if (server.status === "ready" && !inherited.has(server.name)) { if (mode === "all") list.delete(server.name); else list.add(server.name); }
   state.draft[state.tab] = [...list].sort(); state.note = ""; renderMcpPicker("list");
 }
 async function saveMcpPicker(reset) {
   const state = mcpPicker, id = projectId;
   if (!state || state.projectId !== id) throw new Error("Reload Settings before saving MCP");
   const settings = await api({ action: "settings-snapshot", id });
-  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { mcp: reset ? null : state.draft } }, reset ? "MCP servers removed." : "MCP saved. Applies to the next tool call."); }
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { mcp: reset ? null : { off: { all: state.draft.all, coordinator: state.draft.coordinator, worker: state.draft.worker, scout: state.draft.scout, reviewer: state.draft.reviewer }, writes: state.draft.writes } } }, reset ? "MCP servers are on again, writes off." : "MCP saved. Applies to the next tool call."); }
   catch (error) { state.note = error.message; renderMcpPicker(); throw error; }
   await loadMcpPicker(true);
 }
@@ -706,8 +706,8 @@ async function testMcpServer(server) {
 document.addEventListener("change", event => {
   const box = event.target.closest("[data-mcp-pick], [data-mcp-writes]");
   if (!box || !mcpPicker) return;
-  const key = box.dataset.mcpPick !== undefined ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
-  if (box.checked) list.add(name); else list.delete(name);
+  const isPick = box.dataset.mcpPick !== undefined, key = isPick ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
+  if (box.checked === !isPick) list.add(name); else list.delete(name);
   mcpPicker.draft[key] = [...list].sort();
   mcpPicker.note = ""; renderMcpPicker("chrome");
 });
@@ -716,6 +716,35 @@ document.addEventListener("input", event => {
   mcpPicker.query = event.target.value; renderMcpPicker("list");
 });
 
+// Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
+const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer" };
+let promptsState = null;
+async function loadPrompts(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#prompts");
+  if (!id || !plan || !force && promptsState?.projectId === id) return;
+  try {
+    const data = await api({ action: "prompts-snapshot", id });
+    if (id !== projectId || current !== generation) return;
+    promptsState = { projectId: id, roles: data.roles, note: "" };
+    renderPrompts();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`; }
+}
+function renderPrompts() {
+  const node = document.querySelector("#prompts");
+  if (!promptsState || promptsState.projectId !== projectId) return;
+  node.innerHTML = promptsState.roles.map(item => `<fieldset class="events-group prompt-role" data-role="${item.role}"><legend>${promptTitles[item.role]} ${item.override ? '<span class="skill-tag prompt-custom">Customized</span>' : '<small class="note">Default</small>'}</legend>
+    <label class="field"><span class="sr-only">${promptTitles[item.role]} system prompt</span><textarea class="mono prompt-text" rows="8" maxlength="24000" data-prompt="${item.role}" aria-label="${promptTitles[item.role]} system prompt">${esc(item.effective)}</textarea></label>
+    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("") + (promptsState.note ? `<p class="note bad">${esc(promptsState.note)}</p>` : "");
+}
+async function savePrompt(role, reset) {
+  const id = projectId, item = promptsState?.roles.find(entry => entry.role === role);
+  if (!item || promptsState.projectId !== id) throw new Error("Reload Settings before saving prompts");
+  const text = document.querySelector(`[data-prompt="${role}"]`).value;
+  const settings = await api({ action: "settings-snapshot", id });
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { prompts: { [role]: reset || !text.trim() || text === item.default ? null : text } } }, reset ? `${promptTitles[role]} prompt reset to default.` : `${promptTitles[role]} prompt saved. New turns and new worker threads use it.`); }
+  catch (error) { promptsState.note = error.message; renderPrompts(); throw error; }
+  await loadPrompts(true);
+}
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
 let worktrees = null;
 const sizeText = kb => kb < 0 ? "size unknown" : kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
@@ -1467,11 +1496,27 @@ async function loadPrs(force = false) {
   if (!linksReady && prsState.data) { linksReady = true; if (view) render(); }
 }
 const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
+// Composer help: the shortcut list lives in a small popover behind an ⓘ button instead of a permanent hint line. A tap/click toggles it, so touch works; Escape or a click outside closes it.
+const helpRows = worker => [["Enter", "Send"], ["Shift+Enter", "New line"], ...(worker ? [] : [["/", "Commands and skills"], ["@", "Files, docs, issues"], ...(prMenuItems().length ? [["#", "Pull requests"]] : []), ["Drop files", "Attach"]])];
+function closeComposerHelp(except = null) {
+  for (const wrap of document.querySelectorAll(".help-wrap")) if (wrap !== except) { wrap.querySelector(".help-pop").hidden = true; wrap.querySelector(".help-btn").setAttribute("aria-expanded", "false"); }
+}
+function toggleComposerHelp(button) {
+  const wrap = button.closest(".help-wrap"), pop = wrap.querySelector(".help-pop"), open = pop.hidden;
+  closeComposerHelp(wrap);
+  if (open) pop.innerHTML = `<dl>${helpRows(!!button.closest("[data-inline-thread-send]")).map(([key, text]) => `<dt><kbd>${esc(key)}</kbd></dt><dd>${esc(text)}</dd>`).join("")}</dl>`;
+  pop.hidden = !open; button.setAttribute("aria-expanded", String(open));
+}
+document.addEventListener("click", event => { if (!event.target.closest(".help-wrap")) closeComposerHelp(); });
+document.addEventListener("keydown", event => {
+  const open = document.querySelector(".help-pop:not([hidden])");
+  if (event.key !== "Escape" || !open) return;
+  event.preventDefault(); event.stopPropagation(); open.closest(".help-wrap").querySelector(".help-btn").focus(); closeComposerHelp();
+}, true);
 const byNewest = (a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
 function renderPrs() {
   const card = document.querySelector("#prs-card"), data = prNow(), hint = document.querySelector("#compose-hint");
   const groups = data?.providers ?? [], unloaded = data?.unloaded ?? [];
-  hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (prMenuItems().length ? " · # for PRs" : "");
   card.hidden = !groups.length && !unloaded.length;
   if (card.hidden) return;
   const glyphs = prGlyph;
@@ -2314,6 +2359,14 @@ async function action(node) {
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
+    case "cursor-connect": {
+      const started = await api({ action: "cursor-connect" });
+      const cursor = limits?.providers.find(item => item.provider === "cursor");
+      if (cursor) { cursor.connect = started; renderLimits(); }
+      if (started.loginUrl) window.open(started.loginUrl, "_blank", "noopener,noreferrer");
+      scheduleLimitsWatch();
+      break;
+    }
     case "thread-close": if (history.state?.worker) history.back(); else { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); } break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
@@ -2355,6 +2408,9 @@ async function action(node) {
     case "context-save": await saveContextSettings(false); break;
     case "context-reset": await saveContextSettings(true); break;
     case "compact-now": await compactNow(); break;
+    case "prompt-save": await savePrompt(node.dataset.role, false); break;
+    case "prompt-reset": await savePrompt(node.dataset.role, true); break;
+    case "composer-help": toggleComposerHelp(node); break;
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
     case "skills-select": bulkSkills(node.dataset.source, node.dataset.mode); break;
     case "mcp-select": bulkMcp(node.dataset.mode); break;
@@ -3043,7 +3099,7 @@ async function ownerSetupDialog(result = null) {
   const providerCardHtml = card => `<div class="card"><b>${card.state === "connected" ? "✓ " : ""}${esc(card.title)}</b><p class="note">${esc(card.body)}</p>${card.state === "available" && card.connect ? `<button class="primary" data-action="provider-connect" data-card="${esc(card.id)}">${esc(card.connect.label)}</button>` : ""}</div>`;
   const pluginCards = !whole ? "" : snapshot.unloadedProvider ? `<div class="card"><b>${esc(snapshot.unloadedProvider)}</b><p class="note">The provider plugin is not loaded, so workers cannot start here. Load it (see the plugin documentation) or remove the grant; its records are kept.</p></div>` : (snapshot.providerCards ?? []).map(providerCardHtml).join("");
   const githubCard = !whole ? "" : snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? pluginCards : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
-  const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from ${snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? "the provider's base (see its card)" : "current HEAD"}.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
+  const quick = whole ? githubCard : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
   setDialogBody(`${result ? `<p class="note-box ok">Change recorded. No command was run.</p>${rawDetails(result, "Host response")}` : ""}<div class="choice-list">${quick}</div><details class="advanced"><summary>Advanced: folder scopes, GitHub targets, command profiles</summary>${hist}<h3>Look up a GitHub repository</h3><form data-owner-github-inspect data-project="${esc(id)}" class="row"><label class="grow"><span class="sr-only">Repository, owner/name</span><input name="repositoryId" placeholder="owner/repository" aria-label="Repository, owner/name" required></label><button type="submit" class="small">Look up</button></form><p class="note">Reads its numeric ID and default branch. It must match the checkout's GitHub origin.</p><h3>Add or change</h3><div class="row">${actions}</div><h3>Folder scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Command profiles</h3>${profiles}</details>${dlgActions(dlgBtn("Refresh", { action: "owner-setup" }), dlgBtn("Done", { action: "close-dialog" }, "primary"))}`);
 }
 
@@ -3055,7 +3111,7 @@ async function workspaceQuickDialog() {
   if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click access is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
   const other = quick.provider !== "github", extra = quick.dialog;
   dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>${other ? esc(extra?.checkoutLabel ?? "Checkout") : "Checkout"}</span><b class="mono">${esc(quick.ownerCheckout)}</b>${(extra?.rows ?? []).map(([label, value]) => `<span>${esc(label)}</span><b class="mono">${esc(value)}</b>`).join("")}<span>Worker copies</span><b class="mono">${esc(quick.approvedRoot)}</b><span>${other ? "Base head" : "Current HEAD"}</span><b class="mono">${esc(quick.head.slice(0, 12))}</b></div>
-${other ? `<ul>${(extra?.bullets ?? []).map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 2); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${other ? "start from the provider's base and" : "will"} not see them.</p>` : ""}
+${other ? `<ul>${(extra?.bullets ?? []).map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 1); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${other ? "start from the provider's base and" : "will"} not see them.</p>` : ""}
 ${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Allow workers to edit", { action: "workspace-quick-confirm", project: id, revision: snapshot.workspaceRevision }, "primary"))}`;
 }
 
@@ -3644,7 +3700,7 @@ function threadList() {
 function workerDetailHtml(chat, page, work) {
   const threadId = chat.threadId, draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`), role = work?.role ?? "worker";
   const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
-  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
+  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><span class="row help-line"><small>Reuses this ${esc(role)}'s conversation</small><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
 }
 async function inspectThread(threadId, offset = null, textOffset = 0) {
   requireThread(threadId);
@@ -3766,26 +3822,32 @@ window.addEventListener("pagehide", () => { captureDialogDraft(); persistDraftsS
 let limits = null;
 const limitTone = percent => percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
 function untilReset(at) { const ms = at - Date.now(); return ms <= 0 ? "reset passed" : `resets in ${duration(ms)}`; }
+const limitWindowName = { mo: "month" };
 function limitWindow(sample) {
   const stale = sample.resetsAt !== null && sample.resetsAt <= Date.now(), percent = Math.round(sample.usedPercent);
-  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
+  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${limitWindowName[sample.window] ?? sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
 }
 function limitItem(provider) {
   const windows = provider.samples.map(limitWindow), live = windows.filter(win => !win.stale);
   const tone = limitTone(Math.max(0, ...live.map(win => win.percent)));
   const rows = provider.samples.map((sample, i) => {
     const win = windows[i];
-    return `<div class="lim-row" data-tone="${limitTone(win.percent)}"><span>${sample.window}</span><span class="lim-bar"><i style="width:${win.percent}%"></i></span><span>${win.stale ? "—" : `${win.percent}% used`}</span><small>${sample.resetsAt === null ? "Reset time unknown" : `${untilReset(sample.resetsAt)} · ${new Date(sample.resetsAt).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`}${win.stale ? " · last reading is from before the reset, waiting for a new one" : ""} · observed ${ago(sample.observedAt)} via ${sample.source === "headers" ? "response headers" : "usage endpoint"}</small></div>`;
+    return `<div class="lim-row" data-tone="${limitTone(win.percent)}"><span>${limitWindowName[sample.window] ?? sample.window}</span><span class="lim-bar"><i style="width:${win.percent}%"></i></span><span>${win.stale ? "—" : `${win.percent}% used`}</span><small>${sample.resetsAt === null ? "Reset time unknown" : `${untilReset(sample.resetsAt)} · ${new Date(sample.resetsAt).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`}${win.stale ? " · last reading is from before the reset, waiting for a new one" : ""} · observed ${ago(sample.observedAt)} via ${sample.source === "headers" ? "response headers" : "usage endpoint"}</small></div>`;
   });
   const empty = provider.status === "unavailable" ? "Not connected" : "No data yet";
+  const connect = provider.connect, signedOut = provider.status === "unavailable" && !!connect;
+  const connectHtml = !connect ? "" : connect.state === "waiting" ? `<small class="lim-connect-note">Waiting for you to sign in. <a href="${esc(connect.loginUrl)}" target="_blank" rel="noopener noreferrer">Open the Cursor sign-in page</a></small>` : signedOut || connect.state === "failed" ? `${connect.error ? `<small>${esc(connect.error)}</small>` : ""}<button type="button" class="small" data-action="cursor-connect">Connect Cursor</button>` : "";
   const detail = rows.join("") || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
   const label = `${provider.label}: ${provider.samples.length ? provider.samples.map((sample, i) => `${sample.window} ${windows[i].stale ? "reset, waiting for new data" : `${windows[i].percent}% used`}`).join(", ") : empty.toLowerCase()}`;
-  return `<button type="button" class="lim" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="tooltip"><b>${esc(provider.label)}</b>${detail}</span></button>`;
+  return `<div class="lim" tabindex="0" role="group" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="group" aria-label="${esc(provider.label)} details"><b>${esc(provider.label)}</b>${detail}${connectHtml}</span>${signedOut && connect.state === "idle" ? '<button type="button" class="lim-connect" data-action="cursor-connect">Connect</button>' : ""}</div>`;
 }
 function renderLimits() {
   const bar = document.querySelector("#limits-bar");
   const next = limits ? limits.providers.map(limitItem).join("") : "";
-  if (bar.dataset.html !== next) { bar.innerHTML = next; bar.dataset.html = next; }
+  if (bar.dataset.html === next) return;
+  const focused = bar.contains(document.activeElement) ? document.activeElement.closest(".lim")?.dataset.provider : null;
+  bar.innerHTML = next; bar.dataset.html = next;
+  if (focused) bar.querySelector(`.lim[data-provider="${focused}"]`)?.focus({ preventScroll: true });
 }
 async function loadLimits() {
   if (document.hidden) return;
@@ -3793,6 +3855,12 @@ async function loadLimits() {
   if (loaded?.providers) { limits = loaded; renderLimits(); }
 }
 setInterval(() => void loadLimits(), 60000);
+// While a Cursor sign-in is pending, look every 3 s so the bar updates as soon as the host finishes it.
+let limitsWatch = null;
+function scheduleLimitsWatch() {
+  clearInterval(limitsWatch); limitsWatch = null;
+  if (limits?.providers.find(item => item.provider === "cursor")?.connect?.state === "waiting") limitsWatch = setInterval(() => void loadLimits().then(scheduleLimitsWatch), 3000);
+}
 setInterval(renderLimits, 30000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadLimits(); });
 void loadLimits();

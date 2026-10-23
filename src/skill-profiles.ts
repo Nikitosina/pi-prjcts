@@ -3,26 +3,32 @@ import { join } from "node:path";
 import type { ResourceLoader, Skill } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
-/** Per-project skill profiles: "all" goes to every profile, each role adds its own. Children use their role's set. */
+/**
+ * Per-project skill profiles. Every installed skill (repository, global, package, and any installed later) is on for every
+ * profile by default; the owner switches individual ones off, for every profile ("all") or for one role. Only the opt-outs are
+ * stored, never a list of what is on, so nothing new is ever silently excluded.
+ */
 export const SKILL_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
 export type SkillRole = typeof SKILL_ROLES[number];
 const names = Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 512, uniqueItems: true });
-/** "all" plus one name list per role; shared by skills and MCP servers. */
-export const profileLists = { all: names, coordinator: names, worker: names, scout: names, reviewer: names };
 export const profileNames = names;
-export const SkillProfiles = Type.Object(profileLists, { additionalProperties: false });
+/** "all" plus one name list per role. */
+const lists = { all: Type.Optional(names), coordinator: Type.Optional(names), worker: Type.Optional(names), scout: Type.Optional(names), reviewer: Type.Optional(names) };
+/** Names switched off. */
+export const OffLists = Type.Object(lists, { additionalProperties: false });
+export type OffLists = Static<typeof OffLists>;
+/** The top-level lists are the allow-lists saved before the default-on change: still accepted in old project files, ignored, dropped by the next save. */
+export const retiredLists = lists;
+export const SkillProfiles = Type.Object({ off: Type.Optional(OffLists), ...lists }, { additionalProperties: false });
 export type SkillProfiles = Static<typeof SkillProfiles>;
 type Loader = Pick<ResourceLoader, "getSkills">;
 
 const loaded = (loader?: Loader) => loader?.getSkills().skills ?? [];
-/** Saved profiles, or the default for new and existing projects: repository skills in "all", nothing else. */
-export function skillProfiles(saved: SkillProfiles | undefined, loader?: Loader): SkillProfiles {
-  return saved ?? { all: loaded(loader).filter(skill => skill.sourceInfo.scope === "project").map(skill => skill.name), coordinator: [], worker: [], scout: [], reviewer: [] };
-}
-/** Names that no longer load are ignored. */
+/** Names switched off for a role (its own list plus "all"). */
+export const switchedOff = (off: OffLists | undefined, role: SkillRole): Set<string> => new Set([...(off?.all ?? []), ...(off?.[role] ?? [])]);
 export function effectiveSkills(saved: SkillProfiles | undefined, loader: Loader | undefined, role: SkillRole): Skill[] {
-  const profiles = skillProfiles(saved, loader), wanted = new Set([...profiles.all, ...profiles[role]]);
-  return loaded(loader).filter(skill => wanted.has(skill.name));
+  const off = switchedOff(saved?.off, role);
+  return loaded(loader).filter(skill => !off.has(skill.name));
 }
 /** Names and descriptions only; bodies are read on demand. Manual-only skills are left out, as pi does. */
 export function skillIndex(skills: readonly Skill[]): string {

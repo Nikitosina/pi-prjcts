@@ -49,11 +49,11 @@ await kit.run(async () => {
   const snapshot = await rpc({ action: 'settings-snapshot', id });
   check('F16 a project without MCP settings reports mcp = null', snapshot.values.mcp === null, snapshot.values.mcp);
 
-  // Default: nothing enabled.
-  const none = await coord('MCP-TOOLS');
-  check('F3 by default no server is offered', /no MCP servers/i.test(none), none);
-  const deniedDefault = await coord('MCP-CALL fake-ci launch_status {"id":"L0"}');
-  check('F3 by default a call is refused', /not enabled for your role/i.test(deniedDefault) && serverLog().every(entry => entry.tool !== 'launch_status'), deniedDefault);
+  // Default: every ready server is on for every profile; unavailable ones are never offered.
+  const dflt = await coord('MCP-TOOLS');
+  check('F3 by default every ready server is offered, unavailable ones are not', /fake-ci/.test(dflt) && /fake-tracker/.test(dflt) && /fake-xcode/.test(dflt) && !/fake-off/.test(dflt) && !/fake-oauth/.test(dflt), dflt);
+  const okDefault = await coord('MCP-CALL fake-ci launch_status {"id":"L0"}');
+  check('F3 by default a call goes through', /launch L0: PASSED/.test(okDefault), okDefault);
   check('F22 the coordinator prompt carries the MCP note, not tool schemas', /projects_mcp_tools/.test(kit.lastCall('coordinator', '#1').system) && !/launch_status/.test(kit.lastCall('coordinator', '#1').system));
 
   // Picker.
@@ -63,8 +63,11 @@ await kit.run(async () => {
   check('F21 disabled and sign-in servers are locked in the picker', locked === 'fake-oauth,fake-off', locked);
   const tab = async role => { await page.evaluate(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').click()`); await page.waitFor(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').classList.contains('on')`, `${role} tab`); };
   const pick = name => page.evaluate(`document.querySelector('[data-mcp-pick="${name}"]').click()`);
-  await tab('coordinator'); await pick('fake-ci'); await pick('fake-tracker');
-  await tab('worker'); await pick('fake-xcode');
+  const checkedAll = await page.evaluate(`[...document.querySelectorAll('#mcp-picker [data-mcp-pick]')].filter(i => i.checked).map(i => i.dataset.mcpPick).sort().join()`);
+  check('F21 the default picker has every ready server checked (on)', checkedAll === 'fake-ci,fake-tracker,fake-xcode', checkedAll);
+  await tab('coordinator'); await pick('fake-xcode');
+  await tab('worker'); await pick('fake-ci'); await pick('fake-tracker');
+  await tab('scout'); await pick('fake-ci'); await pick('fake-tracker'); await pick('fake-xcode');
   await tab('all');
   await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`); await page.shot('01-mcp-picker');
   await page.viewport(390, 844, true); await delay(300);
@@ -76,7 +79,7 @@ await kit.run(async () => {
   await page.evaluate(`document.querySelector('[data-action="mcp-save"]').click()`);
   await kit.eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.mcp !== null, 'mcp settings not saved', 100);
   const saved = (await rpc({ action: 'settings-snapshot', id })).values.mcp;
-  check('F21 saving the picker persists the profiles', JSON.stringify(saved) === JSON.stringify({ all: [], coordinator: ['fake-ci', 'fake-tracker'], worker: ['fake-xcode'], scout: [], reviewer: [], writes: [] }), saved);
+  check('F21 saving the picker persists the profiles', JSON.stringify(saved) === JSON.stringify({ off: { all: [], coordinator: ['fake-xcode'], worker: ['fake-ci', 'fake-tracker'], scout: ['fake-ci', 'fake-tracker', 'fake-xcode'], reviewer: [] }, writes: [] }), saved);
   check('F4 an MCP-only change needed no reopen (project still open and idle)', (await rpc({ action: 'show', id })).chats.every(chat => !chat.busy));
 
   // Role scoping.
@@ -131,18 +134,18 @@ await kit.run(async () => {
   check('F19 no cold-start duplicates: one start per connection', new Set(serverLog().filter(entry => entry.event === 'start').map(entry => entry.pid)).size === serverLog().filter(entry => entry.event === 'start').length);
 
   // Live settings change, unavailable servers, invalid settings.
-  await kit.updateSettings(id, { mcp: { all: [], coordinator: ['fake-tracker'], worker: ['fake-xcode'], scout: [], reviewer: [], writes: ['fake-tracker'] } });
+  await kit.updateSettings(id, { mcp: { off: { coordinator: ['fake-ci', 'fake-xcode'], worker: ['fake-ci', 'fake-tracker'], scout: ['fake-ci', 'fake-tracker', 'fake-xcode'] }, writes: ['fake-tracker'] } });
   check('F4 removing a server applies to the very next call', /not enabled for your role/i.test(await coord('MCP-CALL fake-ci launch_status {"id":"L4"}')));
-  await kit.updateSettings(id, { mcp: { all: ['fake-off', 'fake-oauth', 'ghost'], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] } });
+  await kit.updateSettings(id, { mcp: { off: { all: ['ghost'] }, writes: [] } });
   const unavailable = await coord('MCP-TOOLS');
-  check('F5/F6 unavailable and stale servers are listed with a status, not offered', /fake-off/.test(unavailable) && /disabled/.test(unavailable) && /needs-sign-in/.test(unavailable) && /ghost/.test(unavailable) && /unknown/.test(unavailable), unavailable);
-  check('F5 a call to a disabled server is refused', /disabled/i.test(await coord('MCP-CALL fake-off whoami')));
-  check('F5 a call to a sign-in server is refused', /sign-in/i.test(await coord('MCP-CALL fake-oauth whoami')));
-  check('F6 a call to a removed server says so', /unknown|unavailable/i.test(await coord('MCP-CALL ghost whoami')));
+  check('F5/F6 unavailable servers and stale opt-out names are never offered', !/fake-off/.test(unavailable) && !/fake-oauth/.test(unavailable) && !/ghost/.test(unavailable) && /fake-ci/.test(unavailable), unavailable);
+  check('F5 a call to a disabled server is refused', /not enabled|disabled/i.test(await coord('MCP-CALL fake-off whoami')));
+  check('F5 a call to a sign-in server is refused', /not enabled|sign-in/i.test(await coord('MCP-CALL fake-oauth whoami')));
+  check('F6 a call to a removed server says so', /not enabled|unknown|unavailable/i.test(await coord('MCP-CALL ghost whoami')));
   const settings = await rpc({ action: 'settings-snapshot', id });
-  check('F17 unknown role rejected', await kit.rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { mcp: { all: [], coordinator: [], worker: [], scout: [], reviewer: [], writes: [], admin: [] } } }) !== null);
-  check('F17 non-string names rejected', await kit.rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { mcp: { all: [42], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] } } }) !== null);
-  await kit.updateSettings(id, { mcp: { all: [], coordinator: ['fake-ci'], worker: ['fake-xcode'], scout: [], reviewer: [], writes: [] } });
+  check('F17 unknown role rejected', await kit.rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { mcp: { off: { admin: [] }, writes: [] } } }) !== null);
+  check('F17 non-string names rejected', await kit.rejects({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { mcp: { off: { all: [42] }, writes: [] } } }) !== null);
+  await kit.updateSettings(id, { mcp: { off: { coordinator: ['fake-tracker', 'fake-xcode'], worker: ['fake-ci', 'fake-tracker'], scout: ['fake-ci', 'fake-tracker', 'fake-xcode'] }, writes: [] } });
 
   // Probe action.
   const probe = await rpc({ action: 'mcp-probe', id, server: 'fake-ci' });

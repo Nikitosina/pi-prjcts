@@ -1,12 +1,20 @@
 // Unit checks for src/usage-limits.ts using header shapes recorded from real responses (values only, no credentials).
 // No network: the endpoint pollers are replaced by PI_PROJECTS_LIMITS_FIXTURE and a missing file.
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'usage-limits-'));
 process.env.PI_PROJECTS_LIMITS_FIXTURE = join(dir, 'missing.json');
+// Private agent dir and HOME: the real Cursor sign-in is never read, and no request leaves the machine.
+const agent = join(dir, 'agent'), userHome = join(dir, 'home'); mkdirSync(agent); mkdirSync(userHome);
+process.env.PI_CODING_AGENT_DIR = agent; process.env.HOME = userHome;
+const seen = [];
+const fake = createServer((req, res) => { seen.push({ url: req.url, cookie: req.headers.cookie }); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ billingCycleEnd: '2026-11-01T00:00:00.000Z', individualUsage: { plan: { enabled: true, totalPercentUsed: 75.5 } } })); });
+await new Promise(ok => fake.listen(0, '127.0.0.1', ok));
+process.env.PI_PROJECTS_CURSOR_DASHBOARD = `http://127.0.0.1:${fake.address().port}`;
 const { observeLimitHeaders, limitsSnapshot, resetLimitsForTest, windowForSeconds } = await import('../src/usage-limits.ts');
 const find = (snapshot, provider) => snapshot.providers.find(item => item.provider === provider);
 
@@ -33,6 +41,21 @@ observeLimitHeaders('anthropic', { 'anthropic-ratelimit-unified-7d-utilization':
 const none = await limitsSnapshot(3_000);
 assert.equal(find(none, 'claude').samples.length, 0); assert.equal(find(none, 'claude').status, 'no-data');
 assert.equal(find(none, 'cursor').status, 'unavailable'); assert.equal(find(none, 'cursor').samples.length, 0);
+
+// Cursor: signed out is unavailable (and offers Connect); a stored sign-in gives the monthly window from the usage summary.
+assert.equal(find(none, 'cursor').connect.state, 'idle');
+resetLimitsForTest();
+const jwt = `x.${Buffer.from(JSON.stringify({ sub: 'auth0|user_1', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.y`;
+writeFileSync(join(agent, 'auth.json'), JSON.stringify({ cursor: { type: 'oauth', access: jwt, refresh: 'r', expires: Date.now() + 3600_000 } }));
+const cursor = find(await limitsSnapshot(5_000), 'cursor');
+assert.deepEqual(cursor.samples.map(({ window, usedPercent, resetsAt }) => ({ window, usedPercent, resetsAt })), [{ window: 'mo', usedPercent: 75.5, resetsAt: Date.parse('2026-11-01T00:00:00.000Z') }]);
+assert.equal(seen.length, 1); assert.equal(seen[0].url, '/api/usage-summary'); assert.ok(seen[0].cookie.startsWith('WorkosCursorSessionToken=auth0%7Cuser_1%3A%3A'));
+assert.ok(!JSON.stringify(cursor).includes(jwt), 'the token never reaches the snapshot');
+// An expired sign-in is not sent anywhere.
+resetLimitsForTest();
+writeFileSync(join(agent, 'auth.json'), JSON.stringify({ cursor: { access: `x.${Buffer.from(JSON.stringify({ sub: 's', exp: 1 })).toString('base64url')}.y` } }));
+assert.equal(find(await limitsSnapshot(6_000), 'cursor').status, 'unavailable'); assert.equal(seen.length, 1);
+fake.close();
 
 // Poll cadence: with a failing source the endpoint is retried only after the backoff, never inside the minute.
 resetLimitsForTest();

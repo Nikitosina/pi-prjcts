@@ -4,7 +4,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { home, socketPath, Request, Project, errorText, jobs, legacyProjectIds, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
+import { PROMPT_ROLES, home, socketPath, Request, Project, errorText, jobs, legacyProjectIds, listProjects, loadProject, notes, parse, projectDir, saveJob, saveProject, type Request as RequestData } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { searchProject } from "./knowledge-search.ts";
 import { loadProjectResourceLoader } from "./project-resources.ts";
@@ -35,8 +35,8 @@ import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } 
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
-import type { DurableProjectRuntime } from "./durable-runtime.ts";
-import { limitsSnapshot } from "./usage-limits.ts";
+import { COORDINATOR_ROLE_TEXT, defaultWorkerRules, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { limitsSnapshot, startCursorLogin } from "./usage-limits.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -116,6 +116,20 @@ async function withDurableOwner<T>({ id, validate, operation }: { id: string; va
   });
 }
 
+/**
+ * Default: a project with a repository checkout gets a whole-repository workspace scope, so its workers get shell and file
+ * tools in their own isolated worktree. Publication (pushes, PRs, merges) keeps its separate approvals. Not applied to a project
+ * that already has a grant, or whose owner ever revoked one: that is their decision.
+ */
+function withDefaultWorkspace(project: Project): Project {
+  if (project.archived || project.deleted || project.workspaceAuthorization || project.workspaceAuthorizationHistory?.length) return project;
+  // Plain Git checkouts only: a workspace provider plugin keeps its own owner-confirmed setup.
+  try {
+    const preview = quickWorkspacePreview(project, workerWorktreeRoot(project.id));
+    return preview.available && preview.provider === "github" ? rebindAuthorizations(grantWholeRepository(project, workerWorktreeRoot(project.id)).project) : project;
+  } catch { return project; }
+}
+
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
   if (closing) throw new Error("Host is stopping");
   if (ownerCloseFailed.has(id)) throw new Error("Project owner close failed; restart the owned host before retrying");
@@ -123,7 +137,10 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
   if (settingsUpdating.has(id)) throw new Error("Project settings update is in progress");
   const present = durableRuntimes.get(id);
   if (present) return present;
-  const project = loadProject(id);
+  // Existing projects get the default scope when their runtime first opens.
+  let project = loadProject(id);
+  const granted = withDefaultWorkspace(project);
+  if (granted !== project) { saveProject(granted); project = granted; }
   const opening = configuredSkills(id).then(loader => openDurableHost(project, loader));
   durableRuntimes.set(id, opening);
   opening.catch(() => { if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id); });
@@ -244,8 +261,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           runtime: "durable", ...(input.requestId ? { creation: { requestId: input.requestId, fingerprint } } : {}),
           ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), decisionAccess: "coordinator", phase: "ready", problem: null,
         });
-        saveProject(created);
-        return created;
+        const withScope = withDefaultWorkspace(created);
+        saveProject(withScope);
+        return withScope;
       });
       if (!project.archived && !project.deleted) await ensureKnowledge(ownedProjectDir(project.id));
       return loadProject(project.id);
@@ -268,6 +286,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "upload-delete": return withProjectLock(input.id, async () => deleteUpload(ownedProjectDir(input.id), input.uploadId));
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
+    case "prompts-snapshot": {
+      const project = loadProject(input.id), defaults = { coordinator: COORDINATOR_ROLE_TEXT, worker: defaultWorkerRules(project), scout: defaultWorkerRules(project), reviewer: defaultWorkerRules(project) };
+      return { scope: "project", roles: PROMPT_ROLES.map(role => ({ role, default: defaults[role], override: project.prompts?.[role] ?? null, effective: project.prompts?.[role] ?? defaults[role] })) };
+    }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
     case "ref-candidates": return refCandidates(loadProject(input.id), await knowledgeDir(input.id), { refresh: input.refresh });
     case "ref-preview": return input.kind === "skill" ? skillPreview(await configuredSkills(input.id), input.value) : refPreview(loadProject(input.id), { kind: input.kind, value: input.value });
@@ -543,6 +565,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (input.confirm !== input.id) throw new Error("Workspace grant requires confirmation matching project id");
       const before = loadProject(input.id);
       if (workspaceAuthorizationRevision(before) !== input.expectedRevision) throw new Error("Workspace authorization changed; refresh before granting");
+      // Projects get this scope automatically; asking again is a no-op that returns the existing one.
+      const existing = before.workspaceAuthorization?.scopes.find(scope => scope.wholeRepository);
+      if (existing) return existing;
       return persistWorkspaceGrant(before, input.expectedRevision, grantWholeRepository(before, workerWorktreeRoot(input.id)));
     }
     case "workspace-revoke": {
@@ -630,6 +655,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "legacy-thread-history": return (await durable(input.id)).legacyThreadHistory(input.name, input);
     case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot": return limitsSnapshot();
+    case "cursor-connect": return startCursorLogin();
     case "thread-history": return (await durable(input.id)).threadHistory(input.threadId, input);
     case "thread-send": return withDurableOwner({ id: input.id, validate: project => {
       if (project.deleted) throw new Error("Project is deleted; admission is denied");

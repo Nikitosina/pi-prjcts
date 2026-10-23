@@ -177,9 +177,9 @@ try {
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
   await waitFor(`document.querySelector('#messages')?.innerText.includes('Done MARK-MAIN') && document.querySelectorAll('#chat-list .chat').length === 3`, s, 'project loaded');
-  await waitFor(`document.querySelector('#chat-list .chat[data-chat=${JSON.stringify(broken.id)}]').classList.contains('attention') && document.querySelector('#warning')?.innerText.includes('Chat "Broken"') && !!document.querySelector('#warning [data-action="chat-select"]')`, s, 'attention in UI');
+  await waitFor(`document.querySelector('#chat-list .chat[data-chat=${JSON.stringify(broken.id)}]').querySelector('.chat-dot')?.dataset.state === 'needs' && document.querySelector('#warning')?.innerText.includes('Chat "Broken"') && !!document.querySelector('#warning [data-action="chat-select"]')`, s, 'attention in UI');
   await shot('01-main-shows-broken-chat-attention', s);
-  result.checks.push('F17 Main shows the Broken chat failure with Open chat, and the Broken pill is flagged');
+  result.checks.push('F17 Main shows the Broken chat failure with Open chat, and the Broken chat dot shows it needs you');
 
   // A in UI: the Settings skills picker lists all 89.
   const settingsUrl = new URL(launch); settingsUrl.searchParams.set('tab', 'settings');
