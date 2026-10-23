@@ -34,7 +34,7 @@ Everything is host-side (`src/usage-limits.ts`). The browser calls the authentic
 
 `claude-bridge` (`src/provider-extensions.ts`) spawns Claude Code as a subprocess, so no HTTP response passes through Pi and **its headers are unreachable**. Turns made through the bridge produce no passive samples; the Claude item then relies on the endpoint below, using the Anthropic login Pi holds.
 
-**2. Read-only usage endpoints with the login Pi or the CLI already has.** Used only when no passive sample is fresher than 60 s. At most one request per provider per 60 s, exponential backoff to 15 min after failures, `Retry-After` honoured, 10 s timeout, no token refresh and no writes.
+**2. Read-only usage endpoints with the login Pi or the CLI already has.** Used only when no passive sample is fresher than 5 min. At most one request per provider per 5 min (the bar's refresh button polls immediately, bypassing the minimum and any backoff, with a 15 s per-provider cooldown), exponential backoff to 15 min after failures, `Retry-After` honoured, 10 s timeout, no token refresh and no writes.
 
 | Endpoint | Credential | Documented? |
 |---|---|---|

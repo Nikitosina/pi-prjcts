@@ -1076,3 +1076,12 @@ a.button-link:hover { background: var(--hover); }
 .help-pop dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 12.5px; }
 .help-pop dt, .help-pop dd { margin: 0; }
 .help-pop kbd { font: 600 11.5px ui-monospace, monospace; padding: 1px 6px; border: 1px solid var(--line, #8886); border-radius: 5px; }
+
+/* Limits refresh button */
+.lim-refresh { margin-left: auto; min-height: 0; padding: 3px 6px; border: 0; color: var(--muted); display: inline-flex; align-items: center; }
+.lim-refresh:hover:not(:disabled) { color: var(--text); background: var(--hover-strong); }
+.lim-refresh:disabled { opacity: .6; cursor: default; }
+.lim-refresh.spinning svg { animation: lim-spin .8s linear infinite; }
+@keyframes lim-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .lim-refresh.spinning svg { animation: none; } }
+.lim-error { color: var(--k-c4553f); }

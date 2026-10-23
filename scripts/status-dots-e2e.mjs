@@ -247,6 +247,18 @@ try {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((cursor.left + cursor.right) / 2), y: Math.round((cursor.top + cursor.bottom) / 2) }, s);
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`, s, 'cursor details');
   await shot('07-limits-bar-unavailable', s);
+  // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
+  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b === document.querySelector('#limits-bar').lastElementChild }; })()`, s);
+  if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last) throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
+  await shot('06b-limits-bar-refresh-icon', s);
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }] }));
+  await click('#limits-bar .lim-refresh', s);
+  await waitFor(`/61%/.test(document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText) && !document.querySelector('#limits-bar .lim-refresh').disabled`, s, 'refreshed numbers');
+  result.checks.push('B3 refresh icon: aria-label and tooltip, last in the bar; clicking refetches now (42% -> 61%) and re-enables the button');
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [] }));
+  await click('#limits-bar .lim-refresh', s); await new Promise(ok => setTimeout(ok, 800));
+  if (!/61%/.test(await evaluate(`document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText`, s))) throw Error('Cooldown did not hold: second refresh inside 15 s refetched');
+  result.checks.push('B4 a second refresh click inside the 15 s host cooldown does not refetch');
   // Connect Cursor from the page: the app builds the login link, the host polls Cursor and keeps the tokens.
   await evaluate(`(window.__opened = [], window.open = url => { window.__opened.push(String(url)); return null; })`, s);
   await waitFor(`!!document.querySelector('.lim[data-provider="cursor"] [data-action="cursor-connect"]')`, s, 'Connect Cursor button');

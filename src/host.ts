@@ -655,6 +655,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "legacy-thread-history": return (await durable(input.id)).legacyThreadHistory(input.name, input);
     case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot": return limitsSnapshot();
+    case "limits-refresh": return limitsSnapshot(Date.now(), true);
     case "cursor-connect": return startCursorLogin();
     case "thread-history": return (await durable(input.id)).threadHistory(input.threadId, input);
     case "thread-send": return withDurableOwner({ id: input.id, validate: project => {

@@ -2359,6 +2359,12 @@ async function action(node) {
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
+    case "limits-refresh": {
+      if (limitsRefreshing) break;
+      limitsRefreshing = true; renderLimits();
+      try { const loaded = await api({ action: "limits-refresh" }); if (loaded?.providers) limits = loaded; } catch (error) { report(error); } finally { limitsRefreshing = false; renderLimits(); }
+      break;
+    }
     case "cursor-connect": {
       const started = await api({ action: "cursor-connect" });
       const cursor = limits?.providers.find(item => item.provider === "cursor");
@@ -3818,8 +3824,8 @@ function restoreBrowserDrafts() {
 }
 restoreBrowserDrafts();
 window.addEventListener("pagehide", () => { captureDialogDraft(); persistDraftsSafely(); });
-// Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once a minute; the bar re-renders every 30 s so countdowns stay current.
-let limits = null;
+// Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once every 5 minutes (the refresh button polls now, with a short per-provider cooldown on the host); the bar re-renders every 30 s so countdowns stay current.
+let limits = null, limitsRefreshing = false;
 const limitTone = percent => percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
 function untilReset(at) { const ms = at - Date.now(); return ms <= 0 ? "reset passed" : `resets in ${duration(ms)}`; }
 const limitWindowName = { mo: "month" };
@@ -3837,13 +3843,15 @@ function limitItem(provider) {
   const empty = provider.status === "unavailable" ? "Not connected" : "No data yet";
   const connect = provider.connect, signedOut = provider.status === "unavailable" && !!connect;
   const connectHtml = !connect ? "" : connect.state === "waiting" ? `<small class="lim-connect-note">Waiting for you to sign in. <a href="${esc(connect.loginUrl)}" target="_blank" rel="noopener noreferrer">Open the Cursor sign-in page</a></small>` : signedOut || connect.state === "failed" ? `${connect.error ? `<small>${esc(connect.error)}</small>` : ""}<button type="button" class="small" data-action="cursor-connect">Connect Cursor</button>` : "";
-  const detail = rows.join("") || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
+  const failure = provider.samples.length && provider.reason ? `<small class="lim-error">Last refresh failed: ${esc(provider.reason)}${provider.lastAttemptAt ? ` · ${ago(provider.lastAttemptAt)}` : ""}</small>` : "";
+  const detail = rows.join("") + failure || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
   const label = `${provider.label}: ${provider.samples.length ? provider.samples.map((sample, i) => `${sample.window} ${windows[i].stale ? "reset, waiting for new data" : `${windows[i].percent}% used`}`).join(", ") : empty.toLowerCase()}`;
   return `<div class="lim" tabindex="0" role="group" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="group" aria-label="${esc(provider.label)} details"><b>${esc(provider.label)}</b>${detail}${connectHtml}</span>${signedOut && connect.state === "idle" ? '<button type="button" class="lim-connect" data-action="cursor-connect">Connect</button>' : ""}</div>`;
 }
 function renderLimits() {
   const bar = document.querySelector("#limits-bar");
-  const next = limits ? limits.providers.map(limitItem).join("") : "";
+  const refresh = `<button type="button" class="ghost small lim-refresh${limitsRefreshing ? " spinning" : ""}" data-action="limits-refresh" aria-label="Refresh limits" title="Refresh limits now"${limitsRefreshing ? " disabled" : ""}><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+  const next = limits ? limits.providers.map(limitItem).join("") + refresh : "";
   if (bar.dataset.html === next) return;
   const focused = bar.contains(document.activeElement) ? document.activeElement.closest(".lim")?.dataset.provider : null;
   bar.innerHTML = next; bar.dataset.html = next;
@@ -3854,7 +3862,7 @@ async function loadLimits() {
   const loaded = await api({ action: "limits-snapshot" }).catch(() => null);
   if (loaded?.providers) { limits = loaded; renderLimits(); }
 }
-setInterval(() => void loadLimits(), 60000);
+setInterval(() => void loadLimits(), 5 * 60000);
 // While a Cursor sign-in is pending, look every 3 s so the bar updates as soon as the host finishes it.
 let limitsWatch = null;
 function scheduleLimitsWatch() {

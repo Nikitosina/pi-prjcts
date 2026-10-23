@@ -20,18 +20,18 @@ export type CursorConnect = { state: "idle" | "waiting" | "failed"; loginUrl: st
 
 const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor" };
 /** The endpoints are undocumented; never poll them more often than this, and back off on failure. */
-export const MIN_POLL_MS = 60_000, MAX_BACKOFF_MS = 15 * 60_000, REQUEST_TIMEOUT_MS = 10_000;
+export const MIN_POLL_MS = 5 * 60_000, MANUAL_COOLDOWN_MS = 15_000, MAX_BACKOFF_MS = 15 * 60_000, REQUEST_TIMEOUT_MS = 10_000;
 /** A passive header sample keeps the poll away while it is this fresh. */
-const PASSIVE_FRESH_MS = 60_000;
+const PASSIVE_FRESH_MS = MIN_POLL_MS;
 const WINDOW_SECONDS = { "5h": 5 * 3600, "7d": 7 * 86400 };
 
 type Polled = Array<Omit<LimitSample, "provider" | "observedAt">>;
 type Stored = LimitSample & { source: LimitSource };
-type OwnState = { samples: Map<LimitWindow, Stored>; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; nextAttemptAt: number; failures: number; inflight?: Promise<void> };
+type OwnState = { samples: Map<LimitWindow, Stored>; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; lastManualAt: number; nextAttemptAt: number; failures: number; inflight?: Promise<void> };
 const state = new Map<LimitProvider, OwnState>();
 const entry = (provider: LimitProvider) => {
   let value = state.get(provider);
-  if (!value) state.set(provider, value = { samples: new Map(), reason: null, unavailable: false, lastAttemptAt: null, nextAttemptAt: 0, failures: 0 });
+  if (!value) state.set(provider, value = { samples: new Map(), reason: null, unavailable: false, lastAttemptAt: null, lastManualAt: 0, nextAttemptAt: 0, failures: 0 });
   return value;
 };
 
@@ -155,11 +155,17 @@ async function pollCursor(): Promise<Polled> {
 const fixture = (provider: LimitProvider): (() => Promise<Polled>) | undefined => process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" ? async () => (await readJson(process.env.PI_PROJECTS_LIMITS_FIXTURE!))?.[provider] ?? [] : undefined;
 const pollerOf = (provider: LimitProvider): (() => Promise<Polled>) => fixture(provider) ?? (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor);
 
-function refreshProvider(provider: LimitProvider, now: number): Promise<void> {
+/** `manual` (the refresh button) skips the minimum interval, the failure backoff and the passive-sample shortcut, but is rate-limited per provider. */
+function refreshProvider(provider: LimitProvider, now: number, manual = false): Promise<void> {
   const own = entry(provider);
   if (own.inflight) return own.inflight;
-  const fresh = [...own.samples.values()].some(sample => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
-  if (now < own.nextAttemptAt || fresh) return Promise.resolve();
+  if (manual) {
+    if (now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
+    own.lastManualAt = now;
+  } else {
+    const fresh = [...own.samples.values()].some(sample => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
+    if (now < own.nextAttemptAt || fresh) return Promise.resolve();
+  }
   own.lastAttemptAt = now;
   own.nextAttemptAt = now + MIN_POLL_MS;
   own.inflight = pollerOf(provider)().then(samples => {
@@ -216,9 +222,9 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
   return connect;
 }
 
-/** Normalized state for the browser. Triggers at most one poll per provider per minute (plus backoff after failures). */
-export async function limitsSnapshot(now = Date.now()): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
-  await Promise.all((Object.keys(LABELS) as LimitProvider[]).map(provider => refreshProvider(provider, now)));
+/** Normalized state for the browser. Triggers at most one poll per provider per 5 minutes (plus backoff after failures); `refresh` polls now. */
+export async function limitsSnapshot(now = Date.now(), refresh = false): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
+  await Promise.all((Object.keys(LABELS) as LimitProvider[]).map(provider => refreshProvider(provider, now, refresh)));
   const providers = (Object.keys(LABELS) as LimitProvider[]).map((provider): ProviderLimits => {
     const own = entry(provider), samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window));
     return { provider, label: LABELS[provider], samples, status: samples.length ? "ok" : own.unavailable ? "unavailable" : "no-data", reason: own.reason, lastAttemptAt: own.lastAttemptAt, nextAttemptAt: own.nextAttemptAt || null, ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}) };
