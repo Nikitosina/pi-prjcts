@@ -19,6 +19,7 @@ const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
 let releaseHold; const hold = new Promise(ok => { releaseHold = ok; });
+let releaseHold2; const hold2 = new Promise(ok => { releaseHold2 = ok; });
 const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 const call = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, null) + chunk({}, 'tool_calls') + 'data: [DONE]\n\n';
 const say = text => chunk({ role: 'assistant', content: text }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n';
@@ -40,11 +41,13 @@ const model = createServer((req, res) => {
       if (marker === 'MARK-SCOUT' && stage === 0) return reply(call('projects_delegate', { role: 'scout', task: 'MARK-SCOUTTASK survey the UI files' }));
       if (marker === 'MARK-FAIL' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-FAILTASK will fail' }));
       if (marker === 'MARK-HOLD' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-HOLDTASK waits' }));
+      if (marker === 'MARK-HOLDTWO' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-HOLDTWOTASK waits' }));
       if (marker === 'MARK-BADTOOL' && stage === 0) return reply(call('projects_worker_read', { workId: randomUUID() }));
       return reply(say(`Answer ${marker}.`));
     }
     if (marker === 'MARK-SCOUTTASK') return reply(say('REPORT-BODY finding one\n\n1. **First** issue `web/app.js:1`\n\n2. Second issue\n\n3. Third issue'));
     if (marker === 'MARK-FAILTASK') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Fake invalid request' } })); return; }
+    if (marker === 'MARK-HOLDTWOTASK') { await hold2; return reply(say('Hold two done')); }
     if (marker === 'MARK-HOLDTASK') { await hold; return reply(say('Hold done')); }
     return reply(say(`Worker ${marker}`));
   });
@@ -185,6 +188,26 @@ try {
   await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, 'switched project');
   await waitFor(`document.querySelector('.proj:not(.on) .state-dot')?.dataset.state === 'needs'`, s, 'list-summary dot on the other project');
   result.checks.push('S2 a project that is not open gets its dot from the list summary (no runtime opened)');
+  // Live state survives leaving a project: start work in Other Project (A), go back to Polish UI (B), A keeps pulsing, then turns green when it finishes, or red when a turn fails.
+  const rowOf = `.proj[data-select-project="${other.id}"] .state-dot`;
+  await rpc({ action: 'message', id: other.id, text: 'MARK-HOLDTWO' });
+  await eventually(async () => (await rpc({ action: 'plan-snapshot', id: other.id })).work.find(w => w.text.startsWith('MARK-HOLDTWOTASK'))?.status === 'running', 'second hold not running');
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'working'`, s, 'A working while open');
+  await click(`.proj[data-select-project="${id}"]`, s);
+  await waitFor(`document.querySelector('#title').innerText === 'Polish UI'`, s, 'switched to B');
+  await delay(1500);
+  const left = await evaluate(`(() => { const d = document.querySelector('${rowOf}'); return { state: d?.dataset.state, label: d?.getAttribute('aria-label'), pulse: d && getComputedStyle(d).animationName }; })()`, s);
+  if (left.state !== 'working' || left.pulse !== 'live-pulse' || !/^Working/.test(left.label)) throw Error('Row of the project left behind lost its working state: ' + JSON.stringify(left));
+  await shot('02b-other-project-working-while-away', s);
+  result.checks.push('S2b a project you left keeps its own pulsing working dot while another project is open');
+  releaseHold2();
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'done'`, s, 'A turns green after finishing while B is open');
+  result.checks.push('S2c ...and turns green (done, not yet checked) when its work finishes while you are elsewhere');
+  await rpc({ action: 'message', id: other.id, text: 'MARK-COORDFAIL' });
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'needs'`, s, 'A turns red after a failed turn while B is open');
+  result.checks.push('S2d ...and turns red when a coordinator turn fails while you are elsewhere');
+  await click(`.proj[data-select-project="${other.id}"]`, s);
+  await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, 'back on A');
   await click('.proj:not(.on)', s);
   await waitFor(`document.querySelector('#title').innerText === 'Polish UI' && document.querySelectorAll('#chat-list .chat').length === 4`, s, 'back on first project');
   await click('#side-toggle', s); await delay(500);
@@ -234,8 +257,8 @@ try {
   // Limits bar (fixture data; the host never contacted a provider).
   await waitFor(`document.querySelectorAll('#limits-bar .lim').length === 3 && /42%/.test(document.querySelector('#limits-bar').innerText)`, s, 'limits bar');
   const bar = await evaluate(`Object.fromEntries([...document.querySelectorAll('#limits-bar .lim')].map(n => [n.dataset.provider, { text: n.innerText.replace(/\\s+/g, ' ').trim(), label: n.getAttribute('aria-label') }]))`, s);
-  if (!/Claude.*5h.*42%.*7d.*24%/.test(bar.claude.text) || /5h/.test(bar.codex.text) || !/Codex.*7d.*3%/.test(bar.codex.text) || !/Cursor.*—/.test(bar.cursor.text) || !/not connected/i.test(bar.cursor.label)) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
-  result.checks.push('B1 bottom bar: Claude 5h 42% / 7d 24%, Codex 7d 3% (no invented 5h), Cursor "—" and "Not connected"');
+  if (!/5h.*42%.*7d.*24%/.test(bar.claude.text) || !/^Claude: 5h/.test(bar.claude.label) || /5h/.test(bar.codex.text) || !/7d.*3%/.test(bar.codex.text) || !/^Codex: 7d/.test(bar.codex.label) || !/—/.test(bar.cursor.text) || !/^Cursor/.test(bar.cursor.label) || !/not connected/i.test(bar.cursor.label) || /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, '')) ) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
+  result.checks.push('B1 bottom bar: provider icons (names only in aria-label), Claude 5h 42% / 7d 24%, Codex 7d 3% (no invented 5h), Cursor "—" and "Not connected"');
   const at = await box('#limits-bar .lim[data-provider="claude"]', s);
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((at.left + at.right) / 2), y: Math.round((at.top + at.bottom) / 2) }, s);
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`, s, 'hover details');
@@ -248,13 +271,27 @@ try {
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`, s, 'cursor details');
   await shot('07-limits-bar-unavailable', s);
   // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
-  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b === document.querySelector('#limits-bar').lastElementChild }; })()`, s);
-  if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last) throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
+  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.dataset.provider === 'cursor', margin: getComputedStyle(b).marginLeft }; })()`, s);
+  if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last || refreshInfo.margin !== '0px') throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
   await shot('06b-limits-bar-refresh-icon', s);
+  await waitFor(`document.querySelectorAll('#limits-bar .mach-item').length >= 2`, s, 'machine status');
+  const mach = await evaluate(`[...document.querySelectorAll('#limits-bar .mach-item')].map(n => [n.dataset.kind, n.innerText.replace(/\\s+/g, ' ').trim()])`, s);
+  const machFormat = { ram: /^\d+\.\d GB \/ \d+\.\d GB|^—/, cpu: /^(\d+%|—)/, ssd: /^(\d+%|—)/, battery: /^(\d+%|—)/ };
+  if (!mach.every(([kind, text]) => machFormat[kind].test(text)) || !mach.some(([kind]) => kind === 'cpu')) throw Error('Machine status wrong: ' + JSON.stringify(mach));
+  if (!(await evaluate(`document.querySelector('#limits-bar .lim-refresh').nextElementSibling === document.querySelector('#limits-bar .mach')`, s))) throw Error('Machine status is not on the right after the refresh button');
+  result.checks.push('B2b machine status renders after the refresh button in the documented formats: ' + JSON.stringify(mach));
+  const cpuBox = await box('#limits-bar .mach-item[data-kind="cpu"]', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((cpuBox.left + cpuBox.right) / 2), y: Math.round((cpuBox.top + cpuBox.bottom) / 2) }, s);
+  await waitFor(`getComputedStyle(document.querySelector('.mach-item[data-kind="cpu"] .mach-tip')).visibility === 'visible'`, s, 'machine tooltip');
+  await shot('06c-machine-hover', s);
+  const barBox = await box('#limits-bar', s);
+  const crop = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: barBox.top, width: 480, height: barBox.bottom - barBox.top, scale: 2 } }, s);
+  writeFileSync(join(artifacts, '06d-bar-left-closeup-2x.png'), Buffer.from(crop.data, 'base64'), { mode: 0o600 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
   writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }] }));
   await click('#limits-bar .lim-refresh', s);
   await waitFor(`/61%/.test(document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText) && !document.querySelector('#limits-bar .lim-refresh').disabled`, s, 'refreshed numbers');
-  result.checks.push('B3 refresh icon: aria-label and tooltip, last in the bar; clicking refetches now (42% -> 61%) and re-enables the button');
+  result.checks.push('B3 refresh icon: aria-label and tooltip, directly after the last provider with no auto margin; clicking refetches now (42% -> 61%) and re-enables the button');
   writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [] }));
   await click('#limits-bar .lim-refresh', s); await new Promise(ok => setTimeout(ok, 800));
   if (!/61%/.test(await evaluate(`document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText`, s))) throw Error('Cooldown did not hold: second refresh inside 15 s refetched');
@@ -267,7 +304,7 @@ try {
   await waitFor(`window.__opened.length === 1`, s, 'login page opened');
   const login = new URL(await evaluate(`window.__opened[0]`, s));
   if (!login.pathname.endsWith('/loginDeepControl') || !login.searchParams.get('challenge') || !login.searchParams.get('uuid') || login.searchParams.get('verifier')) throw Error('Login URL wrong: ' + login);
-  await waitFor(`/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /61/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`, s, 'waiting state');
+  await waitFor(`/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /6\\d%/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`, s, 'waiting state');
   await waitFor(`/61\.?5?%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText) || /62%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText)`, s, 'Cursor usage after login');
   const poll = cursorSeen.polls.at(-1);
   if (createHash('sha256').update(poll.verifier).digest('base64url') !== login.searchParams.get('challenge') || poll.uuid !== login.searchParams.get('uuid')) throw Error('PKCE verifier does not match the challenge: ' + JSON.stringify(poll));
@@ -285,13 +322,33 @@ try {
   result.checks.push('B3 the browser payload is normalized samples only; no tokens or raw provider responses');
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
 
+  // Network outage: the item says it could not reach the provider (never "sign-in expired"), keeps the last numbers, and recovers after a refresh.
+  await delay(16000);
+  const fixtureNow = JSON.parse(readFileSync(join(root, 'limits.json'), 'utf8'));
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ ...fixtureNow, claudeFail: 'unreachable' }));
+  await click('#limits-bar .lim-refresh', s);
+  await waitFor(`/Couldn.t reach Claude, will retry/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`, s, 'unreachable message');
+  const outage = await evaluate(`document.querySelector('.lim[data-provider="claude"] .lim-pop').textContent`, s);
+  if (/sign-in|expired/i.test(outage) || !/Last refresh failed/.test(outage)) throw Error('Outage message wrong: ' + outage);
+  const claudeBox = await box('#limits-bar .lim[data-provider="claude"]', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((claudeBox.left + claudeBox.right) / 2), y: Math.round((claudeBox.top + claudeBox.bottom) / 2) }, s);
+  await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`, s, 'outage details');
+  await shot('10-limits-unreachable', s);
+  result.checks.push('B5 a network failure reads "Couldn\'t reach Claude, will retry" (not sign-in expired) and keeps the last numbers');
+  await delay(16000);
+  writeFileSync(join(root, 'limits.json'), JSON.stringify(fixtureNow));
+  await click('#limits-bar .lim-refresh', s);
+  await waitFor(`!/Last refresh failed/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`, s, 'recovered');
+  result.checks.push('B6 once the network is back a refresh clears the message');
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
+
   // Narrow.
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
   await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 3`, s, 'narrow load');
   await delay(500);
-  const narrow = await evaluate(`({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0 })`, s);
-  if (narrow.width > 391 || !narrow.bar) throw Error('Narrow view broken: ' + JSON.stringify(narrow));
+  const narrow = await evaluate(`({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0, barOverflow: document.querySelector('#limits-bar').scrollWidth > document.querySelector('#limits-bar').clientWidth })`, s);
+  if (narrow.width > 391 || !narrow.bar || narrow.barOverflow) throw Error('Narrow view broken: ' + JSON.stringify(narrow));
   result.checks.push('N1 390px: no horizontal overflow, chat dots and the limits bar present');
   await shot('08-narrow-390', s);
   await click('#activity .worker-line', s);

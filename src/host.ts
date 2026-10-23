@@ -23,20 +23,21 @@ import { startNotifier } from "./notify.ts";
 import { startTelegram } from "./telegram.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
-import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
+import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
-import { loadProviderExtensions } from "./provider-extensions.ts";
+import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
-import { limitsSnapshot, startCursorLogin } from "./usage-limits.ts";
+import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
+import { machineStatus } from "./machine-status.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -207,6 +208,19 @@ function dispatch(input: RequestData): Promise<unknown> {
   return operation;
 }
 
+// Live activity per project for the sidebar. Only runtimes that are already open are asked (a closed project has nothing running), and a result is reused for 1.5 s.
+const activityCache = new Map<string, { at: number; value: Promise<ProjectActivity> }>();
+const IDLE_ACTIVITY: ProjectActivity = { working: false, needs: false, finishedAt: 0 };
+async function projectActivity(id: string): Promise<ProjectActivity> {
+  const opening = durableRuntimes.get(id);
+  if (!opening || closing || lifecycleChanging.has(id) || settingsUpdating.has(id) || ownerCloseFailed.has(id)) return IDLE_ACTIVITY;
+  const cached = activityCache.get(id);
+  if (cached && Date.now() - cached.at < 1500) return cached.value;
+  const value = Promise.race([opening.then(owner => durableHostActivity(owner, id)), new Promise<ProjectActivity>(done => setTimeout(() => done(IDLE_ACTIVITY), 2000).unref())]).catch(() => IDLE_ACTIVITY);
+  activityCache.set(id, { at: Date.now(), value });
+  return value;
+}
+
 async function dispatchRequest(input: RequestData): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
@@ -236,11 +250,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return entry;
     }
     // `notice` is read from disk only (no runtime is opened per project): unanswered questions in the inbox.
-    case "list": return listProjects().filter(project => !project.deleted).map(project => {
+    case "list": return Promise.all(listProjects().filter(project => !project.deleted).map(async project => {
       let questions = 0;
       try { questions = inbox(projectDir(project.id)).filter(item => item.kind === "question" && !item.result).length; } catch {}
-      return { ...project, notice: { questions } };
-    });
+      return { ...project, notice: { questions }, activity: await projectActivity(project.id) };
+    }));
     case "create": {
       if (!isAbsolute(input.cwd)) throw new Error("Workspace path must be absolute");
       const cwd = await realpath(input.cwd);
@@ -664,8 +678,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "legacy-thread-history": return (await durable(input.id)).legacyThreadHistory(input.name, input);
     case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
-    case "limits-snapshot": return limitsSnapshot();
+    case "limits-snapshot": return limitsSnapshot(Date.now(), input.visit === true ? "visit" : false);
     case "limits-refresh": return limitsSnapshot(Date.now(), true);
+    case "machine-status": return machineStatus();
     case "cursor-connect": return startCursorLogin();
     case "thread-history": return (await durable(input.id)).threadHistory(input.threadId, input);
     case "thread-send": return withDurableOwner({ id: input.id, validate: project => {
@@ -735,6 +750,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
 }
 
 let remote: RemoteAccess | null = null;
+// Subscription limits read the logins through Pi's own resolver, which renews an expiring OAuth token under the auth-store lock. Only an OAuth login is used here (an API key has no usage endpoint).
+let limitsModels: Promise<Awaited<ReturnType<typeof createModelRuntime>>> | null = null;
+setLimitsTokenResolver(async providerId => {
+  limitsModels ??= createModelRuntime();
+  limitsModels.catch(() => { limitsModels = null; });
+  const result = await (await limitsModels).getAuth(providerId);
+  return result?.source === "OAuth" ? result.auth.apiKey : undefined;
+});
 const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId), (id, filename, bytes) => withProjectLock(id, async () => {
   const project = loadProject(id);
   if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");

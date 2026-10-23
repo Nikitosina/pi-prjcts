@@ -41,7 +41,7 @@ Everything is host-side (`src/usage-limits.ts`). The browser calls the authentic
 | `GET https://api.anthropic.com/api/oauth/usage` | `anthropic.access` from Pi's `auth.json` | **No, undocumented.** Same call Claude Code and Orca make. |
 | `GET https://chatgpt.com/backend-api/wham/usage` | `openai-codex.access` + `accountId` from Pi's `auth.json`, else `~/.codex/auth.json` | **No, undocumented.** Same call the Codex app and Orca make. |
 
-If a token is expired or missing the item says so ("Not connected" / sign-in expired) and keeps retrying only on the backoff schedule; it never refreshes the token itself, so Pi's own next use does.
+Claude and Codex logins are read through Pi's own credential resolver, which renews an expiring OAuth token under the auth-store lock (the path a model request takes), so a token that expired while Pi was idle is renewed instead of being sent stale. The token is read again on every attempt and never cached; after a 401/403 it is re-read once and a different token is tried. Only a real 401/403 (or no login at all) shows "sign-in rejected" / "Not connected". A network error, timeout, 5xx or 429 shows "Couldn't reach Claude, will retry" (or the provider's own wording), keeps the last numbers, and follows the normal backoff (5 min doubling to 15 min, or the provider's Retry-After). The refresh button always fetches (15 s cooldown per provider), and a page load or the tab becoming visible retries a provider that shows an error instead of waiting out its backoff. Cursor still reads its token from disk.
 
 **3. Cursor: monthly percentage, with "Connect Cursor" in the page.** Cursor's quota is a monthly billing cycle, so its window is `mo` and the bar shows `Cursor 61% month`.
 

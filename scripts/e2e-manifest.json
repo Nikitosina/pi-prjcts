@@ -24,7 +24,9 @@
     "durable-knowledge",
     "coordinator-efficiency",
     "quota-status",
-    "coordinator-gh"
+    "coordinator-gh",
+    "machine-status-unit",
+    "usage-limits-recovery-unit"
   ],
   "browser": [
     "web/**"
@@ -49,7 +51,9 @@
     ],
     "src/usage-limits.ts": [
       "usage-limits-unit",
-      "quota-status-e2e"
+      "usage-limits-recovery-unit",
+      "quota-status-e2e",
+      "status-dots-e2e"
     ],
     "src/coordinator-gh.ts": [
       "coordinator-gh*"
@@ -102,7 +106,11 @@
       "vcs-plugins-e2e"
     ],
     "docs/**": [],
-    "*.md": []
+    "*.md": [],
+    "src/machine-status.ts": [
+      "machine-status-unit",
+      "status-dots-e2e"
+    ]
   },
   "knownFailing": [
     "artifacts-e2e",
