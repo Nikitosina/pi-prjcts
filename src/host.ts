@@ -30,13 +30,13 @@ import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithu
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
-import { loadProviderExtensions } from "./provider-extensions.ts";
+import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } from "./project-models.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
-import { limitsSnapshot, startCursorLogin } from "./usage-limits.ts";
+import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 
 process.umask(0o077);
@@ -678,7 +678,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "legacy-thread-history": return (await durable(input.id)).legacyThreadHistory(input.name, input);
     case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
-    case "limits-snapshot": return limitsSnapshot();
+    case "limits-snapshot": return limitsSnapshot(Date.now(), input.visit === true ? "visit" : false);
     case "limits-refresh": return limitsSnapshot(Date.now(), true);
     case "machine-status": return machineStatus();
     case "cursor-connect": return startCursorLogin();
@@ -750,6 +750,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
 }
 
 let remote: RemoteAccess | null = null;
+// Subscription limits read the logins through Pi's own resolver, which renews an expiring OAuth token under the auth-store lock. Only an OAuth login is used here (an API key has no usage endpoint).
+let limitsModels: Promise<Awaited<ReturnType<typeof createModelRuntime>>> | null = null;
+setLimitsTokenResolver(async providerId => {
+  limitsModels ??= createModelRuntime();
+  limitsModels.catch(() => { limitsModels = null; });
+  const result = await (await limitsModels).getAuth(providerId);
+  return result?.source === "OAuth" ? result.auth.apiKey : undefined;
+});
 const web = await startWeb(dispatch, async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId), (id, filename, bytes) => withProjectLock(id, async () => {
   const project = loadProject(id);
   if (project.deleted || project.archived) throw new Error("Inactive project cannot take uploads");

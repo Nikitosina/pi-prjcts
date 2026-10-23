@@ -27,11 +27,11 @@ const WINDOW_SECONDS = { "5h": 5 * 3600, "7d": 7 * 86400 };
 
 type Polled = Array<Omit<LimitSample, "provider" | "observedAt">>;
 type Stored = LimitSample & { source: LimitSource };
-type OwnState = { samples: Map<LimitWindow, Stored>; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; lastManualAt: number; nextAttemptAt: number; failures: number; inflight?: Promise<void> };
+type OwnState = { samples: Map<LimitWindow, Stored>; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; lastManualAt: number; nextAttemptAt: number; failures: number; holdUntil: number; inflight?: Promise<void> };
 const state = new Map<LimitProvider, OwnState>();
 const entry = (provider: LimitProvider) => {
   let value = state.get(provider);
-  if (!value) state.set(provider, value = { samples: new Map(), reason: null, unavailable: false, lastAttemptAt: null, lastManualAt: 0, nextAttemptAt: 0, failures: 0 });
+  if (!value) state.set(provider, value = { samples: new Map(), reason: null, unavailable: false, lastAttemptAt: null, lastManualAt: 0, nextAttemptAt: 0, failures: 0, holdUntil: 0 });
   return value;
 };
 
@@ -77,26 +77,69 @@ export function observeLimitHeaders(modelProvider: string, headers: Record<strin
   }
 }
 
+/**
+ * Credentials come from Pi's own resolver when the host provides one (it renews an expiring OAuth login under the auth-store lock, the same
+ * path a model request takes, so a token that expired while nobody used the provider is renewed here instead of being sent stale). Without it,
+ * or when it knows no login, the stored token is read from disk on every attempt. Nothing is cached between attempts.
+ */
+export type TokenResolver = (providerId: string) => Promise<string | undefined>;
+let resolveToken: TokenResolver | null = null;
+export function setLimitsTokenResolver(resolver: TokenResolver | null): void { resolveToken = resolver; }
+const RENEW_TIMEOUT_MS = 20_000;
+async function currentToken(providerId: string, what: string, fromDisk: () => Promise<string | undefined>): Promise<string | undefined> {
+  if (resolveToken) {
+    let renewed: string | undefined;
+    try {
+      renewed = await Promise.race([resolveToken(providerId), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), RENEW_TIMEOUT_MS).unref())]);
+    } catch (error) {
+      // A rejected refresh token is an auth problem; a failed renewal request (offline, timeout, 5xx) is not, and nothing is stored from it.
+      const text = error instanceof Error ? `${error.message} ${error.cause instanceof Error ? error.cause.message : ""}` : "";
+      if (/invalid_grant|invalid_client|unauthorized|\b40[013]\b/i.test(text)) throw new Retry(`${what} sign-in was rejected when renewing it. Sign in again`, null, true);
+      throw new Retry(`Couldn't renew the ${what} sign-in right now, will retry`);
+    }
+    if (renewed) return renewed;
+  }
+  return fromDisk();
+}
+/** One attempt, and after an auth rejection one more with whatever the credentials now hold if that is a different token. */
+async function withToken<T>(providerId: string, what: string, fromDisk: () => Promise<string | undefined>, attempt: (token: string) => Promise<T>): Promise<T> {
+  const token = await currentToken(providerId, what, fromDisk);
+  if (!token) throw new Retry(`No ${what} sign-in found (log in with /login)`, null, true);
+  try { return await attempt(token); }
+  catch (error) {
+    if (!(error instanceof Retry && error.signedOut)) throw error;
+    const again = await currentToken(providerId, what, fromDisk);
+    if (!again || again === token) throw error;
+    return attempt(again);
+  }
+}
+
 async function readJson(path: string): Promise<any> { try { return JSON.parse(await readFile(path, "utf8")); } catch { return null; } }
 
+/** `signedOut` is only for a real 401/403 (or no credential at all); everything else, network included, is transient and keeps the normal backoff. */
 class Retry extends Error {
   afterMs: number | null; signedOut: boolean;
   constructor(message: string, afterMs: number | null = null, signedOut = false) { super(message); this.afterMs = afterMs; this.signedOut = signedOut; }
 }
+const unreachable = (what: string) => new Retry(`Couldn't reach ${what}, will retry`);
 const retryAfter = (response: Response) => { const seconds = Number(response.headers.get("retry-after")); return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 24 * 3600_000) : null; };
 async function getJson(url: string, headers: Record<string, string>, what: string): Promise<any> {
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => { throw new Retry(`${what} could not be reached`); });
-  if (response.status === 401 || response.status === 403) { await response.body?.cancel(); throw new Retry(`${what} sign-in expired or not allowed. It refreshes when Pi next uses the provider`, null, true); }
-  if (response.status === 429) { await response.body?.cancel(); throw new Retry(`${what} rate limited the usage request`, retryAfter(response)); }
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => { throw unreachable(what); });
+  if (response.status === 401 || response.status === 403) { await response.body?.cancel(); throw new Retry(`${what} rejected the sign-in (HTTP ${response.status}). Pi renews it before it expires; if this stays, sign in again`, null, true); }
+  if (response.status === 429) { await response.body?.cancel(); throw new Retry(`${what} rate limited the usage request, will retry`, retryAfter(response)); }
+  if (response.status >= 500) { await response.body?.cancel(); throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`); }
   if (!response.ok) { await response.body?.cancel(); throw new Retry(`${what} usage request failed (HTTP ${response.status})`); }
-  return response.json().catch(() => { throw new Retry(`${what} returned an unreadable usage response`); });
+  // The timeout also covers the body; a connection that dies mid-body is the network, not a bad response.
+  const text = await response.text().catch(() => { throw unreachable(what); });
+  try { return JSON.parse(text); } catch { throw new Retry(`${what} returned an unreadable usage response`); }
 }
 
+const claudeUsageUrl = () => process.env.PI_PROJECTS_CLAUDE_USAGE_URL ?? "https://api.anthropic.com/api/oauth/usage";
+const codexUsageUrl = () => process.env.PI_PROJECTS_CODEX_USAGE_URL ?? "https://chatgpt.com/backend-api/wham/usage";
+const storedAccess = async (key: string) => { const token = (await readJson(join(getAgentDir(), "auth.json")))?.[key]?.access; return typeof token === "string" && token ? token : undefined; };
 async function pollClaude(): Promise<Polled> {
-  const token = (await readJson(join(getAgentDir(), "auth.json")))?.anthropic?.access;
-  if (typeof token !== "string" || !token) throw new Retry("No Anthropic sign-in in Pi (log in with /login)", null, true);
   // Read-only GET; undocumented. Same call Claude Code's own usage view makes.
-  const data = await getJson("https://api.anthropic.com/api/oauth/usage", { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0" }, "Claude");
+  const data = await withToken("anthropic", "Claude", () => storedAccess("anthropic"), token => getJson(claudeUsageUrl(), { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0" }, "Claude"));
   const samples: Polled = [];
   for (const [window, raw] of [["5h", data?.five_hour], ["7d", data?.seven_day]] as const) {
     const used = finite(raw?.utilization);
@@ -107,12 +150,11 @@ async function pollClaude(): Promise<Polled> {
 }
 
 async function pollCodex(): Promise<Polled> {
-  const pi = (await readJson(join(getAgentDir(), "auth.json")))?.["openai-codex"];
-  const cli = (await readJson(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json")))?.tokens;
-  const token = pi?.access ?? cli?.access_token, account = pi?.accountId ?? cli?.account_id;
-  if (typeof token !== "string" || !token) throw new Retry("No ChatGPT/Codex sign-in found in Pi or the Codex CLI", null, true);
+  const cliTokens = async () => (await readJson(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json")))?.tokens;
+  const account = async (): Promise<string | null> => { const id = (await readJson(join(getAgentDir(), "auth.json")))?.["openai-codex"]?.accountId ?? (await cliTokens())?.account_id; return typeof id === "string" && id ? id : null; };
+  const fromDisk = async () => (await storedAccess("openai-codex")) ?? ((await cliTokens())?.access_token || undefined);
   // Read-only GET; undocumented. Same call the Codex app's usage view makes.
-  const data = await getJson("https://chatgpt.com/backend-api/wham/usage", { Authorization: `Bearer ${token}`, ...(typeof account === "string" && account ? { "ChatGPT-Account-Id": account } : {}), "User-Agent": "codex-cli", originator: "Codex Desktop" }, "Codex");
+  const data = await withToken("openai-codex", "ChatGPT/Codex", fromDisk, async token => { const id = await account(); return getJson(codexUsageUrl(), { Authorization: `Bearer ${token}`, ...(id ? { "ChatGPT-Account-Id": id } : {}), "User-Agent": "codex-cli", originator: "Codex Desktop" }, "Codex"); });
   const samples: Polled = [];
   for (const raw of [data?.rate_limit?.primary_window, data?.rate_limit?.secondary_window]) {
     const used = finite(raw?.used_percent), seconds = finite(raw?.limit_window_seconds);
@@ -151,17 +193,29 @@ async function pollCursor(): Promise<Polled> {
   return [{ window: "mo", usedPercent: clamp(used), resetsAt: typeof data.billingCycleEnd === "string" ? Date.parse(data.billingCycleEnd) || null : null }];
 }
 
-/** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> with { claude: [{ window, usedPercent, resetsAt }], codex: [...] } replaces the Claude and Codex endpoints (Cursor always uses its real poller). */
-const fixture = (provider: LimitProvider): (() => Promise<Polled>) | undefined => process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" ? async () => (await readJson(process.env.PI_PROJECTS_LIMITS_FIXTURE!))?.[provider] ?? [] : undefined;
+/** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> with { claude: [{ window, usedPercent, resetsAt }], codex: [...] } replaces the Claude and Codex endpoints (Cursor always uses its real poller). `claudeFail` / `codexFail` ("unreachable" or "auth") make that poll fail the way the real one does. */
+const fixture = (provider: LimitProvider): (() => Promise<Polled>) | undefined => process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" ? async () => {
+  const data = await readJson(process.env.PI_PROJECTS_LIMITS_FIXTURE!), fail = data?.[`${provider}Fail`];
+  if (fail === "unreachable") throw unreachable(LABELS[provider]);
+  if (fail === "auth") throw new Retry(`${LABELS[provider]} rejected the sign-in (HTTP 401). Pi renews it before it expires; if this stays, sign in again`, null, true);
+  return data?.[provider] ?? [];
+} : undefined;
 const pollerOf = (provider: LimitProvider): (() => Promise<Polled>) => fixture(provider) ?? (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor);
 
-/** `manual` (the refresh button) skips the minimum interval, the failure backoff and the passive-sample shortcut, but is rate-limited per provider. */
-function refreshProvider(provider: LimitProvider, now: number, manual = false): Promise<void> {
+/**
+ * `manual` (the refresh button) skips the minimum interval, the failure backoff and the passive-sample shortcut, but is rate-limited per provider.
+ * `visit` (a page load or the tab coming back) retries a provider that is in a failure state instead of showing its old error until the backoff ends;
+ * it still waits out a provider's own Retry-After and the per-provider cooldown. Otherwise only the normal schedule applies.
+ */
+type RefreshMode = "auto" | "manual" | "visit";
+function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode = "auto"): Promise<void> {
   const own = entry(provider);
   if (own.inflight) return own.inflight;
-  if (manual) {
+  if (mode === "manual") {
     if (now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
     own.lastManualAt = now;
+  } else if (mode === "visit" && own.failures > 0) {
+    if (now < own.holdUntil || now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
   } else {
     const fresh = [...own.samples.values()].some(sample => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
     if (now < own.nextAttemptAt || fresh) return Promise.resolve();
@@ -170,12 +224,14 @@ function refreshProvider(provider: LimitProvider, now: number, manual = false): 
   own.nextAttemptAt = now + MIN_POLL_MS;
   own.inflight = pollerOf(provider)().then(samples => {
     record(provider, "endpoint", samples);
-    own.failures = 0; own.reason = samples.length ? null : "The provider returned no usage windows"; own.unavailable = false;
+    own.failures = 0; own.holdUntil = 0; own.reason = samples.length ? null : "The provider returned no usage windows"; own.unavailable = false;
   }, error => {
     own.failures++;
     own.reason = error instanceof Error ? error.message : "Usage request failed";
     own.unavailable = error instanceof Retry && error.signedOut;
-    own.nextAttemptAt = Date.now() + Math.min(MAX_BACKOFF_MS, Math.max((error instanceof Retry ? error.afterMs : null) ?? 0, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
+    const afterMs = error instanceof Retry ? error.afterMs : null;
+    own.holdUntil = afterMs ? Date.now() + afterMs : 0;
+    own.nextAttemptAt = Date.now() + Math.min(MAX_BACKOFF_MS, Math.max(afterMs ?? 0, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
   }).finally(() => { own.inflight = undefined; });
   return own.inflight;
 }
@@ -223,8 +279,8 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
 }
 
 /** Normalized state for the browser. Triggers at most one poll per provider per 5 minutes (plus backoff after failures); `refresh` polls now. */
-export async function limitsSnapshot(now = Date.now(), refresh = false): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
-  await Promise.all((Object.keys(LABELS) as LimitProvider[]).map(provider => refreshProvider(provider, now, refresh)));
+export async function limitsSnapshot(now = Date.now(), refresh: boolean | "visit" = false): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
+  await Promise.all((Object.keys(LABELS) as LimitProvider[]).map(provider => refreshProvider(provider, now, refresh === true ? "manual" : refresh === "visit" ? "visit" : "auto")));
   const providers = (Object.keys(LABELS) as LimitProvider[]).map((provider): ProviderLimits => {
     const own = entry(provider), samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window));
     return { provider, label: LABELS[provider], samples, status: samples.length ? "ok" : own.unavailable ? "unavailable" : "no-data", reason: own.reason, lastAttemptAt: own.lastAttemptAt, nextAttemptAt: own.nextAttemptAt || null, ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}) };

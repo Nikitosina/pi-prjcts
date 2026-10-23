@@ -322,6 +322,26 @@ try {
   result.checks.push('B3 the browser payload is normalized samples only; no tokens or raw provider responses');
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
 
+  // Network outage: the item says it could not reach the provider (never "sign-in expired"), keeps the last numbers, and recovers after a refresh.
+  await delay(16000);
+  const fixtureNow = JSON.parse(readFileSync(join(root, 'limits.json'), 'utf8'));
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ ...fixtureNow, claudeFail: 'unreachable' }));
+  await click('#limits-bar .lim-refresh', s);
+  await waitFor(`/Couldn.t reach Claude, will retry/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`, s, 'unreachable message');
+  const outage = await evaluate(`document.querySelector('.lim[data-provider="claude"] .lim-pop').textContent`, s);
+  if (/sign-in|expired/i.test(outage) || !/Last refresh failed/.test(outage)) throw Error('Outage message wrong: ' + outage);
+  const claudeBox = await box('#limits-bar .lim[data-provider="claude"]', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((claudeBox.left + claudeBox.right) / 2), y: Math.round((claudeBox.top + claudeBox.bottom) / 2) }, s);
+  await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`, s, 'outage details');
+  await shot('10-limits-unreachable', s);
+  result.checks.push('B5 a network failure reads "Couldn\'t reach Claude, will retry" (not sign-in expired) and keeps the last numbers');
+  await delay(16000);
+  writeFileSync(join(root, 'limits.json'), JSON.stringify(fixtureNow));
+  await click('#limits-bar .lim-refresh', s);
+  await waitFor(`!/Last refresh failed/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`, s, 'recovered');
+  result.checks.push('B6 once the network is back a refresh clears the message');
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
+
   // Narrow.
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send('Page.navigate', { url: launch.toString() }, s);

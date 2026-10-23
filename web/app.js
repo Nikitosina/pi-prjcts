@@ -3970,9 +3970,10 @@ async function loadMachine() {
   if (loaded && typeof loaded === "object") { machine = loaded; renderMachine(); }
 }
 setInterval(() => void loadMachine(), 10000);
-async function loadLimits() {
+async function loadLimits(visit = false) {
   if (document.hidden) return;
-  const loaded = await api({ action: "limits-snapshot" }).catch(() => null);
+  // A page load or the tab coming back retries a provider that is showing an error instead of waiting out its backoff.
+  const loaded = await api({ action: "limits-snapshot", ...(visit ? { visit: true } : {}) }).catch(() => null);
   if (loaded?.providers) { limits = loaded; renderLimits(); }
 }
 setInterval(() => void loadLimits(), 5 * 60000);
@@ -3983,8 +3984,8 @@ function scheduleLimitsWatch() {
   if (limits?.providers.find(item => item.provider === "cursor")?.connect?.state === "waiting") limitsWatch = setInterval(() => void loadLimits().then(scheduleLimitsWatch), 3000);
 }
 setInterval(renderLimits, 30000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { void loadLimits(); void loadMachine(); } });
-void loadLimits();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { void loadLimits(true); void loadMachine(); } });
+void loadLimits(true);
 void loadMachine();
 void start();
 
