@@ -464,6 +464,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     registry.install(workerManagement.extension);
     registry.install(github.extension);
     registry.install(shell.extension);
+    registry.install(gh.extension);
     registry.install(vcs.extension);
     for (const extension of pluginExtensions) registry.install(extension);
     registry.install(skillFiles.extension);
