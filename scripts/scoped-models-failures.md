@@ -24,7 +24,7 @@ Verified by `scripts/scoped-models-e2e.mjs` (isolated host, local fake provider 
 - S13 `projects_worker_control` still offers `parallelism`, a second owner of the worker limit next to the project setting.
 
 ## UI
-- S14 The coordinator panel has no model control; cycling means opening Settings.
+- S14 The coordinator panel has no model control; cycling means opening Settings. Ctrl+P must also work outside the composer, and repeated cycling must preserve the focused field, draft and selection. Open dialogs must not cycle the project model.
 - S15 Settings has three always-explicit role pickers with no "inherit" choice and no scope editor.
 
 ## Review findings

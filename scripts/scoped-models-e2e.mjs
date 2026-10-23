@@ -123,12 +123,17 @@ try {
   await eventually(async () => (await settings()).values.model === 'fake/fake-model', 'button did not cycle forward with wrap-around');
   check('S14 the button cycles forward through the scope and wraps', true);
   await waitFor(`/fake-model/.test(document.querySelector('#model-cycle').textContent)`, page, 'button label');
-  await evaluate(`document.querySelector('#compose textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }))`, page);
+  await evaluate(`(() => { const textarea = document.querySelector('#compose textarea'); textarea.value = 'keep this draft'; textarea.focus(); textarea.setSelectionRange(3, 7); document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); })()`, page);
   await eventually(async () => (await settings()).values.model === 'fake/fake-three', 'Shift+Ctrl+P did not cycle backward');
-  check('S14 Shift+Ctrl+P in the composer cycles backward', true);
-  await evaluate(`document.querySelector('#compose textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`, page);
+  await waitFor(`/fake-three/.test(document.querySelector('#model-cycle').textContent) && !document.querySelector('#compose textarea').disabled`, page, 'backward cycle rendered');
+  check('S14 cycling retains composer focus, draft and selection', await evaluate(`(() => { const t = document.querySelector('#compose textarea'); return document.activeElement === t && t.value === 'keep this draft' && t.selectionStart === 3 && t.selectionEnd === 7; })()`, page));
+  await evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`, page);
   await eventually(async () => (await settings()).values.model === 'fake/fake-model', 'Ctrl+P did not cycle forward');
-  check('S14 Ctrl+P in the composer cycles forward', true);
+  await waitFor(`/fake-model/.test(document.querySelector('#model-cycle').textContent) && !document.querySelector('#compose textarea').disabled`, page, 'forward cycle rendered');
+  check('S14 repeated Ctrl+P retains composer focus', await evaluate(`document.activeElement === document.querySelector('#compose textarea')`, page));
+  await evaluate(`document.activeElement.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`, page);
+  await eventually(async () => (await settings()).values.model === 'fake/fake-two', 'Ctrl+P outside composer did not cycle forward');
+  check('S14 Ctrl+P cycles without composer focus', true);
   // A configured scope that resolves to nothing usable blocks cycling; it never widens to every configured model.
   const dead = (await rpc({ action: 'model-picker-snapshot' })).items.find(model => !model.configured)?.reference;
   check('S18 fixture has an installed model without credentials', !!dead, dead);
@@ -161,6 +166,9 @@ try {
 
   await evaluate(`document.querySelector('#settings-button').click()`, page);
   await waitFor(`!!document.querySelector('[data-settings-form]')`, page, 'settings form');
+  await evaluate(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`, page);
+  await delay(300);
+  check('S14 Ctrl+P leaves the project model unchanged inside a dialog', (await settings()).values.model === 'fake/fake-model');
   await shot('02-settings-models', page);
   check('S15 worker, scout and reviewer default to inherit the coordinator', JSON.parse(await evaluate(`JSON.stringify(['worker','scout','reviewer'].map(role => { const mp = document.querySelector('.mp[data-role="' + role + '"]'); return [mp.dataset.value, /Inherit coordinator/.test(mp.innerText)]; }))`, page)).every(([value, label]) => value === '' && label));
   check('S15 the scope editor lists the project scope as checked', JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('[data-scope-ref]')].filter(box => box.checked).map(box => box.dataset.scopeRef))`, page)).length === 3);

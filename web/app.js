@@ -438,7 +438,6 @@ function render() {
   applySearchFocus();
 }
 
-// The model button in the composer: shows the coordinator model; a click (or Ctrl+P, Shift+Ctrl+P backwards) switches to the next scoped model.
 function renderModelCycle() {
   const button = document.querySelector("#model-cycle"), reference = view?.project?.model;
   button.hidden = !reference;
@@ -455,8 +454,14 @@ async function cycleModel(step) {
   const at = list.indexOf(view.project.model), next = list[(at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length)];
   if (!next || next === view.project.model) { toast("There is no other scoped model to switch to. Edit the scope in Settings."); return; }
   const settings = await api({ action: "settings-snapshot", id: projectId });
-  await mutate({ action: "settings-update", id: projectId, confirm: projectId, expectedRevision: settings.revision, changes: { model: next } }, `Coordinator model: ${modelCache.get(next)?.name ?? next}. New threads follow it.`);
-  settingsCache = null;
+  const focused = document.activeElement, id = projectId, chat = chatId;
+  try {
+    await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { model: next } }, `Coordinator model: ${modelCache.get(next)?.name ?? next}. New threads follow it.`);
+    settingsCache = null;
+  } finally {
+    // Disabling the composer during the update drops focus; do not steal it from another field or dialog.
+    if (projectId === id && chatId === chat && !dialog.open && document.activeElement === document.body && focused?.isConnected && !focused.disabled) focused.focus({ preventScroll: true });
+  }
 }
 function renderContextMeter(context) {
   const meter = document.querySelector("#compose .context-meter");
@@ -2791,7 +2796,7 @@ document.addEventListener("keydown", event => {
   const picker = event.target.closest?.(".mp");
   if (picker && !event.isComposing && mpKey(event, picker)) return;
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) { event.preventDefault(); openSearch(); return; }
-  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key?.toLowerCase() === "p" && !event.isComposing && !dialog.open && event.target.closest?.("#compose textarea")) { event.preventDefault(); void uiAction(() => cycleModel(event.shiftKey ? -1 : 1)); return; }
+  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key?.toLowerCase() === "p" && !event.isComposing && !dialog.open && projectId && view) { event.preventDefault(); if (!busy) void uiAction(() => cycleModel(event.shiftKey ? -1 : 1)); return; }
   if (event.target.id === "search-input" && !event.isComposing) {
     const count = searchState.results.length;
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) { event.preventDefault(); searchState.active = (searchState.active + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSearchResults(); }
