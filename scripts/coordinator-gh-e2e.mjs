@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { coordinatorGhTools, ghEnabled, runGh } from "../src/coordinator-gh.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "gh-e2e-")));
@@ -73,4 +74,8 @@ assert.equal(missing.exitCode, 127);
 assert.match(missing.problem, /gh not installed/);
 await assert.rejects(call({ args: ["auth", "status"] }), /gh not installed/);
 process.env.PATH = originalPath;
+
+// 8. The durable runtime must install the gh extension; without it projects_gh is missing after a fresh open.
+const runtimeSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "durable-runtime.ts"), "utf8");
+assert.match(runtimeSource, /registry\.install\(gh\.extension\);/, "durable-runtime.ts must call registry.install(gh.extension)");
 console.log("coordinator-gh: all checks passed");

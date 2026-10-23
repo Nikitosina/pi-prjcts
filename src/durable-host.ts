@@ -17,35 +17,61 @@ export async function openDurableHost(project: Project, configuredSkillLoader?: 
   } catch (error) { await owner.close(); throw error; }
 }
 
+type JobLedger = ReturnType<typeof jobs>;
+// Brings a chat's job ledger in line with the runtime's submissions. The ledger of the chat being viewed is always saved; others only when something changed.
+function settleLedger(projectId: string, ledger: JobLedger, submissions: DurableSubmissionState[], alwaysSave: boolean): void {
+  for (const job of ledger) {
+    const submission = submissions.find(item => item.requestId === job.id);
+    if (!submission) continue;
+    const before = `${job.state}\0${job.error}`, wasSettled = job.state === "done" || job.state === "failed";
+    switch (submission.status) {
+      case "queued": job.state = "queued"; job.error = null; break;
+      case "placed": job.state = "running"; job.error = null; break;
+      case "done": job.state = "done"; job.error = null; break;
+      case "unanswered": job.state = submission.reason === "aborted" ? "interrupted" : "failed"; job.error = submission.detail ? `${submission.reason}: ${submission.detail}` : submission.reason; break;
+      default: { const exhaustive: never = submission.status; throw new Error(String(exhaustive)); }
+    }
+    // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
+    if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
+    if (`${job.state}\0${job.error}` !== before || alwaysSave) saveJob(projectId, job);
+  }
+}
+
+export type ProjectActivity = { working: boolean; needs: boolean; finishedAt: number };
+
+// Live state of one open project for the sidebar, whichever project the browser is looking at: a coordinator turn or worker running or queued,
+// a failed newest turn or a blocked worker, and when anything last finished. Same rules the chat tabs use, so the dots agree.
+export async function durableHostActivity(owner: DurableProjectRuntime, projectId: string): Promise<ProjectActivity> {
+  const chats = (await owner.chats()).filter(chat => !chat.archived);
+  const all = jobs(projectId);
+  let needs = false, finishedAt = 0;
+  for (const chat of chats) {
+    const ledger = all.filter(job => (job.chatId ?? "main") === chat.id);
+    if (ledger.some(job => job.state === "queued" || job.state === "running")) settleLedger(projectId, ledger, await owner.chatSubmissions(chat.id), false);
+    if (ledger.findLast(job => job.state === "done" || job.state === "failed")?.state === "failed") needs = true;
+    for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
+  }
+  const work = (await owner.planSnapshot()).work.filter(item => !item.archived);
+  for (const item of work) if (item.status === "completed") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
+  return {
+    working: chats.some(chat => chat.busy) || work.some(item => item.status === "running" || item.status === "queued"),
+    needs: needs || work.some(item => item.status === "blocked"),
+    finishedAt,
+  };
+}
+
 export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string, focus?: number): Promise<Snapshot> {
   const view = await owner.snapshot(chatId);
   const paused = (await owner.planSnapshot()).paused;
   const project = loadProject(view.project.id);
   // Each chat has its own ledger; jobs without a chat belong to Main. Unsettled jobs of other chats are settled too, so attention covers every chat.
   const all = jobs(project.id), ledgerOf = (id: string) => all.filter(job => (job.chatId ?? "main") === id);
-  const settle = (ledger: typeof all, submissions: DurableSubmissionState[]) => {
-    for (const job of ledger) {
-      const submission = submissions.find(item => item.requestId === job.id);
-      if (!submission) continue;
-      const before = `${job.state}\0${job.error}`, wasSettled = job.state === "done" || job.state === "failed";
-      switch (submission.status) {
-        case "queued": job.state = "queued"; job.error = null; break;
-        case "placed": job.state = "running"; job.error = null; break;
-        case "done": job.state = "done"; job.error = null; break;
-        case "unanswered": job.state = submission.reason === "aborted" ? "interrupted" : "failed"; job.error = submission.detail ? `${submission.reason}: ${submission.detail}` : submission.reason; break;
-        default: { const exhaustive: never = submission.status; throw new Error(String(exhaustive)); }
-      }
-      // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
-      if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
-      if (`${job.state}\0${job.error}` !== before || ledger === viewed) saveJob(project.id, job);
-    }
-  };
   const viewed = ledgerOf(view.chatId);
-  settle(viewed, view.coordinator.submissions);
+  settleLedger(project.id, viewed, view.coordinator.submissions, true);
   for (const chat of view.chats) {
     if (chat.id === view.chatId) continue;
     const ledger = ledgerOf(chat.id);
-    if (ledger.some(job => job.state === "queued" || job.state === "running")) settle(ledger, await owner.chatSubmissions(chat.id));
+    if (ledger.some(job => job.state === "queued" || job.state === "running")) settleLedger(project.id, ledger, await owner.chatSubmissions(chat.id), false);
   }
   // Per chat, only the newest settled turn decides attention; a later success clears an earlier failure.
   const failure = (id: string) => { const settled = ledgerOf(id).findLast(job => job.state === "done" || job.state === "failed"); return settled?.state === "failed" ? settled.error : null; };
