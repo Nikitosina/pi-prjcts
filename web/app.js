@@ -2103,10 +2103,19 @@ document.addEventListener("click", event => {
   lightboxOpener = img; img.tabIndex = -1;
   lightboxImg.src = img.currentSrc; lightboxImg.alt = img.alt;
   lightboxCaption.textContent = img.alt; lightboxCaption.hidden = !img.alt;
-  lightbox.showModal(); lightbox.querySelector(".lightbox-x").focus();
+  lightbox.showModal(); fitLightbox(); lightbox.querySelector(".lightbox-x").focus();
 });
+// Scale to the stage (90% of the viewport minus the caption) in both directions: CSS max-* alone would never enlarge a small image.
+function fitLightbox() {
+  const { naturalWidth: w, naturalHeight: h } = lightboxImg.naturalWidth ? lightboxImg : lightboxOpener ?? lightboxImg;
+  if (!lightbox.open || !w || !h) return;
+  const caption = lightboxCaption.hidden ? 0 : lightboxCaption.offsetHeight + 10;
+  const scale = Math.min(innerWidth * 0.9 / w, (innerHeight * 0.9 - caption) / h);
+  lightboxImg.style.width = `${Math.floor(w * scale)}px`; lightboxImg.style.height = `${Math.floor(h * scale)}px`;
+}
+addEventListener("resize", fitLightbox); lightboxImg.addEventListener("load", fitLightbox);
 lightbox.addEventListener("click", event => { if (event.target === lightbox || event.target.closest(".lightbox-x") || event.target.tagName === "FIGURE") lightbox.close(); });
-lightbox.addEventListener("close", () => { lightboxImg.removeAttribute("src"); const back = lightboxOpener?.isConnected ? lightboxOpener : lightboxOpener && [...document.querySelectorAll(".msg .text img")].find(img => img.src === lightboxOpener.src); if (back) { back.tabIndex = -1; back.focus(); } lightboxOpener = null; });
+lightbox.addEventListener("close", () => { if (lightbox.open) return; /* stale event from a close that was followed by a reopen */ lightboxImg.removeAttribute("src"); lightboxImg.removeAttribute("style"); const back = lightboxOpener?.isConnected ? lightboxOpener : lightboxOpener && [...document.querySelectorAll(".msg .text img")].find(img => img.src === lightboxOpener.src); if (back) { back.tabIndex = -1; back.focus(); } lightboxOpener = null; });
 document.addEventListener("click", event => {
   // In a worker chat, artifact links and images reveal the file in the browser column instead of downloading.
   const ref = event.target.closest?.("#worker-messages .artifact-ref:not([data-state=missing])");

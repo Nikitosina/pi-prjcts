@@ -17,7 +17,7 @@ const respond = async ({ coordinator, userText, results, tools, say, call }) => 
   if (/BROWSE-A/.test(userText)) {
     if (results.length === 0) return call('bash', { command: [
       'echo "DIR=$PI_ARTIFACTS_DIR"', 'cd "$PI_ARTIFACTS_DIR"', 'mkdir -p docs data logs a/b/c "my notes"',
-      `cp ${root}/shot.png shot.png`, `cp ${root}/demo.webm demo.webm`,
+      `cp ${root}/shot.png shot.png`, `cp ${root}/tiny.png tiny.png`, `cp ${root}/demo.webm demo.webm`,
       `printf '# Report title\\n\\nSome **bold** text <script>window.__xss=1</script>\\n\\n- item one\\n' > docs/readme.md`,
       `printf '{"ok":true,"items":[1,2]}' > data/result.json`,
       `yes 'LOG-LINE-0123456789 padding padding padding' | head -c 700000 > logs/big.log && printf 'TAIL-MARKER-END\\n' >> logs/big.log`,
@@ -26,7 +26,7 @@ const respond = async ({ coordinator, userText, results, tools, say, call }) => 
       `printf x > "<img src=x onerror=window.__xss=1>.txt"`, 'sleep 1.2', `printf newest > zz-newest.txt`,
     ].join(' && ') });
     const thread = /DIR=\S*\/artifacts\/([0-9a-f-]{36})/.exec(results[0] ?? '')?.[1];
-    return say(`BROWSE-DONE\n\n![Screenshot](artifact:${thread}/shot.png)\n\nSummary: [readme](artifact:${thread}/docs/readme.md) and [deep](artifact:${thread}/a/b/c/deep.txt)`);
+    return say(`BROWSE-DONE\n\n![Screenshot](artifact:${thread}/shot.png)\n\n![Tiny sunrise](artifact:${thread}/tiny.png)\n\nSummary: [readme](artifact:${thread}/docs/readme.md) and [deep](artifact:${thread}/a/b/c/deep.txt)`);
   }
   if (/BROWSE-B/.test(userText)) {
     if (results.length === 0) return call('bash', { command: 'cd "$PI_ARTIFACTS_DIR" && printf second > second.txt' });
@@ -54,14 +54,20 @@ try {
     const c = document.createElement('canvas'); c.width = 320; c.height = 200; const g = c.getContext('2d');
     g.fillStyle = '#c2653a'; g.fillRect(0, 0, 320, 200); g.fillStyle = '#fff'; g.font = '28px sans-serif'; g.fillText('ARTIFACT', 80, 110);
     const png = c.toDataURL('image/png').split(',')[1];
+    // Genuinely small, recognizable 96x64 image: sky, sun, hills.
+    const t = document.createElement('canvas'); t.width = 96; t.height = 64; const tg = t.getContext('2d');
+    tg.fillStyle = '#7fb8e6'; tg.fillRect(0, 0, 96, 64); tg.fillStyle = '#ffd23f'; tg.beginPath(); tg.arc(68, 26, 12, 0, 7); tg.fill();
+    tg.fillStyle = '#3f8f4f'; tg.beginPath(); tg.moveTo(0, 64); tg.lineTo(0, 44); tg.quadraticCurveTo(30, 24, 60, 48); tg.lineTo(96, 40); tg.lineTo(96, 64); tg.fill();
+    const tiny = t.toDataURL('image/png').split(',')[1];
     const rec = new MediaRecorder(c.captureStream(15), { mimeType: 'video/webm' }); const parts = [];
     rec.ondataavailable = e => parts.push(e.data); const done = new Promise(ok => rec.onstop = ok); rec.start(100);
     for (let i = 0; i < 12; i++) { g.fillStyle = 'hsl(' + i * 30 + ',70%,50%)'; g.fillRect(i * 20, 0, 20, 200); await new Promise(ok => setTimeout(ok, 80)); }
     rec.stop(); await done;
     const buf = new Uint8Array(await new Blob(parts, { type: 'video/webm' }).arrayBuffer()); let bin = ''; for (const b of buf) bin += String.fromCharCode(b);
-    return { png, webm: btoa(bin) };
+    return { png, tiny, webm: btoa(bin) };
   })()`, s);
   writeFileSync(join(root, 'shot.png'), Buffer.from(media.png, 'base64'));
+  writeFileSync(join(root, 'tiny.png'), Buffer.from(media.tiny, 'base64'));
   writeFileSync(join(root, 'demo.webm'), Buffer.from(media.webm, 'base64'));
   check('fixtures: browser-made PNG and webm', media.png.length > 100 && media.webm.length > 1000);
 
@@ -74,7 +80,7 @@ try {
   const [threadA, threadB, threadC] = ['BROWSE-A', 'BROWSE-B', 'BROWSE-C'].map(threadOf);
   const listingA = await rpc({ action: 'artifacts-list', id, threadId: threadA });
   const dirA = join(k.home, id, 'artifacts', threadA);
-  check('setup: fake worker saved nested, unicode, large and hostile files', listingA.files.length === 11 && listingA.files.some(f => f.path === 'a/b/c/deep.txt') && listingA.files.some(f => f.path === 'my notes/résumé 日本.txt'), listingA.files.map(f => f.path));
+  check('setup: fake worker saved nested, unicode, large and hostile files', listingA.files.length === 12 && listingA.files.some(f => f.path === 'a/b/c/deep.txt') && listingA.files.some(f => f.path === 'my notes/résumé 日本.txt'), listingA.files.map(f => f.path));
 
   const url = new URL(web.url); url.searchParams.set('project', id); url.searchParams.set('tab', 'coordinator');
   await send('Page.navigate', { url: url.toString() }, s);
@@ -193,6 +199,23 @@ try {
   check('V5 a backdrop click closes it', !(await lbState()).open);
   await evaluate(`(() => { const i = document.createElement('img'); i.id = 'chrome-img'; i.src = ${chatImg}.src; document.querySelector('.app').append(i); i.click(); })()`, s);
   check('V6 an image outside chat messages does not open it', !(await lbState()).open && await evaluate(`document.querySelector('#chrome-img').remove(), true`, s));
+  // Sizing: the visible content (not just the element box) must exceed both the inline rendering and the intrinsic size, at the original aspect ratio.
+  const sizes = async (selector, width, height) => evaluate(`(() => { if (${lb}.open) ${lb}.close(); const chat = document.querySelector(${q(selector)}); chat.click(); const i = ${lb}.querySelector('img'), r = i.getBoundingClientRect(), n = { w: i.naturalWidth, h: i.naturalHeight }, c = chat.getBoundingClientRect();
+    const f = getComputedStyle(i).objectFit === 'contain' ? Math.min(r.width / n.w, r.height / n.h) : 1; const vis = { w: n.w * f, h: n.h * f };
+    return { natural: n, inline: { w: c.width, h: c.height }, element: { w: r.width, h: r.height }, visible: vis, rect: { l: r.left, t: r.top, r: r.right, b: r.bottom }, vw: innerWidth, vh: innerHeight, ratioErr: Math.abs(vis.w / vis.h - n.w / n.h), overflowX: document.documentElement.scrollWidth > innerWidth, caption: ${lb}.querySelector('figcaption').textContent }; })()`, s);
+  const grown = (a, label) => a.visible.w > a.inline.w && a.visible.w > a.natural.w && a.visible.h > a.natural.h && a.ratioErr < 0.02 && a.rect.l >= 0 && a.rect.t >= 0 && a.rect.r <= a.vw && a.rect.b <= a.vh && !a.overflowX && a.visible.w <= a.vw * 0.9 + 1 && a.visible.h <= a.vh * 0.9 + 1;
+  const tinyImg = `#worker-messages img.artifact-media[alt="Tiny sunrise"]`;
+  const small = await sizes(tinyImg);
+  result.viewerSizes = { desktopSmall: small };
+  check('V8 desktop: a 96x64 image is enlarged well past its inline and intrinsic size, aspect kept, inside the viewport', small.natural.w === 96 && small.visible.w > small.inline.w * 4 && grown(small), small);
+  await delay(200);
+  check('V8 the viewer still shows the image after rendering settles', await evaluate(`${lb}.open && !!${lb}.querySelector('img').getAttribute('src') && ${lb}.querySelector('img').complete`, s));
+  await shot('07-lightbox-1440-small', s);
+  await evaluate(`${lb}.close()`, s);
+  const large = await sizes(`#worker-messages img.artifact-media[alt="Screenshot"]`);
+  result.viewerSizes.desktopLarge = large;
+  check('V9 desktop: the 320x200 image is enlarged as well, aspect kept', large.natural.w === 320 && grown(large), large);
+  await evaluate(`${lb}.close()`, s);
   await evaluate(`[...document.querySelectorAll('#worker-messages .artifact-ref a')].find(a => a.textContent === 'deep').click()`, s);
   await waitFor(`document.querySelector('#artifact-tree .artifact-file.on')?.dataset.path === 'a/b/c/deep.txt'`, s, 'link still selects a file');
   await shot('03-three-columns', s);
@@ -213,10 +236,12 @@ try {
   await delay(400);
   check('F13 390px: the worker view fits the screen with the file list', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1 && document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s));
   await shot('04-mobile-worker-view', s);
-  await evaluate(`${chatImg}.click()`, s);
-  const narrow = await lbState();
-  check('V7 390px: the open viewer fits the screen with no horizontal overflow', narrow.open && narrow.fits && !narrow.overflowX, narrow);
-  await delay(200); await shot('06-lightbox-390', s);
+  const narrowLarge = await sizes(`#worker-messages img.artifact-media[alt="Screenshot"]`), narrowSmall = await sizes(tinyImg);
+  result.viewerSizes.mobileSmall = narrowSmall; result.viewerSizes.mobileLarge = narrowLarge;
+  check('V7 390px: the open viewer fits the screen with no horizontal overflow, content enlarged, aspect kept', (await lbState()).open && grown(narrowSmall) && grown(narrowLarge) && narrowLarge.visible.w > 300, { narrowSmall, narrowLarge });
+  await delay(200);
+  check('V7 the viewer still shows the image after rendering settles', await evaluate(`${lb}.open && !!${lb}.querySelector('img').getAttribute('src') && ${lb}.querySelector('img').complete`, s));
+  await shot('06-lightbox-390', s);
   await evaluate(`${lb}.close()`, s);
   check('F15 no browser console or HTTP errors', result.errors.length === 0 && result.httpErrors.length === 0, { errors: result.errors, http: result.httpErrors });
   result.status = 'passed';
