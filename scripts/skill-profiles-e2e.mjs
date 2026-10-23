@@ -258,10 +258,10 @@ try {
   await ask('MARK-S stale');
   const stale = lastCall('scout', 'S-TASK stale');
   check('S7 a stale saved name is ignored', stale && index(stale.system).join() === 'glob-alpha,glob-delta,glob-gamma,repo-one', stale && index(stale.system));
-  // A skill installed later is on without touching the profiles (opt-outs are stored, not the list of what is on).
+  // A skill installed later is on without touching the profiles (opt-outs are stored, not the list of what is on). The objective change reopens the project (workerCap is live now and would not reload skills).
   skill(join(agentDir, 'skills', 'glob-late'), 'glob-late', 'Global skill installed after the profiles were saved.');
   settings = await rpc({ action: 'settings-snapshot', id });
-  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { workerCap: 2 } });
+  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { objective: 'Skills installed later' } });
   await ask('MARK-W late');
   check('S22 a skill installed later is on for workers while the saved opt-outs still apply', index(lastCall('worker', 'W-TASK late').system).join() === 'glob-beta,glob-delta,glob-gamma,glob-late,repo-one', index(lastCall('worker', 'W-TASK late').system));
   settings = await rpc({ action: 'settings-snapshot', id });
