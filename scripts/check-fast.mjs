@@ -21,7 +21,7 @@ const all = discover();
 const sources = Object.fromEntries(all.map(n => [n, readFileSync(join(repo, 'scripts', `${n}.mjs`), 'utf8')]));
 const picked = new Set(), reasons = [];
 const add = (names, why) => { for (const n of names) picked.add(n); if (names.length) reasons.push(`${why} -> ${names.length} script(s)`); };
-const pick = patterns => select(all, patterns.filter(p => all.some(n => globRe(p.replace(/^scripts\//, '')).test(n) || all.includes(p + '-e2e') || all.includes(p))));
+const pick = patterns => { const usable = patterns.filter(p => all.some(n => globRe(p.replace(/^scripts\//, '')).test(n) || all.includes(p + '-e2e') || all.includes(p))); return usable.length ? select(all, usable) : []; };
 
 let everything = false;
 for (const file of changed) {
