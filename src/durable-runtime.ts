@@ -832,12 +832,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
         assertOpen();
         const next = modelRef(selection.model), roles = explicitModels(selection);
         const moved = next.provider !== coordinatorModel.provider || next.modelId !== coordinatorModel.modelId;
-        if (moved && (await chatList()).some(chat => chat.busy)) throw new Error("Model changes need an idle coordinator: a chat is working. Try again when it finishes.");
         assertConfiguredModel(models, next.provider, next.modelId, "Coordinator");
         for (const [role, ref] of Object.entries(roles)) assertConfiguredModel(models, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
         coordinatorModel = next; roleModels = roles;
         if (!moved) return;
-        // Main and every chat run the same coordinator agent; each takes the model for its next generation.
+        // Durable pins in-flight request models; configure changes only subsequent requests.
         await root.configure({ model: next }, context);
         for (const id of await chatConversationIds()) await (await openedHarness.conversation(id, context))?.configure({ model: next }, context);
       }),

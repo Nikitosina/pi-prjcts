@@ -277,7 +277,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
       // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
-      // A model change is refused only while a coordinator turn runs, so no generation in flight is altered.
       if (Object.keys(input.changes).every(key => LIVE_SETTINGS.has(key))) {
         await validateProjectModelChanges(input.changes);
         return withProjectLock(input.id, async () => {

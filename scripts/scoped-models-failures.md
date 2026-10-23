@@ -16,7 +16,7 @@ Verified by `scripts/scoped-models-e2e.mjs` (isolated host, local fake provider 
 
 ## Cycling
 - S9 Changing the coordinator model requires an idle worker queue and closes and reopens the project runtime, so it aborts nothing but is refused while workers run.
-- S10 A model change while a coordinator turn is in flight mutates the running generation instead of being refused.
+- S10 A model change while a coordinator request is in flight is refused, interrupts or restarts that request, or fails to apply to the next request, including a queued follow-up in another existing chat. The held request must finish once with its original model; the new selection must survive restart.
 - S11 After a model change the chats and Main disagree on the model (only the root is reconfigured).
 - S12 The new model does not survive a host restart.
 

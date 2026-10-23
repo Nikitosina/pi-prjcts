@@ -456,7 +456,7 @@ async function cycleModel(step) {
   const settings = await api({ action: "settings-snapshot", id: projectId });
   const focused = document.activeElement, id = projectId, chat = chatId;
   try {
-    await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { model: next } }, `Coordinator model: ${modelCache.get(next)?.name ?? next}. New threads follow it.`);
+    await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { model: next } }, `Coordinator model: ${modelCache.get(next)?.name ?? next}. Next requests and new threads use it.`);
     settingsCache = null;
   } finally {
     // Disabling the composer during the update drops focus; do not steal it from another field or dialog.
@@ -3201,7 +3201,7 @@ async function settingsList(keep = false) {
 <h3>Workers</h3>
 <div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
 <details class="advanced"><summary>Access to project functions</summary><div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}</div></details>
-<p class="note">Model and scope changes apply at once to new threads and need an idle coordinator. The worker limit applies at once and never stops running work. Other changes need an idle project. You review every change before it is saved.</p>
+<p class="note">Model changes apply to the next request without interrupting current work. New threads use the current role selections. The worker limit applies at once and never stops running work. Other changes need an idle project. You review every change before it is saved.</p>
 ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { action: "close-dialog" }), '<button type="submit" class="primary" data-off disabled>Review changes</button>')}</form>`);
   settingsSync();
 }

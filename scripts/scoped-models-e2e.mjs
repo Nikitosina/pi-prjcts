@@ -92,19 +92,26 @@ try {
   await k.ask(id, 'main', 'MARK-DELC with an explicit scout model');
   check('S3 an explicit scout model overrides inheritance', (await plan()).work.find(work => /MARK-DELCTASK/.test(work.text))?.attempt.model === 'fake/fake-model');
 
-  // A turn in flight is never mutated.
+  // Hold an actual provider request, not just a turn waiting to start.
   let free; brain.held = new Promise(ok => { free = ok; });
-  await rpc({ action: 'message', id, text: 'MARK-BUSY hold this turn' });
-  await eventually(async () => (await show()).busy, 'coordinator never became busy');
-  check('S10 a model change is refused while a coordinator turn runs', await fails(() => update({ model: 'fake/fake-two' }), /idle coordinator/));
-  check('S10 the refused change was not saved', (await settings()).values.model === 'fake/fake-three');
-  free(); await eventually(async () => !(await show()).busy, 'busy turn did not finish');
+  await rpc({ action: 'message', id, chatId: chat.id, text: 'MARK-BUSY hold this turn' });
+  await eventually(async () => result.calls.some(call => call.coordinator && call.marker === 'MARK-BUSY'), 'held provider request never started');
+  values = (await update({ model: 'fake/fake-two' })).values;
+  check('S10 a busy coordinator accepts and saves the new model', values.model === 'fake/fake-two');
+  await k.ask(id, 'main', 'MARK-PLAIN while the other chat is busy');
+  check('S10 an idle chat uses the new model while another request runs', modelsOf('coordinator').at(-1) === 'fake-two' && (await show(chat.id)).busy);
+  await rpc({ action: 'message', id, chatId: chat.id, text: 'MARK-NEXT queued after the model change' });
+  free();
+  await eventually(async () => result.calls.some(call => call.coordinator && call.marker === 'MARK-NEXT') && !(await show(chat.id)).busy, 'held request and queued follow-up did not finish');
+  const heldCalls = result.calls.filter(call => call.coordinator && call.marker === 'MARK-BUSY');
+  check('S10 the held request finishes once on its original model', heldCalls.length === 1 && heldCalls[0].model === 'fake-three' && (await show(chat.id)).messages.some(message => message.role === 'assistant' && /Busy turn done/.test(message.text)), heldCalls);
+  check('S10 the queued follow-up uses the new model', result.calls.find(call => call.coordinator && call.marker === 'MARK-NEXT')?.model === 'fake-two');
 
   // Restart: the saved selection is what runs.
   await stopHost(); await startHost();
-  check('S12 the model survives a host restart', (await settings()).values.model === 'fake/fake-three');
+  check('S12 the model survives a host restart', (await settings()).values.model === 'fake/fake-two');
   await k.ask(id, 'main', 'MARK-PLAIN after restart');
-  check('S12 the restarted coordinator requests the saved model', modelsOf('coordinator').at(-1) === 'fake-three', modelsOf('coordinator'));
+  check('S12 the restarted coordinator requests the saved model', modelsOf('coordinator').at(-1) === 'fake-two', modelsOf('coordinator'));
 
   // The worker limit has one owner.
   const control = brain.control;
