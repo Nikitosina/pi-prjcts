@@ -94,7 +94,7 @@ await kit.run(async () => {
   const big = (await kit.plan(git.id)).filter(work => work.role === 'worker').at(-1);
   await delegate(git, { role: 'reviewer', threadId: big.threadId, task: step('code_diff') }, 'git-BIG');
   const bigText = fullResults.at(-1) ?? '';
-  check('git F9: oversized diff (~590 KB) is capped under the harness 50 KB clip and ends with the truncation note', bigText.length > 40 * 1024 && bigText.length < 50 * 1024 && /\[diff truncated at 46 KB of \d+ KB/.test(bigText), bigText.length);
+  check('git F9: oversized diff (~590 KB) is one page of at most 8 KiB that names the next offset and the path option', Buffer.byteLength(bigText) <= 8192 && /\[diff chars 0-\d+ of \d+; continue with offset=\d+, or pass path/.test(bigText), Buffer.byteLength(bigText));
 
   // F15 worker children still inherit the parent worktree: covered by nested-subagents-e2e (run as regression).
 });

@@ -54,7 +54,7 @@ await kit.run(async () => {
   await eventually(() => reports.get(withFiles), 'no report for the artifact thread', 1800);
   const report = reports.get(withFiles);
   summary.artifacts = { reportChars: report.length, xcresultLines: (report.match(/\.xcresult\//g) ?? []).length, listRows: (report.match(/^- /gm) ?? []).length };
-  check('Q10 the completion report lists top-level evidence, not nested xcresult files, and stays small', /summary\.md/.test(report) && !/\.xcresult\//.test(report) && /xcresult/.test(report) && report.length <= 2500 && summary.artifacts.listRows <= 13 && /more bundles/.test(report), summary.artifacts);
+  check('Q10 the completion report lists top-level evidence, not nested xcresult files, and stays small', /summary\.md/.test(report) && !/\.xcresult\//.test(report) && /xcresult/.test(report) && report.length <= 2000 && summary.artifacts.listRows <= 7 && /more bundles/.test(report), summary.artifacts);
   // Q3-Q6: a quota 429 keeps the exact provider text, classifies quota_exceeded, and later admissions are refused locally, also after a host reopen.
   const quota = await settled(await submit('FAKE-QUOTA first'));
   check('Q3 a quota 429 settles failed as quota_exceeded with the raw provider text and the exact model', quota.status === 'failed' && /^quota_exceeded:/.test(quota.blocker) && /Quota exceeded for quota metric/.test(quota.blocker) && /fake\/fake-model/.test(quota.blocker), quota.blocker);

@@ -13,6 +13,7 @@ const promptText = Type.String({ minLength: 1, maxLength: 24000 });
 export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText) }, { additionalProperties: false });
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
+export const DEFAULT_WORKER_CAP = 5;
 /** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
 export const ContextSettings = Type.Object({
   contextWindow: Type.Optional(Type.Integer({ minimum: 4096, maximum: 10_000_000 })),
@@ -79,6 +80,7 @@ export const Project = Type.Object({
   workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
   githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
   githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
+  /** Concurrent workers; absent = DEFAULT_WORKER_CAP. */
   workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
   commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
   /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
@@ -93,7 +95,10 @@ export const Project = Type.Object({
   worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
   contextSettings: Type.Optional(ContextSettings),
   createdAt: text, model: text,
-  models: Type.Object({ worker: text, scout: text, reviewer: text }),
+  /** Role models; an absent role inherits the coordinator model when each worker is admitted. */
+  models: Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }),
+  /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
+  scopedModels: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true })),
   /** Retired legacy-runtime fields (always null / empty); accepted so existing project files load. */
   sessionFile: Type.Optional(Type.Null()),
   runs: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 0 })),
@@ -215,7 +220,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("create"), requestId: Type.Optional(Id), name: text, cwd: text, objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text), knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("models-snapshot"), provider: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("model-picker-snapshot") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("model-picker-snapshot"), id: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("usage-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("event-log"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("host-health"), id: Id }, { additionalProperties: false }),
@@ -225,7 +230,10 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("settings-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("settings-update"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), changes: Type.Object({
     name: Type.Optional(text), objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text),
-    models: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }, { additionalProperties: false })),
+    /** null returns a role to inheriting the coordinator model. */
+    models: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
+    /** null restores Pi's enabledModels as the scope. */
+    scopedModels: Type.Optional(Type.Union([Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true }), Type.Null()])),
     knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** null restores the default (repository skills for every profile). */
     skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),

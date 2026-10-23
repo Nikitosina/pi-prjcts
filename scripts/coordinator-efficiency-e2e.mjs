@@ -40,7 +40,7 @@ const model = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const toolsSince = msgs.slice(msgs.findLastIndex(m => m.role === 'user') + 1).filter(m => m.role === 'tool');
     if (coordinator) {
-      result.systems.coordinator ??= system; result.coordinatorTools ??= tools;
+      result.systems.coordinator ??= system; result.coordinatorTools ??= tools; result.coordinatorToolDescriptions ??= Object.fromEntries((input.tools ?? []).map(t => [t.function?.name, t.function?.description ?? '']));
       if (last.role === 'user' && /\[Durable work/.test(lastUser)) result.reports[/BIGTASK|SHORTTASK/.exec(lastUser)?.[0] ?? 'other'] = lastUser;
       if (last.role === 'user' && /MARK-BIG/.test(lastUser) && !/\[Durable work/.test(lastUser)) return res.end(call('projects_delegate', { role: 'scout', task: 'ROLE scout BIGTASK summarize everything', acceptance: ['A1 list every file', 'A2 cite evidence'] }, 'c-big'));
       if (last.role === 'user' && /MARK-SHORT/.test(lastUser) && !/\[Durable work/.test(lastUser)) return res.end(call('projects_delegate', { role: 'scout', task: 'ROLE scout SHORTTASK say hi' }, 'c-short'));
@@ -49,8 +49,9 @@ const model = createServer((req, res) => {
         if (toolsSince.length === 0) return res.end(call('projects_work_result', { workId, limit: 16000 }, 'r1'));
         if (toolsSince.length === 1) { result.toolResults.full = toolsSince[0].content; return res.end(call('projects_work_result', { workId, offset: 15000, limit: 8000 }, 'r2')); }
         if (toolsSince.length === 2) { result.toolResults.tail = toolsSince[1].content; return res.end(call('projects_work_result', { workId, offset: 0, limit: 5000 }, 'r3')); }
-        if (toolsSince.length === 3) { result.toolResults.page1 = toolsSince[2].content; return res.end(call('projects_work_result', { workId: randomUUID() }, 'r4')); }
-        result.toolResults.unknown = toolsSince[3].content;
+        if (toolsSince.length === 3) { result.toolResults.page1 = toolsSince[2].content; return res.end(call('projects_work_result', { workId }, 'r5')); }
+        if (toolsSince.length === 4) { result.toolResults.dflt = toolsSince[3].content; return res.end(call('projects_work_result', { workId: randomUUID() }, 'r4')); }
+        result.toolResults.unknown = toolsSince[4].content;
       }
       return res.end(say('SUMMARY ok'));
     }
@@ -118,25 +119,40 @@ try {
   await waitFor(async () => result.toolResults.unknown && await summaries() >= 2, 'big report + tool reads');
   const R = result.reports, T = result.toolResults;
   check('E1 short report is unchanged: result text present, no cap note, no pointer', R.SHORTTASK.includes('short result ok') && !/chars omitted|projects_work_result/.test(R.SHORTTASK), R.SHORTTASK);
-  check('E2 long (16000 stored of 20000) report injected capped to 3000 chars + "13000 chars omitted" + pointer naming workId', R.BIGTASK.includes(expectedFull.slice(0, 3000)) && !R.BIGTASK.includes(expectedFull.slice(0, 3100)) && /… 13000 chars omitted; read the full result with projects_work_result \{"workId":"[0-9a-f-]{36}"\}/.test(R.BIGTASK) && R.BIGTASK.length < 5000, R.BIGTASK.length);
+  const shownOf = text => { const omitted = /… (\d+) chars omitted/.exec(text)?.[1]; return omitted ? 16000 - Number(omitted) : -1; };
+  check('E2 long (16000 stored of 20000) report: the whole message is at most 2000 characters, shows a prefix of the result, counts the omitted rest and names workId in the pointer', R.BIGTASK.length <= 2000 && shownOf(R.BIGTASK) >= 800 && R.BIGTASK.includes(expectedFull.slice(0, shownOf(R.BIGTASK))) && !R.BIGTASK.includes(expectedFull.slice(0, shownOf(R.BIGTASK) + 100)) && /read the full result with projects_work_result \{"workId":"[0-9a-f-]{36}"\}/.test(R.BIGTASK), { length: R.BIGTASK.length, shown: shownOf(R.BIGTASK) });
   const parse = text => JSON.parse(text);
   check('E3 projects_work_result returns the exact stored result (16000 chars) in one page, nextOffset null', parse(T.full).text === expectedFull && parse(T.full).total === 16000 && parse(T.full).nextOffset === null, T.full?.slice(0, 200));
   check('E4 last page: offset 15000 returns exactly the 1000-char tail, nextOffset null', parse(T.tail).text === expectedFull.slice(15000) && parse(T.tail).nextOffset === null, T.tail?.slice(0, 200));
   check('E5 paging: limit 5000 gives nextOffset 5000 and the exact first page', parse(T.page1).text === expectedFull.slice(0, 5000) && parse(T.page1).nextOffset === 5000, T.page1?.slice(0, 200));
+  const dflt = JSON.parse(T.dflt), dfltOk = Buffer.byteLength(T.dflt) <= 8192 && dflt.total === 16000 && dflt.nextOffset === dflt.offset + dflt.text.length && dflt.text === expectedFull.slice(0, dflt.text.length) && dflt.text.length >= 3000;
+  check('E22 projects_work_result default page is valid JSON of at most 8192 bytes, shows a prefix of the exact result and nextOffset continues it', dfltOk, { bytes: Buffer.byteLength(T.dflt), nextOffset: dflt.nextOffset, chars: dflt.text?.length });
   check('E6 unknown workId is an error, not data', /Unknown work id/.test(T.unknown ?? ''), T.unknown);
   check('E7 the delegate brief carries appended acceptance criteria', /Acceptance criteria[^]*- A1 list every file\n- A2 cite evidence/.test(result.firstUsers.BIGTASK ?? '') && !/Acceptance criteria/.test(result.firstUsers.SHORTTASK ?? ''), result.firstUsers.BIGTASK);
   const sys = result.systems.coordinator ?? '';
-  check('E8 coordinator instructions: brief with Goal/Acceptance criteria/Constraints/Stop conditions, no micro-milestones, follow-ups only for corrections/new info/failed acceptance, capped reports + tool', /Goal, Acceptance criteria[^]*Constraints and Stop conditions/.test(sys) && /Do not split one task into micro-milestones/.test(sys) && /follow-up only for an owner correction, new information or failed acceptance/.test(sys) && /capped at about 3000 characters/.test(sys) && /Do not micro-delegate/.test(sys) && /Delegate code exploration with the implementation task/.test(sys) && /read preferences\.md/.test(sys), sys.slice(0, 300));
+  check('E8 coordinator instructions keep the manager essentials: brief with Goal/Acceptance criteria/Constraints/Stop conditions, no micro-milestones, follow-ups only for corrections/new info/failed acceptance, the full-result tool, preferences, exploration goes with the task', /Goal[^]*Acceptance criteria[^]*Constraints[^]*Stop conditions/.test(sys) && /milestone/.test(sys) && /follow-up/i.test(sys) && /correction/.test(sys) && /projects_work_result/.test(sys) && /preferences\.md/.test(sys) && /exploration/.test(sys), sys.slice(0, 300));
   check('E9 coordinator has projects_work_result; schema has acceptance', result.coordinatorTools?.includes('projects_work_result'), result.coordinatorTools);
-  check('E10 worker/scout instructions: run to done, no hand-back after a sub-step, one-message blocker report', /Run to done: keep working until the acceptance criteria/.test(result.systems.scout ?? '') && /report in one message the blocker, what you tried and what is needed/.test(result.systems.scout ?? '') && /read preferences\.md/.test(result.systems.scout ?? ''), (result.systems.scout ?? '').slice(0, 300));
+  check('E10 worker/scout instructions keep run to done, no hand-back after a sub-step, a one-message blocker report and preferences', /run to done/i.test(result.systems.scout ?? '') && /blocker/.test(result.systems.scout ?? '') && /one message/.test(result.systems.scout ?? '') && /preferences\.md/.test(result.systems.scout ?? ''), (result.systems.scout ?? '').slice(0, 300));
 
   const parentThread = randomUUID();
   await rpc({action:'work-submit',id:project.id,threadId:parentThread,requestId:randomUUID(),workspaceScopeId:result.scopeId,text:'MARK-PARENT delegate a big child'});
   await waitFor(() => result.toolResults.child, 'parent read child result');
   const C = result.reports.child, parentChildId = /projects_child_result \{"workId":"([^"]+)"/.exec(C)?.[1];
-  check('E11 child report to the parent is capped with a pointer to projects_child_result', C.includes(expectedFull.slice(0, 3000)) && !C.includes(expectedFull.slice(0, 3100)) && /13000 chars omitted/.test(C) && !!parentChildId, C.length);
+  check('E11 child report to the parent: the whole message is at most 2000 characters with a pointer to projects_child_result', C.length <= 2000 && shownOf(C) >= 800 && C.includes(expectedFull.slice(0, shownOf(C))) && !!parentChildId, { length: C.length, shown: shownOf(C) });
   check('E12 parent reads the exact full child result; parent has the tool, coordinator-only tool is not given to it', parse(result.toolResults.child).text === expectedFull && result.parentTools.includes('projects_child_result') && !result.parentTools.includes('projects_work_result'), result.toolResults.child?.slice(0, 200));
   check('E13 worker instructions (scoped parent) contain run-to-done', /Run to done/.test(result.systems.parent ?? ''), (result.systems.parent ?? '').slice(0, 200));
+  // Budgets (owner-approved): Projects text of the coordinator at most 4000 characters, of a worker at most 2000. Exempt: objective, repository instructions, skill index, MEMORY.md index, task brief.
+  const instructionsOf = system => /<instructions>\n([^]*)\n<\/instructions>/.exec(system)?.[1] ?? '';
+  const projectsText = system => instructionsOf(system).replace('Disposable', '');
+  const sizes = { coordinator: projectsText(sys).length, scout: projectsText(result.systems.scout ?? '').length, workerWholeRepo: projectsText(result.systems.parent ?? '').length };
+  result.instructionSizes = sizes;
+  check('E17 coordinator Projects instructions are at most 4000 characters', sizes.coordinator > 0 && sizes.coordinator <= 4000, sizes);
+  check('E18 read-only scout Projects instructions are at most 2000 characters', sizes.scout > 0 && sizes.scout <= 2000, sizes);
+  check('E19 whole-repository worker Projects instructions (worktree, branch, push rule, environment, artifacts) are at most 2000 characters', sizes.workerWholeRepo > 0 && sizes.workerWholeRepo <= 2000, sizes);
+  const wholeRepo = projectsText(result.systems.parent ?? '');
+  check('E20 the whole-repository worker text names its worktree and branch, the owner checkout to leave alone, the push rule and the artifacts folder with the citation form; the background-command and lease tools are offered', /Worktree /.test(wholeRepo) && /branch/.test(wholeRepo) && /owner's checkout/.test(wholeRepo) && /force/.test(wholeRepo) && /artifact:/.test(wholeRepo) && result.parentTools.includes('projects_bg_start') && result.parentTools.includes('projects_lease_acquire'), wholeRepo.slice(0, 400));
+  const D = result.coordinatorToolDescriptions ?? {};
+  check('E21 mechanics moved out of the standing text stay in the tool descriptions: continue a branch or take over a thread, read a PR head, preview/approve a VCS operation, VCS shell limits, MCP use, artifacts', /fromThread/.test(D.projects_delegate) && /branch/.test(D.projects_delegate) && /ref/.test(D.projects_delegate) && /approval/i.test(D.projects_vcs_operation) && /worktree-remount/.test(D.projects_vcs_operation) && /publish|push/i.test(D.projects_vcs_shell) && /MCP/i.test(D.projects_mcp_tools) && /untrusted/i.test(D.projects_mcp_call) && /artifact:/.test(D.projects_artifacts_list), Object.fromEntries(Object.entries(D).filter(([name]) => /delegate|vcs|mcp|artifacts_list/.test(name)).map(([name, text]) => [name, text.length])));
   const plan = await rpc({action:'plan-snapshot',id:project.id});
   check('E14 stored work text/state untouched by cap (plan snapshot lists completed scout)', plan.work.filter(w => w.role === 'scout' && w.status === 'completed').length >= 3, plan.work.map(w => [w.role, w.status]));
   check('E15 coordinator never saw the parent-only tool; no model request without a session id', !result.coordinatorTools.includes('projects_child_result') && result.modelCalls.every(c => c.session), result.coordinatorTools);

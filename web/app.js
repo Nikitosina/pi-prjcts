@@ -485,8 +485,7 @@ function render() {
   const historyButton = document.querySelector('[data-action="routine-history"]');
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
-  const hint = document.querySelector("#compose-hint");
-  hint.textContent = view.project.model.split("/").at(-1); hint.title = view.project.model;
+  renderModelCycle();
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -508,6 +507,31 @@ function render() {
   applySearchFocus();
 }
 
+function renderModelCycle() {
+  const button = document.querySelector("#model-cycle"), reference = view?.project?.model;
+  button.hidden = !reference;
+  if (!reference) return;
+  const name = modelCache.get(reference)?.name ?? reference.split("/").at(-1);
+  button.textContent = name; button.title = `${reference}. Next scoped model (Ctrl+P); previous with Shift+Ctrl+P.`;
+  button.setAttribute("aria-label", `Coordinator model: ${name}. Switch to the next scoped model.`);
+}
+async function cycleModel(step) {
+  if (!projectId || !view) return;
+  await loadModelPicker();
+  if (modelScopeSet && !modelScoped.length) throw new Error("None of your scoped models is usable (not installed or no credentials). Fix the scope in Settings; the model button never switches outside it.");
+  const configured = [...modelCache.values()].filter(model => model.configured).map(model => model.reference), list = modelScopeSet ? modelScoped : configured;
+  const at = list.indexOf(view.project.model), next = list[(at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length)];
+  if (!next || next === view.project.model) { toast("There is no other scoped model to switch to. Edit the scope in Settings."); return; }
+  const settings = await api({ action: "settings-snapshot", id: projectId });
+  const focused = document.activeElement, id = projectId, chat = chatId;
+  try {
+    await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { model: next } }, `Coordinator model: ${modelCache.get(next)?.name ?? next}. Next requests and new threads use it.`);
+    settingsCache = null;
+  } finally {
+    // Disabling the composer during the update drops focus; do not steal it from another field or dialog.
+    if (projectId === id && chatId === chat && !dialog.open && document.activeElement === document.body && focused?.isConnected && !focused.disabled) focused.focus({ preventScroll: true });
+  }
+}
 function renderContextMeter(context) {
   const meter = document.querySelector("#compose .context-meter");
   const known = context && context.window;
@@ -584,7 +608,9 @@ async function loadSkillsPicker(force = false) {
 }
 // Pickers render in three parts so a toggle never moves anything: "all" = shell (tabs, search, list), "list" = rows only (search, bulk), "chrome" = counts and buttons only (a checkbox toggle).
 const sortedLists = value => Object.fromEntries(Object.entries(value).map(([key, list]) => [key, [...list].sort()])); // toggling re-sorts a list; a saved list in another order must not look dirty
-const profileTabsHtml = (action, tab, count) => `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab" class="ghost small${role === tab ? " on" : ""}" aria-selected="${role === tab}" data-action="${action}" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}</div>`;
+// One shared selection is the normal case. Per-role lists stay reachable, and open by themselves when a role already has its own.
+const rolesShown = state => state.roles || state.tab !== "all" || ["coordinator", "worker", "scout", "reviewer"].some(role => state.draft[role].length);
+const profileTabsHtml = (action, tab, count, expanded) => `<div class="skill-tabs" role="tablist">${skillProfileTabs.map(([role, label]) => `<button type="button" role="tab"${role !== "all" && !expanded ? " hidden" : ""} class="ghost small${role === tab ? " on" : ""}" aria-selected="${role === tab}" data-action="${action}" data-role="${role}">${label} <span class="count">${count(role)}</span></button>`).join("")}${expanded ? "" : `<button type="button" class="ghost small" data-action="profile-roles" data-picker="${action.split("-")[0]}">Different per role…</button>`}</div>`;
 const patchPickerChrome = (node, count, dirty) => {
   for (const button of node.querySelectorAll(".skill-tabs [data-role]")) button.querySelector(".count").textContent = count(button.dataset.role);
   const save = node.querySelector('[data-action$="-save"]'); if (save) { save.disabled = !dirty; save.toggleAttribute("data-off", !dirty); }
@@ -609,7 +635,7 @@ function renderSkillsPicker(part = "all") {
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = skillsListHtml(state); node.querySelector(".pick-note").innerHTML = skillsNote(state); return patchPickerChrome(node, count, dirty); }
-  node.innerHTML = `${profileTabsHtml("skills-tab", state.tab, count)}
+  node.innerHTML = `${profileTabsHtml("skills-tab", state.tab, count, rolesShown(state))}
     <p class="note pick-note">${skillsNote(state)}</p>
     <div class="pick-tools"><input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">${bulkButtons("skills-select")}</div>
     <div class="skill-groups">${skillsListHtml(state)}</div>
@@ -678,7 +704,7 @@ function renderMcpPicker(part = "all") {
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = mcpListHtml(state); node.querySelector(".pick-note").innerHTML = mcpNote(state); return patchPickerChrome(node, count, dirty); }
-  node.innerHTML = `${profileTabsHtml("mcp-tab", state.tab, count)}
+  node.innerHTML = `${profileTabsHtml("mcp-tab", state.tab, count, rolesShown(state))}
     <p class="note pick-note">${mcpNote(state)}</p>
     ${servers.length ? `<div class="pick-tools"><input type="search" id="mcp-search" placeholder="Search ${servers.length} servers" value="${esc(state.query)}" aria-label="Search MCP servers">${bulkButtons("mcp-select")}</div>` : ""}
     <div class="skill-groups">${mcpListHtml(state)}</div>
@@ -2447,6 +2473,9 @@ async function action(node) {
     case "settings-back": await settingsList(true); break;
     case "mp-toggle": { const mp = node.closest(".mp"); if (mp.classList.contains("open")) mpClose(mp, true); else mpOpen(mp); break; }
     case "mp-pick": mpPick(node.closest(".mp"), node.dataset.ref); break;
+    case "model-cycle": await cycleModel(1); break;
+    case "scope-clear": for (const box of dialog.querySelectorAll("[data-scope-ref]")) box.checked = false; settingsSync(); break;
+    case "profile-roles": { const skills = node.dataset.picker === "skills"; (skills ? skillsPicker : mcpPicker).roles = true; (skills ? renderSkillsPicker : renderMcpPicker)(); break; }
     case "settings-discard": settingsDiscard(node.dataset.project, node.dataset.field); break;
     case "settings-confirm-discard": {
       requireProject(node.dataset.project);
@@ -2681,7 +2710,7 @@ async function submit(form) {
     const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings saved. New threads use them; running threads keep what they started with.");
     validateSettings(result);
     for (const [field, changed] of Object.entries(proposal.changes)) {
-      if (field === "models" ? Object.entries(changed).some(([role, reference]) => result.values.models[role] !== reference) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
+      if (field === "models" ? Object.entries(changed).some(([role, reference]) => (result.values.models[role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
     }
     for (const key of proposal.draftKeys) {
       const draft = settingsDrafts.get(key), field = key.slice(key.indexOf(":") + 1);
@@ -2795,6 +2824,11 @@ document.addEventListener("submit", event => { if (!event.target.matches("#compo
 function autosize(textarea) { textarea.style.height = "auto"; textarea.style.height = `${Math.min(textarea.scrollHeight + 2, 220)}px`; if (textarea.closest("#compose")) renderBackdrop(textarea); }
 document.addEventListener("change", event => { if (event.target.closest("[data-settings-form]")) settingsSync(); });
 document.addEventListener("input", event => {
+  const filter = event.target.closest?.("[data-scope-filter]"); if (!filter) return;
+  const terms = modelNorm(filter.value).split(/\s+/).filter(Boolean);
+  for (const row of filter.closest(".scope-editor").querySelectorAll(".scope-row")) row.hidden = !terms.every(term => modelNorm(row.textContent).includes(term));
+});
+document.addEventListener("input", event => {
   if (event.target.matches(".mp-search")) { renderModelList(event.target.closest(".mp")); return; }
   if (event.target.id === "search-input") { scheduleSearch(); return; }
   if (event.target.closest("#compose")) { drafts.set(draftKey(), event.target.value); autosize(event.target); void updateSkillMenu(event.target).catch(error => { closeSkillMenu(); report(error); }); }
@@ -2879,6 +2913,7 @@ document.addEventListener("keydown", event => {
   const picker = event.target.closest?.(".mp");
   if (picker && !event.isComposing && mpKey(event, picker)) return;
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) { event.preventDefault(); openSearch(); return; }
+  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key?.toLowerCase() === "p" && !event.isComposing && !dialog.open && projectId && view) { event.preventDefault(); if (!busy) void uiAction(() => cycleModel(event.shiftKey ? -1 : 1)); return; }
   if (event.target.id === "search-input" && !event.isComposing) {
     const count = searchState.results.length;
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) { event.preventDefault(); searchState.active = (searchState.active + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderSearchResults(); }
@@ -3071,7 +3106,7 @@ async function usageList(offset = 0) {
 }
 function validateSettings(value) {
   const v = value?.values;
-  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model, v.models?.worker, v.models?.scout, v.models?.reviewer].some(text => typeof text !== "string") || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
+  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
 }
 function captureSettingsDraft() {
   const form = dialog.querySelector("[data-settings-form]");
@@ -3222,12 +3257,14 @@ const settingsAccess = {
   libraryAccess: ["Uploaded files and evidence", "Whether the coordinator may open the project library.", [["none", "Coordinator cannot open them"], ["coordinator", "Coordinator can open them"]]],
   decisionAccess: ["Questions for you", "Whether the coordinator may ask you to decide something.", [["none", "Coordinator cannot ask"], ["coordinator", "Coordinator can ask"]]],
 };
-let settingsPending = null, modelScoped = [], modelExtensionErrors = [];
-const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker, scout: values.models.scout, reviewer: values.models.reviewer, knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, workerCap: String(values.workerCap) });
+let settingsPending = null, modelScoped = [], modelScopeSet = false, modelExtensionErrors = [];
+const scopeKey = refs => [...refs].sort().join("\n");
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
   const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
   for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
   for (const [role] of settingsRoles) flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+  flat.scoped = scopeKey([...form.querySelectorAll("[data-scope-ref]:checked")].map(box => box.dataset.scopeRef));
   return flat;
 }
 function settingsChanges(flat, values) {
@@ -3235,7 +3272,8 @@ function settingsChanges(flat, values) {
   for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess"]) if (flat[field] !== was[field]) changes[field] = flat[field];
   if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
   if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
-  for (const role of ["worker", "scout", "reviewer"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role];
+  for (const role of ["worker", "scout", "reviewer"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
+  if (flat.scoped !== was.scoped) changes.scopedModels = flat.scoped === "" ? null : flat.scoped.split("\n");
   return changes;
 }
 function validateSettingsChanges(changes) {
@@ -3269,28 +3307,33 @@ async function settingsList(keep = false) {
   const draftOf = field => settingsDrafts.get(`${id}:${field}`), pending = settingsPending?.projectId === id ? settingsPending.flat : {};
   const shown = { ...flatSettings(value.values), ...Object.fromEntries(["name", "objective"].filter(field => draftOf(field)).map(field => [field, draftOf(field).text])), ...pending };
   const draftNote = field => { const draft = draftOf(field); return draft && draft.text !== value.values[field] ? `<span class="field-draft">Unsent edit kept${draft.expectedRevision !== value.revision ? " from an older version of these settings. Saving it is checked and may be rejected" : ""}. ${dlgBtn("Discard edit…", { action: "settings-discard", project: id, field }, "ghost small")}</span>` : ""; };
-  const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}${role === "coordinator" ? "" : " Follows the coordinator unless you pick a model."}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const chosenScope = shown.scoped ? shown.scoped.split("\n") : [], scopeRows = [...modelCache.values()].filter(model => model.configured || chosenScope.includes(model.reference));
+  const scopeField = `<div class="field" data-field="scoped"><span class="flabel">Scoped models</span><span class="fhelp">The models the model button and Ctrl+P cycle through, in list order. Leave all unchecked to use your Pi scope.</span><details class="scope-editor"${chosenScope.length ? " open" : ""}><summary>${chosenScope.length ? `${chosenScope.length} chosen for this project` : "Your Pi scope"}</summary><input type="search" class="scope-filter" data-scope-filter placeholder="Filter ${scopeRows.length} models…" aria-label="Filter scoped models" autocomplete="off"><div class="scope-list">${scopeRows.map(model => `<label class="scope-row"><input type="checkbox" data-scope-ref="${esc(model.reference)}"${chosenScope.includes(model.reference) ? " checked" : ""}${model.configured ? "" : " disabled"}><span>${esc(model.name)}</span><small class="mono">${esc(model.reference)}</small></label>`).join("") || '<p class="note">No models are available.</p>'}</div>${dlgBtn("Use my Pi scope", { action: "scope-clear" }, "ghost small")}</details></div>`;
   const accessField = ([field, [label, help, options]]) => `<div class="field" data-field="${field}"><label><span class="flabel">${label}</span><select name="${field}">${options.map(([option, text]) => `<option value="${option}"${shown[field] === option ? " selected" : ""}>${text}</option>`).join("")}</select></label><span class="fhelp">${help}</span></div>`;
   setDialogBody(`<form data-settings-form data-project="${esc(id)}" novalidate>
 <div class="field" data-field="name"><label><span class="flabel">Project name</span><input name="name" maxlength="120" autocomplete="off" value="${esc(shown.name)}"></label>${draftNote("name")}</div>
 <div class="field" data-field="objective"><label><span class="flabel">Objective</span><span class="fhelp">What this project is for. The coordinator reads it in every new conversation.</span><textarea name="objective" rows="5" maxlength="32000">${esc(shown.objective)}</textarea></label>${draftNote("objective")}</div>
-<h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
-<div class="field-grid">${settingsRoles.map(roleField).join("")}</div>
-<h3>Access and limits</h3>
-<div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}<div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32).</span></div></div>
-<p class="note">Saving needs an idle project. You review every change before it is saved.</p>
+<h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with. The coordinator can be switched from the model button in the chat.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
+<div class="field-grid">${settingsRoles.map(roleField).join("")}</div>${scopeField}
+<h3>Workers</h3>
+<div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
+<details class="advanced"><summary>Access to project functions</summary><div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}</div></details>
+<p class="note">Model changes apply to the next request without interrupting current work. New threads use the current role selections. The worker limit applies at once and never stops running work. Other changes need an idle project. You review every change before it is saved.</p>
 ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { action: "close-dialog" }), '<button type="submit" class="primary" data-off disabled>Review changes</button>')}</form>`);
   settingsSync();
 }
 const accessText = (field, value) => settingsAccess[field][2].find(([option]) => option === value)?.[1] ?? value;
-const modelText = ref => { const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
+const scopeText = refs => refs?.length ? refs.map(ref => esc(modelCache.get(ref)?.name ?? ref)).join(", ") : "<small>Your Pi scope</small>";
+const modelText = ref => { if (ref === "") return "Inherit coordinator"; const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
 const emptyText = text => text ? esc(text) : "<small>empty</small>";
 function settingsDiffRows(changes, values) {
   const rows = [];
   if ("name" in changes) rows.push(["Project name", emptyText(values.name), emptyText(changes.name)]);
   if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
   if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
-  for (const [role, label] of settingsRoles.slice(1)) if (changes.models?.[role]) rows.push([`${label} model`, modelText(values.models[role]), modelText(changes.models[role])]);
+  for (const [role, label] of settingsRoles.slice(1)) if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? ""), modelText(changes.models[role] ?? "")]);
+  if ("scopedModels" in changes) rows.push(["Scoped models", scopeText(values.scopedModels), scopeText(changes.scopedModels)]);
   for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
   if ("workerCap" in changes) rows.push(["Workers at once", String(values.workerCap), String(changes.workerCap)]);
   return rows;
@@ -3314,7 +3357,7 @@ function settingsReview(revision, changes) {
 // Model picker: the current model, then an in-flow list with Pi's scoped models first and a search over every configured model.
 const modelNorm = text => text.toLowerCase().replace(/[-_/.:@]+/g, " ");
 async function loadModelPicker() {
-  const data = await api({ action: "model-picker-snapshot" });
+  const data = await api({ action: "model-picker-snapshot", ...(projectId ? { id: projectId } : {}) });
   if (!data || data.networkChecked !== false || !Array.isArray(data.items) || !Array.isArray(data.scoped)) throw new Error("Invalid model list");
   modelCache.clear();
   for (const model of data.items) {
@@ -3322,18 +3365,26 @@ async function loadModelPicker() {
     modelCache.set(model.reference, { ...model, hay: modelNorm(`${model.reference} ${model.name}`) });
   }
   modelScoped = data.scoped.filter(reference => modelCache.get(reference)?.configured);
+  modelScopeSet = data.scopeSet === true;
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
 function modelButton(reference, disabled = false) {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
-  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
+  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? "Inherit coordinator" : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
 }
 function modelPickerHtml(role, reference, unavailable) {
   const configured = [...modelCache.values()].filter(model => model.configured).length;
   return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable))}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
 }
 const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
-function modelGroups(query, value) {
+const INHERIT_MODEL = { reference: "", name: "Inherit coordinator", contextWindow: null, reasoning: false, configured: true };
+// Worker, scout and reviewer pickers start with "Inherit coordinator" (stored as no model); the coordinator picker does not.
+function modelGroups(query, value, role) {
+  const groups = modelGroupsBase(query, value);
+  if (!role || role === "coordinator" || query.trim() && !"inherit coordinator".includes(query.trim().toLowerCase())) return groups;
+  return [{ label: "", models: [INHERIT_MODEL], more: 0 }, ...groups];
+}
+function modelGroupsBase(query, value) {
   const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
   const configured = [...modelCache.values()].filter(model => model.configured), scoped = new Set(modelScoped), cap = (models, limit, label, extra = {}) => ({ label, models: models.slice(0, limit), more: Math.max(0, models.length - limit), ...extra });
   if (!terms.length) {
@@ -3352,7 +3403,7 @@ function modelGroups(query, value) {
 function renderModelList(mp) {
   const search = mp.querySelector(".mp-search"), value = mp.dataset.value;
   let index = 0;
-  mp.querySelector(".mp-list").innerHTML = [...modelGroups(search.value, value), ...modelExtensionErrors.map(item => ({ label: "", models: [], more: 0, hint: `${item.extension} failed to load: ${item.error}` }))].map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
+  mp.querySelector(".mp-list").innerHTML = [...modelGroups(search.value, value, mp.dataset.role), ...modelExtensionErrors.map(item => ({ label: "", models: [], more: 0, hint: `${item.extension} failed to load: ${item.error}` }))].map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
     const context = compactTokens(model.contextWindow);
     return `<div class="mp-row" role="option" id="mp-${mp.dataset.role}-${index++}" data-ref="${esc(model.reference)}" aria-selected="${model.reference === value}"${group.disabled ? ' aria-disabled="true" title="Add credentials to use this model"' : ' data-action="mp-pick"'}><span class="mp-main"><span class="mp-name">${esc(model.name)}</span><span class="mp-ref mono">${esc(model.reference)}</span></span><span class="mp-tags">${model.reasoning ? '<span class="mp-ctx" title="Supports reasoning">reasoning</span>' : ""}${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : ""}</span></div>`;
   }).join("")}${group.more ? `<div class="mp-more">+${group.more} more. Keep typing to narrow the list.</div>` : ""}${group.hint ? `<div class="mp-more">${esc(group.hint)}</div>` : ""}`).join("");
@@ -3378,7 +3429,7 @@ function mpOpen(mp) {
   mp.querySelector(".mp-pop").scrollIntoView({ block: "nearest" });
 }
 function mpPick(mp, reference) {
-  if (!modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
+  if (reference !== "" && !modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
   mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference);
   mpClose(mp, true); settingsSync();
 }

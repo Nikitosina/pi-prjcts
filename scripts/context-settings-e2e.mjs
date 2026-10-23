@@ -55,7 +55,7 @@ try {
   await eventually(async () => (await show()).busy, 'coordinator never became busy');
   const busyChange = await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: await rev(), changes: { context: { ...saved, keepRecentTokens: 3000 } } });
   check('X3 context settings save while the coordinator is busy (no reopen)', busyChange.values.context.keepRecentTokens === 3000 && (await show()).busy);
-  check('X3 other settings still require an idle project', await fails(async () => rpc({ action: 'settings-update', id, confirm: id, expectedRevision: await rev(), changes: { workerCap: 2 } }), /idle coordinator/));
+  check('X3 other settings still require an idle project', await fails(async () => rpc({ action: 'settings-update', id, confirm: id, expectedRevision: await rev(), changes: { knowledgeAccess: 'maintain' } }), /idle coordinator/));
   release(); await eventually(async () => !(await show()).busy, 'busy turn did not finish');
   await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: await rev(), changes: { context: saved } });
 

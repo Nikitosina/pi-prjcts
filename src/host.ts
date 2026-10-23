@@ -35,7 +35,7 @@ import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } 
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
-import { COORDINATOR_ROLE_TEXT, defaultWorkerRules, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
 import { limitsSnapshot, startCursorLogin } from "./usage-limits.ts";
 
 process.umask(0o077);
@@ -74,6 +74,8 @@ function configuredSkills(id: string) {
 const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
+/** Settings read at use time, so a change needs no reopen. */
+const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "scopedModels", "workerCap"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -257,9 +259,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const created = parse(Project, {
           version: 1, id, name: input.name, cwd, objective: input.objective ?? "", createdAt: new Date().toISOString(),
           model: input.model ?? "openai-codex/gpt-5.6-sol",
-          models: { worker: "openai-codex/gpt-5.6-terra", scout: "openai-codex/gpt-5.6-luna", reviewer: "openai-codex/gpt-5.6-sol" },
+          models: {},
           runtime: "durable", ...(input.requestId ? { creation: { requestId: input.requestId, fingerprint } } : {}),
-          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), decisionAccess: "coordinator", phase: "ready", problem: null,
+          ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), libraryAccess: "coordinator", decisionAccess: "coordinator", phase: "ready", problem: null,
         });
         const withScope = withDefaultWorkspace(created);
         saveProject(withScope);
@@ -269,7 +271,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return loadProject(project.id);
     }
     case "models-snapshot": return projectModelCatalog(input);
-    case "model-picker-snapshot": return projectModelPicker();
+    case "model-picker-snapshot": return projectModelPicker(input.id ? loadProject(input.id) : undefined);
     case "usage-snapshot": return (await durable(input.id)).usageSnapshot(input);
     case "library-import": return withProjectLock(input.id, async () => {
       const project = loadProject(input.id);
@@ -287,7 +289,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "prompts-snapshot": {
-      const project = loadProject(input.id), defaults = { coordinator: COORDINATOR_ROLE_TEXT, worker: defaultWorkerRules(project), scout: defaultWorkerRules(project), reviewer: defaultWorkerRules(project) };
+      const project = loadProject(input.id), defaults = { coordinator: COORDINATOR_ROLE_TEXT, worker: DEFAULT_WORKER_RULES, scout: DEFAULT_WORKER_RULES, reviewer: DEFAULT_WORKER_RULES };
       return { scope: "project", roles: PROMPT_ROLES.map(role => ({ role, default: defaults[role], override: project.prompts?.[role] ?? null, effective: project.prompts?.[role] ?? defaults[role] })) };
     }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
@@ -302,14 +304,22 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
-      // Context/compaction and MCP settings apply live (read on every generation / tool call): no idle requirement, no reopen.
-      if (Object.keys(input.changes).every(key => key === "context" || key === "mcp")) return withProjectLock(input.id, async () => {
-        const project = updateProjectSettings(loadProject(input.id), input);
-        saveProject(project);
-        const running = durableRuntimes.get(input.id);
-        if (running && input.changes.context !== undefined) (await running).applyContext(project.contextSettings);
-        return projectSettings(project);
-      });
+      // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
+      if (Object.keys(input.changes).every(key => LIVE_SETTINGS.has(key))) {
+        await validateProjectModelChanges(input.changes);
+        return withProjectLock(input.id, async () => {
+          const project = updateProjectSettings(loadProject(input.id), input);
+          const running = durableRuntimes.get(input.id);
+          if (running) {
+            const owner = await running;
+            if (input.changes.model !== undefined || input.changes.models !== undefined) await owner.applyModels(project);
+            if (input.changes.context !== undefined) owner.applyContext(project.contextSettings);
+            if (input.changes.workerCap !== undefined) await owner.applyWorkerCap(input.changes.workerCap);
+          }
+          saveProject(project);
+          return projectSettings(project);
+        });
+      }
       await validateProjectModelChanges(input.changes);
       let existing: Promise<DurableProjectRuntime> | undefined;
       await withProjectLock(input.id, async () => {

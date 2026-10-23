@@ -86,11 +86,13 @@ async function command(name, args = {}, expectError = false) {
   return output;
 }
 const control = (action, args = {}, expectError = false) => command('projects_worker_control', { action, ...args }, expectError);
+// The limit has one owner: the project setting, changed live from Settings (never by the coordinator).
+const setCap = async cap => rpc({ action: 'settings-update', id: project.id, confirm: project.id, expectedRevision: (await rpc({ action: 'settings-snapshot', id: project.id })).revision, changes: { workerCap: cap } });
 try {
   await start();
   project = await rpc({ action: 'create', requestId: randomUUID(), name: 'Worker control fixture', cwd: workspace, objective: 'Disposable', model: 'fake/fake-model' });
   const settings = await rpc({ action: 'settings-snapshot', id: project.id });
-  await rpc({ action: 'settings-update', id: project.id, confirm: project.id, expectedRevision: settings.revision, changes: { models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
+  await rpc({ action: 'settings-update', id: project.id, confirm: project.id, expectedRevision: settings.revision, changes: { workerCap: 1, models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
   await command('projects_workers');
   result.checks.push('T1 worker tools offered to coordinator');
   const a = await command('projects_delegate', { task: 'HOLD A' });
@@ -112,7 +114,7 @@ try {
   assert((await command('projects_workers')).threads.find(t => t.threadId === a.threadId).paused);
   assert.equal((await plan()).work.find(w => w.id === follow.attemptId).status, 'interrupted');
   result.checks.push('T3 deduplicated follow-up; individual pause preserves queued work, frees slot, leaves coordinator alive');
-  await control('parallelism', { cap: 2 });
+  await setCap(2);
   await rpc({ action: 'shutdown' }); await hostExit;
   // Simulate a pre-feature coordinator only in the stopped, disposable fixture.
   const db = new DatabaseSync(join(home, project.id, 'durable.sqlite'));
@@ -139,7 +141,7 @@ try {
   await eventually(async () => (await plan()).work.find(w => w.id === steered.attemptId)?.status === 'completed', 'Steering failed');
   assert.equal((await plan()).work.find(w => w.id === follow.attemptId).status, 'stopped');
   result.checks.push('T5 steering drains old attempt and suppresses superseded queued work');
-  await control('parallelism', { cap: 1 });
+  await setCap(1);
   const d = await command('projects_delegate', { task: 'HOLD D' });
   await eventually(async () => (await plan()).work.find(w => w.id === d.workId)?.status === 'running', 'D did not start');
   const e = await command('projects_delegate', { task: 'NEVER E' });
@@ -162,15 +164,17 @@ try {
   const historyPages = [];
   for (const options of [{ limit: 100, textLimit: 16000 }, { limit: 50, textLimit: 7000 }, { limit: 100 }, { textLimit: 16000 }, {}, { limit: 100, textLimit: 1 }, { limit: 16, textLimit: 16000 }]) {
     const page = await command('projects_worker_read', { threadId: historyWorker.threadId, ...options });
-    const expectedTextLimit = options.textLimit ?? 4000;
+    // No limit and no textLimit: the tool's default page is at most 8 KiB (8 messages of 700 characters, fewer when they do not fit); the browser API keeps 30 x 4000.
+    const dflt = Object.keys(options).length === 0;
+    const expectedTextLimit = options.textLimit ?? (dflt ? 700 : 4000);
     const expectedLimit = Math.min(options.limit ?? 30, Math.floor(262144 / expectedTextLimit));
-    assert.equal(page.limit, expectedLimit);
+    if (dflt) { assert(page.limit >= 1 && page.limit <= 8); assert(Buffer.byteLength(JSON.stringify(page)) <= 8192); } else assert.equal(page.limit, expectedLimit);
     assert.equal(page.textLimit, expectedTextLimit);
-    assert(page.items.length <= expectedLimit);
+    assert(page.items.length <= (dflt ? 8 : expectedLimit));
     assert(page.limit * page.textLimit <= 262144);
     assert.equal(page.nextOffset, page.items.length < page.total ? page.items.length : null);
     for (const item of page.items) if (item.text !== undefined) assert(Array.from(item.text).length <= page.textLimit);
-    const http = await rpc({ action: 'thread-history', id: project.id, threadId: historyWorker.threadId, ...options });
+    const http = await rpc({ action: 'thread-history', id: project.id, threadId: historyWorker.threadId, ...(dflt ? { limit: page.limit, textLimit: page.textLimit } : options) });
     assert.deepEqual(http.items, page.items);
     assert.equal(http.limit, page.limit);
     assert.equal(http.nextOffset, page.nextOffset);
@@ -215,13 +219,13 @@ try {
   await command('projects_worker_plan', { work });
   await control('priority', { workId: work[1].id, priority: 20 });
   await control('priority', { workId: high.id, priority: 100 });
-  await control('parallelism', { cap: 2 });
+  await setCap(2);
   await eventually(async () => work.every(item => result.calls.some(c => !c.coordinator && c.text === item.text)), 'Dependency work did not dispatch');
   assert(result.calls.findIndex(c => !c.coordinator && c.text === high.text) < result.calls.findIndex(c => !c.coordinator && c.text === low.text));
   const p = await plan();
   assert(p.work.find(w => w.id === work[0].id).endedAt <= p.work.find(w => w.id === work[1].id).startedAt);
   assert.equal(p.work.find(w => w.id === blocker.workId).status, 'running');
-  await control('parallelism', { cap: 1 });
+  await setCap(1);
   assert.equal((await plan()).work.find(w => w.id === blocker.workId).status, 'running');
   await control('stop', { threadId: blocker.threadId });
   result.checks.push('T7 batch dependencies, priority and live cap changes; lowering cap does not abort work');

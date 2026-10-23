@@ -70,9 +70,9 @@ await kit.run(async () => {
   // Composer help and Settings, in the browser.
   const page = await kit.openPage(await kit.webUrl(id, 'coordinator'));
   await page.waitFor(`!!document.querySelector('#compose [data-action="composer-help"]')`, 'composer help button');
-  await page.waitFor(`document.querySelector('#compose-hint').textContent.length > 0`, 'model name in the composer');
-  const hint = await page.evaluate(`document.querySelector('#compose-hint').textContent`);
-  check('H1 the permanent hint line is gone; the model name stays', !/Enter to send|Shift\\+Enter|for commands/.test(hint) && hint.length > 0 && /fake-model/.test(hint), hint);
+  await page.waitFor(`document.querySelector('#model-cycle')?.textContent.length > 0`, 'model button in the composer');
+  const hint = await page.evaluate(`document.querySelector('#model-cycle').textContent + '|' + document.querySelector('#compose .help-line').innerText`);
+  check('H1 the permanent hint line is gone; the model button shows the model', !/Enter to send|Shift\\+Enter|for commands/.test(hint) && hint.length > 0 && /fake-model/.test(hint), hint);
   check('H1 the help button is labelled', await page.evaluate(`document.querySelector('#compose [data-action="composer-help"]').getAttribute('aria-label')`) === 'Composer help');
   const state = () => page.evaluate(`(() => { const pop = document.querySelector('#compose .help-pop'); return { hidden: pop.hidden, expanded: document.querySelector('#compose .help-btn').getAttribute('aria-expanded'), text: pop.innerText }; })()`);
   check('H2 closed at first', (await state()).hidden === true);

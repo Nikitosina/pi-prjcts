@@ -147,7 +147,7 @@ await kit.run(async () => {
   const bigPlan = await work(gp, 'g-big');
   await diffOf(gp, bigPlan.threadId, 'dbig');
   const big = fullDiffs.at(-1) ?? '';
-  check('F23 an oversized worker diff is capped under the harness clip with a truncation note', big.length > 40 * 1024 && big.length < 50 * 1024 && /\[diff truncated at 46 KB of \d+ KB/.test(big), big.length);
+  check('F23 an oversized worker diff is one page of at most 8 KiB that names the next offset and the path option', Buffer.byteLength(big) <= 8192 && /\[diff chars 0-\d+ of \d+; continue with offset=\d+, or pass path/.test(big), Buffer.byteLength(big));
 
   summary.git = { w1Path, w1Branch, w1Head, existingTip, localTip, originRefs: originRefs() };
   summary.sampleDiff = d1;

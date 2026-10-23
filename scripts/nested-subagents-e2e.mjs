@@ -129,7 +129,7 @@ try {
   const project = await rpc({ action: 'create', requestId: randomUUID(), name: 'Nested', cwd: workspace, objective: 'Disposable nested-subagents fixture', model: 'fake/fake-model' });
   const id = project.id;
   const settings = await rpc({ action: 'settings-snapshot', id });
-  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
+  await rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes: { workerCap: 1, models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
   const first = await rpc({ action: 'owner-setup-snapshot', id });
   await rpc({ action: 'workspace-quick-grant', id, confirm: id, expectedRevision: first.workspaceRevision });
   const ops = await rpc({ action: 'chat-create', id, title: 'Ops' });
