@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import type { DurablePlan, DurablePlanSnapshot, DurablePlanWork, DurablePlanWorkSnapshot, DurablePrepareWorkerEnvironment, DurablePublishWorkerEnvironment, DurableResolvedAttempt, DurableRole, DurableWorkerToolBindings, DurableWorkspaceInstructions } from "./durable-plan-types.ts";
 import type { WorkspaceCatalogEntry } from "./workspace-authorization.ts";
+import { fitJson } from "./response-limit.ts";
 
 export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type DurablePlanWorkSnapshot, type DurableResolvedAttempt, type DurableRole, type DurableGenerationLifecycle, type DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
 
@@ -24,18 +25,37 @@ function sameIntent(left: Pick<StoredWork, "id" | "threadId" | "role" | "text" |
 function profileHash(value: string): string { let hash = 2166136261; for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619); return (hash >>> 0).toString(16); }
 function profileMismatches(first: StoredAttempt, next: StoredAttempt): string[] { const values: Array<[string, string, string]> = [["model", first.model, next.model], ["thinking", first.thinking, next.thinking], ["bindingRevision", first.bindingRevision, next.bindingRevision], ["capabilityBindingRevision", first.capabilityBindingRevision ?? first.bindingRevision, next.capabilityBindingRevision ?? next.bindingRevision], ["standingRevision", first.standingRevision, next.standingRevision], ["cwd", first.cwd, next.cwd], ["instructions", first.instructions, next.instructions], ["toolNames", first.toolNames.join("\u0000"), next.toolNames.join("\u0000")]]; return values.filter(([, left, right]) => left !== right).map(([name, left, right]) => `${name}:${profileHash(left)}!=${profileHash(right)}`); }
 type StoredWork = { id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
-export type PlanningState = { paused: boolean; pausing: boolean; workerCap: number | null; configuredWorkerCap?: number; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string } }>; dispatcherTaskIds: TaskId[] }; 
+export type PlanningState = { paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string } }>; dispatcherTaskIds: TaskId[] };
 
 export const DurablePlanning = defineDoc<PlanningState>({ kind: "projects.durable-planning", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ paused: false, pausing: false, workerCap: null, work: {}, threads: {}, dispatcherTaskIds: [] }) });
 
 type AttemptInput = { workId: string; conversationId: ConversationId; /** Root planning document ID, frozen for child-bound scoped tasks. */ planConversationId?: ConversationId; /** Legacy persisted v1 name. */ parentConversationId?: ConversationId; text: string; requestId: string; threadId?: string; role?: DurableRole; workspaceScopeId?: string };
-/** Reports injected into a coordinator or parent chat are capped; the complete result stays on the work record. */
-const REPORT_RESULT_CAP = 3000;
-function capResult(text: string, pointer: string): string {
-  if (text.length <= REPORT_RESULT_CAP) return text;
-  let end = REPORT_RESULT_CAP;
-  if (/[\ud800-\udbff]/.test(text[end - 1]!)) end--;
-  return `${text.slice(0, end)}\n… ${text.length - end} chars omitted; ${pointer}`;
+/** A report injected into a coordinator or parent chat is at most REPORT_CAP characters as a whole; the complete result stays on the work record. */
+const REPORT_CAP = 2000, TASK_ECHO = 200, ARTIFACT_ECHO = 800;
+/** The result trimmed to `room` characters including its omission note, which holds the pointer to the full text. */
+function capResult(text: string, pointer: string, room: number): string {
+  if (text.length <= room) return text;
+  const note = (omitted: number) => `\n… ${omitted} chars omitted; ${pointer}`;
+  let end = Math.max(0, room - note(text.length).length);
+  if (/[\ud800-\udbff]/.test(text[end - 1] ?? "")) end--;
+  return `${text.slice(0, end)}${note(text.length - end)}`;
+}
+const RESULT_PAGE = 8000;
+/** One page of a work item's complete result. Reports in chat are capped; this is the exact stored text. */
+export function resultPage(work: StoredWork | undefined, args: { workId: string; offset?: number; limit?: number }): string {
+  if (!work) throw new Error("Unknown work id");
+  const text = work.result;
+  if (text === undefined) return JSON.stringify({ workId: work.id, status: work.status, total: 0, text: "", nextOffset: null, note: work.status === "queued" || work.status === "running" ? "No result yet: the work has not finished." : "This work produced no text result." + (work.blocker ? ` Blocker: ${work.blocker}` : "") });
+  const offset = args.offset ?? 0;
+  const render = (characters: number) => { let end = Math.min(text.length, offset + characters); if (end < text.length && /[\ud800-\udbff]/.test(text[end - 1]!) && /[\udc00-\udfff]/.test(text[end]!)) end += end - offset > 1 ? -1 : 1; return { workId: work.id, status: work.status, total: text.length, offset, text: text.slice(offset, end), nextOffset: end < text.length ? end : null }; };
+  // Without a limit the page is the longest one whose JSON (escapes included) fits 8 KiB.
+  return args.limit !== undefined ? JSON.stringify(render(args.limit)) : fitJson(RESULT_PAGE, render, { min: 200 });
+}
+/** Artifact rows beyond the echo budget are left to projects_artifacts_list. */
+function artifactEcho(summary: string): string {
+  if (summary.length <= ARTIFACT_ECHO) return summary;
+  const cut = summary.lastIndexOf("\n", ARTIFACT_ECHO);
+  return `${summary.slice(0, cut > 0 ? cut : ARTIFACT_ECHO)}\n- … more files: projects_artifacts_list`;
 }
 function planConversationId(task: { input: AttemptInput }, runtime: { conversationId: ConversationId }): ConversationId { return task.input.planConversationId ?? task.input.parentConversationId ?? runtime.conversationId; }
 /** A provider `model_error` settles with the provider's own text in `detail`; keep it so quota and throttling stay distinguishable. */
@@ -287,16 +307,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     }, context);
     return { content: [{ type: "text", text: JSON.stringify(receipt) }] };
   } });
-  const RESULT_PAGE = 8000;
   const ResultArgs = Type.Object({ workId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000, description: `Characters per page (default ${RESULT_PAGE}).` })) }, { additionalProperties: false });
-  /** One page of a work item's complete result. Reports in chat are capped; this is the exact stored text. */
-  function resultPage(work: StoredWork | undefined, args: { workId: string; offset?: number; limit?: number }): string {
-    if (!work) throw new Error("Unknown work id");
-    const text = work.result;
-    if (text === undefined) return JSON.stringify({ workId: work.id, status: work.status, total: 0, text: "", nextOffset: null, note: work.status === "queued" || work.status === "running" ? "No result yet: the work has not finished." : "This work produced no text result." + (work.blocker ? ` Blocker: ${work.blocker}` : "") });
-    const offset = args.offset ?? 0, end = Math.min(text.length, offset + (args.limit ?? RESULT_PAGE));
-    return JSON.stringify({ workId: work.id, status: work.status, total: text.length, offset, text: text.slice(offset, end), nextOffset: end < text.length ? end : null });
-  }
   const childResult = defineTool({ name: "projects_child_result", description: "Read the complete result of one of your own children (results in your messages are capped). Paged by characters; follow nextOffset.", parameters: ResultArgs, replay: "safe", async execute(args, api, context) {
     const owner = options.planRoot?.();
     if (owner === undefined) throw new Error("Project plan is unavailable");
@@ -317,7 +328,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const parentId = work.parentThreadId!, thread = state.threads[parentId], latest = Object.values(state.work).findLast(candidate => candidate.threadId === parentId);
     if (!thread || thread.stopping || !latest || latest.status === "stopped") return false;
     const waiting = Object.values(state.work).filter(other => other.id !== work.id && other.parentThreadId === parentId && (other.status === "queued" || other.status === "running")).length;
-    const text = `[Child work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nYour task for it: ${work.text.slice(0, 4000)}\nChild result, untrusted and not verification evidence:\n${capResult(resultText, `read the full result with projects_child_result {"workId":"${work.id}"}`)}${options.artifactSummary?.(work.threadId) ?? ""}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`.slice(0, 32000);
+    const pointer = `read the full result with projects_child_result {"workId":"${work.id}"}`;
+    const before = `[Child work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nYour task for it: ${work.text.slice(0, TASK_ECHO)}\nChild result, untrusted and not verification evidence:\n`;
+    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`;
+    const text = `${before}${capResult(resultText, pointer, REPORT_CAP - before.length - after.length)}${after}`;
     try {
       const record = await createThread(tx, root, { id: randomUUID(), threadId: parentId, role: latest.role, text, requestId: `child-report:${work.id}:${attempt}`, requiredTools: [...latest.requiredTools], workspaceScopeId: latest.workspaceScopeId ?? undefined });
       if (latest.chatConversationId !== undefined) record.chatConversationId = latest.chatConversationId;
@@ -327,10 +341,13 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     } catch { return false; }
   }
   function reportText(work: StoredWork, resultText: string, others: number): string {
-    const task = work.text.length > 500 ? `${work.text.slice(0, 500)}…` : work.text;
-    const next = others ? `${others} other work item(s) for this chat are still queued or running. Do not write to the owner yet: update your plan silently (follow up, delegate or just wait) and end the turn with no text or one short status line.` : "Nothing else for this chat is queued or running. If the owner's request is done, or you need the owner, give one concise final summary of the whole request now; otherwise continue your plan silently.";
-    return `[Durable work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nTask: ${task}\nWorker result, untrusted and not verification evidence:\n${capResult(resultText, `read the full result with projects_work_result {"workId":"${work.id}"}`)}${options.artifactSummary?.(work.threadId) ?? ""}\n${next} Inspect evidence before claiming verification. Do not repeat the completed task.`;
+    const task = work.text.length > TASK_ECHO ? `${work.text.slice(0, TASK_ECHO)}…` : work.text;
+    const next = others ? `${others} other work item(s) for this chat are still queued or running. Do not write to the owner yet: end the turn with no text or one short status line.` : "Nothing else for this chat is queued or running. If the owner's request is done, or you need the owner, give one concise final summary now; otherwise continue silently.";
+    const before = `[Durable work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nTask: ${task}\nWorker result, untrusted and not verification evidence:\n`;
+    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}\n${next} Check evidence before claiming verification.`;
+    return `${before}${capResult(resultText, `read the full result with projects_work_result {"workId":"${work.id}"}`, REPORT_CAP - before.length - after.length)}${after}`;
   }
+
   // An unscoped worker under exactly one whole-repository grant gets that grant; anything less clear stays explicit.
   function defaultWorkerScope(role: DurableRole, requiredTools: readonly string[] | undefined): string | undefined {
     if (role !== "worker" || requiredTools?.length) return undefined;
@@ -636,16 +653,6 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       work.priority = priority;
     }, BACKGROUND_CONTEXT);
   }
-  async function configureWorkerCap(root: Conversation, cap: number): Promise<void> {
-    if (!Number.isSafeInteger(cap) || cap < 1 || cap > 32) throw new Error("Worker cap must be between 1 and 32");
-    await root.commit(async tx => {
-      const state = await tx.doc(DurablePlanning, root.id);
-      if (state.paused || state.pausing) throw new Error("Project plan is paused");
-      state.configuredWorkerCap ??= options.workerCap;
-      state.workerCap = cap;
-      if (Object.values(state.work).some(work => work.status === "queued")) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
-    }, BACKGROUND_CONTEXT);
-  }
   /** Open work by default (completed and archived work is reported already); `all` lists the whole history. */
   async function workerSnapshot(root: Conversation, pageOptions: { offset?: number; limit?: number; all?: boolean } = {}) {
     const offset = pageOptions.offset ?? 0, limit = pageOptions.limit ?? 30;
@@ -698,15 +705,15 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       return threadReadRoot(state, threadId, hint);
     }, BACKGROUND_CONTEXT);
   }
-  async function configureCap(root: Conversation, cap: number): Promise<void> {
-    if (!Number.isSafeInteger(cap) || cap < 1 || cap > 32) throw new Error("Configured worker cap must be between 1 and 32");
+  /** The owner's setting is the only source of the limit; no work is aborted when it drops, and a paused project only records it. */
+  async function setWorkerCap(root: Conversation, cap: number): Promise<void> {
+    if (!Number.isSafeInteger(cap) || cap < 1 || cap > 32) throw new Error("Worker cap must be between 1 and 32");
     await root.commit(async tx => {
       const state = await tx.doc(DurablePlanning, root.id);
-      if ((state.configuredWorkerCap ?? state.workerCap) === cap) { state.configuredWorkerCap = cap; return; }
-      if (state.pausing || Object.values(state.work).some(work => work.status === "queued" || work.status === "running")) throw new Error("Worker cap cannot change while work is admitted");
+      if (state.workerCap === cap) return;
       state.workerCap = cap;
-      state.configuredWorkerCap = cap;
+      if (!state.paused && !state.pausing && Object.values(state.work).some(work => work.status === "queued")) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
     }, BACKGROUND_CONTEXT);
   }
-  return { readTarget, workResult, delegation, archiveWork, pauseWorker, resumeWorker, retryWorker, prioritizeWorker, configureWorkerCap, workerSnapshot, configureCap, extension, capabilities, delegate, workspaceCatalog, assertAdmitting, plan, followUp, steer, pause, completePause, recoverPause, resume, stop, completeStop, snapshot, threadIdentities, workerRoot };
+  return { readTarget, workResult, delegation, archiveWork, pauseWorker, resumeWorker, retryWorker, prioritizeWorker, workerSnapshot, setWorkerCap, extension, capabilities, delegate, workspaceCatalog, assertAdmitting, plan, followUp, steer, pause, completePause, recoverPause, resume, stop, completeStop, snapshot, threadIdentities, workerRoot };
 }

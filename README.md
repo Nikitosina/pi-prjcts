@@ -138,7 +138,13 @@ CLI creation trusts the named workspace's Pi resources and creates a Durable coo
 
 Durable uses the official owned Harness, persistent UUID threads, scoped workspaces and fixed command profiles. Missing workspace/tool access remains a blocker. Worker execution requires explicit grants; the coordinator does not receive a shell. `COMMANDS.md` and `GITHUB-LOCAL.md` describe command/publication limits.
 
-For Durable defaults, use confirmed `settings-update`, native `S` or browser settings rather than editing state or stopping production. Role model selection uses installed offline metadata; configured credentials do not prove connectivity or repair default transport. Existing threads retain frozen model/instruction text. `usage-snapshot`, native `U` and browser usage expose owner-backed counters; page-only worker totals and SDK estimates are not billing.
+Use confirmed `settings-update` or browser settings rather than editing state or stopping production. Coordinator models can be cycled from the composer through the project's scoped list, inherited from Pi's `enabledModels` unless overridden. Worker, scout and reviewer selections default to inheriting the coordinator model when a new thread is admitted; explicit role selections override inheritance. Existing worker threads retain their frozen model and instructions. Coordinator models can change while chats are working: in-flight requests keep their model and subsequent requests use the new selection. Running workers are not interrupted. Configured credentials do not prove connectivity.
+
+New projects allow coordinator questions and access to their captured-evidence library by default; existing grants are not broadened. Concurrency defaults to five workers; explicit project limits remain unchanged. The owner controls this limit in settings, not through the coordinator's tools. Skills and MCP use a shared selection by default, with existing per-role selections retained under advanced controls. Compaction uses Durable defaults unless a legacy override is present; advanced controls retain access to those overrides.
+
+Projects-specific instructions target 4,000 characters for coordinators and 2,000 for workers, excluding repository instructions, owner objectives and on-demand resource content. Project read/search/status responses default to 8 KiB with continuation or expansion; native Pi coding tools keep their own limits. Completion notifications are capped at 2,000 characters with a full-result pointer. These are context budgets, not model-window or billing limits.
+
+`usage-snapshot` and browser usage expose owner-backed counters; page-only worker totals and SDK estimates are not billing.
 
 ## Persistence and recovery
 

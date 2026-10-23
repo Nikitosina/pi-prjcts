@@ -80,7 +80,7 @@ export function readArtifactBytes(controlRoot: string, threadId: string, path: s
   } finally { closeSync(opened.fd); }
 }
 const size = (bytes: number) => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
-const SUMMARY_ROWS = 12, SUMMARY_BUNDLES = 4;
+const SUMMARY_ROWS = 6, SUMMARY_BUNDLES = 2;
 /** Directory bundles (Xcode results, archives) hold hundreds of diagnostics; a report names the bundle, not its contents. */
 const BUNDLE = /^(.*?\.(?:xcresult|xcarchive|dSYM))\//;
 /** Short list appended to a settled-work report, so the coordinator sees (and can cite) the evidence. Files inside bundles collapse into one line per bundle; `projects_artifacts_list` still lists every file. */
@@ -102,10 +102,10 @@ export function artifactSummary(controlRoot: string, threadId: string): string {
     ...topBundles.map(([path, entry]) => `- bundle ${path}: ${entry.files} files, ${size(entry.bytes)}`),
     ...(omittedFiles || omittedBundles ? [`- … ${omittedFiles} more files and ${omittedBundles} more bundles (projects_artifacts_list lists every file)`] : []),
   ];
-  return `\nArtifacts saved by this thread (${listing.files.length} file(s), ${size(listing.totalBytes)}${listing.overCap ? `, OVER the ${size(listing.capBytes)} cap: ask the worker to delete what is not needed` : ""}); cite them as Markdown, images and videos render inline in the chat:\n${lines.join("\n")}`;
+  return `\nArtifacts (${listing.files.length} file(s), ${size(listing.totalBytes)}${listing.overCap ? `, OVER the ${size(listing.capBytes)} cap: ask the worker to delete what is not needed` : ""}); cite as Markdown, images and videos render inline:\n${lines.join("\n")}`;
 }
 export function artifactInstructions(dir: string, threadId: string): string {
-  return `\nArtifacts folder for this thread: ${dir} (also $PI_ARTIFACTS_DIR in your shell). Save verification evidence there: screenshots, videos, logs, reports (point the repository's verification skill or test runner output there, or copy the results). It is outside the worktree, survives worktree cleanup, and the owner and coordinator can view it. Soft cap 500 MB per thread. In your final answer list each saved file as Markdown: ![caption](artifact:${threadId}/<path relative to the folder>) for images and videos, [name](artifact:${threadId}/<path>) for other files.\n`;
+  return `\nArtifacts folder: ${dir} ($PI_ARTIFACTS_DIR), outside the worktree and visible to the owner. Save evidence (screenshots, videos, logs) there and list each file in your answer as a ref [name](artifact:${threadId}/<path>), with a leading ! for images and videos.\n`;
 }
 
 /** Coordinator-only: list and read workers' artifacts folders (known threads of this project only). */
