@@ -1497,7 +1497,7 @@ async function loadPrs(force = false) {
 }
 const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
 // Composer help: the shortcut list lives in a small popover behind an ⓘ button instead of a permanent hint line. A tap/click toggles it, so touch works; Escape or a click outside closes it.
-const helpRows = worker => [["Enter", "Send"], ["Shift+Enter", "New line"], ...(worker ? [] : [["/", "Commands and skills"], ["@", "Files, docs, issues"], ...(prMenuItems().length ? [["#", "Pull requests"]] : []), ["Drop files", "Attach"]])];
+const helpRows = worker => [["Enter", "Send"], ["Shift+Enter", "New line"], ...(worker ? [] : [["/", "Commands and skills"], ["@", "Files, docs, issues"], ["#", "Pull requests"], ["Drop files", "Attach"]])];
 function closeComposerHelp(except = null) {
   for (const wrap of document.querySelectorAll(".help-wrap")) if (wrap !== except) { wrap.querySelector(".help-pop").hidden = true; wrap.querySelector(".help-btn").setAttribute("aria-expanded", "false"); }
 }
@@ -1515,7 +1515,7 @@ document.addEventListener("keydown", event => {
 }, true);
 const byNewest = (a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
 function renderPrs() {
-  const card = document.querySelector("#prs-card"), data = prNow(), hint = document.querySelector("#compose-hint");
+  const card = document.querySelector("#prs-card"), data = prNow();
   const groups = data?.providers ?? [], unloaded = data?.unloaded ?? [];
   card.hidden = !groups.length && !unloaded.length;
   if (card.hidden) return;

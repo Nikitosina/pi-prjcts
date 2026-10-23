@@ -82,6 +82,9 @@ await kit.run(async () => {
   await page.shot('01-composer-help-open');
   const geometry = await page.evaluate(`(() => { const r = document.querySelector('#compose .help-pop').getBoundingClientRect(); return { top: r.top, left: r.left, right: r.right, width: innerWidth }; })()`);
   check('H2 the popover stays inside the viewport', geometry.top >= 0 && geometry.left >= 0 && geometry.right <= geometry.width, geometry);
+  const inside = await page.evaluate(`(() => { const p = document.querySelector('#compose .help-pop').getBoundingClientRect(), c = document.querySelector('#compose').getBoundingClientRect(), b = document.querySelector('#compose .help-btn').getBoundingClientRect(); return { box: [p.left, p.right, p.top, p.bottom, c.left, c.right, c.top, c.bottom, b.top], inside: p.left >= c.left && p.right <= c.right && p.top >= c.top - 1 && p.bottom <= b.top + 2, text: document.querySelector('#compose .help-pop').innerText, placeholder: document.querySelector('#compose textarea').placeholder }; })()`);
+  check('H2b the popover sits inside the composer, above the ⓘ, and lists # Pull requests', inside.inside && /#\s*Pull requests/.test(inside.text), inside);
+  check('H2c the composer placeholder is just "Message the coordinator…"', inside.placeholder === 'Message the coordinator…', inside.placeholder);
   await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   check('H3 Escape closes it', (await state()).hidden === true);
