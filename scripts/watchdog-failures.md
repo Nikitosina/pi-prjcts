@@ -40,3 +40,9 @@ Verified by `scripts/watchdog-e2e.mjs` unless marked (inspection).
 ## Blocked delivery (found live: an uncertain Arc PR receipt silenced every check)
 - D23 An uncertain write receipt (Arc, GitHub, VCS shell, command) blocks watchdog checks. Checks never write; the gate exists so automatic turns do not repeat an uncertain write, and the write tools refuse retries on their own. Pause still blocks checks (D2). (inspection)
 - D24 A check that reached no chat counts as a check in Settings (`ticks`), and one failing chat drops the checks for the other chats. (inspection)
+
+## Healthy checks cost model turns (found in a 103M-token chat: 12 of 14 checks said "healthy"; handling them cost 1.3M tokens for 910 output tokens)
+- D25 A check whose workers are all healthy is still submitted to the coordinator, which replays its whole history to answer with nothing. Only a check with an unproductive verdict is submitted; healthy-only chats are skipped before model admission.
+- D26 A skipped check does not advance the clock, so the next 400 ms tick recomputes digests (git status per worker) and skips again. The interval advances (`lastTickAtMs`, `seq`) whether or not a chat was submitted.
+- D27 The suppression hides an unproductive worker: one unproductive worker among healthy ones in the same chat still submits the whole digest once; a healthy chat next to an unproductive chat gets no submission, the unproductive chat exactly one.
+- D28 A skipped check leaves no trace: Settings and the automation snapshot show `quietChecks`, the number of checks skipped as healthy. `ticks` keeps counting submitted checks only (D24). A stored clock written before this field existed still loads.

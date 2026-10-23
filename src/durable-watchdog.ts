@@ -12,7 +12,7 @@ import type { scheduleRuntime } from "./durable-schedule.ts";
  * project never ticks; a check is due at max(armedAtMs, lastTickAtMs) + everyMs, which survives restarts. `seq` makes each check's event ID
  * unique; it advances in the same transaction that records the event, so two timers cannot admit the same interval twice.
  */
-type WatchdogState = { armedAtMs: number | null; lastTickAtMs: number | null; seq: number; ticks: number; lastWorkers: number; lastError: string | null };
+type WatchdogState = { armedAtMs: number | null; lastTickAtMs: number | null; seq: number; ticks: number; quietChecks?: number; lastWorkers: number; lastError: string | null };
 const Watchdog = defineDoc<WatchdogState>({ kind: "projects.watchdog", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ armedAtMs: null, lastTickAtMs: null, seq: 0, ticks: 0, lastWorkers: 0, lastError: null }) });
 
 type Entry = { id: number; model?: readonly { role: string; content: unknown; timestamp?: number; toolCallId?: string; isError?: boolean; usage?: unknown }[] };
@@ -37,8 +37,8 @@ function usageTokens(usage: unknown): number {
   return num("totalTokens") || num("input") + num("output") + num("cacheRead") + num("cacheWrite");
 }
 
-/** Bounded per-worker digest: runtime, steering, last tool calls, repeats and errors since the last check, tokens since the last check, changed files. */
-export async function workerDigest(work: DurablePlanWorkSnapshot, entries: readonly Entry[] | null, since: number, now: number, parent: string | null, everyMs: number): Promise<string> {
+/** Bounded per-worker digest: runtime, steering, last tool calls, repeats and errors since the last check, tokens since the last check, changed files. `actionable` is false for a healthy verdict. */
+export async function workerDigest(work: DurablePlanWorkSnapshot, entries: readonly Entry[] | null, since: number, now: number, parent: string | null, everyMs: number): Promise<{ text: string; actionable: boolean }> {
   const calls: Array<{ name: string; args: string; at: number; error: boolean; result: string }> = [];
   let tokens = 0, total = 0;
   const results = new Map<string, { error: boolean; text: string }>();
@@ -79,7 +79,7 @@ export async function workerDigest(work: DurablePlanWorkSnapshot, entries: reado
   const noFiles = files === "none uncommitted";
   const stalled = now - started >= everyMs * 2 && tokens > 0 && noFiles;
   const verdict = repeated.length ? "unproductive: repeated identical calls" : repeatedErrors ? "unproductive: repeated errors" : stalled ? "unproductive: tokens spent with no file changes" : "healthy";
-  return [
+  const text = [
     `- ${work.role} thread ${work.threadId}${parent ? ` (sub-agent of ${parent})` : ""}, work ${work.id}: "${clip(work.text, 160)}"`,
     `  running ${minutes(now - started)}${work.steering ? `; this run is a STEER you sent ${minutes(now - started)} ago (steered since an earlier check)` : "; not steered"}`,
     `  last tool calls (oldest first): ${last.length ? last.join(" | ") : "none"}; ${recent.length} call(s) since the last check`,
@@ -88,6 +88,7 @@ export async function workerDigest(work: DurablePlanWorkSnapshot, entries: reado
     `  tokens since the last check: ${tokens.toLocaleString("en-US")} (thread total ${total.toLocaleString("en-US")})`,
     `  files changed in its worktree: ${files}`,
   ].join("\n");
+  return { text, actionable: verdict !== "healthy" };
 }
 
 export function watchdogText(everyMs: number, digests: string[]): string {
@@ -145,20 +146,24 @@ export function watchdogRuntime(root: Conversation, projectId: string, schedules
       groups.set(key, [...(groups.get(key) ?? []), work]);
     }
     const prepared: Array<{ key: number | null; conversation: Conversation; payload: string }> = [];
+    let quiet = 0;
     for (const [key, works] of groups) {
       const conversation = await sources.chat(key);
       if (!conversation) continue;
-      const digests: string[] = [];
-      for (const work of works.slice(0, 12)) digests.push(await workerDigest(work, await sources.entries(work.threadId).catch(() => null), since, now, work.parentThreadId, config.everyMs));
-      if (works.length > 12) digests.push(`- …and ${works.length - 12} more running workers from this chat (inspect with projects_workers)`);
-      prepared.push({ key, conversation, payload: watchdogText(config.everyMs, digests).slice(0, 32000) });
+      const digests: Awaited<ReturnType<typeof workerDigest>>[] = [];
+      for (const work of works) digests.push(await workerDigest(work, await sources.entries(work.threadId).catch(() => null), since, now, work.parentThreadId, config.everyMs));
+      if (!digests.some(digest => digest.actionable)) { quiet++; continue; }
+      // Limit report text, not worker inspection. Put actionable workers first.
+      const shown = digests.sort((a, b) => Number(b.actionable) - Number(a.actionable)).slice(0, 12).map(digest => digest.text);
+      if (works.length > 12) shown.push(`- …and ${works.length - 12} more running workers from this chat (inspect with projects_workers)`);
+      prepared.push({ key, conversation, payload: watchdogText(config.everyMs, shown).slice(0, 32000) });
     }
-    if (!prepared.length) return { skipped: "no-chat" };
+    if (!prepared.length && !quiet) return { skipped: "no-chat" };
     const seq = doc.seq + 1;
     const claimed = await root.commit(async tx => {
       const planning = await tx.doc(DurablePlanning, root.id), value = await tx.doc(Watchdog, root.id);
       if (isClosed() || planning.paused || planning.pausing || value.seq !== seq - 1 || !watchdogConfig(projectId).enabled) return false;
-      value.seq = seq; value.lastTickAtMs = now; value.lastWorkers = running.length;
+      value.seq = seq; value.lastTickAtMs = now; value.lastWorkers = running.length; value.quietChecks = (value.quietChecks ?? 0) + quiet;
       return true;
     }, BACKGROUND_CONTEXT);
     if (!claimed) return { skipped: "superseded" };
@@ -177,7 +182,7 @@ export function watchdogRuntime(root: Conversation, projectId: string, schedules
       } catch (error) { onError(error); failures.push(`${chatKey}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     await root.commit(async tx => { const value = await tx.doc(Watchdog, root.id); if (delivered) value.ticks++; value.lastError = failures.length ? clip(failures.join("; "), 300) : null; }, BACKGROUND_CONTEXT);
-    return { ticked: seq, workers: running.length, chats: delivered, failed: failures.length };
+    return { ticked: seq, workers: running.length, chats: delivered, quiet, failed: failures.length };
   }
   const tick = () => {
     if (current || isClosed()) return;
@@ -188,7 +193,7 @@ export function watchdogRuntime(root: Conversation, projectId: string, schedules
   };
   async function snapshot() {
     const doc = await read(), config = watchdogConfig(projectId);
-    return { enabled: config.enabled, everyMs: loadAutomations(projectId).watchdog.everyMs, effectiveEveryMs: config.everyMs, armedAtMs: doc.armedAtMs, lastTickAtMs: doc.lastTickAtMs, nextAtMs: config.enabled && doc.armedAtMs !== null ? Math.max(doc.armedAtMs, doc.lastTickAtMs ?? 0) + config.everyMs : null, ticks: doc.ticks, lastWorkers: doc.lastWorkers, lastError: doc.lastError };
+    return { enabled: config.enabled, everyMs: loadAutomations(projectId).watchdog.everyMs, effectiveEveryMs: config.everyMs, armedAtMs: doc.armedAtMs, lastTickAtMs: doc.lastTickAtMs, nextAtMs: config.enabled && doc.armedAtMs !== null ? Math.max(doc.armedAtMs, doc.lastTickAtMs ?? 0) + config.everyMs : null, ticks: doc.ticks, quietChecks: doc.quietChecks ?? 0, lastWorkers: doc.lastWorkers, lastError: doc.lastError };
   }
   return { tick, snapshot, idle: () => current ?? Promise.resolve() };
 }

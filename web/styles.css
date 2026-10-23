@@ -267,7 +267,7 @@ small.inline, .inline { display: inline; color: var(--muted); font-size: 12px; }
 .tabs button { white-space: nowrap; flex: none; border: 0; background: transparent; border-bottom: 2px solid transparent; border-radius: 0; padding: 0 10px; font-size: 13px; color: var(--muted); }
 .tabs button:hover { background: transparent; color: var(--text); }
 .tabs button.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
-.body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 22px 40px 24px; max-width: 1240px; }
+.body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; padding: 22px 40px 24px; }
 .body > .panel { flex: none; }
 .body > .panel.grid2 { flex: 1; min-height: 0; }
 .panel { display: grid; gap: 16px; align-content: start; }
@@ -284,13 +284,13 @@ h3.section { font-size: 11.5px; color: var(--muted); text-transform: uppercase; 
 .transcript { overflow: auto; padding-right: 6px; }
 .msg { padding: 10px 0; }
 .msg .who { font-weight: 600; font-size: 12px; margin-bottom: 4px; }
-.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 16px; }
 .msg.you .text { background: var(--chip); padding: 9px 13px; border-radius: 14px; display: inline-block; max-width: 85%; }
 .empty-chat { padding: 60px 10px; text-align: center; }
 .empty-chat h2 { font: 400 24px Georgia, serif; margin-bottom: 10px; }
 .empty-chat p { color: var(--muted); }
 .composer { border: 1px solid var(--line); background: var(--panel); border-radius: 18px; padding: 12px 16px; box-shadow: 0 6px 24px #0000000f; }
-.composer textarea { border: 0; background: transparent; padding: 4px 0; min-height: 52px; max-height: 220px; outline: none; font-size: 15px; resize: none; overflow-y: auto; }
+.composer textarea { border: 0; background: transparent; padding: 4px 0; min-height: 52px; max-height: 220px; outline: none; font-size: 16px; resize: none; overflow-y: auto; }
 .composer textarea:disabled { background: transparent; }
 
 #queue .inbox-item { padding: 10px 6px; gap: 10px; }
@@ -308,6 +308,8 @@ h3.section { font-size: 11.5px; color: var(--muted); text-transform: uppercase; 
 .col .task strong { display: block; font-weight: 500; margin: 6px 0 3px; overflow-wrap: anywhere; }
 
 [data-panel="knowledge"] { max-width: 880px; }
+/* The Coordinator fills the main column; panels that read as documents or forms keep a readable width. */
+[data-panel="settings"], [data-panel="observability"], [data-panel="activity"] { width: 100%; max-width: 1240px; }
 .pane-title { font: 500 20px Georgia, serif; margin: 0; }
 .knowledge-actions { gap: 6px; }
 .doc-view { margin-top: 14px; padding: 4px 18px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--doc); }
@@ -951,9 +953,9 @@ button.primary.danger:hover { background: #8f1d17; border-color: #8f1d17; }
 }
 @media (max-width: 820px) { .activity { grid-template-columns: minmax(0, 1fr); } .artifact-pane { width: 100vw; border-radius: 0; } }
 
-/* Coordinator chat text, a little larger than the rest of the UI. */
-[data-panel="coordinator"] .msg .text { font-size: 15px; }
-[data-panel="coordinator"] .msg .text code, [data-panel="coordinator"] .msg .text pre { font-size: 13px; }
+/* Chat text (coordinator and worker transcripts, reports, composer) is 16px; the rest of the chrome stays at the root size. */
+[data-panel="coordinator"] .msg .text code, [data-panel="coordinator"] .msg .text pre, [data-panel="coordinator"] .report-body code, [data-panel="coordinator"] .report-body pre { font-size: 14px; }
+[data-panel="coordinator"] .report-body { font-size: 16px; }
 
 /* Collapsible project sidebar (wide layouts only; narrow layouts use the top bar): collapses to an icon rail.
    A registered --side-w lets the grid column and the background animate together. */
@@ -971,7 +973,7 @@ button.primary.danger:hover { background: #8f1d17; border-color: #8f1d17; }
 .proj { position: relative; }
 .app.side-collapsed .side { padding-inline: 8px; }
 .app.side-collapsed .side .side-text { max-width: 0; }
-.app.side-collapsed .side .side-text, .app.side-collapsed .side .side-label, .app.side-collapsed .side .quiet, .app.side-collapsed .side #refresh { opacity: 0; pointer-events: none; }
+.app.side-collapsed .side .side-text, .app.side-collapsed .side .side-label, .app.side-collapsed .side .quiet { opacity: 0; pointer-events: none; }
 .app.side-collapsed .side .side-label, .app.side-collapsed .side .quiet { visibility: hidden; }
 .app.side-collapsed .brand-row { justify-content: center; }
 .app.side-collapsed .brand { display: none; }
@@ -979,14 +981,15 @@ button.primary.danger:hover { background: #8f1d17; border-color: #8f1d17; }
 .app.side-collapsed .proj { padding-inline: 6px; gap: 0; }
 /* The pending count becomes a dot on the active avatar. */
 .app.side-collapsed .proj .count { position: absolute; top: 3px; right: 4px; min-width: 8px; height: 8px; padding: 0; font-size: 0; }
-.app.side-collapsed .side-foot { justify-content: center; padding-inline: 0; }
-.app.side-collapsed #connection { font-size: 0; gap: 0; }
-.app.side-collapsed .body { max-width: 1490px; }
+.app.side-collapsed .side-foot { display: flex; justify-content: center; padding: 8px 0; }
+/* Only the status dot stays; Refresh and Hosts leave layout so the dot centers on the avatars' axis. */
+.app.side-collapsed .side #refresh, .app.side-collapsed .side #remote-hosts { display: none; }
+.app.side-collapsed #connection { font-size: 0; gap: 0; width: 7px; height: 7px; margin-right: 1px; }
 @media (max-width: 820px) { .side-toggle { display: none; } .app.side-collapsed .side .side-text, .app.side-collapsed .side #refresh { opacity: 1; max-width: none; pointer-events: auto; } .app.side-collapsed .side { padding-inline: 12px; } .app.side-collapsed .brand { display: block; } }
 
 /* Composer reference highlighting: a mirror layer behind the transparent textarea paints the tokens. Metrics must match the textarea exactly. */
 .compose-field { position: relative; }
-.compose-field textarea, .compose-backdrop { font-family: inherit; font-size: 15px; line-height: 1.6; letter-spacing: normal; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; tab-size: 8; padding: 4px 0; margin: 0; border: 0; box-sizing: border-box; }
+.compose-field textarea, .compose-backdrop { font-family: inherit; font-size: 16px; line-height: 1.6; letter-spacing: normal; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; tab-size: 8; padding: 4px 0; margin: 0; border: 0; box-sizing: border-box; }
 .compose-field textarea { position: relative; z-index: 1; display: block; width: 100%; scrollbar-gutter: stable; }
 .compose-backdrop { position: absolute; inset: 0; overflow: hidden; color: transparent; pointer-events: none; scrollbar-gutter: stable; }
 .compose-backdrop mark.ref { color: transparent; border-radius: 4px; background: var(--ref-bg); box-shadow: 0 0 0 1px var(--ref-line); }
@@ -1041,3 +1044,7 @@ a.button-link:hover { background: var(--hover); }
 .remote-dot { grid-area: dot; width: 8px; height: 8px; border-radius: 50%; background: var(--k-b9b4a5); }
 .remote-dot[data-online="1"] { background: var(--k-4b8d60); }
 @media (max-width: 560px) { .remote-pair { grid-template-columns: minmax(0, 1fr); } .remote-qr { width: 180px; } }
+
+/* Mermaid diagrams in rendered markdown. */
+.mermaid-diagram { margin: 10px 0; padding: 10px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); white-space: normal; }
+.mermaid-diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }

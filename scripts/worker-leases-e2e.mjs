@@ -176,6 +176,40 @@ await kit.run(async () => {
   check('F12 a runaway command is cut off at the log cap; the tail stays small', flood.state === 'killed' && flood.reason === 'log-limit' && flood.logBytes <= 200100 && flood.tail.length <= 20000 && statFlood(bg9.threadId, flood.id) <= 200200, { state: flood.state, reason: flood.reason, logBytes: flood.logBytes, tail: flood.tail.length });
   function statFlood(threadId, bgId) { return readFileSync(join(artDir(threadId), 'bg', `${bgId}.log`)).length; }
 
+  // ---- waiting for a background command ----
+  const workerCalls = tag => result.calls.filter(call => call.role === 'worker' && call.user.includes(tag)).length;
+  const took = item => item.endedAt - item.startedAt;
+  await launch('TAG-bw1', `${bgStart("printf 'a\\n'; sleep 2; printf 'b\\n'; exit 4", 'wait')} ${T('projects_bg_status', { id: '@@BG@@', waitSeconds: 30, tailLines: 5 })} ${T('projects_bg_status', { id: '@@BG@@', tailLines: 0 })}`);
+  const bw1 = await done('TAG-bw1'), waited = out('TAG-bw1', 1);
+  check('F20 one status call with waitSeconds returns when the command ends: state, exit code and tail, no sleep turn; tailLines 0 returns no output', waited.state === 'exited' && waited.code === 4 && waited.tail === 'a\nb' && run('TAG-bw1').results.length === 3 && out('TAG-bw1', 2).tail === '' && out('TAG-bw1', 2).logBytes === 4 && took(bw1) >= 1500 && took(bw1) < 20000, { waited, ms: took(bw1) });
+  await launch('TAG-bw2', `${bgStart("printf 'one\\n'; sleep 3; printf 'two\\n'", 'cursor')} ${sleep(1)} ${T('projects_bg_status', { id: '@@BG@@', after: 0 })} ${T('projects_bg_status', { id: '@@BG@@', after: 4, waitSeconds: 30 })} ${T('projects_bg_status', { id: '@@BG@@', after: 8 })}`);
+  await done('TAG-bw2');
+  const [first, second, third] = [2, 3, 4].map(index => out('TAG-bw2', index));
+  check('F23 `after` returns only output newer than the cursor; logBytes is the next cursor; no new output means an empty tail', first.state === 'running' && first.tail === 'one' && first.logBytes === 4 && second.state === 'exited' && second.code === 0 && second.tail === 'two' && second.logBytes === 8 && third.tail === '' && third.logBytes === 8, { first, second, third });
+  await launch('TAG-bw3', `${bgStart('sleep 60', 'slow')} ${T('projects_bg_status', { id: '@@BG@@', waitSeconds: 1 })} ${bgStop('@@BG@@')}`);
+  const bw3 = await done('TAG-bw3');
+  check('F21 a wait that times out returns the running state after about waitSeconds, not at the end of the command', out('TAG-bw3', 1).state === 'running' && took(bw3) >= 900 && took(bw3) < 20000, { status: out('TAG-bw3', 1), ms: took(bw3) });
+  const bw4 = await launch('TAG-bw4', `${bgStart('sleep 120', 'abort')} ${T('projects_bg_status', { id: '@@BG@@', waitSeconds: 120 })}`);
+  const sleeper = await kit.eventually(() => { const text = run('TAG-bw4')?.results[0]; return text ? JSON.parse(text) : null; }, 'bw4 never started its command');
+  await delay(1500);
+  const stopAt = Date.now();
+  await rpc({ action: 'thread-stop', id, threadId: bw4.threadId });
+  await status('TAG-bw4', ['stopped']);
+  await gone(sleeper.pid, 'command of a thread stopped during a wait');
+  check('F21 stopping the thread ends a wait at once and kills the command', Date.now() - stopAt < 15000, Date.now() - stopAt);
+  await launch('TAG-bw5', `${bgStart('sleep 30', 'schema')} ${T('projects_bg_status', { id: '@@BG@@', waitSeconds: 0 })} ${T('projects_bg_status', { id: '@@BG@@', waitSeconds: 121 })} ${T('projects_bg_status', { id: '@@BG@@', after: -1 })} ${bgStop('@@BG@@')}`);
+  await done('TAG-bw5');
+  check('F25 waitSeconds outside 1..120 and a negative `after` are rejected by the schema', [1, 2, 3].every(index => /waitSeconds|after|minimum|maximum|integer/i.test(run('TAG-bw5').results[index] ?? '') && !/"state"/.test(run('TAG-bw5').results[index] ?? '')), run('TAG-bw5').results);
+  await launch('TAG-bw6', bgStart('sleep 60', 'foreign'));
+  const bw6 = await done('TAG-bw6'), foreign = out('TAG-bw6', 0), foreignStart = Date.now();
+  await launch('TAG-bw7', `${T('projects_bg_status', { id: foreign.id, waitSeconds: 20 })} ${T('projects_bg_status', { id: foreign.id, after: 0 })} ${T('projects_bg_status', { id: 'bg-00000000', waitSeconds: 20 })}`);
+  await done('TAG-bw7');
+  check('F24 another thread cannot wait on, read, or learn about the command; an unknown id fails at once without waiting', [0, 1, 2].every(index => /Unknown background command/.test(run('TAG-bw7').results[index] ?? '')) && alive(foreign.pid) && Date.now() - foreignStart < 15000, run('TAG-bw7').results);
+  await rpc({ action: 'thread-send', id, threadId: bw6.threadId, text: `TAG-bw8 ${bgStop(foreign.id)}`, requestId: crypto.randomUUID() });
+  await delay(400); await kit.settle(id);
+  await gone(foreign.pid, 'foreign-wait fixture command');
+  summary.waiting = { modelCallsStartAndWait: workerCalls('TAG-bw1'), waited, cursor: { first, second, third }, timeoutMs: took(bw3) };
+
   // ---- restart cleanup (hard kill) ----
   const r1 = await launch('TAG-ll1 ONCE-r', `${acquire('r-res', 5)} ${bgStart('sleep 300', 'orphan')} ${bgStart('sleep 301', 'reused-pid')} ${sleep(60)}`);
   await kit.eventually(() => run('TAG-ll1')?.results.length >= 3, 'll1 did not start its commands');

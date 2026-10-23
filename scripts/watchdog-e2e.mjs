@@ -20,6 +20,7 @@ const respond = async ({ coordinator, userText, results, msgs }) => {
       if (results.length === 1) return callU('projects_delegate', { role: 'worker', task: 'WD-HEALTHY implement the progress feature' });
       return sayU('');
     }
+    if (/MARK-WD4\b/.test(userText)) return results.length === 0 ? callU('projects_delegate', { role: 'worker', task: 'WD-HEALTHY4 progress quietly' }) : sayU('');
     if (/MARK-WD2\b/.test(userText) || /MARK-WD3\b/.test(userText)) return results.length === 0 ? callU('projects_delegate', { role: 'worker', task: `WD-LOOP${/MARK-WD(\d)/.exec(userText)[1]} spin` }) : sayU('');
     if (userText.startsWith('[Owner-local event worker.watchdog]')) {
       // Decide once per check (first stage), then run the planned actions in order.
@@ -115,6 +116,16 @@ try {
   const gaps = checks.slice(1).map((m, i) => m.at - checks[i].at);
   check('D3 visible checks are unique and at least one interval apart', checks.length >= 2 && checks.length <= afterIdle.ticks && new Set(checks.map(m => m.text)).size === checks.length && gaps.every(g => g >= EVERY * 0.9), { ticks: afterIdle.ticks, checks: checks.length, gaps });
 
+  // D25-D28: a chat whose workers are all healthy is skipped before the coordinator sees it.
+  const watchdogCalls = () => k.result.calls.filter(call => call.coordinator && call.user.startsWith('[Owner-local event worker.watchdog]')).length;
+  const quiet0 = await wd(), turns0 = brain.turns.length, calls0 = watchdogCalls(), quietStart = Date.now();
+  await rpc({ action: 'message', id, text: 'MARK-WD4 healthy only' });
+  await eventually(async () => (await work()).some(w => /WD-HEALTHY4/.test(w.text) && w.status === 'completed'), 'healthy-only worker did not finish', 900);
+  const quiet1 = await wd(), quietSpan = Date.now() - quietStart, quietChecks = (quiet1.quietChecks ?? 0) - (quiet0.quietChecks ?? 0);
+  result.quiet = { calls: watchdogCalls() - calls0, turns: brain.turns.length - turns0, quietChecks, quietSpan, before: quiet0, after: quiet1 };
+  check('D25 healthy-only checks never reach the coordinator model', watchdogCalls() === calls0 && brain.turns.length === turns0, result.quiet);
+  check('D26/D28 the skipped checks advance the interval, are counted in quietChecks, and ticks keep counting submitted checks only', quietChecks >= 1 && quietChecks <= Math.ceil(quietSpan / EVERY) + 1 && quiet1.lastTickAtMs > (quiet0.lastTickAtMs ?? 0) && quiet1.ticks === quiet0.ticks, result.quiet);
+
   // D2: paused project does not tick.
   await rpc({ action: 'message', id, text: 'MARK-WD2 one more' });
   await eventually(async () => (await wd()).armedAtMs !== null, 'watchdog did not arm for the new worker');
@@ -126,6 +137,8 @@ try {
 
   // D4: restart keeps the clock (last check, count); no check fires just because the host restarted.
   await eventually(async () => (await work()).every(w => !['queued', 'running'].includes(w.status)), 'work still active after resume');
+  // Settled work is not enough: a worker report still pending for the coordinator would make open-time recovery pause the project (D22).
+  for (let seen = -1; seen !== k.result.calls.length;) { seen = k.result.calls.length; await delay(2500); }
   const before = await wd();
   await k.stopHost(); await k.startHost();
   const after = await wd();

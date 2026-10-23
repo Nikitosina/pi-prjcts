@@ -94,7 +94,7 @@ await kit.run(async () => {
 
   // Font (35) and sidebar (33/34).
   const font = await ev(`({ chat: getComputedStyle(document.querySelector('#messages .msg .text')).fontSize, compose: getComputedStyle(${area}).fontSize, body: getComputedStyle(document.body).fontSize })`);
-  check('35 coordinator chat text is 15px; the rest of the UI keeps 14px', font.chat === '15px' && font.compose === '15px' && font.body === '14px', font);
+  check('35 coordinator chat text and composer are 16px; the rest of the UI keeps 14px', font.chat === '16px' && font.compose === '16px' && font.body === '14px', font);
   await page.shot('01-sidebar-open');
   await ev(`document.querySelector('#side-toggle').click()`);
   const collapsed = await ev(`({ cls: document.querySelector('.app').classList.contains('side-collapsed'), side: getComputedStyle(document.querySelector('.side')).display, open: !document.querySelector('#side-open').hidden, bg: getComputedStyle(document.querySelector('.app')).backgroundImage, main: document.querySelector('.main').getBoundingClientRect().left, stored: localStorage.getItem('pi-projects:side-collapsed') })`);

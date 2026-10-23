@@ -1840,6 +1840,7 @@ function renderMarkdown(value, options = {}) {
   const blocks = String(value ?? "").split(/```([^\n]*)\n([\s\S]*?)```/g);
   return blocks.map((part, index) => {
     if (index % 3 === 1) return "";
+    if (index % 3 === 2 && /^(mermaid|flowchart)$/.test(blocks[index - 1].trim())) return `<pre class="mermaid-src" data-mermaid="${esc(blocks[index - 1].trim() === "flowchart" && !/^\s*(flowchart|graph)\b/.test(part) ? `flowchart TD\n${part}` : part)}"><code>${esc(part)}</code></pre>`;
     if (index % 3 === 2) return blocks[index - 1].trim() === "diff" ? `<pre class="diff"><code>${part.split("\n").map(line => `<span class="${line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : ""}">${esc(line)}</span>`).join("\n")}</code></pre>` : `<pre><code>${esc(part)}</code></pre>`;
     const lines = part.split("\n"), out = [];
     let list = null, quote = [];
@@ -1877,6 +1878,42 @@ function renderMarkdown(value, options = {}) {
   }).join("");
 }
 if (initial.searchParams.get("e2e") === "1") window.__projectsRenderMarkdown = renderMarkdown;
+// Mermaid fences first render as plain code blocks. The same-origin build loads on first use and swaps in the diagram; any failure leaves the code block.
+const mermaidSvgs = new Map();
+let mermaidLoad = null;
+function loadMermaid() {
+  mermaidLoad ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/mermaid.min.js";
+    script.onload = () => { const api = globalThis.__esbuild_esm_mermaid_nm?.mermaid; resolve(api?.default ?? api); };
+    script.onerror = () => { mermaidLoad = null; reject(new Error("Mermaid failed to load")); };
+    document.head.append(script);
+  });
+  return mermaidLoad;
+}
+let mermaidSeq = 0, mermaidQueue = Promise.resolve();
+function hydrateMermaid(root = document) {
+  for (const node of root.querySelectorAll("pre[data-mermaid]:not([data-state])")) {
+    const source = node.dataset.mermaid, dark = document.documentElement.dataset.theme === "dark", key = `${dark ? "d" : "l"}:${source}`;
+    const show = svg => { if (!node.isConnected) return; const box = document.createElement("div"); box.className = "mermaid-diagram"; box.innerHTML = svg; node.replaceWith(box); };
+    node.dataset.state = "pending";
+    if (mermaidSvgs.has(key)) { const cached = mermaidSvgs.get(key); if (cached) show(cached); else node.dataset.state = "failed"; continue; }
+    // Renders run one at a time: mermaid keeps global state while it lays out.
+    mermaidQueue = mermaidQueue.then(async () => {
+      try {
+        const mermaid = await loadMermaid();
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "neutral", suppressErrorRendering: true });
+        const id = `mermaid-${++mermaidSeq}`;
+        // Mermaid parks its work in <div id="d…"> (and the svg itself on a parse error); clear both before the diagram takes the svg's id.
+        let svg = null;
+        try { ({ svg } = await mermaid.render(id, source)); }
+        finally { document.getElementById(`d${id}`)?.remove(); document.getElementById(id)?.remove(); }
+        mermaidSvgs.set(key, svg); show(svg);
+      } catch { mermaidSvgs.set(key, null); node.dataset.state = "failed"; }
+    });
+  }
+}
+new MutationObserver(() => hydrateMermaid()).observe(document.body, { childList: true, subtree: true });
 // Artifact references become <img>/<video>/download links. Bytes are fetched once per page (token header, so no plain URLs) and cached as blob URLs.
 const artifactBlobs = new Map();
 const artifactKindOf = path => /\.(png|jpe?g|webp|gif)$/i.test(path) ? "image" : /\.(webm|mp4)$/i.test(path) ? "video" : "other";
@@ -3489,13 +3526,22 @@ function holdsBadge(holds) {
   return ` · <span class="worker-holds" title="${esc(title)}">${esc(parts.join(", "))}</span>`;
 }
 const finished = work => ["completed", "failed", "stopped"].includes(work.status);
+// The chat that admitted a work item (null chatConversationId means Main). Child work keeps the admitting chat, so parentThreadId plays no part.
+function workChatId(work) {
+  const chats = view?.chats ?? [];
+  const main = chats.find(chat => chat.id === "main")?.conversationId ?? null;
+  return (chats.find(chat => chat.conversationId === (work.chatConversationId ?? main)) ?? chats[0])?.id ?? "main";
+}
+const inSelectedChat = work => !view?.chats || workChatId(work) === chatId;
 function durableActivity() {
   const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
   // Finished and archived work leave this panel for Recent results; Activity keeps the full list.
-  const shown = plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
+  const active = plan.work.filter(work => !finished(work) && !work.archived);
+  const shown = active.filter(inSelectedChat).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
+  const elsewhere = active.length - active.filter(inSelectedChat).length;
   const detail = work => work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
   const total = plan.work.length;
-  return (shown.map(work => workLine(work, detail(work))).join("") || `<p class="note">${total ? "No active workers." : "No workers yet."}</p>`) + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
+  return (shown.map(work => workLine(work, detail(work))).join("") || '<p class="note">No active workers from this chat.</p>') + (elsewhere ? `<p class="note other-chats">${elsewhere} active in other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
 }
 function durableResults() {
   const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);
