@@ -119,6 +119,9 @@ try {
     const project = await rpc({ action: 'create', requestId: randomUUID(), name, cwd: workspace, objective: 'Disposable', model: 'fake/fake-model' });
     const settings = await rpc({ action: 'settings-snapshot', id: project.id });
     await rpc({ action: 'settings-update', id: project.id, confirm: project.id, expectedRevision: settings.revision, changes: { models: { worker: 'fake/fake-model', scout: 'fake/fake-model', reviewer: 'fake/fake-model' } } });
+    // Git projects start with the whole-repository scope. Revoke it to test delegation for a project without any grant.
+    const auto = await rpc({ action: 'owner-setup-snapshot', id: project.id });
+    for (const scope of auto.workspace?.scopes ?? []) await rpc({ action: 'workspace-revoke', id: project.id, confirm: project.id, scopeId: scope.id, expectedRevision: (await rpc({ action: 'owner-setup-snapshot', id: project.id })).workspaceRevision });
     return project.id;
   };
   const askIn = id => async text => { const job = await rpc({ action: 'message', id, text }); const done = await settle(id, job); if (done.state !== 'done') throw Error(`${text} failed: ${done.error}`); return lastReply(id); };

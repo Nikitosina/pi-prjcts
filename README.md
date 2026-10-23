@@ -16,7 +16,7 @@ npm run inbox --prefix /Users/nikitarat/.pi/agent/projects-mvp
 ```
 
 The inbox has saved questions with choice buttons and custom answers, Durable
-worker threads (history, follow-up, steer, stop) in Activity, immutable evidence
+worker threads (history, follow-up, steer, stop) expanded in the Workers card, immutable evidence
 previews, shared notes, and coordinator messaging. The message box stays available
 while reading the inbox; `/` focuses it. Drafts survive polling, in-flight sends
 and project switches within the tab. Durable browser controls also cover scoped approval records and separate execution/inspection, managed knowledge, a hash-pinned library with confirmed pasted imports, role settings, usage, lifecycle actions, GitHub observations and routines. Tab/origin-local draft snapshots restore no actions or confirmation inputs.

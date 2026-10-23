@@ -495,10 +495,14 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); for (const work of planValue.work) for (const dependency of work.dependsOn ?? []) if (!planValue.work.some(candidate => candidate.id === dependency) && !state.work[dependency]) throw new Error(`Unknown persisted plan dependency: ${dependency}`); for (const work of planValue.work) await admit(tx, root.id, work, false, chat); if (!state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true })); }, BACKGROUND_CONTEXT);
     return snapshot(root);
   }
+  /** A worker thread admitted without a workspace scope has no shell or file tools and cannot gain them. Once a workspace exists, work for it belongs to a new worker. */
+  function requireWorkspaceThread(thread: { role: DurableRole; workspaceScopeId?: string | null }): void {
+    if (thread.role === "worker" && !thread.workspaceScopeId && (options.workspaceCatalog?.() ?? []).length) throw new Error("This worker was started without a workspace, so it has no shell or file tools and cannot get them. Start a new worker with projects_delegate (new workers get the repository workspace by default) instead of following up, steering or retrying this one.");
+  }
   async function followUp(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId): Promise<string> {
     if (!text || text.length > 32000 || !requestId) throw new Error("Follow-up text and requestId are required");
     const id = crypto.randomUUID();
-    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); return record.id; }, BACKGROUND_CONTEXT);
+    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); requireWorkspaceThread(thread); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); return record.id; }, BACKGROUND_CONTEXT);
   }
   async function steer(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId) {
     if (!text || text.length > 32000 || !requestId) throw new Error("Steering text and requestId are required");
@@ -514,6 +518,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (thread.paused) throw new Error("Worker is paused; resume it before steering");
       const previous = Object.values(state.work).find(work => work.threadId === threadId);
       if (!previous) throw new Error("Durable thread has no frozen role");
+      requireWorkspaceThread(previous);
       const record = await admit(tx, root.id, { id: randomUUID(), threadId, role: previous.role, text, requestId, requiredTools: [...previous.requiredTools], workspaceScopeId: previous.workspaceScopeId ?? undefined }, false, chat);
       state.work[record.id].steering = true;
       if (record.status === "blocked") return { attemptId: record.id, stop: null };
@@ -637,6 +642,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       }
       if (previous.status === "queued" || previous.status === "running") throw new Error("Only terminal work can be retried; steer running work instead");
       if (state.threads[previous.threadId]?.paused) throw new Error("Worker is paused; resume it instead of retrying");
+      requireWorkspaceThread(previous);
       const record = await admit(tx, root.id, { id: randomUUID(), threadId: previous.threadId, role: previous.role, text: previous.text, requestId, dependsOn: [...previous.dependsOn], requiredTools: [...previous.requiredTools], workspaceScopeId: previous.workspaceScopeId ?? undefined }, true, chat);
       state.work[record.id].retryOf = workId;
       state.work[record.id].priority = previous.priority;

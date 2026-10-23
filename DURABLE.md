@@ -168,7 +168,7 @@ Scout and reviewer threads always get `code_read`, `code_grep`, `code_find` and 
 
 ## Archiving work
 
-Running, queued, interrupted and blocked work shows in the Workers card. Completed, failed and stopped work moves to Recent results until archived. The coordinator archives with `projects_worker_archive` (`workIds` or `terminal: true`), and the owner archives from the Activity tab. Archive sets `archivedAt` only: the work record, thread conversation and report are kept, and `projects_workers`/`plan-snapshot` report `archived: true`. Running, queued, interrupted and unknown work is refused. Activity hides archived work unless "Show archived" is on.
+Running, queued, interrupted and blocked work shows in the Workers card. Completed, failed and stopped work moves to Recent results until archived. The coordinator archives with `projects_worker_archive` (`workIds` or `terminal: true`), and the owner archives from the Workers card ("View all work"). Archive sets `archivedAt` only: the work record, thread conversation and report are kept, and `projects_workers`/`plan-snapshot` report `archived: true`. Running, queued, interrupted and unknown work is refused. The card hides archived work unless "Show archived" is on.
 
 The live coordinator bubble streams inside the transcript scroll (`#transcript`) and follows the bottom only while the reader is there. Scrolling up pauses following until the reader scrolls back down or sends a message.
 
@@ -233,17 +233,19 @@ Polished by driving the UI on a real coordinator (`openai-codex/gpt-6-luna`) aga
 
 ### Rail
 - The Needs-you card is hidden when nothing is pending. When something is, the question appears once, with neutral choices.
-- Workers shows only active work, with "View all work (n)" linking to Activity.
+- Workers shows only active work. "View all work (n)" switches the card to every work item in this chat (and back with "Show active only").
 - Order: Needs you, Workers, Knowledge, Recent results.
 - Recent results lists finished work and opens its thread.
 - The Knowledge card is a compact folder tree of topic documents; it hides the starter files and `research/legacy/`.
 
-### Activity
-Master-detail layout: the work list on the left, with the selected row marked; the thread pane on the right. The thread pane shows:
+### Workers card
+Rows expand in place; there is no Activity tab. Clicking a row opens its thread inside the row (clicking again collapses it); search hits and results land on the Coordinator tab with the row expanded. The expanded row shows:
 - a header with status, role, model and the task, which expands on click
-- the transcript
-- the follow-up composer
-- evidence, changes and steer/stop controls in a collapsible section
+- the latest step and the context usage ("Context 12.5k / 200k · 6%")
+- the transcript and the follow-up composer
+- Steer and Stop
+- the artifact browser (always rendered, not collapsed)
+- evidence and changes in a collapsible section
 
 ### Knowledge
 - Documents form a folder tree: folders first with counts and a collapse chevron, then files (MEMORY.md and preferences.md first, then newest). Rows show author, relative time and size. `research/legacy/` starts collapsed; collapsed folders stay collapsed across refreshes and are shared with the rail.
@@ -265,7 +267,7 @@ Verified by `scripts/ui-polish-e2e.mjs`; failures in `scripts/ui-polish-failures
 
 ## Multiple chats per project
 
-Each chat is its own Durable coordinator conversation. Main is the original root conversation; existing projects open with Main only and keep their transcript. Other chats are ownerless conversations listed in the root's `projects.chats` document. Each gets the root's coordinator configuration (model, instructions, tools, extensions) on creation, and again on every open if it differs, so recovery re-adds tools the same way it does for the root. Chats share knowledge, standing instructions, the one plan/worker pool, the Activity tab and the inbox.
+Each chat is its own Durable coordinator conversation. Main is the original root conversation; existing projects open with Main only and keep their transcript. Other chats are ownerless conversations listed in the root's `projects.chats` document. Each gets the root's coordinator configuration (model, instructions, tools, extensions) on creation, and again on every open if it differs, so recovery re-adds tools the same way it does for the root. Chats share knowledge, standing instructions, the one plan/worker pool, the Workers card and the inbox.
 
 - Coordinator-only tools (worker management, questions, GitHub, library, skill files, knowledge writes) accept Main and any chat conversation, never a worker thread.
 - `projects_delegate` and `projects_worker_plan` admit into the root's plan from any chat. The work records the delegating chat (`chatConversationId`), and its report goes to that chat only. A follow-up, steer or retry reports to the chat that issued it; an owner thread follow-up keeps the thread's chat. An owner answer wakes the chat that asked the question.
@@ -352,7 +354,7 @@ A top-level **worker** thread gets `projects_delegate_child` (extension `project
 - **Reports.** When a child settles, its result becomes a follow-up work item on the parent thread: text `[Child work <id>, …]`, with the stable requestId `child-report:<workId>:<attempt>` and the parent's chat. The coordinator never gets the child report. It gets only the parent's answer after its last child settled, in the chat that delegated the parent. A parent answer given while its children are still queued or running is held (`report` marked delivered with a `held:` requestId; `projects_workers` shows `held until children finish`). Each child report tells the parent how many children are still running. If the parent is gone or stopped, the child reports to that chat as usual.
 - **Stop.** Stopping a parent stops its children's queued and running work with the same stop id (blocker "Stopped with its parent worker"). The cascade drains together.
 - **UI.**
-  - Activity nests children (`.work-children[data-parent] > .work.child`, "sub-agent" label) under the parent's newest row.
+  - The Workers card nests children (`.work-children[data-parent] > .work.child`, "sub-agent" label) under the parent's newest row.
   - The Observability trace nests child threads (`.trace-child`) under the parent thread, not under the chat.
 - **E2E.** `scripts/nested-subagents-e2e.mjs`. Failure cases are in `scripts/nested-subagents-failures.md`.
 
@@ -384,7 +386,7 @@ Verified by `scripts/browser-notify-e2e.mjs` (fake model, stubbed Notification A
 One project at a time: every chat (archived ones too), every worker thread (sub-agents included), knowledge documents and upload text. Open it with the header Search button or Cmd/Ctrl+K, which works from any field, the composer included. The `/` composer shortcut is unchanged.
 - **Host.** RPC `search {id, query, limit ≤ 50}` (`searchProject` in `src/knowledge-search.ts`) uses the same BM25 and tokenizer as `projects_search`. Transcripts come from `runtime.searchSources()`, which returns the text messages of each chat and thread with their `index`. That index is the position in `coordinatorMessages`, so it matches both the coordinator transcript and `thread-history` offsets. Message chunks are cached per conversation and position, and keys that are gone are dropped. Tool rows are not indexed. Hits carry their source: `chat` (chatId, chat title, archived, role, index, at), `worker` (threadId, a role and task label, child, role, index, at), `knowledge` (path, offset) or `upload` (uploadId, filename, offset). Ties go to the newer hit. A legacy project searches knowledge and uploads only (by inspection).
 - **Jump.** `show` takes `focus` (a transcript index). The window then reaches back to that message: text rows from 3 rows before it, plus tool rows near it and in the normal tail. Projected messages carry `index` (`data-index` in the DOM). The UI keeps the focus across the 2 s refreshes and live frames. It highlights the message (`.search-focus`, `mark.search-mark`), opens a report or event card, and scrolls to it once. Sending a message, Jump to latest or switching chat or project returns to the normal tail.
-  - A worker hit opens Activity on that thread at `index - 5`.
+  - A worker hit expands that thread in the Workers card at `index - 5`.
   - A knowledge hit opens the document with every match marked, scrolled to the match at the hit offset (`.current`).
   - An upload hit reads the text from 2,000 characters before the offset, so matches past the first 20,000 characters show too.
 - **Dialog.** Search runs on input after 180 ms. A slower earlier query, a closed dialog or a project switch never overwrites the newest list. Arrow keys and Enter pick a result. Snippets are escaped and terms are marked. The dialog says when nothing matches, and why a stop-word-only query is refused. At 390 px the header shows only the icon, and rows wrap.
@@ -458,7 +460,7 @@ Verified by `scripts/context-settings-e2e.mjs` (UI save, busy-coordinator save, 
 - The settled report (to the coordinator, or to the parent for children) appends a list of up to 20 files as `artifact:<threadId>/<path>` refs. Coordinator tools (`projects.artifacts`): `projects_artifacts_list` (overview or one thread) and `projects_artifact_read` (text pages, images ≤5 MB as image content, metadata for video/binary). Known threads of this project only.
 - Safety (`src/artifacts.ts`): bounded walk (2000 entries, depth 8), symlinks skipped and reported, never followed; `..`/absolute/NUL/backslash refused; realpath must stay in the thread folder; files opened `O_NOFOLLOW` and must be regular.
 - Serving: `GET /artifacts/<project>/<thread>/<path>` with the web Bearer token (401 without). CSP gains `media-src 'self' blob:`.
-- Chat: `![caption](artifact:<thread>/<path>)` renders images inline and webm/mp4 as `<video controls>`; `[label](artifact:…)` and other kinds are links fetched only on click. Blob URLs are cached (300 entries) so re-renders do not refetch; a missing file shows "(missing artifact)". Activity thread pane shows an Artifacts box (sizes, cap warning, skipped symlinks, inline previews), refreshed at most every 4 s.
+- Chat: `![caption](artifact:<thread>/<path>)` renders images inline and webm/mp4 as `<video controls>`; `[label](artifact:…)` and other kinds are links fetched only on click. Blob URLs are cached (300 entries) so re-renders do not refetch; a missing file shows "(missing artifact)". An expanded Workers-card row shows an Artifacts box (sizes, cap warning, skipped symlinks, inline previews), refreshed at most every 4 s.
 - E2E: `scripts/artifacts-e2e.mjs` (failure cases `scripts/artifacts-failures.md`).
 
 ## Worker watchdog (C12)

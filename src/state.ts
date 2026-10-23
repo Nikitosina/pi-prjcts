@@ -8,6 +8,9 @@ import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts"
 import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
+export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
+const promptText = Type.String({ minLength: 1, maxLength: 24000 });
+export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText) }, { additionalProperties: false });
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_WORKER_CAP = 5;
@@ -88,6 +91,8 @@ export const Project = Type.Object({
   skillProfiles: Type.Optional(SkillProfiles),
   /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
   mcp: Type.Optional(McpSettings),
+  /** Owner overrides of the editable role instructions, per role (this project only). Absent = the built-in text. */
+  prompts: Type.Optional(PromptOverrides),
   /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
   worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
   contextSettings: Type.Optional(ContextSettings),
@@ -114,6 +119,8 @@ export const Job = Type.Object({
   chatId: Type.Optional(Id),
   /** Owner uploads attached to the message. */
   attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+  /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
+  settledAt: Type.Optional(Type.Number()),
 }, { additionalProperties: false });
 export type Job = Static<typeof Job>;
 export const ChatId = Type.Union([Type.Literal("main"), Id]);
@@ -187,7 +194,7 @@ export const Snapshot = Type.Object({
   uploads: Type.Optional(Type.Array(Type.Unknown())), failedJobs: Type.Optional(Type.Integer({ minimum: 0 })),
   /** Setup cards of workspace provider plugins (Owner setup steps) and the provider id of a grant whose plugin is not loaded. */
   providerCards: Type.Optional(Type.Array(Type.Unknown())), unloadedProvider: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
+  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()), finishedAt: Type.Optional(Type.Number()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
 export const Request = Type.Union([
@@ -201,6 +208,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("command-intent-inspect"), id: Id, confirm: Id, key: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-intents-snapshot"), id: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("coordinator-skills"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("prompts-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("ref-candidates"), id: Id, refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("ref-preview"), id: Id, kind: Type.Union([Type.Literal("file"), Type.Literal("issue"), Type.Literal("skill")]), value: Type.String({ minLength: 1, maxLength: 1024 }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("mcp-catalog"), id: Id }, { additionalProperties: false }),
@@ -233,6 +241,8 @@ export const Request = Type.Union([
     skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
     /** null removes every MCP server. */
     mcp: Type.Optional(Type.Union([McpSettings, Type.Null()])),
+    /** A role set to null returns to the built-in text. */
+    prompts: Type.Optional(Type.Object({ coordinator: Type.Optional(Type.Union([promptText, Type.Null()])), worker: Type.Optional(Type.Union([promptText, Type.Null()])), scout: Type.Optional(Type.Union([promptText, Type.Null()])), reviewer: Type.Optional(Type.Union([promptText, Type.Null()])) }, { additionalProperties: false })),
     /** "" removes the worktree setup command. */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     /** null restores the defaults (catalog window, pi-durable compaction policy). */
@@ -284,6 +294,10 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("legacy-thread-history"), id: Id, name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-history"), id: Id, threadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) , context: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("limits-snapshot") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("limits-refresh") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("cursor-connect") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), requestId: Type.Optional(Id), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-read"), id: Id, uploadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })) }, { additionalProperties: false }),

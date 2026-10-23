@@ -162,15 +162,15 @@ await kit.run(async () => {
   await page.waitFor(`document.querySelector('#prs-card')?.hidden === false && document.querySelectorAll('#prs .pr-group').length === 2`, 'two provider groups in the PR card');
   const cardText = await page.evaluate(`document.querySelector('#prs-card').innerText`);
   check('11 the browser shows both provider groups, escaped hostile titles and per-provider actions', /Fake/.test(cardText) && /Second/.test(cardText) && /Second provider PR <b>x<\/b>/.test(cardText) && !await page.evaluate(`!!document.querySelector('#prs img, #prs b')`) && await page.evaluate(`document.querySelectorAll('#prs [data-action="pr-watch"][data-provider="fake"]').length > 0`), cardText);
-  check('11/23 the composer hint announces # for PRs', /# for PRs/.test(await page.evaluate(`document.querySelector('#compose-hint').textContent`)));
+  check('11/23 the composer help lists # for PRs', await page.evaluate(`(() => { document.querySelector('#compose .help-btn').click(); const text = document.querySelector('#compose .help-pop').innerText; document.querySelector('#compose .help-btn').click(); return /#\\s*Pull requests/.test(text); })()`));
   await page.evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.focus(); t.value = '#2'; t.setSelectionRange(2, 2); t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await page.waitFor(`document.querySelector('#skill-menu')?.hidden === false && document.querySelectorAll('#skill-menu .pr-opt').length >= 1`, '# menu');
   check('11 the # menu lists provider PRs by their ref', /#21/.test(await page.evaluate(`document.querySelector('#skill-menu').innerText`)));
   await page.shot('01-pr-card-two-providers');
   check('9 the browser shows the failed plugins', await page.evaluate(`/Plugin not loaded/.test(document.body.innerText)`), await page.evaluate(`document.body.innerText.slice(0, 300)`));
   await page.evaluate(`document.querySelector('[data-action="close-dialog"]')?.click()`);
-  const step = await (async () => { await page.navigate(await kit.webUrl(id, 'settings')); await page.waitFor(`document.querySelectorAll('#owner-steps li').length >= 3`, 'owner steps'); return page.evaluate(`document.querySelector('#owner-steps').innerText`); })();
-  check('10 Owner setup step 2 is the plugin card', /Fake service/.test(step) && /Connected to fake-repo/.test(step), step);
+  const step = await (async () => { await page.navigate(await kit.webUrl(id, 'settings')); await page.waitFor(`document.querySelectorAll('#owner-steps li').length >= 2`, 'owner steps'); return page.evaluate(`document.querySelector('#owner-steps').innerText`); })();
+  check('10 Owner setup step 1 is the plugin card', /Fake service/.test(step) && /Connected to fake-repo/.test(step), step);
   await page.shot('02-owner-steps');
 
   // ---- Config problems and the plugin missing after use (19-21) ----

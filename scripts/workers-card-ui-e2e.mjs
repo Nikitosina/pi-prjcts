@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const artifacts = join(repo, 'artifacts', `workers-card-ui-${stamp}`), root = join(realpathSync(tmpdir()), `workers-card-ui-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
@@ -100,7 +100,7 @@ async function waitFor(expression, session, label) {
 
 const git = (...args) => execFileSync('/usr/bin/git', ['-C', workspace, ...args], { encoding: 'utf8' }).trim();
 const card = s => evaluate(`document.querySelector('#activity').innerText`, s);
-const lines = s => evaluate(`[...document.querySelectorAll('#activity .worker-line, #outcomes .worker-line')].map(node => node.innerText.replace(/\\s+/g, ' ').trim())`, s);
+const lines = s => evaluate(`[...document.querySelectorAll('#activity .worker-line, #outcomes .worker-line')].map(node => node.innerText.replace(node.querySelector('.ctx-ring')?.innerText ?? '', '').replace(/\\s+/g, ' ').trim())`, s);
 try {
   git('init', '-b', 'main'); git('config', 'user.email', 'e2e@example.invalid'); git('config', 'user.name', 'E2E');
   writeFileSync(join(workspace, 'README.md'), 'base\n'); git('add', '.'); git('commit', '-m', 'c1');
@@ -135,6 +135,8 @@ try {
   const running = shown.find(line => / · running · /.test(line));
   if (!/^MARK-HOLD .+ worker · running · \d+s$/.test(running ?? '')) throw new Error('Running line lacks elapsed time: ' + running);
   result.checks.push('W2 running line shows elapsed time and live-updates');
+  await waitFor(`/^(\\d+%|window unknown)$/.test(document.querySelector('#activity .worker-line.running .ctx-ring')?.innerText.trim() ?? '')`, s, 'running row context indicator');
+  result.checks.push('W9 a running row carries a context ring with a percent or "window unknown", never an invented number');
   const title = await evaluate(`document.querySelector('#activity .worker-line.running .worker-title').innerText`, s);
   if (title.length > 60 || !title.endsWith('…')) throw new Error('Title not shortened: ' + title);
   result.checks.push('W3 long task text is clipped to 60 characters');

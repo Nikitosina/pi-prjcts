@@ -4,8 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pi Projects</title>
   <meta name="color-scheme" content="light dark"><script src="/theme.js"></script>
-  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script><!-- THROWAWAY activity prototype (loads its own CSS); remove with web/activity-prototype.* -->
-  <script defer src="/activity-prototype.js"></script>
+  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
 </head>
 <body>
   <div class="app">
@@ -21,7 +20,7 @@
     <main class="main">
       <header class="phead">
         <div class="row"><span id="avatar" class="avatar">π</span><h1 id="title">Opening your projects.</h1></div>
-        <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="activity">Activity</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
+        <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
         <button id="search-button" class="ghost small search-button" data-action="search" title="Search chats, workers, knowledge and files (⌘K / Ctrl+K)" aria-label="Search" aria-keyshortcuts="Meta+K Control+K"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.4 10.4 3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="search-label">Search</span><kbd class="search-kbd"></kbd></button>
         <div id="lifecycle" class="row" aria-label="Project lifecycle" hidden><span id="lifecycle-state" class="chip" role="status"></span><button id="project-pause" data-action="pause-project">❚❚ Pause</button><button id="project-resume" data-action="resume-project">▶ Resume</button><button class="ghost" data-action="lifecycle-more" title="Archive, delete or restore" aria-label="More project actions">⋯</button></div>
       </header>
@@ -34,18 +33,20 @@
             <div id="transcript" class="transcript"><div id="messages" aria-live="polite"></div><div id="live-reply" class="msg them live-reply" aria-live="polite" hidden></div><div id="questions" class="questions" aria-live="polite"></div><div class="pill-dock"><button id="working-pill" class="working-pill" data-action="jump-latest" hidden><span class="live-dot"></span><span class="pill-text"></span><span aria-hidden="true">↓</span></button></div></div>
             <p id="paused-hint" class="paused-hint" role="status" hidden><span>Paused. Workers are stopped and the coordinator takes no new messages.</span><button class="primary small" data-action="resume-project">Resume</button></p>
             <p id="question-hint" class="question-hint" hidden><span aria-hidden="true">↑</span> The coordinator asked you a question. <button type="button" class="ghost small" data-action="questions-jump">Answer it above</button></p>
-            <form id="compose" class="composer" aria-label="Coordinator messaging"><div id="skill-menu" class="skill-menu" role="listbox" aria-label="Skills" hidden></div><div id="attachments" class="attach-chips" aria-label="Attachments" hidden></div><input type="file" id="attach-input" multiple hidden><div class="compose-field"><div class="compose-backdrop" aria-hidden="true"></div><textarea name="message" aria-label="Message coordinator" placeholder="Message the coordinator…  / commands, skills · @ files, docs, issues · # PRs" rows="2" maxlength="32000" required role="combobox" aria-autocomplete="list" aria-controls="skill-menu"></textarea></div><div class="row between"><small id="compose-hint">Enter to send · Shift+Enter for a new line · / for commands, skills · @ for files, docs, issues · drop files to attach</small><span class="row compose-actions"><button type="button" class="ghost small model-cycle" id="model-cycle" data-action="model-cycle" hidden></button><button type="button" class="ghost small attach-button" data-action="attach-pick" title="Attach files (or drop them here)" aria-label="Attach files"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.8 9.2a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4.2-4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button><span class="context-meter" tabindex="0" role="group" aria-label="Context use unknown"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="track"/><circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/></svg><span class="context-pct" aria-hidden="true"></span><span class="context-popup">Context use unknown</span></span><button type="submit" class="primary">Send ↵</button></span></div></form>
+            <form id="compose" class="composer" aria-label="Coordinator messaging"><div id="skill-menu" class="skill-menu" role="listbox" aria-label="Skills" hidden></div><div id="attachments" class="attach-chips" aria-label="Attachments" hidden></div><input type="file" id="attach-input" multiple hidden><div class="compose-field"><div class="compose-backdrop" aria-hidden="true"></div><textarea name="message" aria-label="Message coordinator" placeholder="Message the coordinator…" rows="2" maxlength="32000" required role="combobox" aria-autocomplete="list" aria-controls="skill-menu"></textarea></div><div class="row between"><span class="row help-line"><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><span class="row compose-actions"><button type="button" class="ghost small model-cycle" id="model-cycle" data-action="model-cycle" hidden></button><button type="button" class="ghost small attach-button" data-action="attach-pick" title="Attach files (or drop them here)" aria-label="Attach files"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.8 9.2a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4.2-4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button><span class="context-meter" tabindex="0" role="group" aria-label="Context use unknown"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="track"/><circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/></svg><span class="context-pct" aria-hidden="true"></span><span class="context-popup">Context use unknown</span></span><button type="submit" class="primary">Send ↵</button></span></div></form>
             <div id="reply-summary" hidden></div>
           </div>
           <aside class="col">
             <div id="needs-card" class="card"><b>Needs you</b><span id="needs-badge" hidden></span><nav id="queue" aria-label="Pending decisions"></nav><div id="letter"></div><div id="needs-questions" class="needs-questions"></div></div>
             <div class="card" id="prs-card" hidden><div class="row between"><b>Pull requests</b><span class="row"><small id="prs-meta" class="note"></small><button type="button" class="ghost small" data-action="prs-refresh" title="Refresh from the PR providers" aria-label="Refresh pull requests">↻</button></span></div><div id="prs"></div></div>
             <div id="plugin-cards"></div>
-            <div class="card"><b>Workers</b><div id="activity"></div></div>
+            <div class="card" id="workers-card"><div class="row between"><b>Workers</b><label class="row archive-toggle" id="archive-toggle" hidden><input type="checkbox" id="show-archived"> Show archived</label></div><div id="activity"></div></div>
             <div class="card"><div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div><div id="notes"></div></div>
             <div class="card"><b>Recent results</b><div id="outcomes"></div></div>
           </aside>
         </section>
+
+        <section id="inline-thread" class="worker-view" aria-label="Worker" hidden></section>
 
         <section class="panel" data-panel="knowledge" hidden>
           <div class="row between"><h2 class="pane-title">Knowledge</h2><span class="row knowledge-actions"><button class="primary small" data-action="knowledge-new">＋ New document</button><button class="small" data-action="notes">Notes</button><button class="small" data-action="library-list">Library</button><button class="small" data-action="upload-pick">Upload files</button></span></div>
@@ -54,18 +55,6 @@
           <div class="row between"><h3 class="section">Uploads</h3><small class="note">Drop files anywhere on this tab · up to 20 MB each</small></div><div id="uploads-inline" class="uploads"></div><input type="file" id="upload-input" multiple hidden>
           <div class="row between"><h3 class="section">Evidence</h3><button class="ghost small" data-action="evidence-list">All evidence</button></div><div id="evidence-inline"></div>
           <h3 class="section">Workspace</h3><p id="workspace" class="note mono"></p><p id="workspace-policy" class="note">Your Mac must stay awake. Workspace scope and isolation require explicit authorization.</p>
-        </section>
-
-        <section class="panel activity" data-panel="activity" hidden>
-          <div class="work-pane"><div class="row between work-head"><b id="work-count">Work</b><label class="row archive-toggle"><input type="checkbox" id="show-archived"> Show archived</label></div><div id="work-list"></div></div>
-          <section id="inline-thread" class="thread-pane" hidden></section><div id="thread-empty" class="thread-pane thread-empty"><p class="note">Select work to read its conversation, follow up or steer it.</p></div>
-          <aside id="artifact-pane" class="artifact-pane" aria-label="Worker artifacts">
-            <div class="artifact-head row between"><b>Artifacts</b><span class="row"><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button><button class="ghost small artifact-drawer-close" data-action="artifacts-toggle" aria-label="Close artifacts">✕</button></span></div>
-            <small id="artifact-summary" class="note"></small>
-            <input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off">
-            <div id="artifact-tree" class="artifact-tree"></div>
-            <div id="artifact-preview" class="artifact-preview" hidden></div>
-          </aside>
         </section>
 
         <section class="panel" data-panel="observability" hidden>
@@ -83,21 +72,23 @@
 
         <section class="panel settings" data-panel="settings" hidden>
           <nav class="set-nav" aria-label="Settings sections">
-            <a href="#set-setup">Owner setup</a><a href="#set-project">Project</a><a href="#set-skills">Skills</a><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a><a href="#set-appearance">Appearance</a><a href="#set-approvals">Approvals</a><a href="#set-danger" class="danger">Danger zone</a>
+            <a href="#set-setup">Owner setup</a><a href="#set-project">Project</a><a href="#set-skills">Skills</a><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a><a href="#set-advanced">Advanced</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a><a href="#set-remote">Remote access</a><a href="#set-appearance">Appearance</a><a href="#set-approvals">Approvals</a><a href="#set-danger" class="danger">Danger zone</a>
           </nav>
           <div class="set-main">
-          <section class="set-section" id="set-setup"><header class="set-head"><div><h2>Owner setup</h2><p class="note">Workers get only the workspace, GitHub target and command profile granted here (skills: see Skills below). Missing grants stay visible blockers.</p></div><button id="owner-setup-button" data-action="owner-setup" class="primary" hidden>Open owner setup</button></header>
+          <section class="set-section" id="set-setup"><header class="set-head"><div><h2>Owner setup</h2><p class="note">Workers edit the repository in their own isolated worktree by default. Pushes, PRs and merges need the GitHub target and command profile granted here (skills: see Skills below). Missing grants stay visible blockers.</p></div><button id="owner-setup-button" data-action="owner-setup" class="primary" hidden>Open owner setup</button></header>
             <div class="card"><ol id="owner-steps" class="stepper"></ol></div></section>
           <section class="set-section" id="set-project"><header class="set-head"><div><h2>Project</h2><p class="note">Name, objective, models and access.</p></div><button id="settings-button" data-action="settings-list" hidden>Edit settings ↗</button></header>
             <div class="card"><div id="settings-summary"></div></div></section>
-          <section class="set-section" id="set-skills"><header class="set-head"><div><h2>Skills</h2><p class="note">Agents see only the names and descriptions of their profile's skills and read a skill when they need it. “All profiles” goes to every profile; each profile adds its own. Child workers use their role's skills. The / picker in the chat still lists every skill.</p></div><span id="skills-summary" class="set-meta"></span></header>
+          <section class="set-section" id="set-skills"><header class="set-head"><div><h2>Skills</h2><p class="note">Agents see only the names and descriptions of their profile's skills and read a skill when they need it. Every installed skill is on for every profile by default, including skills installed later; uncheck one to switch it off for all profiles or for a single profile. Child workers use their role's skills. The / picker in the chat still lists every skill.</p></div><span id="skills-summary" class="set-meta"></span></header>
             <div class="card" id="skills-card"><div id="skills-picker"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-mcp"><header class="set-head"><div><h2>MCP servers</h2><p class="note">External tool servers from your mcp.json. Agents list a server's tools and call them only for the profiles checked here. Tools that change things stay blocked unless you allow writes for that server. Nothing is enabled by default.</p></div><span id="mcp-summary" class="set-meta"></span></header>
+          <section class="set-section" id="set-mcp"><header class="set-head"><div><h2>MCP servers</h2><p class="note">External tool servers from your mcp.json. Every ready server is on for every profile by default, including servers added later; uncheck one to switch it off for all profiles or for a single profile. Tools that change things stay blocked unless you allow writes for that server.</p></div><span id="mcp-summary" class="set-meta"></span></header>
             <div class="card" id="mcp-card"><div id="mcp-picker"><p class="note">Reading…</p></div></div></section>
           <section class="set-section" id="set-worktrees"><header class="set-head"><div><h2>Worktrees</h2><p class="note">Each coding worker gets its own git worktree; scouts and reviewers read PR heads from snapshots. A worktree is removed automatically once its work settled, it is clean, and its commits are pushed or its PR is merged or closed. Branches are always kept; anything with changes, unpushed commits, an open PR or running work stays.</p></div><span id="worktrees-summary" class="set-meta"></span></header>
             <div class="card" id="worktrees-card"><div id="worktrees"><p class="note">Reading…</p></div></div></section>
           <section class="set-section" id="set-context"><header class="set-head"><div><h2>Context and compaction</h2><p class="note">Chats and workers compact automatically with Pi's defaults: older messages are summarized and the recent part is kept verbatim. Use “Compact now” in a chat when you want it sooner. The overrides below are for models whose context size is reported wrongly.</p></div><span id="context-summary" class="set-meta"></span></header>
             <div class="card" id="context-card"><details class="advanced"><summary>Override context window and thresholds</summary><div id="context-settings"><p class="note">Reading…</p></div></details></div></section>
+          <section class="set-section" id="set-advanced"><header class="set-head"><div><h2>Advanced: system prompts</h2><p class="note">Edit the role instructions of the coordinator and of each worker role. These prompts are stored per project, not globally. Changes apply to new coordinator turns and new worker threads; running threads keep the prompt they started with. Only the role instructions are editable: tools, workspace scope, approvals and the project's identity are enforced and appended by the host and do not depend on this text, so a custom prompt cannot widen permissions.</p></div></header>
+            <div class="card" id="prompts-card"><div id="prompts"><p class="note">Reading…</p></div></div></section>
           <section class="set-section" id="set-automations"><header class="set-head"><div><h2>Automations</h2><p class="note">Schedules, monitors and events. Toggling always asks for confirmation.</p></div><button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button></header>
             <div class="card"><h3 class="card-title">Schedules and history</h3><div id="automation-history" class="automation-strip"><p class="note">Reading recent automation history…</p></div><div class="row"><button data-action="routine-history" data-project="" data-kind="intents" data-offset="0" data-text-offset="0">Recent run history</button></div></div>
             <div class="card" id="events-in-card"><div class="row between"><h3 class="card-title">Events in</h3><button class="ghost small" data-action="automation-refresh">Refresh</button></div><p class="note">Follow PRs, the webhook and the worker watchdog send events to one chat. Text from GitHub or a webhook is untrusted.</p><div id="events-in"><p class="note">Reading…</p></div></div></section>
@@ -117,6 +108,7 @@
       </div>
     </main>
   </div>
+  <footer id="limits-bar" class="limits-bar" aria-label="Subscription limits"></footer>
   <div id="toast" role="status" aria-live="polite"></div>
   <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
 </body>

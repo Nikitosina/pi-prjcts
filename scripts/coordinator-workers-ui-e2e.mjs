@@ -202,13 +202,13 @@ try {
 
   await ask('MARK-FAILB');
   await terminal(id, 'MARK-FAILBTASK', 'failed');
-  await evaluate(`document.querySelector('[data-tab="activity"]').click()`, s);
-  await waitFor(`!!document.querySelector('#work-list [data-action="work-archive"]')`, s, 'owner archive button');
-  if (await evaluate(`document.querySelector('#work-list').innerText.includes('MARK-FAILTASK')`, s)) throw Error('Archived work visible without toggle');
-  await evaluate(`document.querySelector('#work-list [data-action="work-archive"]').click()`, s);
-  await waitFor(`!document.querySelector('#work-list').innerText.includes('MARK-FAILBTASK')`, s, 'owner archive hides');
+  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
+  await waitFor(`!!document.querySelector('#activity [data-action="work-archive"]')`, s, 'owner archive button');
+  if (await evaluate(`document.querySelector('#activity').innerText.includes('MARK-FAILTASK')`, s)) throw Error('Archived work visible without toggle');
+  await evaluate(`document.querySelector('#activity [data-action="work-archive"]').click()`, s);
+  await waitFor(`!document.querySelector('#activity').innerText.includes('MARK-FAILBTASK')`, s, 'owner archive hides');
   await evaluate(`document.querySelector('#show-archived').click()`, s);
-  await waitFor(`document.querySelector('#work-list').innerText.includes('MARK-FAILTASK') && document.querySelector('#work-list').innerText.includes('MARK-FAILBTASK') && /archived/i.test(document.querySelector('#work-list').innerText)`, s, 'show archived');
+  await waitFor(`document.querySelector('#activity').innerText.includes('MARK-FAILTASK') && document.querySelector('#activity').innerText.includes('MARK-FAILBTASK') && /archived/i.test(document.querySelector('#activity').innerText)`, s, 'show archived');
   result.checks.push('A4 owner archives from Activity; "Show archived" reveals archived work');
   await shot('01-activity-archived', s);
   await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);

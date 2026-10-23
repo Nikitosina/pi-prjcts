@@ -65,8 +65,8 @@ try {
   assert.doesNotMatch(readFileSync(new URL("../src/durable-planning.ts", import.meta.url), "utf8"), /createCodingTools/);
   pass("F9 coordinator does not receive coding bash tools", true);
   const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
-  assert.match(app, /"3\. Skills"/);
-  assert.match(app, /wholeRepository \? \[\] : \[step\(false, "3\. Fixed command profile"/);
+  assert.match(app, /"2\. Skills"/);
+  assert.match(app, /wholeRepository \? \[\] : \[step\(false, "2\. Fixed command profile"/);
   pass("F10 owner setup labels worker skills automatic for whole-repo", true);
 
   process.env.PI_PROJECTS_HOME = join(root, "home"); mkdirSync(process.env.PI_PROJECTS_HOME, { recursive: true, mode: 0o700 });

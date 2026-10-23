@@ -36,8 +36,8 @@ await kit.run(async () => {
   const gh = await kit.createProject('Mari (GitHub)');
   const second = await rpc({ action: 'owner-setup-snapshot', id: gh });
   await rpc({ action: 'github-quick-authorize', id: gh, confirm: gh, expectedRevision: second.githubRevision });
-  // Some skills and MCP servers already picked so the pickers show real state.
-  await kit.updateSettings(gh, { skills: { all: ['repo-ios', 'repo-swift', 'ios-00'], coordinator: ['review-03'], worker: ['test-09', 'git-12'], scout: [], reviewer: ['review-03'] }, mcp: { all: ['fake-ci'], coordinator: [], worker: ['fake-tracker'], scout: [], reviewer: [], writes: ['fake-tracker'] } });
+  // Some skills and MCP servers already switched off so the pickers show real state (everything else is on by default).
+  await kit.updateSettings(gh, { skills: { off: { all: ['repo-ios', 'repo-swift', 'ios-00'], coordinator: ['review-03'], worker: ['test-09', 'git-12'], reviewer: ['review-03'] } }, mcp: { off: { worker: ['fake-ci'] }, writes: ['fake-tracker'] } });
 
   const page = await kit.openPage(await kit.webUrl(gh, 'settings'));
   const loaded = `document.querySelectorAll('#skills-picker [data-skill-pick]').length === 90 && document.querySelectorAll('#mcp-picker [data-mcp-pick]').length === 6 && !/Reading/.test(document.querySelector('#worktrees').innerText + document.querySelector('#context-settings').innerText + document.querySelector('#events-in').innerText)`;
@@ -81,12 +81,12 @@ await kit.run(async () => {
   await ev(`document.querySelector('#skills-picker > .pick-tools [data-action="skills-select"][data-mode="none"]').click()`);
   check('Clear with a filter unchecks the shown rows', await ev(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].every(i => !i.checked)`));
   await search('');
-  check('Clear with a filter kept rows outside the filter (repo-swift still picked)', await ev(`document.querySelector('[data-skill-pick="repo-swift"]').checked && !document.querySelector('[data-skill-pick="repo-ios"]').checked`));
+  check('Clear with a filter kept rows outside the filter (repo-docs still on)', await ev(`document.querySelector('[data-skill-pick="repo-docs"]').checked && !document.querySelector('[data-skill-pick="repo-ios"]').checked`));
   await search('ios');
   await ev(`document.querySelector('#skills-picker > .pick-tools [data-action="skills-select"][data-mode="all"]').click()`);
-  check('Select all with a filter checks every shown row', await checked() === iosShown);
+  check('Select all with a filter checks every shown row', await ev(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].every(i => i.checked)`));
   await search('');
-  check('only filtered and previously picked rows are checked', await ev(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].filter(i => i.checked).every(i => /ios/.test(i.dataset.skillPick) || i.dataset.skillPick === 'repo-swift')`));
+  check('only filtered and previously switched-off rows changed', await ev(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].filter(i => !i.checked).every(i => i.dataset.skillPick === 'repo-swift')`));
   const groups = await ev(`[...document.querySelectorAll('#skills-picker .skill-group')].map(g => g.dataset.source)`);
   check('skills are grouped by source with a count', groups.join() === 'repo,global' && await ev(`document.querySelector('.skill-group[data-source=global] .count').textContent`) === '78', groups);
   await ev(`document.querySelector('#skills-picker .skill-group[data-source="repo"] [data-action="skills-select"][data-mode="none"]').click()`);
@@ -97,11 +97,11 @@ await kit.run(async () => {
   check('group Select all checks the whole group (78) and tab count follows', await checked() === 78 && await ev(`document.querySelector('[data-action="skills-tab"][data-role="all"] .count').textContent`) === '78');
   await ev(`document.querySelector('[data-action="skills-tab"][data-role="worker"]').click()`);
   await ev(`document.querySelector('#skills-picker > .pick-tools [data-action="skills-select"][data-mode="none"]').click()`);
-  check('on a profile tab, Clear leaves inherited (all-profiles) rows checked and locked', await ev(`[...document.querySelectorAll('#skills-picker [data-skill-pick]')].every(i => i.disabled === i.checked) && document.querySelectorAll('#skills-picker [data-skill-pick]:checked').length === 78`));
+  check('on a profile tab, Clear switches off everything not already off for all profiles; those rows stay locked', await ev(`document.querySelectorAll('#skills-picker [data-skill-pick]:checked').length === 0 && document.querySelectorAll('#skills-picker [data-skill-pick]:disabled').length === 12`));
   await ev(`document.querySelector('[data-action="skills-tab"][data-role="all"]').click()`);
   await ev(`document.querySelector('[data-action="skills-save"]').click()`);
   await page.waitFor(`document.querySelector('[data-action="skills-save"]')?.disabled && document.querySelector('[data-action="skills-tab"][data-role="all"] .count').textContent === '78'`, 'skills saved');
-  check('Save persists the bulk selection and clears the dirty hint', (await rpc({ action: 'settings-snapshot', id: gh })).values.skills.all.length === 78 && await ev(`document.querySelector('#skills-picker .pick-state').hidden`));
+  check('Save persists the bulk selection and clears the dirty hint', (await rpc({ action: 'settings-snapshot', id: gh })).values.skills.off.all.length === 12 && await ev(`document.querySelector('#skills-picker .pick-state').hidden`));
 
   // MCP bulk: only usable servers; filter respected.
   await ev(`document.querySelector('#mcp-picker [data-action="mcp-select"][data-mode="all"]').click()`);
@@ -121,9 +121,9 @@ await kit.run(async () => {
   for (const width of [1440, 420]) {
     await view(width, 'light');
     for (const [href] of nav) {
-      await ev(`document.querySelector('.set-nav a[href="${href}"]').click()`); await kit.delay(450);
-      const ok = await ev(`(() => { const r = document.querySelector('${href}').getBoundingClientRect(); return r.top < innerHeight - 40 && r.bottom > 0; })()`);
-      check(`${width}px: nav link ${href} brings its section into view`, ok);
+      await ev(`document.querySelector('.set-nav a[href="${href}"]').click()`); await kit.delay(2000);
+      const ok = await ev(`(() => { const r = document.querySelector('${href}').getBoundingClientRect(); return r.top < innerHeight - 40 && r.bottom > 0 ? true : [r.top, r.bottom, innerHeight, scrollY]; })()`);
+      check(`${width}px: nav link ${href} brings its section into view`, ok === true, ok);
     }
   }
 

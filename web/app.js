@@ -59,7 +59,24 @@ let liveFrame = null;
 let liveRetryMs = 1000;
 // Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
 let stickToBottom = true;
-let showArchived = false;
+let showArchived = false, allWork = false;
+// The worker view: a main-area page for one worker (?worker=<threadId>) that replaces the coordinator chat until Back or Escape.
+const threadPane = document.querySelector("#inline-thread");
+let pendingWorker = /^[a-f0-9-]{36}$/.test(initial.searchParams.get("worker") ?? "") ? initial.searchParams.get("worker") : null;
+function setWorkerUrl(threadId) {
+  const url = new URL(location.href), had = url.searchParams.has("worker");
+  if (threadId) url.searchParams.set("worker", threadId); else url.searchParams.delete("worker");
+  if (url.href !== location.href) { if (threadId && !had) history.pushState({ worker: true }, "", url); else history.replaceState(threadId ? history.state : null, "", url); }
+}
+function closeWorkerDetail() {
+  workerChat = null; threadPane.hidden = true; threadPane.replaceChildren(); setWorkerUrl(null);
+  document.querySelector('[data-panel="coordinator"]').hidden = tab !== "coordinator";
+}
+window.addEventListener("popstate", () => {
+  const wanted = new URL(location.href).searchParams.get("worker");
+  if (!wanted && workerChat) { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); }
+  else if (wanted && workerChat?.threadId !== wanted && plan?.work.some(work => work.threadId === wanted)) void inspectThread(wanted).catch(report);
+});
 function followTranscript() { if (stickToBottom) { const node = document.querySelector("#transcript"); node.scrollTop = node.scrollHeight; } }
 let selected = null;
 let generation = 0;
@@ -71,7 +88,7 @@ let toastTimer;
 // Dismissed notices: an ✕ hides a warning or error until its text changes; remembered for this tab session.
 const dismissKey = "pi-projects-dismissed";
 const dismissed = new Set((() => { try { return JSON.parse(sessionStorage.getItem(dismissKey) ?? "[]"); } catch { return []; } })());
-const tabs = ["coordinator", "knowledge", "activity", "observability", "settings"];
+const tabs = ["coordinator", "knowledge", "observability", "settings"];
 let tab = tabs.includes(initial.searchParams.get("tab")) ? initial.searchParams.get("tab") : "coordinator";
 // Observability usage is pinned to the project/generation that requested it.
 let usageObs = null, usageLoading = false;
@@ -155,9 +172,15 @@ async function refresh() {
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
+    if (Date.now() - projectListAt > 10000) void reloadProjects();
     ensureLive();
     ensureChanges();
-    if (workerChat && tab === "activity") await refreshWorkerChat(workerChat);
+    if (pendingWorker && plan) {
+      const wanted = pendingWorker; pendingWorker = null;
+      if (plan.work.some(work => work.threadId === wanted)) await inspectThread(wanted);
+    }
+    if (workerChat && tab === "coordinator") await refreshWorkerChat(workerChat);
+    void loadWorkerContexts(current);
   } catch (error) { if (current === generation) showError(error); }
   finally {
     if (polling === current) polling = null;
@@ -221,7 +244,7 @@ async function settledRefresh() {
 // A hidden tab closes the stream so the host stops watching for it; showing the tab refreshes and reopens it. While the stream is down, the 30 s poll below keeps the view current.
 let changeStream = null, changeRetryMs = 1000;
 const POLL_MS = 30000;
-const watchedThread = () => tab === "activity" && workerChat?.id === projectId ? workerChat.threadId : "";
+const watchedThread = () => tab === "coordinator" && workerChat?.id === projectId ? workerChat.threadId : "";
 function ensureChanges() {
   if (changeStream?.id === projectId && changeStream.chat === chatId && changeStream.thread === watchedThread()) return;
   changeStream?.controller.abort();
@@ -310,12 +333,12 @@ function changeProject(id, chat = "main") {
   document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? ""; autosize(document.querySelector("#compose textarea")); renderAttachments();
   document.querySelector("#compose button").disabled = !id || busy;
   html.clear(); usageObs = null;
-  const inlineThread = document.querySelector("#inline-thread"); if (inlineThread) { inlineThread.hidden = true; inlineThread.replaceChildren(); document.querySelector("#thread-empty").hidden = false; }
+  closeWorkerDetail();
   renderArtifactBrowser();
   const p = projects.find(p => p.id === id);
   document.querySelector("#title").textContent = id ? p?.name ?? "Opening project…" : "Create your first project.";
   document.querySelector("#avatar").textContent = initials(p?.name);
-  for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#work-list", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
+  for (const selector of ["#chat-bar", "#queue", "#letter", "#needs-questions", "#questions", "#activity", "#outcomes", "#notes", "#messages", "#reply-summary", "#workspace", "#evidence-inline", "#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time", "#owner-steps", "#settings-summary"]) document.querySelector(selector).replaceChildren();
   document.querySelector("#chat-bar").dataset.html = "";
   renderProjects();
   document.querySelector("#warning").hidden = true;
@@ -343,33 +366,80 @@ function currentChat() { return view?.chats?.find(chat => chat.id === chatId) ??
 function renderChats() {
   const node = document.querySelector("#chat-bar"), chats = view?.chats ?? [];
   const current = currentChat(), archived = chats.filter(chat => chat.archived && chat.id !== chatId);
-  const button = chat => `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.attention ? "attention" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : chat.attention ? " · needs attention" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span></button>`;
+  const button = chat => { const { state, label } = chatState(chat); return `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)} · ${esc(label)}">${stateDot(state, label, "chat-dot")}<span class="chat-title">${esc(chat.title)}</span></button>`; };
   const next = !view?.chats ? "" : `<nav id="chat-list" class="chat-list" aria-label="Chats">${chats.filter(chat => !chat.archived || chat.id === chatId).map(button).join("")}</nav><button type="button" class="ghost small" data-action="chat-new" title="Start a chat that shares this project's workers and knowledge">＋ New chat</button><span class="chat-tools">${current ? `<button type="button" class="ghost small" data-action="chat-rename">Rename</button>` : ""}${current && current.id !== "main" ? current.archived ? `<button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(current.id)}">Restore</button>` : `<button type="button" class="ghost small" data-action="chat-archive">Archive</button>` : ""}${archived.length ? `<details id="chat-archived" class="chat-archived"><summary>Archived (${archived.length})</summary><div class="archived-list">${archived.map(chat => `<div class="archived-row"><span>${esc(chat.title)}</span><span><button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button> <button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(chat.id)}">Restore</button></span></div>`).join("")}</div></details>` : ""}</span>`;
   if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
 
+// One status dot per chat and per project row, highest priority first: needs you (red) > working (pulsing) > done and not yet checked (green) > idle.
+// Needs you: an unanswered question, a blocked worker admitted by the chat, or a failed coordinator turn (pending approvals count on the project row only).
+// Done: the coordinator finished, or a worker from the chat completed, after the last time this browser had the chat open.
+const seenKey = (project, chat) => `pi-projects-seen:${project}:${chat}`;
+function seenAt(project, chat) { try { const value = Number(localStorage.getItem(seenKey(project, chat))); return value > 0 ? value : null; } catch { return null; } }
+function markSeen(project, chat) { try { localStorage.setItem(seenKey(project, chat), String(Date.now())); } catch {} }
+function chatWork(chat) { return plan ? plan.work.filter(work => !work.archived && workChatId(work) === chat.id) : []; }
+const latestFinish = chat => Math.max(chat.finishedAt ?? 0, ...chatWork(chat).filter(work => work.status === "completed").map(work => work.endedAt ?? 0));
+// First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its dot.
+function syncSeen() {
+  if (!view?.chats || !plan) return;
+  for (const chat of view.chats) {
+    const seen = seenAt(projectId, chat.id);
+    if (seen === null || chat.id === chatId && latestFinish(chat) > seen) markSeen(projectId, chat.id);
+  }
+}
+const STATE_PRIORITY = ["needs", "working", "done", "idle"];
+const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+function chatState(chat) {
+  const questions = view.inbox.filter(item => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === chat.id).length;
+  const work = chatWork(chat), blocked = work.filter(item => item.status === "blocked").length, seen = seenAt(projectId, chat.id);
+  const reasons = [questions && `${plural(questions, "unanswered question")}`, blocked && `${plural(blocked, "blocked worker")}`, chat.attention && "last coordinator turn failed"].filter(Boolean);
+  if (reasons.length) return { state: "needs", label: `Needs you: ${reasons.join(", ")}` };
+  const active = work.filter(item => item.status === "running" || item.status === "queued").length;
+  if (chat.busy || active) return { state: "working", label: `Working: ${[chat.busy && "coordinator", active && plural(active, "worker")].filter(Boolean).join(" and ")}` };
+  if (chat.id !== chatId && seen !== null && latestFinish(chat) > seen) return { state: "done", label: "Done, not yet checked" };
+  return { state: "idle", label: "Idle" };
+}
+const stateDot = (state, label, className) => `<span class="${className}" data-state="${state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
+// The open project folds its chats and pending approvals; other projects only have the host's on-disk notice (unanswered questions, or the last saved phase), so they never show done.
+function projectState(project) {
+  if (project.id !== projectId || !view?.chats) {
+    const questions = project.notice?.questions ?? 0;
+    return questions || project.phase === "attention" ? { state: "needs", label: questions ? `Needs you: ${plural(questions, "unanswered question")}` : "Needs you: a chat failed" } : project.phase === "busy" ? { state: "working", label: "Working" } : { state: "idle", label: "Idle" };
+  }
+  const states = view.chats.filter(chat => !chat.archived).map(chat => chatState(chat));
+  const approvals = approvalPage?.total ?? 0;
+  if (approvals) return { state: "needs", label: `Needs you: ${plural(approvals, "pending approval")}${states.some(item => item.state === "needs") ? " and chats" : ""}` };
+  return states.toSorted((a, b) => STATE_PRIORITY.indexOf(a.state) - STATE_PRIORITY.indexOf(b.state))[0] ?? { state: "idle", label: "Idle" };
+}
+let projectListAt = 0;
+async function reloadProjects() {
+  projectListAt = Date.now();
+  const loaded = await api({ action: "list" }).catch(() => null);
+  if (Array.isArray(loaded)) { projects = loaded; renderProjects(); }
+}
 function renderProjects() {
   const node = document.querySelector("#projects");
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';
   node.value = projectId ?? "";
   const list = document.querySelector("#project-list");
-  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${p.id === projectId && pendingCount() ? `<span class="count">${pendingCount()}</span>` : ""}</button>`).join("") || '<p class="note">No projects yet.</p>';
+  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${(({ state, label }) => state === "idle" ? "" : stateDot(state, label, "state-dot"))(projectState(p))}</button>`).join("") || '<p class="note">No projects yet.</p>';
   if (list.dataset.html !== next) { list.innerHTML = next; list.dataset.html = next; }
 }
 function initials(name) { return String(name ?? "π").trim().split(/\s+/).slice(0, 2).map(word => [...word][0] ?? "").join("").toUpperCase() || "π"; }
 function pendingCount() { return view ? view.inbox.filter(item => !item.result).length + (approvalPage?.total ?? 0) : 0; }
 function setTab(next) {
   if (!tabs.includes(next)) return;
+  if (next !== "coordinator" && workerChat) closeWorkerDetail();
   tab = next;
   const url = new URL(location.href); url.searchParams.set("tab", next); history.replaceState(null, "", url);
-  document.querySelectorAll("[data-panel]").forEach(node => { node.hidden = node.dataset.panel !== next; });
+  document.querySelectorAll("[data-panel]").forEach(node => { node.hidden = node.dataset.panel !== next || node.dataset.panel === "coordinator" && !threadPane.hidden; });
   document.querySelectorAll(".tabs [data-tab]").forEach(node => node.classList.toggle("on", node.dataset.tab === next));
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
   ensureChanges();
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -384,6 +454,7 @@ function render() {
   document.querySelector("#title").textContent = view.project.name;
   document.querySelector("#avatar").textContent = initials(view.project.name);
   for (const selector of ["#needs-count"]) { const node = document.querySelector(selector); node.textContent = String(pendingTotal); node.hidden = !pendingTotal; }
+  syncSeen();
   renderProjects();
   renderChats();
   uiPluginCall("render");
@@ -393,7 +464,7 @@ function render() {
   setHtml("#needs-questions", waiting.here.length || waiting.elsewhere.length ? `${waiting.here.length ? `<button type="button" class="ghost small" data-action="questions-jump">${waiting.here.length} ${waiting.here.length === 1 ? "question" : "questions"} in chat ↓</button>` : ""}${waiting.elsewhere.length ? `<button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(waiting.elsewhere[0].chat.id)}">${waiting.elsewhere.length} ${waiting.elsewhere.length === 1 ? "question" : "questions"} in other chats →</button>` : ""}` : "");
   document.querySelector("#needs-card").hidden = !entry && !waiting.here.length && !waiting.elsewhere.length;
   document.querySelector("#question-hint").hidden = !waiting.here.length;
-  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  renderWorkers();
   setHtml("#outcomes", plan ? durableResults() : "");
   renderPrs(); void loadPrs();
   // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
@@ -414,9 +485,7 @@ function render() {
   const historyButton = document.querySelector('[data-action="routine-history"]');
   if (historyButton) { historyButton.dataset.project = projectId ?? ""; historyButton.hidden = !plan; }
   document.querySelector("#approval-page-note").textContent = approvalPage ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.` : "";
-  const hint = document.querySelector("#compose-hint");
   renderModelCycle();
-  hint.textContent = `Enter to send · Shift+Enter for a new line · / for commands, skills · @ for files, docs, issues${prMenuItems().length ? " · # for PRs" : ""}`; hint.title = view.project.model;
   renderPanels();
   document.querySelector("#workspace").textContent = view.project.cwd;
   document.querySelector("#workspace-policy").textContent = "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
@@ -489,19 +558,6 @@ function renderPanels() {
   }
   followTranscript();
   setHtml("#evidence-inline", view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
-  const archivable = item => ["completed", "failed", "stopped", "blocked"].includes(item.status) && !item.archived;
-  const workRow = item => {
-    const when = item.status === "running" && item.startedAt ? `running ${duration(Date.now() - item.startedAt)}` : item.endedAt ? `${item.status} ${duration(Date.now() - item.endedAt)} ago` : item.status;
-    const meta = [item.role, item.attempt?.model?.split("/").at(-1), when, item.archived ? "archived" : "", item.dependsOn.length ? `after ${item.dependsOn.length} item(s)` : ""].filter(Boolean).join(" · ");
-    const child = item.parentThreadId ? ` child" data-parent="${esc(item.parentThreadId)}` : "";
-    return `<div class="work ${esc(item.status)} ${item.archived ? "archived" : ""} ${workerChat?.threadId === item.threadId ? "on" : ""}${child}"><button class="work-open" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(item.threadId)}" title="${esc(item.text)}"><span class="dot"></span><strong>${item.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(item.text.replace(/\s+/g, " ").trim().slice(0, 240))}</strong><small>${esc(meta)}</small>${item.blocker ? `<small class="work-blocker">${esc(item.blocker)}</small>` : ""}</button>${archivable(item) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(item.id)}">Archive</button>` : ""}</div>`;
-  };
-  const listed = work.filter(item => showArchived || !item.archived);
-  document.querySelector("#work-count").textContent = plan ? `Work · ${listed.length}` : "Workers";
-  // One level of nesting: a parent worker's children sit under its newest row; orphans (parent hidden) stay top level.
-  const newest = listed.toReversed(), shownThreads = new Set(newest.map(item => item.threadId));
-  const treeRows = () => { const placed = new Set(); return newest.filter(item => !item.parentThreadId || !shownThreads.has(item.parentThreadId) || item.parentThreadId === item.threadId).map(item => { const first = !placed.has(item.threadId); placed.add(item.threadId); const kids = first ? newest.filter(candidate => candidate.parentThreadId === item.threadId && candidate.threadId !== item.threadId) : []; return workRow(item) + (kids.length ? `<div class="work-children" data-parent="${esc(item.threadId)}">${kids.map(workRow).join("")}</div>` : ""); }).join(""); };
-  setHtml("#work-list", plan ? treeRows() || '<p class="note">No work yet. Message the coordinator to start.</p>' : '<p class="note">No workers are running.</p>');
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
   setHtml("#obs-kpis", [kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""), kpi("Running", count("running")), kpi("Queued", count("queued")), kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""), kpi("Work items", work.length), kpi("Worker cap", plan?.workerCap ?? "—")].join(""));
   renderHealth(p);
@@ -527,8 +583,8 @@ function renderPanels() {
   const scopes = p.workspaceAuthorization?.scopes?.length ?? 0, grants = p.githubAuthorization?.length ?? 0, pluginProvider = p.workspaceAuthorization && p.workspaceAuthorization.provider !== "github" ? p.workspaceAuthorization.provider : null, providerCard = (view.providerCards ?? [])[0];
   const step = (done, title, detail) => `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
   const wholeRepository = p.workspaceAuthorization?.scopes?.some(scope => scope.wholeRepository);
-  setHtml("#owner-steps", [step(scopes > 0, "1. Workspace", wholeRepository ? "Workers can edit this repository" : scopes ? `${scopes} folder-limited scope(s)` : "Workers cannot edit code yet.") + (scopes ? "" : '<li class="step-action"><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></li>'), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `2. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `2. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "2. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "3. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "3. Skills" : "4. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
-  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadWorktrees(); void loadContextSettings(); }
+  setHtml("#owner-steps", [...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `1. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `1. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "1. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
+  if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
   setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
@@ -545,8 +601,8 @@ async function loadSkillsPicker(force = false) {
     const [settings, { skills }] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "coordinator-skills", id })]);
     if (id !== projectId || current !== generation) return;
     const saved = settings.values.skills;
-    const profiles = saved ?? { all: skills.filter(skill => skill.source === "repo").map(skill => skill.name), coordinator: [], worker: [], scout: [], reviewer: [] };
-    skillsPicker = { projectId: id, skills, isDefault: !saved, draft: sortedLists(profiles), saved: JSON.stringify(sortedLists(profiles)), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
+    const profiles = { ...{ all: [], coordinator: [], worker: [], scout: [], reviewer: [] }, ...(saved?.off ?? {}) };
+    skillsPicker = { projectId: id, skills, isDefault: !saved?.off || !Object.values(saved.off).some(list => list.length), draft: sortedLists(profiles), saved: JSON.stringify(sortedLists(profiles)), tab: skillsPicker?.projectId === id ? skillsPicker.tab : "all", query: skillsPicker?.projectId === id ? skillsPicker.query : "", note: "" };
     renderSkillsPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Skills unavailable: ${esc(error.message)}</p>`; }
 }
@@ -568,14 +624,14 @@ function skillsShown(state) {
 function skillsListHtml(state) {
   const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]), shown = skillsShown(state);
   const groups = Object.keys(skillSourceLabels).map(source => [source, shown.filter(skill => skill.source === source)]).filter(([, list]) => list.length);
-  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${inherited || picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
+  const row = skill => { const inherited = state.tab !== "all" && all.has(skill.name); return `<label class="skill-pick${inherited ? " inherited" : ""}"><input type="checkbox" data-skill-pick="${esc(skill.name)}" ${!inherited && !picked.has(skill.name) ? "checked" : ""} ${inherited ? "disabled" : ""}><span><b>${esc(skill.name)}</b>${inherited ? ' <small class="skill-tag">off for all profiles</small>' : ""}${skill.manual ? ' <small class="skill-tag">manual only</small>' : ""}<small>${esc(skill.description)}</small></span></label>`; };
   return groups.map(([source, list]) => `<fieldset class="events-group skill-group" data-source="${source}" aria-label="${skillSourceLabels[source]}"><div class="group-head"><b>${skillSourceLabels[source]} <span class="count">${list.length}</span></b>${bulkButtons("skills-select", source)}</div>${list.map(row).join("")}</fieldset>`).join("") || '<p class="note">No skill matches.</p>';
 }
 function renderSkillsPicker(part = "all") {
   const state = skillsPicker, node = document.querySelector("#skills-picker");
   if (!state || state.projectId !== projectId) return;
-  const known = new Set(state.skills.map(skill => skill.name)), count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
-  document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${state.isDefault && JSON.stringify(state.draft) === state.saved ? "default: repository skills" : `${count("all")} for every profile`}`;
+  const known = new Set(state.skills.map(skill => skill.name)), count = role => state.skills.length - new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
+  document.querySelector("#skills-summary").textContent = `${state.skills.length} loaded · ${count("all")} on for every profile`;
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = skillsListHtml(state); node.querySelector(".pick-note").innerHTML = skillsNote(state); return patchPickerChrome(node, count, dirty); }
@@ -584,20 +640,20 @@ function renderSkillsPicker(part = "all") {
     <div class="pick-tools"><input type="search" id="skills-search" placeholder="Search ${state.skills.length} skills" value="${esc(state.query)}" aria-label="Search skills">${bulkButtons("skills-select")}</div>
     <div class="skill-groups">${skillsListHtml(state)}</div>
     ${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row pick-actions"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled data-off"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled data-off" : ""}>Reset to default</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="skills-save" ${dirty ? "" : "disabled data-off"}>Save skills</button><button class="ghost" data-action="skills-reset" ${state.isDefault ? "disabled data-off" : ""}>Turn all on</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
 }
-const skillsNote = state => (state.tab === "all" ? "Every profile gets these." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the skills checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${skillsShown(state).length} shown.` : "");
+const skillsNote = state => (state.tab === "all" ? "All installed skills are on, including ones installed later. Uncheck to switch one off for every profile." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} uses every skill that is on. Uncheck to switch one off for this profile only.`) + (state.query.trim() ? ` Select all and Clear apply to the ${skillsShown(state).length} shown.` : "");
 /** Bulk select or clear the skills currently shown (respecting search), optionally for one source. Inherited rows stay as they are. */
 function bulkSkills(source, mode) {
   const state = skillsPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
-  for (const skill of skillsShown(state)) if ((!source || skill.source === source) && !inherited.has(skill.name)) { if (mode === "all") list.add(skill.name); else list.delete(skill.name); }
+  for (const skill of skillsShown(state)) if ((!source || skill.source === source) && !inherited.has(skill.name)) { if (mode === "all") list.delete(skill.name); else list.add(skill.name); }
   state.draft[state.tab] = [...list].sort(); state.note = ""; renderSkillsPicker("list");
 }
 async function saveSkillsPicker(reset) {
   const state = skillsPicker, id = projectId;
   if (!state || state.projectId !== id) throw new Error("Reload Settings before saving skills");
   const settings = await api({ action: "settings-snapshot", id });
-  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: reset ? null : state.draft } }, reset ? "Skills reset to repository skills." : "Skills saved. New threads use them; running threads keep theirs."); }
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: reset ? null : { off: state.draft } } }, reset ? "All skills are on again." : "Skills saved. New threads use them; running threads keep theirs."); }
   catch (error) { state.note = error.message; renderSkillsPicker(); throw error; }
   await loadSkillsPicker(true);
 }
@@ -605,7 +661,7 @@ document.addEventListener("change", event => {
   const box = event.target.closest("[data-skill-pick]");
   if (!box || !skillsPicker) return;
   const list = new Set(skillsPicker.draft[skillsPicker.tab]);
-  if (box.checked) list.add(box.dataset.skillPick); else list.delete(box.dataset.skillPick);
+  if (box.checked) list.delete(box.dataset.skillPick); else list.add(box.dataset.skillPick);
   skillsPicker.draft[skillsPicker.tab] = [...list].sort();
   skillsPicker.note = ""; renderSkillsPicker("chrome");
 });
@@ -623,7 +679,7 @@ async function loadMcpPicker(force = false) {
   try {
     const [settings, catalog] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "mcp-catalog", id })]);
     if (id !== projectId || current !== generation) return;
-    const saved = settings.values.mcp ?? { all: [], coordinator: [], worker: [], scout: [], reviewer: [], writes: [] };
+    const saved = { ...{ all: [], coordinator: [], worker: [], scout: [], reviewer: [] }, ...(settings.values.mcp?.off ?? {}), writes: settings.values.mcp?.writes ?? [] };
     mcpPicker = { projectId: id, catalog, isDefault: !settings.values.mcp, draft: sortedLists(saved), saved: JSON.stringify(sortedLists(saved)), tab: mcpPicker?.projectId === id ? mcpPicker.tab : "all", note: "", probes: {}, query: mcpPicker?.projectId === id ? mcpPicker.query : "" };
     renderMcpPicker();
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">MCP unavailable: ${esc(error.message)}</p>`; }
@@ -633,18 +689,18 @@ function mcpListHtml(state) {
   const all = new Set(state.draft.all), picked = new Set(state.draft[state.tab]);
   const row = server => {
     const usable = server.status === "ready", inherited = state.tab !== "all" && all.has(server.name), probe = state.probes[server.name];
-    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${inherited || picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<span class="mcp-actions"><label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span></span>` : ""}</span></div>`;
+    return `<div class="skill-pick${inherited || !usable ? " inherited" : ""}"><input type="checkbox" data-mcp-pick="${esc(server.name)}" aria-label="Enable ${esc(server.name)}" ${usable && !inherited && !picked.has(server.name) ? "checked" : ""} ${inherited || !usable ? "disabled" : ""}><span><b>${esc(server.name)}</b>${inherited ? ' <small class="skill-tag">off for all profiles</small>' : ""}${usable ? "" : ` <small class="skill-tag">${esc(mcpStatusText[server.status] ?? server.status)}</small>`}<small>${esc(server.description)}</small>${usable ? `<span class="mcp-actions"><label class="check"><input type="checkbox" data-mcp-writes="${esc(server.name)}" ${state.draft.writes.includes(server.name) ? "checked" : ""}> Allow writes <small>(tools that change things; off = read-only)</small></label><span class="row"><button type="button" class="ghost small" data-action="mcp-test" data-server="${esc(server.name)}">Test</button>${probe ? `<small class="${probe.ok ? "" : "bad"}">${esc(probe.ok ? `${probe.tools} tools` : probe.error)}</small>` : ""}</span></span>` : ""}</span></div>`;
   };
   const shown = mcpShown(state);
   return shown.map(row).join("") || `<p class="note">${state.catalog.servers.length ? "No server matches." : `No servers in ${esc(state.catalog.path)}.`}</p>`;
 }
-const mcpNote = state => (state.tab === "all" ? "Every profile gets these servers." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} gets “All profiles” plus the servers checked here.`) + (state.query.trim() ? ` Select all and Clear apply to the ${mcpShown(state).length} shown.` : "");
+const mcpNote = state => (state.tab === "all" ? "All servers in mcp.json are on, including ones added later. Uncheck to switch one off for every profile. Write tools stay blocked unless “Allow writes” is checked." : `${esc(skillProfileTabs.find(([role]) => role === state.tab)[1])} uses every server that is on. Uncheck to switch one off for this profile only.`) + (state.query.trim() ? ` Select all and Clear apply to the ${mcpShown(state).length} shown.` : "");
 function renderMcpPicker(part = "all") {
   const state = mcpPicker, node = document.querySelector("#mcp-picker");
   if (!state || state.projectId !== projectId) return;
   const servers = state.catalog.servers, known = new Set(servers.map(item => item.name));
-  const count = role => new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name))).size;
-  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} for every profile`;
+  const ready = servers.filter(item => item.status === "ready").length, count = role => ready - new Set([...state.draft.all, ...(role === "all" ? [] : state.draft[role])].filter(name => known.has(name) && servers.find(item => item.name === name).status === "ready")).size;
+  document.querySelector("#mcp-summary").textContent = `${servers.length} in mcp.json · ${count("all")} on for every profile`;
   const dirty = JSON.stringify(state.draft) !== state.saved;
   if (part === "chrome" && node.querySelector(".skill-groups")) return patchPickerChrome(node, count, dirty);
   if (part === "list" && node.querySelector(".skill-groups")) { node.querySelector(".skill-groups").innerHTML = mcpListHtml(state); node.querySelector(".pick-note").innerHTML = mcpNote(state); return patchPickerChrome(node, count, dirty); }
@@ -653,19 +709,19 @@ function renderMcpPicker(part = "all") {
     ${servers.length ? `<div class="pick-tools"><input type="search" id="mcp-search" placeholder="Search ${servers.length} servers" value="${esc(state.query)}" aria-label="Search MCP servers">${bulkButtons("mcp-select")}</div>` : ""}
     <div class="skill-groups">${mcpListHtml(state)}</div>
     ${state.catalog.error ? `<p class="note bad">${esc(state.catalog.error)}</p>` : ""}${state.note ? `<p class="note bad">${esc(state.note)}</p>` : ""}
-    <div class="row pick-actions"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled data-off"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled data-off" : ""}>Remove all</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
+    <div class="row pick-actions"><button class="primary" data-action="mcp-save" ${dirty ? "" : "disabled data-off"}>Save MCP</button><button class="ghost" data-action="mcp-reset" ${state.isDefault ? "disabled data-off" : ""}>Turn all on</button><small class="pick-state" ${dirty ? "" : "hidden"}>Unsaved changes</small></div>`;
 }
 /** Bulk enable or clear the usable servers currently shown (respecting search). Inherited rows stay as they are. */
 function bulkMcp(mode) {
   const state = mcpPicker, list = new Set(state.draft[state.tab]), inherited = new Set(state.tab === "all" ? [] : state.draft.all);
-  for (const server of mcpShown(state)) if (server.status === "ready" && !inherited.has(server.name)) { if (mode === "all") list.add(server.name); else list.delete(server.name); }
+  for (const server of mcpShown(state)) if (server.status === "ready" && !inherited.has(server.name)) { if (mode === "all") list.delete(server.name); else list.add(server.name); }
   state.draft[state.tab] = [...list].sort(); state.note = ""; renderMcpPicker("list");
 }
 async function saveMcpPicker(reset) {
   const state = mcpPicker, id = projectId;
   if (!state || state.projectId !== id) throw new Error("Reload Settings before saving MCP");
   const settings = await api({ action: "settings-snapshot", id });
-  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { mcp: reset ? null : state.draft } }, reset ? "MCP servers removed." : "MCP saved. Applies to the next tool call."); }
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { mcp: reset ? null : { off: { all: state.draft.all, coordinator: state.draft.coordinator, worker: state.draft.worker, scout: state.draft.scout, reviewer: state.draft.reviewer }, writes: state.draft.writes } } }, reset ? "MCP servers are on again, writes off." : "MCP saved. Applies to the next tool call."); }
   catch (error) { state.note = error.message; renderMcpPicker(); throw error; }
   await loadMcpPicker(true);
 }
@@ -676,8 +732,8 @@ async function testMcpServer(server) {
 document.addEventListener("change", event => {
   const box = event.target.closest("[data-mcp-pick], [data-mcp-writes]");
   if (!box || !mcpPicker) return;
-  const key = box.dataset.mcpPick !== undefined ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
-  if (box.checked) list.add(name); else list.delete(name);
+  const isPick = box.dataset.mcpPick !== undefined, key = isPick ? mcpPicker.tab : "writes", name = box.dataset.mcpPick ?? box.dataset.mcpWrites, list = new Set(mcpPicker.draft[key]);
+  if (box.checked === !isPick) list.add(name); else list.delete(name);
   mcpPicker.draft[key] = [...list].sort();
   mcpPicker.note = ""; renderMcpPicker("chrome");
 });
@@ -686,6 +742,35 @@ document.addEventListener("input", event => {
   mcpPicker.query = event.target.value; renderMcpPicker("list");
 });
 
+// Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
+const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer" };
+let promptsState = null;
+async function loadPrompts(force = false) {
+  const id = projectId, current = generation, node = document.querySelector("#prompts");
+  if (!id || !plan || !force && promptsState?.projectId === id) return;
+  try {
+    const data = await api({ action: "prompts-snapshot", id });
+    if (id !== projectId || current !== generation) return;
+    promptsState = { projectId: id, roles: data.roles, note: "" };
+    renderPrompts();
+  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`; }
+}
+function renderPrompts() {
+  const node = document.querySelector("#prompts");
+  if (!promptsState || promptsState.projectId !== projectId) return;
+  node.innerHTML = promptsState.roles.map(item => `<fieldset class="events-group prompt-role" data-role="${item.role}"><legend>${promptTitles[item.role]} ${item.override ? '<span class="skill-tag prompt-custom">Customized</span>' : '<small class="note">Default</small>'}</legend>
+    <label class="field"><span class="sr-only">${promptTitles[item.role]} system prompt</span><textarea class="mono prompt-text" rows="8" maxlength="24000" data-prompt="${item.role}" aria-label="${promptTitles[item.role]} system prompt">${esc(item.effective)}</textarea></label>
+    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("") + (promptsState.note ? `<p class="note bad">${esc(promptsState.note)}</p>` : "");
+}
+async function savePrompt(role, reset) {
+  const id = projectId, item = promptsState?.roles.find(entry => entry.role === role);
+  if (!item || promptsState.projectId !== id) throw new Error("Reload Settings before saving prompts");
+  const text = document.querySelector(`[data-prompt="${role}"]`).value;
+  const settings = await api({ action: "settings-snapshot", id });
+  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { prompts: { [role]: reset || !text.trim() || text === item.default ? null : text } } }, reset ? `${promptTitles[role]} prompt reset to default.` : `${promptTitles[role]} prompt saved. New turns and new worker threads use it.`); }
+  catch (error) { promptsState.note = error.message; renderPrompts(); throw error; }
+  await loadPrompts(true);
+}
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
 let worktrees = null;
 const sizeText = kb => kb < 0 ? "size unknown" : kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
@@ -1437,11 +1522,27 @@ async function loadPrs(force = false) {
   if (!linksReady && prsState.data) { linksReady = true; if (view) render(); }
 }
 const prGlyph = { failing: ["✕", "bad", "Failing: a required check failed or there are conflicts"], running: ["●", "warn", "Required checks are running"], green: ["✓", "good", "Required checks passed"], none: ["○", "muted", "No checks yet"] };
+// Composer help: the shortcut list lives in a small popover behind an ⓘ button instead of a permanent hint line. A tap/click toggles it, so touch works; Escape or a click outside closes it.
+const helpRows = worker => [["Enter", "Send"], ["Shift+Enter", "New line"], ...(worker ? [] : [["/", "Commands and skills"], ["@", "Files, docs, issues"], ["#", "Pull requests"], ["Drop files", "Attach"]])];
+function closeComposerHelp(except = null) {
+  for (const wrap of document.querySelectorAll(".help-wrap")) if (wrap !== except) { wrap.querySelector(".help-pop").hidden = true; wrap.querySelector(".help-btn").setAttribute("aria-expanded", "false"); }
+}
+function toggleComposerHelp(button) {
+  const wrap = button.closest(".help-wrap"), pop = wrap.querySelector(".help-pop"), open = pop.hidden;
+  closeComposerHelp(wrap);
+  if (open) pop.innerHTML = `<dl>${helpRows(!!button.closest("[data-inline-thread-send]")).map(([key, text]) => `<dt><kbd>${esc(key)}</kbd></dt><dd>${esc(text)}</dd>`).join("")}</dl>`;
+  pop.hidden = !open; button.setAttribute("aria-expanded", String(open));
+}
+document.addEventListener("click", event => { if (!event.target.closest(".help-wrap")) closeComposerHelp(); });
+document.addEventListener("keydown", event => {
+  const open = document.querySelector(".help-pop:not([hidden])");
+  if (event.key !== "Escape" || !open) return;
+  event.preventDefault(); event.stopPropagation(); open.closest(".help-wrap").querySelector(".help-btn").focus(); closeComposerHelp();
+}, true);
 const byNewest = (a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true });
 function renderPrs() {
-  const card = document.querySelector("#prs-card"), data = prNow(), hint = document.querySelector("#compose-hint");
+  const card = document.querySelector("#prs-card"), data = prNow();
   const groups = data?.providers ?? [], unloaded = data?.unloaded ?? [];
-  hint.textContent = hint.textContent.replace(/ · # for PRs$/, "") + (prMenuItems().length ? " · # for PRs" : "");
   card.hidden = !groups.length && !unloaded.length;
   if (card.hidden) return;
   const glyphs = prGlyph;
@@ -2035,7 +2136,7 @@ function renderArtifactBrowser() {
   document.querySelector("#artifact-sort").textContent = artifactSort === "name" ? "Name" : "Newest";
   const count = document.querySelector("#artifact-count"); if (count) count.textContent = b?.files?.length ? `(${b.files.length})` : "";
   filter.hidden = !b?.files?.length;
-  if (!b) { summary.textContent = ""; set(tree, '<p class="note artifact-empty">Select a worker to browse the files it saved.</p>'); renderArtifactPreview(null); return; }
+  if (!b) { summary.textContent = ""; set(tree, '<p class="note artifact-empty">Loading artifacts…</p>'); renderArtifactPreview(null); return; }
   const listing = b.listing;
   summary.textContent = b.files?.length ? `${b.files.length} file(s) · ${fmtBytes(listing.totalBytes)}${listing.overCap ? ` · over the ${fmtBytes(listing.capBytes)} cap` : ""}${listing.truncated ? " · list truncated" : ""}${listing.skipped?.length ? ` · ${listing.skipped.length} skipped (symlinks)` : ""}` : "";
   set(tree, b.error ? `<p class="note">Artifacts unavailable: ${esc(b.error)}</p>` : !b.files ? '<p class="note">Loading artifacts…</p>' : !b.files.length ? '<p class="note artifact-empty">No artifacts yet. Files this worker saves to its artifacts folder appear here.</p>' : artifactTreeHtml(b));
@@ -2274,7 +2375,7 @@ async function action(node) {
       changeChat(target); break;
     }
     case "thread-list": threadList(); break;
-    case "all-work": setTab("activity"); break;
+    case "all-work": allWork = !allWork; render(); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickMenuItem(skillMenu?.items.find(item => item.name === node.dataset.name && item.source === node.dataset.source) ?? { name: node.dataset.name }); break;
     case "ref-pick": { const item = refMenu?.items[Number(node.dataset.index)]; if (item) pickRef(item); break; }
@@ -2284,8 +2385,21 @@ async function action(node) {
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
-    case "artifacts-toggle": document.querySelector("#artifact-pane").classList.toggle("open"); break;
-    case "thread-close": workerChat = null; ensureChanges(); document.querySelector("#inline-thread").hidden = true; document.querySelector("#thread-empty").hidden = false; dialogVersion++; renderArtifactBrowser(); render(); break;
+    case "limits-refresh": {
+      if (limitsRefreshing) break;
+      limitsRefreshing = true; renderLimits();
+      try { const loaded = await api({ action: "limits-refresh" }); if (loaded?.providers) limits = loaded; } catch (error) { report(error); } finally { limitsRefreshing = false; renderLimits(); }
+      break;
+    }
+    case "cursor-connect": {
+      const started = await api({ action: "cursor-connect" });
+      const cursor = limits?.providers.find(item => item.provider === "cursor");
+      if (cursor) { cursor.connect = started; renderLimits(); }
+      if (started.loginUrl) window.open(started.loginUrl, "_blank", "noopener,noreferrer");
+      scheduleLimitsWatch();
+      break;
+    }
+    case "thread-close": if (history.state?.worker) history.back(); else { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); } break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
@@ -2326,6 +2440,9 @@ async function action(node) {
     case "context-save": await saveContextSettings(false); break;
     case "context-reset": await saveContextSettings(true); break;
     case "compact-now": await compactNow(); break;
+    case "prompt-save": await savePrompt(node.dataset.role, false); break;
+    case "prompt-reset": await savePrompt(node.dataset.role, true); break;
+    case "composer-help": toggleComposerHelp(node); break;
     case "skills-tab": skillsPicker.tab = node.dataset.role; renderSkillsPicker(); break;
     case "skills-select": bulkSkills(node.dataset.source, node.dataset.mode); break;
     case "mcp-select": bulkMcp(node.dataset.mode); break;
@@ -2397,7 +2514,7 @@ async function action(node) {
     case "operation-decision": operationDecision(node.dataset.operation, node.dataset.fingerprint, node.dataset.decision); break;
     case "operation-execute": operationExecution(node.dataset.operation, node.dataset.fingerprint); break;
     case "operation-inspect": operationExecution(node.dataset.operation, node.dataset.fingerprint, true); break;
-    case "thread": requireProject(node.dataset.project); await inspectThread(node.dataset.thread); break;
+    case "thread": requireProject(node.dataset.project); if (dialog.contains(node)) closeDialog(); await inspectThread(node.dataset.thread); break;
     case "thread-history-page": requireProject(node.dataset.project); await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset)); break;
     case "thread-send": requireProject(node.dataset.project); requireThread(node.dataset.thread); textDialog("thread-send", node.dataset.thread); break;
     case "thread-steer":
@@ -2804,6 +2921,7 @@ document.addEventListener("keydown", event => {
     return;
   }
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "b" && !event.isComposing && !dialog.open) { event.preventDefault(); setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); return; }
+  if (event.key === "Escape" && workerChat && !dialog.open && !refMenu && !document.querySelector(".mp.open") && !event.isComposing) { event.preventDefault(); document.querySelector('#inline-thread [data-action="thread-close"]')?.click(); return; }
   if (refMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = refMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { refMenu.index = (refMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderRefMenu(); } return; }
@@ -3022,7 +3140,7 @@ async function ownerSetupDialog(result = null) {
   const providerCardHtml = card => `<div class="card"><b>${card.state === "connected" ? "✓ " : ""}${esc(card.title)}</b><p class="note">${esc(card.body)}</p>${card.state === "available" && card.connect ? `<button class="primary" data-action="provider-connect" data-card="${esc(card.id)}">${esc(card.connect.label)}</button>` : ""}</div>`;
   const pluginCards = !whole ? "" : snapshot.unloadedProvider ? `<div class="card"><b>${esc(snapshot.unloadedProvider)}</b><p class="note">The provider plugin is not loaded, so workers cannot start here. Load it (see the plugin documentation) or remove the grant; its records are kept.</p></div>` : (snapshot.providerCards ?? []).map(providerCardHtml).join("");
   const githubCard = !whole ? "" : snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? pluginCards : connected ? `<div class="card"><b>✓ GitHub connected</b><p class="note">Workers push ${esc(connected.branchPrefix)} branches to ${esc(connected.repositoryId)} and open draft PRs against ${esc(connected.baseBranch)}. You approve merges.</p></div>` : snapshot.githubQuick?.available ? `<div class="card"><b>GitHub</b><p class="note">Workers cannot open draft PRs yet.</p><button class="primary" data-action="github-quick">Connect GitHub</button></div>` : `<div class="card"><b>GitHub</b><p class="note">${esc(snapshot.githubQuick?.blocker || "One-click GitHub is unavailable")}</p></div>`;
-  const quick = whole ? `<div class="card"><b>✓ Workers can edit this repository</b><p class="note">${esc(whole.repositoryId)} · new worker threads start from ${snapshot.workspace?.provider && snapshot.workspace.provider !== "github" ? "the provider's base (see its card)" : "current HEAD"}.</p></div>${githubCard}` : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
+  const quick = whole ? githubCard : snapshot.quickGrant?.available ? `<div class="card"><b>Workspace</b><p class="note">Workers cannot edit code yet.</p><button class="primary" data-action="workspace-quick">Let workers edit this repo</button></div>` : `<div class="card"><b>Workspace</b><p class="note">${esc(snapshot.quickGrant?.blocker || "One-click access is unavailable")}</p></div>`;
   setDialogBody(`${result ? `<p class="note-box ok">Change recorded. No command was run.</p>${rawDetails(result, "Host response")}` : ""}<div class="choice-list">${quick}</div><details class="advanced"><summary>Advanced: folder scopes, GitHub targets, command profiles</summary>${hist}<h3>Look up a GitHub repository</h3><form data-owner-github-inspect data-project="${esc(id)}" class="row"><label class="grow"><span class="sr-only">Repository, owner/name</span><input name="repositoryId" placeholder="owner/repository" aria-label="Repository, owner/name" required></label><button type="submit" class="small">Look up</button></form><p class="note">Reads its numeric ID and default branch. It must match the checkout's GitHub origin.</p><h3>Add or change</h3><div class="row">${actions}</div><h3>Folder scopes</h3>${workspaces}<h3>GitHub authorizations</h3>${github}<h3>Command profiles</h3>${profiles}</details>${dlgActions(dlgBtn("Refresh", { action: "owner-setup" }), dlgBtn("Done", { action: "close-dialog" }, "primary"))}`);
 }
 
@@ -3034,7 +3152,7 @@ async function workspaceQuickDialog() {
   if (!quick?.available) { dialog.querySelector(".dialog-body").innerHTML = `<p>${esc(quick?.blocker || "One-click access is unavailable")}</p>${dlgActions(dlgBtn("Open owner setup", { action: "owner-setup" }, "primary"))}`; return; }
   const other = quick.provider !== "github", extra = quick.dialog;
   dialog.querySelector(".dialog-body").innerHTML = `<div class="kv"><span>Repository</span><b>${esc(quick.repositoryId)}</b><span>${other ? esc(extra?.checkoutLabel ?? "Checkout") : "Checkout"}</span><b class="mono">${esc(quick.ownerCheckout)}</b>${(extra?.rows ?? []).map(([label, value]) => `<span>${esc(label)}</span><b class="mono">${esc(value)}</b>`).join("")}<span>Worker copies</span><b class="mono">${esc(quick.approvedRoot)}</b><span>${other ? "Base head" : "Current HEAD"}</span><b class="mono">${esc(quick.head.slice(0, 12))}</b></div>
-${other ? `<ul>${(extra?.bullets ?? []).map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 2); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${other ? "start from the provider's base and" : "will"} not see them.</p>` : ""}
+${other ? `<ul>${(extra?.bullets ?? []).map(item => `<li>${esc(item)}</li>`).join("")}</ul>` : `<ul><li>Each worker gets its own git worktree, starting from HEAD at the time it starts.</li><li>Workers may read, edit and create any file except VCS metadata (.git). Your checkout is never written.</li><li>Workers may run repository commands in their isolated worktree. Draft PRs need GitHub (step 1); merges always need your approval.</li></ul>`}${quick.dirty ? `<p class="notice">Your checkout has uncommitted changes. Workers ${other ? "start from the provider's base and" : "will"} not see them.</p>` : ""}
 ${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Allow workers to edit", { action: "workspace-quick-confirm", project: id, revision: snapshot.workspaceRevision }, "primary"))}`;
 }
 
@@ -3570,7 +3688,7 @@ function requireProject(id) { if (id !== projectId) throw new Error("Selected pr
 function closeCurrentDialog(id, version) { if (projectId === id && dialogVersion === version) closeDialog(); }
 function requireThread(id) { if (!uuid(id) || !plan?.work.some(work => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan"); }
 function workLine(work, detail) {
-  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small></button>`;
+  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small>${contextRing(workerContexts.get(work.threadId))}</button>`;
 }
 // Shared resources a running worker holds: leases by resource name, and its running background commands.
 function holdsBadge(holds) {
@@ -3587,15 +3705,47 @@ function workChatId(work) {
   return (chats.find(chat => chat.conversationId === (work.chatConversationId ?? main)) ?? chats[0])?.id ?? "main";
 }
 const inSelectedChat = work => !view?.chats || workChatId(work) === chatId;
+const archivable = work => ["completed", "failed", "stopped", "blocked"].includes(work.status) && !work.archived;
 function durableActivity() {
   const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
-  // Finished and archived work leave this panel for Recent results; Activity keeps the full list.
-  const active = plan.work.filter(work => !finished(work) && !work.archived);
-  const shown = active.filter(inSelectedChat).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0)).slice(0, 12);
-  const elsewhere = active.length - active.filter(inSelectedChat).length;
-  const detail = work => work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
-  const total = plan.work.length;
-  return (shown.map(work => workLine(work, detail(work))).join("") || '<p class="note">No active workers from this chat.</p>') + (elsewhere ? `<p class="note other-chats">${elsewhere} active in other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">View all work (${total}) →</button>` : "");
+  // Finished and archived work leave this card for Recent results; "View all work" lists every item of this chat.
+  const pool = allWork ? plan.work.filter(work => showArchived || !work.archived).toReversed() : plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  const mine = pool.filter(inSelectedChat), shown = allWork ? mine : mine.slice(0, 12);
+  const detail = work => work.archived ? "archived" : work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
+  const item = work => {
+    return `<div class="worker-item${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
+  };
+  const elsewhere = pool.length - mine.length, total = plan.work.length;
+  // One level of nesting: a parent's sub-agents sit under its newest row; orphans (parent not listed) stay top level.
+  const threads = new Set(shown.map(work => work.threadId)), placed = new Set();
+  const tree = work => {
+    const first = !placed.has(work.threadId); placed.add(work.threadId);
+    const kids = first ? shown.filter(child => child.parentThreadId === work.threadId && child.threadId !== work.threadId) : [];
+    return item(work) + (kids.length ? `<div class="work-children" data-parent="${esc(work.threadId)}">${kids.map(item).join("")}</div>` : "");
+  };
+  return (shown.filter(work => !work.parentThreadId || !threads.has(work.parentThreadId) || work.parentThreadId === work.threadId).map(tree).join("") || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) + (elsewhere ? `<p class="note other-chats">${elsewhere} ${allWork ? "in" : "active in"} other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${total}) →`}</button>` : "");
+}
+function renderWorkers() {
+  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  document.querySelector("#archive-toggle").hidden = !allWork;
+}
+// Context use of the workers listed in the card, read host-side; rows show nothing until a reading exists.
+const workerContexts = new Map();
+async function loadWorkerContexts(current) {
+  const ids = [...new Set([...document.querySelectorAll("#activity .worker-line[data-thread]")].map(node => node.dataset.thread))].slice(0, 40);
+  if (!ids.length) return;
+  const read = await api({ action: "worker-contexts", id: projectId, threadIds: ids }).catch(() => null);
+  if (!read || current !== generation) return;
+  let changed = false;
+  for (const [id, value] of Object.entries(read)) if (value && JSON.stringify(workerContexts.get(id)) !== JSON.stringify(value)) { workerContexts.set(id, value); changed = true; }
+  if (changed) renderWorkers();
+}
+// Small ring plus percent; a missing window is said so, never guessed.
+function contextRing(context) {
+  if (!context || context.tokens == null) return "";
+  const percent = context.window ? Math.min(100, Math.round(context.tokens / context.window * 100)) : null;
+  const level = percent === null ? "low" : percent >= 90 ? "high" : percent >= 70 ? "mid" : "low", c = 2 * Math.PI * 6;
+  return `<span class="ctx-ring" data-level="${level}" title="${esc(contextLine(context))}"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" class="track"/><circle cx="8" cy="8" r="6" class="fill" stroke-dasharray="${(c * (percent ?? 0) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 8 8)"/></svg>${percent === null ? "window unknown" : `${percent}%`}</span>`;
 }
 function durableResults() {
   const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);
@@ -3605,36 +3755,45 @@ function threadList() {
   if (!plan) throw new Error("Durable plan is not loaded");
   showDialog("Durable work and reusable threads", `<p>Work items sharing a thread UUID reuse its conversation. Status is not verification evidence.</p>${plan.work.toReversed().map(work => `<article class="task">${badge(work.status)}<strong>${esc(work.text)}</strong><p>Role ${esc(work.role)} · Work ${esc(work.id)}<br>Thread ${esc(work.threadId)}<br>${esc(work.blocker ?? "")}</p><button data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}">Read owned history</button></article>`).join("") || '<p>No retained work items.</p>'}`);
 }
+function workerDetailHtml(chat, page, work) {
+  const threadId = chat.threadId, draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`), role = work?.role ?? "worker";
+  const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
+  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><span class="row help-line"><small>Reuses this ${esc(role)}'s conversation</small><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
+}
 async function inspectThread(threadId, offset = null, textOffset = 0) {
   requireThread(threadId);
   if (workerFocus?.threadId !== threadId) workerFocus = null;
   if (![offset ?? 0, textOffset].every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)) throw new Error("Invalid thread history page");
   const chat = { id: projectId, generation, threadId, offset, textOffset };
   workerChat = chat;
-  setTab("activity");
-  const target = document.querySelector("#inline-thread");
-  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>'; document.querySelector("#thread-empty").hidden = true;
+  const target = threadPane;
+  target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>';
+  setTab("coordinator");
+  setWorkerUrl(threadId);
+  document.querySelector(".body").scrollTop = 0;
+  render();
   const version = ++dialogVersion;
   const page = await workerChatPage(chat);
   if (workerChat !== chat || version !== dialogVersion || chat.generation !== generation || target.hidden) return;
   const work = plan.work.findLast(item => item.threadId === threadId);
-  const draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`);
-  const role = work?.role ?? "worker";
-  target.innerHTML = `<div class="thread-head"><div class="grow"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p></div><button class="ghost small artifact-toggle" data-action="artifacts-toggle">Artifacts <span id="artifact-count"></span></button><button class="ghost small" data-action="thread-close" aria-label="Close thread">✕</button></div><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div><form class="composer" data-inline-thread-send data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><details class="worker-controls"><summary>Evidence, changes and controls</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p><div class="row"><button data-thread-mutation data-action="thread-steer" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" data-project="${esc(chat.id)}" data-thread="${esc(threadId)}">Stop…</button></div></details>`;
-  document.querySelector("#thread-empty").hidden = true;
+  target.innerHTML = workerDetailHtml(chat, page, work);
   renderWorkerChat(chat, page, true);
   render();
 }
 async function workerChatPage(chat) {
-  const read = offset => api({ action: "thread-history", id: chat.id, threadId: chat.threadId, offset, limit: 30, textOffset: chat.textOffset, textLimit: 4000 });
+  const read = offset => api({ action: "thread-history", id: chat.id, threadId: chat.threadId, offset, limit: 30, textOffset: chat.textOffset, textLimit: 4000, context: true });
   let page = await read(chat.offset ?? 0);
   if (chat.offset === null && page.total > 30) page = await read(Math.max(0, page.total - 30));
   if (page.threadId !== chat.threadId || !Array.isArray(page.items) || chat.offset !== null && page.offset !== chat.offset) throw new Error("History does not match its owned thread/page");
   return page;
 }
+function contextLine({ tokens, window }) {
+  const k = n => n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
+  return tokens == null ? "" : window ? `Context ${k(tokens)} / ${k(window)} · ${Math.round(tokens / window * 100)}%` : `Context ${k(tokens)} · window unknown`;
+}
 async function refreshWorkerChat(chat) {
   const page = await workerChatPage(chat);
-  if (workerChat !== chat || chat.generation !== generation || projectId !== chat.id || document.querySelector("#inline-thread").hidden) return;
+  if (workerChat !== chat || chat.generation !== generation || projectId !== chat.id || threadPane.hidden) return;
   if (document.querySelector("#worker-messages")) renderWorkerChat(chat, page);
 }
 function renderWorkerChat(chat, page, opening = false) {
@@ -3645,6 +3804,9 @@ function renderWorkerChat(chat, page, opening = false) {
     transcript.innerHTML = messages; transcript.dataset.content = messages;
     if (atEnd) transcript.scrollTop = transcript.scrollHeight;
   }
+  const lastTool = page.items.findLast(item => item.kind === "tool");
+  document.querySelector("#worker-latest").innerHTML = lastTool ? `Latest: <code>${esc(lastTool.name)}</code> ${esc(clip(lastTool.argsPreview ?? "", 90))}` : "";
+  document.querySelector("#worker-context").innerHTML = contextRing(page.context);
   if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id) focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
   document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
@@ -3714,6 +3876,54 @@ function restoreBrowserDrafts() {
 }
 restoreBrowserDrafts();
 window.addEventListener("pagehide", () => { captureDialogDraft(); persistDraftsSafely(); });
+// Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once every 5 minutes (the refresh button polls now, with a short per-provider cooldown on the host); the bar re-renders every 30 s so countdowns stay current.
+let limits = null, limitsRefreshing = false;
+const limitTone = percent => percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
+function untilReset(at) { const ms = at - Date.now(); return ms <= 0 ? "reset passed" : `resets in ${duration(ms)}`; }
+const limitWindowName = { mo: "month" };
+function limitWindow(sample) {
+  const stale = sample.resetsAt !== null && sample.resetsAt <= Date.now(), percent = Math.round(sample.usedPercent);
+  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${limitWindowName[sample.window] ?? sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
+}
+function limitItem(provider) {
+  const windows = provider.samples.map(limitWindow), live = windows.filter(win => !win.stale);
+  const tone = limitTone(Math.max(0, ...live.map(win => win.percent)));
+  const rows = provider.samples.map((sample, i) => {
+    const win = windows[i];
+    return `<div class="lim-row" data-tone="${limitTone(win.percent)}"><span>${limitWindowName[sample.window] ?? sample.window}</span><span class="lim-bar"><i style="width:${win.percent}%"></i></span><span>${win.stale ? "—" : `${win.percent}% used`}</span><small>${sample.resetsAt === null ? "Reset time unknown" : `${untilReset(sample.resetsAt)} · ${new Date(sample.resetsAt).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`}${win.stale ? " · last reading is from before the reset, waiting for a new one" : ""} · observed ${ago(sample.observedAt)} via ${sample.source === "headers" ? "response headers" : "usage endpoint"}</small></div>`;
+  });
+  const empty = provider.status === "unavailable" ? "Not connected" : "No data yet";
+  const connect = provider.connect, signedOut = provider.status === "unavailable" && !!connect;
+  const connectHtml = !connect ? "" : connect.state === "waiting" ? `<small class="lim-connect-note">Waiting for you to sign in. <a href="${esc(connect.loginUrl)}" target="_blank" rel="noopener noreferrer">Open the Cursor sign-in page</a></small>` : signedOut || connect.state === "failed" ? `${connect.error ? `<small>${esc(connect.error)}</small>` : ""}<button type="button" class="small" data-action="cursor-connect">Connect Cursor</button>` : "";
+  const failure = provider.samples.length && provider.reason ? `<small class="lim-error">Last refresh failed: ${esc(provider.reason)}${provider.lastAttemptAt ? ` · ${ago(provider.lastAttemptAt)}` : ""}</small>` : "";
+  const detail = rows.join("") + failure || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
+  const label = `${provider.label}: ${provider.samples.length ? provider.samples.map((sample, i) => `${sample.window} ${windows[i].stale ? "reset, waiting for new data" : `${windows[i].percent}% used`}`).join(", ") : empty.toLowerCase()}`;
+  return `<div class="lim" tabindex="0" role="group" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="group" aria-label="${esc(provider.label)} details"><b>${esc(provider.label)}</b>${detail}${connectHtml}</span>${signedOut && connect.state === "idle" ? '<button type="button" class="lim-connect" data-action="cursor-connect">Connect</button>' : ""}</div>`;
+}
+function renderLimits() {
+  const bar = document.querySelector("#limits-bar");
+  const refresh = `<button type="button" class="ghost small lim-refresh${limitsRefreshing ? " spinning" : ""}" data-action="limits-refresh" aria-label="Refresh limits" title="Refresh limits now"${limitsRefreshing ? " disabled" : ""}><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
+  const next = limits ? limits.providers.map(limitItem).join("") + refresh : "";
+  if (bar.dataset.html === next) return;
+  const focused = bar.contains(document.activeElement) ? document.activeElement.closest(".lim")?.dataset.provider : null;
+  bar.innerHTML = next; bar.dataset.html = next;
+  if (focused) bar.querySelector(`.lim[data-provider="${focused}"]`)?.focus({ preventScroll: true });
+}
+async function loadLimits() {
+  if (document.hidden) return;
+  const loaded = await api({ action: "limits-snapshot" }).catch(() => null);
+  if (loaded?.providers) { limits = loaded; renderLimits(); }
+}
+setInterval(() => void loadLimits(), 5 * 60000);
+// While a Cursor sign-in is pending, look every 3 s so the bar updates as soon as the host finishes it.
+let limitsWatch = null;
+function scheduleLimitsWatch() {
+  clearInterval(limitsWatch); limitsWatch = null;
+  if (limits?.providers.find(item => item.provider === "cursor")?.connect?.state === "waiting") limitsWatch = setInterval(() => void loadLimits().then(scheduleLimitsWatch), 3000);
+}
+setInterval(renderLimits, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadLimits(); });
+void loadLimits();
 void start();
 
 // Settings section nav: smooth-scroll to a section (no hash navigation) and highlight the section in view.

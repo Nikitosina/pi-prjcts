@@ -61,6 +61,7 @@ try {
   await ensureHost(); pid = (await health()).pid; pass("isolated public host started");
   project = await api({ action: "create", name: "Fake-model owner catalog", cwd: workspace, model: FAKE_MODEL });
   await pinFakeRoles(api, project.id);
+  { const auto = await api({ action: "owner-setup-snapshot", id: project.id }); for (const item of auto.workspace?.scopes ?? []) await api({ action: "workspace-revoke", id: project.id, confirm: project.id, scopeId: item.id, expectedRevision: (await api({ action: "owner-setup-snapshot", id: project.id })).workspaceRevision }); } // the default whole-repository scope is revoked so the explicit folder grant below is what is tested
   assert.equal(project.runtime, "durable");
   beforeGrant = await api({ action: "show", id: project.id }); assert.equal(beforeGrant.project.id, project.id); assert.equal(beforeGrant.jobs.length, 0); pass("show opened an idle Durable coordinator");
 

@@ -7,9 +7,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const stamp = new Date().toISOString().replaceAll(':', '-');
-const artifacts = process.env.ARTIFACT_DIR || join('/Users/nikitarat/.pi/agent/projects-mvp/artifacts', `projects-chat-md-${stamp}`), root = process.env.REVIEW_ROOT ? realpathSync(process.env.REVIEW_ROOT) : join(realpathSync(tmpdir()), `projects-chat-md-${randomUUID()}`);
+const artifacts = process.env.ARTIFACT_DIR || join(process.env.PI_ARTIFACTS_DIR || repo + '/artifacts', `projects-chat-md-${stamp}`), root = process.env.REVIEW_ROOT ? realpathSync(process.env.REVIEW_ROOT) : join(realpathSync(tmpdir()), `projects-chat-md-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace');
 const result = { scope: 'startup + browser render of project-home UI', root, home, checks: [], errors: [], httpErrors: [], modelSubmissions: 0, grantsIssued: 0, providerOperations: 0 };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
@@ -117,7 +117,7 @@ try {
   result.checks.push('coordinator chat is the default tab; composer enabled');
   await shot('01-coordinator', s);
 
-  for (const [n, name] of [['02', 'knowledge'], ['03', 'activity'], ['04', 'observability'], ['05', 'settings']]) {
+  for (const [n, name] of [['02', 'knowledge'], ['03', 'observability'], ['04', 'settings']]) {
     await evaluate(`document.querySelector('.tabs [data-tab=${name}]').click()`, s);
     await waitFor(`!document.querySelector('[data-panel=${name}]').hidden && [...document.querySelectorAll('[data-panel]')].filter(n => getComputedStyle(n).display !== 'none').map(n => n.dataset.panel).join() === '${name}' && new URL(location.href).searchParams.get('tab') === '${name}'`, s, `${name} tab`);
     if (name === 'observability') await waitFor(`!document.querySelector('#obs-usage').textContent.includes('Reading')`, s, 'usage counters loaded');
@@ -154,8 +154,8 @@ try {
   await shot('08-mobile', s);
   result.checks.push('narrow viewport screenshot captured');
 
-  const frontend = await evaluate(`({ activity: !!document.querySelector('#inline-thread'), automation: !!document.querySelector('#automation-history'), stepper: document.querySelectorAll('#owner-steps li').length, timeline: !!document.querySelector('#obs-timeline'), events: !!document.querySelector('#obs-event-log'), usageTime: !!document.querySelector('#obs-usage-time') })`, s);
-  if (!frontend.activity || !frontend.automation || frontend.stepper < 3 || !frontend.timeline || !frontend.events || !frontend.usageTime) throw new Error('Second-pass frontend panels are missing: ' + JSON.stringify(frontend));
+  const frontend = await evaluate(`({ workers: !!document.querySelector('#workers-card #activity'), automation: !!document.querySelector('#automation-history'), stepper: document.querySelectorAll('#owner-steps li').length, timeline: !!document.querySelector('#obs-timeline'), events: !!document.querySelector('#obs-event-log'), usageTime: !!document.querySelector('#obs-usage-time') })`, s);
+  if (!frontend.workers || !frontend.automation || frontend.stepper < 3 || !frontend.timeline || !frontend.events || !frontend.usageTime) throw new Error('Second-pass frontend panels are missing: ' + JSON.stringify(frontend));
   await evaluate(`document.querySelector('.tabs [data-tab=observability]').click()`, s);
   await waitFor(`document.querySelector('#obs-timeline').textContent.length > 0`, s, 'timeline placeholder or bars');
   await evaluate(`document.querySelector('.tabs [data-tab=settings]').click()`, s);

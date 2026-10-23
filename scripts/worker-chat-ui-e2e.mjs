@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const artifacts = join(repo, 'artifacts', `worker-chat-ui-${stamp}`), root = join(realpathSync(tmpdir()), `worker-chat-ui-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
@@ -172,7 +172,7 @@ try {
   result.checks.push('C6 Enter sends worker follow-up');
   await evaluate(`document.querySelector('[data-action="thread-close"]').click()`, s);
   await delay(2500);
-  if (!(await evaluate(`document.querySelector('#inline-thread').hidden`, s))) throw Error('Closed worker reopened');
+  if (!(await evaluate(`document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden && !new URL(location.href).searchParams.has('worker')`, s))) throw Error('Closed worker reopened');
   result.checks.push('C5 close remains closed after refresh');
   for (let i = 0; i < 14; i++) {
     await rpc({ action: 'thread-send', id: project.id, threadId, requestId: randomUUID(), text: 'History turn ' + i });

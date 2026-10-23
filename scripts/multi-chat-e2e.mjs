@@ -184,8 +184,8 @@ try {
   // F6/F16: the shared worker pool is one plan; Activity lists the chat's work.
   const plan = await rpc({ action: 'plan-snapshot', id });
   if (plan.work.length !== 1 || !plan.work[0].text.includes('MARK-SCOUTJOB')) throw Error('Plan wrong: ' + JSON.stringify(plan.work));
-  await click(s, '[data-tab="activity"]');
-  await waitFor(`document.querySelector('#work-list').innerText.includes('MARK-SCOUTJOB')`, s, 'activity lists chat work');
+  await click(s, '#activity [data-action="all-work"]');
+  await waitFor(`document.querySelector('#activity').innerText.includes('MARK-SCOUTJOB')`, s, 'activity lists chat work');
   result.checks.push('F6/F16 work delegated from a chat lands in the one shared plan and the Activity tab');
   await click(s, '[data-tab="coordinator"]');
 

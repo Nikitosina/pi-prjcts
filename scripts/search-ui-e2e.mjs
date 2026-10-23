@@ -142,7 +142,7 @@ try {
   await evaluate(`document.querySelector('#search-results .search-row[data-source="worker"]').click()`, s);
   await waitFor(`!!document.querySelector('#worker-messages .search-focus mark')`, s, 'worker message highlighted');
   await waitFor(inView('#worker-messages', '#worker-messages .search-focus'), s, 'worker message visible');
-  check('S9 a worker hit opens Activity on that thread and highlights the message', await evaluate(`new URL(location.href).searchParams.get('tab') === 'activity' && document.querySelector('#worker-messages .search-focus').innerText.includes('ibexvortex')`, s));
+  check('S9 a worker hit opens the worker view and highlights the message', await evaluate(`new URL(location.href).searchParams.get('tab') === 'coordinator' && !document.querySelector('#inline-thread').hidden && new URL(location.href).searchParams.has('worker') && !!document.querySelector('#inline-thread #worker-messages') && document.querySelector('#worker-messages .search-focus').innerText.includes('ibexvortex')`, s));
   await shot('03-worker-hit', s);
 
   // S10: knowledge and upload hits.
@@ -175,6 +175,9 @@ try {
   await waitFor(`/at least one word/.test(document.querySelector('#search-results').innerText)`, s, 'stop-word message');
   check('S6 the UI says when nothing matches and why a stop-word query is refused', true);
   await evaluate(`document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); document.querySelector('dialog').close()`, s);
+  // S9 left the worker view open; Back returns to the chat, where "/" focuses the composer.
+  await evaluate(`document.querySelector('#inline-thread [data-action="thread-close"]')?.click()`, s);
+  await waitFor(`document.querySelector('#inline-thread').hidden`, s, 'back from worker view');
   // "/" still focuses the composer.
   await evaluate(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true }))`, s);
   check('S11 the "/" composer shortcut still works', await evaluate(`document.activeElement === document.querySelector('#compose textarea')`, s));

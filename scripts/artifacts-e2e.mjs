@@ -131,12 +131,14 @@ try {
   await delay(1500);
   check('A19 re-rendering does not refetch the image (blob cache)', (await fetches()) === before && before >= 1, { before, after: await fetches() });
 
-  // Activity thread pane.
-  const activity = new URL(web.url); activity.searchParams.set('project', id); activity.searchParams.set('tab', 'activity');
+  // Worker pane inside the Workers card.
+  const activity = new URL(web.url); activity.searchParams.set('project', id); activity.searchParams.set('tab', 'coordinator');
   await send('Page.navigate', { url: activity.toString() }, s);
-  await waitFor(`!!document.querySelector('[data-action="thread"][data-thread="${thread}"]')`, s, 'thread button');
-  await evaluate(`document.querySelector('[data-action="thread"][data-thread="${thread}"]').click()`, s);
-  await waitFor(`!!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]')`, s, 'artifact browser files');
+  // The card lists active work only: click "View all work" while it says so, then expand the worker once.
+  // Page.navigate resolves before the new document commits; an evaluate that lands mid-commit throws, so retry it.
+  for (let attempt = 0; ; attempt++) { try {
+    await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); const row = document.querySelector('[data-action="thread"][data-thread="${thread}"]'); if (row && document.querySelector('#inline-thread').hidden) row.click(); return !!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]'); })()`, s, 'artifact browser files');
+  break; } catch (error) { if (attempt > 3 || !/navigated or closed/.test(String(error))) throw error; } }
   await evaluate(`document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]').click()`, s);
   await waitFor(`[...document.querySelectorAll('#artifact-preview img.artifact-media')].some(i => i.naturalWidth === 320)`, s, 'artifact browser image preview');
   const pane = await evaluate(`document.querySelector('#artifact-pane').innerText`, s);
