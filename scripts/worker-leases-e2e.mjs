@@ -234,7 +234,8 @@ await kit.run(async () => {
 
   // ---- runbook / usage instruction text ----
   const system = run('TAG-ll2').system, coordinator = kit.lastCall('coordinator', 'LBL-w1').system;
-  check('F19 worker and coordinator instructions point at runbooks/ and the lease and bg tools', /runbooks\//.test(system) && /projects_bg_start/.test(system) && /projects_lease_acquire/.test(system) && /runbooks\/ with projects_knowledge_write/.test(coordinator) && /projects_lease_acquire/.test(coordinator), { worker: system.length, coordinator: coordinator.length });
+  const workerTools = run('TAG-ll2').tools ?? [];
+  check('F19 the worker is offered the lease and background tools and told to read runbooks/; the coordinator is told to record runbooks/ and to share leases', /runbooks\//.test(system) && workerTools.includes('projects_bg_start') && workerTools.includes('projects_lease_acquire') && /runbooks\/ with projects_knowledge_write/.test(coordinator) && /lease/.test(coordinator), { worker: system.length, coordinator: coordinator.length, workerTools });
 
   summary.leases = { denied, granted, ttl: out('TAG-lb2', 0), restart: out('TAG-ll2', 0) };
   summary.background = { started, finished, stopped, flood: { state: flood.state, reason: flood.reason, logBytes: flood.logBytes }, orphanRecord: after[orphan.id], reusedPidRecord: after[reused.id] };

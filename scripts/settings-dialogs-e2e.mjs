@@ -78,7 +78,7 @@ await kit.run(async () => {
   await page.waitFor(`!document.querySelector('${pickerOf('worker')} .mp-pop').hidden && document.activeElement.classList.contains('mp-search')`, 'picker open + search focused');
   const rows = () => ev(`[...document.querySelectorAll('${pickerOf('worker')} .mp-row')].map(r => r.dataset.ref + (r.getAttribute('aria-disabled') ? '!' : ''))`);
   const groups = () => ev(`[...document.querySelectorAll('${pickerOf('worker')} .mp-group')].map(g => g.textContent)`);
-  check('picker: Scoped models first, exactly the scoped list, hint to search all', JSON.stringify(await rows()) === JSON.stringify(expectedScoped) && (await groups())[0] === 'Scoped models' && /search all \d+ configured/.test(await ev(`document.querySelector('${pickerOf('worker')} .mp-list').innerText`)));
+  check('picker: Inherit coordinator, then the scoped list, hint to search all', (await rows())[0] === '' && JSON.stringify((await rows()).slice(1)) === JSON.stringify(expectedScoped) && (await groups())[0] === 'Scoped models' && /search all \d+ configured/.test(await ev(`document.querySelector('${pickerOf('worker')} .mp-list').innerText`)));
   check('picker: compact context windows (272k, 1M) and current marked', await ev(`(() => { const t = document.querySelector('${pickerOf('worker')} .mp-list').innerText; return /272k/.test(t) && /1M/.test(t) && document.querySelector('${pickerOf('worker')} .mp-row[aria-selected=true]')?.dataset.ref === 'fake/fake-model'; })()`));
   await capture('model-picker-scoped', { footer: false });
   const type = async text => { await ev(`(() => { const i = document.querySelector('${pickerOf('worker')} .mp-search'); i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`); };

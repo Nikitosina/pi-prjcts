@@ -1,6 +1,6 @@
 import { SettingsManager, getAgentDir, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
 import { createModelRuntime, providerExtensionStatus } from "./provider-extensions.ts";
-import type { Request } from "./state.ts";
+import type { Project, Request } from "./state.ts";
 
 type Changes = Extract<Request, { action: "settings-update" }>["changes"];
 const openRegistry = () => createModelRuntime();
@@ -13,22 +13,28 @@ export async function projectModelCatalog(options: { provider?: string; offset?:
   const items = models.slice(offset, offset + limit).map(model => ({ reference: `${model.provider}/${model.id}`, provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning, configured: registry.getProviderAuthStatus(model.provider).configured }));
   return { items, total: models.length, offset, nextOffset: offset + items.length < models.length ? offset + items.length : null, networkChecked: false };
 }
-/** Everything the picker needs in one offline response: all models (configured flag) plus Pi's own scoped list (settings enabledModels, resolved by Pi's resolver against configured models). */
-export async function projectModelPicker() {
+/** Everything the picker needs in one offline response: all models (configured flag) plus the scoped list: the project's own scope when set, else Pi's (settings enabledModels, resolved by Pi's resolver against configured models). */
+export async function projectModelPicker(project?: Pick<Project, "cwd" | "scopedModels">) {
   const registry = await openRegistry();
   const models = [...registry.getModels()].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
   const items = models.map(model => ({ reference: `${model.provider}/${model.id}`, name: model.name, contextWindow: model.contextWindow, reasoning: model.reasoning, configured: registry.getProviderAuthStatus(model.provider).configured }));
   let scoped: string[] = [];
-  try {
-    const patterns = SettingsManager.create(process.cwd(), getAgentDir()).getEnabledModels() ?? [];
+  // scopeSet tells "no scope configured" (cycle every configured model) from "a scope resolving to nothing usable" (block, never widen).
+  let scopeSet = false;
+  if (project?.scopedModels) { scopeSet = true; scoped = project.scopedModels.filter(reference => items.some(item => item.reference === reference)); }
+  else try {
+    const patterns = SettingsManager.create(project?.cwd ?? process.cwd(), getAgentDir()).getEnabledModels() ?? [];
+    scopeSet = patterns.length > 0;
     if (patterns.length) scoped = (await resolveModelScopeWithDiagnostics(patterns, registry)).scopedModels.map(entry => `${entry.model.provider}/${entry.model.id}`);
   } catch { scoped = []; }
-  return { items, scoped: [...new Set(scoped)], networkChecked: false, extensionErrors: (await providerExtensionStatus()).errors };
+  return { items, scoped: [...new Set(scoped)], scopeSet, networkChecked: false, extensionErrors: (await providerExtensionStatus()).errors };
 }
 export async function validateProjectModelChanges(changes: Changes): Promise<void> {
-  const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => value !== undefined);
-  if (!selections.length) return;
+  const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => typeof value === "string");
+  const scope = changes.scopedModels ?? [];
+  if (!selections.length && !scope.length) return;
   const registry = await openRegistry();
+  for (const reference of scope) if (!registry.getModels().some(model => `${model.provider}/${model.id}` === reference)) throw new Error(`Scoped models must be installed models: ${reference}`);
   for (const reference of selections) {
     const slash = reference.indexOf("/");
     if (slash < 1 || slash === reference.length - 1) throw new Error("Model settings require a provider/model reference");

@@ -37,9 +37,9 @@ export async function kit(name, extraEnv = {}, respond) {
       const coordinator = tools.includes('projects_delegate'), lastUser = msgs.findLastIndex(m => m.role === 'user');
       const userText = contentText(msgs[lastUser]?.content), marker = /MARK-[A-Z0-9]+/.exec(userText)?.[0] ?? 'none';
       const results = msgs.slice(lastUser + 1).filter(m => m.role === 'tool').map(m => contentText(m.content));
-      result.calls.push({ at: Date.now(), coordinator, marker, stage: results.length, user: userText.slice(0, 400) });
+      result.calls.push({ at: Date.now(), coordinator, marker, stage: results.length, model: input.model, user: userText.slice(0, 400) });
       const reply = text => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(text); };
-      const custom = await respond?.({ coordinator, marker, userText, results, tools, say, call, msgs });
+      const custom = await respond?.({ coordinator, marker, userText, results, tools, say, call, msgs, request: input });
       if (custom === 'HOLD') return;
       if (custom?.error) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: custom.error } })); return; }
       if (typeof custom === 'string') return reply(custom);
