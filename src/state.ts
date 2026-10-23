@@ -72,6 +72,8 @@ export const Project = Type.Object({
   knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])),
   libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
   decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
+  /** Coordinator gh access; absent means full. */
+  githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
   /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
   workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
   workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
@@ -226,7 +228,7 @@ export const Request = Type.Union([
     models: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
     /** null restores Pi's enabledModels as the scope. */
     scopedModels: Type.Optional(Type.Union([Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true }), Type.Null()])),
-    knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+    knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** null restores the default (repository skills for every profile). */
     skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
     /** null removes every MCP server. */

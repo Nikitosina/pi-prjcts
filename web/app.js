@@ -3138,10 +3138,11 @@ const settingsAccess = {
   knowledgeAccess: ["Workers and project knowledge", "The coordinator always keeps the knowledge notes up to date.", [["read-only", "Workers can read it"], ["maintain", "Workers can read and update it"]]],
   libraryAccess: ["Uploaded files and evidence", "Whether the coordinator may open the project library.", [["none", "Coordinator cannot open them"], ["coordinator", "Coordinator can open them"]]],
   decisionAccess: ["Questions for you", "Whether the coordinator may ask you to decide something.", [["none", "Coordinator cannot ask"], ["coordinator", "Coordinator can ask"]]],
+  githubCli: ["Coordinator GitHub CLI (gh): full access", "Lets the coordinator run any gh command as you (merge, close, delete, settings). Off removes the tool.", [["full", "Full access (merge, close, delete, settings)"], ["none", "Off"]]],
 };
 let settingsPending = null, modelScoped = [], modelScopeSet = false, modelExtensionErrors = [];
 const scopeKey = refs => [...refs].sort().join("\n");
-const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, workerCap: String(values.workerCap) });
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
   const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
   for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
@@ -3151,7 +3152,7 @@ function settingsFormValues(form) {
 }
 function settingsChanges(flat, values) {
   const was = flatSettings(values), changes = {};
-  for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess"]) if (flat[field] !== was[field]) changes[field] = flat[field];
+  for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess", "githubCli"]) if (flat[field] !== was[field]) changes[field] = flat[field];
   if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
   if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
   for (const role of ["worker", "scout", "reviewer"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];

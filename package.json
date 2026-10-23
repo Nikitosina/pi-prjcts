@@ -13,7 +13,8 @@
     "e2e:legacy-removal": "node scripts/legacy-removal-e2e.mjs",
     "e2e:coordinator-efficiency": "node scripts/coordinator-efficiency-e2e.mjs",
     "e2e:quota-status": "node scripts/quota-status-e2e.mjs",
-    "verify": "npm run check && npm run e2e:durable-runtime && npm run e2e:durable-knowledge && npm run e2e:coordinator-efficiency && npm run e2e:quota-status",
+    "e2e:coordinator-gh": "node scripts/coordinator-gh-e2e.mjs",
+    "verify": "npm run check && npm run e2e:durable-runtime && npm run e2e:durable-knowledge && npm run e2e:coordinator-efficiency && npm run e2e:quota-status && npm run e2e:coordinator-gh",
     "projects": "node src/cli.ts"
   },
   "pi": { "extensions": [] },
