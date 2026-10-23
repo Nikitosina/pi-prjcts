@@ -36,6 +36,7 @@ import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } f
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
+import { limitsSnapshot } from "./usage-limits.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -627,6 +628,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { stopped: true, threadId: input.threadId };
     }
     case "legacy-thread-history": return (await durable(input.id)).legacyThreadHistory(input.name, input);
+    case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
+    case "limits-snapshot": return limitsSnapshot();
     case "thread-history": return (await durable(input.id)).threadHistory(input.threadId, input);
     case "thread-send": return withDurableOwner({ id: input.id, validate: project => {
       if (project.deleted) throw new Error("Project is deleted; admission is denied");

@@ -107,6 +107,8 @@ export const Job = Type.Object({
   chatId: Type.Optional(Id),
   /** Owner uploads attached to the message. */
   attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+  /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
+  settledAt: Type.Optional(Type.Number()),
 }, { additionalProperties: false });
 export type Job = Static<typeof Job>;
 export const ChatId = Type.Union([Type.Literal("main"), Id]);
@@ -180,7 +182,7 @@ export const Snapshot = Type.Object({
   uploads: Type.Optional(Type.Array(Type.Unknown())), failedJobs: Type.Optional(Type.Integer({ minimum: 0 })),
   /** Setup cards of workspace provider plugins (Owner setup steps) and the provider id of a grant whose plugin is not loaded. */
   providerCards: Type.Optional(Type.Array(Type.Unknown())), unloadedProvider: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()) }, { additionalProperties: false }))),
+  chats: Type.Optional(Type.Array(Type.Object({ id: ChatId, title: Type.String(), conversationId: Type.Integer(), createdAt: Type.Number(), archived: Type.Boolean(), busy: Type.Boolean(), attention: Type.Optional(Type.Boolean()), finishedAt: Type.Optional(Type.Number()) }, { additionalProperties: false }))),
 });
 export type Snapshot = Static<typeof Snapshot>;
 export const Request = Type.Union([
@@ -274,6 +276,8 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("legacy-thread-history"), id: Id, name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-history"), id: Id, threadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })), textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })) , context: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-send"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("limits-snapshot") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), requestId: Type.Optional(Id), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-read"), id: Id, uploadId: Id, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 2_000_000 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })) }, { additionalProperties: false }),

@@ -27,7 +27,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     for (const job of ledger) {
       const submission = submissions.find(item => item.requestId === job.id);
       if (!submission) continue;
-      const before = `${job.state}\0${job.error}`;
+      const before = `${job.state}\0${job.error}`, wasSettled = job.state === "done" || job.state === "failed";
       switch (submission.status) {
         case "queued": job.state = "queued"; job.error = null; break;
         case "placed": job.state = "running"; job.error = null; break;
@@ -35,6 +35,8 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
         case "unanswered": job.state = submission.reason === "aborted" ? "interrupted" : "failed"; job.error = submission.detail ? `${submission.reason}: ${submission.detail}` : submission.reason; break;
         default: { const exhaustive: never = submission.status; throw new Error(String(exhaustive)); }
       }
+      // Stamped on the observed transition only, so turns that finished before this field existed do not light up.
+      if ((job.state === "done" || job.state === "failed") && !wasSettled) job.settledAt = Date.now();
       if (`${job.state}\0${job.error}` !== before || ledger === viewed) saveJob(project.id, job);
     }
   };
@@ -47,7 +49,8 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
   }
   // Per chat, only the newest settled turn decides attention; a later success clears an earlier failure.
   const failure = (id: string) => { const settled = ledgerOf(id).findLast(job => job.state === "done" || job.state === "failed"); return settled?.state === "failed" ? settled.error : null; };
-  const chats = view.chats.map(chat => ({ ...chat, attention: failure(chat.id) !== null }));
+  const finishedAt = (id: string) => ledgerOf(id).findLast(job => job.state === "done" && job.settledAt !== undefined)?.settledAt;
+  const chats = view.chats.map(chat => ({ ...chat, attention: failure(chat.id) !== null, ...(finishedAt(chat.id) === undefined ? {} : { finishedAt: finishedAt(chat.id) }) }));
   const failing = [chats.find(chat => chat.id === view.chatId), ...chats].find(chat => chat?.attention);
   project.problem = !failing ? null : failing.id === view.chatId ? failure(failing.id) : `Chat "${failing.title}": ${failure(failing.id)}`;
   project.phase = project.problem ? "attention" : view.chats.some(chat => chat.busy) ? "busy" : "ready";

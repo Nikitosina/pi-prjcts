@@ -181,9 +181,9 @@ try {
   check('N14 Activity nests both children under the parent\'s newest row, labelled sub-agent; none at top level', tree.kids.length === 2 && tree.kids.every(k => k.label && k.parent === parentA.threadId) && new Set(tree.kids.map(k => k.thread)).size === 2 && tree.kids.some(k => k.thread === workerA.threadId) && tree.topChildRows === 0 && tree.prevIsParent, tree);
   await shot('01-activity-tree', s);
   await evaluate(`document.querySelector('#activity .work-children [data-thread="${workerA.threadId}"]').click()`, s);
-  await waitFor(`!!document.querySelector('#activity .worker-item.child.on [data-thread="${workerA.threadId}"]')`, s, 'child thread opened');
+  await waitFor(`!document.querySelector('#inline-thread').hidden && new URL(location.href).searchParams.get('worker') === '${workerA.threadId}'`, s, 'child worker view opened');
   await delay(500);
-  check('N16 clicking a child row opens that child\'s thread', await evaluate(`!!document.querySelector('#activity .worker-item.child.on [data-thread="${workerA.threadId}"]')`, s));
+  check('N16 clicking a child row opens that child\'s worker view (deep-linkable)', await evaluate(`!document.querySelector('#inline-thread').hidden && new URL(location.href).searchParams.get('worker') === '${workerA.threadId}' && !!document.querySelector('#worker-messages')`, s));
   await shot('02-child-thread-open', s);
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send('Page.navigate', { url: launch.toString() }, s);

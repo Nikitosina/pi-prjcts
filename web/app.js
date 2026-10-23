@@ -60,9 +60,23 @@ let liveRetryMs = 1000;
 // Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
 let stickToBottom = true;
 let showArchived = false, allWork = false;
-// The open worker's conversation; it is mounted in the Workers card row of that worker.
-const threadPane = Object.assign(document.createElement("div"), { id: "inline-thread", className: "worker-pane", hidden: true });
-function closeWorkerDetail() { workerChat = null; threadPane.hidden = true; threadPane.replaceChildren(); threadPane.remove(); }
+// The worker view: a main-area page for one worker (?worker=<threadId>) that replaces the coordinator chat until Back or Escape.
+const threadPane = document.querySelector("#inline-thread");
+let pendingWorker = /^[a-f0-9-]{36}$/.test(initial.searchParams.get("worker") ?? "") ? initial.searchParams.get("worker") : null;
+function setWorkerUrl(threadId) {
+  const url = new URL(location.href), had = url.searchParams.has("worker");
+  if (threadId) url.searchParams.set("worker", threadId); else url.searchParams.delete("worker");
+  if (url.href !== location.href) { if (threadId && !had) history.pushState({ worker: true }, "", url); else history.replaceState(threadId ? history.state : null, "", url); }
+}
+function closeWorkerDetail() {
+  workerChat = null; threadPane.hidden = true; threadPane.replaceChildren(); setWorkerUrl(null);
+  document.querySelector('[data-panel="coordinator"]').hidden = tab !== "coordinator";
+}
+window.addEventListener("popstate", () => {
+  const wanted = new URL(location.href).searchParams.get("worker");
+  if (!wanted && workerChat) { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); }
+  else if (wanted && workerChat?.threadId !== wanted && plan?.work.some(work => work.threadId === wanted)) void inspectThread(wanted).catch(report);
+});
 function followTranscript() { if (stickToBottom) { const node = document.querySelector("#transcript"); node.scrollTop = node.scrollHeight; } }
 let selected = null;
 let generation = 0;
@@ -161,7 +175,12 @@ async function refresh() {
     if (Date.now() - projectListAt > 10000) void reloadProjects();
     ensureLive();
     ensureChanges();
+    if (pendingWorker && plan) {
+      const wanted = pendingWorker; pendingWorker = null;
+      if (plan.work.some(work => work.threadId === wanted)) await inspectThread(wanted);
+    }
     if (workerChat && tab === "coordinator") await refreshWorkerChat(workerChat);
+    void loadWorkerContexts(current);
   } catch (error) { if (current === generation) showError(error); }
   finally {
     if (polling === current) polling = null;
@@ -347,37 +366,50 @@ function currentChat() { return view?.chats?.find(chat => chat.id === chatId) ??
 function renderChats() {
   const node = document.querySelector("#chat-bar"), chats = view?.chats ?? [];
   const current = currentChat(), archived = chats.filter(chat => chat.archived && chat.id !== chatId);
-  const button = chat => { const badge = workBadge(chat); return `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.busy ? "busy" : ""} ${chat.attention ? "attention" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)}${chat.busy ? " · working" : chat.attention ? " · needs attention" : ""}${badge.waiting ? ` · ${badge.waiting} waiting` : badge.done ? " · worker finished" : ""}"><span class="chat-dot"></span><span class="chat-title">${esc(chat.title)}</span>${workBadgeHtml(badge)}</button>`; };
+  const button = chat => { const { state, label } = chatState(chat); return `<button class="chat ${chat.id === chatId ? "on" : ""} ${chat.archived ? "archived" : ""}" data-action="chat-select" data-chat="${esc(chat.id)}" title="${esc(chat.title)} · ${esc(label)}">${stateDot(state, label, "chat-dot")}<span class="chat-title">${esc(chat.title)}</span></button>`; };
   const next = !view?.chats ? "" : `<nav id="chat-list" class="chat-list" aria-label="Chats">${chats.filter(chat => !chat.archived || chat.id === chatId).map(button).join("")}</nav><button type="button" class="ghost small" data-action="chat-new" title="Start a chat that shares this project's workers and knowledge">＋ New chat</button><span class="chat-tools">${current ? `<button type="button" class="ghost small" data-action="chat-rename">Rename</button>` : ""}${current && current.id !== "main" ? current.archived ? `<button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(current.id)}">Restore</button>` : `<button type="button" class="ghost small" data-action="chat-archive">Archive</button>` : ""}${archived.length ? `<details id="chat-archived" class="chat-archived"><summary>Archived (${archived.length})</summary><div class="archived-list">${archived.map(chat => `<div class="archived-row"><span>${esc(chat.title)}</span><span><button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button> <button type="button" class="ghost small" data-action="chat-restore" data-chat="${esc(chat.id)}">Restore</button></span></div>`).join("")}</div></details>` : ""}</span>`;
   if (node.dataset.html !== next) { const open = node.querySelector("#chat-archived")?.open; node.innerHTML = next; node.dataset.html = next; if (open && node.querySelector("#chat-archived")) node.querySelector("#chat-archived").open = true; }
 }
 
-// Chat and project marks. Waiting (a count): an unanswered question or a blocked worker admitted by the chat; pending approvals count on the project row only. Done (a mark): a completed worker whose endedAt is newer than the last time this browser had the chat open.
+// One status dot per chat and per project row, highest priority first: needs you (red) > working (pulsing) > done and not yet checked (green) > idle.
+// Needs you: an unanswered question, a blocked worker admitted by the chat, or a failed coordinator turn (pending approvals count on the project row only).
+// Done: the coordinator finished, or a worker from the chat completed, after the last time this browser had the chat open.
 const seenKey = (project, chat) => `pi-projects-seen:${project}:${chat}`;
 function seenAt(project, chat) { try { const value = Number(localStorage.getItem(seenKey(project, chat))); return value > 0 ? value : null; } catch { return null; } }
 function markSeen(project, chat) { try { localStorage.setItem(seenKey(project, chat), String(Date.now())); } catch {} }
 function chatWork(chat) { return plan ? plan.work.filter(work => !work.archived && workChatId(work) === chat.id) : []; }
-const completedSince = (work, seen) => work.status === "completed" && (work.endedAt ?? 0) > seen;
-// First sight of a chat starts its clock; the open chat is always up to date, so selecting a chat clears its done mark.
+const latestFinish = chat => Math.max(chat.finishedAt ?? 0, ...chatWork(chat).filter(work => work.status === "completed").map(work => work.endedAt ?? 0));
+// First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its dot.
 function syncSeen() {
   if (!view?.chats || !plan) return;
   for (const chat of view.chats) {
     const seen = seenAt(projectId, chat.id);
-    if (seen === null || chat.id === chatId && chatWork(chat).some(work => completedSince(work, seen))) markSeen(projectId, chat.id);
+    if (seen === null || chat.id === chatId && latestFinish(chat) > seen) markSeen(projectId, chat.id);
   }
 }
-function workBadge(chat) {
+const STATE_PRIORITY = ["needs", "working", "done", "idle"];
+const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+function chatState(chat) {
   const questions = view.inbox.filter(item => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === chat.id).length;
-  const work = chatWork(chat), seen = seenAt(projectId, chat.id);
-  const waiting = questions + work.filter(item => item.status === "blocked").length;
-  return { waiting, done: !waiting && chat.id !== chatId && seen !== null && work.some(item => completedSince(item, seen)) };
+  const work = chatWork(chat), blocked = work.filter(item => item.status === "blocked").length, seen = seenAt(projectId, chat.id);
+  const reasons = [questions && `${plural(questions, "unanswered question")}`, blocked && `${plural(blocked, "blocked worker")}`, chat.attention && "last coordinator turn failed"].filter(Boolean);
+  if (reasons.length) return { state: "needs", label: `Needs you: ${reasons.join(", ")}` };
+  const active = work.filter(item => item.status === "running" || item.status === "queued").length;
+  if (chat.busy || active) return { state: "working", label: `Working: ${[chat.busy && "coordinator", active && plural(active, "worker")].filter(Boolean).join(" and ")}` };
+  if (chat.id !== chatId && seen !== null && latestFinish(chat) > seen) return { state: "done", label: "Done, not yet checked" };
+  return { state: "idle", label: "Idle" };
 }
-const workBadgeHtml = badge => badge.waiting ? `<span class="work-badge" aria-label="${badge.waiting} waiting">${badge.waiting}</span>` : badge.done ? '<span class="work-badge done" aria-label="Worker finished">✓</span>' : "";
-// The open project aggregates its chats plus pending approvals; other projects only have the host's on-disk notice (unanswered questions, or the attention phase).
-function projectWorkBadge(project) {
-  if (project.id !== projectId || !view?.chats) { const questions = project.notice?.questions ?? 0; return { waiting: questions || (project.phase === "attention" ? 1 : 0), done: false }; }
-  const badges = view.chats.filter(chat => !chat.archived).map(workBadge);
-  return { waiting: badges.reduce((sum, badge) => sum + badge.waiting, 0) + (approvalPage?.total ?? 0), done: badges.some(badge => badge.done) };
+const stateDot = (state, label, className) => `<span class="${className}" data-state="${state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
+// The open project folds its chats and pending approvals; other projects only have the host's on-disk notice (unanswered questions, or the last saved phase), so they never show done.
+function projectState(project) {
+  if (project.id !== projectId || !view?.chats) {
+    const questions = project.notice?.questions ?? 0;
+    return questions || project.phase === "attention" ? { state: "needs", label: questions ? `Needs you: ${plural(questions, "unanswered question")}` : "Needs you: a chat failed" } : project.phase === "busy" ? { state: "working", label: "Working" } : { state: "idle", label: "Idle" };
+  }
+  const states = view.chats.filter(chat => !chat.archived).map(chat => chatState(chat));
+  const approvals = approvalPage?.total ?? 0;
+  if (approvals) return { state: "needs", label: `Needs you: ${plural(approvals, "pending approval")}${states.some(item => item.state === "needs") ? " and chats" : ""}` };
+  return states.toSorted((a, b) => STATE_PRIORITY.indexOf(a.state) - STATE_PRIORITY.indexOf(b.state))[0] ?? { state: "idle", label: "Idle" };
 }
 let projectListAt = 0;
 async function reloadProjects() {
@@ -390,16 +422,17 @@ function renderProjects() {
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';
   node.value = projectId ?? "";
   const list = document.querySelector("#project-list");
-  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${workBadgeHtml(projectWorkBadge(p))}</button>`).join("") || '<p class="note">No projects yet.</p>';
+  const next = projects.map(p => `<button class="proj ${p.id === projectId ? "on" : ""}" data-select-project="${esc(p.id)}" title="${esc(p.name)}"><span class="avatar sm">${esc(initials(p.name))}</span><span class="grow side-text">${esc(p.name)}</span>${(({ state, label }) => state === "idle" ? "" : stateDot(state, label, "state-dot"))(projectState(p))}</button>`).join("") || '<p class="note">No projects yet.</p>';
   if (list.dataset.html !== next) { list.innerHTML = next; list.dataset.html = next; }
 }
 function initials(name) { return String(name ?? "π").trim().split(/\s+/).slice(0, 2).map(word => [...word][0] ?? "").join("").toUpperCase() || "π"; }
 function pendingCount() { return view ? view.inbox.filter(item => !item.result).length + (approvalPage?.total ?? 0) : 0; }
 function setTab(next) {
   if (!tabs.includes(next)) return;
+  if (next !== "coordinator" && workerChat) closeWorkerDetail();
   tab = next;
   const url = new URL(location.href); url.searchParams.set("tab", next); history.replaceState(null, "", url);
-  document.querySelectorAll("[data-panel]").forEach(node => { node.hidden = node.dataset.panel !== next; });
+  document.querySelectorAll("[data-panel]").forEach(node => { node.hidden = node.dataset.panel !== next || node.dataset.panel === "coordinator" && !threadPane.hidden; });
   document.querySelectorAll(".tabs [data-tab]").forEach(node => node.classList.toggle("on", node.dataset.tab === next));
   // A hidden transcript loses its scroll position; coming back to the chat means reading the newest message.
   if (next === "coordinator") { stickToBottom = true; requestAnimationFrame(followTranscript); }
@@ -2281,7 +2314,7 @@ async function action(node) {
     case "pr-hide": { await api({ action: "pr-hide", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, hide: node.dataset.hide === "true" }); prsState.at = 0; await loadPrs(); break; }
     case "pr-watch": { const on = node.getAttribute("aria-pressed") !== "true"; await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on }); prsState.at = 0; await loadPrs(); break; }
     case "artifact-dir": case "artifact-select": case "artifact-deselect": case "artifacts-sort": case "artifact-download": case "artifact-open": artifactAction(node.dataset.action, node); break;
-    case "thread-close": closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); break;
+    case "thread-close": if (history.state?.worker) history.back(); else { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); } break;
     case "toggle-clamp": node.classList.toggle("clamp"); break;
     case "provider-list": await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0)); break;
     case "provider-record": requireProject(node.dataset.project); providerRecord(node.dataset.record); break;
@@ -2390,7 +2423,7 @@ async function action(node) {
     case "operation-decision": operationDecision(node.dataset.operation, node.dataset.fingerprint, node.dataset.decision); break;
     case "operation-execute": operationExecution(node.dataset.operation, node.dataset.fingerprint); break;
     case "operation-inspect": operationExecution(node.dataset.operation, node.dataset.fingerprint, true); break;
-    case "thread": requireProject(node.dataset.project); if (node.classList.contains("worker-line") && workerChat?.threadId === node.dataset.thread) { closeWorkerDetail(); ensureChanges(); dialogVersion++; render(); } else await inspectThread(node.dataset.thread); break;
+    case "thread": requireProject(node.dataset.project); if (dialog.contains(node)) closeDialog(); await inspectThread(node.dataset.thread); break;
     case "thread-history-page": requireProject(node.dataset.project); await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset)); break;
     case "thread-send": requireProject(node.dataset.project); requireThread(node.dataset.thread); textDialog("thread-send", node.dataset.thread); break;
     case "thread-steer":
@@ -2791,6 +2824,7 @@ document.addEventListener("keydown", event => {
     return;
   }
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "b" && !event.isComposing && !dialog.open) { event.preventDefault(); setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); return; }
+  if (event.key === "Escape" && workerChat && !dialog.open && !refMenu && !document.querySelector(".mp.open") && !event.isComposing) { event.preventDefault(); document.querySelector('#inline-thread [data-action="thread-close"]')?.click(); return; }
   if (refMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = refMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { refMenu.index = (refMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderRefMenu(); } return; }
@@ -3540,7 +3574,7 @@ function requireProject(id) { if (id !== projectId) throw new Error("Selected pr
 function closeCurrentDialog(id, version) { if (projectId === id && dialogVersion === version) closeDialog(); }
 function requireThread(id) { if (!uuid(id) || !plan?.work.some(work => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan"); }
 function workLine(work, detail) {
-  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small></button>`;
+  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small>${contextRing(workerContexts.get(work.threadId))}</button>`;
 }
 // Shared resources a running worker holds: leases by resource name, and its running background commands.
 function holdsBadge(holds) {
@@ -3563,13 +3597,9 @@ function durableActivity() {
   // Finished and archived work leave this card for Recent results; "View all work" lists every item of this chat.
   const pool = allWork ? plan.work.filter(work => showArchived || !work.archived).toReversed() : plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
   const mine = pool.filter(inSelectedChat), shown = allWork ? mine : mine.slice(0, 12);
-  const open = workerChat?.id === projectId ? plan.work.findLast(work => work.threadId === workerChat.threadId) : null;
-  if (open && !shown.some(work => work.threadId === open.threadId)) shown.unshift(open);
-  let slotted = false;
   const detail = work => work.archived ? "archived" : work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
   const item = work => {
-    const here = !slotted && open?.threadId === work.threadId; slotted ||= here;
-    return `<div class="worker-item${here ? " on" : ""}${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}${here ? '<div data-slot="thread"></div>' : ""}</div>`;
+    return `<div class="worker-item${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
   };
   const elsewhere = pool.length - mine.length, total = plan.work.length;
   // One level of nesting: a parent's sub-agents sit under its newest row; orphans (parent not listed) stay top level.
@@ -3581,12 +3611,27 @@ function durableActivity() {
   };
   return (shown.filter(work => !work.parentThreadId || !threads.has(work.parentThreadId) || work.parentThreadId === work.threadId).map(tree).join("") || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) + (elsewhere ? `<p class="note other-chats">${elsewhere} ${allWork ? "in" : "active in"} other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${total}) →`}</button>` : "");
 }
-// Re-rendering the card replaces its rows; the open worker's pane is moved back into its row.
 function renderWorkers() {
   setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
   document.querySelector("#archive-toggle").hidden = !allWork;
-  const slot = document.querySelector('#activity [data-slot="thread"]');
-  if (slot && threadPane.parentNode !== slot) slot.append(threadPane);
+}
+// Context use of the workers listed in the card, read host-side; rows show nothing until a reading exists.
+const workerContexts = new Map();
+async function loadWorkerContexts(current) {
+  const ids = [...new Set([...document.querySelectorAll("#activity .worker-line[data-thread]")].map(node => node.dataset.thread))].slice(0, 40);
+  if (!ids.length) return;
+  const read = await api({ action: "worker-contexts", id: projectId, threadIds: ids }).catch(() => null);
+  if (!read || current !== generation) return;
+  let changed = false;
+  for (const [id, value] of Object.entries(read)) if (value && JSON.stringify(workerContexts.get(id)) !== JSON.stringify(value)) { workerContexts.set(id, value); changed = true; }
+  if (changed) renderWorkers();
+}
+// Small ring plus percent; a missing window is said so, never guessed.
+function contextRing(context) {
+  if (!context || context.tokens == null) return "";
+  const percent = context.window ? Math.min(100, Math.round(context.tokens / context.window * 100)) : null;
+  const level = percent === null ? "low" : percent >= 90 ? "high" : percent >= 70 ? "mid" : "low", c = 2 * Math.PI * 6;
+  return `<span class="ctx-ring" data-level="${level}" title="${esc(contextLine(context))}"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" class="track"/><circle cx="8" cy="8" r="6" class="fill" stroke-dasharray="${(c * (percent ?? 0) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 8 8)"/></svg>${percent === null ? "window unknown" : `${percent}%`}</span>`;
 }
 function durableResults() {
   const done = plan.work.filter(work => finished(work) && !work.archived).toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0)).slice(0, 5);
@@ -3599,7 +3644,7 @@ function threadList() {
 function workerDetailHtml(chat, page, work) {
   const threadId = chat.threadId, draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`), role = work?.role ?? "worker";
   const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
-  return `<div class="row between"><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><button class="ghost small" data-action="thread-close" aria-label="Collapse worker">✕</button></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><p class="worker-context" id="worker-context"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><div class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></div><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
+  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><small>Reuses this ${esc(role)}'s conversation · Enter to send</small><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
 }
 async function inspectThread(threadId, offset = null, textOffset = 0) {
   requireThread(threadId);
@@ -3607,17 +3652,16 @@ async function inspectThread(threadId, offset = null, textOffset = 0) {
   if (![offset ?? 0, textOffset].every(value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)) throw new Error("Invalid thread history page");
   const chat = { id: projectId, generation, threadId, offset, textOffset };
   workerChat = chat;
-  setTab("coordinator");
   const target = threadPane;
   target.hidden = false; target.innerHTML = '<p class="note">Reading worker conversation…</p>';
+  setTab("coordinator");
+  setWorkerUrl(threadId);
+  document.querySelector(".body").scrollTop = 0;
   render();
-  target.scrollIntoView({ block: "nearest" });
   const version = ++dialogVersion;
   const page = await workerChatPage(chat);
   if (workerChat !== chat || version !== dialogVersion || chat.generation !== generation || target.hidden) return;
   const work = plan.work.findLast(item => item.threadId === threadId);
-  const draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`);
-  const role = work?.role ?? "worker";
   target.innerHTML = workerDetailHtml(chat, page, work);
   renderWorkerChat(chat, page, true);
   render();
@@ -3648,7 +3692,7 @@ function renderWorkerChat(chat, page, opening = false) {
   }
   const lastTool = page.items.findLast(item => item.kind === "tool");
   document.querySelector("#worker-latest").innerHTML = lastTool ? `Latest: <code>${esc(lastTool.name)}</code> ${esc(clip(lastTool.argsPreview ?? "", 90))}` : "";
-  document.querySelector("#worker-context").textContent = page.context ? contextLine(page.context) : "";
+  document.querySelector("#worker-context").innerHTML = contextRing(page.context);
   if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id) focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
   const pageButton = (label, offset, slice = 0) => `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
   document.querySelector("#worker-history-pages").innerHTML = `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some(message => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
@@ -3718,6 +3762,40 @@ function restoreBrowserDrafts() {
 }
 restoreBrowserDrafts();
 window.addEventListener("pagehide", () => { captureDialogDraft(); persistDraftsSafely(); });
+// Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once a minute; the bar re-renders every 30 s so countdowns stay current.
+let limits = null;
+const limitTone = percent => percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
+function untilReset(at) { const ms = at - Date.now(); return ms <= 0 ? "reset passed" : `resets in ${duration(ms)}`; }
+function limitWindow(sample) {
+  const stale = sample.resetsAt !== null && sample.resetsAt <= Date.now(), percent = Math.round(sample.usedPercent);
+  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
+}
+function limitItem(provider) {
+  const windows = provider.samples.map(limitWindow), live = windows.filter(win => !win.stale);
+  const tone = limitTone(Math.max(0, ...live.map(win => win.percent)));
+  const rows = provider.samples.map((sample, i) => {
+    const win = windows[i];
+    return `<div class="lim-row" data-tone="${limitTone(win.percent)}"><span>${sample.window}</span><span class="lim-bar"><i style="width:${win.percent}%"></i></span><span>${win.stale ? "—" : `${win.percent}% used`}</span><small>${sample.resetsAt === null ? "Reset time unknown" : `${untilReset(sample.resetsAt)} · ${new Date(sample.resetsAt).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}`}${win.stale ? " · last reading is from before the reset, waiting for a new one" : ""} · observed ${ago(sample.observedAt)} via ${sample.source === "headers" ? "response headers" : "usage endpoint"}</small></div>`;
+  });
+  const empty = provider.status === "unavailable" ? "Not connected" : "No data yet";
+  const detail = rows.join("") || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
+  const label = `${provider.label}: ${provider.samples.length ? provider.samples.map((sample, i) => `${sample.window} ${windows[i].stale ? "reset, waiting for new data" : `${windows[i].percent}% used`}`).join(", ") : empty.toLowerCase()}`;
+  return `<button type="button" class="lim" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="tooltip"><b>${esc(provider.label)}</b>${detail}</span></button>`;
+}
+function renderLimits() {
+  const bar = document.querySelector("#limits-bar");
+  const next = limits ? limits.providers.map(limitItem).join("") : "";
+  if (bar.dataset.html !== next) { bar.innerHTML = next; bar.dataset.html = next; }
+}
+async function loadLimits() {
+  if (document.hidden) return;
+  const loaded = await api({ action: "limits-snapshot" }).catch(() => null);
+  if (loaded?.providers) { limits = loaded; renderLimits(); }
+}
+setInterval(() => void loadLimits(), 60000);
+setInterval(renderLimits, 30000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadLimits(); });
+void loadLimits();
 void start();
 
 // Settings section nav: smooth-scroll to a section (no hash navigation) and highlight the section in view.

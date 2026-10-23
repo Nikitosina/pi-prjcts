@@ -60,6 +60,7 @@ import { coordinatorLibraryTools } from "./durable-library.ts";
 import { searchKnowledge } from "./knowledge-search.ts";
 import { UPLOAD_IMAGE_INLINE_BYTES, listUploads, uploadBytes, uploadText } from "./uploads.ts";
 import { durableDecisions } from "./durable-decisions.ts";
+import { observeLimitHeaders } from "./usage-limits.ts";
 import { operationApprovals, type OperationApprovals } from "./operation-approvals.ts";
 import { githubReadSnapshot, githubWriteSnapshot, githubWriteInspector, type GithubWriteInspectionInput } from "./github-worker.ts";
 
@@ -191,6 +192,8 @@ export type DurableProjectRuntime = {
   reset(chatId?: string): Promise<{ chatId: string }>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
   snapshot(chatId?: string): Promise<DurableProjectSnapshot>;
+  /** Context use of each listed worker thread (`null` for an unknown one); the window is the worker model's catalog window or null. */
+  workerContexts(threadIds: string[]): Promise<Record<string, { tokens: number; window: number | null } | null>>;
   threadHistory(threadId: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number; context?: boolean }): ReturnType<typeof threadHistory>;
   legacyThreadHistory(name: string, options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number }): ReturnType<typeof threadHistory>;
   scheduleCreate(input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule }): Promise<unknown>;
@@ -323,7 +326,12 @@ export async function openDurableProject(input: { project: Project; dir: string;
         else outer.addEventListener("abort", () => { if (!routineEnd()) controller.abort(outer.reason); }, { once: true });
         signal = controller.signal;
       }
-      const stream = dispatch(model, request, { ...options, ...(sessionId ? { sessionId } : {}), ...(signal ? { signal } : {}) });
+      // Passive subscription-limit headers; a throwing observer must never fail the request.
+      const onResponse: NonNullable<typeof options>["onResponse"] = async (response, responseModel) => {
+        try { observeLimitHeaders(responseModel.provider, response.headers); } catch {}
+        await options?.onResponse?.(response, responseModel);
+      };
+      const stream = dispatch(model, request, { ...options, onResponse, ...(sessionId ? { sessionId } : {}), ...(signal ? { signal } : {}) });
       const settle = () => { settled = true; };
       void stream.result().then(settle, settle);
       if (input.onGenerationLifecycle) {
@@ -859,6 +867,16 @@ export async function openDurableProject(input: { project: Project; dir: string;
       githubWriteSnapshot: options => githubWriteSnapshot(root, options),
       githubWriteInspect: value => { assertOpen(); return writeInspector.inspect(value); },
       snapshot: async id => { const selected = await resolveChat(id); return snapshot(openedHarness, openedStorage, root, selected.conversation, selected.chat.id, await chatList(), project, await planning.threadIdentities(root), { window: models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null, catalogWindow: catalogWindow() }); },
+      workerContexts: async threadIds => {
+        assertOpen();
+        const owned = await planning.threadIdentities(root);
+        return Object.fromEntries(await Promise.all(threadIds.map(async id => {
+          const thread = owned.find(item => item.threadId === id), child = thread && await openedHarness.conversation(thread.conversationId, context);
+          if (!child) return [id, null] as const;
+          const model = (await child.agent(context)).model;
+          return [id, { tokens: contextTokens((await child.context(context)).messages), window: model ? catalogModel(model.provider, model.modelId)?.contextWindow ?? null : null }] as const;
+        })));
+      },
       threadHistory: async (id, options = {}) => {
         assertOpen();
         const owned = (await planning.threadIdentities(root)).find(thread => thread.threadId === id);

@@ -137,7 +137,7 @@ try {
   // The card lists active work only: click "View all work" while it says so, then expand the worker once.
   // Page.navigate resolves before the new document commits; an evaluate that lands mid-commit throws, so retry it.
   for (let attempt = 0; ; attempt++) { try {
-    await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); const row = document.querySelector('[data-action="thread"][data-thread="${thread}"]'); if (row && !document.querySelector('#inline-thread')) row.click(); return !!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]'); })()`, s, 'artifact browser files');
+    await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); const row = document.querySelector('[data-action="thread"][data-thread="${thread}"]'); if (row && document.querySelector('#inline-thread').hidden) row.click(); return !!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]'); })()`, s, 'artifact browser files');
   break; } catch (error) { if (attempt > 3 || !/navigated or closed/.test(String(error))) throw error; } }
   await evaluate(`document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]').click()`, s);
   await waitFor(`[...document.querySelectorAll('#artifact-preview img.artifact-media')].some(i => i.naturalWidth === 320)`, s, 'artifact browser image preview');

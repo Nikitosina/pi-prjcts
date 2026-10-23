@@ -81,12 +81,12 @@ try {
   // The card lists active work only; "View all work" is clicked while it still says so, until the finished worker shows.
   await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('[data-action="thread"][data-thread="${threadA}"]'); })()`, s, 'worker A in the list');
 
-  check('F12 no worker expanded: there is no artifact browser', await evaluate(`!document.querySelector('#artifact-pane')`, s));
+  check('F12 no worker view open: there is no artifact browser', await evaluate(`!document.querySelector('#artifact-pane')`, s));
   await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 5`, s, 'artifact tree');
-  const layout = await evaluate(`(() => { const row = document.querySelector('#activity .worker-item.on'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inRow: row.contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`, s);
+  const layout = await evaluate(`(() => { const view = document.querySelector('#inline-thread'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inView: !view.hidden && view.contains(document.querySelector('#artifact-pane')) && !document.querySelector('#workers-card').contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`, s);
   result.layout = layout;
-  check('F1 the artifact browser sits inside the expanded row and fits the card; its tree scrolls', layout.inRow && layout.width < 360 && layout.treeOverflow === 'auto' && layout.treeMax, layout);
+  check('F1 the artifact browser sits in the worker view (not the Workers card); its tree scrolls', layout.inView && layout.treeOverflow === 'auto' && layout.treeMax, layout);
 
   const tree = await evaluate(`({ dirs: [...document.querySelectorAll('#artifact-tree .artifact-dir > button')].map(b => b.dataset.dir), summary: document.querySelector('#artifact-summary').innerText, rootFiles: [...document.querySelectorAll('#artifact-tree > .artifact-file')].map(b => b.dataset.path) })`, s);
   result.tree = tree;
@@ -183,14 +183,15 @@ try {
   await waitFor(`document.querySelector('#artifact-tree')?.innerText.includes('No artifacts yet')`, s, 'worker C empty state');
   check('F12 a worker without artifacts shows an empty state', true);
   await click('[data-action="thread-close"]', s);
-  check('F12 closing the worker removes the browser', await evaluate(`!document.querySelector('#artifact-pane')`, s));
+  await waitFor(`!document.querySelector('#artifact-pane') && document.querySelector('#inline-thread').hidden`, s, 'Back closes the worker view');
+  check('F12 Back closes the worker view and removes the browser', true);
   await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s, 'worker A again');
 
   await viewport(390, 844, true, s);
   await delay(400);
-  check('F13 390px: the expanded row fits the screen with the file list', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1 && document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s));
-  await shot('04-mobile-expanded', s);
+  check('F13 390px: the worker view fits the screen with the file list', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1 && document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s));
+  await shot('04-mobile-worker-view', s);
   check('F15 no browser console or HTTP errors', result.errors.length === 0 && result.httpErrors.length === 0, { errors: result.errors, http: result.httpErrors });
   result.status = 'passed';
 } catch (error) {
