@@ -4,11 +4,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, realpathSync, writeFileSync, createWriteStream } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
+import { guardCoordinatorCommand } from '../src/coordinator-shell.ts';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const artifacts = join(repo, 'artifacts', `coordinator-efficiency-${stamp}`), root = join(realpathSync(tmpdir()), `coordinator-efficiency-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
@@ -124,9 +126,9 @@ try {
   check('E6 unknown workId is an error, not data', /Unknown work id/.test(T.unknown ?? ''), T.unknown);
   check('E7 the delegate brief carries appended acceptance criteria', /Acceptance criteria[^]*- A1 list every file\n- A2 cite evidence/.test(result.firstUsers.BIGTASK ?? '') && !/Acceptance criteria/.test(result.firstUsers.SHORTTASK ?? ''), result.firstUsers.BIGTASK);
   const sys = result.systems.coordinator ?? '';
-  check('E8 coordinator instructions: brief with Goal/Acceptance criteria/Constraints/Stop conditions, no micro-milestones, follow-ups only for corrections/new info/failed acceptance, capped reports + tool', /Goal, Acceptance criteria[^]*Constraints and Stop conditions/.test(sys) && /Do not split one task into micro-milestones/.test(sys) && /follow-up only for an owner correction, new information or failed acceptance/.test(sys) && /capped at about 3000 characters/.test(sys) && /Do not micro-delegate/.test(sys), sys.slice(0, 300));
+  check('E8 coordinator instructions: brief with Goal/Acceptance criteria/Constraints/Stop conditions, no micro-milestones, follow-ups only for corrections/new info/failed acceptance, capped reports + tool', /Goal, Acceptance criteria[^]*Constraints and Stop conditions/.test(sys) && /Do not split one task into micro-milestones/.test(sys) && /follow-up only for an owner correction, new information or failed acceptance/.test(sys) && /capped at about 3000 characters/.test(sys) && /Do not micro-delegate/.test(sys) && /Delegate code exploration with the implementation task/.test(sys) && /read preferences\.md/.test(sys), sys.slice(0, 300));
   check('E9 coordinator has projects_work_result; schema has acceptance', result.coordinatorTools?.includes('projects_work_result'), result.coordinatorTools);
-  check('E10 worker/scout instructions: run to done, no hand-back after a sub-step, one-message blocker report', /Run to done: keep working until the acceptance criteria/.test(result.systems.scout ?? '') && /report in one message the blocker, what you tried and what is needed/.test(result.systems.scout ?? ''), (result.systems.scout ?? '').slice(0, 300));
+  check('E10 worker/scout instructions: run to done, no hand-back after a sub-step, one-message blocker report', /Run to done: keep working until the acceptance criteria/.test(result.systems.scout ?? '') && /report in one message the blocker, what you tried and what is needed/.test(result.systems.scout ?? '') && /read preferences\.md/.test(result.systems.scout ?? ''), (result.systems.scout ?? '').slice(0, 300));
 
   const parentThread = randomUUID();
   await rpc({action:'work-submit',id:project.id,threadId:parentThread,requestId:randomUUID(),workspaceScopeId:result.scopeId,text:'MARK-PARENT delegate a big child'});
@@ -138,6 +140,8 @@ try {
   const plan = await rpc({action:'plan-snapshot',id:project.id});
   check('E14 stored work text/state untouched by cap (plan snapshot lists completed scout)', plan.work.filter(w => w.role === 'scout' && w.status === 'completed').length >= 3, plan.work.map(w => [w.role, w.status]));
   check('E15 coordinator never saw the parent-only tool; no model request without a session id', !result.coordinatorTools.includes('projects_child_result') && result.modelCalls.every(c => c.session), result.coordinatorTools);
+  const quotedRead = 'grep -E "them|style|16052" web/app.js | head -20';
+  check('E16 quoted search operators remain data; publication and file redirects remain blocked', guardCoordinatorCommand(quotedRead) === quotedRead && ['git push origin HEAD', 'ls; git push origin HEAD', 'echo ok > forbidden.txt'].every(command => guardCoordinatorCommand(command) !== command));
   result.status = result.errors.length ? 'failed' : 'passed';
 } catch (error) {
   result.status = 'failed'; result.failure = redact(error?.stack ?? error);

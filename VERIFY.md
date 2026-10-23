@@ -1,12 +1,13 @@
 # MVP verification contract
 
-Run `npm run e2e`. The script uses real Pi sessions, the installed pi-subagents runner, and configured model credentials. It writes a dated evidence directory containing assertions, worker artifacts, and project records. No mocks or unit tests.
+`npm run verify` is the deterministic gate (CI runs it): `tsc --noEmit` plus the fake-model host checks `e2e:durable-runtime`, `e2e:durable-knowledge`, `e2e:coordinator-efficiency` and `e2e:quota-status`. Each check writes a dated evidence directory under `artifacts/`. Failure modes for a script live beside it in `scripts/<name>-failures.md`, written before the code.
+
+The gate does not cover the browser UI, simulators or real model credentials. Run the matching `scripts/*-e2e.mjs` by hand for those (`node scripts/<name>-e2e.mjs`), and list the checks you did not run in your report. Several of them still hardcode paths under `/Users/nikitarat`.
+
+The lists below are the failure modes release checks must exercise; use a disposable project.
 
 Failure cases to exercise:
 
-- Pi 1.0 removes an unused core export that the background runner still requires,
-  preventing worker launches. Skip only that obsolete alias on Pi 1.x; other
-  missing host dependencies must still fail.
 - Two clients start two hosts or two sessions for the same project.
 - Closing a client kills delegated work or loses its result.
 - A saved coordinator session cannot reopen after host restart.

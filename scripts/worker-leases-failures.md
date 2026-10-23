@@ -26,3 +26,16 @@ Written before the code. E2E: scripts/worker-leases-e2e.mjs (fake model, git pro
 
 ## Runbooks
 19. Instruction text only: coordinator and worker instructions tell them to read `runbooks/` before builds/simulators and to record the working method after resolving an environment problem; existing asserted phrases remain.
+
+## Waiting for a background command (found in a 103M-token chat: 36 sleep+tail polling turns, each replaying the full context)
+20. A worker that needs a build result polls with `sleep N; tail` or repeated `projects_bg_status`; each poll is a model turn. `projects_bg_status` with `waitSeconds` returns when the command ends, with its state, exit code and capped tail.
+21. A wait (at most 120 s, under the tool timeout) that outlives the command's end keeps waiting until the timeout: the wait MUST resolve on exit, on `waitSeconds`, and on abort (thread stop), and release its timer and abort listener in all three cases.
+22. A wait on a command that already ended, or whose record is `lost`, returns at once.
+23. Each poll resends the same output: `after` (a log byte offset, the previous `logBytes`) returns only newer output, still capped by tailLines, bytes and chars; an offset past the end of the log returns the normal tail.
+22b. A wait returns only after the command's output pipes drained, never at the process exit alone (the tail would miss its last lines).
+24. A wait on another thread's id, or an unknown id, fails with the same error as a plain status before any waiting, and the other thread's command keeps running.
+25. `waitSeconds` outside 1..120 and a negative `after` are rejected by the schema; calls without them behave as before (F17).
+26. Worker instructions still say to sleep and tail; they point at `waitSeconds`.
+27. `tailLines: 0` returns an empty tail (it returned the whole capped tail through `slice(-0)`).
+28. A wait called between the process exit and the close of its pipes still waits for the drain (the wait is on the close, not on `state`).
+29. SDK boundary, not enforced here: the tool-argument validator truncates a fractional integer (`after: 1.5` becomes 1) instead of rejecting it; negative and out-of-range values are rejected.

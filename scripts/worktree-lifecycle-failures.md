@@ -40,7 +40,8 @@ Written before implementation. E2E: `scripts/worktree-lifecycle-e2e.mjs`; guard 
 - K3 a worktree whose thread is queued/running is removed.
 - K4 a worktree with an open PR is removed (Follow-PRs fixes / follow-ups still need it).
 - K5 gitignored dependencies (node_modules) make removal fail or count as dirty.
-- K6 cleaned thread receives a follow-up and fails with an obscure allocation error instead of "start a worker on branch X".
+- K6 cleaned thread receives a follow-up and fails (obscure allocation error, or an instruction to re-delegate) although its kept branch holds everything: the host must revive the worktree at the same path on that branch with the same frozen binding.
+- K11 a cleaned thread whose kept branch was deleted is revived onto a fresh branch (silently losing work) or fails with an obscure allocation error: it must fail with a blocker that says the branch no longer exists and to start a new worker, creating nothing.
 - K7 reclaimable size missing/wrong; Settings has no manual action; kept reasons not shown.
 - K8 automatic cleanup never runs, or runs while the project is paused/closing.
 - K9 local branch deleted (commits lost) by cleanup.

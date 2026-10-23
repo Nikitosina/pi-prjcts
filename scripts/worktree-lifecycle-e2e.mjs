@@ -63,6 +63,7 @@ const model = createServer((req, res) => {
         return res.end(say('Review dispatched.'));
       }
       if (/MARK-LOCAL/.test(userText) && n === 0) return res.end(call('projects_delegate', { role: 'worker', task: 'W3-TASK commit local.txt locally; do not push' }));
+      if (/MARK-FOLLOW3 (\S+)/.test(userText) && n === 0) return res.end(call('projects_worker_control', { action: 'follow_up', threadId: /MARK-FOLLOW3 (\S+)/.exec(userText)[1], text: 'W3-AGAIN one more change', requestId: randomUUID() }));
       if (/MARK-FOLLOW (\S+)/.test(userText) && n === 0) return res.end(call('projects_worker_control', { action: 'follow_up', threadId: /MARK-FOLLOW (\S+)/.exec(userText)[1], text: 'W1-AGAIN one more change', requestId: randomUUID() }));
       return res.end(say('Noted.'));
     }
@@ -296,19 +297,29 @@ try {
   check('C9 manual cleanup removed W1 and the PR-head snapshot; W2 and W3 stay', !existsSync(w1Path) && !existsSync(headPath) && existsSync(w2Path) && existsSync(w3Path) && existsSync(join(w2Path, 'wip-note.txt')));
   check('K5/K9 removal worked with ignored node_modules and kept W1\'s local branch', /^[0-9a-f]{40}$/.test(git(workspace, 'rev-parse', '--verify', `refs/heads/${brain.b1}`)), brain.b1);
 
-  // K6: following up the cleaned thread fails with a clear "continue branch" message.
+  // K6: following up a cleaned thread revives its worktree (same path, same kept branch) instead of sending the coordinator to re-delegate.
+  const w1Before = (await plan()).find(e => e.threadId === w1.threadId);
   await ask(`MARK-FOLLOW ${w1.threadId}`);
   work = await plan();
   const again = byText(work, 'W1-AGAIN')[0];
-  check('K6 a follow-up on a cleaned-up thread fails clearly, pointing at the kept branch', again?.status === 'failed' && /worktree was cleaned up/.test(again.blocker ?? '') && /continue branch pi\/durable-/.test(again.blocker ?? ''), again);
+  check('K6 a follow-up on a cleaned-up thread runs in its revived worktree: same path, same kept branch, no re-delegation', again?.status === 'completed' && again.attempt?.cwd === w1Path && existsSync(w1Path) && git(w1Path, 'branch', '--show-current') === brain.b1 && git(w1Path, 'status', '--porcelain') === '' && git(w1Path, 'rev-parse', 'HEAD') === git(workspace, 'rev-parse', `refs/heads/${brain.b1}`), again);
+  check('K6 reviving did not change the thread\'s frozen binding or leave a second worktree for it', again.attempt?.bindingRevision === w1Before.attempt?.bindingRevision && git(workspace, 'worktree', 'list', '--porcelain').split('\n').filter(line => line === `worktree ${w1Path}`).length === 1, { before: w1Before.attempt?.bindingRevision, after: again.attempt?.bindingRevision });
 
   // K8: automatic cleanup. Publish W3's commit, restart with a short interval; W3 goes, dirty W2 stays.
-  git(w3Path, 'push', '-q', 'origin', `HEAD:refs/heads/${git(w3Path, 'rev-parse', '--abbrev-ref', 'HEAD')}`);
+  const w3Branch = git(w3Path, 'rev-parse', '--abbrev-ref', 'HEAD');
+  git(w3Path, 'push', '-q', 'origin', `HEAD:refs/heads/${w3Branch}`);
   await stopHost(); env.PI_PROJECTS_WORKTREE_CLEANUP_MS = '1500'; startHost(); await waitHost();
   await rpc({ action: 'show', id });
   await eventually(async () => !existsSync(w3Path), 'automatic cleanup did not remove W3', 600);
   await delay(2000);
   check('K8 automatic cleanup removed the now-pushed W3 and kept dirty W2', !existsSync(w3Path) && existsSync(join(w2Path, 'wip-note.txt')));
+
+  // K11: a cleaned thread whose kept branch is gone cannot be revived: a typed blocker says so and names the way forward, and nothing is created.
+  git(workspace, 'branch', '-D', w3Branch);
+  const worktreesBefore = git(workspace, 'worktree', 'list', '--porcelain');
+  await ask(`MARK-FOLLOW3 ${work.find(w => w.text.includes('W3-TASK')).threadId}`);
+  const w3Again = byText(await plan(), 'W3-AGAIN')[0];
+  check('K11 a cleaned thread whose branch no longer exists fails with an unrecoverable blocker and creates no worktree', w3Again?.status === 'failed' && /no longer exists/.test(w3Again.blocker ?? '') && /new worker/.test(w3Again.blocker ?? '') && git(workspace, 'worktree', 'list', '--porcelain') === worktreesBefore, w3Again);
 
   result.errors = result.errors.filter(e => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter(e => !e.url.endsWith('/api'));

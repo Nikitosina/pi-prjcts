@@ -107,6 +107,9 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     ["/theme.js", { path: "theme.js", mime: "text/javascript; charset=utf-8" }],
     ["/app.js", { path: "app.js", mime: "text/javascript; charset=utf-8" }],
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
+    // THROWAWAY activity prototype; delete with web/activity-prototype.*.
+    ["/activity-prototype.js", { path: "activity-prototype.js", mime: "text/javascript; charset=utf-8" }],
+    ["/activity-prototype.css", { path: "activity-prototype.css", mime: "text/css; charset=utf-8" }],
     ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
   ]);
   const server = createServer(async (request, response) => {

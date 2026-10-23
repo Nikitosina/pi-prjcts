@@ -44,7 +44,8 @@ export function guardCoordinatorCommand(command: string): string {
   // Output only to the terminal: 2>&1 and /dev/null are the only redirects.
   const plain = command.replace(/[0-9&]?>{1,2}\s*(?:&[12]|\/dev\/null)(?=\s|$|[;&|])/g, " ");
   if (plain.includes(">")) return refuse(command, "file redirects are not allowed");
-  for (const chunk of plain.split(/&&|\|\||[;&|\n]/).map(part => part.trim()).filter(Boolean)) {
+  const chunks = plain.match(/(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^;&|\n])+/g) ?? [];
+  for (const chunk of chunks.map(part => part.trim()).filter(Boolean)) {
     // GIT_EXTERNAL_DIFF, GIT_PAGER and similar variables make git run other programs.
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(chunk)) return refuse(chunk, "environment assignments are not allowed");
     const [path = "", ...rest] = chunk.split(/\s+/), executable = path.split("/").at(-1)!, args = rest.join(" ");

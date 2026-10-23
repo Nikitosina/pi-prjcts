@@ -13,7 +13,7 @@ import { AuthorizedRepository, WorkspaceIntent, type AuthorizedRepository as Aut
 /* Before effects: preserve crash-after-effect, dirty/foreign/active work, lease
  * changes, source/provider drift, low disk, and shared-store ambiguity. */
 const Receipts = defineDoc<{ receipts: Record<string, WorkspaceReceipt> }>({ kind: "projects.workspace-isolation", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ receipts: {} }) });
-export type WorkspaceIsolation = { allocate(intent: Intent): Promise<WorkspaceReceipt>; reconcile(intent: Intent): Promise<WorkspaceReceipt>; release(intent: Intent): Promise<WorkspaceReceipt>; snapshot(): Promise<WorkspaceSnapshot> };
+export type WorkspaceIsolation = { allocate(intent: Intent): Promise<WorkspaceReceipt>; reconcile(intent: Intent): Promise<WorkspaceReceipt>; release(intent: Intent): Promise<WorkspaceReceipt>; /** Re-creates the worktree of a git receipt the host cleaned up, on its kept branch; a still-released receipt carries the reason it cannot be revived. */ revive(intent: Intent): Promise<WorkspaceReceipt>; snapshot(): Promise<WorkspaceSnapshot> };
 type Command = { code: number; stdout: string; stderr: string };
 type Options = { conversation: Conversation; authority: { projectId: string; owner: string }; authorizedRepositories?: readonly Authorization[]; context?: Context; /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void; /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string; /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean };  
 type Facts = { facts: Record<string, string>; reason: string | null };
@@ -58,8 +58,30 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     const out = await backendOf(intent.scope.provider)!.release(intent, current);
     return out.ok ? put(receipt(intent, "released", out.facts, null, null, null)) : put(receipt(intent, "preserved", out.facts ?? current.providerFacts, current.workspacePath, out.lease === undefined ? current.lease : out.lease, out.reason));
   }
+  async function revive(intent: Intent) {
+    authorize(intent, allowed, authority); const old = await get(intent.id);
+    if (!old || !sameFrozenIntent(old, intent)) throw new Error("No matching workspace receipt to revive");
+    const refused = (reason: string) => receipt(intent, "released", old.providerFacts, null, null, reason);
+    if (old.state !== "released" || old.providerFacts.remove !== "cleanup-unforced" || intent.scope.provider !== "git") return old;
+    const kept = await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${intent.scope.branch}`], intent.scope.ownerCheckout);
+    if (kept.code) return refused(`branch ${intent.scope.branch} no longer exists`);
+    // A crash after `git worktree add` but before the receipt put leaves the worktree behind; only one locked by this exact intent on this branch is adopted.
+    let found = await gitEntry(intent.scope);
+    if (found && (found.facts.locked !== `workspace-intent:${intent.id}` || found.facts.branch !== `refs/heads/${intent.scope.branch}`)) return refused("a worktree at this path belongs to another allocation");
+    if (!found) {
+      const pre = await preflight(intent.scope, false); if (pre.reason) return refused(pre.reason);
+      const added = await command(cli.git(), ["worktree", "add", "--lock", "--reason", `workspace-intent:${intent.id}`, intent.scope.workspacePath, intent.scope.branch], intent.scope.ownerCheckout);
+      if (added.code) return refused(`git could not re-create the worktree: ${short(added.stderr)}`);
+      await options.afterProviderEffect?.(old);
+      found = await gitEntry(intent.scope);
+    }
+    if (!found || found.facts.branch !== `refs/heads/${intent.scope.branch}`) return put(receipt(intent, "uncertain", old.providerFacts, intent.scope.workspacePath, null, "Revived worktree is not on the kept branch"));
+    // The allocation-time facts come back unchanged, so the thread's frozen binding revision still matches.
+    const { remove: _remove, cleanedAt: _cleanedAt, ...facts } = old.providerFacts;
+    return put(receipt(intent, "allocated", { ...facts, branch: `refs/heads/${intent.scope.branch}` }, intent.scope.workspacePath, null, null));
+  }
   async function snapshot(): Promise<WorkspaceSnapshot> { return options.conversation.commit(async tx => ({ receipts: Object.values((await tx.doc(Receipts, options.conversation.id)).receipts).map(dto) }), context); }
-  return { allocate, reconcile, release, snapshot };
+  return { allocate, reconcile, release, revive, snapshot };
 }
 
 function sameFrozenIntent(receipt: WorkspaceReceipt, intent: Intent): boolean { return receipt.intentId === intent.id && receipt.attemptId === intent.attemptId && JSON.stringify(receipt.scope) === JSON.stringify(intent.scope); }

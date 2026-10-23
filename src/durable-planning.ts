@@ -38,6 +38,36 @@ function capResult(text: string, pointer: string): string {
   return `${text.slice(0, end)}\n… ${text.length - end} chars omitted; ${pointer}`;
 }
 function planConversationId(task: { input: AttemptInput }, runtime: { conversationId: ConversationId }): ConversationId { return task.input.planConversationId ?? task.input.parentConversationId ?? runtime.conversationId; }
+/** A provider `model_error` settles with the provider's own text in `detail`; keep it so quota and throttling stay distinguishable. */
+function unansweredReason(answer: { reason: string; detail?: unknown }): string { return answer.reason === "model_error" && typeof answer.detail === "string" && answer.detail ? `model_error: ${answer.detail.slice(0, 2000)}` : answer.reason; }
+type ProviderFailure = "quota_exceeded" | "rate_limited";
+/** Quota means the account's allowance is spent (it resets in hours); a bare 429 or overload is transient and must not stop other work. */
+export function providerFailure(reason: string): ProviderFailure | undefined {
+  if (!reason.startsWith("model_error")) return undefined;
+  if (/quota exceeded|exceeded your (?:current )?quota|insufficient_quota|usage.?limit (?:reached|exceeded)|hit your .{0,20}limit|session limit|(?:five_hour|seven_day|weekly|monthly|daily) limit|credit balance|out of budget|available balance|billing (?:hard )?limit|payment required/i.test(reason)) return "quota_exceeded";
+  if (/rate.?limit|too many requests|\b429\b|overloaded/i.test(reason)) return "rate_limited";
+  return undefined;
+}
+/** Blocker text: the failure class and exact model first, then the provider's own words. Unclassified reasons stay as they were. */
+function failureBlocker(reason: string, model: string | undefined): string {
+  const kind = providerFailure(reason);
+  return kind ? `${kind}: ${model ?? "unknown model"}: ${reason.replace(/^model_error: ?/, "")}` : reason;
+}
+const QUOTA_COOLDOWN_MS = 15 * 60_000;
+const providerOf = (model: string): string => model.slice(0, Math.max(model.indexOf("/"), 0) || model.length);
+/**
+ * The provider's quota stays refused for a bounded time after a failed work item says so. Derived from persisted work, so it survives a host
+ * reopen; a later completed work item on the same provider proves the quota is back and ends it early.
+ */
+function quotaCooldown(state: { work: Record<string, StoredWork> }, model: string, now: number): { model: string; until: number; blocker: string } | undefined {
+  const provider = providerOf(model), works = Object.values(state.work).filter(work => work.attempt && providerOf(work.attempt.model) === provider);
+  const hit = works.filter(work => work.status === "failed" && work.blocker?.startsWith("quota_exceeded:") && (work.endedAt ?? 0) + QUOTA_COOLDOWN_MS > now).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+  if (!hit || works.some(work => work.status === "completed" && (work.endedAt ?? 0) > (hit.endedAt ?? 0))) return undefined;
+  return { model: hit.attempt!.model, until: (hit.endedAt ?? 0) + QUOTA_COOLDOWN_MS, blocker: hit.blocker! };
+}
+function quotaRefusal(model: string, hit: { model: string; until: number; blocker: string }): string {
+  return `quota_exceeded: provider ${providerOf(model)} reported its quota spent (last failure on ${hit.model}); new work on ${model} is refused locally until ${new Date(hit.until).toISOString()}. Last error: ${hit.blocker.slice(0, 300)}. Wait, or ask the owner to configure another model for this role; the provider is never switched automatically.`;
+}
 type AttemptState = { phase: "submit" };
 const Attempt = defineTask<AttemptInput, AttemptState, { status: "completed" | "failed" | "interrupted"; reason: string | null }>({
   name: "projects.plan-attempt", version: 1, initial: () => ({ phase: "submit" }),
@@ -45,19 +75,20 @@ const Attempt = defineTask<AttemptInput, AttemptState, { status: "completed" | "
     submit: async (task, runtime, context) => {
       const child = await runtime.conversation(task.input.conversationId, context);
       if (!child) throw new Error("Planned worker conversation is missing");
-      await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, planConversationId(task, runtime)); if (state.paused || state.pausing) throw new Error("Project plan is paused; worker submission is not authorized"); }, context);
+      await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, planConversationId(task, runtime)); if (state.paused || state.pausing) throw new Error("Project plan is paused; worker submission is not authorized"); return undefined; }, context);
       const baseline = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context));
-      await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, runtime.conversationId); const work = state.work[task.input.workId]; if (work?.attempt) work.attempt.usage.baseline = baseline; }, context);
+      await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, runtime.conversationId); const work = state.work[task.input.workId]; if (work?.attempt) work.attempt.usage.baseline = baseline; return undefined; }, context);
       let result: AttemptResult = { status: "failed", reason: "Attempt did not settle" };
       try {
         const submission = await child.submit({ type: "input", content: task.input.text, requestId: task.input.requestId, whenBusy: "followUp" }, context);
         const answer = await submission.wait(context);
-        result = answer.status === "unanswered" ? { status: answer.reason === "aborted" ? "interrupted" : "failed", reason: answer.reason } : { status: "completed", reason: null };
+        result = answer.status === "unanswered" ? { status: answer.reason === "aborted" ? "interrupted" : "failed", reason: unansweredReason(answer) } : { status: "completed", reason: null };
         if (answer.status === "done" && answer.type === "input") {
           await runtime.commit(async tx => {
             const entry = await tx.entry(AssistantEntry, answer.answer);
             const message = entry?.model?.[0];
             result.text = message?.role === "assistant" ? message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("").slice(0, 16000) : "";
+            return undefined;
           }, context);
         }
       } catch (error) {
@@ -90,12 +121,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (!task.input.threadId || !task.input.role || !task.input.workspaceScopeId) throw new Error("Scoped attempt input is incomplete");
     let frozen!: { instructions: string; configured: boolean };
     // Read-only check: a value returned from runtime.commit is a task-state transition, so capture instead of returning.
-    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || work.threadId !== task.input.threadId || work.role !== task.input.role || work.workspaceScopeId !== task.input.workspaceScopeId || work.conversationId !== task.input.conversationId || state.threads[work.threadId]?.activeWorkId !== work.id) throw new Error("Scoped attempt identity/active authorization no longer matches its frozen plan work"); const profile = work.attempt; if (!profile) throw new Error("Scoped attempt has no frozen profile"); const model = frozenModel(profile, work.role); if ( profile.model !== `${model.provider}/${model.modelId}` || profile.thinking !== "medium" || profile.standingRevision !== options.standingRevision || (profile.capabilityBindingRevision ?? profile.bindingRevision) !== bindingRevision) throw new Error("Scoped attempt frozen profile differs from current host settings"); frozen = { instructions: profile.instructions, configured: work.workspaceConfigured }; }, context);
+    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || work.threadId !== task.input.threadId || work.role !== task.input.role || work.workspaceScopeId !== task.input.workspaceScopeId || work.conversationId !== task.input.conversationId || state.threads[work.threadId]?.activeWorkId !== work.id) throw new Error("Scoped attempt identity/active authorization no longer matches its frozen plan work"); const profile = work.attempt; if (!profile) throw new Error("Scoped attempt has no frozen profile"); const model = frozenModel(profile, work.role); if ( profile.model !== `${model.provider}/${model.modelId}` || profile.thinking !== "medium" || profile.standingRevision !== options.standingRevision || (profile.capabilityBindingRevision ?? profile.bindingRevision) !== bindingRevision) throw new Error("Scoped attempt frozen profile differs from current host settings"); frozen = { instructions: profile.instructions, configured: work.workspaceConfigured }; return undefined; }, context);
     if (frozen.configured && (await runtime.agent(context)).instructions !== frozen.instructions) throw new Error("Scoped thread instruction text no longer matches its frozen profile");
     const publish = options.publishWorkerEnvironment; let environment; try { environment = await options.prepareWorkerEnvironment?.({ conversationId: Number(task.input.conversationId), workId: task.input.workId, threadId: task.input.threadId, role: task.input.role, workspaceScopeId: task.input.workspaceScopeId }); if (!environment || !publish) throw new Error("Scoped worker environment was not prepared/publishable by the host"); } catch (error) { return runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: { status: "failed", reason: error instanceof Error ? error.message : String(error) } } }), context); }
-    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || state.threads[work.threadId]?.activeWorkId !== work.id || work.workspaceScopeId !== task.input.workspaceScopeId) throw new Error("Scoped worker binding/active authorization changed before configuration"); if (work.workspaceBindingRevision !== null && work.workspaceBindingRevision !== environment.bindingRevision) throw new Error("Scoped worker binding revision changed"); publish(environment.extension); const needsConfigure = !work.workspaceConfigured || work.attempt?.cwd !== environment.cwd; if (needsConfigure) { const profile = work.attempt; if (!profile) throw new Error("Scoped worker lost its frozen profile before configuration"); if (!frozen.configured && environment.repositoryStanding && !options.workspaceInstructions) throw new Error("Selected repository standing instructions require the host instruction factory"); const baseInstructions = !frozen.configured && environment.repositoryStanding && options.workspaceInstructions ? options.workspaceInstructions(work.role, environment.repositoryStanding) : profile.instructions; const instructions = `${baseInstructions}${environment.workerInstructions ?? ""}`; await configure(tx, task.input.conversationId, { model: work.attempt ? frozenModel(work.attempt, work.role) : options.models[work.role], thinkingLevel: "medium", cwd: environment.cwd, tools: [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])], extensions: [options.workerPolicy, capabilities, environment.extension, ...(nests(work) ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions }); profile.instructions = instructions; if (work.attempt) { work.attempt.boundTools = [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])].map(tool => tool.name); work.attempt.cwd = environment.cwd; work.attempt.bindingRevision = environment.bindingRevision; } work.workspaceConfigured = true; work.workspaceBindingRevision = environment.bindingRevision; const thread = state.threads[work.threadId]; if (thread) { thread.workspaceConfigured = true; thread.workspaceBindingRevision = environment.bindingRevision; } } }, context);
-    await options.beforeScopedSubmit?.(); const baseline = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context)); await runtime.commit(async tx => { const work = (await tx.doc(DurablePlanning, rootPlanConversationId)).work[task.input.workId]; if (work?.attempt) work.attempt.usage.baseline = baseline; }, context); let result: AttemptResult;
-    try { const submission = await child.submit({ type: "input", content: task.input.text, requestId: task.input.requestId, whenBusy: "followUp" }, context); const answer = await submission.wait(context); result = answer.status === "unanswered" ? { status: answer.reason === "aborted" ? "interrupted" : "failed", reason: answer.reason } : { status: "completed", reason: null }; if (answer.status === "done" && answer.type === "input") { await runtime.commit(async tx => { const entry = await tx.entry(AssistantEntry, answer.answer); const message = entry?.model?.[0]; result.text = message?.role === "assistant" ? message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("").slice(0, 16000) : ""; }, context); } } catch (error) { result = { status: runtime.signal.aborted ? "interrupted" : "failed", reason: error instanceof Error ? error.message : String(error) }; }
+    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || state.threads[work.threadId]?.activeWorkId !== work.id || work.workspaceScopeId !== task.input.workspaceScopeId) throw new Error("Scoped worker binding/active authorization changed before configuration"); if (work.workspaceBindingRevision !== null && work.workspaceBindingRevision !== environment.bindingRevision) throw new Error("Scoped worker binding revision changed"); publish(environment.extension); const needsConfigure = !work.workspaceConfigured || work.attempt?.cwd !== environment.cwd; if (needsConfigure) { const profile = work.attempt; if (!profile) throw new Error("Scoped worker lost its frozen profile before configuration"); if (!frozen.configured && environment.repositoryStanding && !options.workspaceInstructions) throw new Error("Selected repository standing instructions require the host instruction factory"); const baseInstructions = !frozen.configured && environment.repositoryStanding && options.workspaceInstructions ? options.workspaceInstructions(work.role, environment.repositoryStanding) : profile.instructions; const instructions = `${baseInstructions}${environment.workerInstructions ?? ""}`; await configure(tx, task.input.conversationId, { model: work.attempt ? frozenModel(work.attempt, work.role) : options.models[work.role], thinkingLevel: "medium", cwd: environment.cwd, tools: [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])], extensions: [options.workerPolicy, capabilities, environment.extension, ...(nests(work) ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions }); profile.instructions = instructions; if (work.attempt) { work.attempt.boundTools = [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])].map(tool => tool.name); work.attempt.cwd = environment.cwd; work.attempt.bindingRevision = environment.bindingRevision; } work.workspaceConfigured = true; work.workspaceBindingRevision = environment.bindingRevision; const thread = state.threads[work.threadId]; if (thread) { thread.workspaceConfigured = true; thread.workspaceBindingRevision = environment.bindingRevision; } } return undefined; }, context);
+    await options.beforeScopedSubmit?.(); const baseline = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context)); await runtime.commit(async tx => { const work = (await tx.doc(DurablePlanning, rootPlanConversationId)).work[task.input.workId]; if (work?.attempt) work.attempt.usage.baseline = baseline; return undefined; }, context); let result: AttemptResult;
+    try { const submission = await child.submit({ type: "input", content: task.input.text, requestId: task.input.requestId, whenBusy: "followUp" }, context); const answer = await submission.wait(context); result = answer.status === "unanswered" ? { status: answer.reason === "aborted" ? "interrupted" : "failed", reason: unansweredReason(answer) } : { status: "completed", reason: null }; if (answer.status === "done" && answer.type === "input") { await runtime.commit(async tx => { const entry = await tx.entry(AssistantEntry, answer.answer); const message = entry?.model?.[0]; result.text = message?.role === "assistant" ? message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("").slice(0, 16000) : ""; return undefined; }, context); } } catch (error) { result = { status: runtime.signal.aborted ? "interrupted" : "failed", reason: error instanceof Error ? error.message : String(error) }; }
     const final = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context)); await runtime.commit(async tx => { const work = (await tx.doc(DurablePlanning, rootPlanConversationId)).work[task.input.workId]; if (work?.attempt) work.attempt.usage = { baseline, final, delta: usageDelta(baseline, final) }; return { status: "terminal", outcome: { status: "completed", result } }; }, context);
   } }, abort: async (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: { status: "interrupted", reason: "aborted" } } }), context) });
   const Report = defineTask<{ workId: string }, { phase: "report" }, null>({
@@ -106,11 +137,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         await runtime.commit(async tx => {
           const state = await tx.doc(DurablePlanning, runtime.conversationId);
           const work = state.work[task.input.workId];
-          if (state.paused || state.pausing || !work?.report || work.report.delivered) return;
+          if (state.paused || state.pausing || !work?.report || work.report.delivered) return undefined;
           target = work.chatConversationId ?? runtime.conversationId;
           const receipt = await tx.submissionByRequest(target, work.report.requestId);
           if (receipt?.status === "unanswered" && receipt.reason === "aborted") work.report.requestId += ":resume";
           pending = { ...work.report };
+          return undefined;
         }, context);
         if (pending) {
           const parent = await runtime.conversation(target, context) ?? await runtime.conversation(runtime.conversationId, context);
@@ -120,6 +152,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
           await runtime.commit(async tx => {
             const work = (await tx.doc(DurablePlanning, runtime.conversationId)).work[task.input.workId];
             if (work?.report && work.report.requestId === pending?.requestId && (answer.status !== "unanswered" || answer.reason !== "aborted")) work.report.delivered = true;
+            return undefined;
           }, context);
         }
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
@@ -141,7 +174,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
           if (work?.status === "running" && work.taskId === Number(task.input.attemptTaskId)) {
             work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
             work.endedAt = Date.now();
-            work.blocker = work.status === "completed" ? null : result?.reason ?? `Durable task ${outcome?.status ?? "missing"}`;
+            work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
             work.attempt &&= { ...work.attempt, endedAt: work.endedAt };
             const thread = state.threads[work.threadId];
             if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
@@ -189,7 +222,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
             const result = outcome?.status === "completed" && isAttemptResult(outcome.result) ? outcome.result : undefined;
             work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
             work.endedAt = Date.now();
-            work.blocker = work.status === "completed" ? null : result?.reason ?? `Durable task ${outcome?.status ?? "missing"}`;
+            work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
             work.attempt &&= { ...work.attempt, endedAt: Date.now() };
             const thread = state.threads[work.threadId];
             if (thread) thread.activeWorkId = null;
@@ -393,6 +426,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const origin = chat ?? Object.values(state.work).findLast(candidate => candidate.threadId === work.threadId)?.chatConversationId;
     const link = work.parentThreadId ?? state.threads[work.threadId]?.parentThreadId;
     const record = await createThread(tx, parent, work);
+    const exhausted = record.status === "queued" && record.attempt ? quotaCooldown(state, record.attempt.model, Date.now()) : undefined;
+    if (exhausted) throw new Error(quotaRefusal(record.attempt!.model, exhausted));
     if (origin !== undefined && Number(origin) !== Number(parent)) record.chatConversationId = origin;
     // Every attempt on a child thread (including coordinator follow-ups) reports to its parent.
     if (link && record.status !== "blocked") { record.parentThreadId = link; if (state.threads[record.threadId]) state.threads[record.threadId].parentThreadId = link; }
@@ -415,6 +450,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       const parents = work.dependsOn.map(id => state.work[id]);
       if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
       if (!parents.every(parentWork => parentWork?.status === "completed")) continue;
+      const exhausted = work.attempt ? quotaCooldown(state, work.attempt.model, Date.now()) : undefined;
+      if (exhausted) { work.status = "blocked"; work.blocker = quotaRefusal(work.attempt!.model, exhausted); continue; }
       const scoped = work.workspaceScopeId !== null; const id = await tx.createTask(scoped ? ScopedAttempt : Attempt, { workId: work.id, conversationId: work.conversationId!, planConversationId: parent, text: work.resumes ? `The project was paused and has resumed. Continue this task from where it stopped:\n\n${work.text}` : work.text, requestId: `${work.requestId ?? `plan:${work.id}`}${work.resumes ? `:resume-${work.resumes}` : ""}`, threadId: work.threadId, role: work.role, workspaceScopeId: work.workspaceScopeId ?? undefined }, { ownership: { kind: "conversation" }, background: true, ...(scoped ? { conversationId: work.conversationId! } : {}) });
       work.settlementTaskId = await tx.createTask(Settlement, { workId: work.id, attemptTaskId: id }, { ownership: { kind: "conversation" }, background: true });
       work.taskId = id; work.status = "running"; work.startedAt ??= Date.now(); work.attempt &&= { ...work.attempt, startedAt: work.startedAt };

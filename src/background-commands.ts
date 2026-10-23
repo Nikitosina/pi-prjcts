@@ -72,21 +72,33 @@ export function createBackgroundCommands(options: { controlRoot: string; maxPerT
     if (!info) throw new Error("Unknown background command");
     return { info, entry };
   }
-  function status(threadId: string, id: string, tailLines: number): BackgroundStatus {
+  /** `after` is a log byte offset (a previous logBytes): only output past it is returned; an offset beyond the log gives the normal tail. */
+  function status(threadId: string, id: string, tailLines: number, after?: number): BackgroundStatus {
     const { info } = owned(threadId, id), path = join(bgDir(options.controlRoot, threadId), `${id}.log`);
     let tail = "", tailTruncated = false, logBytes = 0;
     if (existsSync(path)) {
       logBytes = statSync(path).size;
-      const length = Math.min(logBytes, TAIL_BYTES), buffer = Buffer.alloc(length), fd = openSync(path, "r");
-      try { readSync(fd, buffer, 0, length, logBytes - length); } finally { closeSync(fd); }
+      const from = after !== undefined && after <= logBytes ? Math.max(after, logBytes - TAIL_BYTES) : Math.max(0, logBytes - TAIL_BYTES), length = logBytes - from, buffer = Buffer.alloc(length), fd = openSync(path, "r");
+      try { readSync(fd, buffer, 0, length, from); } finally { closeSync(fd); }
       const lines = buffer.toString("utf8").split("\n");
       if (lines.at(-1) === "") lines.pop();
-      let picked = lines.slice(-tailLines).join("\n");
-      tailTruncated = logBytes > length || lines.length > tailLines;
+      let picked = tailLines > 0 ? lines.slice(-tailLines).join("\n") : "";
+      tailTruncated = from > (after !== undefined && after <= logBytes ? after : 0) || lines.length > tailLines;
       if (picked.length > TAIL_CHARS) { picked = picked.slice(-TAIL_CHARS); tailTruncated = true; }
       tail = picked;
     }
     return { ...info, tail, tailTruncated, logBytes };
+  }
+  /** Like status, but a running command is awaited first: until its output pipes drained after the exit, `waitSeconds`, or abort. Authorization happens before any waiting. */
+  async function wait(threadId: string, id: string, input: { tailLines: number; after?: number; waitSeconds: number; signal?: AbortSignal }): Promise<BackgroundStatus> {
+    const { entry } = owned(threadId, id);
+    // `exited` settles on close (pipes drained), later than the exit that flips info.state; wait on it for every live entry (already settled: returns at once).
+    if (entry && input.waitSeconds > 0 && !input.signal?.aborted) {
+      let timer: NodeJS.Timeout | undefined, onAbort: (() => void) | undefined;
+      const interrupted = new Promise<void>(resolve => { timer = setTimeout(resolve, input.waitSeconds * 1000); onAbort = resolve; input.signal?.addEventListener("abort", onAbort, { once: true }); });
+      try { await Promise.race([entry.exited, interrupted]); } finally { clearTimeout(timer); if (onAbort) input.signal?.removeEventListener("abort", onAbort); }
+    }
+    return status(threadId, id, input.tailLines, input.after);
   }
   async function stop(threadId: string, id: string): Promise<BackgroundInfo> {
     const { info, entry } = owned(threadId, id);
@@ -115,6 +127,6 @@ export function createBackgroundCommands(options: { controlRoot: string; maxPerT
     }
     return reaped;
   }
-  return { start, status, stop, list, killThread, killAll, reap };
+  return { start, status, wait, stop, list, killThread, killAll, reap };
 }
 export type BackgroundCommands = ReturnType<typeof createBackgroundCommands>;

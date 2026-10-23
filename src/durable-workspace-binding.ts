@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createCodingTools, type ResourceLoader } from "@earendil-works/pi-coding-agent";
@@ -24,7 +24,7 @@ import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
 
-const ENVIRONMENT_NOTE = "\n\nShared resources and long commands: bash calls time out, so start builds, test runs, dev servers and other long commands with projects_bg_start (returns an id; the output goes to a log artifact), poll with projects_bg_status and end them with projects_bg_stop; they keep running across your turns and stop with the thread. Simulators, devices and other machine-global resources are shared with other workers: take a lease with projects_lease_acquire {resource, ttlMinutes, waitSeconds?} before using one, keep to a neutral name others also use, and release it with projects_lease_release when done (it also frees itself when your work ends). If it is held, you are told by whom and until when: do other work, wait with waitSeconds, or report the blocker; never stop the other worker's use of it. Before building or using simulators read the runbooks/ project knowledge for a known working method.";
+const ENVIRONMENT_NOTE = "\n\nShared resources and long commands: bash calls time out, so start builds, test runs, dev servers and other long commands with projects_bg_start (returns an id; the output goes to a log artifact), check on them with projects_bg_status (pass waitSeconds, 1 to 120, to wait for the command to exit, and after with logBytes from its last reply to get only newer output; the wait ends at exit or timeout, not on new output; do not poll with sleep and tail) and end them with projects_bg_stop; they keep running across your turns and stop with the thread. Simulators, devices and other machine-global resources are shared with other workers: take a lease with projects_lease_acquire {resource, ttlMinutes, waitSeconds?} before using one, keep to a neutral name others also use, and release it with projects_lease_release when done (it also frees itself when your work ends). If it is held, you are told by whom and until when: do other work, wait with waitSeconds, or report the blocker; never stop the other worker's use of it. Before building or using simulators read the runbooks/ project knowledge for a known working method.";
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export function durableWorkspaceBinding(input: { project: Project; configuredSkillLoader?: Pick<ResourceLoader, "getSkills">; conversation: () => Conversation; controlRoot: string; projectStanding?: DurableStanding; commands?: ReturnType<typeof commandExecution>; commandApprovals?: () => OperationApprovals; isClosed?: () => boolean; /** Whole-repository workers get lease and background-command tools when present. */ environment?: { leases: ResourceLeases; background: BackgroundCommands } }): DurablePrepareWorkerEnvironment | undefined {
   const authorization = input.project.workspaceAuthorization;
@@ -79,7 +79,11 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const branch = plan?.branch ?? allocated?.branch ?? (continued ? continued.name : publication ? `${publication.branchPrefix}${name}` : whole ? `pi/${name}` : name);
     const intent: WorkspaceIntent = { id: intentId, attemptId, action: "allocate", scope: { projectId: input.project.id, repositoryId: repository.repositoryId, provider, ownerCheckout: repository.ownerCheckout, approvedRoot: repository.approvedRoot, workspacePath, workspaceName: name, branch, baseRevision, headRevision: plan?.headRevision ?? allocated?.headRevision ?? (continued ? ownerHead(repository.ownerCheckout) : baseRevision), owner: leaseOwner, leaseReason: plan?.leaseReason ?? `durable workspace ${allocationThread}`, sharedObjectStore: plan ? plan.sharedObjectStore : null, fileOwnership: scope.files, capabilityProfileRevision: hash(JSON.stringify({ authorization, scope })), ...(whole ? { allowDirtyOwner: true as const } : {}), ...(plan ? plan.continueBranch ? { continueBranch: true as const } : {} : allocated?.continueBranch || continued ? { continueBranch: true as const } : {}) } };
     let receipt = await isolation.allocate(intent); if (receipt.state !== "allocated") receipt = await isolation.reconcile(intent);
-    if (receipt.state === "released" && receipt.providerFacts.remove === "cleanup-unforced") throw new Error(`This thread's worktree was cleaned up after its work settled; branch ${branch} is kept. Delegate a new worker and tell it to continue branch ${branch} (fetch it and push to it).`);
+    // A thread whose settled worktree was cleaned up gets it back on its kept branch (same path, same frozen binding).
+    if (receipt.state === "released" && receipt.providerFacts.remove === "cleanup-unforced") {
+      receipt = await isolation.revive(intent);
+      if (receipt.state === "released") throw new Error(`This thread's worktree was cleaned up after its work settled and could not be restored: ${receipt.reason ?? "provider cannot re-create it"}. Start a new worker for follow-up work${receipt.reason?.includes("no longer exists") ? "" : ` and tell it to continue branch ${branch} (fetch it and push to it)`}.`);
+    }
     if (receipt.state !== "allocated" || !receipt.workspacePath) throw new Error(`Workspace allocation is ${receipt.state}: ${receipt.reason ?? "no exact receipt"}`);
     if (JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope)) throw new Error("Frozen workspace allocation receipt differs from current host scope; refusing registry publication");
     const attachment = plug ? await plug.attach({ ...bindContext, receipt, receipts, plan: plan! }) : undefined;
@@ -127,9 +131,11 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
         const kept = thread.bound ? offered.filter(tool => thread.bound!.includes(tool.name)) : !thread.workspaceConfigured && provider.offered(input.project.id) ? offered : [];
         if (kept.length) { tools.push(...kept); pluginNotes += provider.instructions ?? ""; }
       }
-      const guard = (command: string) => attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy);
+      const owners = ownerRoots(repository.ownerCheckout, workDir);
+      const guard = (command: string) => guardOwnerCheckout(attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy), workDir, owners);
       const codingTools = createCodingTools(workDir, { bash: { spawnHook: ({ command, env, ...context }) => ({ ...context, env: { ...env, PI_ARTIFACTS_DIR: artifacts! }, command: guard(command) }) } });
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {
+        if (tool.name === "write" || tool.name === "edit") assertOutsideOwner(String((args as { path?: unknown }).path ?? ""), workDir, owners);
         return tool.execute(api.callId, args, context.abortSignal, update => api.output(update.content.map(item => item.type === "text" ? item.text : "").join("")));
       } }));
       const builtinNames = new Set(builtins.map(tool => tool.name));
@@ -145,7 +151,7 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     } })] });
     // Skills now come from the role profile (instructions + projects_skill_file). The retired grant fingerprint stays in the hash so existing threads keep their binding revision.
     const handover = `${thread.workspaceFrom ? "\n\nThis worktree was taken over from an earlier worker thread: its branch, commits and uncommitted changes are already here. Check the status first and continue from there; the earlier thread can no longer work." : ""}${thread.continueBranch ? `\n\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)} when it was created), which belongs to an existing PR. Commit on top and push to that branch so the PR is updated; never open a second PR for this work.` : ""}`;
-    return { cwd: workDir, tools, extension, repositoryStanding, workerInstructions: `${handover}${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. ${attachment ? attachment.instructions : `Your branch is ${branch}. You may fetch, merge, rebase, cherry-pick and resolve conflicts. Push to your branch, or to another existing project branch (${gitPolicy.prefix}*) when your task says to continue it (for example an open project PR): fetch it, work on top of it, and push with git push origin HEAD:<that branch>. After a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other non-project branches, never plain --force, delete branches or merge PRs; the owner approves merges.${publication ? ` Open or update a draft PR (GitHub open_draft_pr tool, after pushing your own branch, against ${publication.baseBranch}) only when your task asks for a PR; when you continue an existing PR branch, pushing updates that PR.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${input.environment ? ENVIRONMENT_NOTE : ""}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
+    return { cwd: workDir, tools, extension, repositoryStanding, workerInstructions: `${whole ? `\n\nYour worktree is ${workDir} on branch ${branch}: run commands and make every edit there. The owner's checkout ${repository.ownerCheckout} is not yours; reading it is fine, but do not cd into it, run git against it or write to it (an accident guard, not a sandbox).` : ""}${handover}${whole ? `\n\nYOLO whole-repository mode: use the built-in Pi coding tools in this worktree. You may run commands and edit any repository file. ${attachment ? attachment.instructions : `Your branch is ${branch}. You may fetch, merge, rebase, cherry-pick and resolve conflicts. Push to your branch, or to another existing project branch (${gitPolicy.prefix}*) when your task says to continue it (for example an open project PR): fetch it, work on top of it, and push with git push origin HEAD:<that branch>. After a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other non-project branches, never plain --force, delete branches or merge PRs; the owner approves merges.${publication ? ` Open or update a draft PR (GitHub open_draft_pr tool, after pushing your own branch, against ${publication.baseBranch}) only when your task asks for a PR; when you continue an existing PR branch, pushing updates that PR.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${input.environment ? ENVIRONMENT_NOTE : ""}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
   };
 }
 /** Pushes may target this worker's branch or any other project branch (the publication prefix); never the base/default branch. */
@@ -181,6 +187,34 @@ export function guardWorkerGitCommand(command: string, branch: string, policy: {
   if (blocked === undefined) return command;
   const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; --force-with-lease is allowed there, plain --force, +refs, deletes, mirror/all/tags, pushes to ${[...guarded].filter(name => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
+}
+/** Real and given spellings of the owner checkout; empty when the worktree itself sits inside it (nothing to separate). */
+function ownerRoots(checkout: string, workDir: string): string[] {
+  const roots = [...new Set([resolve(checkout), realpathSync(checkout)])];
+  return roots.some(root => inside(root, resolve(workDir)) || inside(root, realpathSync(workDir))) ? [] : roots;
+}
+function inside(root: string, path: string): boolean { return path === root || path.startsWith(root + sep); }
+/** Best-effort accident guard (not a sandbox): refuses cd/pushd/git -C/redirect/tee targets inside the owner checkout; reads stay allowed. */
+export function guardOwnerCheckout(command: string, workDir: string, owners: readonly string[]): string {
+  if (!owners.length) return command;
+  const hits = (path: string) => { const target = path.replace(/^["']|["']$/g, ""); return target !== "" && owners.some(root => inside(root, resolve(workDir, target))); };
+  const blocked = command.split(/[;&|\n]+/).map(part => part.trim()).find(chunk => {
+    const words = (chunk.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map(word => word.replace(/^["']|["']$/g, ""));
+    const after = (name: string) => words.flatMap((word, index) => word === name ? [words.slice(index + 1).find(next => !next.startsWith("-")) ?? ""] : []);
+    const flagged = words.flatMap((word, index) => word === "-C" || word === "--git-dir" || word === "--work-tree" ? [words[index + 1] ?? ""] : /^--(?:git-dir|work-tree)=/.test(word) ? [word.slice(word.indexOf("=") + 1)] : []);
+    const redirected = [...chunk.matchAll(/(?:^|[^<>&\d])\d*>>?\s*("[^"]*"|'[^']*'|[^\s;&|<>]+)/g)].map(match => match[1]);
+    return [...after("cd"), ...after("pushd"), ...(words.includes("git") ? flagged : []), ...redirected, ...words.flatMap((word, index) => word === "tee" ? words.slice(index + 1).filter(next => !next.startsWith("-")) : [])].some(hits);
+  });
+  if (blocked === undefined) return command;
+  const message = `Blocked: "${blocked.slice(0, 200)}" works in the owner's checkout (${owners[0]}), not in your worktree (${workDir}). Nothing in this command ran. Reading the owner checkout is fine; run commands and write files in your worktree. This check is best-effort.`;
+  return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
+}
+function assertOutsideOwner(path: string, workDir: string, owners: readonly string[]): void {
+  if (!owners.length || !path) return;
+  let target = resolve(workDir, path); const tail: string[] = [];
+  while (!existsSync(target) && dirname(target) !== target) { tail.unshift(target.slice(dirname(target).length + 1)); target = dirname(target); }
+  const real = resolve(realpathSync(target), ...tail);
+  if (owners.some(root => inside(root, real))) throw new Error(`${path} is inside the owner's checkout (${owners[0]}); write files in your worktree (${workDir}) instead. Reading the owner checkout is fine.`);
 }
 function ownerHead(checkout: string): string { return execFileSync("/usr/bin/git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } }).trim(); }
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }

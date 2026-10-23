@@ -282,5 +282,5 @@ async function withWriteLock<T>(path: string, waitMs: number, action: () => Prom
 function isMissing(error: unknown): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"; }
 function digest(value: Buffer): string { return createHash("sha256").update(value).digest("hex"); }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function result(value: Record<string, string | number | null>) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
+function result<Details extends object>(value: Details) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
 function blocked(blocker: string) { return { ...result({ blocker }), isError: true }; }
