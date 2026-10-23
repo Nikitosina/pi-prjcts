@@ -15,6 +15,19 @@ export const say = value => chunk({ role: 'assistant', content: value }, null) +
 const contentText = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('') : JSON.stringify(content ?? '');
 export { delay, randomUUID };
 
+/** Poll `fn` until it returns something truthy (returns that value) or `timeout` ms pass (throws `Timed out: <description>`). Cheap probes only: the default interval is 25 ms. */
+export async function waitFor(fn, description = 'condition', { timeout = 30000, interval = 25 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() >= deadline) throw Error(`Timed out: ${description}`);
+    await delay(interval);
+  }
+}
+/** Screenshots that no assertion reads are only written when E2E_SHOTS=1. */
+export const shotsEnabled = () => process.env.E2E_SHOTS === '1';
+
 /** `handler({ role, user, results, tools, system, msgs })` returns a response string (say/call) or nothing (default: "DONE <role>"). */
 export async function createKit(name, { env: extraEnv = {}, handler = () => undefined } = {}) {
   if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
@@ -30,7 +43,8 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
   kit.check = (label, ok, detail) => { if (!ok) throw Error(`${label}: ${JSON.stringify(detail ?? null).slice(0, 3000)}`); result.checks.push(label); };
   kit.git = (dir, ...args) => execFileSync('/usr/bin/git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
   kit.initRepo = (dir = dirs.workspace) => { kit.git(dir, 'init', '-b', 'main'); kit.git(dir, 'config', 'user.email', 'e2e@example.invalid'); kit.git(dir, 'config', 'user.name', 'E2E'); writeFileSync(join(dir, 'README.md'), 'base\n'); kit.git(dir, 'add', '.'); kit.git(dir, 'commit', '-qm', 'c1'); };
-  kit.eventually = async (fn, description, tries = 600) => { for (let i = 0; i < tries; i++) { const value = await fn(); if (value) return value; await delay(100); } throw Error(description); };
+  kit.waitFor = waitFor;
+  kit.eventually = async (fn, description, tries = 600) => { for (let i = 0; i < tries * 4; i++) { const value = await fn(); if (value) return value; await delay(25); } throw Error(description); };
 
   const model = createServer((req, res) => {
     req.setEncoding('utf8');
@@ -86,7 +100,13 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
   };
   kit.plan = async id => (await kit.rpc({ action: 'plan-snapshot', id })).work;
   kit.settle = id => kit.eventually(async () => { const view = await kit.rpc({ action: 'show', id }); return !view.chats.some(c => c.busy) && !(await kit.plan(id)).some(w => ['queued', 'running'].includes(w.status)); }, 'project did not go idle', 1200);
-  kit.ask = async (id, text) => { await kit.rpc({ action: 'message', id, text }); await delay(300); await kit.settle(id); };
+  kit.ask = async (id, text) => {
+    const before = result.calls.length;
+    await kit.rpc({ action: 'message', id, text });
+    // The turn must have started (a model call arrived or the chat is busy) before idle means done; bounded so a call-free reply still settles.
+    await waitFor(async () => result.calls.length > before || (await kit.rpc({ action: 'show', id })).chats.some(c => c.busy), 'turn start', { timeout: 1500, interval: 20 }).catch(() => {});
+    await kit.settle(id);
+  };
   kit.updateSettings = async (id, changes) => { const settings = await kit.rpc({ action: 'settings-snapshot', id }); return kit.rpc({ action: 'settings-update', id, confirm: id, expectedRevision: settings.revision, changes }); };
 
   // Chrome over a pipe (CDP).
@@ -119,14 +139,14 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     await send('Page.navigate', { url }, s);
     const page = {
       evaluate: async expression => { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, s); if (r.exceptionDetails) throw Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description ?? '')); return r.result.value; },
-      shot: async label => { const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, s); writeFileSync(join(artifacts, `${label}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); },
+      shot: async (label, { force = false } = {}) => { if (!force && !shotsEnabled()) return; const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, s); writeFileSync(join(artifacts, `${label}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); },
       navigate: next => send('Page.navigate', { url: next }, s),
       reload: () => send('Page.reload', {}, s),
       viewport: (width, height, mobile = false) => send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile }, s),
       /** Raw CDP call on this page (trusted input: Input.insertText, Input.dispatchKeyEvent). */
       cdp: (method, params = {}) => send(method, params, s),
     };
-    page.waitFor = async (expression, label, tries = 240) => { for (let i = 0; i < tries; i++) { if (await page.evaluate(expression)) return; await delay(250); } throw Error(`Timed out waiting for ${label}`); };
+    page.waitFor = async (expression, label, tries = 240) => { for (let i = 0; i < tries * 2.5; i++) { if (await page.evaluate(expression).catch(error => { if (i > 100) throw error; return false; })) return; await delay(100); } throw Error(`Timed out waiting for ${label}`); };
     return page;
   };
   /** Settings tab URL of a project in the owned host's browser UI. */
@@ -137,7 +157,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     try { await kit.waitHost(); await body(kit); result.errors = result.errors.filter(e => !/Failed to load resource/.test(e)); result.httpErrors = result.httpErrors.filter(e => !e.url.endsWith('/api')); kit.check('no browser errors', !result.errors.length && !result.httpErrors.length, result.errors.concat(result.httpErrors)); result.status = 'passed'; }
     catch (error) { result.status = 'failed'; result.failure = redact(error?.stack ?? error); }
     finally {
-      if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(500); if (!cdpEnded) chrome.kill('SIGTERM'); }
+      if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} for (let i = 0; i < 50 && !cdpEnded; i++) await delay(20); if (!cdpEnded) chrome.kill('SIGTERM'); }
       await kit.stopHost().catch(() => host?.kill('SIGKILL'));
       model.closeAllConnections(); model.close(); kit.save();
     }

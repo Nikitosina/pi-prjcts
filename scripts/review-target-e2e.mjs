@@ -56,10 +56,10 @@ await kit.run(async () => {
     check(`${label} F14: reviewer has code_diff and no write/edit/shell tool`, reviewerCall.tools.includes('code_diff') && !reviewerCall.tools.some(name => ['bash', 'write', 'edit', 'code_write', 'code_edit'].includes(name)), reviewerCall.tools);
 
     // F14 path escape stays refused, F8 option-like base rejected without side effects.
-    await delegate(project, { role: 'reviewer', threadId: worker.threadId, task: `${step('code_read', { path: '../../../../etc/hosts' })} ${step('code_diff', { base: '--output=/tmp/pwned-review-target' })}` }, `${label}-T2`);
+    await delegate(project, { role: 'reviewer', threadId: worker.threadId, task: `${step('code_read', { path: '../../../../etc/hosts' })} ${step('code_diff', { base: `--output=/tmp/pwned-review-target-${process.pid}` })}` }, `${label}-T2`);
     const [escaped, badBase] = reviewerOut(`${label}-T2`);
     check(`${label} F14: path outside the worker root refused`, /outside this thread's code root/.test(escaped ?? ''), escaped);
-    check(`${label} F8: option-like base refused, nothing written`, /Invalid base/.test(badBase ?? '') && !existsSync('/tmp/pwned-review-target'), badBase);
+    check(`${label} F8: option-like base refused, nothing written`, /Invalid base/.test(badBase ?? '') && !existsSync(`/tmp/pwned-review-target-${process.pid}`), badBase);
 
     // F2 unknown thread, F4/F5 conflicting params, F6 bad id: delegate fails, no work admitted.
     const work0 = (await kit.plan(project.id)).length;

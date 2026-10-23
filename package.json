@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
+    "check:fast": "node scripts/check-fast.mjs",
+    "e2e": "node scripts/run-e2e.mjs",
     "inbox": "node src/cli.ts ui",
     "e2e:durable-runtime": "node scripts/durable-runtime-e2e.mjs",
     "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
@@ -14,7 +16,7 @@
     "e2e:coordinator-efficiency": "node scripts/coordinator-efficiency-e2e.mjs",
     "e2e:quota-status": "node scripts/quota-status-e2e.mjs",
     "e2e:coordinator-gh": "node scripts/coordinator-gh-e2e.mjs",
-    "verify": "npm run check && npm run e2e:durable-runtime && npm run e2e:durable-knowledge && npm run e2e:coordinator-efficiency && npm run e2e:quota-status && npm run e2e:coordinator-gh",
+    "verify": "npm run check && node scripts/run-e2e.mjs --jobs 3 --retry-failed-serially durable-runtime durable-knowledge coordinator-efficiency quota-status coordinator-gh",
     "projects": "node src/cli.ts"
   },
   "pi": { "extensions": [] },

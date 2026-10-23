@@ -62,14 +62,14 @@ function send(method, params = {}, sessionId) {
   });
 }
 async function evaluate(expression, session) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, session); if (r.exceptionDetails) throw Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description ?? '')); return r.result.value; }
-async function shot(name, session, full = false) {
+async function shot(name, session, full = false) { if (process.env.E2E_SHOTS !== '1') return;
   const params = { format: 'png' };
   if (full) { const m = await send('Page.getLayoutMetrics', {}, session); params.clip = { x: 0, y: 0, width: 1440, height: Math.min(2400, Math.ceil(m.cssContentSize.height)), scale: 1 }; params.captureBeyondViewport = true; }
   const image = await send('Page.captureScreenshot', params, session);
   writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 });
 }
 async function waitFor(expression, session, label) {
-  for (let i = 0; i < 60; i++) { if (await evaluate(expression, session)) return; await delay(250); }
+  for (let i = 0; i < 60 * 2.5; i++) { if (await evaluate(expression, session).catch(error => { if (i > 100) throw error; return false; })) return; await delay(100); }
   throw new Error(`Timed out waiting for ${label}`);
 }
 
@@ -173,7 +173,7 @@ try {
   result.status = 'failed'; result.failure = redact(error?.stack ?? error);
   try { result.diagnostic = await evaluate(`({ title: document.querySelector('#title').textContent, composeDisabled: document.querySelector('#compose textarea').disabled, dialogOpen: document.querySelector('#dialog').open, active: document.activeElement?.tagName, visible: [...document.querySelectorAll('[data-panel]:not([hidden])')].map(n => n.dataset.panel), error: document.querySelector('#error').hidden ? null : document.querySelector('#error').textContent })`, chromeSession); } catch {}
 } finally {
-  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(1000); if (!cdpEnded) chrome.kill('SIGTERM'); }
+  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} for (let i = 0; i < 1000 / 20 && !cdpEnded; i++) await delay(20); if (!cdpEnded) chrome.kill('SIGTERM'); }
   save();
 }
 if (result.status === 'passed' && process.env.KEEP_HOST === '1') {

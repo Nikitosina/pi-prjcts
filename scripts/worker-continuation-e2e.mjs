@@ -124,10 +124,10 @@ await kit.run(async () => {
 
   // ---- git: branch ----
   const before = { refs: originRefs(), trees: worktreeCount(kit.workspace) };
-  for (const [ref, pattern, label] of [['main', /not a project branch/, 'main'], ['origin/main', /not a project branch/, 'origin/main'], ['feature/other', /not a project branch/, 'a branch outside the project prefix'], ['--upload-pack=touch /tmp/pwned-continuation', /Invalid branch/, 'an option-like ref'], ['pi/a..b', /Invalid branch/, 'a traversal ref'], ['pi/missing-branch', /not found/, 'an unresolvable branch'], ['12', /PR number/, 'a PR number (git)']]) {
+  for (const [ref, pattern, label] of [['main', /not a project branch/, 'main'], ['origin/main', /not a project branch/, 'origin/main'], ['feature/other', /not a project branch/, 'a branch outside the project prefix'], [`--upload-pack=touch /tmp/pwned-continuation-${process.pid}`, /Invalid branch/, 'an option-like ref'], ['pi/a..b', /Invalid branch/, 'a traversal ref'], ['pi/missing-branch', /not found/, 'an unresolvable branch'], ['12', /PR number/, 'a PR number (git)']]) {
     await rejected(gp, { role: 'worker', branch: ref, task: 'x' }, `g-b-${label.replace(/\W/g, '')}`, pattern, `F13/F14/F15 git branch ${label} rejected, no work admitted`);
   }
-  check('F13/F15 rejected branches created no worktree, no origin ref and no side-effect file', worktreeCount(kit.workspace) === before.trees && originRefs().join() === before.refs.join() && !existsSync('/tmp/pwned-continuation'), { trees: worktreeCount(kit.workspace), refs: originRefs() });
+  check('F13/F15 rejected branches created no worktree, no origin ref and no side-effect file', worktreeCount(kit.workspace) === before.trees && originRefs().join() === before.refs.join() && !existsSync(`/tmp/pwned-continuation-${process.pid}`), { trees: worktreeCount(kit.workspace), refs: originRefs() });
 
   await delegate(gp, { role: 'worker', branch: 'pi/existing', task: run('pwd', 'git branch --show-current', 'cat existing.txt', 'echo CONT-WORK > cont.txt', 'git add cont.txt', 'git commit -qm cont-work', 'git push origin HEAD:pi/existing') }, 'g-b1');
   const b1Plan = await work(gp, 'g-b1'), b1 = workerRun('g-b1').results;

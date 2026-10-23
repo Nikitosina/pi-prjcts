@@ -58,7 +58,7 @@ const model = createServer((req, res) => {
         const scope = /MARK-REVIEW (\S+)/.exec(userText)[1];
         if (n === 0) return res.end(call('projects_delegate', { role: 'reviewer', ref: brain.b1, task: 'REVIEW-HEAD review feature.txt on the PR head' }));
         if (n === 1) return res.end(call('projects_delegate', { role: 'scout', workspaceScopeId: scope, task: 'SCOUT-SCOPED read README.md' }));
-        if (n === 2) return res.end(call('projects_delegate', { role: 'reviewer', ref: '--upload-pack=touch /tmp/pwned', task: 'BAD-REF' }));
+        if (n === 2) return res.end(call('projects_delegate', { role: 'reviewer', ref: `--upload-pack=touch /tmp/pwned-lifecycle-${process.pid}`, task: 'BAD-REF' }));
         if (n === 3) return res.end(call('projects_delegate', { role: 'reviewer', ref: 'pi/does-not-exist', task: 'MISSING-REF' }));
         return res.end(say('Review dispatched.'));
       }
@@ -131,7 +131,7 @@ function rpc(input) {
   });
 }
 async function eventually(fn, description, tries = 600) {
-  for (let i = 0; i < tries; i++) { const value = await fn(); if (value) return value; await delay(100); }
+  for (let i = 0; i < tries * 2; i++) { const value = await fn(); if (value) return value; await delay(50); }
   throw Error(description);
 }
 const waitHost = () => eventually(async () => { if (hostEnded) throw Error('Host exited'); try { return (await rpc()).pid === host.pid; } catch { return false; } }, 'Owned host did not start');
@@ -163,9 +163,9 @@ function send(method, params = {}, sessionId) {
   });
 }
 async function evaluate(expression, session) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, session); if (r.exceptionDetails) throw Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description ?? '')); return r.result.value; }
-async function shot(name, session) { const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
+async function shot(name, session) { if (process.env.E2E_SHOTS !== '1') return; const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
 async function waitFor(expression, session, label, tries = 240) {
-  for (let i = 0; i < tries; i++) { if (await evaluate(expression, session)) return; await delay(250); }
+  for (let i = 0; i < tries * 2.5; i++) { if (await evaluate(expression, session).catch(error => { if (i > 100) throw error; return false; })) return; await delay(100); }
   let page = ''; try { page = await evaluate(`document.body.innerText.slice(0, 3000)`, session); } catch {}
   throw Error(`Timed out waiting for ${label}; page: ${page}`);
 }
@@ -249,7 +249,7 @@ try {
   const receipt = JSON.parse(delegations[0]);
   check('R1 a reviewer delegated with ref reads the PR head (feature.txt v1), not the owner checkout (no feature.txt)', review?.status === 'completed' && /v1/.test(reviewSaw) && !existsSync(join(workspace, 'feature.txt')) && receipt.reads?.sha === rebased, { reviewSaw, receipt });
   check('S1/C11f a scout given workspaceScopeId runs read-only (scope ignored, receipt says so)', scout?.status === 'completed' && scout.workspaceScopeId == null && /workspaceScopeId ignored/.test(delegations[1]), { scout, d: delegations[1] });
-  check('R2 an option-like ref is refused before any git call', /Invalid ref/.test(delegations[2]) && !existsSync('/tmp/pwned'), delegations[2]);
+  check('R2 an option-like ref is refused before any git call', /Invalid ref/.test(delegations[2]) && !existsSync(`/tmp/pwned-lifecycle-${process.pid}`), delegations[2]);
   check('R6 an unknown ref refuses the delegation clearly', /was not found on origin or locally/.test(delegations[3]) && !byText(work, 'MISSING-REF').length, delegations[3]);
 
   // Step 4: change the setup to a failing command; W3 commits locally only.
@@ -329,7 +329,7 @@ try {
 } catch (error) {
   result.status = 'failed'; result.failure = redact(error?.stack ?? error);
 } finally {
-  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(500); if (!cdpEnded) chrome.kill('SIGTERM'); }
+  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20); if (!cdpEnded) chrome.kill('SIGTERM'); }
   await stopHost().catch(() => host.kill('SIGKILL'));
   model.closeAllConnections(); model.close(); save();
 }

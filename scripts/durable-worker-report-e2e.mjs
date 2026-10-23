@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const repo = '/Users/nikitarat/.pi/agent/projects-mvp';
+const repo = process.cwd();
 const stamp = new Date().toISOString().replaceAll(':', '-');
 const artifacts = join(repo, 'artifacts', `durable-worker-report-${stamp}`), root = join(realpathSync(tmpdir()), `durable-worker-report-${randomUUID()}`);
 const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');

@@ -48,6 +48,7 @@ try {
   await evaluate(`window.__setVisible(true); window.__permAnswer = 'granted'; document.querySelector('#notify-browser').click()`, s);
   await waitFor(`document.querySelector('#notify-browser').checked && /on/i.test(document.querySelector('#notify-browser-state').innerText) && localStorage.getItem('pi-projects-notify') === '1'`, s, 'enabled state');
   await waitFor(`window.__notifyCursor !== undefined`, s, 'feed cursor');
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   await shot('01-settings-notifications', s);
   result.checks.push('N4 turning it on asks for permission and shows it is on');
@@ -75,6 +76,7 @@ try {
   await evaluate(`window.__failFeed = true; window.__setVisible(false)`, s);
   await k.ask(a, 'main', 'MARK-FROZEN while frozen');
   await waitFor(`/not receiving/i.test(document.querySelector('#notify-browser-state').innerText)`, s, 'feed failure shown');
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   await shot('01b-feed-failing', s);
   await evaluate(`window.__setVisible(true); window.__failFeed = false`, s);
@@ -176,6 +178,7 @@ try {
   await evaluate(`window.__oldDocument = true`, s);
   await send('Page.navigate', { url: set.toString() }, s);
   await waitFor(`!window.__oldDocument && !!document.querySelector('#notify-browser')`, s, 'mobile card');
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   if (!await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s)) throw Error('Notifications card overflows at 390px');
   await shot('03-settings-mobile', s);

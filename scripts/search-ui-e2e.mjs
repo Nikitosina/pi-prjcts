@@ -87,7 +87,7 @@ try {
   const slow = await eventually(async () => (await plan(a)).work.find(w => w.text.includes('WSTOP-TASK') && w.status === 'running'), 'slow worker did not start');
   await rpc({ action: 'thread-stop', id: a, threadId: slow.threadId });
   await eventually(async () => (await plan(a)).work.find(w => w.id === slow.id && !['queued', 'running'].includes(w.status)), 'slow worker did not stop');
-  await delay(2000);
+  await eventually(async () => (await feedAll()).some(n => n.text === 'Done MARK-WSTOP.'), 'the coordinator turn that delegated the stopped worker did not finish', 300);
   const afterStop = await feedAll();
   check('W3 one notice per failure across scans', afterStop.filter(n => n.workId === failed.id).length === 1, afterStop);
   check('W5 a stopped worker is not a failure notice', !afterStop.some(n => n.workId === slow.id), afterStop.filter(n => n.workId));

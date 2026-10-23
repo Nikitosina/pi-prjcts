@@ -47,7 +47,7 @@ await kit.run(async () => {
   const view = async (width, theme) => { await page.viewport(width, 1000, width < 600); await setTheme(theme); await kit.delay(600); };
   // The page scrolls inside .body, so capture with a viewport as tall as the content (capped), then restore.
   const shot = async name => { const width = await ev('innerWidth'), tall = await ev(`Math.min(9000, Math.ceil(document.querySelector('.body').scrollHeight + document.querySelector('.body').getBoundingClientRect().top))`); await page.viewport(width, Math.max(tall, 1000), width < 600); await kit.delay(300); await page.shot(`${folder}/${name}`); await page.viewport(width, 1000, width < 600); await kit.delay(200); };
-  const gotoProject = async id => { await page.navigate(await kit.webUrl(id, 'settings')); await kit.delay(1500); await page.waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length > 0 && !/Reading/.test(document.querySelector('#worktrees').innerText + document.querySelector('#events-in').innerText)`, 'project settings'); await page.evaluate(contrastLib); };
+  const gotoProject = async id => { await page.navigate(await kit.webUrl(id, 'settings')); await page.waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length > 0 && !/Reading/.test(document.querySelector('#worktrees').innerText + document.querySelector('#events-in').innerText)`, 'project settings'); await page.evaluate(contrastLib); };
 
   // Design-iteration screenshots: desktop and 420 px, light and dark; GitHub variant.
   for (const [width, theme] of [[1440, 'light'], [1440, 'dark'], [420, 'light'], [420, 'dark']]) { await view(width, theme); await shot(`github-${width}-${theme}`); }
@@ -100,7 +100,7 @@ await kit.run(async () => {
   check('on a profile tab, Clear switches off everything not already off for all profiles; those rows stay locked', await ev(`document.querySelectorAll('#skills-picker [data-skill-pick]:checked').length === 0 && document.querySelectorAll('#skills-picker [data-skill-pick]:disabled').length === 12`));
   await ev(`document.querySelector('[data-action="skills-tab"][data-role="all"]').click()`);
   await ev(`document.querySelector('[data-action="skills-save"]').click()`);
-  await page.waitFor(`document.querySelector('[data-action="skills-save"]')?.disabled && document.querySelector('[data-action="skills-tab"][data-role="all"] .count').textContent === '78'`, 'skills saved');
+  await page.waitFor(`document.querySelector('[data-action="skills-save"]')?.disabled && document.querySelector('[data-action="skills-tab"][data-role="all"] .count').textContent === '78' && document.querySelector('#skills-picker .pick-state').hidden`, 'skills saved');
   check('Save persists the bulk selection and clears the dirty hint', (await rpc({ action: 'settings-snapshot', id: gh })).values.skills.off.all.length === 12 && await ev(`document.querySelector('#skills-picker .pick-state').hidden`));
 
   // MCP bulk: only usable servers; filter respected.
@@ -121,8 +121,10 @@ await kit.run(async () => {
   for (const width of [1440, 420]) {
     await view(width, 'light');
     for (const [href] of nav) {
-      await ev(`document.querySelector('.set-nav a[href="${href}"]').click()`); await kit.delay(2000);
-      const ok = await ev(`(() => { const r = document.querySelector('${href}').getBoundingClientRect(); return r.top < innerHeight - 40 && r.bottom > 0 ? true : [r.top, r.bottom, innerHeight, scrollY]; })()`);
+      await ev(`document.querySelector('.set-nav a[href="${href}"]').click()`); 
+      const inView = `(() => { const r = document.querySelector('${href}').getBoundingClientRect(); return r.top < innerHeight - 40 && r.bottom > 0 ? true : [r.top, r.bottom, innerHeight, scrollY]; })()`;
+      await page.waitFor(`${inView} === true`, `${href} in view`, 8).catch(() => {}); // the smooth scroll takes up to ~2 s; the check below still reports the position
+      const ok = await ev(inView);
       check(`${width}px: nav link ${href} brings its section into view`, ok === true, ok);
     }
   }

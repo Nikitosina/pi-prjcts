@@ -15,7 +15,7 @@ import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 // registry-name collisions can cross scopes; independent writers can race; unsafe calls can
 // stop after rename; and master, foreign, traversal, VCS, symlink, and stale-CAS calls deny.
 // This is a standalone Git-fixture authorization, not allocator/provider parity.
-const root = join("/Users/nikitarat/.pi/agent/projects-mvp/artifacts", `workspace-write-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
+const root = join(join(process.cwd(), "artifacts"), `workspace-write-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const owner = join(root, "owner"), oneRoot = join(root, "worker-one"), twoRoot = join(root, "worker-two"), crashRoot = join(root, "worker-crash"), control = join(root, "control");
 mkdirSync(root, { recursive: true, mode: 0o700 });
 const fake = await startFakeModel(root); // offline: private SDK home with only the fake model; the crash child inherits it mkdirSync(control, { mode: 0o700 });

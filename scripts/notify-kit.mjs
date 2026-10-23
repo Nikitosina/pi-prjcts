@@ -68,7 +68,7 @@ export async function kit(name, extraEnv = {}, respond) {
     });
   }
   async function eventually(fn, description, tries = 600) {
-    for (let i = 0; i < tries; i++) { const value = await fn(); if (value) return value; await delay(100); }
+    for (let i = 0; i < tries * 2; i++) { const value = await fn(); if (value) return value; await delay(50); }
     throw Error(description);
   }
   async function startHost() {
@@ -108,9 +108,9 @@ export async function kit(name, extraEnv = {}, respond) {
     });
   }
   async function evaluate(expression, session) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, session); if (r.exceptionDetails) throw Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description ?? '')); return r.result.value; }
-  async function shot(file, session) { const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${file}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
+  async function shot(file, session) { if (process.env.E2E_SHOTS !== '1') return; const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${file}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
   async function waitFor(expression, session, label, tries = 240) {
-    for (let i = 0; i < tries; i++) { if (await evaluate(expression, session)) return; await delay(250); }
+    for (let i = 0; i < tries * 2.5; i++) { if (await evaluate(expression, session).catch(error => { if (i > 100) throw error; return false; })) return; await delay(100); }
     throw Error(`Timed out waiting for ${label}`);
   }
   async function openPage(url, init = '') {
@@ -124,7 +124,7 @@ export async function kit(name, extraEnv = {}, respond) {
     await send('Page.navigate', { url }, sessionId);
     return sessionId;
   }
-  async function closeChrome() { if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(500); if (!cdpEnded) chrome.kill('SIGTERM'); } }
+  async function closeChrome() { if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20); if (!cdpEnded) chrome.kill('SIGTERM'); } }
 
   const setup = async (projectName, cwd = workspace) => {
     const project = await rpc({ action: 'create', requestId: randomUUID(), name: projectName, cwd, objective: 'Disposable notification fixture', model: 'fake/fake-model' });
