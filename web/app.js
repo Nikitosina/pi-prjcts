@@ -3885,6 +3885,13 @@ function limitWindow(sample) {
   const stale = sample.resetsAt !== null && sample.resetsAt <= Date.now(), percent = Math.round(sample.usedPercent);
   return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${limitWindowName[sample.window] ?? sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
 }
+// Monochrome marks drawn in currentColor (no external assets); the provider name stays in aria-label and the hover detail.
+const iconSvg = body => `<svg class="prov-icon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const providerIcon = {
+  claude: iconSvg('<path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2"/>'),
+  codex: iconSvg('<path d="M8 1.6l5.5 3.2v6.4L8 14.4l-5.5-3.2V4.8z"/><path d="M8 1.6v6.4l5.5 3.2M8 8L2.5 11.2"/>'),
+  cursor: iconSvg('<path d="M8 1.6l5.5 3.2v6.4L8 14.4l-5.5-3.2V4.8z"/><path d="M8 8l5.5-3.2M8 8L2.5 4.8M8 8v6.4" opacity=".55"/>'),
+};
 function limitItem(provider) {
   const windows = provider.samples.map(limitWindow), live = windows.filter(win => !win.stale);
   const tone = limitTone(Math.max(0, ...live.map(win => win.percent)));
@@ -3898,17 +3905,50 @@ function limitItem(provider) {
   const failure = provider.samples.length && provider.reason ? `<small class="lim-error">Last refresh failed: ${esc(provider.reason)}${provider.lastAttemptAt ? ` · ${ago(provider.lastAttemptAt)}` : ""}</small>` : "";
   const detail = rows.join("") + failure || `<small>${empty}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
   const label = `${provider.label}: ${provider.samples.length ? provider.samples.map((sample, i) => `${sample.window} ${windows[i].stale ? "reset, waiting for new data" : `${windows[i].percent}% used`}`).join(", ") : empty.toLowerCase()}`;
-  return `<div class="lim" tabindex="0" role="group" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name">${esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="group" aria-label="${esc(provider.label)} details"><b>${esc(provider.label)}</b>${detail}${connectHtml}</span>${signedOut && connect.state === "idle" ? '<button type="button" class="lim-connect" data-action="cursor-connect">Connect</button>' : ""}</div>`;
+  return `<div class="lim" tabindex="0" role="group" data-provider="${esc(provider.provider)}" data-tone="${tone}" aria-label="${esc(label)}"><span class="lim-name" aria-hidden="true" title="${esc(provider.label)}">${providerIcon[provider.provider] ?? esc(provider.label)}</span>${windows.map(win => win.html).join("") || "<span>—</span>"}<span class="lim-pop" role="group" aria-label="${esc(provider.label)} details"><b>${esc(provider.label)}</b>${detail}${connectHtml}</span>${signedOut && connect.state === "idle" ? '<button type="button" class="lim-connect" data-action="cursor-connect">Connect</button>' : ""}</div>`;
 }
 function renderLimits() {
   const bar = document.querySelector("#limits-bar");
   const refresh = `<button type="button" class="ghost small lim-refresh${limitsRefreshing ? " spinning" : ""}" data-action="limits-refresh" aria-label="Refresh limits" title="Refresh limits now"${limitsRefreshing ? " disabled" : ""}><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
   const next = limits ? limits.providers.map(limitItem).join("") + refresh : "";
-  if (bar.dataset.html === next) return;
+  if (bar.dataset.html === next) { renderMachine(); return; }
   const focused = bar.contains(document.activeElement) ? document.activeElement.closest(".lim")?.dataset.provider : null;
-  bar.innerHTML = next; bar.dataset.html = next;
+  bar.innerHTML = next; bar.dataset.html = next; renderMachine();
   if (focused) bar.querySelector(`.lim[data-provider="${focused}"]`)?.focus({ preventScroll: true });
 }
+// Machine status (host-sampled, cached ~5 s there): polled every 10 s while the tab is visible. A null value means unreadable (—); a missing one is hidden.
+let machine = null;
+const machineIcon = {
+  ram: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4.5" width="13" height="6" rx="1"/><path d="M4.5 10.5v2M8 10.5v2M11.5 10.5v2M4.5 7.5h1M7.5 7.5h1M10.5 7.5h1"/></svg>',
+  cpu: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1"/><path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg>',
+  ssd: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="8" width="13" height="5" rx="1.2"/><path d="M1.5 8l2-4.5h9L14.5 8M11.5 10.5h.01"/></svg>',
+  battery: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4.5" width="11" height="7" rx="1.2"/><path d="M14.5 7v2"/></svg>',
+};
+// The machine group is its own node, re-rendered only when its text changes, so a CPU tick never rebuilds the provider items (and drops their hover).
+const machineEl = Object.assign(document.createElement("div"), { className: "mach" });
+machineEl.setAttribute("role", "group"); machineEl.setAttribute("aria-label", "Machine status");
+function renderMachine() {
+  const bar = document.querySelector("#limits-bar");
+  if (machineEl.parentElement !== bar) bar.append(machineEl);
+  const next = machineHtml();
+  if (machineEl.dataset.html !== next) { machineEl.innerHTML = next; machineEl.dataset.html = next; }
+}
+function machineHtml() {
+  if (!machine) return "";
+  const pct = value => typeof value === "number" ? `${value}%` : "—";
+  const items = [];
+  if ("ram" in machine) items.push(["ram", machine.ram ? `${machine.ram.usedGb.toFixed(1)} GB / ${machine.ram.totalGb.toFixed(1)} GB` : "—", "Memory in use (app + wired + compressed) / total physical memory"]);
+  if ("cpu" in machine) items.push(["cpu", pct(machine.cpu), "CPU usage across all cores"]);
+  if ("ssd" in machine) items.push(["ssd", pct(machine.ssd), "Disk space used on the main data volume"]);
+  if ("battery" in machine) items.push(["battery", pct(machine.battery), "Battery charge"]);
+  return `${items.map(([kind, text, what]) => `<span class="mach-item" tabindex="0" data-kind="${kind}" aria-label="${esc(`${what}: ${text}`)}">${machineIcon[kind]}<span>${esc(text)}</span><span class="mach-tip" role="tooltip">${esc(what)}</span></span>`).join("")}`;
+}
+async function loadMachine() {
+  if (document.hidden) return;
+  const loaded = await api({ action: "machine-status" }).catch(() => null);
+  if (loaded && typeof loaded === "object") { machine = loaded; renderMachine(); }
+}
+setInterval(() => void loadMachine(), 10000);
 async function loadLimits() {
   if (document.hidden) return;
   const loaded = await api({ action: "limits-snapshot" }).catch(() => null);
@@ -3922,8 +3962,9 @@ function scheduleLimitsWatch() {
   if (limits?.providers.find(item => item.provider === "cursor")?.connect?.state === "waiting") limitsWatch = setInterval(() => void loadLimits().then(scheduleLimitsWatch), 3000);
 }
 setInterval(renderLimits, 30000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) void loadLimits(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { void loadLimits(); void loadMachine(); } });
 void loadLimits();
+void loadMachine();
 void start();
 
 // Settings section nav: smooth-scroll to a section (no hash navigation) and highlight the section in view.

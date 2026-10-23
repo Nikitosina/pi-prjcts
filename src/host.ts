@@ -37,6 +37,7 @@ import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts"
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
 import { limitsSnapshot, startCursorLogin } from "./usage-limits.ts";
+import { machineStatus } from "./machine-status.ts";
 
 process.umask(0o077);
 process.env.PI_PROJECTS_HOST = "1";
@@ -666,6 +667,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "worker-contexts": return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot": return limitsSnapshot();
     case "limits-refresh": return limitsSnapshot(Date.now(), true);
+    case "machine-status": return machineStatus();
     case "cursor-connect": return startCursorLogin();
     case "thread-history": return (await durable(input.id)).threadHistory(input.threadId, input);
     case "thread-send": return withDurableOwner({ id: input.id, validate: project => {

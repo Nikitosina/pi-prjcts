@@ -297,6 +297,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("limits-snapshot") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("limits-refresh") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("machine-status") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("cursor-connect") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("message"), id: Id, text, chatId: Type.Optional(ChatId), requestId: Type.Optional(Id), attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),

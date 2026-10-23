@@ -234,8 +234,8 @@ try {
   // Limits bar (fixture data; the host never contacted a provider).
   await waitFor(`document.querySelectorAll('#limits-bar .lim').length === 3 && /42%/.test(document.querySelector('#limits-bar').innerText)`, s, 'limits bar');
   const bar = await evaluate(`Object.fromEntries([...document.querySelectorAll('#limits-bar .lim')].map(n => [n.dataset.provider, { text: n.innerText.replace(/\\s+/g, ' ').trim(), label: n.getAttribute('aria-label') }]))`, s);
-  if (!/Claude.*5h.*42%.*7d.*24%/.test(bar.claude.text) || /5h/.test(bar.codex.text) || !/Codex.*7d.*3%/.test(bar.codex.text) || !/Cursor.*—/.test(bar.cursor.text) || !/not connected/i.test(bar.cursor.label)) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
-  result.checks.push('B1 bottom bar: Claude 5h 42% / 7d 24%, Codex 7d 3% (no invented 5h), Cursor "—" and "Not connected"');
+  if (!/5h.*42%.*7d.*24%/.test(bar.claude.text) || !/^Claude: 5h/.test(bar.claude.label) || /5h/.test(bar.codex.text) || !/7d.*3%/.test(bar.codex.text) || !/^Codex: 7d/.test(bar.codex.label) || !/—/.test(bar.cursor.text) || !/^Cursor/.test(bar.cursor.label) || !/not connected/i.test(bar.cursor.label) || /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, '')) ) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
+  result.checks.push('B1 bottom bar: provider icons (names only in aria-label), Claude 5h 42% / 7d 24%, Codex 7d 3% (no invented 5h), Cursor "—" and "Not connected"');
   const at = await box('#limits-bar .lim[data-provider="claude"]', s);
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((at.left + at.right) / 2), y: Math.round((at.top + at.bottom) / 2) }, s);
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`, s, 'hover details');
@@ -248,13 +248,24 @@ try {
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`, s, 'cursor details');
   await shot('07-limits-bar-unavailable', s);
   // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
-  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b === document.querySelector('#limits-bar').lastElementChild }; })()`, s);
-  if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last) throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
+  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.dataset.provider === 'cursor', margin: getComputedStyle(b).marginLeft }; })()`, s);
+  if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last || refreshInfo.margin !== '0px') throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
   await shot('06b-limits-bar-refresh-icon', s);
+  await waitFor(`document.querySelectorAll('#limits-bar .mach-item').length >= 2`, s, 'machine status');
+  const mach = await evaluate(`[...document.querySelectorAll('#limits-bar .mach-item')].map(n => [n.dataset.kind, n.innerText.replace(/\\s+/g, ' ').trim()])`, s);
+  const machFormat = { ram: /^\d+\.\d GB \/ \d+\.\d GB|^—/, cpu: /^(\d+%|—)/, ssd: /^(\d+%|—)/, battery: /^(\d+%|—)/ };
+  if (!mach.every(([kind, text]) => machFormat[kind].test(text)) || !mach.some(([kind]) => kind === 'cpu')) throw Error('Machine status wrong: ' + JSON.stringify(mach));
+  if (!(await evaluate(`document.querySelector('#limits-bar .lim-refresh').nextElementSibling === document.querySelector('#limits-bar .mach')`, s))) throw Error('Machine status is not on the right after the refresh button');
+  result.checks.push('B2b machine status renders after the refresh button in the documented formats: ' + JSON.stringify(mach));
+  const cpuBox = await box('#limits-bar .mach-item[data-kind="cpu"]', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((cpuBox.left + cpuBox.right) / 2), y: Math.round((cpuBox.top + cpuBox.bottom) / 2) }, s);
+  await waitFor(`getComputedStyle(document.querySelector('.mach-item[data-kind="cpu"] .mach-tip')).visibility === 'visible'`, s, 'machine tooltip');
+  await shot('06c-machine-hover', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
   writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }] }));
   await click('#limits-bar .lim-refresh', s);
   await waitFor(`/61%/.test(document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText) && !document.querySelector('#limits-bar .lim-refresh').disabled`, s, 'refreshed numbers');
-  result.checks.push('B3 refresh icon: aria-label and tooltip, last in the bar; clicking refetches now (42% -> 61%) and re-enables the button');
+  result.checks.push('B3 refresh icon: aria-label and tooltip, directly after the last provider with no auto margin; clicking refetches now (42% -> 61%) and re-enables the button');
   writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [] }));
   await click('#limits-bar .lim-refresh', s); await new Promise(ok => setTimeout(ok, 800));
   if (!/61%/.test(await evaluate(`document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText`, s))) throw Error('Cooldown did not hold: second refresh inside 15 s refetched');
@@ -267,7 +278,7 @@ try {
   await waitFor(`window.__opened.length === 1`, s, 'login page opened');
   const login = new URL(await evaluate(`window.__opened[0]`, s));
   if (!login.pathname.endsWith('/loginDeepControl') || !login.searchParams.get('challenge') || !login.searchParams.get('uuid') || login.searchParams.get('verifier')) throw Error('Login URL wrong: ' + login);
-  await waitFor(`/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /61/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`, s, 'waiting state');
+  await waitFor(`/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /6\\d%/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`, s, 'waiting state');
   await waitFor(`/61\.?5?%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText) || /62%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText)`, s, 'Cursor usage after login');
   const poll = cursorSeen.polls.at(-1);
   if (createHash('sha256').update(poll.verifier).digest('base64url') !== login.searchParams.get('challenge') || poll.uuid !== login.searchParams.get('uuid')) throw Error('PKCE verifier does not match the challenge: ' + JSON.stringify(poll));
@@ -290,8 +301,8 @@ try {
   await send('Page.navigate', { url: launch.toString() }, s);
   await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 3`, s, 'narrow load');
   await delay(500);
-  const narrow = await evaluate(`({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0 })`, s);
-  if (narrow.width > 391 || !narrow.bar) throw Error('Narrow view broken: ' + JSON.stringify(narrow));
+  const narrow = await evaluate(`({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0, barOverflow: document.querySelector('#limits-bar').scrollWidth > document.querySelector('#limits-bar').clientWidth })`, s);
+  if (narrow.width > 391 || !narrow.bar || narrow.barOverflow) throw Error('Narrow view broken: ' + JSON.stringify(narrow));
   result.checks.push('N1 390px: no horizontal overflow, chat dots and the limits bar present');
   await shot('08-narrow-390', s);
   await click('#activity .worker-line', s);
