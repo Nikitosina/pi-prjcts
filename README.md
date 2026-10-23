@@ -136,7 +136,7 @@ CLI creation trusts the named workspace's Pi resources and creates a Durable coo
 
 ## Durable controls
 
-Durable uses the official owned Harness, persistent UUID threads, scoped workspaces and fixed command profiles. Missing workspace/tool access remains a blocker. Worker execution requires explicit grants; the coordinator does not receive a shell. `COMMANDS.md` and `GITHUB-LOCAL.md` describe command/publication limits.
+Durable uses the official owned Harness, persistent UUID threads, scoped workspaces and fixed command profiles. Missing workspace/tool access remains a blocker. Worker execution requires explicit grants; the coordinator does not receive a shell. It does get `projects_gh`: the owner's `gh` login with no command restrictions (merge, close, delete, settings; argv only, no shell, logged to `gh-calls.jsonl`), on by default and switched off with Settings → Access → "Coordinator GitHub CLI (gh)" (`githubCli: "none"`). `COMMANDS.md` and `GITHUB-LOCAL.md` describe command/publication limits.
 
 Use confirmed `settings-update` or browser settings rather than editing state or stopping production. Coordinator models can be cycled from the composer through the project's scoped list, inherited from Pi's `enabledModels` unless overridden. Worker, scout and reviewer selections default to inheriting the coordinator model when a new thread is admitted; explicit role selections override inheritance. Existing worker threads retain their frozen model and instructions. Coordinator models can change while chats are working: in-flight requests keep their model and subsequent requests use the new selection. Running workers are not interrupted. Configured credentials do not prove connectivity.
 
