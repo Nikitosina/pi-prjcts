@@ -133,6 +133,7 @@ async function start() {
     const loaded = await api({ action: "list" });
     if (current !== generation) return;
     projects = loaded;
+    for (const project of loaded) if (seenAt(project.id, PROJECT_SEEN) === null) markSeen(project.id, PROJECT_SEEN);
     renderProjects();
     if (!projects.some(p => p.id === projectId)) {
       // A legacy (pre-Durable) project is not listed; say why instead of silently opening another one.
@@ -172,7 +173,8 @@ async function refresh() {
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection"); connection.textContent = next.busy ? "Coordinating" : "Connected"; connection.dataset.state = "up"; connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
-    if (Date.now() - projectListAt > 10000) void reloadProjects();
+    // Leaving a project re-reads the list at once, so the row of the one you left shows its live state, not the list from before.
+    if (Date.now() - projectListAt > 10000 || listedFor !== projectId) void reloadProjects();
     ensureLive();
     ensureChanges();
     if (pendingWorker && plan) {
@@ -382,6 +384,7 @@ const latestFinish = chat => Math.max(chat.finishedAt ?? 0, ...chatWork(chat).fi
 // First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its dot.
 function syncSeen() {
   if (!view?.chats || !plan) return;
+  markSeen(projectId, PROJECT_SEEN);
   for (const chat of view.chats) {
     const seen = seenAt(projectId, chat.id);
     if (seen === null || chat.id === chatId && latestFinish(chat) > seen) markSeen(projectId, chat.id);
@@ -400,23 +403,40 @@ function chatState(chat) {
   return { state: "idle", label: "Idle" };
 }
 const stateDot = (state, label, className) => `<span class="${className}" data-state="${state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
-// The open project folds its chats and pending approvals; other projects only have the host's on-disk notice (unanswered questions, or the last saved phase), so they never show done.
+// The open project folds its chats and pending approvals. Every other project comes from the host's list: unanswered questions and its live activity
+// (turn or workers running, failure or blocked worker, last finish), so a project keeps showing its own state after you leave it.
+const PROJECT_SEEN = "__project";
 function projectState(project) {
   if (project.id !== projectId || !view?.chats) {
-    const questions = project.notice?.questions ?? 0;
-    return questions || project.phase === "attention" ? { state: "needs", label: questions ? `Needs you: ${plural(questions, "unanswered question")}` : "Needs you: a chat failed" } : project.phase === "busy" ? { state: "working", label: "Working" } : { state: "idle", label: "Idle" };
+    const questions = project.notice?.questions ?? 0, activity = project.activity;
+    if (questions || project.phase === "attention" || activity?.needs) return { state: "needs", label: questions ? `Needs you: ${plural(questions, "unanswered question")}` : activity?.needs ? "Needs you: a chat failed or a worker is blocked" : "Needs you: a chat failed" };
+    if (activity ? activity.working : project.phase === "busy") return { state: "working", label: "Working" };
+    const seen = seenAt(project.id, PROJECT_SEEN);
+    if (activity && seen !== null && activity.finishedAt > seen) return { state: "done", label: "Done, not yet checked" };
+    return { state: "idle", label: "Idle" };
   }
   const states = view.chats.filter(chat => !chat.archived).map(chat => chatState(chat));
   const approvals = approvalPage?.total ?? 0;
   if (approvals) return { state: "needs", label: `Needs you: ${plural(approvals, "pending approval")}${states.some(item => item.state === "needs") ? " and chats" : ""}` };
   return states.toSorted((a, b) => STATE_PRIORITY.indexOf(a.state) - STATE_PRIORITY.indexOf(b.state))[0] ?? { state: "idle", label: "Idle" };
 }
-let projectListAt = 0;
+let projectListAt = 0, listedFor = null;
 async function reloadProjects() {
-  projectListAt = Date.now();
+  projectListAt = Date.now(); listedFor = projectId;
   const loaded = await api({ action: "list" }).catch(() => null);
-  if (Array.isArray(loaded)) { projects = loaded; renderProjects(); }
+  if (Array.isArray(loaded)) {
+    projects = loaded;
+    // First sight of a project starts its clock, like chats: older finishes never light up.
+    for (const project of loaded) if (seenAt(project.id, PROJECT_SEEN) === null) markSeen(project.id, PROJECT_SEEN);
+    renderProjects();
+  }
 }
+// Rows of other projects only change on the host's list, so while one of them is working the list is re-read every 5 s (else every 15 s); only while the tab is visible.
+setInterval(() => {
+  if (document.hidden) return;
+  const otherWorking = projects.some(project => project.id !== projectId && project.activity?.working);
+  if (Date.now() - projectListAt > (otherWorking ? 4500 : 14500)) void reloadProjects();
+}, 5000);
 function renderProjects() {
   const node = document.querySelector("#projects");
   node.innerHTML = projects.length ? projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("") : '<option value="">No projects yet</option>';

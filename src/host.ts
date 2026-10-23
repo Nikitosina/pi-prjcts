@@ -23,7 +23,7 @@ import { startNotifier } from "./notify.ts";
 import { startTelegram } from "./telegram.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
-import { openDurableHost, durableHostSnapshot } from "./durable-host.ts";
+import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
 import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace, quickWorkspacePreview, workspaceAuthorizationRevision, workspaceRepositoryFingerprint } from "./workspace-authorization.ts";
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
@@ -208,6 +208,19 @@ function dispatch(input: RequestData): Promise<unknown> {
   return operation;
 }
 
+// Live activity per project for the sidebar. Only runtimes that are already open are asked (a closed project has nothing running), and a result is reused for 1.5 s.
+const activityCache = new Map<string, { at: number; value: Promise<ProjectActivity> }>();
+const IDLE_ACTIVITY: ProjectActivity = { working: false, needs: false, finishedAt: 0 };
+async function projectActivity(id: string): Promise<ProjectActivity> {
+  const opening = durableRuntimes.get(id);
+  if (!opening || closing || lifecycleChanging.has(id) || settingsUpdating.has(id) || ownerCloseFailed.has(id)) return IDLE_ACTIVITY;
+  const cached = activityCache.get(id);
+  if (cached && Date.now() - cached.at < 1500) return cached.value;
+  const value = Promise.race([opening.then(owner => durableHostActivity(owner, id)), new Promise<ProjectActivity>(done => setTimeout(() => done(IDLE_ACTIVITY), 2000).unref())]).catch(() => IDLE_ACTIVITY);
+  activityCache.set(id, { at: Date.now(), value });
+  return value;
+}
+
 async function dispatchRequest(input: RequestData): Promise<unknown> {
   if (closing) throw new Error("Host is stopping");
   switch (input.action) {
@@ -237,11 +250,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return entry;
     }
     // `notice` is read from disk only (no runtime is opened per project): unanswered questions in the inbox.
-    case "list": return listProjects().filter(project => !project.deleted).map(project => {
+    case "list": return Promise.all(listProjects().filter(project => !project.deleted).map(async project => {
       let questions = 0;
       try { questions = inbox(projectDir(project.id)).filter(item => item.kind === "question" && !item.result).length; } catch {}
-      return { ...project, notice: { questions } };
-    });
+      return { ...project, notice: { questions }, activity: await projectActivity(project.id) };
+    }));
     case "create": {
       if (!isAbsolute(input.cwd)) throw new Error("Workspace path must be absolute");
       const cwd = await realpath(input.cwd);

@@ -19,6 +19,7 @@ const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
 let releaseHold; const hold = new Promise(ok => { releaseHold = ok; });
+let releaseHold2; const hold2 = new Promise(ok => { releaseHold2 = ok; });
 const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 const call = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, null) + chunk({}, 'tool_calls') + 'data: [DONE]\n\n';
 const say = text => chunk({ role: 'assistant', content: text }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n';
@@ -40,11 +41,13 @@ const model = createServer((req, res) => {
       if (marker === 'MARK-SCOUT' && stage === 0) return reply(call('projects_delegate', { role: 'scout', task: 'MARK-SCOUTTASK survey the UI files' }));
       if (marker === 'MARK-FAIL' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-FAILTASK will fail' }));
       if (marker === 'MARK-HOLD' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-HOLDTASK waits' }));
+      if (marker === 'MARK-HOLDTWO' && stage === 0) return reply(call('projects_delegate', { role: 'worker', task: 'MARK-HOLDTWOTASK waits' }));
       if (marker === 'MARK-BADTOOL' && stage === 0) return reply(call('projects_worker_read', { workId: randomUUID() }));
       return reply(say(`Answer ${marker}.`));
     }
     if (marker === 'MARK-SCOUTTASK') return reply(say('REPORT-BODY finding one\n\n1. **First** issue `web/app.js:1`\n\n2. Second issue\n\n3. Third issue'));
     if (marker === 'MARK-FAILTASK') { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Fake invalid request' } })); return; }
+    if (marker === 'MARK-HOLDTWOTASK') { await hold2; return reply(say('Hold two done')); }
     if (marker === 'MARK-HOLDTASK') { await hold; return reply(say('Hold done')); }
     return reply(say(`Worker ${marker}`));
   });
@@ -185,6 +188,26 @@ try {
   await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, 'switched project');
   await waitFor(`document.querySelector('.proj:not(.on) .state-dot')?.dataset.state === 'needs'`, s, 'list-summary dot on the other project');
   result.checks.push('S2 a project that is not open gets its dot from the list summary (no runtime opened)');
+  // Live state survives leaving a project: start work in Other Project (A), go back to Polish UI (B), A keeps pulsing, then turns green when it finishes, or red when a turn fails.
+  const rowOf = `.proj[data-select-project="${other.id}"] .state-dot`;
+  await rpc({ action: 'message', id: other.id, text: 'MARK-HOLDTWO' });
+  await eventually(async () => (await rpc({ action: 'plan-snapshot', id: other.id })).work.find(w => w.text.startsWith('MARK-HOLDTWOTASK'))?.status === 'running', 'second hold not running');
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'working'`, s, 'A working while open');
+  await click(`.proj[data-select-project="${id}"]`, s);
+  await waitFor(`document.querySelector('#title').innerText === 'Polish UI'`, s, 'switched to B');
+  await delay(1500);
+  const left = await evaluate(`(() => { const d = document.querySelector('${rowOf}'); return { state: d?.dataset.state, label: d?.getAttribute('aria-label'), pulse: d && getComputedStyle(d).animationName }; })()`, s);
+  if (left.state !== 'working' || left.pulse !== 'live-pulse' || !/^Working/.test(left.label)) throw Error('Row of the project left behind lost its working state: ' + JSON.stringify(left));
+  await shot('02b-other-project-working-while-away', s);
+  result.checks.push('S2b a project you left keeps its own pulsing working dot while another project is open');
+  releaseHold2();
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'done'`, s, 'A turns green after finishing while B is open');
+  result.checks.push('S2c ...and turns green (done, not yet checked) when its work finishes while you are elsewhere');
+  await rpc({ action: 'message', id: other.id, text: 'MARK-COORDFAIL' });
+  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'needs'`, s, 'A turns red after a failed turn while B is open');
+  result.checks.push('S2d ...and turns red when a coordinator turn fails while you are elsewhere');
+  await click(`.proj[data-select-project="${other.id}"]`, s);
+  await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, 'back on A');
   await click('.proj:not(.on)', s);
   await waitFor(`document.querySelector('#title').innerText === 'Polish UI' && document.querySelectorAll('#chat-list .chat').length === 4`, s, 'back on first project');
   await click('#side-toggle', s); await delay(500);
