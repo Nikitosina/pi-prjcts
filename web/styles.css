@@ -1110,3 +1110,13 @@ a.button-link:hover { background: var(--hover); }
 @media (max-width: 560px) { .mach { display: none; } }
 /* Phone width: collapse the mini progress bars (percentages stay) so providers and refresh fit without scrolling. */
 @media (max-width: 560px) { .limits-bar { padding: 0 6px; gap: 0; } .lim { gap: 4px; padding: 2px 4px; } .lim-win { gap: 3px; } .limits-bar > .lim > .lim-win > .lim-bar { width: 0; } }
+
+/* Chat image viewer. */
+#lightbox { position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; height: 100dvh; max-height: none; border: 0; border-radius: 0; background: #000c; box-shadow: none; padding: 0; overflow: hidden; }
+#lightbox[open] { display: flex; align-items: center; justify-content: center; }
+#lightbox::backdrop { background: transparent; }
+#lightbox figure { position: relative; margin: 0; max-width: 90vw; max-height: 90vh; max-height: 90dvh; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+#lightbox img { display: block; max-width: 90vw; max-height: calc(90dvh - 40px); width: auto; height: auto; object-fit: contain; background: var(--doc); border-radius: 4px; }
+#lightbox figcaption { color: #fff; font-size: 13px; text-align: center; max-width: 90vw; overflow-wrap: anywhere; }
+.lightbox-x { position: fixed; top: 12px; right: 12px; z-index: 1; font-size: 16px; line-height: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #fff6; background: #000a; color: #fff; cursor: pointer; }
+.msg .text img { cursor: pointer; }

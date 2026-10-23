@@ -2093,10 +2093,24 @@ function hydrateArtifacts(root = document) {
   }
 }
 new MutationObserver(() => hydrateArtifacts()).observe(document.body, { childList: true, subtree: true });
+// Images inside chat messages open larger in #lightbox; chrome images (status icons, logos, avatars) are not under .msg.
+const lightbox = document.querySelector("#lightbox"), lightboxImg = lightbox.querySelector("img"), lightboxCaption = lightbox.querySelector("figcaption");
+let lightboxOpener = null;
+document.addEventListener("click", event => {
+  const img = event.target.closest?.(".msg .text img");
+  if (!img || !img.currentSrc) return;
+  event.preventDefault();
+  lightboxOpener = img; img.tabIndex = -1;
+  lightboxImg.src = img.currentSrc; lightboxImg.alt = img.alt;
+  lightboxCaption.textContent = img.alt; lightboxCaption.hidden = !img.alt;
+  lightbox.showModal(); lightbox.querySelector(".lightbox-x").focus();
+});
+lightbox.addEventListener("click", event => { if (event.target === lightbox || event.target.closest(".lightbox-x") || event.target.tagName === "FIGURE") lightbox.close(); });
+lightbox.addEventListener("close", () => { lightboxImg.removeAttribute("src"); const back = lightboxOpener?.isConnected ? lightboxOpener : lightboxOpener && [...document.querySelectorAll(".msg .text img")].find(img => img.src === lightboxOpener.src); if (back) { back.tabIndex = -1; back.focus(); } lightboxOpener = null; });
 document.addEventListener("click", event => {
   // In a worker chat, artifact links and images reveal the file in the browser column instead of downloading.
   const ref = event.target.closest?.("#worker-messages .artifact-ref:not([data-state=missing])");
-  if (ref && workerChat?.threadId === ref.dataset.artifactThread && !event.target.closest("video")) { event.preventDefault(); void selectArtifact(ref.dataset.artifactPath); return; }
+  if (ref && workerChat?.threadId === ref.dataset.artifactThread && !event.target.closest("video, img")) { event.preventDefault(); void selectArtifact(ref.dataset.artifactPath); return; }
   const link = event.target.closest?.(".artifact-ref[data-state=link] .artifact-link");
   if (!link) return;
   event.preventDefault();
@@ -2941,7 +2955,7 @@ document.addEventListener("keydown", event => {
     return;
   }
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "b" && !event.isComposing && !dialog.open) { event.preventDefault(); setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); return; }
-  if (event.key === "Escape" && workerChat && !dialog.open && !refMenu && !document.querySelector(".mp.open") && !event.isComposing) { event.preventDefault(); document.querySelector('#inline-thread [data-action="thread-close"]')?.click(); return; }
+  if (event.key === "Escape" && workerChat && !dialog.open && !lightbox.open && !refMenu && !document.querySelector(".mp.open") && !event.isComposing) { event.preventDefault(); document.querySelector('#inline-thread [data-action="thread-close"]')?.click(); return; }
   if (refMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = refMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if (count) { refMenu.index = (refMenu.index + (event.key === "ArrowDown" ? 1 : count - 1)) % count; renderRefMenu(); } return; }

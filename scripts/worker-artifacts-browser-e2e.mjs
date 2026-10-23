@@ -171,9 +171,30 @@ try {
   await evaluate(`[...document.querySelectorAll('#worker-messages .artifact-ref a')].find(a => a.textContent === 'deep').click()`, s);
   await waitFor(`document.querySelector('#artifact-tree .artifact-file.on')?.dataset.path === 'a/b/c/deep.txt' && document.querySelector('#artifact-body pre')?.innerText === 'deep file'`, s, 'chat link selects file');
   check('F10 clicking an artifact link in the chat selects that file in the browser', true);
-  await evaluate(`document.querySelector('#worker-messages img.artifact-media').click()`, s);
-  await waitFor(`document.querySelector('#artifact-tree .artifact-file.on')?.dataset.path === 'shot.png'`, s, 'chat image selects file');
-  check('F10 clicking the inline image selects it too', true);
+  // Image viewer: a chat image opens #lightbox (no longer selects the file); images outside messages do nothing.
+  const lb = `document.querySelector('#lightbox')`, chatImg = `document.querySelector('#worker-messages img.artifact-media')`;
+  const lbState = () => evaluate(`(() => { const d = ${lb}, i = d.querySelector('img'), r = i.getBoundingClientRect(); return { open: d.open, role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'), label: d.getAttribute('aria-label'), same: i.src === ${chatImg}.src, caption: d.querySelector('figcaption').textContent, inside: d.contains(document.activeElement), fits: r.width > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight, overflowX: document.documentElement.scrollWidth > innerWidth }; })()`, s);
+  const press = async key => { for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key, code: key, windowsVirtualKeyCode: 27 }, s); };
+  await evaluate(`${chatImg}.click()`, s);
+  const opened = await lbState();
+  check('V1 clicking a chat image opens a labelled modal dialog with that image and its alt text, focus inside', opened.open && opened.role === 'dialog' && opened.modal === 'true' && !!opened.label && opened.same && opened.caption === 'Screenshot' && opened.inside && opened.fits, opened);
+  await delay(200); await shot('05-lightbox-1440', s);
+  await evaluate(`${lb}.querySelector('img').click()`, s);
+  check('V2 clicking the image itself keeps the dialog open', (await lbState()).open);
+  await press('Escape');
+  await waitFor(`!${lb}.open`, s, 'Escape closes the viewer');
+  await waitFor(`document.activeElement === ${chatImg}`, s, 'focus returns to the clicked image');
+  check('V3 Escape closes it and focus returns to the clicked image', true);
+  await evaluate(`${chatImg}.click()`, s);
+  await evaluate(`${lb}.querySelector('.lightbox-x').click()`, s);
+  check('V4 the close button closes it', !(await lbState()).open);
+  await evaluate(`${chatImg}.click()`, s);
+  await evaluate(`${lb}.dispatchEvent(new MouseEvent('click', { bubbles: true }))`, s);
+  check('V5 a backdrop click closes it', !(await lbState()).open);
+  await evaluate(`(() => { const i = document.createElement('img'); i.id = 'chrome-img'; i.src = ${chatImg}.src; document.querySelector('.app').append(i); i.click(); })()`, s);
+  check('V6 an image outside chat messages does not open it', !(await lbState()).open && await evaluate(`document.querySelector('#chrome-img').remove(), true`, s));
+  await evaluate(`[...document.querySelectorAll('#worker-messages .artifact-ref a')].find(a => a.textContent === 'deep').click()`, s);
+  await waitFor(`document.querySelector('#artifact-tree .artifact-file.on')?.dataset.path === 'a/b/c/deep.txt'`, s, 'link still selects a file');
   await shot('03-three-columns', s);
 
   await click(`[data-action="thread"][data-thread="${threadB}"]`, s);
@@ -192,6 +213,11 @@ try {
   await delay(400);
   check('F13 390px: the worker view fits the screen with the file list', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1 && document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s));
   await shot('04-mobile-worker-view', s);
+  await evaluate(`${chatImg}.click()`, s);
+  const narrow = await lbState();
+  check('V7 390px: the open viewer fits the screen with no horizontal overflow', narrow.open && narrow.fits && !narrow.overflowX, narrow);
+  await delay(200); await shot('06-lightbox-390', s);
+  await evaluate(`${lb}.close()`, s);
   check('F15 no browser console or HTTP errors', result.errors.length === 0 && result.httpErrors.length === 0, { errors: result.errors, http: result.httpErrors });
   result.status = 'passed';
 } catch (error) {
