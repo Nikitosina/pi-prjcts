@@ -1,0 +1,134 @@
+{
+  "_doc": "Used by scripts/check-fast.mjs. `all`: changed files matching these globs run every script. `smoke`: always run (the CI scripts). `map`: changed-file glob -> script names/globs. `browser`: files that every browser script exercises. Besides `map`, a changed src/<module>.ts also selects every script whose source or name mentions <module>. `knownFailing`: scripts that already fail on main; the runner reports them as KNOWN-FAIL and does not fail on them (durable-project-*-tdd need reviewed Node launch flags and fail with LAUNCH_FLAGS_UNREVIEWED when started plainly).",
+  "all": [
+    "scripts/lib/**",
+    "scripts/notify-kit.mjs",
+    "scripts/run-e2e.mjs",
+    "scripts/check-fast.mjs",
+    "scripts/e2e-manifest.json",
+    "scripts/fake-*.mjs",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "src/host.ts",
+    "src/state.ts",
+    "src/http.ts",
+    "src/client.ts",
+    "src/cli.ts",
+    "src/durable-runtime.ts",
+    "src/durable-host.ts",
+    "src/index.ts"
+  ],
+  "smoke": [
+    "durable-runtime",
+    "durable-knowledge",
+    "coordinator-efficiency",
+    "quota-status",
+    "coordinator-gh",
+    "machine-status-unit",
+    "usage-limits-recovery-unit"
+  ],
+  "browser": [
+    "web/**"
+  ],
+  "map": {
+    "src/web.ts": [
+      "*-ui-e2e",
+      "chat-*",
+      "settings-*",
+      "theme-e2e",
+      "search-ui-e2e"
+    ],
+    "src/notify.ts": [
+      "browser-notify-e2e",
+      "telegram-e2e"
+    ],
+    "src/web-push.ts": [
+      "browser-notify-e2e"
+    ],
+    "src/telegram*.ts": [
+      "telegram-e2e"
+    ],
+    "src/usage-limits.ts": [
+      "usage-limits-unit",
+      "usage-limits-recovery-unit",
+      "quota-status-e2e",
+      "status-dots-e2e"
+    ],
+    "src/coordinator-gh.ts": [
+      "coordinator-gh*"
+    ],
+    "src/mcp-*.ts": [
+      "mcp-e2e"
+    ],
+    "src/plugins.ts": [
+      "vcs-plugins-e2e",
+      "provider-extensions-e2e"
+    ],
+    "src/plugin-types.ts": [
+      "vcs-plugins-e2e",
+      "provider-extensions-e2e"
+    ],
+    "src/provider-extensions.ts": [
+      "provider-extensions-e2e"
+    ],
+    "src/skill-profiles.ts": [
+      "skill-profiles-e2e",
+      "coordinator-github-skills-e2e"
+    ],
+    "src/worker-skill-*.ts": [
+      "skill-profiles-e2e",
+      "coordinator-github-skills-e2e"
+    ],
+    "src/durable-*.ts": [
+      "durable-runtime-e2e",
+      "durable-threads-e2e"
+    ],
+    "src/github-*.ts": [
+      "github-*",
+      "follow-prs-e2e",
+      "durable-project-github-*"
+    ],
+    "src/pr-*.ts": [
+      "github-pr-watch-e2e",
+      "follow-prs-e2e",
+      "auto-merge-e2e"
+    ],
+    "src/workspace-*.ts": [
+      "workspace-*",
+      "durable-workspace-*"
+    ],
+    "src/worktree-*.ts": [
+      "worktree-lifecycle-e2e",
+      "workspace-*"
+    ],
+    "plugins/**": [
+      "vcs-plugins-e2e"
+    ],
+    "docs/**": [],
+    "*.md": [],
+    "src/machine-status.ts": [
+      "machine-status-unit",
+      "status-dots-e2e"
+    ]
+  },
+  "knownFailing": [
+    "artifacts-e2e",
+    "context-settings-e2e",
+    "coordinator-efficiency-e2e",
+    "coordinator-github-skills-e2e",
+    "delegate-defaults-e2e",
+    "durable-local-schedule-host-positive-e2e",
+    "durable-project-*",
+    "github-pr-watch-e2e",
+    "github-quick-e2e",
+    "inline-refs-e2e",
+    "legacy-removal-e2e",
+    "scoped-models-e2e",
+    "settings-dialogs-e2e",
+    "setup-e2e",
+    "uploads-search-e2e",
+    "vcs-plugins-e2e",
+    "workspace-quick-grant-ui-e2e"
+  ]
+}

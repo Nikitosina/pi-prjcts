@@ -97,7 +97,7 @@ function rpc(input) {
   });
 }
 async function eventually(fn, description, tries = 600) {
-  for (let i = 0; i < tries; i++) { const value = await fn(); if (value) return value; await delay(100); }
+  for (let i = 0; i < tries * 2; i++) { const value = await fn(); if (value) return value; await delay(50); }
   throw Error(description);
 }
 const waitHost = () => eventually(async () => { if (hostEnded) throw Error('Host exited'); try { return (await rpc()).pid === host.pid; } catch { return false; } }, 'Owned host did not start');
@@ -129,9 +129,9 @@ function send(method, params = {}, sessionId) {
   });
 }
 async function evaluate(expression, session) { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, session); if (r.exceptionDetails) throw Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description ?? '')); return r.result.value; }
-async function shot(name, session) { const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
+async function shot(name, session) { if (process.env.E2E_SHOTS !== '1') return; const image = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, session); writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, 'base64'), { mode: 0o600 }); }
 async function waitFor(expression, session, label, tries = 240) {
-  for (let i = 0; i < tries; i++) { if (await evaluate(expression, session)) return; await delay(250); }
+  for (let i = 0; i < tries * 2.5; i++) { if (await evaluate(expression, session).catch(error => { if (i > 100) throw error; return false; })) return; await delay(100); }
   throw Error(`Timed out waiting for ${label}`);
 }
 
@@ -188,6 +188,7 @@ try {
   check('Q11 the coordinator system prompt carries the repository AGENTS.md', sys.includes('REPO-RULE-ALPHA') && sys.includes('Repository instructions'), sys.slice(0, 300));
   check('Q16 plan-first prompting: decompose up front, prefer follow-ups, no micro-delegation, report only at the end', /Plan first/.test(sys) && /Prefer continuing an existing thread/.test(sys) && /Do not micro-delegate/.test(sys) && /Report to the owner only at the end/.test(sys) && !/Summarize each result for the user/.test(sys));
 
+  await eventually(async () => (await rpc({ action: 'notify-feed', after: 0 })).items.filter(item => item.projectId === id).slice(feedBefore).some(item => item.kind === 'result'), 'no result notice reached the feed', 300); // the notice scan runs on a tick; a loaded machine can be late
   const feed = (await rpc({ action: 'notify-feed', after: 0 })).items.filter(item => item.projectId === id).slice(feedBefore);
   const finished = feed.filter(item => item.kind === 'result');
   result.feed = feed.map(item => [item.kind, item.text.slice(0, 60)]);
@@ -239,7 +240,7 @@ try {
   result.status = 'failed'; result.failure = redact(error?.stack ?? error);
 } finally {
   releaseChildren();
-  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} await delay(500); if (!cdpEnded) chrome.kill('SIGTERM'); }
+  if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20); if (!cdpEnded) chrome.kill('SIGTERM'); }
   await stopHost().catch(() => host.kill('SIGKILL'));
   model.closeAllConnections(); model.close(); save();
 }

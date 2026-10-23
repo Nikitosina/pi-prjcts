@@ -11,7 +11,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { workspaceIsolation } from "../src/workspace-isolation.ts";
 
 const id = randomUUID(), stamp = new Date().toISOString().replaceAll(":", "-");
-const evidence = join("/Users/nikitarat/.pi/agent/projects-mvp/artifacts", `workspace-allocation-${stamp}-${id}`); mkdirSync(evidence, { recursive: true, mode: 0o700 });
+const evidence = join(join(process.cwd(), "artifacts"), `workspace-allocation-${stamp}-${id}`); mkdirSync(evidence, { recursive: true, mode: 0o700 });
 const report = { failuresRecordedBeforeEffects: ["effect before receipt", "dirty/foreign/active cleanup", "provider/scope mismatch", "shared object store and lease drift (provider plugins test their own backends)"], checks: [], receipts: [], commands: [] };
 const run = (file, args, cwd) => { report.commands.push({ file, args, cwd }); return execFileSync(file, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); };
 const check = (value, message) => { report.checks.push({ value, message }); if (!value) throw Error(message); };

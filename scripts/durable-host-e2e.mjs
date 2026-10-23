@@ -25,7 +25,9 @@ try {
   assert.ok(Date.now() - started < 10000); pass('Host message admits without waiting for a model');
   const before = await until(project.id, view => view.jobs.some(item => item.id === job.id && item.state === 'done'));
   assert.ok(before.messages.some(message => message.text.includes('HOST_READY'))); pass('Existing client snapshot shows the model answer');
-  await request({ action: 'shutdown' }, false); await sleep(1500); pid = undefined;
+  await request({ action: 'shutdown' }, false);
+  for (let i = 0; i < 300; i++) { const gone = await health().then(h => h.pid !== pid, () => true); if (gone) break; await sleep(25); }
+  pid = undefined;
   await ensureHost(); pid = (await health()).pid;
   const after = await request({ action: 'show', id: project.id });
   assert.ok(after.messages.some(message => message.text.includes('HOST_READY'))); assert.equal(after.project.id, project.id); pass('Host restart preserves project and conversation');

@@ -131,7 +131,7 @@ async function main() {
     const address=new URL(launch.reply.data.url);address.searchParams.set('project',project.id);
     await openBrowser(address.href);
     await until(Math.min(testEnd,Date.now()+15000),()=>evaluate('document.querySelector("#connection").textContent.startsWith("Connected")'),'BROWSER_READY');
-    saveBytes('browser-ready.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
+    if(process.env.E2E_SHOTS==='1') saveBytes('browser-ready.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
     need(await evaluate('Boolean(document.querySelector("#project-pause"))'),'behavior','BROWSER_PAUSE_CONTROL_MISSING','Browser must offer a real project pause control');
     await evaluate('(()=>{const n=document.querySelector("#compose textarea");n.value="Retain this owned draft through pause";n.dispatchEvent(new Event("input",{bubbles:true}));})()');
     await click('#project-pause');
@@ -143,7 +143,7 @@ async function main() {
     const ui=await evaluate('({state:document.querySelector("#lifecycle-state").textContent,draft:document.querySelector("#compose textarea").value,textareaDisabled:document.querySelector("#compose textarea").disabled,sendDisabled:document.querySelector("#compose button").disabled,hashCleared:location.hash===""})');
     const final=await show(project.id);
     need(ui.state==='Paused' && ui.draft==='Retain this owned draft through pause' && ui.textareaDisabled && ui.sendDisabled && ui.hashCleared && final.paused===true && final.jobs.length===0 && final.durableInspection.coordinator.generationTasks.length===0,'behavior','BROWSER_PAUSE_STATE','Confirmed pause must show real paused state, retain draft, disable admission and create no model work');
-    saveBytes('browser-resumed.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
+    if(process.env.E2E_SHOTS==='1') saveBytes('browser-resumed.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
     need(await evaluate('Boolean(document.querySelector("#project-resume"))'),'behavior','BROWSER_RESUME_CONTROL_MISSING','Browser must expose explicit confirmed recovery');
     await click('#project-resume');await click('#dialog [data-action="close-dialog"]');
     need((await show(project.id)).paused===true,'behavior','BROWSER_RESUME_CANCEL_MUTATED','Cancel resume keeps pause');
@@ -159,7 +159,7 @@ async function main() {
     const resumedUi=await evaluate('({state:document.querySelector("#lifecycle-state").textContent,draft:document.querySelector("#compose textarea").value,textareaDisabled:document.querySelector("#compose textarea").disabled,sendDisabled:document.querySelector("#compose button").disabled})');
     const resumed=await show(project.id);const resumeRequests=browserRequests.filter(item=>item.action==='resume');
     need(resumed.paused===false && resumed.jobs.length===0 && resumed.durableInspection.coordinator.generationTasks.length===0 && resumedUi.state==='Ready' && !resumedUi.textareaDisabled && !resumedUi.sendDisabled && resumedUi.draft===ui.draft && resumeRequests.length===1 && resumeRequests[0].id===project.id && resumeRequests[0].confirm===project.id && resumeRequests[0].recovery==='leave-interrupted','behavior','BROWSER_RESUME_FORWARDING','Explicit confirmed policy must reach host once, unblock messaging and keep draft with no model work');
-    saveBytes('browser-resumed.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
+    if(process.env.E2E_SHOTS==='1') saveBytes('browser-resumed.png',Buffer.from((await cdp('Page.captureScreenshot',{format:'png'})).data,'base64'));
     receipts.behavior={pausedUi:ui,resumedUi,projectId:project.id,paused:resumed.paused,jobCount:resumed.jobs.length,generationCount:resumed.durableInspection.coordinator.generationTasks.length,resumeRequests};
     receipts.browserRequests=browserRequests;
 

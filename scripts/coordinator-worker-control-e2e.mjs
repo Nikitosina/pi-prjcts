@@ -62,7 +62,7 @@ function rpc(input) {
   });
 }
 async function eventually(fn, description) {
-  for (let i = 0; i < 200; i++) { const value = await fn(); if (value) return value; await delay(100); }
+  for (let i = 0; i < 200 * 2; i++) { const value = await fn(); if (value) return value; await delay(50); }
   throw Error(description);
 }
 async function start() {

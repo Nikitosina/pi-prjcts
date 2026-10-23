@@ -109,6 +109,7 @@ try {
   await evaluate(`document.querySelector('[data-action="telegram-pair"]').click()`, s);
   await waitFor(`/\\/pair \\d{6}/.test(document.querySelector('#telegram').innerText) && !document.querySelector('#telegram').innerText.includes('/pair ${code}')`, s, 'second pair code');
   code = /\/pair (\d{6})/.exec(await evaluate(`document.querySelector('#telegram').innerText`, s))[1];
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   await shot('01-settings-pairing', s);
   text(GROUP, `/pair ${code}`);
@@ -283,6 +284,7 @@ try {
   await waitFor(`!window.__old && document.readyState === 'complete' && !!document.querySelector('#telegram-token')`, s, 'card after restart');
   // The page left open across the restart polled the new host with its old token (401) until it was reopened with the new address.
   result.httpErrors = result.httpErrors.filter(e => e.status !== 401);
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   await shot('02-settings-paired', s);
   tg.revoked.add(TOKEN); wake();
@@ -307,6 +309,7 @@ try {
   await send('Page.navigate', { url: await settingsUrl(a) }, s);
   await waitFor(`!!document.querySelector('#telegram-token')`, s, 'mobile card');
   result.httpErrors = result.httpErrors.filter(e => e.status !== 401); // same restart window as above
+  await waitFor(`!!document.querySelector('#notify-card')`, s, '#notify-card');
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   if (!await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s)) throw Error('Telegram card overflows at 390px');
   await shot('03-settings-mobile', s);

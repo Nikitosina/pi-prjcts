@@ -97,7 +97,7 @@ function rpc(input) {
 const git = (...args) => execFileSync('/usr/bin/git', ['-C', workspace, ...args], { encoding: 'utf8' }).trim();
 const held = new Set();
 const check = (name, ok, detail) => { result.checks.push(`${ok ? 'PASS' : 'FAIL'} ${name}`); if (!ok) { result.errors.push({ name, detail }); } };
-const waitFor = async (fn, what, n = 200) => { for (let i = 0; i < n; i++) { const v = await fn(); if (v) return v; await delay(100); } throw Error(`Timed out: ${what}`); };
+const waitFor = async (fn, what, n = 200) => { for (let i = 0; i < n * 2; i++) { const v = await fn(); if (v) return v; await delay(50); } throw Error(`Timed out: ${what}`); };
 try {
   git('init', '-b', 'main'); git('config', 'user.email', 'e2e@example.invalid'); git('config', 'user.name', 'E2E');
   writeFileSync(join(workspace, 'README.md'), 'base\n'); git('add', '.'); git('commit', '-m', 'base');
