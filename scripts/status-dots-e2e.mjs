@@ -262,7 +262,7 @@ try {
   await waitFor(`getComputedStyle(document.querySelector('.mach-item[data-kind="cpu"] .mach-tip')).visibility === 'visible'`, s, 'machine tooltip');
   await shot('06c-machine-hover', s);
   const barBox = await box('#limits-bar', s);
-  const crop = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: barBox.top, width: 400, height: barBox.bottom - barBox.top, scale: 2 } }, s);
+  const crop = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: barBox.top, width: 480, height: barBox.bottom - barBox.top, scale: 2 } }, s);
   writeFileSync(join(artifacts, '06d-bar-left-closeup-2x.png'), Buffer.from(crop.data, 'base64'), { mode: 0o600 });
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
   writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }] }));
