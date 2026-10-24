@@ -185,7 +185,8 @@ export const DurableInspection = Type.Object({
 export type DurableInspection = Static<typeof DurableInspection>;
 export const Snapshot = Type.Object({
   project: Project, busy: Type.Boolean(), paused: Type.Optional(Type.Boolean()), jobs: Type.Array(Job),
-  messages: Type.Array(Type.Object({ role: Type.String(), /** Position in the full transcript (search jumps). */ index: Type.Optional(Type.Integer({ minimum: 0 })), at: Type.Number(), text: Type.String(), thinking: Type.Optional(Type.String({ maxLength: 300 })), kind: Type.Optional(Type.Literal("tool")), name: Type.Optional(Type.String()), argsPreview: Type.Optional(Type.String({ maxLength: 500 })), status: Type.Optional(Type.Union([Type.Literal("ok"), Type.Literal("error"), Type.Literal("pending")])), resultPreview: Type.Optional(Type.String({ maxLength: 500 })) })), 
+  messages: Type.Array(Type.Object({ role: Type.String(), /** Position in the full transcript (search jumps). */ index: Type.Optional(Type.Integer({ minimum: 0 })), at: Type.Number(), text: Type.String(), thinking: Type.Optional(Type.String({ maxLength: 300 })), kind: Type.Optional(Type.Union([Type.Literal("tool"), Type.Literal("compaction")])), name: Type.Optional(Type.String()), argsPreview: Type.Optional(Type.String({ maxLength: 500 })), status: Type.Optional(Type.Union([Type.Literal("ok"), Type.Literal("error"), Type.Literal("pending")])), resultPreview: Type.Optional(Type.String({ maxLength: 500 })) })), 
+  /** Stored conversational messages older than the window. */ earlier: Type.Optional(Type.Integer({ minimum: 0 })),
   inbox: Type.Array(InboxEntry), notes: Type.Array(Note), evidence: Type.Array(Evidence),
   durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(Type.Object({ tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) }, { additionalProperties: false })),
@@ -253,7 +254,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("show"), id: Id, chatId: Type.Optional(ChatId), /** Transcript index the window must include (search jump). */ focus: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })), /** Transcript index the window reaches back to (Show earlier messages). */ from: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000_000 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("search"), id: Id, query: Type.String({ minLength: 1, maxLength: 500 }), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("chat-create"), id: Id, title: Type.Optional(Type.String({ maxLength: 120 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("chat-update"), id: Id, chatId: ChatId, title: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })), archived: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),

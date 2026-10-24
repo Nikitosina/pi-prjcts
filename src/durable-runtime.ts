@@ -6,8 +6,8 @@ import { type ModelRuntime, calculateContextTokens, estimateTokens } from "@eare
 import type { Context as ModelRequest, Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
-  AssistantEntry, GenerationTask, Harness, ToolTask, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
-  type Conversation, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
+  AssistantEntry, CompactionEntry, GenerationTask, Harness, ToolTask, ResetEntry, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
+  type Conversation, type EntryRecord, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { createModelRuntime, observeProviderPrompt } from "./provider-extensions.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -119,7 +119,9 @@ export type DurableSubmissionState = {
 
 export type DurableCoordinatorMessage =
   | { id: number; role: "user" | "assistant"; at: number; text: string; /** Reasoning summary of an assistant step, bounded. */ thinking?: string }
-  | { id: number; kind: "tool"; name: string; argsPreview: string; status: "ok" | "error" | "pending"; resultPreview: string; at: number };
+  | { id: number; kind: "tool"; name: string; argsPreview: string; status: "ok" | "error" | "pending"; resultPreview: string; at: number }
+  /** Where a compaction summary was written; the stored messages around it stay in the transcript. */
+  | { id: number; kind: "compaction"; role?: undefined; at: number };
 
 export type DurableProjectSnapshot = {
   project: Project;
@@ -727,7 +729,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const read = async (conversation: Conversation | null | undefined): Promise<SearchMessage[]> => {
           if (!conversation) return [];
           const view = await conversation.viewState(context);
-          try { return omitIdleWatchdogTurns(coordinatorMessages(view.value.entries)).flatMap((message, index) => "kind" in message || !message.text.trim() ? [] : [{ index, role: message.role, at: message.at, text: message.text }]); }
+          try { return omitIdleWatchdogTurns<DurableCoordinatorMessage>(await chatTranscript(openedStorage, conversation, view.value.entries)).flatMap((message, index) => "kind" in message || !message.text.trim() ? [] : [{ index, role: message.role, at: message.at, text: message.text }]); }
           finally { view.dispose(); }
         };
         const work = (await planning.snapshot(root)).work;
@@ -1082,7 +1084,7 @@ async function snapshot(harness: Harness, storage: Storage, root: Conversation, 
     const admitted = await harness.snapshot(AdmittedInputs, chat.id, context);
     const ids = await coordinatorInputSubmissionIds(storage, chat, inspection, admitted?.ids ?? []);
     const submissions = await Promise.all(ids.map(id => projectSubmission(harness, chat, id)));
-    const messages = omitIdleWatchdogTurns(coordinatorMessages(view.value.entries));
+    const messages = omitIdleWatchdogTurns<DurableCoordinatorMessage>(await chatTranscript(storage, chat, view.value.entries));
     const generationTasks = await coordinatorGenerationTasks(storage, chat, inspection);
     const workers = await Promise.all(threads.map(async thread => {
       const child = await harness.conversation(thread.conversationId, context);
@@ -1269,12 +1271,37 @@ function generationEntryId(value: unknown): number {
   return value.entryId;
 }
 
-function coordinatorMessages(entries: readonly { id: number; model?: readonly { role: string; content: unknown; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean }[] }[]): DurableCoordinatorMessage[] {
+/**
+ * Every stored message of a chat since its last reset, oldest first, with a divider at each compaction. `active` (the Durable view) only starts at the
+ * newest compaction's first kept entry; the entries before it stay in storage, so the whole range is read from there. Entries up to the view's newest
+ * entry are immutable, so the result is reused until that entry changes.
+ */
+const transcriptCache = new WeakMap<Storage, Map<number, { tail: number; messages: DurableCoordinatorMessage[] }>>();
+async function chatTranscript(storage: Storage, chat: Conversation, active: readonly EntryRecord[]): Promise<DurableCoordinatorMessage[]> {
+  const newest = active.reduce<EntryRecord | undefined>((best, entry) => !best || Number(entry.id) > Number(best.id) ? entry : best, undefined);
+  if (!newest) return [];
+  const cache = transcriptCache.get(storage) ?? new Map<number, { tail: number; messages: DurableCoordinatorMessage[] }>();
+  transcriptCache.set(storage, cache);
+  const cached = cache.get(Number(chat.id));
+  if (cached?.tail === Number(newest.id)) return cached.messages;
+  const range: EntryRecord[] = [];
+  let cursor: Awaited<ReturnType<Storage["scanEntries"]>>["next"] | undefined;
+  scan: do {
+    const page = await storage.scanEntries({ conversationId: chat.id, maxEntryId: newest.id }, 256, cursor, context);
+    for (const entry of page.items) { range.push(entry); if (ResetEntry.is(entry)) break scan; }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  const messages = coordinatorMessages(range.reverse(), true);
+  cache.set(Number(chat.id), { tail: Number(newest.id), messages });
+  return messages;
+}
+
+function coordinatorMessages(entries: readonly { id: number; kind?: string; model?: readonly { role: string; content: unknown; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean }[] }[], markCompactions = false): DurableCoordinatorMessage[] {
   const results = new Map<string, { isError: boolean; preview: string; at: number }>();
   for (const entry of entries) for (const message of entry.model ?? []) {
     if (message.role === "toolResult" && message.toolCallId) results.set(message.toolCallId, { isError: message.isError === true, preview: boundedPreview(message.content), at: message.timestamp ?? 0 });
   }
-  return entries.flatMap(entry => entry.model?.flatMap(message => {
+  return entries.flatMap(entry => markCompactions && CompactionEntry.is(entry as never) ? [{ id: Number(entry.id), kind: "compaction" as const, at: entry.model?.[0]?.timestamp ?? 0 }] : entry.model?.flatMap(message => {
     if (message.role === "user" || message.role === "assistant") {
       const thinking = message.role === "assistant" ? thinkingText(message.content) : "";
       const text: DurableCoordinatorMessage[] = [{ id: Number(entry.id), role: message.role, at: message.timestamp ?? 0, text: messageText(message.content), ...(thinking ? { thinking: thinking.length > THINKING_LIMIT ? `${thinking.slice(0, THINKING_LIMIT - 1)}…` : thinking } : {}) }];
