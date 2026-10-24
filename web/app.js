@@ -148,6 +148,19 @@ async function start() {
   } catch (error) { if (current === generation) showError(error); }
 }
 
+// Show earlier messages: per chat, the transcript index the window reaches back to (the host adds everything from there on, so new messages never push it out).
+const historyFrom = new Map();
+async function showEarlier() {
+  const first = view.messages.reduce((least, message) => Number.isInteger(message.index) ? Math.min(least, message.index) : least, Infinity);
+  if (!Number.isFinite(first)) return;
+  const key = `${projectId}/${chatId}`, node = document.querySelector("#transcript");
+  const before = { height: node.scrollHeight, top: node.scrollTop };
+  historyFrom.set(key, Math.max(0, first - 200));
+  stickToBottom = false;
+  await settledRefresh();
+  // The older messages land above the reading position: keep what the owner was looking at where it was.
+  if (`${projectId}/${chatId}` === key) node.scrollTop = before.top + node.scrollHeight - before.height;
+}
 async function refresh() {
   if (!projectId) return;
   if (polling === generation) { refreshQueued = true; return; }
@@ -157,7 +170,8 @@ async function refresh() {
   try {
     let next;
     const focus = searchFocus?.project === id && searchFocus.chat === chat ? { focus: searchFocus.index } : {};
-    try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }), ...focus }); }
+    const from = historyFrom.get(`${id}/${chat}`);
+    try { next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }), ...focus, ...(from === undefined ? {} : { from }) }); }
     catch (error) { if (chat !== "main" && /Unknown chat/.test(error.message) && current === generation) { polling = null; changeChat("main"); return; } throw error; }
     if (current !== generation) return;
     const [nextPlan, nextApprovals, nextDocs] = await Promise.all([api({ action: "plan-snapshot", id }), api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }), api({ action: "knowledge-list", id })]);
@@ -1237,6 +1251,7 @@ function eventHtml(message, kind, body) {
 }
 function indexAttr(message) { return Number.isInteger(message.index) ? ` data-index="${message.index}"` : ""; }
 function chatMessageHtml(message, assistant) {
+  if (message.kind === "compaction") return `<div class="compaction-divider" role="separator" aria-label="Context compacted"${indexAttr(message)} title="${esc(when(message.at))}"><span>Context compacted</span></div>`;
   if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message);
   const thought = message.thinking ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>` : "";
   if (!message.text?.trim()) return thought;
@@ -1721,7 +1736,8 @@ function transcriptHtml(answered) {
     while (rest.length && Number.isFinite(message.at) && message.at > Date.parse(rest[0].at)) out.push(answeredCard(rest.shift()));
     out.push(chatMessageHtml(message, "Coordinator"));
   }
-  return [...out, ...rest.map(answeredCard)].join("");
+  const earlier = view.earlier > 0 ? [`<button type="button" class="ghost small earlier-messages" data-action="history-earlier">Show earlier messages (${view.earlier})</button>`] : [];
+  return [...earlier, ...out, ...rest.map(answeredCard)].join("");
 }
 function answerForm(entry) {
   return `<form data-answer data-project="${esc(projectId)}" data-entry="${entry.id}" class="q-answer"><textarea name="answer" rows="1" aria-label="Answer the coordinator's question" placeholder="${entry.choices.length ? "Or write your own answer…" : "Your answer…"}" title="Enter to send, Shift+Enter for a new line" maxlength="24000" required>${esc(answers.get(answerKey(projectId, entry.id)) ?? "")}</textarea><button class="primary" type="submit">Send answer</button></form>`;
@@ -2419,6 +2435,7 @@ async function action(node) {
     }
     case "thread-list": threadList(); break;
     case "all-work": allWork = !allWork; render(); break;
+    case "history-earlier": node.blur(); await showEarlier(); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickMenuItem(skillMenu?.items.find(item => item.name === node.dataset.name && item.source === node.dataset.source) ?? { name: node.dataset.name }); break;
     case "ref-pick": { const item = refMenu?.items[Number(node.dataset.index)]; if (item) pickRef(item); break; }

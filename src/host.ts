@@ -389,7 +389,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         }, true);
       } finally { settingsUpdating.delete(input.id); }
     }
-    case "show": return durableHostSnapshot(await durable(input.id), input.chatId, input.focus);
+    case "show": return durableHostSnapshot(await durable(input.id), input.chatId, input.focus, input.from);
     case "search": return searchProject(ownedProjectDir(input.id), input.query, await (await durable(input.id)).searchSources(), input.limit);
     case "chat-create": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted || project.archived) throw new Error("Inactive project cannot open a chat"); }, operation: owner => owner.chatCreate(input.title) });
     case "chat-update": return withDurableOwner({ id: input.id, validate: project => { if (project.deleted) throw new Error("Project is deleted"); }, operation: owner => owner.chatUpdate(input.chatId, { title: input.title, archived: input.archived }) });

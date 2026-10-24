@@ -371,6 +371,9 @@ h3.section { font-size: 11.5px; color: var(--muted); text-transform: uppercase; 
 .tool-failed { flex: none; font-size: 11px; font-weight: 600; }
 .tool-call pre { margin: 6px 0 4px; padding: 10px 12px; border-radius: 8px; background: var(--code); color: var(--text); font-size: 11.5px; }
 .msg + .tool-call, .tool-call + .msg { margin-top: 6px; }
+.compaction-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; color: var(--muted); font-size: 11px; letter-spacing: .02em; }
+.compaction-divider::before, .compaction-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.earlier-messages { display: block; margin: 4px auto 12px; }
 .report { margin: 10px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .report > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; min-width: 0; }
 .report > summary::-webkit-details-marker { display: none; }
