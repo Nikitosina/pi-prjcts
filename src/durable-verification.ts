@@ -40,11 +40,13 @@ async function own(tx: Tx, root: ConversationId, conversationId: ConversationId)
   const latest = entry && Object.values(state.work).findLast(work => work.threadId === entry[0]);
   if (!entry || latest?.role !== "verifier" || !entry[1].parentThreadId) throw new Error("Only a verifier thread can use this tool");
   const verification = state.threads[entry[1].parentThreadId]?.verification, attempt = verification?.attempts.find(item => item.verifierThreadId === entry[0]);
-  if (!verification || !attempt) throw new Error("This verifier has no verification attempt");
+  if (!verification || !attempt) throw new Error(`This verifier has no verification attempt (worker thread ${entry[1].parentThreadId}: ${verification ? `${verification.attempts.length} attempts, open=${verification.open}, outcome=${verification.outcome ?? "none"}, reason=${verification.reason ?? ""}` : "no cycle"})`);
   if (attempt.state !== "running") throw new Error(`This attempt already ended as ${attempt.state}; start nothing more`);
   return { workerThreadId: entry[1].parentThreadId, verification, attempt, verifierThreadId: entry[0] };
 }
 
+/** Plain copy that outlives the transaction (tracked document objects cannot be used after it settles). */
+const detached = (value: Own): Own => JSON.parse(JSON.stringify(value));
 const text = (value: unknown, isError = false) => ({ content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
 const Evidence = Type.Object({ runId: Type.Optional(Type.String({ pattern: "^r[0-9]{1,3}$" })), artifact: Type.Optional(Type.String({ minLength: 1, maxLength: 400 })), note: Type.Optional(Type.String({ maxLength: 500 })) }, { additionalProperties: false });
 
@@ -59,7 +61,7 @@ export function verificationTools(deps: VerificationToolDeps) {
     async execute(args, api, context) {
       if (deps.isClosed?.()) return text("Project runtime is closing", true);
       if (!sandboxAvailable()) return text("No enforceable sandbox on this platform: nothing was run. Record a blocked verdict.", true);
-      const mine = await api.commit(tx => own(tx, root(), api.conversationId), context);
+      const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
       const paths = attemptPaths(deps.controlRoot, mine.attempt.key), artifacts = ensureArtifactDir(deps.controlRoot, mine.verifierThreadId);
       const id = `r${mine.attempt.runs.length + 1}`;
       if (mine.attempt.runs.length >= 200) return text("Run limit reached for this attempt; record the verdict", true);
@@ -82,7 +84,7 @@ export function verificationTools(deps: VerificationToolDeps) {
     parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 4000 }), criteria: Type.Array(Type.Object({ id: Type.String({ pattern: "^c[0-9]{1,2}$" }), status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("blocked")]), reason: Type.String({ maxLength: 2000 }), evidence: Type.Optional(Type.Array(Evidence, { maxItems: 12 })) }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }),
     replay: "unsafe", executionMode: "sequential",
     async execute(args, api, context) {
-      const mine = await api.commit(tx => own(tx, root(), api.conversationId), context);
+      const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
       const paths = attemptPaths(deps.controlRoot, mine.attempt.key);
       const exists = (path: string) => { try { closeSync(openArtifact(deps.controlRoot, mine.verifierThreadId, path).fd); return true; } catch { return false; } };
       const judged = judge(mine.verification.criteria, mine.attempt.runs, args, exists);

@@ -388,7 +388,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     let seen: { role: DurableRole; top: boolean; scoped: boolean; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string } | undefined;
     await read(async tx => {
       const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
-      if (work) seen = { role: work.role, top: !work.parentThreadId, scoped: work.workspaceScopeId !== null, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && structuredClone(state.threads[work.parentThreadId ?? work.threadId]!.verification), task: briefOf(state, work) };
+      if (work) seen = { role: work.role, top: !work.parentThreadId, scoped: work.workspaceScopeId !== null, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work) };
       return undefined;
     });
     if (!seen) return { kind: "none" };
@@ -416,7 +416,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
     const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
     work.result = text;
-    work.report = { requestId: `plan-report:${work.id}:${tag}`, delivered: false, text: reportText(work, text, others) };
+    work.report = { requestId: `plan-report:${work.id}:${tag}`, delivered: false, text: reportText({ ...work, text: briefOf(state, work) }, text, others) };
     await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
   }
   /** Ends a cycle. Verified work stays completed; anything else stops being "completed" for dependents and for the coordinator. */
@@ -437,12 +437,14 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (prepared.kind === "none" || prepared.kind === "revision") return false;
     const thread = state.threads[work.threadId]!;
     if (prepared.kind === "escalate") {
-      thread.verification = thread.verification?.open ? thread.verification : { model: "", skill: verificationSkill(), criteria: [], attempts: [], workIds: [], open: true };
-      thread.verification.workIds.push(work.id);
+      if (!thread.verification?.open) thread.verification = { model: "", skill: verificationSkill(), criteria: [], attempts: [], workIds: [], open: true };
+      thread.verification!.workIds.push(work.id);
       await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
       return true;
     }
-    const cycle = thread.verification?.open ? thread.verification : (thread.verification = { model: prepared.model, skill: prepared.skill, criteria: prepared.criteria, attempts: [], workIds: [], open: true });
+    if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, criteria: prepared.criteria, attempts: [], workIds: [], open: true };
+    // Read back through the document: only the tracked object records later mutations.
+    const cycle = thread.verification!;
     cycle.workIds.push(work.id);
     const verifierThreadId = randomUUID(), verifierWorkId = randomUUID();
     try {

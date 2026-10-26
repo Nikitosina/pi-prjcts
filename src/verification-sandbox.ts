@@ -22,15 +22,15 @@ export type SandboxPolicy = {
 
 const quote = (path: string) => JSON.stringify(realpathSync(path));
 
-/** Deny-by-default writes, no remote network, and no reads of credentials or project data. Reads of code and system files stay open so toolchains run. */
+/** Reads of credentials and project data are denied by content (file-read-data), not metadata, so tools can still stat the path to their working directory. Deny-by-default writes, no remote network, and no reads of credentials or project data. Reads of code and system files stay open so toolchains run. */
 export function sandboxProfile(policy: SandboxPolicy): string {
   const home = realpathSync(homedir());
   const secrets = SECRET_HOME_DIRS.map(path => join(home, path)).filter(path => existsSync(path));
   return [
     "(version 1)", "(allow default)",
     "(deny file-write*)", `(allow file-write* (subpath "/dev") ${policy.writable.map(path => `(subpath ${quote(path)})`).join(" ")})`,
-    ...[...secrets, ...policy.unreadable.filter(path => existsSync(path))].map(path => `(deny file-read* (subpath ${quote(path)}))`),
-    ...policy.readable.map(path => `(allow file-read* (subpath ${quote(path)}))`),
+    ...[...secrets, ...policy.unreadable.filter(path => existsSync(path))].map(path => `(deny file-read-data (subpath ${quote(path)}))`),
+    ...policy.readable.map(path => `(allow file-read-data (subpath ${quote(path)}))`),
     "(deny network-outbound)", '(allow network-outbound (remote ip "localhost:*") (remote unix-socket))',
   ].join("\n");
 }

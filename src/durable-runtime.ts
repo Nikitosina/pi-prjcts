@@ -495,8 +495,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
         check: async () => {
           if (!sandboxAvailable()) return "This machine has no enforceable sandbox (macOS sandbox-exec), so verifier commands cannot run";
           const skill = loadProject(project.id).verification?.skill ?? "";
-          await refreshDelegatedSkills();
-          if (!skill || !knownSkills.has(skill)) return `The verification skill "${skill}" is not installed or not discoverable`;
+          // Judged on a fresh discovery: knownSkills only grows, so a skill deleted since open would still be "known".
+          let present = false;
+          try { present = Boolean(skill) && (input.discoverSkills ? (await input.discoverSkills()).getSkills().skills.some(item => item.name === skill) : knownSkills.has(skill)); } catch { present = false; }
+          if (present) await refreshDelegatedSkills();
+          if (!present) return `The verification skill "${skill}" is not installed or not discoverable`;
           const ref = roleModels.verifier;
           if (!ref) return "No verifier model is configured in Settings";
           try { assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier"); } catch (error) { return error instanceof Error ? error.message : String(error); }
