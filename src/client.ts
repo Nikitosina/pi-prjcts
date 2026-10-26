@@ -8,6 +8,9 @@ import { home, socketPath, parse, Reply, WebInfo, Id, type Request } from "./sta
 import { once } from "node:events";
 import { remoteConfig, kickstartRemoteHost } from "./remote.ts";
 
+// Allow the bounded shell import as well as normal host initialization.
+const hostStartAttempts = 250;
+
 export async function request(input: Request, start = true): Promise<unknown> {
   if (start) await ensureHost();
   return exchange("POST", "/api", JSON.stringify(input));
@@ -33,7 +36,7 @@ export async function ensureHost(): Promise<void> {
   mkdirSync(home(), { recursive: true, mode: 0o700 });
   if (remoteConfig()?.enabled) {
     kickstartRemoteHost();
-    for (let attempt = 0; attempt < 100; attempt++) { await sleep(100); try { await health(); return; } catch {} }
+    for (let attempt = 0; attempt < hostStartAttempts; attempt++) { await sleep(100); try { await health(); return; } catch {} }
     throw new Error(`Remote host did not start. Read ${join(home(), "host.log")}`);
   }
   const log = openSync(join(home(), "host.log"), "a", 0o600);
@@ -45,7 +48,7 @@ export async function ensureHost(): Promise<void> {
   const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], { detached: true, stdio: ["ignore", log, log], env, cwd: fileURLToPath(new URL("..", import.meta.url)) });
   child.on("error", () => {});
   child.unref(); closeSync(log);
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
     await sleep(100);
     try { await health(); return; } catch { /* The host may still be loading the SDK. */ }
   }
@@ -71,7 +74,7 @@ export async function ensureRemoteHost(): Promise<void> {
     }
   }
   kickstartRemoteHost();
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
     await sleep(100);
     try {
       await health();

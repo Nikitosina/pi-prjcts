@@ -9,7 +9,8 @@ import {
   AssistantEntry, CompactionEntry, GenerationTask, Harness, ToolTask, ResetEntry, configure, createRegistry, defineDoc, defineExtension, defineTool, hook, section,
   type Conversation, type EntryRecord, type Storage, type Submission, type ToolExecutionApi, type SubmissionId, type ToolRegistration,
 } from "@earendil-works/pi-durable";
-import { createModelRuntime, observeProviderPrompt } from "./provider-extensions.ts";
+import { observeProviderPrompt } from "./provider-extensions.ts";
+import { liveModelRuntime } from "./live-models.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
@@ -322,7 +323,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     catch (error) { throw new Error("Durable project storage is already owned by another process", { cause: error }); }
 
     await ensureKnowledge(dir);
-    const models = await createModelRuntime();
+    const { models, refresh: refreshModels, prepare: prepareModels } = await liveModelRuntime();
     const dispatch = models.streamSimple.bind(models);
     models.streamSimple = (model, request, options) => {
       // Fail closed until reconciliation/guard installation has completed; hooks only observe.
@@ -906,8 +907,10 @@ export async function openDurableProject(input: { project: Project; dir: string;
         assertOpen();
         const next = modelRef(selection.model), roles = explicitModels(selection);
         const moved = next.provider !== coordinatorModel.provider || next.modelId !== coordinatorModel.modelId;
-        assertConfiguredModel(models, next.provider, next.modelId, "Coordinator");
-        for (const [role, ref] of Object.entries(roles)) assertConfiguredModel(models, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
+        await refreshModels(candidate => {
+          assertConfiguredModel(candidate, next.provider, next.modelId, "Coordinator");
+          for (const [role, ref] of Object.entries(roles)) assertConfiguredModel(candidate, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
+        });
         coordinatorModel = next; roleModels = roles;
         if (!moved) return;
         // Durable pins in-flight request models; configure changes only subsequent requests.
@@ -942,6 +945,9 @@ export async function openDurableProject(input: { project: Project; dir: string;
         // Everything is rebuilt from the saved project, the checkout's standing instructions and the disk catalog before anything is applied, and applied in one commit: a failure leaves the chat as it was.
         const current = loadProject(project.id);
         if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
+        const modelUpdate = await prepareModels();
+        assertConfiguredModel(modelUpdate.candidate, coordinatorModel.provider, coordinatorModel.modelId, "Coordinator");
+        for (const [role, ref] of Object.entries(roleModels)) assertConfiguredModel(modelUpdate.candidate, ref.provider, ref.modelId, role);
         const standingNow = loadDurableStanding(project.cwd);
         const next = rolesOf(loader, current.skillProfiles);
         const agent = await conversation.agent(context);
@@ -950,6 +956,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const names = (list: readonly { name: string }[]) => JSON.stringify(list.map(item => item.name).sort());
         const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
         if (changed) await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context);
+        modelUpdate.commit();
         remember(loader);
         coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map(skill => skill.name)));
         return { chatId: chat.id, skills: next.coordinator.length, changed };
