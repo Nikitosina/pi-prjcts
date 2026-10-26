@@ -24,16 +24,27 @@ export async function projectModelPicker(project?: Pick<Project, "cwd" | "scoped
   }
   const models = [...registry.getModels()].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
   const items = models.map(model => ({ reference: `${model.provider}/${model.id}`, name: model.name, contextWindow: model.contextWindow, reasoning: model.reasoning, configured: registry.getProviderAuthStatus(model.provider).configured }));
-  let scoped: string[] = [];
+  let scoped: string[] = [], unavailableScoped: string[] = [];
   // scopeSet tells "no scope configured" (cycle every configured model) from "a scope resolving to nothing usable" (block, never widen).
   let scopeSet = false;
-  if (project?.scopedModels) { scopeSet = true; scoped = project.scopedModels.filter(reference => items.some(item => item.reference === reference)); }
+  if (project?.scopedModels) {
+    scopeSet = true;
+    scoped = project.scopedModels.filter(reference => items.some(item => item.reference === reference && item.configured));
+    unavailableScoped = project.scopedModels.filter(reference => items.some(item => item.reference === reference && !item.configured));
+  }
   else try {
     const patterns = SettingsManager.create(project?.cwd ?? process.cwd(), getAgentDir()).getEnabledModels() ?? [];
     scopeSet = patterns.length > 0;
-    if (patterns.length) scoped = (await resolveModelScopeWithDiagnostics(patterns, registry)).scopedModels.map(entry => `${entry.model.provider}/${entry.model.id}`);
+    if (patterns.length) {
+      scoped = (await resolveModelScopeWithDiagnostics(patterns, registry)).scopedModels.map(entry => `${entry.model.provider}/${entry.model.id}`);
+      // Use Pi's matching rules for display too, without widening the usable scope or changing auth.
+      const installed = new Proxy(registry, { get: (target, key) => key === "getAvailable" ? async () => models : Reflect.get(target, key) });
+      unavailableScoped = (await resolveModelScopeWithDiagnostics(patterns, installed)).scopedModels
+        .filter(entry => !registry.getProviderAuthStatus(entry.model.provider).configured)
+        .map(entry => `${entry.model.provider}/${entry.model.id}`);
+    }
   } catch { scoped = []; }
-  return { items, scoped: [...new Set(scoped)], scopeSet, networkChecked: false, extensionErrors: [...(await providerExtensionStatus()).errors, ...(refreshError ? [{ extension: "local models", error: "Local model refresh failed; showing previous catalog" }] : [])] };
+  return { items, scoped: [...new Set(scoped)], unavailableScoped: [...new Set(unavailableScoped)], scopeSet, networkChecked: false, extensionErrors: [...(await providerExtensionStatus()).errors, ...(refreshError ? [{ extension: "local models", error: "Local model refresh failed; showing previous catalog" }] : [])] };
 }
 export async function validateProjectModelChanges(changes: Changes): Promise<void> {
   const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => typeof value === "string");

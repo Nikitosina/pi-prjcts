@@ -3359,7 +3359,7 @@ const settingsAccess = {
   decisionAccess: ["Questions for you", "Whether the coordinator may ask you to decide something.", [["none", "Coordinator cannot ask"], ["coordinator", "Coordinator can ask"]]],
   githubCli: ["Coordinator GitHub CLI (gh): full access", "Lets the coordinator run any gh command as you (merge, close, delete, settings). Off removes the tool.", [["full", "Full access (merge, close, delete, settings)"], ["none", "Off"]]],
 };
-let settingsPending = null, modelScoped = [], modelScopeSet = false, modelExtensionErrors = [];
+let settingsPending = null, modelScoped = [], modelUnavailableScoped = [], modelScopeSet = false, modelExtensionErrors = [];
 const scopeKey = refs => [...refs].sort().join("\n");
 const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
@@ -3467,6 +3467,7 @@ async function loadModelPicker() {
     modelCache.set(model.reference, { ...model, hay: modelNorm(`${model.reference} ${model.name}`) });
   }
   modelScoped = data.scoped.filter(reference => modelCache.get(reference)?.configured);
+  modelUnavailableScoped = (data.unavailableScoped ?? []).filter(reference => modelCache.has(reference) && !modelCache.get(reference).configured);
   modelScopeSet = data.scopeSet === true;
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
@@ -3490,9 +3491,12 @@ function modelGroupsBase(query, value) {
   const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
   const configured = [...modelCache.values()].filter(model => model.configured), scoped = new Set(modelScoped), cap = (models, limit, label, extra = {}) => ({ label, models: models.slice(0, limit), more: Math.max(0, models.length - limit), ...extra });
   if (!terms.length) {
-    const current = modelCache.get(value), groups = current && !scoped.has(value) ? [{ label: "Current", models: [current], more: 0 }] : [];
-    if (!scoped.size) return [...groups, cap(configured, MODEL_ROWS, "Configured models")];
-    return [...groups, { label: "Scoped models", models: modelScoped.map(reference => modelCache.get(reference)), more: 0 }, { label: "", models: [], more: 0, hint: `Type to search all ${configured.length} configured models.` }];
+    const current = modelCache.get(value), groups = current && !scoped.has(value) && !modelUnavailableScoped.includes(value) ? [{ label: "Current", models: [current], more: 0 }] : [];
+    if (scoped.size) groups.push({ label: "Scoped models", models: modelScoped.map(reference => modelCache.get(reference)), more: 0 });
+    if (modelUnavailableScoped.length) groups.push({ label: "Scoped models without credentials", models: modelUnavailableScoped.map(reference => modelCache.get(reference)), more: 0, hint: "Installed, but credentials are unavailable to this host. Check the host's environment and Pi provider configuration. On macOS, restart the host after changing exported zsh startup variables." });
+    if (!scoped.size && !modelScopeSet) groups.push(cap(configured, MODEL_ROWS, "Configured models"));
+    else groups.push({ label: "", models: [], more: 0, hint: `Type to search all ${configured.length} configured models.` });
+    return groups;
   }
   const groups = [], inScope = modelScoped.map(reference => modelCache.get(reference)).filter(hit);
   if (inScope.length) groups.push({ label: "Scoped models", models: inScope, more: 0 });
@@ -3507,7 +3511,7 @@ function renderModelList(mp) {
   let index = 0;
   mp.querySelector(".mp-list").innerHTML = [...modelGroups(search.value, value, mp.dataset.role), ...modelExtensionErrors.map(item => ({ label: "", models: [], more: 0, hint: `${item.extension} failed to load: ${item.error}` }))].map(group => `${group.label ? `<div class="mp-group" role="presentation">${esc(group.label)}</div>` : ""}${group.models.map(model => {
     const context = compactTokens(model.contextWindow);
-    return `<div class="mp-row" role="option" id="mp-${mp.dataset.role}-${index++}" data-ref="${esc(model.reference)}" aria-selected="${model.reference === value}"${group.disabled ? ' aria-disabled="true" title="Add credentials to use this model"' : ' data-action="mp-pick"'}><span class="mp-main"><span class="mp-name">${esc(model.name)}</span><span class="mp-ref mono">${esc(model.reference)}</span></span><span class="mp-tags">${model.reasoning ? '<span class="mp-ctx" title="Supports reasoning">reasoning</span>' : ""}${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : ""}</span></div>`;
+    return `<div class="mp-row" role="option" id="mp-${mp.dataset.role}-${index++}" data-ref="${esc(model.reference)}" aria-selected="${model.reference === value}"${group.disabled || !model.configured ? ' aria-disabled="true" title="Credentials unavailable to this host. Check its environment and Pi provider configuration."' : ' data-action="mp-pick"'}><span class="mp-main"><span class="mp-name">${esc(model.name)}</span><span class="mp-ref mono">${esc(model.reference)}</span></span><span class="mp-tags">${model.reasoning ? '<span class="mp-ctx" title="Supports reasoning">reasoning</span>' : ""}${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : ""}</span></div>`;
   }).join("")}${group.more ? `<div class="mp-more">+${group.more} more. Keep typing to narrow the list.</div>` : ""}${group.hint ? `<div class="mp-more">${esc(group.hint)}</div>` : ""}`).join("");
   const rows = [...mp.querySelectorAll(".mp-row:not([aria-disabled])")], selected = rows.findIndex(row => row.dataset.ref === value);
   mpSetActive(mp, search.value.trim() || selected < 0 ? 0 : selected);
