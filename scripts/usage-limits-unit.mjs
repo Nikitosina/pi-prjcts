@@ -15,8 +15,15 @@ const seen = [];
 const fake = createServer((req, res) => { seen.push({ url: req.url, cookie: req.headers.cookie }); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ billingCycleEnd: '2026-11-01T00:00:00.000Z', individualUsage: { plan: { enabled: true, totalPercentUsed: 75.5 } } })); });
 await new Promise(ok => fake.listen(0, '127.0.0.1', ok));
 process.env.PI_PROJECTS_CURSOR_DASHBOARD = `http://127.0.0.1:${fake.address().port}`;
-const { MIN_POLL_MS, MANUAL_COOLDOWN_MS, observeLimitHeaders, limitsSnapshot, resetLimitsForTest, windowForSeconds } = await import('../src/usage-limits.ts');
+const { MIN_POLL_MS, MANUAL_COOLDOWN_MS, observeLimitHeaders, limitsSnapshot, resetLimitsForTest, windowForSeconds, parseElizaUsage } = await import('../src/usage-limits.ts');
 const find = (snapshot, provider) => snapshot.providers.find(item => item.provider === provider);
+
+// Eliza: sum actual monthly cost across usage buckets. The account and UTC calendar-month bounds come from the response and documented reset rule.
+const october = Date.parse('2026-10-26T18:00:00Z');
+const elizaBody = { account: 'owner', pool: '', usage: { all: { stats: { monthly: { requests: 58, cost: 5.25 } } }, 'chain:top_opensource': { stats: { monthly: { requests: 10, cost: 0.095 } } } } };
+assert.deepEqual(parseElizaUsage(elizaBody, october), { amountUsd: 5.345, periodStartAt: Date.parse('2026-10-01T00:00:00Z'), periodEndAt: Date.parse('2026-11-01T00:00:00Z'), account: 'owner', pool: null });
+assert.equal(parseElizaUsage({ ...elizaBody, usage: {} }, october), null, 'an empty usage object is no data, not a fabricated zero');
+for (const bad of [{ ...elizaBody, account: '' }, { ...elizaBody, pool: null }, { ...elizaBody, usage: { all: { stats: { monthly: { cost: -1 } } } } }, { ...elizaBody, usage: { all: { stats: { monthly: {} } } } }, { ...elizaBody, usage: { all: { stats: { monthly: { cost: null } } } } }]) assert.throws(() => parseElizaUsage(bad, october), /unreadable usage response/);
 
 // Anthropic unified headers: utilization is a 0..1 fraction, reset is epoch seconds.
 observeLimitHeaders('anthropic', { 'anthropic-ratelimit-unified-5h-utilization': '0.11', 'anthropic-ratelimit-unified-5h-reset': '1792750800', 'anthropic-ratelimit-unified-7d-utilization': '0.36', 'anthropic-ratelimit-unified-7d-reset': '1792774800', 'anthropic-ratelimit-unified-status': 'allowed' }, 1_000);

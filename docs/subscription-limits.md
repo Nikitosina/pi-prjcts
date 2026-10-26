@@ -51,7 +51,9 @@ Claude and Codex logins are read through Pi's own credential resolver, which ren
 - *Sources checked:* the `cursor-agent` CLI is not installed on this machine, and there is no `~/.cursor/auth.json`, so its file format was not verified locally; Orca's source and the `pi-cursor` package were read instead. If the sign-in has expired the item says "Cursor sign-in expired. Use Connect Cursor" and sends nothing.
 - *Not built:* a "paste your session cookie" form. It is unnecessary because the token already exists, and it would make users handle a credential by hand.
 
-**No invented numbers.** No sample means `—`; hover says "No data yet" with the reason and the time of the last attempt. A reading whose reset time has passed is dimmed and shown as `—` until a new reading arrives.
+**4. Eliza: actual USD month-to-date cost.** The item immediately after Cursor reads `Eliza $X.XX`. The host calls the documented `GET https://api.eliza.yandex.net/v2/usage` with the existing `ELIZA_TOKEN` and sums `usage.*.stats.monthly.cost` across the returned usage buckets. The tooltip names the account, optional pool, USD, UTC calendar-month period and fetch time. See [Eliza USD usage](eliza-usage.md) for the source documentation, verified response shape and limitations.
+
+**No invented numbers.** No sample means `—`; hover says "No data yet" with the reason and the time of the last attempt. A reading whose reset time has passed is dimmed and shown as `—` until a new reading arrives. Eliza's empty or malformed response never becomes $0.
 
 ## Checks
 

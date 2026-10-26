@@ -15,6 +15,7 @@ const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir =
 if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
 for (const dir of [artifacts, root, home, workspace, agentDir, join(root, 'userhome')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 const fixtureAt = Date.now();
+const elizaFixture = { account: 'fixture-account', pool: '', usage: { all: { stats: { monthly: { requests: 8, cost: 12.34 } } }, 'chain:top_opensource': { stats: { monthly: { requests: 2, cost: 0.005 } } } } };
 const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const redact = text => String(text).replace(/token=[^&#\s"]+/gi, 'token=[redacted]');
@@ -131,6 +132,7 @@ try {
   writeFileSync(join(root, 'limits.json'), JSON.stringify({
     claude: [{ window: '5h', usedPercent: 42, resetsAt: fixtureAt + 2 * 3600e3 + 17 * 60e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }],
     codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }],
+    eliza: elizaFixture,
   }));
   await eventually(async () => { if (hostEnded) throw Error('Host exited'); try { return (await rpc()).pid === host.pid; } catch { return false; } }, 'Owned host did not start');
   const project = await rpc({ action: 'create', requestId: randomUUID(), name: 'Polish UI', cwd: workspace, objective: 'Disposable status fixture', model: 'fake/fake-model' });
@@ -255,10 +257,19 @@ try {
   await waitFor(`document.querySelector('#inline-thread').hidden`, s, 'deep-link Back');
 
   // Limits bar (fixture data; the host never contacted a provider).
-  await waitFor(`document.querySelectorAll('#limits-bar .lim').length === 3 && /42%/.test(document.querySelector('#limits-bar').innerText)`, s, 'limits bar');
+  await waitFor(`document.querySelectorAll('#limits-bar .lim').length === 4 && /42%/.test(document.querySelector('#limits-bar').innerText)`, s, 'limits bar');
   const bar = await evaluate(`Object.fromEntries([...document.querySelectorAll('#limits-bar .lim')].map(n => [n.dataset.provider, { text: n.innerText.replace(/\\s+/g, ' ').trim(), label: n.getAttribute('aria-label') }]))`, s);
-  if (!/5h.*42%.*7d.*24%/.test(bar.claude.text) || !/^Claude: 5h/.test(bar.claude.label) || /5h/.test(bar.codex.text) || !/7d.*3%/.test(bar.codex.text) || !/^Codex: 7d/.test(bar.codex.label) || !/—/.test(bar.cursor.text) || !/^Cursor/.test(bar.cursor.label) || !/not connected/i.test(bar.cursor.label) || /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, '')) ) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
-  result.checks.push('B1 bottom bar: provider icons (names only in aria-label), Claude 5h 42% / 7d 24%, Codex 7d 3% (no invented 5h), Cursor "—" and "Not connected"');
+  if (!/5h.*42%.*7d.*24%/.test(bar.claude.text) || !/^Claude: 5h/.test(bar.claude.label) || /5h/.test(bar.codex.text) || !/7d.*3%/.test(bar.codex.text) || !/^Codex: 7d/.test(bar.codex.label) || !/—/.test(bar.cursor.text) || !/^Cursor/.test(bar.cursor.label) || !/not connected/i.test(bar.cursor.label) || bar.eliza.text !== 'Eliza $12.35' || !/^Eliza: \$12.35 month to date/.test(bar.eliza.label) || /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, '')) ) throw Error('Limits bar content wrong: ' + JSON.stringify(bar));
+  const providerOrder = await evaluate(`[...document.querySelectorAll('#limits-bar .lim')].map(n => n.dataset.provider).join(',')`, s);
+  if (providerOrder !== 'claude,codex,cursor,eliza') throw Error('Eliza is not immediately after Cursor: ' + providerOrder);
+  result.checks.push('B1 bottom bar with explicit fixture data: Claude 5h 42% / 7d 24%, Codex 7d 3%, Cursor unavailable, then Eliza $12.35 month to date');
+  const elizaBox = await box('#limits-bar .lim[data-provider="eliza"]', s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((elizaBox.left + elizaBox.right) / 2), y: Math.round((elizaBox.top + elizaBox.bottom) / 2) }, s);
+  await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="eliza"] .lim-pop')).visibility === 'visible'`, s, 'Eliza details');
+  const elizaPop = await evaluate(`document.querySelector('.lim[data-provider="eliza"] .lim-pop').innerText`, s);
+  if (!/\$12.35 month to date/.test(elizaPop) || !/USD · all usage buckets/.test(elizaPop) || !/Account fixture-account/.test(elizaPop) || !/00:00 UTC/.test(elizaPop) || !/GET \/v2\/usage/.test(elizaPop)) throw Error('Eliza details wrong: ' + elizaPop);
+  await shot('06a-eliza-fixture-tooltip', s);
+  result.checks.push('B1b Eliza fixture tooltip explains USD, month-to-date period, account scope, reset and actual usage endpoint');
   const at = await box('#limits-bar .lim[data-provider="claude"]', s);
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: Math.round((at.left + at.right) / 2), y: Math.round((at.top + at.bottom) / 2) }, s);
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`, s, 'hover details');
@@ -271,7 +282,7 @@ try {
   await waitFor(`getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`, s, 'cursor details');
   await shot('07-limits-bar-unavailable', s);
   // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
-  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.dataset.provider === 'cursor', margin: getComputedStyle(b).marginLeft }; })()`, s);
+  const refreshInfo = await evaluate(`(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.dataset.provider === 'eliza', margin: getComputedStyle(b).marginLeft }; })()`, s);
   if (refreshInfo.label !== 'Refresh limits' || !refreshInfo.title || !refreshInfo.last || refreshInfo.margin !== '0px') throw Error('Refresh button wrong: ' + JSON.stringify(refreshInfo));
   await shot('06b-limits-bar-refresh-icon', s);
   await waitFor(`document.querySelectorAll('#limits-bar .mach-item').length >= 2`, s, 'machine status');
@@ -285,14 +296,14 @@ try {
   await waitFor(`getComputedStyle(document.querySelector('.mach-item[data-kind="cpu"] .mach-tip')).visibility === 'visible'`, s, 'machine tooltip');
   await shot('06c-machine-hover', s);
   const barBox = await box('#limits-bar', s);
-  const crop = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: barBox.top, width: 480, height: barBox.bottom - barBox.top, scale: 2 } }, s);
-  writeFileSync(join(artifacts, '06d-bar-left-closeup-2x.png'), Buffer.from(crop.data, 'base64'), { mode: 0o600 });
+  const crop = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: barBox.top, width: 700, height: barBox.bottom - barBox.top, scale: 2 } }, s);
+  writeFileSync(join(artifacts, '06d-eliza-fixture-after-cursor-2x.png'), Buffer.from(crop.data, 'base64'), { mode: 0o600 });
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }, s);
-  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }] }));
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 }, { window: '7d', usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 }], codex: [{ window: '7d', usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }], eliza: elizaFixture }));
   await click('#limits-bar .lim-refresh', s);
   await waitFor(`/61%/.test(document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText) && !document.querySelector('#limits-bar .lim-refresh').disabled`, s, 'refreshed numbers');
   result.checks.push('B3 refresh icon: aria-label and tooltip, directly after the last provider with no auto margin; clicking refetches now (42% -> 61%) and re-enables the button');
-  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [] }));
+  writeFileSync(join(root, 'limits.json'), JSON.stringify({ claude: [{ window: '5h', usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [], eliza: elizaFixture }));
   await click('#limits-bar .lim-refresh', s); await new Promise(ok => setTimeout(ok, 800));
   if (!/61%/.test(await evaluate(`document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText`, s))) throw Error('Cooldown did not hold: second refresh inside 15 s refetched');
   result.checks.push('B4 a second refresh click inside the 15 s host cooldown does not refetch');
@@ -345,7 +356,7 @@ try {
   // Narrow.
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send('Page.navigate', { url: launch.toString() }, s);
-  await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 3`, s, 'narrow load');
+  await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 4`, s, 'narrow load');
   await delay(500);
   const narrow = await evaluate(`({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0, barOverflow: document.querySelector('#limits-bar').scrollWidth > document.querySelector('#limits-bar').clientWidth })`, s);
   if (narrow.width > 391 || !narrow.bar || narrow.barOverflow) throw Error('Narrow view broken: ' + JSON.stringify(narrow));

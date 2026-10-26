@@ -11,6 +11,7 @@ const dir = mkdtempSync(join(tmpdir(), 'usage-recovery-'));
 const agent = join(dir, 'agent'), userHome = join(dir, 'home'); mkdirSync(agent); mkdirSync(userHome);
 process.env.PI_CODING_AGENT_DIR = agent; process.env.HOME = userHome; process.env.CODEX_HOME = join(dir, 'codex');
 delete process.env.PI_PROJECTS_LIMITS_FIXTURE;
+delete process.env.ELIZA_TOKEN;
 let mode = 'ok', accepted = 'fresh'; const hits = [];
 const usage = { five_hour: { utilization: 33, resets_at: '2030-01-01T00:00:00Z' }, seven_day: { utilization: 12, resets_at: '2030-01-02T00:00:00Z' } };
 const server = createServer((req, res) => {
@@ -18,14 +19,18 @@ const server = createServer((req, res) => {
   if (mode === 'drop') return req.socket.destroy();
   if (mode === '503') { res.writeHead(503); return res.end('down'); }
   if (mode === '429') { res.writeHead(429, { 'retry-after': '1200' }); return res.end(); }
-  if (req.headers.authorization !== `Bearer ${accepted}`) { res.writeHead(401); return res.end('no'); }
-  res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(usage));
+  const eliza = req.url === '/eliza';
+  if (req.headers.authorization !== `${eliza ? 'OAuth' : 'Bearer'} ${accepted}`) { res.writeHead(401); return res.end('no'); }
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(eliza ? { account: 'owner', pool: '', usage: { all: { stats: { monthly: { requests: 3, cost: 4.25 } } }, other: { stats: { monthly: { requests: 2, cost: 0.75 } } } } } : usage));
 });
 await new Promise(ok => server.listen(0, '127.0.0.1', ok));
 process.env.PI_PROJECTS_CLAUDE_USAGE_URL = process.env.PI_PROJECTS_CODEX_USAGE_URL = `http://127.0.0.1:${server.address().port}/usage`;
+process.env.PI_PROJECTS_ELIZA_USAGE_URL = `http://127.0.0.1:${server.address().port}/eliza`;
 const limits = await import('../src/usage-limits.ts');
 const { limitsSnapshot, resetLimitsForTest, MANUAL_COOLDOWN_MS, MAX_BACKOFF_MS } = limits;
 const claude = async (now, refresh) => (await limitsSnapshot(now, refresh)).providers.find(item => item.provider === 'claude');
+const eliza = async (now, refresh) => (await limitsSnapshot(now, refresh)).providers.find(item => item.provider === 'eliza');
 // The resolver is shared by every provider; these tests only answer for Claude.
 const forClaude = fn => async id => (id === 'anthropic' ? fn() : undefined);
 const setDisk = (access, expires = Date.now() + 3600_000) => writeFileSync(join(agent, 'auth.json'), JSON.stringify({ anthropic: { type: 'oauth', access, refresh: 'r', expires } }));
@@ -105,5 +110,26 @@ begin(); setDisk('fresh');
 await claude(clock()); const h = hits.length;
 await claude(clock() + 60_000, 'visit'); assert.equal(hits.length, h, 'no extra poll when there is no error');
 
+// 7. Eliza uses the existing OAuth token only on the host, returns actual USD month-to-date usage, and recovers from transient failures without losing it.
+begin(); process.env.ELIZA_TOKEN = 'fresh';
+item = await eliza(clock());
+assert.equal(item.usage.amountUsd, 5); assert.equal(item.usage.account, 'owner'); assert.equal(item.usage.pool, null); assert.equal(item.status, 'ok');
+assert.ok(item.usage.periodStartAt <= Date.now() && item.usage.periodEndAt > Date.now()); assert.ok(!JSON.stringify(item).includes('fresh'));
+mode = 'drop';
+item = await eliza(clock() + 1000, true); assert.equal(item.usage.amountUsd, 5); assert.match(item.reason, /^Couldn't reach Eliza, will retry$/); assert.equal(item.status, 'ok');
+mode = 'ok';
+item = await eliza(clock() + MANUAL_COOLDOWN_MS + 1000, true); assert.equal(item.reason, null); assert.equal(item.usage.amountUsd, 5);
+
+// 8. Missing/rejected Eliza auth is honestly unavailable, not $0; a later valid token recovers through the same manual refresh path.
+begin(); delete process.env.ELIZA_TOKEN;
+item = await eliza(clock()); assert.equal(item.status, 'unavailable'); assert.equal(item.usage, null); assert.match(item.reason, /No Eliza OAuth token found/);
+process.env.ELIZA_TOKEN = 'fresh';
+item = await eliza(clock() + 1000, true); assert.equal(item.status, 'ok'); assert.equal(item.usage.amountUsd, 5);
+begin(); accepted = 'other';
+item = await eliza(clock()); assert.equal(item.status, 'unavailable'); assert.equal(item.usage, null); assert.match(item.reason, /HTTP 401/);
+accepted = 'fresh';
+item = await eliza(clock() + 1000, true); assert.equal(item.status, 'ok'); assert.equal(item.usage.amountUsd, 5);
+
+delete process.env.ELIZA_TOKEN;
 server.close();
 console.log('usage-limits recovery: all checks passed');
