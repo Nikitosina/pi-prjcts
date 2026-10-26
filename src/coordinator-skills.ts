@@ -66,7 +66,7 @@ export function compactSkillText(text: string): string {
 }
 
 /** One reader for every role: the caller's effective skill set (see skill-profiles.ts) decides what it may open. */
-export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conversation | undefined; allowed: (api: ToolExecutionApi, context: Context) => Promise<ReadonlySet<string>> }) {
+export function coordinatorSkillTool(input: { /** Resolves a skill by name from the runtime's own snapshots; never rebuilds the catalog per read. */ skill: (name: string) => Promise<Skill | undefined>; root: () => Conversation | undefined; allowed: (api: ToolExecutionApi, context: Context) => Promise<ReadonlySet<string>> }) {
   const tool = defineTool({
     name: "projects_skill_file",
     description: "Read a file of a skill listed for your role (or a skill the owner invoked): SKILL.md by default, or a file it references. path is relative to the skill's directory. Paged by characters.",
@@ -74,9 +74,10 @@ export function coordinatorSkillTool(input: { loader?: Loader; root: () => Conve
     replay: "safe",
     async execute(args, api: ToolExecutionApi, context) {
       if (!input.root()) throw new Error("Project is unavailable");
-      const skill = input.loader?.getSkills().skills.find(item => item.name === args.skill);
+      const allowed = await input.allowed(api, context);
+      const skill = await input.skill(args.skill);
       if (!skill) throw new Error(`Unknown skill ${args.skill}`);
-      if (!(await input.allowed(api, context)).has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
+      if (!allowed.has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
       // Checked lexically first, then again after symlinks resolve.
       const escapes = (from: string, to: string) => { const inside = relative(from, to); return isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`); };
       const requested = resolve(skill.baseDir, args.path ?? "SKILL.md");

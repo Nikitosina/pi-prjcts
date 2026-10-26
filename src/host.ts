@@ -63,15 +63,8 @@ catch (error) {
 }
 writeFileSync(lockFd, String(process.pid)); closeSync(lockFd);
 if (existsSync(socketPath())) unlinkSync(socketPath());
-const configuredSkillLoaders = new Map<string, ReturnType<typeof loadProjectResourceLoader>>();
-function configuredSkills(id: string) {
-  const present = configuredSkillLoaders.get(id);
-  if (present) return present;
-  const opening = loadProjectResourceLoader(loadProject(id));
-  configuredSkillLoaders.set(id, opening);
-  opening.catch(() => { if (configuredSkillLoaders.get(id) === opening) configuredSkillLoaders.delete(id); });
-  return opening;
-}
+/** The skills installed right now (global, project-local, packages): built from disk on every call, never cached, so a skill installed a moment ago is found without a restart. Passive: never downloads a missing package. */
+const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(id), { passive: true });
 const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
@@ -144,7 +137,8 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
   let project = loadProject(id);
   const granted = withDefaultWorkspace(project);
   if (granted !== project) { saveProject(granted); project = granted; }
-  const opening = configuredSkills(id).then(loader => openDurableHost(project, loader));
+  // Opening may install a configured package once, as before; later catalog lookups are passive.
+  const opening = loadProjectResourceLoader(project).then(loader => openDurableHost(project, loader, () => configuredSkills(id)));
   durableRuntimes.set(id, opening);
   opening.catch(() => { if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id); });
   return opening;
@@ -186,7 +180,6 @@ async function closeLifecycleOwner(id: string, owner: DurableProjectRuntime): Pr
     throw new Error("Project owner close failed; restart the owned host before retrying", { cause: error });
   }
   durableRuntimes.delete(id);
-  configuredSkillLoaders.delete(id);
 }
 
 function ownedProjectDir(id: string): string {
@@ -435,6 +428,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { threads: [...new Set(threads)].flatMap(threadId => { const { dir: _, ...listing } = listArtifacts(dir, threadId); return listing.files.length ? [listing] : []; }) };
     }
     case "compact": return withDurableOwner({ id: input.id, operation: owner => owner.compact(input.chatId) });
+    case "chat-reload": return withDurableOwner({ id: input.id, operation: owner => owner.reload(input.chatId) });
     case "chat-reset": return withDurableOwner({ id: input.id, operation: owner => owner.reset(input.chatId) });
     case "worktrees-snapshot": return withDurableOwner({ id: input.id, operation: owner => owner.worktrees() });
     case "worktrees-cleanup": if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id"); return withDurableOwner({ id: input.id, operation: owner => owner.cleanupWorktrees() });
@@ -709,7 +703,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const job = prepareJob();
         // The job keeps what the owner typed; the coordinator receives the expanded skill.
         // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
-        const text = await expandSkillCommand(await configuredSkills(input.id), job.text) + await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text) + await referencedPrBlock(loadProject(input.id), job.text);
+        const text = (skillNames(job.text).length ? await expandSkillCommand(await configuredSkills(input.id), job.text) : job.text) + await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text) + await referencedPrBlock(loadProject(input.id), job.text);
         if (text.length > 120_000) throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
         for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
         const plan = await owner.planSnapshot();

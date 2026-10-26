@@ -250,6 +250,7 @@ export const Request = Type.Union([
     context: Type.Optional(Type.Union([ContextSettings, Type.Null()]))
   }, { additionalProperties: false }) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("compact"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("chat-reload"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("chat-reset"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),

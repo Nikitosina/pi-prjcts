@@ -630,7 +630,12 @@ const skillSourceLabels = { repo: "Repository", global: "Global", package: "Pack
 let skillsPicker = null;
 async function loadSkillsPicker(force = false) {
   const id = projectId, current = generation, node = document.querySelector("#skills-picker");
-  if (!id || !plan || !force && skillsPicker?.projectId === id) return;
+  if (!id || !plan) return;
+  // Opening Settings rebuilds the list from disk. Unsaved choices are kept: only the catalog is refreshed, so a skill installed meanwhile still shows up.
+  if (!force && skillsPicker?.projectId === id && JSON.stringify(skillsPicker.draft) !== skillsPicker.saved) {
+    try { const { skills } = await api({ action: "coordinator-skills", id }); if (id === projectId && current === generation && skillsPicker?.projectId === id) { skillsPicker.skills = skills; renderSkillsPicker(); } } catch {}
+    return;
+  }
   try {
     const [settings, { skills }] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "coordinator-skills", id })]);
     if (id !== projectId || current !== generation) return;
@@ -1273,6 +1278,7 @@ const skillIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 1.5 3
 const chatArgs = () => chatId === "main" ? {} : { chatId };
 const slashCommands = [
   { name: "new", description: "Clear this chat's context; earlier messages stay stored", run: () => mutate({ action: "chat-reset", id: projectId, ...chatArgs() }, "New context started.") },
+  { name: "reload", description: "Reload skills, instructions and tools for this chat", run: () => mutate({ action: "chat-reload", id: projectId, ...chatArgs() }, result => result.changed ? `Reloaded: ${result.skills} skill${result.skills === 1 ? "" : "s"} for this chat; prompt and tools updated.` : `Already up to date (${result.skills} skill${result.skills === 1 ? "" : "s"}).`) },
   { name: "compact", description: "Compact this chat's context now", run: compactNow },
   { name: "name", description: "Rename this chat", argument: "<title>", run: async title => {
     if (!title) return document.querySelector('#chat-bar [data-action="chat-rename"]')?.click();
@@ -1305,13 +1311,14 @@ async function sessionDialog() {
   const rows = [["Chat", chat?.title ?? "Main"], ["Chat ID", chatId], ["Conversation", chat?.conversationId ?? "—"], ["Model", view.project.model], ["Context", context?.window ? `${context.tokens.toLocaleString()} / ${context.window.toLocaleString()} tokens` : "unknown"], ["Messages shown", view.messages.length], ["Tokens used", usage ? usage.total.totalTokens.toLocaleString() : "—"], ["Cost (SDK estimate)", usage ? `$${usage.total.cost.total.toFixed(2)}` : "—"]];
   setDialogBody(`<div class="kv">${rows.map(([key, value]) => `<span>${esc(key)}</span><b>${esc(value)}</b>`).join("")}</div>`);
 }
-// "/" picker in the coordinator composer: commands (at the start of the message), then skills. The skill catalog loads once per project on first use.
+// "/" picker in the coordinator composer: commands (at the start of the message), then skills.
 let skillCatalog = null, skillMenu = null, prMenu = null, refMenu = null;
 async function loadSkills() {
   const id = projectId;
-  if (skillCatalog?.projectId === id) return skillCatalog.skills;
+  // The host rebuilds the catalog from disk on every request, so a skill installed a moment ago shows up; keystrokes within a couple of seconds share one answer.
+  if (skillCatalog?.projectId === id && Date.now() - skillCatalog.at < 2000) return skillCatalog.skills;
   const { skills } = await api({ action: "coordinator-skills", id });
-  if (id === projectId) skillCatalog = { projectId: id, skills };
+  if (id === projectId) skillCatalog = { projectId: id, skills, at: Date.now() };
   return skills;
 }
 // Inline triggers anywhere in the text: "/" skills, "@" issues/docs/uploads/files, "#" PRs. A trigger counts at the start or after whitespace or an opening bracket.
@@ -1975,7 +1982,7 @@ async function uiAction(action) {
 async function mutate(input, success) {
   if (busy) throw new Error("Another action is still pending. Your draft was kept.");
   busy = true; disableActions();
-  try { const result = await api(input); toast(success); if (input.id === projectId) { if (document.querySelector("#letter").contains(document.activeElement) || document.querySelector("#questions").contains(document.activeElement)) document.activeElement.blur(); await refresh(); } return result; }
+  try { const result = await api(input); toast(typeof success === "function" ? success(result) : success); if (input.id === projectId) { if (document.querySelector("#letter").contains(document.activeElement) || document.querySelector("#questions").contains(document.activeElement)) document.activeElement.blur(); await refresh(); } return result; }
   finally { busy = false; disableActions(); }
 }
 
