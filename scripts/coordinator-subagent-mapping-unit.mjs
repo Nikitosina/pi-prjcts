@@ -7,7 +7,7 @@ const project = { id: '00000000-0000-4000-8000-000000000001', name: 'Demo', obje
 for (const custom of [undefined, 'Custom owner role text']) {
   const text = coordinatorInstructions({ ...project, prompts: custom ? { coordinator: custom } : undefined }, '', '');
   assert.ok(text.includes(SUBAGENT_TOOL_MAPPING), 'mapping is appended by code');
-  for (const name of ['agent_spawn', 'agent_wait', 'agent_types', 'projects_delegate', 'projects_worker_plan', 'wait:false', 'before waiting on any', 'need no owner approval']) {
+  for (const name of ['agent_spawn', 'agent_wait', 'agent_types', 'projects_delegate', 'projects_worker_plan', 'wait:false', 'before waiting on any', 'grants no other capability or permission', 'several projects_delegate calls in the same turn', 'ref/threadId target', 'branch/fromThread continuation']) {
     assert.ok(text.includes(name), `instructions mention ${name}`);
   }
 }
