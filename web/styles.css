@@ -422,10 +422,10 @@ details.advanced > summary { cursor: pointer; color: var(--muted); }
   .tabs { order: 1; flex-basis: 100%; height: 40px; }
   .grid2, .grid-obs { grid-template-columns: minmax(0, 1fr); }
   .col { position: static; max-height: none; }
-  .app, .main { height: auto; }
-  .body { overflow: visible; }
-  .convo { height: auto; }
-  .transcript { max-height: 60vh; }
+  .main { height: auto; flex: 1; min-height: 0; }
+  .convo { min-height: 240px; }
+  .body > [data-panel="coordinator"].grid2 { grid-template-rows: minmax(240px, 1fr) auto; }
+  .col { max-height: 35vh; }
   button, button.small { min-height: 44px; }
 }
 .worker-line { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1px 8px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 7px 0; font-size: 12.5px; }
@@ -1113,6 +1113,37 @@ a.button-link:hover { background: var(--hover); }
 @media (max-width: 560px) { .mach { display: none; } }
 /* Phone width: collapse the mini progress bars (percentages stay) so providers and refresh fit without scrolling. */
 @media (max-width: 560px) { .limits-bar { padding: 0 6px; gap: 0; } .lim { gap: 4px; padding: 2px 4px; } .lim-win { gap: 3px; } .limits-bar > .lim > .lim-win > .lim-bar { width: 0; } }
+
+/* Keep the narrow and tablet shell in the visible viewport. In particular, Safari must never scroll the
+   document to reveal the composer: the transcript and .body own scrolling, while the separate limits bar stays fixed. */
+@media (max-width: 1024px) {
+  html, body { width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
+  body { position: fixed; inset: 0; }
+  .app { position: fixed; left: 0; right: 0; top: var(--visual-viewport-top, 0px); height: calc(var(--visual-viewport-height, 100dvh) - 28px - env(safe-area-inset-bottom, 0px)); }
+  .side { height: auto; flex: none; }
+  .limits-bar { position: fixed; left: 0; right: 0; top: calc(var(--visual-viewport-top, 0px) + var(--visual-viewport-height, 100dvh) - 28px - env(safe-area-inset-bottom, 0px)); bottom: auto; height: calc(28px + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px); }
+}
+@media (max-width: 820px) {
+  .app { display: flex; flex-direction: column; }
+  .body { overflow: auto; }
+  .transcript { max-height: none; overscroll-behavior: contain; }
+}
+@media (max-width: 820px) and (max-height: 650px) {
+  /* A keyboard or landscape leaves room for the conversation, not the auxiliary rail. The rail remains
+     available in the normal portrait layout and all its data remains available in the other tabs. */
+  .body > [data-panel="coordinator"].grid2 { grid-template-rows: minmax(0, 1fr); }
+  .body > [data-panel="coordinator"] > .col { display: none; }
+  .convo { min-height: 0; }
+  .body { padding-top: 8px; padding-bottom: 8px; }
+}
+@media (min-width: 821px) and (max-width: 1024px) and (max-height: 650px) {
+  .body > [data-panel="coordinator"].grid2 { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .body > [data-panel="coordinator"] > .col { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot, .search-focus, .artifact-file.fresh { animation: none; }
+  .app.side-animate, .side .side-text { transition: none; }
+}
 
 /* Chat image viewer. */
 #lightbox { position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; height: 100dvh; max-height: none; border: 0; border-radius: 0; background: #000c; box-shadow: none; padding: 0; overflow: hidden; }

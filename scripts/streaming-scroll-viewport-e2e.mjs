@@ -1,0 +1,141 @@
+// Browser regression for streaming paint cadence, transcript anchoring and the mobile viewport shell.
+// Isolated host, deterministic local fake model and real Chrome/CDP input. Mobile metrics are not Safari proof.
+import { createKit, delay } from './lib/e2e-kit.mjs';
+
+const burstText = Array.from({ length: 32 }, (_, i) => `Burst paragraph ${i}: ${'readable text '.repeat(8)}`).join('\n\n');
+const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const k = await createKit('streaming-scroll-viewport', { handler: async ({ role, user }) => {
+  if (role !== 'coordinator') return undefined;
+  if (user.includes('MARK-BURST')) {
+    // Deliberately deliver the entire sequence as one bursty HTTP response.
+    return chunk({ role: 'assistant', content: '' }) + burstText.split(/(?<= )/).map(content => chunk({ content })).join('') + chunk({}, 'stop') + 'data: [DONE]\n\n';
+  }
+  if (user.includes('MARK-FILL')) return undefined;
+  return undefined;
+} });
+const { result } = k;
+const metrics = async page => page.evaluate(`(() => {
+  const v = visualViewport, composer = document.querySelector('#compose').getBoundingClientRect();
+  const status = document.querySelector('#limits-bar').getBoundingClientRect();
+  const send = document.querySelector('#compose button[type="submit"]').getBoundingClientRect();
+  return { width: innerWidth, height: innerHeight, visualWidth: v?.width, visualHeight: v?.height,
+    visualTop: v?.offsetTop, composerBottom: composer.bottom, sendInside: send.right <= composer.right + 1 && send.bottom <= composer.bottom + 1, statusTop: status.top, statusBottom: status.bottom,
+    bodyScroll: document.scrollingElement.scrollTop, horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1 };
+})()`);
+const anchored = async page => page.evaluate(`(() => {
+  const t = document.querySelector('#transcript'), box = t.getBoundingClientRect();
+  const row = [...t.querySelectorAll('[data-index]')].find(n => { const r = n.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; });
+  return row ? { index: row.dataset.index, offset: row.getBoundingClientRect().top - box.top, top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight } : null;
+})()`);
+const readOlder = async page => {
+  await page.evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop = Math.min(180, t.scrollHeight - t.clientHeight - 80); t.dispatchEvent(new Event('scroll')); })()`);
+  await delay(150);
+  return anchored(page);
+};
+
+await k.run(async () => {
+  const id = await k.createProject('Streaming and viewport', { grant: false });
+  for (let i = 0; i < 34; i++) await k.ask(id, `MARK-FILL ${i}`);
+  const url = new URL(await k.webUrl(id, 'coordinator')); url.searchParams.set('e2e', '1');
+  const page = await k.openPage(url.toString());
+  await page.waitFor(`document.querySelectorAll('#messages .msg').length >= 20`, 'seeded transcript');
+  await page.shot('01-desktop', { force: true });
+  result.measurements = {};
+
+  // A trailing user message used to re-enable following on every refresh. Real polling must not do that.
+  const beforePoll = await readOlder(page);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, x: 20, y: 20 });
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x: 20, y: 20 });
+  await page.evaluate(`document.querySelector('#refresh').click()`);
+  await delay(400);
+  const afterPoll = await anchored(page);
+  k.check('R1 polling preserves the older-message anchor instead of jumping to a trailing user message', beforePoll.index === afterPoll.index && Math.abs(beforePoll.offset - afterPoll.offset) < 2 && afterPoll.gap > 100, { beforePoll, afterPoll });
+  result.measurements.polling = { beforePoll, afterPoll };
+
+  // Selection is content, not a disposable side effect of a polling render.
+  const selection = await page.evaluate(`(() => {
+    const text = [...document.querySelectorAll('#messages .msg.them .text p')].find(n => n.getBoundingClientRect().bottom > document.querySelector('#transcript').getBoundingClientRect().top);
+    const range = document.createRange(); range.selectNodeContents(text); const s = getSelection(); s.removeAllRanges(); s.addRange(range); return s.toString();
+  })()`);
+  await page.evaluate(`document.querySelector('#refresh').click()`); await delay(400);
+  k.check('R2 polling preserves text selection and its DOM range', await page.evaluate(`getSelection().toString()`) === selection && await page.evaluate(`getSelection().anchorNode.isConnected`), selection.slice(0, 100));
+  await page.evaluate(`getSelection().removeAllRanges()`);
+
+  // Late image/markdown growth above the reader must retain the same visible message and offset.
+  const beforeMedia = await anchored(page);
+  await page.evaluate(`(() => {
+    const first = document.querySelector('#messages .msg .text'); const img = document.createElement('img');
+    img.alt = 'late deterministic media'; img.style.cssText = 'display:block;width:120px;height:1px'; first.prepend(img);
+    requestAnimationFrame(() => { img.style.height = '220px'; });
+  })()`);
+  await delay(250);
+  const afterMedia = await anchored(page);
+  k.check('R3 late media sizing preserves the reading anchor', beforeMedia.index === afterMedia.index && Math.abs(beforeMedia.offset - afterMedia.offset) < 2, { beforeMedia, afterMedia });
+  result.measurements.lateMedia = { beforeMedia, afterMedia };
+
+  // Compaction/history pagination inserts above the reader and must retain the same message too.
+  const firstText = await page.evaluate(`document.querySelector('#messages .earlier-messages')?.textContent ?? ''`);
+  k.check('R4 history pagination is available in the long fixture', /Show earlier/.test(firstText), firstText);
+  const beforePage = await anchored(page);
+  await page.evaluate(`document.querySelector('#messages .earlier-messages').click()`);
+  await page.waitFor(`!document.querySelector('#messages .earlier-messages')`, 'older page inserted');
+  await delay(150);
+  const afterPage = await anchored(page);
+  k.check('R5 history pagination preserves the reading anchor', beforePage.index === afterPage.index && Math.abs(beforePage.offset - afterPage.offset) < 2, { beforePage, afterPage });
+  result.measurements.pagination = { beforePage, afterPage };
+
+  // Send through real input/click. The response is a burst, not a slowed-down fake stream.
+  await page.evaluate(`document.querySelector('[data-action="jump-latest"]').click()`).catch(() => {});
+  await page.evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop = t.scrollHeight; t.dispatchEvent(new Event('scroll')); })()`);
+  const composer = await page.evaluate(`(() => { const r = document.querySelector('#compose textarea').getBoundingClientRect(); return { x: r.x + 20, y: r.y + 20 }; })()`);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...composer });
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...composer });
+  await page.cdp('Input.insertText', { text: 'MARK-BURST' });
+  await page.evaluate(`(() => {
+    window.__paintBursts = 0; window.__paintObserver = new MutationObserver(() => { window.__paintBursts++; });
+    window.__paintObserver.observe(document.querySelector('#live-reply'), { childList: true, subtree: true });
+    window.__burstStarted = performance.now();
+  })()`);
+  const send = await page.evaluate(`(() => { const r = document.querySelector('#compose button[type="submit"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...send });
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...send });
+  await page.waitFor(`document.querySelector('#messages').innerText.includes('Burst paragraph 31') && document.querySelector('#live-reply').hidden`, 'immediate final burst text');
+  const burst = await page.evaluate(`(() => { window.__paintObserver.disconnect(); return { renders: window.__paintBursts, elapsed: performance.now() - window.__burstStarted, text: [...document.querySelectorAll('#messages .msg.them')].at(-1).innerText }; })()`);
+  k.check('R6 bursty SSE is frame-batched rather than one full markdown replacement per delta', burst.renders > 0 && burst.renders <= 8, burst);
+  k.check('R7 final text is committed immediately, without added streaming latency', burst.elapsed < 5000 && /Burst paragraph 31/.test(burst.text), burst);
+  const finalHost = await k.rpc({ action: 'show', id });
+  k.check('R8 browser final agrees with host transcript', finalHost.messages.findLast(m => m.role === 'assistant')?.text === burstText, burst.elapsed);
+  result.measurements.burst = burst;
+
+  // Explicit chat switches intentionally open at newest; returning must not inherit a paused reader from another chat.
+  const side = await k.rpc({ action: 'chat-create', id, title: 'Side' });
+  await page.waitFor(`!!document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]')`, 'side chat');
+  await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]').click()`);
+  await page.waitFor(`document.querySelector('#chat-list .chat.on')?.dataset.chat === '${side.id}'`, 'side selected');
+  await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="main"]').click()`);
+  await page.waitFor(`document.querySelector('#messages').innerText.includes('Burst paragraph 31')`, 'main selected');
+  const switched = await anchored(page);
+  k.check('R9 chat switches follow newest intentionally', switched.gap < 40, switched);
+
+  // Chrome viewport regressions: composer and the separate limits bar both stay in the visual viewport.
+  await page.viewport(390, 844, true); await delay(150);
+  const phone = await metrics(page);
+  k.check('V1 phone composer and status bar fit the visual viewport', phone.composerBottom <= phone.visualTop + phone.visualHeight - 27 && Math.abs(phone.statusBottom - (phone.visualTop + phone.visualHeight)) < 2 && !phone.horizontalOverflow, phone);
+  await page.shot('02-phone', { force: true });
+  await page.viewport(390, 500, true); await delay(150);
+  const keyboardSized = await metrics(page);
+  k.check('V2 keyboard-sized viewport reanchors both bottom surfaces', keyboardSized.composerBottom <= keyboardSized.visualTop + keyboardSized.visualHeight - 27 && Math.abs(keyboardSized.statusBottom - (keyboardSized.visualTop + keyboardSized.visualHeight)) < 2, keyboardSized);
+  await page.viewport(844, 390, true); await delay(150);
+  const landscape = await metrics(page);
+  k.check('V3 orientation-sized viewport keeps both bars anchored without overflow', landscape.composerBottom <= landscape.visualTop + landscape.visualHeight - 27 && landscape.sendInside && Math.abs(landscape.statusBottom - (landscape.visualTop + landscape.visualHeight)) < 2 && !landscape.horizontalOverflow, landscape);
+  await page.shot('03-landscape', { force: true });
+  await page.viewport(1024, 768, true); await delay(150);
+  const tablet = await metrics(page);
+  k.check('V4 tablet viewport shell remains anchored', tablet.composerBottom <= tablet.visualTop + tablet.visualHeight - 27 && Math.abs(tablet.statusBottom - (tablet.visualTop + tablet.visualHeight)) < 2, tablet);
+  await page.shot('04-tablet', { force: true });
+  result.measurements.viewports = { phone, keyboardSized, landscape, tablet };
+
+  await page.cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  k.check('A1 reduced motion disables live and layout animation', await page.evaluate(`getComputedStyle(document.querySelector('.live-dot')).animationName === 'none' && getComputedStyle(document.querySelector('.app')).transitionDuration === '0s'`));
+  result.browser = 'Chrome with CDP device metrics; this is not iOS Safari verification';
+});
