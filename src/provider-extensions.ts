@@ -1,10 +1,9 @@
 import { DefaultPackageManager, ModelRuntime, SettingsManager, discoverAndLoadExtensions, getAgentDir, type CreateModelRuntimeOptions } from "@earendil-works/pi-coding-agent";
 import { contentText, getCurrentSystemMessage, type Context } from "@earendil-works/pi-ai";
-import { existsSync, realpathSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { home } from "./state.ts";
+import { localModelStore } from "./model-store.ts";
 
 /**
  * Model providers contributed by the owner's Pi packages and agent-dir extensions.
@@ -67,8 +66,8 @@ export function loadProviderExtensions(): Promise<Loaded> { return loading ??= l
  * providers all count as configured, exactly as running sessions resolve auth. Registration failures are recorded, never thrown.
  */
 export async function createModelRuntime(options: Omit<CreateModelRuntimeOptions, "refreshOnCreate" | "allowModelNetwork"> = {}): Promise<ModelRuntime> {
-  const modelsStorePath = options.modelsStorePath ?? await projectModelsStore();
-  const [runtime, loaded] = await Promise.all([ModelRuntime.create({ ...options, modelsStorePath, allowModelNetwork: false, refreshOnCreate: false }), loadProviderExtensions()]);
+  const store = options.modelsStore || options.modelsStorePath ? {} : { modelsStore: await localModelStore() };
+  const [runtime, loaded] = await Promise.all([ModelRuntime.create({ ...options, ...store, allowModelNetwork: false, refreshOnCreate: false }), loadProviderExtensions()]);
   const { registrations, status } = observed = loaded;
   const record = (extension: string, text: string) => { if (!status.errors.some(item => item.extension === extension && item.error === text)) status.errors.push({ extension, error: text }); };
   // SDK registrations start unawaited refreshes. Drain them before the final pass so a late one cannot invalidate its availability snapshot.
@@ -87,24 +86,11 @@ export async function createModelRuntime(options: Omit<CreateModelRuntimeOptions
     }
   } finally { runtime.refresh = refresh; }
   await Promise.allSettled(registrationRefreshes);
-  try { await runtime.refresh({ allowNetwork: false }); } catch (error) { record("model availability", message(error)); }
+  try {
+    const result = await runtime.refresh({ allowNetwork: false });
+    if (result.errors.size || runtime.getError()) throw new Error("Local model configuration could not be refreshed");
+  } catch { throw new Error("Local model configuration could not be refreshed; previous runtime kept"); }
   return runtime;
-}
-
-/** Seed once from Pi's catalog, then keep every SDK refresh write in the Projects home. */
-async function projectModelsStore(): Promise<string> {
-  const path = join(home(), "models-store.json");
-  await mkdir(home(), { recursive: true, mode: 0o700 });
-  if (!existsSync(path)) {
-    try {
-      const seed = await readFile(join(getAgentDir(), "models-store.json"), "utf8");
-      JSON.parse(seed);
-      await writeFile(path, seed, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if (!(error instanceof SyntaxError) && !(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "EEXIST"))) throw error;
-    }
-  }
-  return path;
 }
 
 export async function providerExtensionStatus(): Promise<ProviderExtensionStatus> { const { status } = await loadProviderExtensions(); return { loaded: [...status.loaded], errors: status.errors.map(item => ({ ...item })), providers: [...status.providers] }; }
