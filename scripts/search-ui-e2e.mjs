@@ -123,7 +123,7 @@ try {
   await key(s, 'ArrowDown'); await key(s, 'ArrowUp');
   check('S11 arrows move the selection', await evaluate(`document.querySelector('#search-results .search-row.active') === document.querySelector('#search-results .search-row')`, s));
   await key(s, 'Enter');
-  await waitFor(`!document.querySelector('dialog').open && new URL(location.href).searchParams.get('chat') === ${JSON.stringify(two.id)} && !!document.querySelector('#messages .search-focus')`, s, 'jumped to chat Two');
+  await waitFor(`!document.querySelector('dialog[open]') && new URL(location.href).searchParams.get('chat') === ${JSON.stringify(two.id)} && !!document.querySelector('#messages .search-focus')`, s, 'jumped to chat Two');
   await waitFor(inView('#transcript', '#messages .search-focus'), s, 'focused message visible');
   check('S7 Enter opens the right chat, renders the old message, highlights the word and scrolls to it', await evaluate(`document.querySelector('#messages .search-focus').innerText.includes('pangolinsaxophone') && [...document.querySelectorAll('#messages .search-focus mark')].some(m => /pangolinsaxophone/i.test(m.textContent))`, s));
   await shot('02-jumped-old-message', s);
@@ -152,7 +152,7 @@ try {
   await waitFor(`document.querySelector('#search-results .search-row[data-source="knowledge"]')`, s, 'knowledge result');
   await evaluate(`document.querySelector('#search-results .search-row[data-source="knowledge"]').click()`, s);
   await waitFor(`!!document.querySelector('dialog[open] .doc-view mark.search-mark')`, s, 'doc highlighted');
-  await waitFor(inView('dialog .dialog-body', 'dialog .doc-view mark.search-mark.current'), s, 'doc mark visible');
+  await waitFor(inView('dialog[open] .dialog-body', 'dialog[open] .doc-view mark.search-mark.current'), s, 'doc mark visible');
   check('S10 a knowledge hit opens the document scrolled to the highlighted word', true);
   await shot('04-knowledge-hit', s);
   await keyK(s, 'document.body');
@@ -161,7 +161,7 @@ try {
   await waitFor(`document.querySelector('#search-results .search-row[data-source="upload"]')`, s, 'upload result');
   await evaluate(`document.querySelector('#search-results .search-row[data-source="upload"]').click()`, s);
   await waitFor(`!!document.querySelector('dialog[open] .upload-text mark.search-mark')`, s, 'upload highlighted');
-  await waitFor(inView('dialog .dialog-body', 'dialog .upload-text mark.search-mark.current'), s, 'upload mark visible');
+  await waitFor(inView('dialog[open] .dialog-body', 'dialog[open] .upload-text mark.search-mark.current'), s, 'upload mark visible');
   check('S10 an upload hit past 20 000 characters opens at that place, highlighted', true);
   await shot('05-upload-hit', s);
   await evaluate(`document.querySelector('[data-action="close-dialog"]').click()`, s);
@@ -174,7 +174,7 @@ try {
   await typeQuery(s, 'the of');
   await waitFor(`/at least one word/.test(document.querySelector('#search-results').innerText)`, s, 'stop-word message');
   check('S6 the UI says when nothing matches and why a stop-word query is refused', true);
-  await evaluate(`document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); document.querySelector('dialog').close()`, s);
+  await evaluate(`document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); document.querySelector('dialog[open]').close()`, s);
   // S9 left the worker view open; Back returns to the chat, where "/" focuses the composer.
   await evaluate(`document.querySelector('#inline-thread [data-action="thread-close"]')?.click()`, s);
   await waitFor(`document.querySelector('#inline-thread').hidden`, s, 'back from worker view');
