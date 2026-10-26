@@ -23,12 +23,20 @@ Opt-in per project (Settings → Verification). Off by default; a project that n
 
 ## Limits (honest)
 
-- macOS only (sandbox-exec). `verify-pi-prjcts`-style browser runs need the sandbox to permit loopback and the browser; shared simulators/browsers are not yet leased per attempt, and the verifier's own browser is not leased against other agents.
-- A verifier can only exercise what the sandbox allows; skills needing network or credentials report `blocked`.
-- Only scoped top-level workers are verified; scouts, reviewers and nested children are not.
-- Restart recovery relies on the durable planning state and is not covered by a dedicated restart test.
+- **macOS only** (`sandbox-exec`). Elsewhere verification is refused (escalated), never run unconfined.
+- **Machine-wide resources are not leased.** A verifier run holds no lease on simulators, the owner's apps or fixed browser ports. Instead they are made unavailable: `projects_verify_run` refuses commands naming `simctl`, `xcodebuild`, `osascript`, `screencapture`, `open -a`, `--remote-debugging-port`; the sandbox denies the CoreSimulator service and signalling processes outside the sandbox. A skill that needs them gets `blocked` (escalated), not a weaker pass. Headless browsers on a private profile and loopback ports work. The refusal is a command-name filter plus the sandbox rules, not a general resource broker.
+- **Only scoped top-level workers are verified.** With verification on, a top-level worker without an isolated worktree is escalated as "Verification does not apply" and its work is blocked (not reported complete). That path is covered by the code and not by an e2e. Scouts, reviewers and nested child workers are not verified; their parent worker's result is.
+- A verifier can only do what the sandbox allows; skills needing network or credentials report `blocked`.
 - Snapshot limit: 50k files / 1 GiB.
+- **Restart:** a host kill leaves the project paused with the verifier interrupted and the attempt open; the owner resumes with the existing recovery action and the same verifier thread continues on the same snapshot. Until then the worker stays frozen and its dependents wait.
+
+## Frozen at cycle start
+
+Verifier model, skill and criteria are stored in the cycle, and every verifier thread of the cycle is created with that model and skill (`frozen` on the plan work). Changing Settings mid-cycle does not change the judge; if the frozen model is no longer configured the attempt escalates instead of falling back.
 
 ## Tests
 
-`node scripts/verification-unit.mjs` (verdict judging, escalation rules, sandbox, settings) and `node scripts/verification-loop-e2e.mjs` (isolated host, deterministic model at the provider seam, real git/sandbox/commands: fail → fix → fresh pass, escape attempt, blocked, drift, repeated failure, missing skill, cap 1, disabled). Browser: `verify-pi-prjcts` drive `verification-settings`.
+- `node scripts/verification-unit.mjs`: verdict rules, escalation rules, snapshots, sandbox (writes, reads, network, signals, simulator service, global-resource refusal), settings.
+- `node scripts/verification-loop-e2e.mjs` (V0–V7): isolated host, deterministic model at the provider seam, real git/sandbox/commands. Fail → fix → fresh pass, escape attempt, blocked, drift, repeated failure, missing skill, cap 1, disabled.
+- `node scripts/verification-recovery-e2e.mjs` (R1–R3): three real attempts then exhaustion; host SIGKILL mid-attempt, restart, resume, settings changed meanwhile and still frozen; cap 2 with three parents where the finished parent's verifier is scheduled ahead of queued work.
+- Browser: `verify-pi-prjcts` drive `verification-settings`.

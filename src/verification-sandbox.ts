@@ -6,6 +6,9 @@ import { join } from "node:path";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const SECRET_HOME_DIRS = [".ssh", ".aws", ".gnupg", ".config/gh", ".config/git", ".netrc", ".npmrc", ".pi", ".claude", ".codex", ".docker", "Library/Keychains"];
+/** Commands that drive machine-wide resources (simulators, the owner's apps, screen). Verifier runs hold no lease on them, so they are refused up front and reported as blocked. */
+const GLOBAL_RESOURCE = /\b(simctl|xcodebuild|osascript|screencapture|remote-debugging-port)\b|\bopen\s+-[a-zA-Z]*a\b/;
+export function globalResourceUse(command: string): string | null { return GLOBAL_RESOURCE.exec(command)?.[0] ?? null; }
 export const LOG_CAP_BYTES = 8 * 1024 * 1024;
 export const TAIL_CHARS = 6000;
 
@@ -31,6 +34,8 @@ export function sandboxProfile(policy: SandboxPolicy): string {
     "(deny file-write*)", `(allow file-write* (subpath "/dev") ${policy.writable.map(path => `(subpath ${quote(path)})`).join(" ")})`,
     ...[...secrets, ...policy.unreadable.filter(path => existsSync(path))].map(path => `(deny file-read-data (subpath ${quote(path)}))`),
     ...policy.readable.map(path => `(allow file-read-data (subpath ${quote(path)}))`),
+    // Global, unleased resources: no simulator service, no signalling processes outside the sandbox (no stopping the owner's browser or simulator).
+    '(deny mach-lookup (global-name-prefix "com.apple.CoreSimulator"))', "(deny signal (target others))",
     "(deny network-outbound)", '(allow network-outbound (remote ip "localhost:*") (remote unix-socket))',
   ].join("\n");
 }

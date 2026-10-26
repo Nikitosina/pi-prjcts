@@ -26,6 +26,8 @@ export type DurablePlanWork = Readonly<{
   workspaceFrom?: string;
   /** Worker continuing an existing branch (host-resolved and authorized): its worktree starts on this branch at this tip. */
   continueBranch?: Readonly<{ name: string; sha: string }>;
+  /** Verifier (host-set): the model and skill the verification cycle froze when it started; a later Settings change does not apply. */
+  frozen?: Readonly<{ model: string; skill: string }>;
 }>;
 export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork[] }>;
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */

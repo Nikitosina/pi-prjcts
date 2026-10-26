@@ -396,9 +396,11 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       const attempt = seen.verification?.attempts.find(item => item.verifierWorkId === workId);
       return attempt ? { kind: "revision", current: await hooks.revision(attempt.sourcePath).catch(() => null) } : { kind: "none" };
     }
-    if (!completed || seen.role !== "worker" || !seen.top || !seen.scoped || !seen.cwd) return { kind: "none" };
+    if (!completed || seen.role !== "worker" || !seen.top) return { kind: "none" };
     const open = seen.verification?.open ? seen.verification : undefined;
     if (!open && !hooks.config().enabled) return { kind: "none" };
+    // Verification is on but this worker has no worktree to snapshot: it is reported as not verified, never as plain completion.
+    if (!seen.scoped || !seen.cwd) return { kind: "escalate", reason: "Verification does not apply: this worker has no isolated worktree to snapshot (only scoped workers are verified)" };
     if ((open?.attempts.length ?? 0) >= MAX_VERIFICATION_ATTEMPTS) return { kind: "escalate", reason: "Verification attempts are exhausted" };
     const problem = open ? null : await hooks.check();
     if (problem) return { kind: "escalate", reason: problem };
@@ -449,8 +451,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const verifierThreadId = randomUUID(), verifierWorkId = randomUUID();
     try {
       if (cycle.attempts.length + 1 !== prepared.n) throw new Error("Verification state changed while the snapshot was prepared");
-      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head }), parentThreadId: work.threadId, readRoot: prepared.targetPath, requestId: `verify:${work.id}` }, false);
-      record.priority = VERIFIER_PRIORITY;
+      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head }), parentThreadId: work.threadId, readRoot: prepared.targetPath, requestId: `verify:${work.id}`, frozen: { model: cycle.model, skill: cycle.skill } }, false);
+      state.work[record.id]!.priority = VERIFIER_PRIORITY; // through the document: the returned record is a plain copy
       cycle.attempts.push({ n: prepared.n, verifierWorkId, verifierThreadId, key: prepared.key, revision: prepared.manifest.revision, head: prepared.manifest.head, branch: prepared.manifest.branch, sourcePath: prepared.sourcePath, targetPath: prepared.targetPath, state: "running", runs: [], startedAt: Date.now() });
     } catch (error) {
       void options.verification?.release(prepared.key).catch(() => undefined);
@@ -538,8 +540,13 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const workspaceScopeId = work.role !== "worker" && !existing ? null : work.workspaceScopeId ?? null;
     const missing = selected.filter(name => !bindings.has(name));
     let model = options.models[work.role];
+    if (work.frozen) {
+      const pinned = options.resolveModel?.(work.frozen.model, work.role);
+      if (!pinned || `${pinned.provider}/${pinned.modelId}` !== work.frozen.model) throw new Error("The verification cycle's frozen verifier model is unavailable; nothing falls back to another model");
+      model = pinned;
+    }
     const instructions = options.instructions[work.role];
-    let profile: StoredAttempt = { id: crypto.randomUUID(), projectId: options.projectId, model: `${model.provider}/${model.modelId}`, thinking: "medium", instructions, skills: options.skillNames?.(work.role), cwd: options.cwd, toolNames: selected, bindingRevision, capabilityBindingRevision: bindingRevision, standingRevision: options.standingRevision, startedAt: null, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } };
+    let profile: StoredAttempt = { id: crypto.randomUUID(), projectId: options.projectId, model: `${model.provider}/${model.modelId}`, thinking: "medium", instructions, skills: work.frozen ? [work.frozen.skill] : options.skillNames?.(work.role), cwd: options.cwd, toolNames: selected, bindingRevision, capabilityBindingRevision: bindingRevision, standingRevision: options.standingRevision, startedAt: null, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } };
     if (missing.length) return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: null, workspaceConfigured: false, status: "blocked", blocker: `Missing required tool bindings: ${missing.join(", ")}`, conversationId: null, taskId: null, attempt: profile };
     let conversationId: ConversationId; let continuationAttempt: StoredAttempt | undefined;
     if (existing) {

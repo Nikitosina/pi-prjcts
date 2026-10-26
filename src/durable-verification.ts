@@ -8,7 +8,7 @@ import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
 import { home } from "./state.ts";
 import { captureTarget, changedFromManifest, readManifest, snapshotTarget, writeManifest, type TargetManifest } from "./verification-target.ts";
 import { failureSignature, judge, type RunRecord, type Verification, type VerificationAttempt } from "./verification-model.ts";
-import { runSandboxed, sandboxAvailable, sandboxEnv } from "./verification-sandbox.ts";
+import { globalResourceUse, runSandboxed, sandboxAvailable, sandboxEnv } from "./verification-sandbox.ts";
 
 export type AttemptPaths = { dir: string; target: string; scratch: string; manifest: string };
 export const attemptPaths = (controlRoot: string, key: string): AttemptPaths => ({ dir: join(controlRoot, "verification", key), target: join(controlRoot, "verification", key, "target"), scratch: join(controlRoot, "verification", key, "scratch"), manifest: join(controlRoot, "verification", key, "manifest.json") });
@@ -61,6 +61,8 @@ export function verificationTools(deps: VerificationToolDeps) {
     async execute(args, api, context) {
       if (deps.isClosed?.()) return text("Project runtime is closing", true);
       if (!sandboxAvailable()) return text("No enforceable sandbox on this platform: nothing was run. Record a blocked verdict.", true);
+      const shared = globalResourceUse(args.command);
+      if (shared) return text(`Refused: "${shared}" uses a machine-wide resource (simulator, owner's app or fixed browser port) that verification does not lease. Nothing was run. Record the criterion that needs it as blocked.`, true);
       const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
       const paths = attemptPaths(deps.controlRoot, mine.attempt.key), artifacts = ensureArtifactDir(deps.controlRoot, mine.verifierThreadId);
       const id = `r${mine.attempt.runs.length + 1}`;

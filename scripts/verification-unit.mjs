@@ -106,6 +106,14 @@ try {
     const loop = await sh(`node -e "const s=require('http').createServer((q,r)=>r.end('pong')).listen(0,'127.0.0.1',()=>fetch('http://127.0.0.1:'+s.address().port).then(r=>r.text()).then(t=>{console.log(t);process.exit(0)}))"`);
     check('loopback still works (the verification host and browser need it)', loop.exitCode === 0 && loop.tail.includes('pong'));
     check('the environment carries no credentials and points HOME at scratch', (await sh('echo "$HOME|$TMPDIR|${GITHUB_TOKEN:-none}"')).tail.trim() === `${join(scratch, 'home')}|${join(scratch, 'tmp')}|none`);
+    check('commands that drive unleased machine-wide resources are refused up front', ['xcrun simctl boot X', 'xcodebuild test', 'open -a Safari', 'osascript -e x', 'chrome --remote-debugging-port=9222'].every(command => sandbox.globalResourceUse(command)) && sandbox.globalResourceUse('node check.mjs') === null);
+    const outsider = (await import('node:child_process')).spawn('sleep', ['30'], { stdio: 'ignore' });
+    const killed = await sh(`kill -9 ${outsider.pid}`);
+    await new Promise(ok => setTimeout(ok, 200));
+    check('a command cannot signal processes outside the sandbox (no stopping the owner\'s browser or simulator)', killed.exitCode !== 0 && outsider.exitCode === null && outsider.signalCode === null);
+    outsider.kill('SIGKILL');
+    const sim = await sh('xcrun simctl list devices 2>&1 | head -3');
+    check('the simulator service is unreachable from the sandbox', !/Booted|Shutdown/.test(sim.tail));
     const slow = await sandbox.runSandboxed({ command: 'sleep 30', cwd: work, policy, env, timeoutMs: 400, stdoutPath: join(artifacts, 'o.log'), stderrPath: join(artifacts, 'e.log') });
     check('a command that overruns is killed and reported as timed out', slow.timedOut && slow.durationMs < 5000);
     const big = await sh('yes | head -c 300000');
