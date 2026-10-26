@@ -1116,10 +1116,11 @@ a.button-link:hover { background: var(--hover); }
 
 /* Keep the narrow and tablet shell in the visible viewport. In particular, Safari must never scroll the
    document to reveal the composer: the transcript and .body own scrolling, while the separate limits bar stays fixed. */
-@media (max-width: 1024px) {
+@media (max-width: 1024px), (pointer: coarse) {
   html, body { width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
   body { position: fixed; inset: 0; }
   .app { position: fixed; left: 0; right: 0; top: var(--visual-viewport-top, 0px); height: calc(var(--visual-viewport-height, 100dvh) - 28px - env(safe-area-inset-bottom, 0px)); }
+  .main { height: auto; min-height: 0; }
   .side { height: auto; flex: none; }
   .limits-bar { position: fixed; left: 0; right: 0; top: calc(var(--visual-viewport-top, 0px) + var(--visual-viewport-height, 100dvh) - 28px - env(safe-area-inset-bottom, 0px)); bottom: auto; height: calc(28px + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px); }
 }

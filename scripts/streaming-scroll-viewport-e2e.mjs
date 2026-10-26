@@ -84,9 +84,10 @@ await k.run(async () => {
   k.check('R5 history pagination preserves the reading anchor', beforePage.index === afterPage.index && Math.abs(beforePage.offset - afterPage.offset) < 2, { beforePage, afterPage });
   result.measurements.pagination = { beforePage, afterPage };
 
-  // Send through real input/click. The response is a burst, not a slowed-down fake stream.
-  await page.evaluate(`document.querySelector('[data-action="jump-latest"]').click()`).catch(() => {});
-  await page.evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop = t.scrollHeight; t.dispatchEvent(new Event('scroll')); })()`);
+  // Send through real input/click from an unfollowed reading position. Sending, not scrolling first,
+  // must opt back into following. The response is a burst, not a slowed-down fake stream.
+  const beforeSend = await anchored(page);
+  k.check('R5S send starts from a genuinely unfollowed reading position', beforeSend.gap > 100, beforeSend);
   const composer = await page.evaluate(`(() => { const r = document.querySelector('#compose textarea').getBoundingClientRect(); return { x: r.x + 20, y: r.y + 20 }; })()`);
   await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...composer });
   await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...composer });
@@ -100,18 +101,35 @@ await k.run(async () => {
   await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...send });
   await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...send });
   await page.waitFor(`document.querySelector('#messages').innerText.includes('Burst paragraph 31') && document.querySelector('#live-reply').hidden`, 'immediate final burst text');
-  const burst = await page.evaluate(`(() => { window.__paintObserver.disconnect(); return { renders: window.__paintBursts, elapsed: performance.now() - window.__burstStarted, text: [...document.querySelectorAll('#messages .msg.them')].at(-1).innerText }; })()`);
+  const burst = await page.evaluate(`(() => { window.__paintObserver.disconnect(); const last = [...document.querySelectorAll('#messages .msg.them')].at(-1); return { renders: window.__paintBursts, elapsed: performance.now() - window.__burstStarted, text: last.innerText, bodyText: last.querySelector('.text').innerText }; })()`);
   k.check('R6 bursty SSE is frame-batched rather than one full markdown replacement per delta', burst.renders > 0 && burst.renders <= 8, burst);
   k.check('R7 final text is committed immediately, without added streaming latency', burst.elapsed < 5000 && /Burst paragraph 31/.test(burst.text), burst);
   const finalHost = await k.rpc({ action: 'show', id });
-  k.check('R8 browser final agrees with host transcript', finalHost.messages.findLast(m => m.role === 'assistant')?.text === burstText, burst.elapsed);
+  const hostText = finalHost.messages.findLast(m => m.role === 'assistant')?.text;
+  k.check('R8 browser final exactly matches host transcript', hostText === burstText && burst.bodyText === hostText, { elapsed: burst.elapsed, hostLength: hostText?.length, browserLength: burst.bodyText.length });
+  const afterSend = await anchored(page);
+  k.check('R8S sending from scrolled-up state resumes following', afterSend.gap < 40, { beforeSend, afterSend });
   result.measurements.burst = burst;
 
-  // Explicit chat switches intentionally open at newest; returning must not inherit a paused reader from another chat.
+  // Exercise the exact settled-live path with identical live and committed markdown: selection moves
+  // to the final message rather than disappearing when the live bubble is hidden.
+  const settledSelection = await page.evaluate(`(() => {
+    const source = [...document.querySelectorAll('#messages .msg.them .text')].at(-1), live = document.querySelector('#live-reply');
+    live.innerHTML = '<div class="text">' + source.innerHTML + '</div>'; live.hidden = false;
+    const paragraph = live.querySelector('p'), range = document.createRange(); range.selectNodeContents(paragraph); const s = getSelection(); s.removeAllRanges(); s.addRange(range);
+    const expected = s.toString(), saved = captureLiveSelection(); renderLive(); restoreLiveSelection(saved);
+    return { expected, hidden: live.hidden, selected: s.toString(), connected: s.anchorNode?.isConnected === true, inFinal: document.querySelector('#messages').contains(s.anchorNode) };
+  })()`);
+  k.check('R8L streaming completion moves selection into the matching committed message', settledSelection.hidden && settledSelection.selected === settledSelection.expected && settledSelection.connected && settledSelection.inFinal, { ...settledSelection, expected: settledSelection.expected.slice(0, 100), selected: settledSelection.selected.slice(0, 100) });
+  await page.evaluate(`getSelection().removeAllRanges()`);
+
+  // Explicit chat switches intentionally open at newest and must replace selected old-chat content.
+  await page.evaluate(`(() => { const text = [...document.querySelectorAll('#messages .msg.them .text p')].at(-1); const r = document.createRange(); r.selectNodeContents(text); const s = getSelection(); s.removeAllRanges(); s.addRange(r); })()`);
   const side = await k.rpc({ action: 'chat-create', id, title: 'Side' });
   await page.waitFor(`!!document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]')`, 'side chat');
   await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]').click()`);
   await page.waitFor(`document.querySelector('#chat-list .chat.on')?.dataset.chat === '${side.id}'`, 'side selected');
+  k.check('R9S explicit chat switch clears selection and never retains old-chat messages', await page.evaluate(`getSelection().isCollapsed && !document.querySelector('#messages').innerText.includes('Burst paragraph 31')`));
   await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="main"]').click()`);
   await page.waitFor(`document.querySelector('#messages').innerText.includes('Burst paragraph 31')`, 'main selected');
   const switched = await anchored(page);
@@ -133,7 +151,28 @@ await k.run(async () => {
   const tablet = await metrics(page);
   k.check('V4 tablet viewport shell remains anchored', tablet.composerBottom <= tablet.visualTop + tablet.visualHeight - 27 && Math.abs(tablet.statusBottom - (tablet.visualTop + tablet.visualHeight)) < 2, tablet);
   await page.shot('04-tablet', { force: true });
-  result.measurements.viewports = { phone, keyboardSized, landscape, tablet };
+
+  // Override only VisualViewport geometry and dispatch its real resize event. The layout viewport
+  // deliberately stays unchanged, reproducing keyboard shrink independently of window resize.
+  await page.viewport(900, 768, true); await delay(100);
+  const independent = await page.evaluate(`(async () => {
+    const before = { width: innerWidth, height: innerHeight }; const v = visualViewport;
+    Object.defineProperties(v, { height: { configurable: true, value: 430 }, offsetTop: { configurable: true, value: 40 } });
+    v.dispatchEvent(new Event('resize')); await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+    const composer = document.querySelector('#compose').getBoundingClientRect(), status = document.querySelector('#limits-bar').getBoundingClientRect();
+    return { before, after: { width: innerWidth, height: innerHeight }, visualBottom: v.offsetTop + v.height, composerBottom: composer.bottom, statusBottom: status.bottom };
+  })()`);
+  k.check('V5 independent visual viewport shrink keeps tablet composer visible without layout resize', independent.before.width === independent.after.width && independent.before.height === independent.after.height && independent.composerBottom <= independent.visualBottom - 27 && Math.abs(independent.statusBottom - independent.visualBottom) < 2, independent);
+  await page.evaluate(`(() => { const v = visualViewport; delete v.height; delete v.offsetTop; v.dispatchEvent(new Event('resize')); })()`);
+
+  await page.cdp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await page.viewport(1180, 820, true); await delay(150);
+  const wideTablet = await page.evaluate(`(() => { const v = visualViewport; Object.defineProperty(v, 'height', { configurable: true, value: 500 }); v.dispatchEvent(new Event('resize')); return { coarse: matchMedia('(pointer: coarse)').matches, layoutWidth: innerWidth }; })()`);
+  await delay(100);
+  const wideMetrics = await metrics(page);
+  k.check('V6 coarse-pointer landscape tablet above 1024px follows visual viewport', wideTablet.coarse && wideTablet.layoutWidth === 1180 && wideMetrics.composerBottom <= wideMetrics.visualTop + wideMetrics.visualHeight - 27 && Math.abs(wideMetrics.statusBottom - (wideMetrics.visualTop + wideMetrics.visualHeight)) < 2, { wideTablet, wideMetrics });
+  await page.shot('05-wide-tablet', { force: true });
+  result.measurements.viewports = { phone, keyboardSized, landscape, tablet, independent, wideTablet: { ...wideTablet, ...wideMetrics } };
 
   await page.cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   k.check('A1 reduced motion disables live and layout animation', await page.evaluate(`getComputedStyle(document.querySelector('.live-dot')).animationName === 'none' && getComputedStyle(document.querySelector('.app')).transitionDuration === '0s'`));

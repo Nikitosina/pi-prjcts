@@ -314,9 +314,10 @@ async function applyLive(frame) {
   liveFrame = frame;
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
   const settled = previous && (previous.entries !== frame.entries || previous.running !== frame.running);
+  const selection = settled ? captureLiveSelection() : null;
   if (settled) await settledRefresh();
   // SSE can deliver a large burst in one task. Paint at most once per frame without delaying the first chunk or the final text.
-  if (settled) renderLive(); else scheduleLiveRender();
+  if (settled) { renderLive(); restoreLiveSelection(selection); } else scheduleLiveRender();
 }
 let liveRenderFrame = null;
 function scheduleLiveRender() {
@@ -409,7 +410,36 @@ function renderLive() {
   renderWorkingPill();
 }
 
+function selectionPath(root, node) {
+  const path = [];
+  for (let current = node; current && current !== root; current = current.parentNode) path.unshift(Array.prototype.indexOf.call(current.parentNode.childNodes, current));
+  return path;
+}
+function selectionNode(root, path) {
+  let node = root;
+  for (const index of path) { node = node?.childNodes[index]; if (!node) return null; }
+  return node;
+}
+function captureLiveSelection() {
+  const root = document.querySelector("#live-reply .text"), selection = document.getSelection();
+  if (!root || !selection?.rangeCount || selection.isCollapsed || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) return null;
+  return { projectId, chatId, text: root.textContent, anchor: selectionPath(root, selection.anchorNode), anchorOffset: selection.anchorOffset, focus: selectionPath(root, selection.focusNode), focusOffset: selection.focusOffset };
+}
+function restoreLiveSelection(saved) {
+  if (!saved || saved.projectId !== projectId || saved.chatId !== chatId) return;
+  const root = [...document.querySelectorAll("#messages .msg.them .text")].reverse().find(node => node.textContent.startsWith(saved.text));
+  const anchor = root && selectionNode(root, saved.anchor), focus = root && selectionNode(root, saved.focus);
+  if (!anchor || !focus) return;
+  document.getSelection().setBaseAndExtent(anchor, saved.anchorOffset, focus, saved.focusOffset);
+}
+
+function clearTranscriptSelection() {
+  const selection = document.getSelection(), transcript = document.querySelector("#transcript");
+  if (selection && transcript && (transcript.contains(selection.anchorNode) || transcript.contains(selection.focusNode))) selection.removeAllRanges();
+}
+
 function changeProject(id, chat = "main") {
+  clearTranscriptSelection();
   generation++;
   workerChat = null; searchFocus = null; workerFocus = null;
   projectId = id; chatId = chat; linksReady = false;
@@ -442,6 +472,7 @@ function changeProject(id, chat = "main") {
 // Switching chats keeps the project, plan and rail; only the transcript, live stream and draft change.
 function changeChat(chat) {
   if (chat === chatId && view?.chatId === chat) return;
+  clearTranscriptSelection();
   generation++;
   chatId = chat;
   if (searchFocus?.chat !== chat) searchFocus = null;
