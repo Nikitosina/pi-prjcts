@@ -10,6 +10,39 @@ if (supplied) {
 initial.hash = "";
 history.replaceState(null, "", initial);
 const token = localStorage.getItem(key) || "";
+const signIn = document.querySelector("#sign-in");
+signIn.addEventListener("cancel", event => event.preventDefault());
+signIn.querySelector("form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.querySelector("#sign-in-link"), error = document.querySelector("#sign-in-error");
+  const button = signIn.querySelector("button");
+  error.textContent = "";
+  let link;
+  try { link = new URL(input.value.trim()); } catch {
+    error.textContent = "Paste the full inbox link, including #token=."; return;
+  }
+  if (link.origin !== location.origin) {
+    error.textContent = "This link belongs to another host address. Use the link for this app's address."; return;
+  }
+  const next = new URLSearchParams(link.hash.slice(1)).get("token");
+  if (!/^[a-f0-9]{64}$/.test(next ?? "")) {
+    error.textContent = "This link is missing a valid #token=. Copy the original inbox link."; return;
+  }
+  button.disabled = true;
+  try {
+    const response = await fetch("/api", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${next}` }, body: JSON.stringify({ action: "list" }), signal: AbortSignal.timeout(15000) });
+    const reply = await response.json();
+    if (!response.ok || reply?.ok !== true) {
+      error.textContent = "This link was not accepted. Get the current link with npm run projects -- ui-url."; return;
+    }
+    localStorage.setItem(key, next);
+    input.value = "";
+    location.reload();
+  } catch {
+    error.textContent = "Could not sign in. Check that the host is running and browser storage is allowed.";
+  } finally { button.disabled = false; }
+});
+function showSignIn() { if (!signIn.open) signIn.showModal(); }
 // The host keeps its port across restarts, so opening its new address in this tab is only a fragment change: take the new token and reload.
 addEventListener("hashchange", () => {
   const next = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -1966,8 +1999,9 @@ async function api(input) {
   const frame = uiFrame();
   let rejected = false;
   try {
-    if (!token) throw new Error("Open the inbox with /projects-ui or npm run inbox to authenticate this tab.");
+    if (!token) { showSignIn(); throw new Error("Paste your inbox link to sign in."); }
     const response = await fetch("/api", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(input), signal: AbortSignal.timeout(120000) });
+    if (response.status === 401) showSignIn();
     const reply = await response.json();
     rejected = reply?.ok === false;
     if (!response.ok || reply?.ok !== true) throw new Error(typeof reply?.error === "string" ? reply.error : `Host returned ${response.status}`);

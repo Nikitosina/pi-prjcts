@@ -165,10 +165,10 @@ try {
   await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
   await waitFor(`!!document.querySelector('#knowledge-inline [data-path="research/live-test.md"]')`, s, 'inline knowledge list', 40);
   await evaluate(`document.querySelector('#knowledge-inline [data-path="research/live-test.md"]').click()`, s);
-  await waitFor(`document.querySelector('dialog')?.open && document.querySelector('dialog').innerText.includes('KNOW-BODY')`, s, 'doc opens', 40);
+  await waitFor(`document.querySelector('dialog[open]')?.open && document.querySelector('dialog[open]').innerText.includes('KNOW-BODY')`, s, 'doc opens', 40);
   result.checks.push('L7 Knowledge tab lists docs inline; click opens the doc');
   await shot('04-knowledge', s);
-  await evaluate(`document.querySelector('dialog').close(); document.querySelector('[data-tab="coordinator"]').click()`, s);
+  await evaluate(`document.querySelector('dialog[open]').close(); document.querySelector('[data-tab="coordinator"]').click()`, s);
 
   const leak = await rpc({ action: 'message', id: a.id, text: 'MARK-SLOW second stream' });
   await waitFor(`/thinking|working|LIVE-PART/i.test(document.querySelector('#live-reply')?.innerText ?? '')`, s, 'A live again', 40);

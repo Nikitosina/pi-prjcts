@@ -7,6 +7,17 @@
   <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
 </head>
 <body>
+  <dialog id="sign-in" aria-labelledby="sign-in-title" aria-describedby="sign-in-note">
+    <div class="dialog-body">
+      <h2 id="sign-in-title">Sign in to Pi Projects</h2>
+      <p id="sign-in-note" class="note">Safari and Dock apps keep separate sign-ins. Run <code>npm run projects -- ui-url</code> in the pi-prjcts folder, then paste the full link containing <code>#token=</code> here. Keep this link private.</p>
+      <form>
+        <label class="field"><span>Inbox sign-in link</span><input id="sign-in-link" type="password" autocomplete="off" spellcheck="false" required autofocus></label>
+        <p id="sign-in-error" class="dialog-error" role="alert"></p>
+        <button type="submit" class="primary">Sign in</button>
+      </form>
+    </div>
+  </dialog>
   <div class="app">
     <aside class="side" id="side" aria-label="Projects">
       <div class="brand-row"><div class="brand">π <span class="side-text"><b>Projects</b> <span class="local">LOCAL</span></span></div><button type="button" id="side-toggle" class="ghost small side-toggle" data-side-toggle aria-controls="side" aria-expanded="true" aria-label="Hide sidebar" title="Hide sidebar (⌘B / Ctrl+B)"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 3v10" stroke="currentColor" stroke-width="1.3"/></svg></button></div>
