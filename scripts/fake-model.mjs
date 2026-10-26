@@ -13,7 +13,7 @@ export const FAKE_MODEL = 'fake/fake-model';
 export async function startFakeModel(root, { models = [], delayMs = 0 } = {}) {
   const agentDir = join(root, 'agent'), userHome = join(root, 'userhome');
   for (const dir of [agentDir, userHome]) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const requests = [], fired = new Set();
+  const requests = [], fired = new Set(), hold = { ms: delayMs };
   const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
   const text = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('') : '';
   const toolCall = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${Math.random().toString(36).slice(2)}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, null) + chunk({}, 'tool_calls') + 'data: [DONE]\n\n';
@@ -30,7 +30,7 @@ export async function startFakeModel(root, { models = [], delayMs = 0 } = {}) {
         frame = toolCall(name, JSON.parse(json.replaceAll('$REV', results.join(' ').match(/[a-f0-9]{64}/g)?.at(-1) ?? '')));
       }
       requests.push({ at: Date.now(), model: input.model, user: user.slice(0, 300), system: text(input.messages.find(m => m.role === 'system' || m.role === 'developer')?.content), answer, tools: offered, called: frame ? calls[results.length][3] : null });
-      setTimeout(() => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(frame ?? chunk({ role: 'assistant', content: answer }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n'); }, delayMs);
+      setTimeout(() => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(frame ?? chunk({ role: 'assistant', content: answer }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n'); }, hold.ms);
     });
   });
   await new Promise(ok => server.listen(0, '127.0.0.1', ok));
@@ -38,7 +38,7 @@ export async function startFakeModel(root, { models = [], delayMs = 0 } = {}) {
   writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'fake', api: 'openai-completions', models: ['fake-model', ...models].map(id => ({ id, name: id, reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 })) } } }));
   Object.assign(process.env, { HOME: userHome, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1' });
   for (const key of Object.keys(process.env)) if (key.startsWith('PI_SUBAGENT') || key === 'PI_SESSION_FILE') delete process.env[key];
-  return { agentDir, requests, close: () => { server.closeAllConnections(); server.close(); } };
+  return { agentDir, requests, hold, close: () => { server.closeAllConnections(); server.close(); } };
 }
 
 // `create` stores the built-in codex role defaults; pin every role to a fake model before any worker runs.

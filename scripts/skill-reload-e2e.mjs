@@ -1,5 +1,4 @@
-// Browser E2E: skill profiles (Settings picker, per-role index, on-demand reading restricted to the role set). Isolated host, local fake model; no real providers, no network.
-// Failure cases recorded in skill-reload-failures.md before implementation.
+// Host E2E: instant skill discovery and /reload (real host, fake model recording each prompt; no real providers, no network).
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';

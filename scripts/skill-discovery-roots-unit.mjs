@@ -18,7 +18,6 @@ const passive = await loadProjectResourceLoader({ cwd: ws }, { passive: true });
 const names = passive.getSkills().skills.map(item => item.name).sort();
 for (const label of Object.keys(roots)) assert.ok(names.includes(`only-${label}`), `${label} root is discovered`);
 const shared = passive.getSkills().skills.find(item => item.name === 'shared');
-console.log('collision winner:', shared.description, 'diagnostics:', passive.getSkills().diagnostics.length);
 const installs = () => existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(line => /install/.test(line)) : [];
 assert.deepEqual(installs(), [], 'passive discovery must not install a package');
 await loadProjectResourceLoader({ cwd: ws }).catch(() => {});

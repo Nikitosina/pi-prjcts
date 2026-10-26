@@ -37,6 +37,7 @@ import { prMonitorRuntime } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
 import type { PrCardData } from "./plugin-types.ts";
 import type { PrNotice } from "./pr-notices.ts";
+import { configureWhenIdle } from "./durable-idle-configure.ts";
 import { coordinatorSkillTool } from "./coordinator-skills.ts";
 import { mcpGatewayTools } from "./mcp-tools.ts";
 import { mcpPool } from "./mcp-servers.ts";
@@ -663,7 +664,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       await root.configure({ model: coordinatorModel, instructions, tools: coordinatorTools, extensions: coordinatorExtensionsFor(recoveredAgent) }, context);
     }
     // Chats run the same coordinator as Main; recovery re-adds tools to each, exactly as for the root.
-    const chatAgent = async (): Promise<Parameters<typeof configure>[2]> => { const agent = await root.agent(context); return { model: coordinatorModel, thinkingLevel: "medium", cwd: project.cwd, instructions: coordinatorInstructions(project, standing.text, roleIndex("coordinator")), tools: agent.tools, extensions: agent.extensions }; };
+    const chatAgent = async (): Promise<Parameters<typeof configure>[2]> => { const agent = await root.agent(context); return { model: coordinatorModel, thinkingLevel: "medium", cwd: project.cwd, instructions: agent.instructions, tools: agent.tools, extensions: agent.extensions }; };
     const agentKey = (agent: Awaited<ReturnType<Conversation["agent"]>>) => JSON.stringify([agent.model?.provider, agent.model?.modelId, agent.instructions, agent.tools.map(tool => tool.name).sort(), agent.extensions.map(extension => extension.name).sort()]);
     const rootKey = agentKey(await root.agent(context));
     for (const id of await chatConversationIds()) {
@@ -769,9 +770,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
           })),
         };
       },
-      chatCreate: async title => {
+      chatCreate: async title => schedules.mutex.run(async () => {
         assertOpen();
+        // Prompt, tools and skill list all come from Main's current state (open-time or its last reload), read together under the same lock a reload takes.
         const agent = await chatAgent();
+        const inherited = new Set(coordinatorSkills.get(Number(root.id)) ?? roleSkills.coordinator.map(skill => skill.name));
         const created = await root.commit(async tx => {
           const doc = await tx.doc(ProjectChats, root.id);
           if (doc.chats.length >= 500) throw new Error("Chat limit reached; archive is not deletion, so reuse an existing chat");
@@ -782,8 +785,9 @@ export async function openDurableProject(input: { project: Project; dir: string;
           return chat;
         }, context);
         coordinatorIds.add(created.conversationId);
+        coordinatorSkills.set(created.conversationId, inherited);
         return (await resolveChat(created.id)).chat;
-      },
+      }),
       chatUpdate: async (id, change) => { assertOpen(); await updateChat(id, change); return (await resolveChat(id)).chat; },
       result: async submissionId => result(openedHarness, root, submissionId),
       wait: async submissionId => wait(openedHarness, root, submissionId),
@@ -792,7 +796,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         return wait(openedHarness, root, admitted.submissionId);
       },
       send: async (id, text, options = {}) => ({ attemptId: await admitting(() => planning.followUp(root, parse(threadId, id), text, options.requestId ?? `worker-send:${id}:${crypto.randomUUID()}`)) }),
-      plan: async (planValue, chat) => schedules.mutex.run(async () => { assertOpen(); await refreshDelegatedSkills(); return planning.plan(root, planValue, chat as Conversation["id"] | undefined); }),
+      plan: async (planValue, chat) => { await refreshDelegatedSkills(); return schedules.mutex.run(async () => { assertOpen(); return planning.plan(root, planValue, chat as Conversation["id"] | undefined); }); },
       followUp: async (threadId, text, options) => ({ attemptId: await admitting(() => planning.followUp(root, threadId, text, options.requestId, options.chat as Conversation["id"] | undefined)) }),
       steerThread: async (threadId, text, options) => {
         const staged = await admitting(() => planning.steer(root, threadId, text, options.requestId, options.chat as Conversation["id"] | undefined));
@@ -918,7 +922,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const tools = coordinatorToolsFor(agent, current), extensions = coordinatorExtensionsFor(agent);
         const names = (list: readonly { name: string }[]) => JSON.stringify(list.map(item => item.name).sort());
         const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
-        if (changed) await conversation.configure({ instructions, tools, extensions }, context);
+        if (changed) await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context);
         remember(loader);
         coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map(skill => skill.name)));
         return { chatId: chat.id, skills: next.coordinator.length, changed };

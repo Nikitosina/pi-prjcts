@@ -19,7 +19,7 @@ const id = randomUUID(), dir = projectDir(id), workspace = join(base, 'workspace
 const skill = (name, description) => { const folder = join(workspace, '.pi', 'skills', name); mkdirSync(folder, { recursive: true }); writeFileSync(join(folder, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\nBODY-${name}\n`); };
 skill('first-skill', 'Present when the runtime opened.');
 const model = FAKE_MODEL;
-const project = { version: 1, id, runtime: 'durable', name: 'Skill reload', cwd: workspace, objective: 'Verify reload semantics', createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: 'ready', problem: null, runs: [] };
+const project = { version: 1, id, runtime: 'durable', context: { autoCompact: false, contextWindow: 20000, keepRecentTokens: 2000 }, name: 'Skill reload', cwd: workspace, objective: 'Verify reload semantics', createdAt: new Date().toISOString(), model, models: { worker: model, scout: model, reviewer: model }, sessionFile: null, phase: 'ready', problem: null, runs: [] };
 writeFileSync(join(workspace, 'AGENTS.md'), 'STANDING-ONE: be terse.\n');
 saveProject(project);
 const checks = [], diagnostics = [];
@@ -87,12 +87,52 @@ try {
   for (let i = 0; i < 360 && !(await runtime.planSnapshot()).work.some(w => w.threadId === workerThread && w.text.includes('WORKER_TWO') && w.status === 'completed'); i++) await sleep(500);
   assert.equal(systemOf('WORKER_TWO', 'persistent background worker'), workerSystem); pass('an existing worker keeps its frozen prompt');
 
+  // The allow-list freezes names, not contents: an allowed name reads the skill as it is now (documented in WORKER-SKILLS.md).
+  writeFileSync(join(workspace, '.pi', 'skills', 'first-skill', 'SKILL.md'), '---\nname: first-skill\ndescription: Present when the runtime opened.\n---\n\nBODY-first-skill-EDITED\n');
+  assert.match((await say('Read it. FAKE-CALL projects_skill_file {"skill":"first-skill"}', 'main')).text, /BODY-first-skill-EDITED/); pass('an allowed skill name reads its current content, not a frozen copy');
+
+  // A chat created after Main's reload inherits Main's prompt, tools and skill list together, not the open-time prompt.
+  const chatC = await runtime.chatCreate('After reload');
+  await say('Reply exactly C_FIRST.', chatC.id);
+  const mainRequest = fake.requests.findLast(item => item.user.includes('AFTER_RELOAD') && item.system.includes('persistent coordinator')), cRequest = fake.requests.findLast(item => item.user.includes('C_FIRST'));
+  assert.equal(cRequest.system, mainRequest.system); assert.deepEqual([...cRequest.tools].sort(), [...mainRequest.tools].sort());
+  assert.match(cRequest.system, /STANDING-TWO/); assert.match(cRequest.system, /second-skill/);
+  assert.match((await say('Read it. FAKE-CALL projects_skill_file {"skill":"second-skill"}', chatC.id)).text, /BODY-second-skill/); pass('a new chat after Main reload gets the same prompt, tools and skill list');
+  const chatD = await runtime.chatCreate('Before second reload');
+
+  // Admission paths that skip the owner lock (worker results, scheduled and background input) and automatic compaction: the swap itself refuses.
+  const { configureWhenIdle } = await import('../src/durable-idle-configure.ts');
+  const swapNow = () => runtime.withRoot(root => configureWhenIdle(root, root, { instructions: 'SWAPPED' }, BACKGROUND_CONTEXT));
+  fake.hold.ms = 2500;
+  const slow = await runtime.withRoot(root => root.submit({ type: 'input', content: 'Reply exactly RACE_TURN.', requestId: randomUUID(), whenBusy: 'followUp' }, BACKGROUND_CONTEXT));
+  const beforeRace = await agentOf();
+  await assert.rejects(swapNow(), /working/); await assert.rejects(runtime.reload(), /working/);
+  assert.deepEqual(await agentOf(), beforeRace); pass('a turn admitted outside the owner lock blocks the swap and nothing changes');
+  await runtime.withRoot(async root => { await (await slow).wait(BACKGROUND_CONTEXT); }); fake.hold.ms = 0;
+  for (const n of [1, 2, 3]) await say(`Reply exactly PAD_${n}. ${'padding words '.repeat(900)}`);
+  fake.hold.ms = 2500;
+  let compactError; const compacting = runtime.compact('main').catch(error => { compactError = error; });
+  let refused = false;
+  for (let i = 0; i < 60 && !(await runtime.snapshot()).coordinator?.context?.compacting; i++) await sleep(50);
+  if (!(await runtime.snapshot()).coordinator?.context?.compacting) { fake.hold.ms = 0; await compacting; assert.fail(`compaction never became visible (${compactError ?? 'no error'}; ${JSON.stringify(diagnostics.slice(-2).map(d => String(d?.message ?? d).slice(0, 300)))}; ${fake.requests.slice(-2).map(r => r.user.slice(0, 80)).join(' // ')})`); }
+  try { await swapNow(); } catch (error) { refused = /compacting/.test(String(error)); }
+  fake.hold.ms = 0; await compacting;
+  for (let i = 0; i < 200 && (await runtime.snapshot()).coordinator?.context?.compacting; i++) await sleep(100);
+  await agentOf();
+  assert.ok(refused, `compaction must block the swap (${compactError ?? 'no compaction error'})`); pass('a running compaction blocks the swap');
+
   // Revocation: switching the grants off again removes the tools at the next reload.
   saveProject({ ...saved, libraryAccess: undefined, decisionAccess: undefined, githubCli: undefined });
   assert.equal((await runtime.reload()).changed, true);
   const revoked = await agentOf();
   for (const name of ['projects_library_list', 'projects_library_read', 'projects_question']) assert.ok(!revoked.tools.includes(name), name);
   assert.ok(revoked.tools.includes('projects_gh')); pass('revoked grants are removed at the next reload');
+  const chatE = await runtime.chatCreate('After revocation');
+  await say('Reply exactly E_FIRST.', chatE.id); await say('Reply exactly MAIN_REVOKED.');
+  const eRequest = fake.requests.findLast(item => item.user.includes('E_FIRST')), mainRevoked = fake.requests.findLast(item => item.user.includes('MAIN_REVOKED'));
+  assert.equal(eRequest.system, mainRevoked.system); assert.deepEqual([...eRequest.tools].sort(), [...mainRevoked.tools].sort());
+  assert.ok(!eRequest.tools.includes('projects_library_read') && eRequest.tools.includes('projects_gh'));
+  pass('a chat created after a revoking reload is offered exactly Main\'s reduced prompt and tools');
   assert.equal((await runtime.reload()).changed, false); pass('reload with nothing new reports no change');
   await assert.rejects(runtime.reload('00000000-0000-4000-8000-000000000000'), /Unknown chat/); pass('reload of an unknown chat is refused');
   writeFileSync(join(base, 'report.json'), JSON.stringify({ ok: true, checks, diagnostics: diagnostics.length }, null, 2));
