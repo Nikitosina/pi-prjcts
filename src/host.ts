@@ -28,6 +28,7 @@ import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
+import { sandboxAvailable } from "./verification-sandbox.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
@@ -69,7 +70,7 @@ const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
 /** Settings read at use time, so a change needs no reopen. */
-const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "scopedModels", "workerCap"]);
+const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "scopedModels", "verification", "workerCap"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -314,6 +315,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
       if (Object.keys(input.changes).every(key => LIVE_SETTINGS.has(key))) {
         await validateProjectModelChanges(input.changes);
+        if (input.changes.verification?.enabled) {
+          if (!sandboxAvailable()) throw new Error("Verification needs an OS sandbox for the verifier's commands, and this machine has none (macOS sandbox-exec)");
+          const skill = input.changes.verification.skill.trim();
+          if (!(await configuredSkills(input.id)).getSkills().skills.some(item => item.name === skill)) throw new Error(`Verification skill "${skill}" is not installed for this project`);
+        }
         return withProjectLock(input.id, async () => {
           const project = updateProjectSettings(loadProject(input.id), input);
           const running = durableRuntimes.get(input.id);

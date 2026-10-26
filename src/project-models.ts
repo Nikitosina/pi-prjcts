@@ -30,7 +30,7 @@ export async function projectModelPicker(project?: Pick<Project, "cwd" | "scoped
   return { items, scoped: [...new Set(scoped)], scopeSet, networkChecked: false, extensionErrors: (await providerExtensionStatus()).errors };
 }
 export async function validateProjectModelChanges(changes: Changes): Promise<void> {
-  const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer].filter(value => typeof value === "string");
+  const selections = [changes.model, changes.models?.worker, changes.models?.scout, changes.models?.reviewer, changes.models?.verifier].filter(value => typeof value === "string");
   const scope = changes.scopedModels ?? [];
   if (!selections.length && !scope.length) return;
   const registry = await openRegistry();

@@ -7,6 +7,8 @@ import { Type } from "typebox";
 import type { DurablePlan, DurablePlanSnapshot, DurablePlanWork, DurablePlanWorkSnapshot, DurablePrepareWorkerEnvironment, DurablePublishWorkerEnvironment, DurableResolvedAttempt, DurableRole, DurableWorkerToolBindings, DurableWorkspaceInstructions } from "./durable-plan-types.ts";
 import type { WorkspaceCatalogEntry } from "./workspace-authorization.ts";
 import { fitJson } from "./response-limit.ts";
+import { parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary } from "./verification-model.ts";
+import type { TargetManifest } from "./verification-target.ts";
 
 export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type DurablePlanWorkSnapshot, type DurableResolvedAttempt, type DurableRole, type DurableGenerationLifecycle, type DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
 
@@ -25,7 +27,7 @@ function sameIntent(left: Pick<StoredWork, "id" | "threadId" | "role" | "text" |
 function profileHash(value: string): string { let hash = 2166136261; for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619); return (hash >>> 0).toString(16); }
 function profileMismatches(first: StoredAttempt, next: StoredAttempt): string[] { const values: Array<[string, string, string]> = [["model", first.model, next.model], ["thinking", first.thinking, next.thinking], ["bindingRevision", first.bindingRevision, next.bindingRevision], ["capabilityBindingRevision", first.capabilityBindingRevision ?? first.bindingRevision, next.capabilityBindingRevision ?? next.bindingRevision], ["standingRevision", first.standingRevision, next.standingRevision], ["cwd", first.cwd, next.cwd], ["instructions", first.instructions, next.instructions], ["toolNames", first.toolNames.join("\u0000"), next.toolNames.join("\u0000")]]; return values.filter(([, left, right]) => left !== right).map(([name, left, right]) => `${name}:${profileHash(left)}!=${profileHash(right)}`); }
 type StoredWork = { id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
-export type PlanningState = { paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string } }>; dispatcherTaskIds: TaskId[] };
+export type PlanningState = { paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string }; /** Automatic verification of this worker's finished work (opt-in project setting). */ verification?: Verification }>; dispatcherTaskIds: TaskId[] };
 
 export const DurablePlanning = defineDoc<PlanningState>({ kind: "projects.durable-planning", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ paused: false, pausing: false, workerCap: null, work: {}, threads: {}, dispatcherTaskIds: [] }) });
 
@@ -127,7 +129,24 @@ const Attempt = defineTask<AttemptInput, AttemptState, { status: "completed" | "
  */
 const ARCHIVABLE = new Set(["completed", "failed", "stopped", "blocked"]);
 
-export function planningRuntime(options: { projectId: string; models: Record<DurableRole, ModelRef>; resolveModel?: (model: string, role: DurableRole) => ModelRef; cwd: string; instructions: Record<DurableRole, string>; /** Host-only: rebuilds the skill index before a new thread freezes its instructions. */ refreshSkills?: () => Promise<void>; /** Host-only: names of the skills a new thread of this role may read, in step with its instructions. */ skillNames?: (role: DurableRole) => string[]; standingRevision: string; workspaceInstructions?: DurableWorkspaceInstructions; knowledgeTools: readonly ToolRegistration[]; /** Scout and reviewer only: read-only checkout tools and their extension. */ readOnlyCode?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; /** Reviewer only: the review-verdict tool and its extension. */ reviewerTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerPolicy: ReturnType<typeof defineExtension>; /** Every role: the profile-restricted skill reader. */ skillFiles?: { tool: ToolRegistration; extension: ReturnType<typeof defineExtension> }; /** Every role: the MCP gateway tools (servers are filtered per role at call time). */ mcp?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerTools?: DurableWorkerToolBindings; workerCap: number; workspaceCatalog?: () => readonly WorkspaceCatalogEntry[]; /** Host-only scoped-worker preparation; absent means every workspace scope is denied. */ prepareWorkerEnvironment?: DurablePrepareWorkerEnvironment; /** Host-only registry publication, invoked after post-preparation authorization validation. */ publishWorkerEnvironment?: DurablePublishWorkerEnvironment; beforeScopedSubmit?: () => Promise<void>; /** Root conversation owning the shared plan, so delegation from any chat admits into one pool. */ planRoot?: () => ConversationId | undefined; /** Host-only: fetch a ref into a read-only snapshot for scout/reviewer threads. */ readHead?: (ref: string) => Promise<{ root: string; sha: string }>; /** Host-only: resolve and authorize an existing branch / PR for a worker to continue; rejects branches the owner does not own. */ resolveBranch?: (ref: string, workspaceScopeId: string | undefined) => Promise<{ name: string; sha: string }>; /** Host-only: short listing of a thread's artifacts folder for its report (empty when none). */ artifactSummary?: (threadId: string) => string }) {
+export type VerificationHooks = {
+  /** Read fresh at the end of each worker turn. */
+  config: () => { enabled: boolean; skill: string };
+  /** A problem that makes verification impossible right now (missing skill or model, no sandbox), or null. */
+  check: () => Promise<string | null>;
+  /** Copies the worker's tree for one attempt; idempotent per key. */
+  prepare: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; targetPath: string }>;
+  /** Content revision of a tree now, uncommitted and untracked work included. */
+  revision: (sourcePath: string) => Promise<string>;
+  release: (key: string) => Promise<void>;
+};
+type PreparedVerification =
+  | { kind: "none" }
+  | { kind: "revision"; current: string | null }
+  | { kind: "escalate"; reason: string }
+  | { kind: "start"; n: number; model: string; skill: string; key: string; sourcePath: string; targetPath: string; manifest: TargetManifest; criteria: Criterion[]; task: string };
+
+export function planningRuntime(options: { projectId: string; models: Record<DurableRole, ModelRef>; resolveModel?: (model: string, role: DurableRole) => ModelRef; cwd: string; instructions: Record<DurableRole, string>; /** Host-only: rebuilds the skill index before a new thread freezes its instructions. */ refreshSkills?: () => Promise<void>; /** Host-only: names of the skills a new thread of this role may read, in step with its instructions. */ skillNames?: (role: DurableRole) => string[]; standingRevision: string; workspaceInstructions?: DurableWorkspaceInstructions; knowledgeTools: readonly ToolRegistration[]; /** Scout and reviewer only: read-only checkout tools and their extension. */ readOnlyCode?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; /** Reviewer only: the review-verdict tool and its extension. */ reviewerTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerPolicy: ReturnType<typeof defineExtension>; /** Every role: the profile-restricted skill reader. */ skillFiles?: { tool: ToolRegistration; extension: ReturnType<typeof defineExtension> }; /** Every role: the MCP gateway tools (servers are filtered per role at call time). */ mcp?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerTools?: DurableWorkerToolBindings; /** Host hooks of the opt-in verification loop; absent means the project cannot verify. */ verification?: VerificationHooks; /** Verifier-only tools (sandboxed run, verdict), offered to verifier threads and nobody else. */ verifierTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerCap: number; workspaceCatalog?: () => readonly WorkspaceCatalogEntry[]; /** Host-only scoped-worker preparation; absent means every workspace scope is denied. */ prepareWorkerEnvironment?: DurablePrepareWorkerEnvironment; /** Host-only registry publication, invoked after post-preparation authorization validation. */ publishWorkerEnvironment?: DurablePublishWorkerEnvironment; beforeScopedSubmit?: () => Promise<void>; /** Root conversation owning the shared plan, so delegation from any chat admits into one pool. */ planRoot?: () => ConversationId | undefined; /** Host-only: fetch a ref into a read-only snapshot for scout/reviewer threads. */ readHead?: (ref: string) => Promise<{ root: string; sha: string }>; /** Host-only: resolve and authorize an existing branch / PR for a worker to continue; rejects branches the owner does not own. */ resolveBranch?: (ref: string, workspaceScopeId: string | undefined) => Promise<{ name: string; sha: string }>; /** Host-only: short listing of a thread's artifacts folder for its report (empty when none). */ artifactSummary?: (threadId: string) => string }) {
   if (!Number.isSafeInteger(options.workerCap) || options.workerCap < 1) throw new Error("workerCap must be a positive integer");
   if (options.workerTools && (!options.workerTools.revision || options.workerTools.revision.length > 256)) throw new Error("Worker capability bindings require a revision");
   const bindings = new Map((options.workerTools?.tools ?? []).map(tool => [tool.name, tool]));
@@ -187,6 +206,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       settle: async (task, runtime, context) => {
         const [outcome] = await runtime.outcomes([task.input.attemptTaskId], context);
         const result = outcome?.status === "completed" && isAttemptResult(outcome.result) ? outcome.result : undefined;
+        const prepared = await prepareVerification(runtime.conversationId, change => runtime.commit(change, context), task.input.workId, result?.status === "completed");
         await runtime.commit(async tx => {
           const state = await tx.doc(DurablePlanning, runtime.conversationId);
           const work = state.work[task.input.workId];
@@ -200,10 +220,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
             if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
             const resultText = result?.text ?? work.blocker ?? "No text result.";
             if (result?.text) work.result = result.text;
-            if (work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
-              const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
-              // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
-              if (work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")))) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
+            const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
+            // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
+            const held = work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")));
+            const verifying = work.status !== "interrupted" && work.role === "verifier" ? await settleVerifier(tx, runtime.conversationId, state, work, prepared, String(task.input.attemptTaskId)) : work.status === "completed" && !held && await startVerification(tx, runtime.conversationId, state, work, prepared, resultText, String(task.input.attemptTaskId));
+            if (!verifying && work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
+              if (held) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
               else {
                 const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
                 const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
@@ -351,6 +373,121 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     return `${before}${capResult(resultText, `read the full result with projects_work_result {"workId":"${work.id}"}`, REPORT_CAP - before.length - after.length)}${after}`;
   }
 
+
+  // ---- Opt-in verification loop: a finished top-level worker turn starts a fresh verifier on a snapshot of its tree; the verdict returns to the worker, passes complete it, everything else escalates.
+  const verificationSkill = (): string => options.verification!.config().skill;
+  /** Task text a cycle is judged against: the latest brief on the thread, never the host's own feedback or child-report messages. */
+  function briefOf(state: PlanningState, work: StoredWork): string {
+    const own = Object.values(state.work).filter(item => item.threadId === work.threadId && item.role === "worker" && !item.requestId?.startsWith("verify-feedback:") && !item.requestId?.startsWith("child-report:"));
+    return (own.findLast(item => item.id === work.id) ?? own.at(-1) ?? work).text;
+  }
+  /** Reads what the settlement needs, then does the file work (snapshot, revision) outside the transaction. */
+  async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean): Promise<PreparedVerification> {
+    const hooks = options.verification;
+    if (!hooks) return { kind: "none" };
+    let seen: { role: DurableRole; top: boolean; scoped: boolean; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string } | undefined;
+    await read(async tx => {
+      const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
+      if (work) seen = { role: work.role, top: !work.parentThreadId, scoped: work.workspaceScopeId !== null, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && structuredClone(state.threads[work.parentThreadId ?? work.threadId]!.verification), task: briefOf(state, work) };
+      return undefined;
+    });
+    if (!seen) return { kind: "none" };
+    if (seen.role === "verifier") {
+      const attempt = seen.verification?.attempts.find(item => item.verifierWorkId === workId);
+      return attempt ? { kind: "revision", current: await hooks.revision(attempt.sourcePath).catch(() => null) } : { kind: "none" };
+    }
+    if (!completed || seen.role !== "worker" || !seen.top || !seen.scoped || !seen.cwd) return { kind: "none" };
+    const open = seen.verification?.open ? seen.verification : undefined;
+    if (!open && !hooks.config().enabled) return { kind: "none" };
+    if ((open?.attempts.length ?? 0) >= MAX_VERIFICATION_ATTEMPTS) return { kind: "escalate", reason: "Verification attempts are exhausted" };
+    const problem = open ? null : await hooks.check();
+    if (problem) return { kind: "escalate", reason: problem };
+    let model: string;
+    try { const ref = options.models.verifier; model = `${ref.provider}/${ref.modelId}`; } catch (error) { return { kind: "escalate", reason: error instanceof Error ? error.message : "No verifier model is configured" }; }
+    const key = workId;
+    try {
+      const { manifest, targetPath } = await hooks.prepare(key, seen.cwd);
+      return { kind: "start", n: (open?.attempts.length ?? 0) + 1, model: open?.model ?? model, skill: open?.skill ?? hooks.config().skill, key, sourcePath: seen.cwd, targetPath, manifest, criteria: open?.criteria ?? parseCriteria(seen.task), task: seen.task };
+    } catch (error) { return { kind: "escalate", reason: `The work could not be snapshotted for verification: ${error instanceof Error ? error.message : String(error)}` }; }
+  }
+  /** Queues the report of a worker whose cycle ended; `text` is the complete message and is kept as the work's result. */
+  async function queueReport(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, text: string, tag: string): Promise<void> {
+    const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
+    const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
+    const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
+    work.result = text;
+    work.report = { requestId: `plan-report:${work.id}:${tag}`, delivered: false, text: reportText(work, text, others) };
+    await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
+  }
+  /** Ends a cycle. Verified work stays completed; anything else stops being "completed" for dependents and for the coordinator. */
+  async function closeCycle(tx: Tx, root: ConversationId, state: PlanningState, workerThreadId: string, outcome: "verified" | "escalated", reason: string, extra: string, tag: string): Promise<void> {
+    const cycle = state.threads[workerThreadId]?.verification;
+    if (!cycle) return;
+    cycle.open = false; cycle.outcome = outcome; cycle.reason = reason;
+    for (const attempt of cycle.attempts) if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); void options.verification?.release(attempt.key).catch(() => undefined); }
+    const finished = cycle.workIds.map(id => state.work[id]).filter((item): item is StoredWork => item !== undefined), last = finished.at(-1);
+    if (outcome === "escalated") for (const item of finished) if (item.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; }
+    if (!last) return;
+    const latest = cycle.attempts.at(-1), summary = latest ? verdictText(cycle, latest) : "";
+    const head = outcome === "verified" ? `VERIFIED by an independent verifier after ${cycle.attempts.length} attempt(s).\n${summary}` : `NOT VERIFIED: ${reason}. The worker's task is not complete; decide what to do next.\n${summary}`;
+    await queueReport(tx, root, state, last, `${head}\n\nWorker's last answer (untrusted):\n${extra}`, tag);
+  }
+  /** A finished worker turn: start the next verifier attempt, or end the cycle. False means verification does not apply and the normal report goes out. */
+  async function startVerification(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, resultText: string, tag: string): Promise<boolean> {
+    if (prepared.kind === "none" || prepared.kind === "revision") return false;
+    const thread = state.threads[work.threadId]!;
+    if (prepared.kind === "escalate") {
+      thread.verification = thread.verification?.open ? thread.verification : { model: "", skill: verificationSkill(), criteria: [], attempts: [], workIds: [], open: true };
+      thread.verification.workIds.push(work.id);
+      await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
+      return true;
+    }
+    const cycle = thread.verification?.open ? thread.verification : (thread.verification = { model: prepared.model, skill: prepared.skill, criteria: prepared.criteria, attempts: [], workIds: [], open: true });
+    cycle.workIds.push(work.id);
+    const verifierThreadId = randomUUID(), verifierWorkId = randomUUID();
+    try {
+      if (cycle.attempts.length + 1 !== prepared.n) throw new Error("Verification state changed while the snapshot was prepared");
+      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head }), parentThreadId: work.threadId, readRoot: prepared.targetPath, requestId: `verify:${work.id}` }, false);
+      record.priority = VERIFIER_PRIORITY;
+      cycle.attempts.push({ n: prepared.n, verifierWorkId, verifierThreadId, key: prepared.key, revision: prepared.manifest.revision, head: prepared.manifest.head, branch: prepared.manifest.branch, sourcePath: prepared.sourcePath, targetPath: prepared.targetPath, state: "running", runs: [], startedAt: Date.now() });
+    } catch (error) {
+      void options.verification?.release(prepared.key).catch(() => undefined);
+      await closeCycle(tx, root, state, work.threadId, "escalated", `The verifier could not be started: ${error instanceof Error ? error.message : String(error)}`, resultText, tag);
+    }
+    return true;
+  }
+  /** A verifier's thread ended: turn its recorded verdict into the next step. Always true (a verifier never reports on its own). */
+  async function settleVerifier(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, tag: string): Promise<boolean> {
+    const workerThreadId = work.parentThreadId, cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined, attempt = cycle?.attempts.find(item => item.verifierWorkId === work.id);
+    if (!workerThreadId || !cycle || !attempt || !cycle.open || attempt.endedAt !== undefined) return true;
+    if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = work.status === "completed" ? "The verifier finished without recording a verdict" : `The verifier did not finish: ${work.blocker ?? work.status}`; }
+    else if (prepared.kind === "revision" && prepared.current !== attempt.revision && attempt.state !== "stale") { attempt.state = "stale"; attempt.reason = "The worker's tree changed before the verdict was used, so it is rejected"; }
+    attempt.endedAt = Date.now();
+    void options.verification?.release(attempt.key).catch(() => undefined);
+    const last = state.work[cycle.workIds.at(-1)!], answer = last?.result ?? "";
+    const step = nextStep(cycle, attempt);
+    if (step.kind === "verified") { await closeCycle(tx, root, state, workerThreadId, "verified", "", answer, tag); return true; }
+    if (step.kind === "retry" && last) {
+      const text = `[Automatic verification failed]\n${verdictText(cycle, attempt)}\n\nFix what failed in your worktree, then finish as usual; a fresh verifier checks your next result (${MAX_VERIFICATION_ATTEMPTS - attempt.n} attempt(s) left). The original task and criteria stay authoritative: leave them, the checks and the verification skill as they are. Your completion is decided by the verifier, not by your own report.`;
+      try {
+        const record = await createThread(tx, root, { id: randomUUID(), threadId: workerThreadId, role: "worker", text, requestId: `verify-feedback:${work.id}`, requiredTools: [...last.requiredTools], workspaceScopeId: last.workspaceScopeId ?? undefined });
+        if (last.chatConversationId !== undefined) record.chatConversationId = last.chatConversationId;
+        state.work[record.id] = record;
+        return true;
+      } catch (error) { await closeCycle(tx, root, state, workerThreadId, "escalated", `The failure could not be handed back to the worker: ${error instanceof Error ? error.message : String(error)}`, answer, tag); return true; }
+    }
+    await closeCycle(tx, root, state, workerThreadId, "escalated", step.kind === "escalate" ? step.reason : "Verification ended", answer, tag);
+    return true;
+  }
+
+  /** Ends an open verification cycle without a report (the owner stopped the worker or its verifier). */
+  function abandonCycle(state: PlanningState, workerThreadId: string | undefined, reason: string): void {
+    const cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined;
+    if (!cycle?.open) return;
+    cycle.open = false; cycle.outcome = "escalated"; cycle.reason = reason;
+    for (const attempt of cycle.attempts) if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); void options.verification?.release(attempt.key).catch(() => undefined); }
+    for (const id of cycle.workIds) { const item = state.work[id]; if (item?.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; } }
+  }
   // An unscoped worker under exactly one whole-repository grant gets that grant; anything less clear stays explicit.
   function defaultWorkerScope(role: DurableRole, requiredTools: readonly string[] | undefined): string | undefined {
     if (role !== "worker" || requiredTools?.length) return undefined;
@@ -415,10 +552,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     } else {
       const child = await tx.createConversation({ ownership: { kind: "ownerless" } });
       conversationId = child.id;
-      const readOnly = work.role === "worker" ? undefined : options.readOnlyCode, review = work.role === "reviewer" ? options.reviewerTools : undefined, nested = nests(work);
-      const exactTools = [...options.knowledgeTools, ...(readOnly?.tools ?? []), ...(review?.tools ?? []), ...(nested ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? []), ...selected.map(name => bindings.get(name)! )];
+      const readOnly = work.role === "worker" ? undefined : options.readOnlyCode, review = work.role === "reviewer" ? options.reviewerTools : undefined, verify = work.role === "verifier" ? options.verifierTools : undefined, nested = nests(work);
+      if (work.role === "verifier" && (!verify || !readOnly)) throw new Error("This project cannot run verifiers");
+      // A verifier gets code reading, its skill and its two tools; no knowledge, MCP, delegation or workspace capabilities.
+      const exactTools = work.role === "verifier" ? [...readOnly!.tools, ...verify!.tools, ...(options.skillFiles ? [options.skillFiles.tool] : [])] : [...options.knowledgeTools, ...(readOnly?.tools ?? []), ...(review?.tools ?? []), ...(nested ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? []), ...selected.map(name => bindings.get(name)! )];
       profile.boundTools = exactTools.map(tool => tool.name);
-      if (workspaceScopeId === null) await configure(tx, child.id, { model, thinkingLevel: "medium", cwd: options.cwd, tools: exactTools, extensions: [options.workerPolicy, capabilities, ...(readOnly ? [readOnly.extension] : []), ...(review ? [review.extension] : []), ...(nested ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions });
+      if (workspaceScopeId === null) await configure(tx, child.id, { model, thinkingLevel: "medium", cwd: options.cwd, tools: exactTools, extensions: [options.workerPolicy, capabilities, ...(readOnly ? [readOnly.extension] : []), ...(review ? [review.extension] : []), ...(verify ? [verify.extension] : []), ...(nested ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(work.role !== "verifier" && options.mcp ? [options.mcp.extension] : [])], instructions });
       state.threads[work.threadId] = { conversationId, activeWorkId: null, workspaceScopeId, workspaceBindingRevision: null, workspaceConfigured: workspaceScopeId === null, ...(work.role === "worker" && work.workspaceFrom ? { workspaceFrom: work.workspaceFrom } : {}), ...(work.role === "worker" && work.continueBranch ? { continueBranch: { ...work.continueBranch } } : {}) };
     }
     if (work.role !== "worker" && work.readRoot) { const thread = state.threads[work.threadId]!; thread.readRoot = work.readRoot; if (work.readSha) thread.readSha = work.readSha; else delete thread.readSha; }
@@ -431,6 +570,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const state = await tx.doc(DurablePlanning, parent);
     if (await hasUncertainVcsOperations(tx, parent)) throw new Error("A VCS operation has an uncertain outcome; worker admission is denied");
     if (state.paused) throw new Error("Project plan is paused; new worker admission is denied");
+    if (work.role === "worker" && state.threads[work.threadId]?.verification?.attempts.some(attempt => attempt.state === "running")) throw new Error("This worker is being verified; its tree is frozen until the verifier finishes");
     if (state.workerCap === null) state.workerCap = options.workerCap;
     const same = state.work[work.id];
     if (same) {
@@ -467,9 +607,11 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     for (const { work } of queue) {
       if (started.length >= slots) break;
       if (state.threads[work.threadId]?.activeWorkId !== null || state.threads[work.threadId]?.stopping || state.threads[work.threadId]?.paused) continue;
+      // The worker's tree is frozen while a verifier reads its snapshot of it.
+      if (work.role === "worker" && state.threads[work.threadId]?.verification?.attempts.some(attempt => attempt.state === "running")) continue;
       const parents = work.dependsOn.map(id => state.work[id]);
       if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
-      if (!parents.every(parentWork => parentWork?.status === "completed")) continue;
+      if (!parents.every(parentWork => parentWork?.status === "completed" && !state.threads[parentWork.threadId]?.verification?.open)) continue;
       const exhausted = work.attempt ? quotaCooldown(state, work.attempt.model, Date.now()) : undefined;
       if (exhausted) { work.status = "blocked"; work.blocker = quotaRefusal(work.attempt!.model, exhausted); continue; }
       const scoped = work.workspaceScopeId !== null; const id = await tx.createTask(scoped ? ScopedAttempt : Attempt, { workId: work.id, conversationId: work.conversationId!, planConversationId: parent, text: work.resumes ? `The project was paused and has resumed. Continue this task from where it stopped:\n\n${work.text}` : work.text, requestId: `${work.requestId ?? `plan:${work.id}`}${work.resumes ? `:resume-${work.resumes}` : ""}`, threadId: work.threadId, role: work.role, workspaceScopeId: work.workspaceScopeId ?? undefined }, { ownership: { kind: "conversation" }, background: true, ...(scoped ? { conversationId: work.conversationId! } : {}) });
@@ -576,6 +718,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         const current = state.threads[target]!;
         current.stopping = stopId;
         delete current.paused;
+        // Stopping a worker or its verifier ends the automatic loop; nothing is reported on, the owner stopped it.
+        abandonCycle(state, current.verification?.open ? target : Object.values(state.work).findLast(item => item.threadId === target)?.role === "verifier" ? current.parentThreadId : undefined, "Stopped explicitly");
         for (const work of Object.values(state.work)) if (work.threadId === target && (work.status === "queued" || work.status === "running" || work.status === "interrupted")) {
           if (work.taskId !== null) taskIds.push(work.taskId);
           work.status = "stopped"; work.blocker = target === threadId ? "Stopped explicitly" : "Stopped with its parent worker";
@@ -680,7 +824,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   function workReceipt(work: StoredWork): { workId: string; threadId: string; status: StoredWork["status"]; blocker: string | null; workspaceScopeId: string | null } { return { workId: work.id, threadId: work.threadId, status: work.status, blocker: work.blocker, workspaceScopeId: work.workspaceScopeId }; }
   function numberRecord(source: Record<string, number>): Record<string, number> { return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, value])); }
   function attemptSnapshot(work: StoredWork): DurableResolvedAttempt | null { const attempt = work.attempt; return attempt === null ? null : { id: attempt.id, projectId: attempt.projectId, threadId: work.threadId, role: work.role, model: attempt.model, thinking: attempt.thinking, instructions: attempt.instructions, cwd: attempt.cwd, toolNames: [...(attempt.boundTools ?? attempt.toolNames)], bindingRevision: attempt.bindingRevision, standingRevision: attempt.standingRevision, startedAt: attempt.startedAt, endedAt: attempt.endedAt, usage: { baseline: numberRecord(attempt.usage.baseline), final: numberRecord(attempt.usage.final), delta: numberRecord(attempt.usage.delta) } }; }
-  function projectSnapshot(state: PlanningState): DurablePlanSnapshot { return { paused: state.paused, pausing: state.pausing, workerCap: state.workerCap, work: Object.values(state.work).map(work => ({ id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...work.dependsOn], status: work.status, blocker: work.blocker, startedAt: work.startedAt ?? work.attempt?.startedAt ?? null, endedAt: work.endedAt ?? work.attempt?.endedAt ?? null, archived: work.archivedAt !== undefined, chatConversationId: work.chatConversationId === undefined ? null : Number(work.chatConversationId), parentThreadId: work.parentThreadId ?? null, attempt: attemptSnapshot(work), ...(work.steering ? { steering: true } : {}) })) }; }
+  function projectSnapshot(state: PlanningState): DurablePlanSnapshot { return { paused: state.paused, pausing: state.pausing, workerCap: state.workerCap, work: Object.values(state.work).map(work => ({ id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...work.dependsOn], status: work.status, blocker: work.blocker, startedAt: work.startedAt ?? work.attempt?.startedAt ?? null, endedAt: work.endedAt ?? work.attempt?.endedAt ?? null, archived: work.archivedAt !== undefined, chatConversationId: work.chatConversationId === undefined ? null : Number(work.chatConversationId), parentThreadId: work.parentThreadId ?? null, attempt: attemptSnapshot(work), ...(work.steering ? { steering: true } : {}) })), ...verificationSnapshot(state) }; }
+  function verificationSnapshot(state: PlanningState): { verification?: Record<string, VerificationSummary> } { const cycles = Object.entries(state.threads).flatMap(([id, thread]) => thread.verification ? [[id, summarizeVerification(thread.verification)] as const] : []); return cycles.length ? { verification: Object.fromEntries(cycles) } : {}; }
   /** Hide terminal work from default views. `terminal` selects every unarchived terminal item. Nothing is deleted. */
   async function archiveWork(root: Conversation, selection: { workIds?: readonly string[]; terminal?: boolean }): Promise<{ archived: string[] }> {
     if (!selection.terminal && !selection.workIds?.length) throw new Error("Pass workIds or terminal: true");

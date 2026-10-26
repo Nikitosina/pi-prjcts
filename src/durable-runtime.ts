@@ -55,6 +55,10 @@ import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { omitIdleWatchdogTurns, watchdogRuntime } from "./durable-watchdog.ts";
 import { reviewVerdictTools } from "./durable-review.ts";
+import { prepareAttemptTarget, releaseAttemptTarget, verificationTools as buildVerificationTools } from "./durable-verification.ts";
+import { VERIFIER_RULES } from "./verification-model.ts";
+import { captureTarget } from "./verification-target.ts";
+import { sandboxAvailable } from "./verification-sandbox.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { githubOperations, type ExecutionInput } from "./github-operations.ts";
@@ -370,10 +374,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
       return model && window && provider === coordinatorModel.provider && modelId === coordinatorModel.modelId ? { ...model, contextWindow: window } : model;
     }) as typeof models.getModel;
     // A role without its own model follows the coordinator, read each time a worker is admitted.
-    const explicitModels = (selection: Pick<Project, "models">): Partial<Record<"worker" | "scout" | "reviewer", ReturnType<typeof modelRef>>> => Object.fromEntries(Object.entries(selection.models).flatMap(([role, value]) => value ? [[role, modelRef(value)]] : []));
+    const explicitModels = (selection: Pick<Project, "models">): Partial<Record<"worker" | "scout" | "reviewer" | "verifier", ReturnType<typeof modelRef>>> => Object.fromEntries(Object.entries(selection.models).flatMap(([role, value]) => value ? [[role, modelRef(value)]] : []));
     let roleModels = explicitModels(project);
     const roleModel = (role: "worker" | "scout" | "reviewer") => roleModels[role] ?? coordinatorModel;
-    const roleModelNow = { get worker() { return roleModel("worker"); }, get scout() { return roleModel("scout"); }, get reviewer() { return roleModel("reviewer"); } };
+    // The verifier never inherits the coordinator's model: the owner picks the judge, or there is none.
+    const roleModelNow = { get worker() { return roleModel("worker"); }, get scout() { return roleModel("scout"); }, get reviewer() { return roleModel("reviewer"); }, get verifier() { const ref = roleModels.verifier; if (!ref) throw new Error("No verifier model is configured in Settings"); return ref; } };
     assertConfiguredModel(models, coordinatorModel.provider, coordinatorModel.modelId, "Coordinator");
     for (const [role, ref] of Object.entries(roleModels)) assertConfiguredModel(models, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
 
@@ -420,7 +425,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
       return api.commit(async tx => {
         const state = await tx.doc(DurablePlanning, planRoot.id), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
         const work = entry && Object.values(state.work).findLast(item => item.threadId === entry[0]);
-        return entry && work ? { role: work.role, skills: work.attempt?.skills ? [...work.attempt.skills] : undefined, cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
+        // A verifier reads exactly its frozen skill list; it has no MCP tools bound, so its stand-in role only keys the (empty) default.
+        return entry && work ? { role: work.role === "verifier" ? "reviewer" : work.role, skills: work.attempt?.skills ? [...work.attempt.skills] : work.role === "verifier" ? [] : undefined, cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
       }, context);
     };
     const skillFiles = coordinatorSkillTool({ skill: lookupSkill, root: () => rootReference, allowed: async (api, context) => {
@@ -470,7 +476,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const ownLease = (threadId?: string) => (holder: { projectId: string; threadId: string }) => holder.projectId === project.id && !holder.threadId.startsWith("plugin:") && (threadId === undefined || holder.threadId === threadId);
     stopCommands = async () => { hostLeases.releaseWhere(ownLease()); try { await background.killAll(); } finally { await commands.close(); } };
     const binder = durableWorkspaceBinding({ project, configuredSkillLoader: input.configuredSkillLoader, projectStanding: standing, commands, commandApprovals: () => approvals, isClosed: () => closed, environment: { leases: hostLeases, background }, conversation: () => { if (!rootReference) throw new Error("Durable root is unavailable for workspace allocation"); return rootReference; }, controlRoot: dir });
-    const prepareWorkerEnvironment = binder === undefined ? undefined : async (request: Readonly<{ conversationId: number; workId: string; threadId: string; role: "worker" | "scout" | "reviewer"; workspaceScopeId: string }>) => { const environment = await binder(request); await input.testAfterWorkerPreparation?.({ conversationId: request.conversationId, workId: request.workId, threadId: request.threadId, cwd: environment.cwd, bindingRevision: environment.bindingRevision }); return environment; };
+    const prepareWorkerEnvironment = binder === undefined ? undefined : async (request: Readonly<{ conversationId: number; workId: string; threadId: string; role: DurableRole; workspaceScopeId: string }>) => { const environment = await binder(request); await input.testAfterWorkerPreparation?.({ conversationId: request.conversationId, workId: request.workId, threadId: request.threadId, cwd: environment.cwd, bindingRevision: environment.bindingRevision }); return environment; };
     const heads = readHeads(project.cwd, dir, { projectId: project.id, project: () => loadProject(project.id) });
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
       const target = await planning.readTarget(api, context);
@@ -480,12 +486,33 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
-    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
+    // Opt-in verification loop: tools only verifier threads are bound to, plus the host hooks planning calls at the end of a worker turn.
+    const verification = {
+      tools: buildVerificationTools({ planRoot: () => rootReference?.id, controlRoot: dir, currentRevision: async path => (await captureTarget(path)).revision, isClosed: () => closed }),
+      hooks: {
+        config: () => { const current = loadProject(project.id).verification; return { enabled: Boolean(current?.enabled), skill: current?.skill ?? "" }; },
+        check: async () => {
+          if (!sandboxAvailable()) return "This machine has no enforceable sandbox (macOS sandbox-exec), so verifier commands cannot run";
+          const skill = loadProject(project.id).verification?.skill ?? "";
+          await refreshDelegatedSkills();
+          if (!skill || !knownSkills.has(skill)) return `The verification skill "${skill}" is not installed or not discoverable`;
+          const ref = roleModels.verifier;
+          if (!ref) return "No verifier model is configured in Settings";
+          try { assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier"); } catch (error) { return error instanceof Error ? error.message : String(error); }
+          return null;
+        },
+        prepare: async (key: string, source: string) => { const { manifest, paths } = await prepareAttemptTarget(dir, key, source); return { manifest, targetPath: paths.target }; },
+        revision: async (path: string) => (await captureTarget(path)).revision,
+        release: (key: string) => releaseAttemptTarget(dir, key),
+      },
+    };
+    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => role === "verifier" ? [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) : delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; }, get verifier() { return verifierInstructions(project, standing.text, knownSkills.get(loadProject(project.id).verification?.skill ?? "")); } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role === "verifier" ? "reviewer" : role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, verifierTools: verification.tools, verification: verification.hooks, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
     registry.install(policy);
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
     registry.install(readOnlyCode.extension);
     registry.install(reviewerTools.extension);
+    registry.install(verification.tools.extension);
     registry.install(planning.extension);
     registry.install(planning.capabilities);
     registry.install(planning.delegation);
@@ -1471,6 +1498,14 @@ function coordinatorInstructions(project: Project, repositoryStanding: string, s
   const plugin = plugins.coordinatorTools().filter(provider => provider.applies(project)).map(provider => provider.instructions?.(project) ?? "").join("");
   return `You are the persistent coordinator for ${project.name}. ${project.prompts?.coordinator ?? COORDINATOR_ROLE_TEXT} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
 }
+function verifierInstructions(project: Project, repositoryStanding: string, skill: Skill | undefined): string {
+  return `You are a verifier for ${project.name}. Project instructions: ${project.objective}
+
+${repositoryStanding ? `Repository instructions (frozen for this thread):
+${repositoryStanding}
+
+` : ""}${VERIFIER_RULES}${skill ? `\n\nVerification skill (read its SKILL.md with projects_skill_file first): ${skill.name}: ${skill.description}` : ""}`;
+}
 const workRules = () => `${plugins.workerRules().map(rule => `${rule} `).join("")}`;
 function workerInstructions(project: Project, knowledgeAccess: KnowledgeAccess, repositoryStanding: string, role: DurableRole = "worker"): string {
   return `You are a persistent background worker for ${project.name}. Project instructions: ${project.objective}
@@ -1478,5 +1513,5 @@ function workerInstructions(project: Project, knowledgeAccess: KnowledgeAccess, 
 ${repositoryStanding ? `Repository instructions (frozen for this thread):
 ${repositoryStanding}
 
-` : ""}${project.prompts?.[role] ?? DEFAULT_WORKER_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
+` : ""}${(role === "verifier" ? undefined : project.prompts?.[role]) ?? DEFAULT_WORKER_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
 }
