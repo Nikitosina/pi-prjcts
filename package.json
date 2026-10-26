@@ -8,6 +8,7 @@
     "check:fast": "node scripts/check-fast.mjs",
     "e2e": "node scripts/run-e2e.mjs",
     "inbox": "node src/cli.ts ui",
+    "prototype:agent-desktop": "node web/prototype-agent-desktop/serve.mjs",
     "e2e:durable-runtime": "node scripts/durable-runtime-e2e.mjs",
     "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
     "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",
