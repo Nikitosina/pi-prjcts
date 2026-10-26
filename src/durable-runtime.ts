@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { Workers, backgroundWorkers } from "./durable-workers.ts";
 import { DurablePlanning, planningRuntime } from "./durable-planning.ts";
+import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
@@ -399,7 +400,17 @@ export async function openDurableProject(input: { project: Project; dir: string;
     // What each coordinator chat may read: the open-time set until that chat is reloaded, then its own reloaded set (a reload never widens another chat).
     const coordinatorSkills = new Map<number, ReadonlySet<string>>();
     const roleIndex = (role: SkillRole) => skillIndex((role === "coordinator" ? roleSkills : delegatedSkills)[role]) + (role === "coordinator" ? MCP_NOTE : "");
-    const refreshDelegatedSkills = async () => { if (input.discoverSkills) try { delegatedSkills = rolesOf(await input.discoverSkills(), loadProject(project.id).skillProfiles); } catch (error) { report(input.onReport, project.id, error); } };
+    // Skills the runtime has seen (open, each reload, each delegation); a read resolves here. Only a skill the owner invoked by name and the runtime has not seen triggers one rebuild.
+    const knownSkills = new Map<string, Skill>();
+    const remember = (loader: Parameters<typeof effectiveSkills>[1]) => { for (const skill of loader?.getSkills().skills ?? []) knownSkills.set(skill.name, skill); };
+    remember(input.configuredSkillLoader);
+    const lookupSkill = async (name: string) => {
+      const seen = knownSkills.get(name);
+      if (seen || !input.discoverSkills || !invokedSkills(dir).has(name)) return seen;
+      try { remember(await input.discoverSkills()); } catch (error) { report(input.onReport, project.id, error); }
+      return knownSkills.get(name);
+    };
+    const refreshDelegatedSkills = async () => { if (input.discoverSkills) try { const loader = await input.discoverSkills(); remember(loader); delegatedSkills = rolesOf(loader, loadProject(project.id).skillProfiles); } catch (error) { report(input.onReport, project.id, error); } };
     // Who is calling and where: coordinators (Main and chats) work in the project checkout, a worker in its frozen worktree, scouts and reviewers in their read root.
     const callerOf = async (api: ToolExecutionApi, context: Context): Promise<{ role: SkillRole; cwd: string; skills?: readonly string[] } | null> => {
       if (isCoordinator(api.conversationId)) return { role: "coordinator", cwd: project.cwd };
@@ -411,7 +422,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
         return entry && work ? { role: work.role, skills: work.attempt?.skills ? [...work.attempt.skills] : undefined, cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
       }, context);
     };
-    const skillFiles = coordinatorSkillTool({ loader: async () => { try { return input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader; } catch { return input.configuredSkillLoader; } }, root: () => rootReference, allowed: async (api, context) => {
+    const skillFiles = coordinatorSkillTool({ skill: lookupSkill, root: () => rootReference, allowed: async (api, context) => {
       const caller = await callerOf(api, context);
       return !caller ? new Set() : caller.role === "coordinator" ? new Set([...(coordinatorSkills.get(Number(api.conversationId)) ?? roleSkills.coordinator.map(skill => skill.name)), ...invokedSkills(dir)]) : new Set(caller.skills ?? roleSkills[caller.role].map(skill => skill.name));
     } });
@@ -887,7 +898,10 @@ export async function openDurableProject(input: { project: Project; dir: string;
         await conversation.reset(undefined, context);
         return { chatId: chat.id };
       }),
-      reload: id => schedules.mutex.run(async () => {
+      reload: async id => {
+        // The catalog is rebuilt before the admission lock is taken: packages may be slow and must not stall turns.
+        const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
+        return schedules.mutex.run(async () => {
         assertOpen();
         const { conversation, chat } = await resolveChat(id);
         if (chat.archived) throw new Error("Chat is archived; restore it before reloading");
@@ -898,7 +912,6 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const current = loadProject(project.id);
         if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
         const standingNow = loadDurableStanding(project.cwd);
-        const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
         const next = rolesOf(loader, current.skillProfiles);
         const agent = await conversation.agent(context);
         const instructions = coordinatorInstructions(current, standingNow.text, skillIndex(next.coordinator) + MCP_NOTE);
@@ -906,9 +919,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const names = (list: readonly { name: string }[]) => JSON.stringify(list.map(item => item.name).sort());
         const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
         if (changed) await conversation.configure({ instructions, tools, extensions }, context);
+        remember(loader);
         coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map(skill => skill.name)));
         return { chatId: chat.id, skills: next.coordinator.length, changed };
-      }),
+        });
+      },
       operationRequest: approvals.request,
       operationDecide: approvals.decide,
       operationSnapshot: approvals.snapshot,

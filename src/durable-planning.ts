@@ -292,6 +292,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   const delegateChild = defineTool({ name: "projects_delegate_child", description: `Delegate a bounded sub-task to a child thread: worker (gets your workspace scope), scout or reviewer (read-only code tools on your worktree, so they see your current changes). Children share the project worker pool and cannot delegate further. Delegate only genuinely independent work that should run in parallel with yours; do small reads, checks and status questions yourself. Use at most one reviewer per head. A child's result comes back to you as a new message in this thread after it finishes, not to the coordinator: end your turn after delegating if you need the result, then continue when it arrives. Only your answer after the last child result reaches the coordinator. At most ${MAX_ACTIVE_CHILDREN} of your children may be queued or running.`, parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])) }), replay: "unsafe", async execute(args, api, context) {
     const owner = options.planRoot?.();
     if (owner === undefined) throw new Error("Project plan is unavailable");
+    // A new child sees the catalog as it is now; the parent's own frozen prompt and skill list are not touched.
+    await options.refreshSkills?.();
     const receipt = await api.commit(async tx => {
       const state = await tx.doc(DurablePlanning, owner), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
       if (!entry) throw new Error("Only worker threads can delegate child work");
