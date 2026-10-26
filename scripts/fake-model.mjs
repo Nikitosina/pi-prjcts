@@ -29,7 +29,7 @@ export async function startFakeModel(root, { models = [], delayMs = 0 } = {}) {
         if (once) fired.add(json);
         frame = toolCall(name, JSON.parse(json.replaceAll('$REV', results.join(' ').match(/[a-f0-9]{64}/g)?.at(-1) ?? '')));
       }
-      requests.push({ at: Date.now(), model: input.model, user: user.slice(0, 300), answer, tools: offered, called: frame ? calls[results.length][3] : null });
+      requests.push({ at: Date.now(), model: input.model, user: user.slice(0, 300), system: text(input.messages.find(m => m.role === 'system' || m.role === 'developer')?.content), answer, tools: offered, called: frame ? calls[results.length][3] : null });
       setTimeout(() => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(frame ?? chunk({ role: 'assistant', content: answer }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n'); }, delayMs);
     });
   });

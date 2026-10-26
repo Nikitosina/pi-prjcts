@@ -74,9 +74,11 @@ export function coordinatorSkillTool(input: { /** Current catalog, so a skill in
     replay: "safe",
     async execute(args, api: ToolExecutionApi, context) {
       if (!input.root()) throw new Error("Project is unavailable");
+      // The caller's set is read first: it commits through the tool's overlay, which must not wait on a catalog rebuild.
+      const allowed = await input.allowed(api, context);
       const skill = (await input.loader())?.getSkills().skills.find(item => item.name === args.skill);
       if (!skill) throw new Error(`Unknown skill ${args.skill}`);
-      if (!(await input.allowed(api, context)).has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
+      if (!allowed.has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
       // Checked lexically first, then again after symlinks resolve.
       const escapes = (from: string, to: string) => { const inside = relative(from, to); return isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`); };
       const requested = resolve(skill.baseDir, args.path ?? "SKILL.md");

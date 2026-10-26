@@ -15,7 +15,7 @@ import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { Workers, backgroundWorkers } from "./durable-workers.ts";
 import { DurablePlanning, planningRuntime } from "./durable-planning.ts";
-import { advertisedSkills, effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
+import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
 import { artifactSummary, coordinatorArtifactTools } from "./artifacts.ts";
@@ -388,32 +388,32 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const vcs = coordinatorVcsTools({ runtime: () => vcsReference, projectId: project.id, isCoordinator });
     // Installed always so recorded calls still resolve; offered unless the owner turned gh access off.
     const gh = coordinatorGhTools({ cwd: project.cwd, dir, isCoordinator });
-    const ghTools = ghEnabled(project) ? gh.tools : [];
-    const githubTools = project.githubAuthorization?.length ? github.tools : [];
     // Plugin tools are installed always so recorded calls still resolve; offered only where the provider applies to the project.
     const pluginCoordinator = plugins.coordinatorTools().map(provider => ({ provider, ...provider.create({ projectId: project.id, root: () => rootReference, isCoordinator }) }));
-    const pluginTools = pluginCoordinator.filter(item => item.provider.applies(project)).flatMap(item => item.tools);
     const pluginExtensions = pluginCoordinator.map(item => item.extension);
     // Prompts carry only the index of each role's effective set; projects_skill_file reads a body on demand, restricted to the caller's set.
     // Two sets, both built from the owner's current profiles: the coordinator's follows /reload; the other roles follow the catalog at each delegation. A thread's own set is frozen in its instructions.
     const rolesOf = (loader: Parameters<typeof effectiveSkills>[1], profiles: Project["skillProfiles"]) => Object.fromEntries(SKILL_ROLES.map(role => [role, effectiveSkills(profiles, loader, role)])) as Record<SkillRole, ReturnType<typeof effectiveSkills>>;
-    let roleSkills = rolesOf(input.configuredSkillLoader, project.skillProfiles), delegatedSkills = roleSkills;
+    const roleSkills = rolesOf(input.configuredSkillLoader, project.skillProfiles);
+    let delegatedSkills = roleSkills;
+    // What each coordinator chat may read: the open-time set until that chat is reloaded, then its own reloaded set (a reload never widens another chat).
+    const coordinatorSkills = new Map<number, ReadonlySet<string>>();
     const roleIndex = (role: SkillRole) => skillIndex((role === "coordinator" ? roleSkills : delegatedSkills)[role]) + (role === "coordinator" ? MCP_NOTE : "");
     const refreshDelegatedSkills = async () => { if (input.discoverSkills) try { delegatedSkills = rolesOf(await input.discoverSkills(), loadProject(project.id).skillProfiles); } catch (error) { report(input.onReport, project.id, error); } };
     // Who is calling and where: coordinators (Main and chats) work in the project checkout, a worker in its frozen worktree, scouts and reviewers in their read root.
-    const callerOf = async (api: ToolExecutionApi, context: Context): Promise<{ role: SkillRole; cwd: string; instructions?: string } | null> => {
+    const callerOf = async (api: ToolExecutionApi, context: Context): Promise<{ role: SkillRole; cwd: string; skills?: readonly string[] } | null> => {
       if (isCoordinator(api.conversationId)) return { role: "coordinator", cwd: project.cwd };
       const planRoot = rootReference;
       if (!planRoot) return null;
       return api.commit(async tx => {
         const state = await tx.doc(DurablePlanning, planRoot.id), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
         const work = entry && Object.values(state.work).findLast(item => item.threadId === entry[0]);
-        return entry && work ? { role: work.role, instructions: work.attempt?.instructions ?? "", cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
+        return entry && work ? { role: work.role, skills: work.attempt?.skills ? [...work.attempt.skills] : undefined, cwd: work.role === "worker" ? work.attempt?.cwd ?? project.cwd : entry[1].readRoot ?? project.cwd } : null;
       }, context);
     };
     const skillFiles = coordinatorSkillTool({ loader: async () => { try { return input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader; } catch { return input.configuredSkillLoader; } }, root: () => rootReference, allowed: async (api, context) => {
       const caller = await callerOf(api, context);
-      return !caller ? new Set() : caller.role === "coordinator" ? new Set([...roleSkills.coordinator.map(skill => skill.name), ...invokedSkills(dir)]) : advertisedSkills(caller.instructions ?? "");
+      return !caller ? new Set() : caller.role === "coordinator" ? new Set([...(coordinatorSkills.get(Number(api.conversationId)) ?? roleSkills.coordinator.map(skill => skill.name)), ...invokedSkills(dir)]) : new Set(caller.skills ?? roleSkills[caller.role].map(skill => skill.name));
     } });
     // Installed always so recorded calls resolve; the owner's per-profile selection is read fresh on every call.
     const mcp = mcpGatewayTools({ pool: mcpPool, settings: () => loadProject(project.id).mcp, caller: callerOf });
@@ -425,9 +425,16 @@ export async function openDurableProject(input: { project: Project; dir: string;
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
     const tools = maintainedKnowledgeTools(dir);
     const workerKnowledge = knowledgeAccess === "maintain" ? tools : tools.filter(tool => !mutationTools.has(tool.name));
-    const libraryTools = project.libraryAccess === "coordinator" ? coordinatorLibraryTools({ projectId: project.id, dir, root: () => rootReference, isCoordinator }) : [];
+    // Library and decision tools authorize against the saved project on every call; the grant only decides whether a chat is offered them.
+    const libraryTools = coordinatorLibraryTools({ projectId: project.id, dir, root: () => rootReference, isCoordinator });
     const libraryPolicy = defineExtension({ name: "projects.durable-library", tools: libraryTools });
-    const decisions = durableDecisions({ projectId: project.id, dir, enabled: project.decisionAccess === "coordinator", root: () => rootReference, isCoordinator });
+    const decisions = durableDecisions({ projectId: project.id, dir, enabled: () => loadProject(project.id).decisionAccess === "coordinator", root: () => rootReference, isCoordinator });
+    // What a coordinator chat is offered, from the saved project: revoking a grant removes the tool at the next /reload (or reopen), granting adds only tools the runtime already owns.
+    const offeredTools = (current: Project) => [
+      ...(current.libraryAccess === "coordinator" ? libraryTools : []), ...(current.decisionAccess === "coordinator" ? decisions.tools : []),
+      ...(current.githubAuthorization?.length ? github.tools : []), ...(ghEnabled(current) ? gh.tools : []),
+      ...pluginCoordinator.filter(item => item.provider.applies(current)).flatMap(item => item.tools),
+    ];
     const standing = loadDurableStanding(project.cwd);
     const workerStanding = workerInstructions(project, knowledgeAccess, standing.text), roleStanding = (role: DurableRole) => workerInstructions(project, knowledgeAccess, standing.text, role);
     const policy = defineExtension({
@@ -461,7 +468,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
-    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
+    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
     registry.install(policy);
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
@@ -495,7 +502,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       model: coordinatorModel,
       thinkingLevel: "medium",
       extensions: [policy, planning.extension, libraryPolicy, decisions.extension, workerManagement.extension, github.extension, shell.extension, gh.extension, vcs.extension, ...pluginExtensions, skillFiles.extension, mcp.extension, artifacts.extension],
-      tools: [...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, ...ghTools, ...shell.tools, ...vcs.tools, ...pluginTools, skillFiles.tool, ...mcp.tools, ...artifacts.tools, planning.delegate, ...(planning.workspaceCatalog ? [planning.workspaceCatalog] : [])],
+      tools: [...tools, ...workerManagement.tools, ...shell.tools, ...vcs.tools, ...offeredTools(project), skillFiles.tool, ...mcp.tools, ...artifacts.tools, planning.delegate, ...(planning.workspaceCatalog ? [planning.workspaceCatalog] : [])],
       cwd: project.cwd,
       instructions: coordinatorInstructions(project, standing.text, roleIndex("coordinator")),
     } });
@@ -636,8 +643,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const workerManagementNames = new Set(workerManagement.tools.map(tool => tool.name));
     const ownedNames = new Set<string>([...COORDINATOR_GITHUB_TOOLS, ...shell.tools.map(tool => tool.name), ...gh.tools.map(tool => tool.name), ...vcs.tools.map(tool => tool.name), ...pluginCoordinator.flatMap(item => item.tools.map(tool => tool.name)), skillFiles.tool.name, ...mcp.tools.map(tool => tool.name), ...artifacts.tools.map(tool => tool.name)]);
     type AgentNow = Awaited<ReturnType<Conversation["agent"]>>;
-    const coordinatorToolsFor = (agent: AgentNow) => [...agent.tools.filter(tool => !knowledgeNames.has(tool.name) && !workerManagementNames.has(tool.name) && !ownedNames.has(tool.name)), ...tools, ...libraryTools, ...decisions.tools, ...workerManagement.tools, ...githubTools, ...ghTools, ...shell.tools, ...vcs.tools, ...pluginTools, skillFiles.tool, ...mcp.tools, ...artifacts.tools];
-    const coordinatorTools = coordinatorToolsFor(recoveredAgent);
+    const coordinatorToolsFor = (agent: AgentNow, current: Project) => [...agent.tools.filter(tool => !knowledgeNames.has(tool.name) && !workerManagementNames.has(tool.name) && !ownedNames.has(tool.name)), ...tools, ...workerManagement.tools, ...shell.tools, ...vcs.tools, ...offeredTools(current), skillFiles.tool, ...mcp.tools, ...artifacts.tools];
+    const coordinatorTools = coordinatorToolsFor(recoveredAgent, project);
     const ownedExtensions = new Set([workerManagement.extension.name, github.extension.name, shell.extension.name, gh.extension.name, vcs.extension.name, ...pluginExtensions.map(extension => extension.name), skillFiles.extension.name, mcp.extension.name, artifacts.extension.name]);
     const coordinatorExtensionsFor = (agent: AgentNow) => [...agent.extensions.filter(extension => !ownedExtensions.has(extension.name)), workerManagement.extension, github.extension, shell.extension, gh.extension, vcs.extension, ...pluginExtensions, skillFiles.extension, mcp.extension, artifacts.extension];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
@@ -887,15 +894,19 @@ export async function openDurableProject(input: { project: Project; dir: string;
         if (chat.busy) throw new Error("This chat is working; wait for it to finish before reloading");
         const view = await conversation.viewState(context);
         try { if (liveFrame(view.value).compacting) throw new Error("This chat is compacting; wait for it to finish before reloading"); } finally { view.dispose(); }
-        // Everything is built before anything is applied, and applied in one commit: a failed rebuild leaves the chat exactly as it was.
+        // Everything is rebuilt from the saved project, the checkout's standing instructions and the disk catalog before anything is applied, and applied in one commit: a failure leaves the chat as it was.
+        const current = loadProject(project.id);
+        if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
+        const standingNow = loadDurableStanding(project.cwd);
         const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
-        const next = rolesOf(loader, loadProject(project.id).skillProfiles);
+        const next = rolesOf(loader, current.skillProfiles);
         const agent = await conversation.agent(context);
-        const instructions = coordinatorInstructions(project, standing.text, skillIndex(next.coordinator) + MCP_NOTE);
-        const tools = coordinatorToolsFor(agent), extensions = coordinatorExtensionsFor(agent);
-        const changed = agent.instructions !== instructions || JSON.stringify(agent.tools.map(tool => tool.name).sort()) !== JSON.stringify(tools.map(tool => tool.name).sort());
+        const instructions = coordinatorInstructions(current, standingNow.text, skillIndex(next.coordinator) + MCP_NOTE);
+        const tools = coordinatorToolsFor(agent, current), extensions = coordinatorExtensionsFor(agent);
+        const names = (list: readonly { name: string }[]) => JSON.stringify(list.map(item => item.name).sort());
+        const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
         if (changed) await conversation.configure({ instructions, tools, extensions }, context);
-        roleSkills = next;
+        coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map(skill => skill.name)));
         return { chatId: chat.id, skills: next.coordinator.length, changed };
       }),
       operationRequest: approvals.request,

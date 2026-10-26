@@ -26,10 +26,11 @@ const call = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0,
 const say = value => chunk({ role: 'assistant', content: value }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n';
 const contentText = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => part.text ?? '').join('') : JSON.stringify(content ?? '');
 // Skills: two repository (.pi/skills), four global (agent dir). Bodies carry BODY-<name> so prompts can be checked for bodies.
-const skill = (dir, name, description, { body = `BODY-${name}`, ref } = {}) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body}\n`); if (ref) writeFileSync(join(dir, 'ref.md'), ref); };
+const skill = (dir, name, description, { body = `BODY-${name}`, ref, manual = false } = {}) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n${manual ? 'disable-model-invocation: true\n' : ''}---\n\n# ${name}\n\n${body}\n`); if (ref) writeFileSync(join(dir, 'ref.md'), ref); };
 const homeSkills = join(userHome, '.agents', 'skills'), repoPi = join(workspace, '.pi', 'skills'), repoAgents = join(workspace, '.agents', 'skills'), globalSkills = join(agentDir, 'skills');
 skill(join(globalSkills, 'glob-old'), 'glob-old', 'Old global description.', { body: 'BODY-glob-old-v1' });
 skill(join(globalSkills, 'glob-excl'), 'glob-excl', 'Global skill switched off for coordinator and worker.');
+skill(join(globalSkills, 'glob-manual'), 'glob-manual', 'Manual-only global skill.', { manual: true });
 skill(join(repoPi, 'repo-old'), 'repo-old', 'Repository skill present at startup.');
 const model = createServer((req, res) => {
   req.setEncoding('utf8');
@@ -117,6 +118,8 @@ try {
   check('baseline coordinator index = installed minus its exclusions', index(coord0.system).join() === 'glob-old,repo-old', index(coord0.system));
   check('baseline worker index = installed minus its exclusions', index(worker0.system).join() === 'glob-old,repo-old', index(worker0.system));
   const preThread = (await plan()).find(w => w.text.includes('W-TASK pre')).threadId;
+  await ask('MARK-W manual SKILL-READ glob-manual');
+  check('a manual-only skill stays out of the index but a worker of that role can still read it', !index(worker0.system).includes('glob-manual') && toolResult('worker', 'W-TASK manual').includes('BODY-glob-manual'), toolResult('worker', 'W-TASK manual').slice(0, 200));
   const toolsBefore = [...coord0.tools].sort();
 
   // Install after the host and the project runtime are already running; change one existing skill.

@@ -30,23 +30,10 @@ export function effectiveSkills(saved: SkillProfiles | undefined, loader: Loader
   const off = switchedOff(saved?.off, role);
   return loaded(loader).filter(skill => !off.has(skill.name));
 }
-const INDEX_HEADER = "Skills for your role (names and descriptions only).";
-/** Names and descriptions only; bodies are read on demand. Manual-only skills are left out, as pi does. A description stays on one line so the index can be read back. */
+/** Names and descriptions only; bodies are read on demand. Manual-only skills are left out, as pi does. */
 export function skillIndex(skills: readonly Skill[]): string {
   const listed = skills.filter(skill => !skill.disableModelInvocation);
-  return listed.length ? `\n\n${INDEX_HEADER} When one applies, read its SKILL.md with projects_skill_file before acting, then any file it references:\n${listed.map(skill => `- ${skill.name}: ${skill.description.replace(/\s+/g, " ")}`).join("\n")}` : "";
-}
-/** The names a thread was told about, read back from its frozen instructions: a worker keeps the skills it started with when more are installed later. */
-export function advertisedSkills(instructions: string): Set<string> {
-  const start = instructions.lastIndexOf(INDEX_HEADER);
-  const names = new Set<string>();
-  if (start < 0) return names;
-  for (const line of instructions.slice(start).split("\n").slice(1)) {
-    const name = /^- ([^\s:]+): /.exec(line)?.[1];
-    if (!name) break;
-    names.add(name);
-  }
-  return names;
+  return listed.length ? `\n\nSkills for your role (names and descriptions only). When one applies, read its SKILL.md with projects_skill_file before acting, then any file it references:\n${listed.map(skill => `- ${skill.name}: ${skill.description}`).join("\n")}` : "";
 }
 
 /** Skills the owner invoked with `/skill:` stay readable by the coordinator even outside its profile. */
