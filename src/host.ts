@@ -63,8 +63,8 @@ catch (error) {
 }
 writeFileSync(lockFd, String(process.pid)); closeSync(lockFd);
 if (existsSync(socketPath())) unlinkSync(socketPath());
-/** The skills installed right now (global, project-local, packages): built from disk on every call, never cached, so a skill installed a moment ago is found without a restart. A runtime keeps the catalog it opened with until /reload. */
-const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(id));
+/** The skills installed right now (global, project-local, packages): built from disk on every call, never cached, so a skill installed a moment ago is found without a restart. Passive: never downloads a missing package. */
+const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(id), { passive: true });
 const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
@@ -137,7 +137,8 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
   let project = loadProject(id);
   const granted = withDefaultWorkspace(project);
   if (granted !== project) { saveProject(granted); project = granted; }
-  const opening = configuredSkills(id).then(loader => openDurableHost(project, loader, () => configuredSkills(id)));
+  // Opening may install a configured package once, as before; later catalog lookups are passive.
+  const opening = loadProjectResourceLoader(project).then(loader => openDurableHost(project, loader, () => configuredSkills(id)));
   durableRuntimes.set(id, opening);
   opening.catch(() => { if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id); });
   return opening;
