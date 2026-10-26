@@ -7,9 +7,7 @@ description: Verify pi-prjcts by driving its real browser inbox (Decision inbox 
 
 Surface: the browser inbox (`web/`, served by `src/host.ts` on a random loopback port). The CLI (`npm run projects -- ...`) shares the same host and is secondary. Isolation: every run gets its own `HOME`, project home, agent dir, port and socket, so it never touches the owner's host. Run from the checkout root. Needs `node_modules` (`npm ci`) and Google Chrome at `/Applications/Google Chrome.app` (override with `VERIFY_CHROME`).
 
-This skill lives in `.agents/skills/verify-pi-prjcts/`, the repo-local root that both the SDK catalog and worker repository-skill discovery scan. `.cursor/skills/verify-pi-prjcts` is a symlink pointer to it for tools that read `.cursor`; keep it a symlink (worker discovery refuses symlinks *inside* `.agents/skills`, so the canonical copy must stay real files).
-
-All commands below are `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs <command>` (`V` for short). Pick the feature file in [features/README.md](features/README.md) first; it lists preconditions and which journeys are scripted.
+All commands below are `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs <command>` (`V` for short). Moving or re-pointing this skill: read [references/placement.md](references/placement.md) first. Pick the feature file in [features/README.md](features/README.md) first; it lists preconditions and which journeys are scripted.
 
 ## Launch
 
@@ -21,14 +19,16 @@ All commands below are `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs 
 
 ## Drive
 
-`V drive --run <scratch> <feature>` runs one scripted journey through headless Chrome (raw CDP over a pipe, real `Input.insertText` and clicks). Scripted today: `message-coordinator`. Other features in `features/` are manual recipes; use the same CDP approach with the ids they list, and say in your report that they are unscripted. Add a journey by extending the `journeys` map in `scripts/verify.mjs` and updating the feature file.
+`V drive --run <scratch> <feature>` runs one scripted journey through headless Chrome (raw CDP over a pipe, real `Input.insertText` and clicks). Scripted today: `message-coordinator` (pointer clicks via `Input.dispatchMouseEvent` after a hit test, asserts both bubbles, composer clear and reload persistence). Each drive writes to its own `drive-<feature>-<timestamp>/` folder inside the evidence dir. Other features in `features/` are manual recipes; use the same CDP approach with the ids they list, and say in your report that they are unscripted. Add a journey by extending the `journeys` map in `scripts/verify.mjs` and updating the feature file.
 
 ## Evidence
 
-Each drive writes into the evidence dir: `01-before-send.png`, `02-typed.png`, `03-reply.png`, `messages-dom.txt`, `host-show-messages.json` (host's stored transcript), `model-requests.jsonl` (what the provider received), `report.json` (steps, console errors, HTTP errors). Proof standards: use the real user path (typing, clicking), capture action and result, confirm a side effect through a read-only second view, and report anything unscripted or blocked as such. A precondition the seed lacks is a failure reported with its reason, never a weaker journey.
+Read-only second view of host state: `V rpc --run <scratch> <action> ['{"field":"value"}']` with `id` defaulting to the seeded project. Allowed actions: `list`, `show`, `plan-snapshot`, `knowledge-list`, `knowledge-read`, `knowledge-history`, `search`; everything else is refused.
+
+Each drive folder holds: `01-before-send.png`, `02-typed.png`, `03-reply.png`, `04-after-reload.png`, `messages-dom.txt`, `host-show-messages.json` (host's stored transcript), `model-requests.jsonl` (what the provider received), `report.json` (steps, console errors, HTTP errors, problems). A failure adds `99-failure.png`. `<evidence>/diagnostics/` always gets redacted copies of `host.log`, `fake-provider.log`, `model-requests.jsonl` and `run.json`, written before scratch is removed (also when launch or drive fails). Proof standards: use the real user path (typing, clicking), capture action and result, confirm a side effect through a read-only second view, and report anything unscripted or blocked as such. A precondition the seed lacks is a failure reported with its reason, never a weaker journey.
 
 The only mock is the fake provider at the existing model seam. A pass shows the UI, host routing and transcript storage work; it says nothing about real model output, tool calls or credentials.
 
 ## Cleanup
 
-`V cleanup --run <scratch>` asks the host to shut down, kills only the pids recorded in `run.json` if they linger, and deletes the scratch dir. The evidence dir stays. Run it after every attempt, including failed ones. It never matches processes by name; if you started extra processes yourself, stop those by pid.
+`V cleanup --run <scratch>` asks the host to shut down, then stops each process group recorded in `run.json` (host, fake provider, any Chrome from a drive) only while its start time still matches the recorded one; a reused pid is skipped and reported. If anything stays alive it exits 1 and keeps scratch and `run.json`, so rerun it. Otherwise it deletes scratch; the evidence dir stays. Run it after every attempt, including failed ones. It never matches processes by name; stop extra processes you started yourself by pid.

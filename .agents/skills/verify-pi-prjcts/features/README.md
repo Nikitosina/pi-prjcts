@@ -13,7 +13,7 @@ Maintained source for verifying what a user does in the Pi Projects browser inbo
 
 - Browser entry is the launch link in `run.json` (`webUrl`, token in the `#fragment`), opened in headless Chrome over CDP.
 - Prefer ARIA labels and ids: `textarea[aria-label="Message coordinator"]`, `#compose button[type=submit]`, `#messages`, `#title`, `#search-button`, `#create`.
-- Type with `Input.insertText` and click real buttons. Skip `rpc` writes for the journey itself; `rpc show` and the request log are read-only second views.
+- Type with `Input.insertText` and click real buttons. Never use host writes for the journey itself. Read-only second views: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> show` (allowlisted: list, show, plan-snapshot, knowledge-list, knowledge-read, knowledge-history, search) and `model-requests.jsonl`.
 - The fake provider answers `VERIFY-FAKE-REPLY: <your last message>` and never calls tools. A journey that needs a model-chosen tool call reports failure with that reason.
 
 ## Proof and skip reporting

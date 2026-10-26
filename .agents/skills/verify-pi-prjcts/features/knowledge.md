@@ -17,9 +17,10 @@ The user creates and reads a Markdown knowledge document from the Knowledge tab;
 
 Preconditions: launch, doctor `ok: true`.
 
-- Recipe only, not scripted: click `[data-tab=knowledge]`, click `[data-action=knowledge-new]`, fill the path and text fields in the dialog, save. Proof: dialog shows the new path; `rpc knowledge-list` (read-only) lists it; the file exists (`find <scratch>/home -path "*knowledge*" -name "<topic>.md"`) before cleanup. Copy that file into the evidence dir before cleanup, because cleanup removes the scratch dir.
+- Recipe only, not scripted: pointer-click `button[data-tab=knowledge]`, then `button[data-action=knowledge-new]` ("＋ New document"). In the dialog fill `input[name=path]` with a folder path such as `research/verify-topic.md` and click "Continue". In the editor (`form[data-knowledge-write]`) insert text into `textarea[name=text]` and click "Save". Proof: the new path appears in `#knowledge-inline`; `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> knowledge-list` lists it; `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> knowledge-read '{"path":"research/verify-topic.md"}'` returns the text. Copy the file from `<scratch>/home` into the evidence dir before cleanup (found with `find <scratch>/home -path "*knowledge*" -name "verify-topic.md"`), because cleanup removes scratch.
 
 ## Gotchas
 
 - Updates need the current revision; a new topic uses `expectedRevision: null`, so creating an existing path conflicts.
+- The path must start with a folder (architecture/, research/, decisions/, runbooks/ or plans/); a bare file name is refused.
 - The new topic is not added to `MEMORY.md` automatically.
