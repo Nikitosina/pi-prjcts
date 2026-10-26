@@ -26,7 +26,8 @@
     "quota-status",
     "coordinator-gh",
     "machine-status-unit",
-    "usage-limits-recovery-unit"
+    "usage-limits-recovery-unit",
+    "coordinator-subagent-mapping-unit"
   ],
   "browser": [
     "web/**"
