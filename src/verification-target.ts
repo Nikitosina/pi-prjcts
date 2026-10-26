@@ -87,5 +87,19 @@ export async function snapshotTarget(source: string, dest: string, expected: Tar
   await git(dest, ["-c", "user.name=pi-verify", "-c", "user.email=verify@invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "--allow-empty", "-m", `Verification snapshot of ${expected.revision}`]);
 }
 
+/** Files that define what counts as proof: verification skills, scripts, tests, build and CI config. A worker that edits them can weaken the check it is judged by. */
+const PROOF_FILE = /^(\.agents|\.cursor|\.claude)\/skills\/|^scripts\/|(^|\/)(tests?|__tests__|spec|e2e)\/|\.(test|spec)\.[cm]?[jt]sx?$|^(package\.json|Makefile|\.github\/workflows\/)/;
+export type ProofChanges = { paths: string[]; diff: string };
+/** Which proof-defining files differ from HEAD (edited, added, deleted) and their diff, capped. Shown to the verifier and in the verdict. */
+export async function proofChanges(root: string, manifest: Pick<TargetManifest, "files" | "head">): Promise<ProofChanges> {
+  const status = (await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).catch(() => Buffer.alloc(0))).toString("utf8").split("\0").filter(entry => entry.length > 3).map(entry => entry.slice(3));
+  const paths = [...new Set(status)].filter(path => PROOF_FILE.test(path)).sort();
+  if (!paths.length) return { paths, diff: "" };
+  const tracked = manifest.head ? (await git(root, ["diff", "HEAD", "--no-ext-diff", "--no-textconv", "--no-color", "--", ...paths]).catch(() => Buffer.alloc(0))).toString("utf8") : "";
+  const added = paths.filter(path => !tracked.includes(`b/${path}`)).map(path => `(new or removed file) ${path}`).join("\n");
+  const text = `${tracked}${added ? `\n${added}` : ""}`;
+  return { paths, diff: text.length > 6000 ? `${text.slice(0, 6000)}\n… (diff capped; ${paths.length} proof file(s) changed)` : text };
+}
+
 export async function writeManifest(path: string, manifest: TargetManifest): Promise<void> { await writeFile(path, JSON.stringify(manifest), { mode: 0o600 }); }
 export async function readManifest(path: string): Promise<TargetManifest> { return JSON.parse(await readFile(path, "utf8")) as TargetManifest; }

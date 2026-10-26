@@ -35,17 +35,25 @@ const model = createServer((req, res) => {
     const all = msgs.map(m => text(m.content)).join('\n'), marker = /MARK-[A-Z0-9]+/.exec(all)?.[0] ?? 'none';
     const turn = msgs.slice(lastUser + 1).filter(m => m.role === 'tool'), stage = turn.length, last = text(turn.at(-1)?.content);
     const role = names.includes('projects_delegate') ? 'coordinator' : names.includes('projects_verify_run') ? 'verifier' : names.includes('bash') ? 'worker' : 'other';
-    result.requests.push({ at: Date.now(), role, model: input.model, marker, stage, tools: names, user: user.slice(0, 160) });
+    result.requests.push({ at: Date.now(), role, model: input.model, marker, stage, tools: names, user: user.slice(0, 160), proofNote: /define the proof/.test(all), longCriterion: all.includes('L'.repeat(3000)) });
     const reply = out => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(out); };
     try {
       if (role === 'coordinator') {
         if (user.startsWith('[Durable work')) { result.reports.push(user); return reply(say('Noted.')); }
         const task = user.match(/MARK-[A-Z0-9]+/)?.[0];
-        if (task && stage === 0) return reply(call('projects_delegate', { task: `${task} write feature.txt`, acceptance: ['feature.txt exists in the repository and contains the word done', 'node check.mjs exits 0'] }));
+        if (task && stage === 0) {
+          // The tool caps acceptance at 20 items of 500 characters; a brief can still carry its own criteria list, which the verification must keep whole.
+          const list = items => `${task} write feature.txt\n\nAcceptance criteria (done means all are met):\n${items.map(item => `- ${item}`).join('\n')}`;
+          if (task === 'MARK-MANY') return reply(call('projects_delegate', { task: list(Array.from({ length: 21 }, (_, i) => `criterion ${i + 1} holds`)) }));
+          if (task === 'MARK-LONG') return reply(call('projects_delegate', { task: list(['feature.txt exists in the repository and contains the word done', `node check.mjs exits 0 ${'L'.repeat(3000)}`]) }));
+          return reply(call('projects_delegate', { task: `${task} write feature.txt`, acceptance: ['feature.txt exists in the repository and contains the word done', 'node check.mjs exits 0'] }));
+        }
         return reply(say('Delegated.'));
       }
       if (role === 'worker') {
         if (stage > 0) return reply(say(`Worker finished ${marker}`));
+        if (marker === 'MARK-REPAIRFAIL' && /^\[Automatic verification failed\]/.test(user)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'repair turn refused by the provider', type: 'invalid_request_error' } })); }
+        if (marker === 'MARK-PROOF') return reply(call('bash', { command: 'mkdir -p scripts && echo "process.exit(0)" > scripts/check.mjs && echo done > feature.txt' }));
         if (marker.startsWith('MARK-SAT') && marker !== 'MARK-SATA') await gate(marker).wait; // B and C hold their slots until released
         const left = /(\d) attempt\(s\) left/.exec(user)?.[1];
         const content = /^\[Automatic verification failed\]/.test(user) ? (marker === 'MARK-THREE' ? (left === '2' ? 'half' : 'half2') : 'done') : marker.startsWith('MARK-SAT') ? 'done' : 'nope';
@@ -161,6 +169,29 @@ try {
   const finalPlan = await plan(id), startOf = marker => finalPlan.work.find(w => w.text.includes(marker) && w.role === 'worker').attempt?.startedAt ?? Infinity, verifierOf = marker => finalPlan.work.find(w => w.role === 'verifier' && w.parentThreadId === finalPlan.work.find(x => x.role === 'worker' && x.text.includes(marker)).threadId);
   check('R3 all three parents end verified, the cap of 2 was never exceeded and nobody deadlocked', cycles.every(c => c.outcome === 'verified') && peak <= 2, { peak, outcomes: cycles.map(c => c.outcome) });
   check('R3 a finished parent\'s verifier is scheduled ahead of work that was queued earlier', verifierOf('MARK-SATB').attempt.startedAt <= startOf('MARK-SATA'), { verifierB: verifierOf('MARK-SATB').attempt.startedAt, workerA: startOf('MARK-SATA') });
+  // R4: a repair turn that fails must not leave the cycle open forever.
+  const repairFail = await waitCycle(id, 'MARK-REPAIRFAIL');
+  const repairTurns = (await plan(id)).work.filter(w => w.threadId === repairFail.worker.threadId && w.role === 'worker');
+  check('R4 a failed repair turn ends the cycle as escalated and the earlier "completed" turn stops counting as complete', repairFail.cycle.outcome === 'escalated' && /repair turn failed/.test(repairFail.cycle.reason) && repairTurns.length === 2 && repairTurns[0].status === 'blocked' && repairTurns[1].status === 'failed', { cycle: repairFail.cycle, statuses: repairTurns.map(w => [w.status, w.blocker]) });
+  // R5: criteria that do not fit are refused whole; nothing is silently dropped.
+  const many = await waitCycle(id, 'MARK-MANY');
+  check('R5 21 criteria are refused with a reason and no verifier starts; the work is blocked, not completed', many.cycle.attempts.length === 0 && many.cycle.outcome === 'escalated' && /21 acceptance criteria/.test(many.cycle.reason) && many.snapshot.work.find(w => w.id === many.worker.id).status === 'blocked', many.cycle);
+  const long = await waitCycle(id, 'MARK-LONG');
+  check('R5 a 3000-character criterion reaches the verifier whole', long.cycle.outcome === 'verified' && long.cycle.criteria[1].text.length > 3000 && result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-LONG' && r.longCriterion), long.cycle.criteria.map(c => c.text.length));
+  // R6: edits to the proof (scripts, tests, skills) are shown to the verifier and recorded.
+  const proof = await waitCycle(id, 'MARK-PROOF');
+  check('R6 a worker that adds a script file shows it as changed proof to the verifier and in the cycle', proof.cycle.attempts[0].proofFiles.includes('scripts/check.mjs') && result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-PROOF' && r.proofNote), proof.cycle.attempts[0]);
+  // R7: finished attempts leave no snapshots behind.
+  await delay(1500);
+  const left = execFileSync('/usr/bin/find', [root, '-type', 'd', '-path', '*/verification/*/target', '-maxdepth', '12'], { encoding: 'utf8' }).trim();
+  check('R7 no verification snapshot (target or scratch) stays after the cycles ended', left === '', left);
+  // R8: with verification on, a top-level worker that has no isolated worktree is not silently completed.
+  const loose = join(root, 'loose'); mkdirSync(join(loose, '.agents/skills/mini-verify'), { recursive: true }); writeFileSync(join(loose, '.agents/skills/mini-verify/SKILL.md'), '---\nname: mini-verify\ndescription: Verify that feature.txt says done (loose workspace).\n---\n\nRun node check.mjs.\n');
+  writeFileSync(join(loose, 'README.md'), 'not a git repository\n');
+  const looseProject = (await rpc({ action: 'create', requestId: randomUUID(), name: 'No worktree', cwd: loose, objective: 'Disposable', model: 'fake/fake-model' })).id;
+  await settingsUpdate(looseProject, { models: { verifier: 'fake/fake-judge' }, verification: { enabled: true, skill: 'mini-verify' } });
+  const unscoped = await waitCycle(looseProject, 'MARK-UNSCOPED');
+  check('R8 a worker without an isolated worktree is escalated as not verifiable and blocked, never reported complete', unscoped.cycle.outcome === 'escalated' && /does not apply/.test(unscoped.cycle.reason) && unscoped.cycle.attempts.length === 0 && unscoped.snapshot.work.find(w => w.id === unscoped.worker.id).status === 'blocked', unscoped.cycle);
   console.log(JSON.stringify({ ok: true, checks: result.checks }, null, 2));
 } catch (error) {
   result.error = String(error?.stack ?? error);

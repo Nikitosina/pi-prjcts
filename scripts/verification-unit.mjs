@@ -93,7 +93,7 @@ try {
     const work = join(root, 'sbx', 'work'), scratch = join(root, 'sbx', 'scratch'), artifacts = join(process.env.PI_PROJECTS_HOME, 'proj', 'artifacts', 'thread'), other = join(root, 'sbx', 'other'), secrets = join(root, 'sbx', 'secrets');
     for (const dir of [work, scratch, artifacts, other, secrets]) mkdirSync(dir, { recursive: true });
     writeFileSync(join(secrets, 'token'), 'hunter2'); writeFileSync(join(process.env.PI_PROJECTS_HOME, 'proj', 'knowledge.md'), 'other thread data');
-    const policy = { writable: [work, scratch, artifacts], unreadable: [secrets, process.env.PI_PROJECTS_HOME], readable: [artifacts] };
+    const policy = { writable: [work, scratch, artifacts], unreadable: [secrets, process.env.PI_PROJECTS_HOME], readable: [artifacts], sockets: [scratch] };
     const env = sandbox.sandboxEnv(scratch, artifacts);
     const sh = async command => sandbox.runSandboxed({ command, cwd: work, policy, env, timeoutMs: 20000, stdoutPath: join(artifacts, 'o.log'), stderrPath: join(artifacts, 'e.log') });
     check('a command writes its snapshot, scratch and artifacts', (await sh(`echo a > ok.txt && echo b > ${scratch}/s.txt && echo c > ${artifacts}/c.txt`)).exitCode === 0 && existsSync(join(work, 'ok.txt')));
@@ -114,13 +114,73 @@ try {
     outsider.kill('SIGKILL');
     const sim = await sh('xcrun simctl list devices 2>&1 | head -3');
     check('the simulator service is unreachable from the sandbox', !/Booted|Shutdown/.test(sim.tail));
+    // Sockets: the owner's host control socket, Docker's and mDNSResponder's are all unix sockets of the same user.
+    const net2 = await import('node:net'), { homedir } = await import('node:os');
+    const serve = path => new Promise(ok => { const server = net2.createServer(c => { c.end('hello'); }).listen(path, () => ok(server)); });
+    const hostSock = join(tmpdir(), `fake-host-${process.pid}.sock`), dockerSock = join(root, 'docker.sock'), localSock = join(scratch, 'own.sock');
+    const servers = [await serve(hostSock), await serve(dockerSock)];
+    const dial = path => sh(`node -e 'const s=require("net").connect(process.argv[1]);s.on("data",d=>{console.log("GOT",String(d));process.exit(0)});s.on("error",e=>{console.log("ERR",e.code);process.exit(3)})' ${path}`);
+    const hostTry = await dial(hostSock), dockerTry = await dial(dockerSock);
+    check('a command cannot connect to the host control socket or a Docker-style socket of the same user', /ERR (EPERM|EACCES)/.test(hostTry.tail) && /ERR (EPERM|EACCES)/.test(dockerTry.tail), { hostTry: hostTry.tail, dockerTry: dockerTry.tail });
+    const own = await sh(`node -e 'const n=require("net"),p=process.argv[1];n.createServer(c=>c.end("ok")).listen(p,()=>{const c=n.connect(p);c.on("data",d=>{console.log("LOCAL",String(d));process.exit(0)});c.on("error",e=>{console.log("ERR",e.code);process.exit(3)})})' ${localSock}`);
+    check('but a unix socket inside its own run directory works', /LOCAL ok/.test(own.tail), own.tail);
+    servers.forEach(server => server.close());
+    const dns = await sh(`node -e 'require("dns").lookup("example.com",(e,a)=>{console.log(e?"DNSERR "+e.code:"RESOLVED "+a);process.exit(e?3:0)})'`);
+    check('name resolution through the system resolver is unavailable', /DNSERR/.test(dns.tail) && dns.exitCode !== 0, dns.tail);
+    // The real home: a decoy file stands in for secrets (no real secret is read). The test also proves the sandbox does not read /Users generally.
+    const decoyDir = join(homedir(), `.pi-sandbox-decoy-${process.pid}`); mkdirSync(decoyDir, { recursive: true }); writeFileSync(join(decoyDir, 'secret.txt'), 'DECOY-SECRET');
+    const read = await sh(`cat ${decoyDir}/secret.txt; ls ${decoyDir}`);
+    rmSync(decoyDir, { recursive: true, force: true });
+    check('a command cannot read files under the real home directory', !read.tail.includes('DECOY-SECRET') && read.exitCode !== 0, read.tail);
+    // Delegation services. Harmless probes: if any of these ran, they would show their usual output instead of a denial.
+    for (const [name, command, forbidden] of [['open', '/usr/bin/open -h', /Usage|usage/], ['osascript', "/usr/bin/osascript -e 'return 41+1'", /^42/m], ['security', '/usr/bin/security list-keychains', /keychain/i], ['launchctl', '/bin/launchctl list', /PID|Label/], ['simctl', 'xcrun simctl list devices', /iOS|Booted|Shutdown|== Devices/]]) {
+      const outcome = await sh(`${command} 2>&1`);
+      check(`${name} cannot run from the sandbox`, outcome.exitCode !== 0 && !forbidden.test(outcome.tail), outcome.tail);
+    }
+    // The sandbox must not break ordinary toolchains.
+    const tool = await sh(`node -e 'console.log(6*7)' && git --version && git init -q gi && python3 -c "print(7*6)" && curl -s -m 3 http://127.0.0.1:9 ; true`);
+    check('toolchains (node, git, python) still run', /42[\s\S]*git version[\s\S]*42/.test(tool.tail), tool.tail);
     const slow = await sandbox.runSandboxed({ command: 'sleep 30', cwd: work, policy, env, timeoutMs: 400, stdoutPath: join(artifacts, 'o.log'), stderrPath: join(artifacts, 'e.log') });
     check('a command that overruns is killed and reported as timed out', slow.timedOut && slow.durationMs < 5000);
     const big = await sh('yes | head -c 300000');
     check('output is hashed in full and only a tail comes back', big.stdoutBytes === 300000 && big.tail.length <= sandbox.TAIL_CHARS && /^[a-f0-9]{64}$/.test(big.stdoutSha256));
   } else {
-    await assert.rejects(sandbox.runSandboxed({ command: 'true', cwd: root, policy: { writable: [], unreadable: [], readable: [] }, env: {}, timeoutMs: 1000, stdoutPath: join(root, 'o'), stderrPath: join(root, 'e') }), /No enforceable sandbox/);
+    await assert.rejects(sandbox.runSandboxed({ command: 'true', cwd: root, policy: { writable: [], unreadable: [], readable: [], sockets: [] }, env: {}, timeoutMs: 1000, stdoutPath: join(root, 'o'), stderrPath: join(root, 'e') }), /No enforceable sandbox/);
     checks.push('without an enforceable sandbox verifier commands are refused');
+  }
+
+  // Full criteria survive; what cannot fit is refused, never cut.
+  const longText = 'x'.repeat(5000), many = `Do it\n\nAcceptance criteria (all):\n${Array.from({ length: 25 }, (_, index) => `- criterion ${index + 1}`).join('\n')}\n`;
+  check('a long criterion is kept whole', model.parseCriteria(`Do\n\nAcceptance criteria:\n- ${longText}\n`)[0].text === longText);
+  check('more than 20 criteria are all parsed and then refused, not truncated', model.parseCriteria(many).length === 25 && /25 acceptance criteria/.test(model.criteriaProblem(many, model.parseCriteria(many))) && model.criteriaProblem('short', model.parseCriteria('short')) === null && /characters/.test(model.criteriaProblem('y'.repeat(30000), [{ id: 'c1', text: 'a' }])));
+  // A pass cannot rest on a run that did not finish; the failure signature sees output and reasons.
+  const mkRun = (id, extra) => ({ ...run(id), exitCode: 0, ...extra });
+  for (const [name, extra] of [['timed out', { timedOut: true, exitCode: null, signal: 'SIGTERM' }], ['aborted', { aborted: true, exitCode: null, signal: 'SIGTERM' }], ['killed', { signal: 'SIGKILL', exitCode: null }]]) {
+    const bad = model.judge(criteria, [mkRun('r1', extra)], { summary: 's', criteria: [{ id: 'c1', status: 'pass', reason: 'ok', evidence: [{ runId: 'r1' }] }, { id: 'c2', status: 'pass', reason: 'ok', evidence: [{ runId: 'r1' }] }] }, exists);
+    check(`a pass resting on a ${name} run is rejected`, !bad.ok && bad.errors.some(error => /proves nothing/.test(error)));
+  }
+  const sig = (stdout, reason = 'broken') => model.failureSignature({ runs: [{ ...run('r1'), stdout: { path: 'a', bytes: 1, sha256: stdout }, stderr: { path: 'b', bytes: 0, sha256: '' } }], verdict: { status: 'fail', summary: 's', recordedAt: 1, criteria: [{ id: 'c1', status: 'fail', reason, evidence: [{ runId: 'r1' }] }] } });
+  check('the failure signature changes with the output or the reason, and is stable otherwise', sig('aa') === sig('aa') && sig('aa') !== sig('bb') && sig('aa') !== sig('aa', 'different reason'));
+  // The proof the verifier runs: edits to skills, scripts and tests are surfaced.
+  const proofRepo = join(root, 'proof'); mkdirSync(join(proofRepo, 'scripts'), { recursive: true }); mkdirSync(join(proofRepo, 'src'));
+  git(proofRepo, 'init', '-q', '-b', 'main'); writeFileSync(join(proofRepo, 'scripts/check.mjs'), 'process.exit(1)\n'); writeFileSync(join(proofRepo, 'src/a.ts'), 'a\n'); git(proofRepo, 'add', '-A'); git(proofRepo, 'commit', '-qm', 'base');
+  writeFileSync(join(proofRepo, 'scripts/check.mjs'), 'process.exit(0) // weakened\n'); writeFileSync(join(proofRepo, 'src/a.ts'), 'b\n'); writeFileSync(join(proofRepo, 'scripts/new-test.mjs'), 'x\n');
+  const proof = await target.proofChanges(proofRepo, await target.captureTarget(proofRepo));
+  check('files that define the proof show in a diff, and ordinary source does not', proof.paths.join() === 'scripts/check.mjs,scripts/new-test.mjs' && /weakened/.test(proof.diff) && !/src\/a\.ts/.test(proof.diff));
+  // A host that died mid-command leaves its process group behind; the registry finds and kills it, and never a reused pid.
+  if (sandbox.sandboxAvailable()) {
+    const registry = join(root, 'running'); mkdirSync(registry);
+    const orphan = (await import('node:child_process')).spawn('/usr/bin/sandbox-exec', ['-p', '(version 1)(allow default)', '/bin/sleep', '60'], { detached: true, stdio: 'ignore' }); orphan.unref();
+    await new Promise(ok => setTimeout(ok, 300));
+    const started = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(orphan.pid)], { encoding: 'utf8' }).trim();
+    writeFileSync(join(registry, `${orphan.pid}.json`), JSON.stringify({ pid: orphan.pid, hostPid: 999999, started }));
+    const innocent = (await import('node:child_process')).spawn('sleep', ['60'], { stdio: 'ignore' });
+    writeFileSync(join(registry, `${innocent.pid}.json`), JSON.stringify({ pid: innocent.pid, hostPid: 999999, started: 'Thu Jan  1 00:00:00 2099' }));
+    const reaped = sandbox.reapOrphans(registry);
+    await new Promise(ok => setTimeout(ok, 300));
+    let gone = false; try { process.kill(orphan.pid, 0); } catch { gone = true; }
+    check('a command left behind by a dead host is killed on the next start; a process whose pid was reused is not touched', reaped.join() === String(orphan.pid) && gone && innocent.exitCode === null && innocent.signalCode === null && !existsSync(join(registry, `${orphan.pid}.json`)));
+    innocent.kill('SIGKILL');
   }
 
   // Settings: the verifier model is never assumed.

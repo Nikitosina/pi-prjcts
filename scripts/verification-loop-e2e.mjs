@@ -46,7 +46,7 @@ const model = createServer((req, res) => {
       if (role === 'worker') {
         if (marker === 'MARK-NOCHANGE' && stage === 0) return reply(call('bash', { command: 'echo nope > feature.txt' }));
         if (/^\[Automatic verification failed\]/.test(user) && marker !== 'MARK-NOCHANGE' && stage === 0) { return reply(call('bash', { command: 'echo done > feature.txt' })); }
-        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-RESTART' && false ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
+        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
         return reply(say(`Worker finished ${marker}`));
       }
       if (role === 'verifier') {
@@ -124,6 +124,9 @@ try {
   // V1: enabling needs its own verifier model and an installed skill; nothing is assumed.
   await assert.rejects(settingsUpdate(id, { verification: { enabled: true, skill: 'mini-verify' } }), /own verifier model/);
   await assert.rejects(settingsUpdate(id, { models: { verifier: 'fake/fake-judge' }, verification: { enabled: true, skill: 'no-such-skill' } }), /not installed/);
+  // The same checks apply when the change also carries a setting that needs the idle path.
+  await assert.rejects(settingsUpdate(id, { name: 'Renamed', models: { verifier: 'fake/fake-judge' }, verification: { enabled: true, skill: 'no-such-skill' } }), /not installed/);
+  assert.equal((await rpc({ action: 'settings-snapshot', id })).values.name, 'Verification loop', 'a refused mixed change stores nothing');
   assert.equal((await rpc({ action: 'settings-snapshot', id })).values.models.verifier, undefined, 'a rejected update must not half-apply');
   await settingsUpdate(id, { models: { verifier: 'fake/fake-judge' }, verification: { enabled: true, skill: 'mini-verify' } });
   const settings = (await rpc({ action: 'settings-snapshot', id })).values;
@@ -151,7 +154,7 @@ try {
   const listing = await rpc({ action: 'artifacts-list', id, threadId: second.verifierThreadId });
   check('V2 command logs and a saved artifact are kept for the verifier thread', ['runs/r1.stdout.log', 'runs/r1.stderr.log', 'feature-seen.txt'].every(file => listing.files.some(f => f.path === file)), listing.files.map(f => f.path));
   check('V2 the worker\'s worktree holds its fix and nothing from the verifier', readFileSync(join(sourceHead, 'feature.txt'), 'utf8') === 'done\n' && git(sourceHead, 'status', '--porcelain') === '?? feature.txt');
-  const keys = readdirSync(join(home, id, 'verification'));
+  const keys = readdirSync(join(home, id, 'verification')).filter(name => name !== 'running');
   check('V2 snapshots were removed after use; evidence stays', keys.length >= 2 && keys.every(key => !existsSync(join(home, id, 'verification', key, 'target')) && existsSync(join(home, id, 'verification', key, 'manifest.json'))), keys);
   check('V2 capacity: cap 1 was never exceeded while a parent waited on its verifier', peak <= 1, peak);
 
@@ -169,8 +172,6 @@ try {
   const driftWorker = await delegateTask(id, 'MARK-DRIFT');
   const liveRevision = await eventually(async () => { const c = cycleOf(await plan(id), driftWorker); return c?.attempts[0]?.state === 'running' && c; }, 'drift verifier running');
   const frozen = await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-DRIFT' && r.stage === 2), 'drift verifier reached its verdict step');
-  await assert.rejects(rpc({ action: 'message', id, text: 'x' }).then(() => { throw Error('unreachable'); }), /unreachable/).catch(() => undefined);
-  await assert.rejects(rpc({ action: 'worker-control', id, control: 'follow_up' }).catch(error => { throw error; }), () => true).catch(() => undefined);
   writeFileSync(join((await plan(id)).work.find(w => w.id === driftWorker.id).attempt.cwd, 'feature.txt'), 'edited behind the verifier\n');
   gate('drift').open();
   const drift = await eventually(async () => settled(await plan(id), driftWorker), 'drift cycle ended');

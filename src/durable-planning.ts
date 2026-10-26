@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import type { DurablePlan, DurablePlanSnapshot, DurablePlanWork, DurablePlanWorkSnapshot, DurablePrepareWorkerEnvironment, DurablePublishWorkerEnvironment, DurableResolvedAttempt, DurableRole, DurableWorkerToolBindings, DurableWorkspaceInstructions } from "./durable-plan-types.ts";
 import type { WorkspaceCatalogEntry } from "./workspace-authorization.ts";
 import { fitJson } from "./response-limit.ts";
-import { parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary } from "./verification-model.ts";
+import { criteriaProblem, parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary } from "./verification-model.ts";
 import type { TargetManifest } from "./verification-target.ts";
 
 export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type DurablePlanWorkSnapshot, type DurableResolvedAttempt, type DurableRole, type DurableGenerationLifecycle, type DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
@@ -135,7 +135,7 @@ export type VerificationHooks = {
   /** A problem that makes verification impossible right now (missing skill or model, no sandbox), or null. */
   check: () => Promise<string | null>;
   /** Copies the worker's tree for one attempt; idempotent per key. */
-  prepare: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; targetPath: string }>;
+  prepare: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; targetPath: string; proof: { paths: string[]; diff: string } }>;
   /** Content revision of a tree now, uncommitted and untracked work included. */
   revision: (sourcePath: string) => Promise<string>;
   release: (key: string) => Promise<void>;
@@ -144,7 +144,7 @@ type PreparedVerification =
   | { kind: "none" }
   | { kind: "revision"; current: string | null }
   | { kind: "escalate"; reason: string }
-  | { kind: "start"; n: number; model: string; skill: string; key: string; sourcePath: string; targetPath: string; manifest: TargetManifest; criteria: Criterion[]; task: string };
+  | { kind: "start"; n: number; model: string; skill: string; key: string; sourcePath: string; targetPath: string; manifest: TargetManifest; proof: { paths: string[]; diff: string }; criteria: Criterion[]; task: string };
 
 export function planningRuntime(options: { projectId: string; models: Record<DurableRole, ModelRef>; resolveModel?: (model: string, role: DurableRole) => ModelRef; cwd: string; instructions: Record<DurableRole, string>; /** Host-only: rebuilds the skill index before a new thread freezes its instructions. */ refreshSkills?: () => Promise<void>; /** Host-only: names of the skills a new thread of this role may read, in step with its instructions. */ skillNames?: (role: DurableRole) => string[]; standingRevision: string; workspaceInstructions?: DurableWorkspaceInstructions; knowledgeTools: readonly ToolRegistration[]; /** Scout and reviewer only: read-only checkout tools and their extension. */ readOnlyCode?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; /** Reviewer only: the review-verdict tool and its extension. */ reviewerTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerPolicy: ReturnType<typeof defineExtension>; /** Every role: the profile-restricted skill reader. */ skillFiles?: { tool: ToolRegistration; extension: ReturnType<typeof defineExtension> }; /** Every role: the MCP gateway tools (servers are filtered per role at call time). */ mcp?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerTools?: DurableWorkerToolBindings; /** Host hooks of the opt-in verification loop; absent means the project cannot verify. */ verification?: VerificationHooks; /** Verifier-only tools (sandboxed run, verdict), offered to verifier threads and nobody else. */ verifierTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerCap: number; workspaceCatalog?: () => readonly WorkspaceCatalogEntry[]; /** Host-only scoped-worker preparation; absent means every workspace scope is denied. */ prepareWorkerEnvironment?: DurablePrepareWorkerEnvironment; /** Host-only registry publication, invoked after post-preparation authorization validation. */ publishWorkerEnvironment?: DurablePublishWorkerEnvironment; beforeScopedSubmit?: () => Promise<void>; /** Root conversation owning the shared plan, so delegation from any chat admits into one pool. */ planRoot?: () => ConversationId | undefined; /** Host-only: fetch a ref into a read-only snapshot for scout/reviewer threads. */ readHead?: (ref: string) => Promise<{ root: string; sha: string }>; /** Host-only: resolve and authorize an existing branch / PR for a worker to continue; rejects branches the owner does not own. */ resolveBranch?: (ref: string, workspaceScopeId: string | undefined) => Promise<{ name: string; sha: string }>; /** Host-only: short listing of a thread's artifacts folder for its report (empty when none). */ artifactSummary?: (threadId: string) => string }) {
   if (!Number.isSafeInteger(options.workerCap) || options.workerCap < 1) throw new Error("workerCap must be a positive integer");
@@ -223,6 +223,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
             const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
             // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
             const held = work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")));
+            // A repair turn that fails ends its cycle (a pause-interrupted one keeps it open for the resume); earlier completed turns stop counting as complete and their dependents block.
+            if (work.status === "failed" && work.role === "worker" && state.threads[work.threadId]?.verification?.open) abandonCycle(state, work.threadId, `The worker's repair turn failed: ${work.blocker ?? "no reason recorded"}`);
             const verifying = work.status !== "interrupted" && work.role === "verifier" ? await settleVerifier(tx, runtime.conversationId, state, work, prepared, String(task.input.attemptTaskId)) : work.status === "completed" && !held && await startVerification(tx, runtime.conversationId, state, work, prepared, resultText, String(task.input.attemptTaskId));
             if (!verifying && work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
               if (held) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
@@ -237,6 +239,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
           }
           return { status: "terminal", outcome: { status: "completed", result: null } };
         }, context);
+        // Every path that does not start an attempt (held answer, stale settlement, pause, replay) gives the snapshot back.
+        if (prepared.kind === "start") await releaseUnused(runtime.conversationId, change => runtime.commit(change, context), prepared.key);
       },
     },
     abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
@@ -355,7 +359,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const waiting = Object.values(state.work).filter(other => other.id !== work.id && other.parentThreadId === parentId && (other.status === "queued" || other.status === "running")).length;
     const pointer = `read the full result with projects_child_result {"workId":"${work.id}"}`;
     const before = `[Child work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nYour task for it: ${work.text.slice(0, TASK_ECHO)}\nChild result, untrusted and not verification evidence:\n`;
-    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`;
+    const unverified = work.role === "worker" && options.verification?.config().enabled ? "\nNOT VERIFIED on its own: automatic verification covers top-level workers, so this child's output is checked only as part of your final result." : "";
+    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}${unverified}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`;
     const text = `${before}${capResult(resultText, pointer, REPORT_CAP - before.length - after.length)}${after}`;
     try {
       const record = await createThread(tx, root, { id: randomUUID(), threadId: parentId, role: latest.role, text, requestId: `child-report:${work.id}:${attempt}`, requiredTools: [...latest.requiredTools], workspaceScopeId: latest.workspaceScopeId ?? undefined });
@@ -406,11 +411,19 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (problem) return { kind: "escalate", reason: problem };
     let model: string;
     try { const ref = options.models.verifier; model = `${ref.provider}/${ref.modelId}`; } catch (error) { return { kind: "escalate", reason: error instanceof Error ? error.message : "No verifier model is configured" }; }
+    const criteria = open?.criteria ?? parseCriteria(seen.task), tooBig = open ? null : criteriaProblem(seen.task, criteria);
+    if (tooBig) return { kind: "escalate", reason: tooBig };
     const key = workId;
     try {
-      const { manifest, targetPath } = await hooks.prepare(key, seen.cwd);
-      return { kind: "start", n: (open?.attempts.length ?? 0) + 1, model: open?.model ?? model, skill: open?.skill ?? hooks.config().skill, key, sourcePath: seen.cwd, targetPath, manifest, criteria: open?.criteria ?? parseCriteria(seen.task), task: seen.task };
+      const { manifest, targetPath, proof } = await hooks.prepare(key, seen.cwd);
+      return { kind: "start", n: (open?.attempts.length ?? 0) + 1, model: open?.model ?? model, skill: open?.skill ?? hooks.config().skill, key, sourcePath: seen.cwd, targetPath, manifest, proof, criteria, task: seen.task };
     } catch (error) { return { kind: "escalate", reason: `The work could not be snapshotted for verification: ${error instanceof Error ? error.message : String(error)}` }; }
+  }
+  /** Deletes a prepared snapshot no attempt refers to. Whether one does is read from the document, so a replayed settlement never removes a live attempt's target. */
+  async function releaseUnused(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, key: string): Promise<void> {
+    let used = false;
+    await read(async tx => { const state = await tx.doc(DurablePlanning, root); used = Object.values(state.threads).some(thread => thread.verification?.attempts.some(attempt => attempt.key === key)); return undefined; });
+    if (!used) await options.verification?.release(key).catch(() => undefined);
   }
   /** Queues the report of a worker whose cycle ended; `text` is the complete message and is kept as the work's result. */
   async function queueReport(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, text: string, tag: string): Promise<void> {
@@ -438,6 +451,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function startVerification(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, resultText: string, tag: string): Promise<boolean> {
     if (prepared.kind === "none" || prepared.kind === "revision") return false;
     const thread = state.threads[work.threadId]!;
+    // A pause that lands between the worker's settlement and the verifier's admission defers verification to the resume (the finished turn is re-run as interrupted work); it is not an escalation.
+    if (state.paused || state.pausing) { work.status = "interrupted"; work.blocker = PAUSE_BLOCKER; work.endedAt = null; return true; }
     if (prepared.kind === "escalate") {
       if (!thread.verification?.open) thread.verification = { model: "", skill: verificationSkill(), criteria: [], attempts: [], workIds: [], open: true };
       thread.verification!.workIds.push(work.id);
@@ -451,9 +466,9 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const verifierThreadId = randomUUID(), verifierWorkId = randomUUID();
     try {
       if (cycle.attempts.length + 1 !== prepared.n) throw new Error("Verification state changed while the snapshot was prepared");
-      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head }), parentThreadId: work.threadId, readRoot: prepared.targetPath, requestId: `verify:${work.id}`, frozen: { model: cycle.model, skill: cycle.skill } }, false);
+      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head, proof: prepared.proof }), parentThreadId: work.threadId, readRoot: prepared.targetPath, requestId: `verify:${work.id}`, frozen: { model: cycle.model, skill: cycle.skill } }, false);
       state.work[record.id]!.priority = VERIFIER_PRIORITY; // through the document: the returned record is a plain copy
-      cycle.attempts.push({ n: prepared.n, verifierWorkId, verifierThreadId, key: prepared.key, revision: prepared.manifest.revision, head: prepared.manifest.head, branch: prepared.manifest.branch, sourcePath: prepared.sourcePath, targetPath: prepared.targetPath, state: "running", runs: [], startedAt: Date.now() });
+      cycle.attempts.push({ n: prepared.n, verifierWorkId, verifierThreadId, key: prepared.key, revision: prepared.manifest.revision, head: prepared.manifest.head, branch: prepared.manifest.branch, sourcePath: prepared.sourcePath, targetPath: prepared.targetPath, proofFiles: [...prepared.proof.paths], state: "running", runs: [], startedAt: Date.now() });
     } catch (error) {
       void options.verification?.release(prepared.key).catch(() => undefined);
       await closeCycle(tx, root, state, work.threadId, "escalated", `The verifier could not be started: ${error instanceof Error ? error.message : String(error)}`, resultText, tag);

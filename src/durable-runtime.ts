@@ -56,10 +56,10 @@ import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { omitIdleWatchdogTurns, watchdogRuntime } from "./durable-watchdog.ts";
 import { reviewVerdictTools } from "./durable-review.ts";
-import { prepareAttemptTarget, releaseAttemptTarget, verificationTools as buildVerificationTools } from "./durable-verification.ts";
+import { prepareAttemptTarget, releaseAttemptTarget, runRegistry, verificationTools as buildVerificationTools } from "./durable-verification.ts";
 import { VERIFIER_RULES } from "./verification-model.ts";
 import { captureTarget } from "./verification-target.ts";
-import { sandboxAvailable } from "./verification-sandbox.ts";
+import { reapOrphans, sandboxAvailable } from "./verification-sandbox.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { githubOperations, type ExecutionInput } from "./github-operations.ts";
@@ -487,6 +487,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
+    // Commands of a previous host that died mid-verification run in their own process groups and outlive it.
+    reapOrphans(runRegistry(dir));
     // Opt-in verification loop: tools only verifier threads are bound to, plus the host hooks planning calls at the end of a worker turn.
     const verification = {
       tools: buildVerificationTools({ planRoot: () => rootReference?.id, controlRoot: dir, currentRevision: async path => (await captureTarget(path)).revision, isClosed: () => closed }),
@@ -505,7 +507,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
           try { assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier"); } catch (error) { return error instanceof Error ? error.message : String(error); }
           return null;
         },
-        prepare: async (key: string, source: string) => { const { manifest, paths } = await prepareAttemptTarget(dir, key, source); return { manifest, targetPath: paths.target }; },
+        prepare: async (key: string, source: string) => { const { manifest, paths, proof } = await prepareAttemptTarget(dir, key, source); return { manifest, targetPath: paths.target, proof }; },
         revision: async (path: string) => (await captureTarget(path)).revision,
         release: (key: string) => releaseAttemptTarget(dir, key),
       },

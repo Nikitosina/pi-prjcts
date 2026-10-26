@@ -6,15 +6,16 @@ import { Type } from "typebox";
 import { ensureArtifactDir, openArtifact } from "./artifacts.ts";
 import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
 import { home } from "./state.ts";
-import { captureTarget, changedFromManifest, readManifest, snapshotTarget, writeManifest, type TargetManifest } from "./verification-target.ts";
+import { captureTarget, changedFromManifest, proofChanges, readManifest, snapshotTarget, writeManifest, type ProofChanges, type TargetManifest } from "./verification-target.ts";
 import { failureSignature, judge, type RunRecord, type Verification, type VerificationAttempt } from "./verification-model.ts";
 import { globalResourceUse, runSandboxed, sandboxAvailable, sandboxEnv } from "./verification-sandbox.ts";
 
+export const runRegistry = (controlRoot: string): string => join(controlRoot, "verification", "running");
 export type AttemptPaths = { dir: string; target: string; scratch: string; manifest: string };
 export const attemptPaths = (controlRoot: string, key: string): AttemptPaths => ({ dir: join(controlRoot, "verification", key), target: join(controlRoot, "verification", key, "target"), scratch: join(controlRoot, "verification", key, "scratch"), manifest: join(controlRoot, "verification", key, "manifest.json") });
 
 /** Copies the worker's tree for one attempt. Idempotent per key: a replayed settlement rebuilds the same snapshot. */
-export async function prepareAttemptTarget(controlRoot: string, key: string, sourcePath: string): Promise<{ manifest: TargetManifest; paths: AttemptPaths }> {
+export async function prepareAttemptTarget(controlRoot: string, key: string, sourcePath: string): Promise<{ manifest: TargetManifest; paths: AttemptPaths; proof: ProofChanges }> {
   const paths = attemptPaths(controlRoot, key), manifest = await captureTarget(sourcePath);
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
   await snapshotTarget(sourcePath, paths.target, manifest);
@@ -22,7 +23,7 @@ export async function prepareAttemptTarget(controlRoot: string, key: string, sou
   await writeManifest(paths.manifest, manifest);
   const again = await captureTarget(sourcePath);
   if (again.revision !== manifest.revision) throw new Error("The worker's tree changed while it was being copied for verification");
-  return { manifest, paths };
+  return { manifest, paths, proof: await proofChanges(sourcePath, manifest) };
 }
 
 /** The disposable parts go; the manifest, run records and artifacts stay as evidence. */
@@ -71,10 +72,10 @@ export function verificationTools(deps: VerificationToolDeps) {
       const files = { stdout: `runs/${id}.stdout.log`, stderr: `runs/${id}.stderr.log` };
       const result = await runSandboxed({
         command: args.command, cwd: paths.target, timeoutMs: (args.timeoutSeconds ?? 600) * 1000, signal: context.abortSignal,
-        env: sandboxEnv(paths.scratch, artifacts), stdoutPath: join(artifacts, files.stdout), stderrPath: join(artifacts, files.stderr),
-        policy: { writable: [paths.target, paths.scratch, artifacts], unreadable: [home(), deps.controlRoot], readable: [paths.dir, artifacts] },
+        env: sandboxEnv(paths.scratch, artifacts), stdoutPath: join(artifacts, files.stdout), stderrPath: join(artifacts, files.stderr), registry: runRegistry(deps.controlRoot),
+        policy: { writable: [paths.target, paths.scratch, artifacts], unreadable: [home(), deps.controlRoot], readable: [paths.dir, artifacts], sockets: [paths.scratch] },
       });
-      const record: RunRecord = { id, command: args.command.slice(0, 2000), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: result.durationMs, stdout: { path: files.stdout, bytes: result.stdoutBytes, sha256: result.stdoutSha256 }, stderr: { path: files.stderr, bytes: result.stderrBytes, sha256: result.stderrSha256 }, tail: result.tail.slice(-1500), at: Date.now() };
+      const record: RunRecord = { id, command: args.command.slice(0, 2000), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, aborted: result.aborted, durationMs: result.durationMs, stdout: { path: files.stdout, bytes: result.stdoutBytes, sha256: result.stdoutSha256 }, stderr: { path: files.stderr, bytes: result.stderrBytes, sha256: result.stderrSha256 }, tail: result.tail.slice(-1500), at: Date.now() };
       await api.commit(async tx => { (await own(tx, root(), api.conversationId)).attempt.runs.push(record); }, context);
       const changed = await changedFromManifest(paths.target, await readManifest(paths.manifest));
       return text({ runId: id, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, aborted: result.aborted, durationMs: result.durationMs, logs: [files.stdout, files.stderr], tail: result.tail, ...(changed.length ? { warning: `This command changed ${changed.length} file(s) of the snapshot (${changed.slice(0, 5).join(", ")}). A verdict from a modified snapshot is recorded as blocked.` } : {}) }, result.exitCode !== 0);

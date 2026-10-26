@@ -3431,7 +3431,7 @@ ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { acti
 }
 const accessText = (field, value) => settingsAccess[field][2].find(([option]) => option === value)?.[1] ?? value;
 const scopeText = refs => refs?.length ? refs.map(ref => esc(modelCache.get(ref)?.name ?? ref)).join(", ") : "<small>Your Pi scope</small>";
-const modelText = ref => { if (ref === "") return "Inherit coordinator"; const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
+const modelText = (ref, role = "") => { if (ref === "") return emptyModelName(role); const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
 const verifyText = value => value?.enabled ? `On: skill <b>${esc(value.skill)}</b>, verifier model above` : "Off";
 const verificationNote = cycle => cycle ? `<p class="note" data-verification>Verification ${cycle.open ? "running" : esc(cycle.outcome ?? "ended")} (skill ${esc(cycle.skill)}, model ${esc(cycle.model)}): ${cycle.attempts.map(item => `attempt ${item.n} ${esc(item.state)}`).join(", ") || "no attempt yet"}${cycle.reason ? `. ${esc(cycle.reason)}` : ""}</p>` : "";
 const emptyText = text => text ? esc(text) : "<small>empty</small>";
@@ -3440,7 +3440,7 @@ function settingsDiffRows(changes, values) {
   if ("name" in changes) rows.push(["Project name", emptyText(values.name), emptyText(changes.name)]);
   if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
   if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
-  for (const [role, label] of settingsRoles.slice(1)) if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? ""), modelText(changes.models[role] ?? "")]);
+  for (const [role, label] of settingsRoles.slice(1)) if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? "", role), modelText(changes.models[role] ?? "", role)]);
   if ("scopedModels" in changes) rows.push(["Scoped models", scopeText(values.scopedModels), scopeText(changes.scopedModels)]);
   for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
   if ("verification" in changes) rows.push(["Verification", verifyText(values.verification), verifyText(changes.verification)]);
@@ -3478,21 +3478,24 @@ async function loadModelPicker() {
   modelScopeSet = data.scopeSet === true;
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
-function modelButton(reference, disabled = false) {
+const emptyModelName = role => role === "verifier" ? "No verifier model" : "Inherit coordinator";
+function modelButton(reference, disabled = false, role = "") {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
-  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? "Inherit coordinator" : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
+  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? emptyModelName(role) : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
 }
 function modelPickerHtml(role, reference, unavailable) {
   const configured = [...modelCache.values()].filter(model => model.configured).length;
-  return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable))}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
+  return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable), role)}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
 }
 const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
 const INHERIT_MODEL = { reference: "", name: "Inherit coordinator", contextWindow: null, reasoning: false, configured: true };
+const NO_VERIFIER_MODEL = { ...INHERIT_MODEL, name: "No verifier model (verification off)" };
 // Worker, scout and reviewer pickers start with "Inherit coordinator" (stored as no model); the coordinator picker does not.
 function modelGroups(query, value, role) {
   const groups = modelGroupsBase(query, value);
-  if (!role || role === "coordinator" || query.trim() && !"inherit coordinator".includes(query.trim().toLowerCase())) return groups;
-  return [{ label: "", models: [INHERIT_MODEL], more: 0 }, ...groups];
+  const none = role === "verifier" ? NO_VERIFIER_MODEL : INHERIT_MODEL;
+  if (!role || role === "coordinator" || query.trim() && !none.name.toLowerCase().includes(query.trim().toLowerCase())) return groups;
+  return [{ label: "", models: [none], more: 0 }, ...groups];
 }
 function modelGroupsBase(query, value) {
   const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
@@ -3543,7 +3546,7 @@ function mpOpen(mp) {
 }
 function mpPick(mp, reference) {
   if (reference !== "" && !modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
-  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference);
+  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference, false, mp.dataset.role);
   mpClose(mp, true); settingsSync();
 }
 function mpKey(event, mp) {

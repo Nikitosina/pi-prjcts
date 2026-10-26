@@ -21,14 +21,35 @@ Opt-in per project (Settings → Verification). Off by default; a project that n
 - **Capacity.** Verifiers use the shared worker pool at high priority; a worker that finished its turn has released its slot, so cap 1 cannot deadlock (tested). They are children and count toward the same cap.
 - **Durability.** The cycle (frozen model/skill/criteria, attempts, revisions, runs, verdicts) lives in the planning document, so it survives restart; snapshots are removed after use, manifests, run records and logs stay as evidence.
 
+## Sandbox contract (what is enforced)
+
+Every `projects_verify_run` command runs under macOS `sandbox-exec` with a profile that starts from "allow default" and then denies, by class:
+
+| Denied | How | Proof (`scripts/verification-unit.mjs`) |
+|---|---|---|
+| Writes outside the snapshot, its scratch dir and the verifier's artifacts | `deny file-write*` + allow list | write attempts to other paths and the source worktree fail |
+| Reading any home directory's content (`/Users/*`, the real `$HOME`, credentials, project data) | `deny file-read-data` on `/Users` and `$HOME`, allow list for the snapshot, its artifacts and the running toolchain | a decoy file under the real home cannot be read; the artifacts folder inside the project home can |
+| Every unix socket except one inside the run's scratch dir: the host control socket (no token, same user), Docker, mDNSResponder | `deny network*` then allow loopback TCP and `unix-socket (subpath scratch)` | a socket in tmp and a Docker-style socket are refused with EPERM; one in scratch works |
+| DNS and the rest of the network | no mDNSResponder socket or mach service | `example.com` does not resolve; loopback TCP works |
+| Mach services: LaunchServices, AppleEvents, securityd, CoreSimulator, dnssd | `deny mach-lookup`, `appleevent-send`, `lsopen`; allow list of the few services toolchains need | `open`, `osascript`, `security`, `launchctl`, `xcrun simctl` all fail instead of running |
+| Signalling processes outside the sandbox | `deny signal (target others)` | a `kill -9` of an outside process fails |
+
+`projects_verify_run` also refuses commands naming `simctl`, `xcodebuild`, `osascript`, `screencapture`, `launchctl`, `open -a`, `--remote-debugging-port` up front, for a clearer message; the sandbox is what enforces it.
+
+**Not enforced**: loopback TCP is open (a verification's own servers need it), so services the owner runs on loopback ports are reachable from a verifier command. The platform's file-read rules outside `/Users` (system files, `/opt`, `/tmp`) stay open so toolchains run. Do not rely on this as protection against hostile code beyond the table above.
+
+**Resources that are not leased are unavailable, not shared.** There is no lease binding for simulators, devices or the owner's browser. Skills that need them (iOS simulator work, Yandex Keyboard, headless Chrome with a GUI process: Chrome aborts under this profile) cannot run: the verifier records the criterion as `blocked`, and the cycle escalates as NOT VERIFIED with that reason. That is the intended result, not a bug, and it means this loop is **not ready** for skills such as `verify-keyboard` or Mari's browser/simulator flows until a leased, separately approved execution path exists.
+
 ## Limits (honest)
 
-- **macOS only** (`sandbox-exec`). Elsewhere verification is refused (escalated), never run unconfined.
-- **Machine-wide resources are not leased.** A verifier run holds no lease on simulators, the owner's apps or fixed browser ports. Instead they are made unavailable: `projects_verify_run` refuses commands naming `simctl`, `xcodebuild`, `osascript`, `screencapture`, `open -a`, `--remote-debugging-port`; the sandbox denies the CoreSimulator service and signalling processes outside the sandbox. A skill that needs them gets `blocked` (escalated), not a weaker pass. Headless browsers on a private profile and loopback ports work. The refusal is a command-name filter plus the sandbox rules, not a general resource broker.
-- **Only scoped top-level workers are verified.** With verification on, a top-level worker without an isolated worktree is escalated as "Verification does not apply" and its work is blocked (not reported complete). That path is covered by the code and not by an e2e. Scouts, reviewers and nested child workers are not verified; their parent worker's result is.
-- A verifier can only do what the sandbox allows; skills needing network or credentials report `blocked`.
-- Snapshot limit: 50k files / 1 GiB.
-- **Restart:** a host kill leaves the project paused with the verifier interrupted and the attempt open; the owner resumes with the existing recovery action and the same verifier thread continues on the same snapshot. Until then the worker stays frozen and its dependents wait.
+- **macOS only** (`sandbox-exec`, deprecated by Apple but present). Elsewhere verification is refused (escalated), never run unconfined.
+- **Only scoped top-level workers are verified.** A top-level worker without an isolated worktree is escalated "Verification does not apply" and blocked (e2e R8). A child worker's report carries an explicit "NOT VERIFIED on its own" line; its output is checked as part of the parent's final result. Scouts and reviewers produce no work product to verify.
+- Snapshot limit: 50k files / 1 GiB. The brief must fit intact: more than 20 criteria or more than 24000 characters of task are refused (blocked) rather than truncated.
+- **The proof is the worker's tree.** The snapshot contains the worker's edits to skills, scripts and tests. They are listed and diffed for the verifier and named in the verdict report; the loop does not forbid them.
+- Failure signature: failing criteria, their reasons, exit codes and output hashes. Identical on two consecutive attempts means no progress (escalate); any change counts as progress, bounded by the 3-attempt cap.
+- A pass cannot cite a run that timed out, was aborted or was killed.
+- A repair turn that fails closes the cycle (escalated, earlier completed turns become blocked, dependents block). A pause leaves the cycle open for the resume.
+- **Restart:** a host kill leaves the project paused with the verifier interrupted and the attempt open; the owner resumes with the existing recovery action and the same cycle continues. Sandboxed commands left running by the dead host are killed on the next start (identity recorded per run; a reused pid is never signalled).
 
 ## Frozen at cycle start
 
@@ -38,5 +59,5 @@ Verifier model, skill and criteria are stored in the cycle, and every verifier t
 
 - `node scripts/verification-unit.mjs`: verdict rules, escalation rules, snapshots, sandbox (writes, reads, network, signals, simulator service, global-resource refusal), settings.
 - `node scripts/verification-loop-e2e.mjs` (V0–V7): isolated host, deterministic model at the provider seam, real git/sandbox/commands. Fail → fix → fresh pass, escape attempt, blocked, drift, repeated failure, missing skill, cap 1, disabled.
-- `node scripts/verification-recovery-e2e.mjs` (R1–R3): three real attempts then exhaustion; host SIGKILL mid-attempt, restart, resume, settings changed meanwhile and still frozen; cap 2 with three parents where the finished parent's verifier is scheduled ahead of queued work.
+- `node scripts/verification-recovery-e2e.mjs` (R1–R8): three real attempts then exhaustion; host SIGKILL mid-attempt, restart, resume, settings changed meanwhile and still frozen (attempt 2 runs on the frozen model and skill); cap 2 with three parents where the finished parent's verifier is scheduled ahead of queued work; failed repair turn; 21 criteria refused and a 3000-character criterion kept whole; proof-file diff shown; no snapshot left behind; worker without a worktree escalated.
 - Browser: `verify-pi-prjcts` drive `verification-settings`.
