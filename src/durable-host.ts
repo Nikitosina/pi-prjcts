@@ -6,8 +6,8 @@ import { attachmentContent, listUploads } from "./uploads.ts";
 import { plugins } from "./plugins.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
-export async function openDurableHost(project: Project, configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader): Promise<DurableProjectRuntime> {
-  const owner = await openDurableProject({ project, dir: projectDir(project.id), configuredSkillLoader });
+export async function openDurableHost(project: Project, configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader, discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>): Promise<DurableProjectRuntime> {
+  const owner = await openDurableProject({ project, dir: projectDir(project.id), configuredSkillLoader, discoverSkills });
   try {
     if ((await owner.planSnapshot()).paused) return owner;
     for (const job of jobs(project.id).filter(job => job.state === "queued" || job.state === "running")) {
