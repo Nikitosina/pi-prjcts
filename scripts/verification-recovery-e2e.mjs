@@ -1,5 +1,5 @@
 // Restart recovery, frozen model/skill, three real attempts and saturated multi-parent scheduling for the verification loop, on an isolated host, with a deterministic fake provider at the model seam and real everything else: git worktrees,
-// snapshots, the OS sandbox, command execution, artifacts and the durable plan. No real providers, no owner state.
+// trusted command execution, revision drift checks, artifacts and the durable plan. No real providers, no owner state.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
@@ -61,8 +61,14 @@ const model = createServer((req, res) => {
       }
       if (role === 'verifier') {
         if (stage === 0) return reply(call('projects_skill_file', { skill: input.model === 'fake-judge' ? 'mini-verify' : 'other-verify' }));
-        if (stage === 1) return reply(call('projects_verify_run', { command: 'node check.mjs; true' }));
-        if (stage === 2) {
+        const leases = marker === 'MARK-RESTART' || marker === 'MARK-STOP' || marker === 'MARK-AFTERSTOP';
+        if (leases && stage === 1) return reply(call('projects_lease_acquire', { resource: 'verification-recovery-browser', ttlMinutes: 5 }));
+        if (marker === 'MARK-STOP' && stage === 2) { const acquired = { ...JSON.parse(last), marker, attempt: Number(/Attempt (\d)/.exec(all)?.[1] ?? 0) }; (result.leases ??= []).push(acquired); await gate('stop-verifier').wait; }
+        if (stage === 1 || leases && stage === 2) {
+          if (leases && marker !== 'MARK-STOP') { const acquired = { ...JSON.parse(last), marker, attempt: Number(/Attempt (\d)/.exec(all)?.[1] ?? 0) }; (result.leases ??= []).push(acquired); if (!acquired.acquired) throw Error(`verifier lease was not released: ${last}`); }
+          return reply(call('projects_verify_run', { command: 'node check.mjs; true' }));
+        }
+        if (stage === 2 || leases && stage === 3) {
           if (marker === 'MARK-RESTART') await gate('restart-verifier').wait;
           const parsed = JSON.parse(last.slice(last.indexOf('{'))), seen = FEATURE.exec(parsed.tail)?.[1] ?? '?', c1 = seen === 'done' || seen === 'half2', c2 = seen === 'done' || seen === 'half';
           const run = parsed.runId, evidence = [{ runId: run }];
@@ -115,7 +121,7 @@ const killHost = async () => { host.kill('SIGKILL'); await hostExit; };
 try {
   git(workspace, 'init', '-b', 'main'); git(workspace, 'config', 'user.email', 'e2e@example.invalid'); git(workspace, 'config', 'user.name', 'E2E');
   git(workspace, 'remote', 'add', 'origin', 'git@github.com:acme/demo.git');
-  for (const name of ['mini-verify', 'other-verify']) { mkdirSync(join(workspace, '.agents/skills', name), { recursive: true }); writeFileSync(join(workspace, '.agents/skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Verify that feature.txt says done by running node check.mjs in the snapshot (${name}).\n---\n\nRun \`node check.mjs\` from the snapshot root.\n`); }
+  for (const name of ['mini-verify', 'other-verify']) { mkdirSync(join(workspace, '.agents/skills', name), { recursive: true }); writeFileSync(join(workspace, '.agents/skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Verify that feature.txt says done by running node check.mjs in the worktree (${name}).\n---\n\nRun \`node check.mjs\` from the worktree root.\n`); }
   writeFileSync(join(workspace, 'check.mjs'), "import { readFileSync } from 'node:fs';\nconst text = readFileSync('feature.txt', 'utf8').trim();\nconsole.log('feature.txt =', JSON.stringify(text));\nprocess.exit(text === 'done' ? 0 : 1);\n");
   writeFileSync(join(workspace, 'README.md'), 'demo\n'); git(workspace, 'add', '.'); git(workspace, 'commit', '-m', 'base');
   await startHost();
@@ -133,7 +139,7 @@ try {
   const job = await rpc({ action: 'message', id, text: 'MARK-RESTART please do the task' });
   await eventually(async () => (await rpc({ action: 'show', id })).jobs.find(j => j.id === job.id)?.state === 'done', 'coordinator turn');
   const restartWorker = await eventually(async () => (await plan(id)).work.find(w => w.role === 'worker' && w.text.includes('MARK-RESTART')), 'restart worker');
-  await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-RESTART' && r.stage === 2), 'verifier waiting at its verdict step');
+  await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-RESTART' && r.stage === 3), 'verifier waiting at its verdict step');
   const before = cycleOf(await plan(id), restartWorker);
   check('R2 an attempt is running when the host dies', before.open && before.attempts.length === 1 && before.attempts[0].state === 'running');
   await settingsUpdate(id, { models: { verifier: 'fake/fake-judge2' }, verification: { enabled: true, skill: 'other-verify' } });
@@ -148,7 +154,19 @@ try {
   check('R2 model and skill were frozen when the cycle started: nothing used the changed settings', after.model === 'fake/fake-judge' && after.skill === 'mini-verify' && !result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-RESTART' && r.model === 'fake-judge2'), { model: after.model, skill: after.skill, verifierModels: [...new Set(result.requests.filter(r => r.marker === 'MARK-RESTART' && r.role === 'verifier').map(r => r.model))] });
   check('R2 the restart ended in an honest state: verified after a real retry, or escalated, never a silent completion', after.outcome === 'verified' ? after.attempts.at(-1).state === 'pass' : after.outcome === 'escalated' && (await plan(id)).work.find(w => w.id === restartWorker.id).status === 'blocked', after);
   result.restartOutcome = after;
+  const restartLeases = result.leases.filter(item => item.marker === 'MARK-RESTART');
+  check('R2 a fresh post-restart holder reacquires the shared resource; replay of the interrupted holder is not counted as proof', after.attempts.length === 2 && after.attempts[0].verifierThreadId !== after.attempts[1].verifierThreadId && restartLeases.filter(item => item.attempt === 1).length >= 2 && restartLeases.filter(item => item.attempt === 2).length === 1 && restartLeases.every(item => item.acquired), { leases: restartLeases, holders: after.attempts.map(item => item.verifierThreadId) });
   await settingsUpdate(id, { models: { verifier: 'fake/fake-judge' }, verification: { enabled: true, skill: 'mini-verify' } });
+
+  // R2b: explicitly stopping a parent also frees its verifier's lease; a later verifier can take it.
+  const stopWorker = await delegateTask(id, 'MARK-STOP');
+  await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-STOP' && r.stage === 2), 'stop verifier holds its lease');
+  await rpc({ action: 'thread-stop', id, threadId: stopWorker.threadId });
+  await eventually(async () => !cycleOf(await plan(id), stopWorker)?.open, 'stopped cycle closes');
+  gate('stop-verifier').open();
+  const afterStop = await waitCycle(id, 'MARK-AFTERSTOP');
+  const stopLeases = result.leases.filter(item => item.marker === 'MARK-STOP'), afterStopLeases = result.leases.filter(item => item.marker === 'MARK-AFTERSTOP');
+  check('R2b stop cleanup releases the verifier lease and each fresh holder in the next fail-repair-pass cycle acquires it once', afterStop.cycle.outcome === 'verified' && afterStop.cycle.attempts.map(item => item.state).join() === 'fail,pass' && stopLeases.length === 1 && afterStopLeases.filter(item => item.attempt === 1).length === 1 && afterStopLeases.filter(item => item.attempt === 2).length === 1 && [...stopLeases, ...afterStopLeases].every(item => item.acquired), { stopLeases, afterStopLeases });
 
   // R3: saturated scheduler with several parents. Cap 2: B holds a slot, A takes the other, C is queued behind them. A finishes and needs a verifier.
   await settingsUpdate(id, { workerCap: 2 });
@@ -181,10 +199,10 @@ try {
   // R6: edits to the proof (scripts, tests, skills) are shown to the verifier and recorded.
   const proof = await waitCycle(id, 'MARK-PROOF');
   check('R6 a worker that adds a script file shows it as changed proof to the verifier and in the cycle', proof.cycle.attempts[0].proofFiles.includes('scripts/check.mjs') && result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-PROOF' && r.proofNote), proof.cycle.attempts[0]);
-  // R7: finished attempts leave no snapshots behind.
+  // R7: the trusted design keeps revision manifests, not disposable target or scratch trees.
   await delay(1500);
-  const left = execFileSync('/usr/bin/find', [root, '-type', 'd', '-path', '*/verification/*/target', '-maxdepth', '12'], { encoding: 'utf8' }).trim();
-  check('R7 no verification snapshot (target or scratch) stays after the cycles ended', left === '', left);
+  const left = execFileSync('/usr/bin/find', [root, '-type', 'd', '(', '-path', '*/verification/*/target', '-o', '-path', '*/verification/*/scratch', ')', '-maxdepth', '12'], { encoding: 'utf8' }).trim();
+  check('R7 no obsolete verification snapshot or scratch tree is made; evidence manifests stay', left === '' && readdirSync(join(home, id, 'verification')).every(key => existsSync(join(home, id, 'verification', key, 'manifest.json'))), left);
   // R8: with verification on, a top-level worker that has no isolated worktree is not silently completed.
   const loose = join(root, 'loose'); mkdirSync(join(loose, '.agents/skills/mini-verify'), { recursive: true }); writeFileSync(join(loose, '.agents/skills/mini-verify/SKILL.md'), '---\nname: mini-verify\ndescription: Verify that feature.txt says done (loose workspace).\n---\n\nRun node check.mjs.\n');
   writeFileSync(join(loose, 'README.md'), 'not a git repository\n');

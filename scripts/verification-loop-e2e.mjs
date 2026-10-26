@@ -1,5 +1,5 @@
 // Opt-in verification loop on an isolated host, with a deterministic fake provider at the model seam and real everything else: git worktrees,
-// snapshots, the OS sandbox, command execution, artifacts and the durable plan. No real providers, no owner state.
+// trusted command execution, revision drift checks, artifacts and the durable plan. No real providers, no owner state.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer, request } from 'node:http';
@@ -46,18 +46,23 @@ const model = createServer((req, res) => {
       if (role === 'worker') {
         if (marker === 'MARK-NOCHANGE' && stage === 0) return reply(call('bash', { command: 'echo nope > feature.txt' }));
         if (/^\[Automatic verification failed\]/.test(user) && marker !== 'MARK-NOCHANGE' && stage === 0) { return reply(call('bash', { command: 'echo done > feature.txt' })); }
-        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
+        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-BG' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
         return reply(say(`Worker finished ${marker}`));
       }
       if (role === 'verifier') {
         if (stage === 0) return reply(call('projects_skill_file', { skill: 'mini-verify' }));
         if (marker === 'MARK-BLOCKED') return stage === 1 ? reply(call('projects_verification_verdict', { summary: 'Cannot exercise the feature.', criteria: ['c1', 'c2'].map(id => ({ id, status: 'blocked', reason: 'no browser available' })) })) : reply(say('Recorded.'));
-        if (stage === 1) return reply(call('projects_verify_run', { command: marker === 'MARK-ESCAPE' ? `echo pwned > ${process.env.ESCAPE_TARGET}; echo tampered > feature.txt; git -C ${process.env.ESCAPE_SOURCE} commit --allow-empty -qm pwned; node check.mjs` : 'node check.mjs; echo "exit-code-now=$?"; mkdir -p "$PI_ARTIFACTS_DIR"; cp feature.txt "$PI_ARTIFACTS_DIR/feature-seen.txt"; node check.mjs' }));
-        if (stage === 2) {
+        if (marker === 'MARK-LEASE' && stage === 1) return reply(call('projects_lease_acquire', { resource: 'verification-loop-browser', ttlMinutes: 5 }));
+        if (marker === 'MARK-BG' && stage === 1) return reply(call('projects_bg_start', { command: 'sleep 1; echo tampered > feature.txt', label: 'late verifier drift' }));
+        if (stage === 1 || (marker === 'MARK-LEASE' || marker === 'MARK-BG') && stage === 2) {
+          if (marker === 'MARK-LEASE') { const acquired = JSON.parse(last); (result.leases ??= []).push(acquired); if (!acquired.acquired) throw Error(`fresh verifier could not take released lease: ${last}`); }
+          return reply(call('projects_verify_run', { command: marker === 'MARK-ESCAPE' ? 'echo tampered > feature.txt; node check.mjs' : 'node check.mjs; echo "exit-code-now=$?"; mkdir -p "$PI_ARTIFACTS_DIR"; cp feature.txt "$PI_ARTIFACTS_DIR/feature-seen.txt"; node check.mjs' }));
+        }
+        if (stage === 2 || (marker === 'MARK-LEASE' || marker === 'MARK-BG') && stage === 3) {
           if (marker === 'MARK-DRIFT') await gate('drift').wait;
           const run = JSON.parse(last), pass = run.exitCode === 0;
           const evidence = [{ runId: run.runId }, ...(existsSync(join(home, '..', 'unused')) ? [] : [])];
-          return reply(call('projects_verification_verdict', { summary: pass ? 'check.mjs exits 0 on the snapshot.' : 'check.mjs fails on the snapshot.', criteria: [{ id: 'c1', status: pass ? 'pass' : 'fail', reason: pass ? 'feature.txt says done' : 'feature.txt does not say done', evidence }, { id: 'c2', status: pass ? 'pass' : 'fail', reason: pass ? 'exit 0' : `exit ${run.exitCode}`, evidence }] }));
+          return reply(call('projects_verification_verdict', { summary: pass ? 'check.mjs exits 0 on the worktree.' : 'check.mjs fails on the worktree.', criteria: [{ id: 'c1', status: pass ? 'pass' : 'fail', reason: pass ? 'feature.txt says done' : 'feature.txt does not say done', evidence }, { id: 'c2', status: pass ? 'pass' : 'fail', reason: pass ? 'exit 0' : `exit ${run.exitCode}`, evidence }] }));
         }
         return reply(say('Verdict recorded.'));
       }
@@ -106,7 +111,7 @@ try {
   git(workspace, 'init', '-b', 'main'); git(workspace, 'config', 'user.email', 'e2e@example.invalid'); git(workspace, 'config', 'user.name', 'E2E');
   git(workspace, 'remote', 'add', 'origin', 'git@github.com:acme/demo.git');
   mkdirSync(join(workspace, '.agents/skills/mini-verify'), { recursive: true });
-  writeFileSync(join(workspace, '.agents/skills/mini-verify/SKILL.md'), '---\nname: mini-verify\ndescription: Verify that feature.txt says done by running node check.mjs in the snapshot.\n---\n\nRun `node check.mjs` from the snapshot root; it exits 0 only when feature.txt contains done.\n');
+  writeFileSync(join(workspace, '.agents/skills/mini-verify/SKILL.md'), '---\nname: mini-verify\ndescription: Verify that feature.txt says done by running node check.mjs in the worktree.\n---\n\nRun `node check.mjs` from the worktree root; it exits 0 only when feature.txt contains done.\n');
   writeFileSync(join(workspace, 'check.mjs'), "import { readFileSync } from 'node:fs';\nconst text = readFileSync('feature.txt', 'utf8').trim();\nconsole.log('feature.txt =', JSON.stringify(text));\nprocess.exit(text === 'done' ? 0 : 1);\n");
   writeFileSync(join(workspace, 'README.md'), 'demo\n'); git(workspace, 'add', '.'); git(workspace, 'commit', '-m', 'base');
   await startHost();
@@ -152,17 +157,16 @@ try {
   const afterWork = (await plan(id)).work;
   check('V2 verifier threads are children of the worker thread and share its pool', afterWork.filter(w => w.role === 'verifier').every(w => w.parentThreadId === loop.worker.threadId) && afterWork.filter(w => w.role === 'verifier').length === 2);
   const listing = await rpc({ action: 'artifacts-list', id, threadId: second.verifierThreadId });
-  check('V2 command logs and a saved artifact are kept for the verifier thread', ['runs/r1.stdout.log', 'runs/r1.stderr.log', 'feature-seen.txt'].every(file => listing.files.some(f => f.path === file)), listing.files.map(f => f.path));
+  check('V2 command logs and a saved artifact are kept for the verifier thread', listing.files.some(f => /^bg\/bg-[a-f0-9]{8}\.log$/.test(f.path)) && listing.files.some(f => f.path === 'feature-seen.txt'), listing.files.map(f => f.path));
   check('V2 the worker\'s worktree holds its fix and nothing from the verifier', readFileSync(join(sourceHead, 'feature.txt'), 'utf8') === 'done\n' && git(sourceHead, 'status', '--porcelain') === '?? feature.txt');
-  const keys = readdirSync(join(home, id, 'verification')).filter(name => name !== 'running');
-  check('V2 snapshots were removed after use; evidence stays', keys.length >= 2 && keys.every(key => !existsSync(join(home, id, 'verification', key, 'target')) && existsSync(join(home, id, 'verification', key, 'manifest.json'))), keys);
+  const keys = readdirSync(join(home, id, 'verification'));
+  check('V2 no snapshots are made; revision manifests and other evidence stay', keys.length >= 2 && keys.every(key => !existsSync(join(home, id, 'verification', key, 'target')) && existsSync(join(home, id, 'verification', key, 'manifest.json'))), keys);
   check('V2 capacity: cap 1 was never exceeded while a parent waited on its verifier', peak <= 1, peak);
 
-  // V3: the sandbox holds against a verifier that tries to change the source; the verdict from a modified snapshot is not a pass.
-  process.env.ESCAPE_TARGET = join(root, 'escaped.txt'); process.env.ESCAPE_SOURCE = workspace;
+  // V3: trusted commands can change the worktree. Undeclared drift makes the verdict stale instead of a false pass.
   stopWatching();
   const escape = await waitCycle(id, 'MARK-ESCAPE');
-  check('V3 a verifier that writes outside its snapshot or commits to the source gets nowhere; a modified snapshot never passes', !existsSync(process.env.ESCAPE_TARGET) && git(workspace, 'log', '--oneline').split('\n').length === 1 && escape.cycle.attempts[0].state === 'blocked' && escape.cycle.outcome === 'escalated' && escape.cycle.attempts.length === 1, escape.cycle);
+  check('V3 a verifier command can write the trusted target, but an undeclared change never passes', escape.cycle.attempts[0].state === 'stale' && escape.cycle.outcome === 'escalated' && escape.cycle.attempts.length === 1, escape.cycle);
   await eventually(async () => reportFor('MARK-ESCAPE', 'NOT VERIFIED'), 'escalation reported');
   check('V3 the coordinator is told the work is NOT verified and the work is not completed', (await plan(id)).work.find(w => w.id === escape.worker.id).status === 'blocked' && !reportFor('MARK-ESCAPE', 'VERIFIED by'));
 
@@ -180,6 +184,16 @@ try {
   // V5: a worker that changes nothing is not looped: the same failure twice escalates after two attempts.
   const same = await waitCycle(id, 'MARK-NOCHANGE');
   check('V5 the same failure twice escalates instead of burning the third attempt', same.cycle.attempts.length === 2 && same.cycle.attempts.every(a => a.state === 'fail') && same.cycle.outcome === 'escalated' && /same way/.test(same.cycle.reason), same.cycle);
+
+  // V5b: a failed verifier's lease is released before its fresh replacement starts.
+  const leased = await waitCycle(id, 'MARK-LEASE');
+  check('V5b both attempts acquire the same shared resource: failed-attempt cleanup releases it', leased.cycle.outcome === 'verified' && result.leases?.length === 2 && result.leases.every(item => item.acquired), result.leases);
+
+  // V5c: settlement stops a verifier background job before accepting the revision and releasing the worker.
+  const background = await waitCycle(id, 'MARK-BG');
+  await delay(1200);
+  const backgroundTree = background.snapshot.work.find(w => w.id === background.worker.id).attempt.cwd;
+  check('V5c a leftover verifier background process cannot change the tree after a pass or overlap the worker', background.cycle.outcome === 'verified' && readFileSync(join(backgroundTree, 'feature.txt'), 'utf8') === 'done\n', background.cycle);
 
   // V6: a missing skill or model at the end of a turn escalates; nothing is claimed complete.
   rmSync(join(workspace, '.agents/skills/mini-verify'), { recursive: true });

@@ -7,7 +7,7 @@ The owner opts a project into the automatic verification loop in Project setting
 - `refuse` — enabling without a Verifier model is refused by the host and stored nowhere.
 - `enable` — Verifier model + skill saved through the review dialog; `settings-snapshot` shows both.
 - `persist` — reload shows the saved state; turning it off stores `verification: null`.
-- `loop` — the fail → fix → fresh pass loop itself. Not drivable here: the fake provider never calls tools. Covered by `scripts/verification-loop-e2e.mjs` (deterministic model at the provider seam, real sandbox, git and commands).
+- `loop` — the fail → fix → fresh pass loop itself. Not drivable by this settings-only journey. Covered by `scripts/verification-loop-e2e.mjs` (trusted commands and drift checks) and `scripts/verification-trusted-browser-e2e.mjs` (this canonical skill runs inside the verifier with real isolated Chrome/host proof). Both use a deterministic model at the provider seam.
 
 ## How to get to it (user POV)
 

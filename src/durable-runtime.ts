@@ -46,7 +46,7 @@ import { MCP_NOTE } from "./mcp-profiles.ts";
 import type { DurableRole, DurableGenerationLifecycleObserver, DurablePlan, DurablePlanSnapshot, DurableWorkerToolBindings } from "./durable-plan-types.ts";
 export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
 import { loadDurableStanding } from "./durable-standing.ts";
-import { durableWorkspaceBinding } from "./durable-workspace-binding.ts";
+import { durableWorkspaceBinding, verifierShell } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
 import { ensureKnowledge, historyKnowledge, knowledgeContext, listKnowledge, memoryIndex, readKnowledge, writeKnowledge } from "./knowledge.ts";
 import { DEFAULT_WORKER_CAP, Project as ProjectSchema, addNote, loadProject, notes, parse, projectDir, type ContextSettings, type DurableInspection, type Project } from "./state.ts";
@@ -56,10 +56,9 @@ import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { omitIdleWatchdogTurns, watchdogRuntime } from "./durable-watchdog.ts";
 import { reviewVerdictTools } from "./durable-review.ts";
-import { prepareAttemptTarget, releaseAttemptTarget, runRegistry, verificationTools as buildVerificationTools } from "./durable-verification.ts";
+import { captureAttemptTarget, verificationTools as buildVerificationTools } from "./durable-verification.ts";
 import { VERIFIER_RULES } from "./verification-model.ts";
 import { captureTarget } from "./verification-target.ts";
-import { reapOrphans, sandboxAvailable } from "./verification-sandbox.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { githubOperations, type ExecutionInput } from "./github-operations.ts";
@@ -487,15 +486,14 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
-    // Commands of a previous host that died mid-verification run in their own process groups and outlive it.
-    reapOrphans(runRegistry(dir));
     // Opt-in verification loop: tools only verifier threads are bound to, plus the host hooks planning calls at the end of a worker turn.
+    // A verifier is trusted like its worker: its commands use the worker's shell policy, the host's lease table and the background-command runner.
     const verification = {
-      tools: buildVerificationTools({ planRoot: () => rootReference?.id, controlRoot: dir, currentRevision: async path => (await captureTarget(path)).revision, isClosed: () => closed }),
+      tools: buildVerificationTools({ projectId: project.id, planRoot: () => rootReference?.id, controlRoot: dir, background, leases: hostLeases, shell: (scopeId, cwd, branch) => verifierShell(loadProject(project.id), scopeId, cwd, branch), isClosed: () => closed }),
       hooks: {
         config: () => { const current = loadProject(project.id).verification; return { enabled: Boolean(current?.enabled), skill: current?.skill ?? "" }; },
+        scopeCheck: (scopeId: string) => { const shell = verifierShell(loadProject(project.id), scopeId, "/", null); return "refusal" in shell ? shell.refusal : null; },
         check: async () => {
-          if (!sandboxAvailable()) return "This machine has no enforceable sandbox (macOS sandbox-exec), so verifier commands cannot run";
           const skill = loadProject(project.id).verification?.skill ?? "";
           // Judged on a fresh discovery: knownSkills only grows, so a skill deleted since open would still be "known".
           let present = false;
@@ -507,9 +505,9 @@ export async function openDurableProject(input: { project: Project; dir: string;
           try { assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier"); } catch (error) { return error instanceof Error ? error.message : String(error); }
           return null;
         },
-        prepare: async (key: string, source: string) => { const { manifest, paths, proof } = await prepareAttemptTarget(dir, key, source); return { manifest, targetPath: paths.target, proof }; },
+        capture: (key: string, source: string) => captureAttemptTarget(dir, key, source),
         revision: async (path: string) => (await captureTarget(path)).revision,
-        release: (key: string) => releaseAttemptTarget(dir, key),
+        finish: async (verifierThreadId: string) => { try { await background.killThread(verifierThreadId); } finally { hostLeases.releaseWhere(ownLease(verifierThreadId)); } },
       },
     };
     const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => role === "verifier" ? [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) : delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; }, get verifier() { return verifierInstructions(project, standing.text); } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role === "verifier" ? "reviewer" : role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, verifierTools: verification.tools, verification: verification.hooks, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });

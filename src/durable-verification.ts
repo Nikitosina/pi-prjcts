@@ -1,38 +1,37 @@
-import { closeSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { closeSync, createReadStream } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { defineExtension, defineTool, type ConversationId, type Tx } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { ensureArtifactDir, openArtifact } from "./artifacts.ts";
+import type { BackgroundCommands } from "./background-commands.ts";
 import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
-import { home } from "./state.ts";
-import { captureTarget, changedFromManifest, proofChanges, readManifest, snapshotTarget, writeManifest, type ProofChanges, type TargetManifest } from "./verification-target.ts";
+import type { ResourceLeases } from "./resource-leases.ts";
+import { captureTarget, diffManifests, driftPaths, proofChanges, readManifest, writeManifest, type ProofChanges, type TargetManifest } from "./verification-target.ts";
 import { failureSignature, judge, type RunRecord, type Verification, type VerificationAttempt } from "./verification-model.ts";
-import { globalResourceUse, runSandboxed, sandboxAvailable, sandboxEnv } from "./verification-sandbox.ts";
+import { missingLease } from "./verification-resources.ts";
+import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 
-export const runRegistry = (controlRoot: string): string => join(controlRoot, "verification", "running");
-export type AttemptPaths = { dir: string; target: string; scratch: string; manifest: string };
-export const attemptPaths = (controlRoot: string, key: string): AttemptPaths => ({ dir: join(controlRoot, "verification", key), target: join(controlRoot, "verification", key, "target"), scratch: join(controlRoot, "verification", key, "scratch"), manifest: join(controlRoot, "verification", key, "manifest.json") });
+export type AttemptPaths = { dir: string; manifest: string };
+export const attemptPaths = (controlRoot: string, key: string): AttemptPaths => ({ dir: join(controlRoot, "verification", key), manifest: join(controlRoot, "verification", key, "manifest.json") });
 
-/** Copies the worker's tree for one attempt. Idempotent per key: a replayed settlement rebuilds the same snapshot. */
-export async function prepareAttemptTarget(controlRoot: string, key: string, sourcePath: string): Promise<{ manifest: TargetManifest; paths: AttemptPaths; proof: ProofChanges }> {
+/** Records the exact revision of the worker's tree that one attempt verifies. Idempotent per key: a replayed settlement rewrites the same manifest. */
+export async function captureAttemptTarget(controlRoot: string, key: string, sourcePath: string): Promise<{ manifest: TargetManifest; proof: ProofChanges }> {
   const paths = attemptPaths(controlRoot, key), manifest = await captureTarget(sourcePath);
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
-  await snapshotTarget(sourcePath, paths.target, manifest);
-  await mkdir(paths.scratch, { recursive: true, mode: 0o700 });
   await writeManifest(paths.manifest, manifest);
-  const again = await captureTarget(sourcePath);
-  if (again.revision !== manifest.revision) throw new Error("The worker's tree changed while it was being copied for verification");
-  return { manifest, paths, proof: await proofChanges(sourcePath, manifest) };
+  return { manifest, proof: await proofChanges(sourcePath, manifest) };
 }
 
-/** The disposable parts go; the manifest, run records and artifacts stay as evidence. */
-export async function releaseAttemptTarget(controlRoot: string, key: string): Promise<void> {
-  const paths = attemptPaths(controlRoot, key);
-  await rm(paths.target, { recursive: true, force: true }); await rm(paths.scratch, { recursive: true, force: true });
-}
-
-export type VerificationToolDeps = { planRoot: () => ConversationId | undefined; controlRoot: string; currentRevision: (sourcePath: string) => Promise<string>; isClosed?: () => boolean };
+/** Shell policy the verifier's commands pass through: the one of the worker whose work is checked, or why the host cannot apply it. */
+export type VerifierShell = { guard: (command: string) => string } | { refusal: string };
+export type VerificationToolDeps = {
+  projectId: string; planRoot: () => ConversationId | undefined; controlRoot: string;
+  background: BackgroundCommands; leases: ResourceLeases;
+  shell: (scopeId: string, cwd: string, branch: string | null) => VerifierShell;
+  isClosed?: () => boolean;
+};
 type Own = { workerThreadId: string; verification: Verification; attempt: VerificationAttempt; verifierThreadId: string };
 
 async function own(tx: Tx, root: ConversationId, conversationId: ConversationId): Promise<Own> {
@@ -50,41 +49,58 @@ async function own(tx: Tx, root: ConversationId, conversationId: ConversationId)
 const detached = (value: Own): Own => JSON.parse(JSON.stringify(value));
 const text = (value: unknown, isError = false) => ({ content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }], ...(isError ? { isError: true } : {}) });
 const Evidence = Type.Object({ runId: Type.Optional(Type.String({ pattern: "^r[0-9]{1,3}$" })), artifact: Type.Optional(Type.String({ minLength: 1, maxLength: 400 })), note: Type.Optional(Type.String({ maxLength: 500 })) }, { additionalProperties: false });
+const sha256Of = (path: string): Promise<string> => new Promise((resolve, reject) => { const hash = createHash("sha256"); createReadStream(path).on("data", chunk => hash.update(chunk)).on("end", () => resolve(hash.digest("hex"))).on("error", reject); });
+const shortList = (paths: readonly string[]) => paths.slice(0, 10).join(", ") + (paths.length > 10 ? `, … (${paths.length} in all)` : "");
 
-/** The verifier's two tools: sandboxed command execution in its snapshot, and one structured verdict. Both refuse any other thread. */
+/**
+ * The verifier's tools: shell commands in the worker's worktree, one structured verdict, and the lease and background-command tools workers have.
+ * The verifier is trusted like its worker: the commands run as the same user with the same environment and shell policy, and nothing confines them.
+ * Drift detection and the verdict rules keep the evidence tied to one revision; they do not stop a command from doing anything.
+ */
 export function verificationTools(deps: VerificationToolDeps) {
   const root = () => { const id = deps.planRoot(); if (id === undefined) throw new Error("Project plan is unavailable"); return id; };
+  const shellOf = (mine: Own): { guard: (command: string) => string } => {
+    const shell = deps.shell(mine.verification.scopeId, mine.attempt.sourcePath, mine.attempt.branch);
+    if ("refusal" in shell) throw new Error(shell.refusal);
+    return shell;
+  };
   const run = defineTool({
     name: "projects_verify_run",
-    description: "Run one shell command in your verification snapshot (your working directory) under the OS sandbox: writes only to the snapshot, its scratch space and $PI_ARTIFACTS_DIR, no network beyond loopback, no credentials. Returns the exit code, the output tail, a run id to cite in the verdict and the log files (artifacts). Commands run one at a time.",
+    description: "Run one shell command in the finished worker's worktree (your working directory) and record it as evidence. It runs as the same user, with the same environment and shell policy as the worker's bash, and nothing confines it: use only what the skill and criteria call for, and do not edit the work. Commands naming a simulator, container runtime, fixed browser port or desktop session need your lease on it first (projects_lease_acquire). Returns the exit code, the output tail, a run id to cite in the verdict, the log artifact, and any change the command left in the worktree (declare those in the verdict's sourceWrites). Commands run one at a time.",
     parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 4000 }), timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 1800, description: "Default 600." })) }, { additionalProperties: false }),
     replay: "unsafe", executionMode: "sequential",
     async execute(args, api, context) {
       if (deps.isClosed?.()) return text("Project runtime is closing", true);
-      if (!sandboxAvailable()) return text("No enforceable sandbox on this platform: nothing was run. Record a blocked verdict.", true);
-      const shared = globalResourceUse(args.command);
-      if (shared) return text(`Refused: "${shared}" uses a machine-wide resource (simulator, owner's app or fixed browser port) that verification does not lease. Nothing was run. Record the criterion that needs it as blocked.`, true);
       const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
-      const paths = attemptPaths(deps.controlRoot, mine.attempt.key), artifacts = ensureArtifactDir(deps.controlRoot, mine.verifierThreadId);
-      const id = `r${mine.attempt.runs.length + 1}`;
       if (mine.attempt.runs.length >= 200) return text("Run limit reached for this attempt; record the verdict", true);
-      await mkdir(join(artifacts, "runs"), { recursive: true, mode: 0o700 });
-      const files = { stdout: `runs/${id}.stdout.log`, stderr: `runs/${id}.stderr.log` };
-      const result = await runSandboxed({
-        command: args.command, cwd: paths.target, timeoutMs: (args.timeoutSeconds ?? 600) * 1000, signal: context.abortSignal,
-        env: sandboxEnv(paths.scratch, artifacts), stdoutPath: join(artifacts, files.stdout), stderrPath: join(artifacts, files.stderr), registry: runRegistry(deps.controlRoot),
-        policy: { writable: [paths.target, paths.scratch, artifacts], unreadable: [home(), deps.controlRoot], readable: [paths.dir, artifacts], sockets: [paths.scratch] },
-      });
-      const record: RunRecord = { id, command: args.command.slice(0, 2000), exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, aborted: result.aborted, durationMs: result.durationMs, stdout: { path: files.stdout, bytes: result.stdoutBytes, sha256: result.stdoutSha256 }, stderr: { path: files.stderr, bytes: result.stderrBytes, sha256: result.stderrSha256 }, tail: result.tail.slice(-1500), at: Date.now() };
+      const shell = shellOf(mine), held = deps.leases.held(holder => holder.projectId === deps.projectId && holder.threadId === mine.verifierThreadId).map(item => item.resource);
+      const missing = missingLease(args.command, held);
+      if (missing) return text(`Not run: this command uses the ${missing.resource}, which other workers share, and you hold no lease for it. Take ${missing.hint} with projects_lease_acquire first. If the lease is held by someone else, or you lack the tool or grant, record the criterion that needs it as blocked.`, true);
+      const id = `r${mine.attempt.runs.length + 1}`, artifacts = ensureArtifactDir(deps.controlRoot, mine.verifierThreadId), started = Date.now(), deadline = started + (args.timeoutSeconds ?? 600) * 1000;
+      const job = deps.background.start(mine.verifierThreadId, { command: shell.guard(args.command), label: `verify ${id}`, cwd: mine.attempt.sourcePath, env: { ...process.env, PI_ARTIFACTS_DIR: artifacts } });
+      let timedOut = false, aborted = false, status;
+      for (;;) {
+        status = await deps.background.wait(mine.verifierThreadId, job.id, { tailLines: 60, waitSeconds: Math.max(1, Math.min(30, Math.ceil((deadline - Date.now()) / 1000))), signal: context.abortSignal });
+        if (status.state !== "running") break;
+        aborted = context.abortSignal?.aborted === true; timedOut = !aborted && Date.now() >= deadline;
+        if (aborted || timedOut) { await deps.background.stop(mine.verifierThreadId, job.id); status = await deps.background.wait(mine.verifierThreadId, job.id, { tailLines: 60, waitSeconds: 10 }); break; }
+      }
+      const logPath = `bg/${job.id}.log`, record: RunRecord = { id, command: args.command.slice(0, 2000), exitCode: status.code, signal: status.signal, timedOut, aborted, durationMs: Date.now() - started, log: { path: logPath, bytes: status.logBytes, sha256: await sha256Of(join(artifacts, logPath)).catch(() => "") }, tail: status.tail.slice(-1500), at: Date.now() };
       await api.commit(async tx => { (await own(tx, root(), api.conversationId)).attempt.runs.push(record); }, context);
-      const changed = await changedFromManifest(paths.target, await readManifest(paths.manifest));
-      return text({ runId: id, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, aborted: result.aborted, durationMs: result.durationMs, logs: [files.stdout, files.stderr], tail: result.tail, ...(changed.length ? { warning: `This command changed ${changed.length} file(s) of the snapshot (${changed.slice(0, 5).join(", ")}). A verdict from a modified snapshot is recorded as blocked.` } : {}) }, result.exitCode !== 0);
+      const paths = attemptPaths(deps.controlRoot, mine.attempt.key);
+      const drift = await captureTarget(mine.attempt.sourcePath).then(async now => diffManifests(await readManifest(paths.manifest), now)).catch(() => undefined);
+      const changed = drift ? driftPaths(drift) : [];
+      return text({ runId: id, exitCode: status.code, signal: status.signal, timedOut, aborted, durationMs: record.durationMs, log: logPath, tail: status.tail, ...(changed.length ? { sourceChanges: { added: drift!.added.slice(0, 10), removed: drift!.removed.slice(0, 10), modified: drift!.modified.slice(0, 10) }, warning: `The worktree now differs from the revision you verify in ${changed.length} file(s): ${shortList(changed)}. Declare each in the verdict's sourceWrites with its reason; an undeclared change makes the attempt stale.` } : {}) }, status.code !== 0);
     },
   });
   const verdict = defineTool({
     name: "projects_verification_verdict",
-    description: "Record the verification verdict once: every criterion id with pass, fail or blocked, a reason and its evidence (run ids from projects_verify_run, artifact paths relative to your artifacts folder). The host derives the overall status; a pass needs a run per criterion. It is rejected, not recorded, when it is incomplete or cites evidence that does not exist.",
-    parameters: Type.Object({ summary: Type.String({ minLength: 1, maxLength: 4000 }), criteria: Type.Array(Type.Object({ id: Type.String({ pattern: "^c[0-9]{1,2}$" }), status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("blocked")]), reason: Type.String({ maxLength: 2000 }), evidence: Type.Optional(Type.Array(Evidence, { maxItems: 12 })) }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }) }, { additionalProperties: false }),
+    description: "Record the verification verdict once: every criterion id with pass, fail or blocked, a reason and its evidence (run ids from projects_verify_run, artifact paths relative to your artifacts folder). The host derives the overall status; a pass needs a run per criterion that finished normally. It is rejected, not recorded, when it is incomplete or cites evidence that does not exist. If the worktree differs from the revision you were given, list every changed path in sourceWrites with its reason; an undeclared change makes the attempt stale.",
+    parameters: Type.Object({
+      summary: Type.String({ minLength: 1, maxLength: 4000 }),
+      criteria: Type.Array(Type.Object({ id: Type.String({ pattern: "^c[0-9]{1,2}$" }), status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("blocked")]), reason: Type.String({ maxLength: 2000 }), evidence: Type.Optional(Type.Array(Evidence, { maxItems: 12 })) }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }),
+      sourceWrites: Type.Optional(Type.Array(Type.Object({ path: Type.String({ minLength: 1, maxLength: 500 }), reason: Type.String({ minLength: 1, maxLength: 500 }) }, { additionalProperties: false }), { maxItems: 100 })),
+    }, { additionalProperties: false }),
     replay: "unsafe", executionMode: "sequential",
     async execute(args, api, context) {
       const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
@@ -92,19 +108,37 @@ export function verificationTools(deps: VerificationToolDeps) {
       const exists = (path: string) => { try { closeSync(openArtifact(deps.controlRoot, mine.verifierThreadId, path).fd); return true; } catch { return false; } };
       const judged = judge(mine.verification.criteria, mine.attempt.runs, args, exists);
       if (!judged.ok) return text({ recorded: false, errors: judged.errors }, true);
-      const changed = await changedFromManifest(paths.target, await readManifest(paths.manifest)).catch(() => ["(snapshot unreadable)"]);
-      const current = await deps.currentRevision(mine.attempt.sourcePath).catch(() => null);
+      const now = await captureTarget(mine.attempt.sourcePath).catch(() => null);
+      const drift = now ? driftPaths(diffManifests(await readManifest(paths.manifest), now)) : null;
+      const declared = new Map((args.sourceWrites ?? []).map(write => [write.path, write.reason]));
       const recorded = await api.commit(async tx => {
         const { attempt } = await own(tx, root(), api.conversationId);
         attempt.verdict = judged.verdict;
-        if (changed.length) { attempt.state = "blocked"; attempt.reason = `The verifier modified the snapshot (${changed.slice(0, 5).join(", ")}); a verdict from changed files is not evidence of the worker's revision`; }
-        else if (current !== attempt.revision) { attempt.state = "stale"; attempt.reason = "The worker's tree changed after the snapshot was taken, so this verdict does not describe the current work"; }
-        else attempt.state = judged.verdict.status;
+        const undeclared = drift?.filter(path => !declared.has(path)) ?? [];
+        if (drift === null) { attempt.state = "stale"; attempt.reason = "The worker's tree could not be read to confirm it still matches the verified revision"; }
+        else if (undeclared.length) { attempt.state = "stale"; attempt.reason = `The worker's tree no longer matches the verified revision and the verdict does not account for the change (${shortList(undeclared)}), so it does not describe the work`; }
+        else {
+          if (drift.length) { attempt.sourceWrites = drift.map(path => ({ path, reason: declared.get(path)! })); attempt.finalRevision = now!.revision; }
+          attempt.state = judged.verdict.status;
+        }
         attempt.signature = failureSignature(attempt);
         return { state: attempt.state, reason: attempt.reason };
       }, context);
       return text({ recorded: true, ...recorded });
     },
   });
-  return { tools: [run, verdict], extension: defineExtension({ name: "projects.verification-tools", tools: [run, verdict] }) };
+  const environment = workerEnvironmentTools({ projectId: deps.projectId, leases: deps.leases, background: deps.background, target: async (api, context) => {
+    const mine = await api.commit(async tx => detached(await own(tx, root(), api.conversationId)), context);
+    const guard = (command: string): string => {
+      const held = deps.leases.held(holder => holder.projectId === deps.projectId && holder.threadId === mine.verifierThreadId).map(item => item.resource), missing = missingLease(command, held);
+      if (missing) {
+        const message = `Not run: this command uses the ${missing.resource}, which other workers share, and you hold no lease for it. Take ${missing.hint} with projects_lease_acquire first.`;
+        return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
+      }
+      return shellOf(mine).guard(command);
+    };
+    return { threadId: mine.verifierThreadId, cwd: mine.attempt.sourcePath, env: { ...process.env, PI_ARTIFACTS_DIR: ensureArtifactDir(deps.controlRoot, mine.verifierThreadId) }, guard };
+  } });
+  const tools = [run, verdict, ...environment];
+  return { tools, extension: defineExtension({ name: "projects.verification-tools", tools }) };
 }

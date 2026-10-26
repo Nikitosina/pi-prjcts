@@ -229,6 +229,10 @@ const journeys = {
     record('entry', `opened ${origin}; Project settings dialog`);
     await open();
     if ((await snap()).values.verification !== null) throw Error('verification must be off in a fresh project');
+    const trust = await page.evaluate(`document.querySelector('[data-verify-trust]')?.innerText ?? ''`), emptyModel = await page.evaluate(`document.querySelector('.mp[data-role=verifier] .mp-current')?.innerText ?? ''`);
+    if (!/trusted like the worker, not sandboxed/.test(trust) || !/not a security boundary/.test(trust)) throw Error(`trusted execution disclosure is missing or misleading: ${trust}`);
+    if (!/No verifier model/.test(emptyModel)) throw Error(`empty verifier model is not labelled clearly: ${emptyModel}`);
+    record('visible', 'verification discloses trusted shell execution and no security boundary; the empty verifier model is labelled');
     await page.shot(dir, '01-settings-off');
     // 1. Opting in without a verifier model is refused by the host; nothing is stored.
     await page.click('input[name=verifyEnabled]');

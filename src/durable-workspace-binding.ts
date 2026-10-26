@@ -119,7 +119,6 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     if (input.commands) tools.push(...await commandWorkerTools({ executor: input.commands, approvals: input.commandApprovals, project: input.project, root: input.conversation(), authority, scopeId: scope.id, conversationId: request.conversationId, workId: request.workId, lock }));
     if (publication) tools.push(...await githubWorkerTools({ project: input.project, root: input.conversation(), authority, conversationId: request.conversationId, branch, scopeId: scope.id, workId: request.workId, baseRevision, publication, isClosed: input.isClosed }));
     if (attachment) tools.push(...await attachment.tools(authority));
-    const gitPolicy = { prefix: publication?.branchPrefix ?? "pi/", protected: publication ? [publication.baseBranch] : [] };
     // Evidence folder per thread, in the project home (survives worktree cleanup); path in the instructions and $PI_ARTIFACTS_DIR.
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
     let pluginNotes = "";
@@ -131,7 +130,7 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
         if (kept.length) { tools.push(...kept); pluginNotes += provider.instructions ?? ""; }
       }
       const owners = ownerRoots(repository.ownerCheckout, workDir);
-      const guard = (command: string) => guardOwnerCheckout(attachment ? attachment.guard(command) : guardWorkerGitCommand(command, branch, gitPolicy), workDir, owners);
+      const guard = workerShellGuard({ branch, workDir, ownerCheckout: repository.ownerCheckout, publication, attachmentGuard: attachment?.guard });
       const codingTools = createCodingTools(workDir, { bash: { spawnHook: ({ command, env, ...context }) => ({ ...context, env: { ...env, PI_ARTIFACTS_DIR: artifacts! }, command: guard(command) }) } });
       const builtins: ToolRegistration[] = codingTools.map(tool => defineTool({ name: tool.name, description: tool.description, parameters: tool.parameters, replay: "unsafe", async execute(args, api, context) {
         if (tool.name === "write" || tool.name === "edit") assertOutsideOwner(String((args as { path?: unknown }).path ?? ""), workDir, owners);
@@ -139,8 +138,9 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
       } }));
       const builtinNames = new Set(builtins.map(tool => tool.name));
       tools.splice(0, tools.length, ...tools.filter(tool => !(tool.name.startsWith("projects_workspace_") && /_(?:read|write|read_list|list)$/.test(tool.name)) && !builtinNames.has(tool.name)), ...builtins);
-      if (input.environment) tools.push(...workerEnvironmentTools({ projectId: input.project.id, threadId: request.threadId, cwd: workDir, env: { ...process.env, PI_ARTIFACTS_DIR: artifacts! }, guard, ...input.environment }));
+      if (input.environment) tools.push(...workerEnvironmentTools({ projectId: input.project.id, ...input.environment, target: () => ({ threadId: request.threadId, cwd: workDir, env: { ...process.env, PI_ARTIFACTS_DIR: artifacts! }, guard }) }));
     }
+    const gitPolicy = { prefix: publication?.branchPrefix ?? "pi/", protected: publication ? [publication.baseBranch] : [] };
     // Deliberately uninstalled: ScopedAttempt publishes only after its post-preparation active/binding recheck.
     assertStanding();
     const extension = defineExtension({ name: `projects.workspace.${scope.id}.${intentId}.${request.conversationId}`, tools, hooks: [hook(ToolTask, { beforeTool: (_call, api) => {
@@ -152,6 +152,26 @@ export function durableWorkspaceBinding(input: { project: Project; configuredSki
     const handover = `${thread.workspaceFrom ? "\nThis worktree was taken over from an earlier worker thread; its branch, commits and uncommitted changes are here. Check the status first; the earlier thread can no longer work." : ""}${thread.continueBranch ? `\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)}) of an existing PR. Commit on top and push to it; never open a second PR.` : ""}`;
     return { cwd: workDir, tools, extension, repositoryStanding, workerInstructions: `${whole ? `\n\nWorktree ${workDir} (branch ${branch}): run commands and make every edit here. Never cd into, run git against or write to the owner's checkout ${repository.ownerCheckout}; reading it is fine.` : ""}${handover}${whole ? `${attachment ? `\n${attachment.instructions}` : `\nPush to your branch or another project branch (${gitPolicy.prefix}*): git push origin HEAD:<branch>. You may fetch, merge, rebase and cherry-pick; after a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other branches, force-push plainly, delete branches or merge PRs.${publication ? ` Open or update a draft PR (open_draft_pr, against ${publication.baseBranch}) only when your task asks for a PR; pushing to an existing PR branch updates it.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`, bindingRevision: hash(JSON.stringify({ receipt: receipt.providerFacts, scope, workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []), names: tools.map(tool => tool.name), commands: (input.project.commandProfiles ?? []).filter(profile => profile.enabled && profile.scopeIds.includes(scope.id)).map(profile => ({ id: profile.id, revision: profile.revision })), ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}) })) };
   };
+}
+/**
+ * The shell policy of a whole-repository worker: its git pushes stay on project branches and its commands stay out of the owner's checkout.
+ * Workers, their background commands and their verifiers all run commands through this one function; it is best-effort text matching, not a sandbox.
+ */
+export function workerShellGuard(input: { branch: string; workDir: string; ownerCheckout: string; publication?: { branchPrefix: string; baseBranch: string }; attachmentGuard?: (command: string) => string }): (command: string) => string {
+  const gitPolicy = { prefix: input.publication?.branchPrefix ?? "pi/", protected: input.publication ? [input.publication.baseBranch] : [] };
+  const owners = ownerRoots(input.ownerCheckout, input.workDir);
+  return command => guardOwnerCheckout(input.attachmentGuard ? input.attachmentGuard(command) : guardWorkerGitCommand(command, input.branch, gitPolicy), input.workDir, owners);
+}
+/**
+ * The shell policy a verifier's commands pass through: the one of the worker whose scope it verifies. Plugin workspace providers keep that policy
+ * inside the plugin, which verifiers cannot reach, so those scopes are refused rather than run under a weaker one.
+ */
+export function verifierShell(project: Project, scopeId: string, workDir: string, branch: string | null): { guard: (command: string) => string } | { refusal: string } {
+  const authorization = project.workspaceAuthorization, scope = authorization?.scopes.find(item => item.id === scopeId), repository = authorization?.repositories.find(item => item.repositoryId === scope?.repositoryId);
+  if (!authorization || !scope || !repository) return { refusal: "The worker's workspace scope is no longer authorized for this project" };
+  if (authorization.provider !== "github") return { refusal: `Verification covers git workspaces. The "${authorization.provider}" workspace provider keeps its shell policy in its plugin, which verifiers cannot use, so its workers are not verified` };
+  const publication = project.githubAuthorization?.find(item => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(project));
+  return { guard: workerShellGuard({ branch: branch ?? "", workDir, ownerCheckout: repository.ownerCheckout, publication }) };
 }
 /** Pushes may target this worker's branch or any other project branch (the publication prefix); never the base/default branch. */
 export function guardWorkerGitCommand(command: string, branch: string, policy: { prefix?: string; protected?: readonly string[] } = {}): string {

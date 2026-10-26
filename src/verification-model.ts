@@ -8,22 +8,28 @@ export type Criterion = { id: string; text: string };
 export type EvidenceRef = { runId?: string; artifact?: string; note?: string };
 export type CriterionStatus = "pass" | "fail" | "blocked";
 export type CriterionResult = { id: string; status: CriterionStatus; reason: string; evidence: EvidenceRef[] };
-/** A command the host ran for the verifier. Logs are artifact files of the verifier thread (relative paths). */
-export type RunRecord = { id: string; command: string; exitCode: number | null; signal: string | null; timedOut: boolean; aborted: boolean; durationMs: number; stdout: { path: string; bytes: number; sha256: string }; stderr: { path: string; bytes: number; sha256: string }; tail: string; at: number };
+/** A command the host ran for the verifier. The log (stdout and stderr together) is an artifact file of the verifier thread (relative path). */
+export type RunRecord = { id: string; command: string; exitCode: number | null; signal: string | null; timedOut: boolean; aborted: boolean; durationMs: number; log: { path: string; bytes: number; sha256: string }; tail: string; at: number };
+/** A change the verifier's commands left in the worker's tree, declared by the verifier with the reason (a test runner writing coverage, a snapshot file). */
+export type SourceWrite = { path: string; reason: string };
 export type Verdict = { status: CriterionStatus; summary: string; criteria: CriterionResult[]; recordedAt: number };
 /** `stale`: the worker's tree no longer matches the verified revision, so the result proves nothing about the current work. */
 export type AttemptState = "running" | "pass" | "fail" | "blocked" | "stale";
 export type VerificationAttempt = {
   n: number; verifierWorkId: string; verifierThreadId: string; key: string;
   /** Exact content revision of the worker's tree (uncommitted and untracked work included) that was copied for the verifier. */
-  revision: string; head: string | null; branch: string | null; sourcePath: string; targetPath: string;
+  revision: string; head: string | null; branch: string | null; sourcePath: string;
   /** Skill, script, test and CI files the worker changed in this revision: the proof the verifier runs may differ from the one the owner expects. */
   proofFiles?: string[];
+  /** Changes to the tree between the revision above and the verdict, each declared by the verifier. Undeclared changes make the attempt stale. */
+  sourceWrites?: SourceWrite[]; finalRevision?: string;
   state: AttemptState; reason?: string; verdict?: Verdict; runs: RunRecord[]; signature?: string; startedAt: number; endedAt?: number;
 };
 export type Verification = {
   /** Frozen when the cycle starts, so a Settings change cannot swap the judge mid-loop. */
   model: string; skill: string; criteria: Criterion[];
+  /** Workspace scope of the worker: its repository decides the shell policy the verifier's commands pass through. */
+  scopeId: string;
   attempts: VerificationAttempt[];
   /** Worker work ids this cycle covers; they stay unfinished for dependents until the cycle ends. */
   workIds: string[];
@@ -48,7 +54,7 @@ export function criteriaProblem(task: string, criteria: readonly Criterion[]): s
   return null;
 }
 
-export type VerdictInput = { summary: string; criteria: { id: string; status: CriterionStatus; reason: string; evidence?: EvidenceRef[] }[] };
+export type VerdictInput = { summary: string; criteria: { id: string; status: CriterionStatus; reason: string; evidence?: EvidenceRef[] }[]; sourceWrites?: SourceWrite[] };
 
 /**
  * The host derives the overall status; the verifier cannot claim a pass the criteria do not carry. A pass needs a recorded run (or an
@@ -85,7 +91,7 @@ export function judge(criteria: readonly Criterion[], runs: readonly RunRecord[]
  */
 export function failureSignature(attempt: Pick<VerificationAttempt, "verdict" | "runs">): string {
   const failing = (attempt.verdict?.criteria ?? []).filter(item => item.status !== "pass").map(item => {
-    const runs = item.evidence.flatMap(ref => ref.runId ? [attempt.runs.find(run => run.id === ref.runId)] : []).map(run => run ? [run.exitCode ?? "x", run.signal ?? "", run.timedOut ? "T" : "", run.stdout.sha256, run.stderr.sha256].join(":") : "missing");
+    const runs = item.evidence.flatMap(ref => ref.runId ? [attempt.runs.find(run => run.id === ref.runId)] : []).map(run => run ? [run.exitCode ?? "x", run.signal ?? "", run.timedOut ? "T" : "", run.log.sha256].join(":") : "missing");
     return `${item.id}|${item.status}|${item.reason.trim().replace(/\s+/g, " ")}|${runs.join(",")}`;
   }).sort();
   return createHash("sha256").update(failing.join("\n")).digest("hex");
@@ -116,25 +122,28 @@ export function verdictText(verification: Verification, attempt: VerificationAtt
     const text = verification.criteria.find(criterion => criterion.id === item.id)?.text ?? item.id;
     const runs = item.evidence.flatMap(ref => ref.runId ? [attempt.runs.find(run => run.id === ref.runId)] : []).filter(run => run !== undefined);
     const shown = item.status === "pass" ? [] : runs.map(run => `    run ${run.id}: \`${clip(run.command, 300)}\` exit ${run.exitCode ?? run.signal ?? "?"}${run.timedOut ? " (timed out)" : ""}\n${clip(run.tail.trim(), 700).split("\n").map(line => `      ${line}`).join("\n")}`);
-    const artifacts = item.evidence.flatMap(ref => [...(ref.artifact ? [ref.artifact] : []), ...(ref.runId ? (() => { const run = attempt.runs.find(candidate => candidate.id === ref.runId); return run ? [run.stdout.path, run.stderr.path] : []; })() : [])]).map(path => `[${path}](artifact:${attempt.verifierThreadId}/${path})`);
+    const artifacts = item.evidence.flatMap(ref => [...(ref.artifact ? [ref.artifact] : []), ...(ref.runId ? (() => { const run = attempt.runs.find(candidate => candidate.id === ref.runId); return run ? [run.log.path] : []; })() : [])]).map(path => `[${path}](artifact:${attempt.verifierThreadId}/${path})`);
     return [`- ${item.id} ${item.status.toUpperCase()}: ${clip(text, 200)}\n  ${clip(item.reason, 600)}${artifacts.length ? `\n  evidence: ${artifacts.join(", ")}` : ""}`, ...shown].join("\n");
   });
-  return `Verification attempt ${attempt.n} of ${MAX_VERIFICATION_ATTEMPTS} (verifier thread ${attempt.verifierThreadId}) on revision ${attempt.revision.slice(0, 12)}${attempt.branch ? ` (${attempt.branch}` + (attempt.head ? ` @ ${attempt.head.slice(0, 9)}, plus uncommitted work)` : ")") : ""}: ${attempt.state.toUpperCase()}${attempt.reason ? ` (${attempt.reason})` : ""}${attempt.proofFiles?.length ? `\nProof files the worker changed (skills, scripts, tests, CI; review them): ${attempt.proofFiles.slice(0, 12).join(", ")}${attempt.proofFiles.length > 12 ? ", …" : ""}` : ""}\n${attempt.verdict ? `${clip(attempt.verdict.summary, 1200)}\n${lines.join("\n")}` : "No verdict was recorded."}`;
+  return `Verification attempt ${attempt.n} of ${MAX_VERIFICATION_ATTEMPTS} (verifier thread ${attempt.verifierThreadId}) on revision ${attempt.revision.slice(0, 12)}${attempt.branch ? ` (${attempt.branch}` + (attempt.head ? ` @ ${attempt.head.slice(0, 9)}, plus uncommitted work)` : ")") : ""}: ${attempt.state.toUpperCase()}${attempt.reason ? ` (${attempt.reason})` : ""}${attempt.proofFiles?.length ? `\nProof files the worker changed (skills, scripts, tests, CI; review them): ${attempt.proofFiles.slice(0, 12).join(", ")}${attempt.proofFiles.length > 12 ? ", …" : ""}` : ""}${attempt.sourceWrites?.length ? `\nChanges the verifier's commands left in the worktree (declared by the verifier): ${attempt.sourceWrites.slice(0, 12).map(write => `${write.path} (${write.reason.slice(0, 120)})`).join("; ")}` : ""}\n${attempt.verdict ? `${clip(attempt.verdict.summary, 1200)}\n${lines.join("\n")}` : "No verdict was recorded."}`;
 }
 
 /** Role text of every verifier thread. Fixed in code: the verifier's behavior is part of the loop's guarantees, not a Settings prompt. */
 export const VERIFIER_RULES = `Role profile: verifier.
-You decide whether finished work meets its criteria, by running the project's verification skill against a frozen snapshot of that work. Your evidence decides, whatever the worker claimed.
+You decide whether finished work meets its criteria, by running the project's verification skill against the worker's worktree. Your evidence decides, whatever the worker claimed.
+You are trusted like the worker: projects_verify_run runs shell commands as the same user, with the same environment and shell policy as the worker's bash, in the worker's worktree. Nothing confines them, so read a command before you run it, and use only what the skill and the criteria call for.
 1. Read the verification skill named in your task with projects_skill_file, then the feature file it points to for the changed surface.
-2. Run what the skill prescribes with projects_verify_run. Commands run in the snapshot under an OS sandbox: they write only the snapshot, their scratch space and $PI_ARTIFACTS_DIR, and reach only loopback. Save screenshots and logs in $PI_ARTIFACTS_DIR and run the skill's cleanup before you finish.
-3. Judge each criterion by its own wording. A pass cites the run that shows the behavior; a criterion you cannot exercise is blocked, with the reason.
-4. Call projects_verification_verdict once, answering every criterion id.
-Fail means the work is wrong. Blocked means you cannot tell (skill missing, tool failing, environment unavailable). Report what the runs show: editing the snapshot, the criteria or the checks changes the question, and the host rejects a verdict from a modified snapshot. Your verdict goes back to the worker automatically.`;
+2. Run what the skill prescribes with projects_verify_run. Save screenshots and logs in $PI_ARTIFACTS_DIR and run the skill's cleanup before you finish.
+3. A simulator, container runtime, fixed browser port or desktop session is shared with other workers: take its lease first (projects_lease_acquire, then projects_lease_release when done). If you cannot get the lease, or the skill needs a tool or grant you lack, mark that criterion blocked with the reason.
+4. Judge each criterion by its own wording. A pass cites the run that shows the behavior.
+5. Report; do not fix. You have no edit or write tools. If your commands leave files changed in the worktree (a test runner writing coverage or snapshots), list each path with its reason in sourceWrites; a change you do not declare makes the attempt stale.
+6. Call projects_verification_verdict once, answering every criterion id.
+Fail means the work is wrong. Blocked means you cannot tell (skill missing, tool failing, resource unavailable). Your verdict goes back to the worker automatically.`;
 
 export function verifierBrief(input: { proof?: { paths: string[]; diff: string }; skill: string; criteria: readonly Criterion[]; task: string; attempt: number; revision: string; branch: string | null; head: string | null }): string {
   return `Verify the finished work of a worker thread. Attempt ${input.attempt} of ${MAX_VERIFICATION_ATTEMPTS}; you start with no memory of earlier attempts.
 Verification skill: ${input.skill}
-Snapshot: your working directory, content revision ${input.revision.slice(0, 12)} of branch ${input.branch ?? "(detached)"} at ${input.head?.slice(0, 9) ?? "no commit"}, including the worker's uncommitted and untracked files.
+Target: the worker's worktree (your working directory), content revision ${input.revision.slice(0, 12)} of branch ${input.branch ?? "(detached)"} at ${input.head?.slice(0, 9) ?? "no commit"}, including the worker's uncommitted and untracked files. The worker is paused until you finish.
 
 Original task (authoritative; the worker's own summary is not):
 ${input.task}
@@ -145,7 +154,7 @@ ${input.criteria.map(item => `- ${item.id}: ${item.text}`).join("\n")}`;
 
 
 /** What the plan snapshot, Settings and the coordinator see of a cycle: states and ids, not command output. */
-export type VerificationSummary = { open: boolean; outcome: Verification["outcome"] | null; reason: string | null; model: string; skill: string; criteria: Criterion[]; attempts: { n: number; state: AttemptState; reason: string | null; revision: string; verifierThreadId: string; runs: number; proofFiles: string[]; criteria: { id: string; status: CriterionStatus }[] }[] };
+export type VerificationSummary = { open: boolean; outcome: Verification["outcome"] | null; reason: string | null; model: string; skill: string; criteria: Criterion[]; attempts: { n: number; state: AttemptState; reason: string | null; revision: string; verifierThreadId: string; runs: number; proofFiles: string[]; sourceWrites: SourceWrite[]; criteria: { id: string; status: CriterionStatus }[] }[] };
 export function summarizeVerification(cycle: Verification): VerificationSummary {
-  return { open: cycle.open, outcome: cycle.outcome ?? null, reason: cycle.reason ?? null, model: cycle.model, skill: cycle.skill, criteria: cycle.criteria.map(item => ({ ...item })), attempts: cycle.attempts.map(item => ({ n: item.n, state: item.state, reason: item.reason ?? null, revision: item.revision, verifierThreadId: item.verifierThreadId, runs: item.runs.length, proofFiles: [...(item.proofFiles ?? [])], criteria: (item.verdict?.criteria ?? []).map(result => ({ id: result.id, status: result.status })) })) };
+  return { open: cycle.open, outcome: cycle.outcome ?? null, reason: cycle.reason ?? null, model: cycle.model, skill: cycle.skill, criteria: cycle.criteria.map(item => ({ ...item })), attempts: cycle.attempts.map(item => ({ n: item.n, state: item.state, reason: item.reason ?? null, revision: item.revision, verifierThreadId: item.verifierThreadId, runs: item.runs.length, proofFiles: [...(item.proofFiles ?? [])], sourceWrites: (item.sourceWrites ?? []).map(write => ({ ...write })), criteria: (item.verdict?.criteria ?? []).map(result => ({ id: result.id, status: result.status })) })) };
 }

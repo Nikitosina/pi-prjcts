@@ -28,7 +28,6 @@ import { authorizationFingerprint, catalog, grantWholeRepository, grantWorkspace
 import { createGithubInspection } from "./github-inspection.ts";
 import { authorizeGithub, authorizeGithubQuick, githubQuickPreview, inspectGithubRepository, rebindOneClickGithub } from "./github-authorization.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
-import { sandboxAvailable } from "./verification-sandbox.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
@@ -69,10 +68,9 @@ const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
 /** Settings read at use time, so a change needs no reopen. */
-/** Turning verification on needs an enforceable sandbox and an installed skill, whichever settings path carries the change. */
+/** Turning verification on needs an installed skill, whichever settings path carries the change. */
 async function validateVerificationChange(id: string, changes: { verification?: { enabled: boolean; skill: string } | null }): Promise<void> {
   if (!changes.verification?.enabled) return;
-  if (!sandboxAvailable()) throw new Error("Verification needs an OS sandbox for the verifier's commands, and this machine has none (macOS sandbox-exec)");
   const skill = changes.verification.skill.trim();
   if (!(await configuredSkills(id)).getSkills().skills.some(item => item.name === skill)) throw new Error(`Verification skill "${skill}" is not installed for this project`);
 }

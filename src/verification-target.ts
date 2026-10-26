@@ -1,8 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { lstat, readFile, readlink, writeFile } from "node:fs/promises";
+import { join, sep } from "node:path";
 
 const GIT_ENV = { PATH: "/usr/bin:/bin", GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" };
 const MAX_FILES = 50_000, MAX_BYTES = 1024 ** 3;
@@ -46,12 +45,12 @@ async function listFiles(root: string): Promise<string[]> {
 export async function captureTarget(root: string): Promise<TargetManifest> {
   const paths = await listFiles(root), files: TargetEntry[] = [];
   let bytes = 0;
-  if (paths.length > MAX_FILES) throw new Error(`Target has ${paths.length} files; verification snapshots are limited to ${MAX_FILES}`);
+  if (paths.length > MAX_FILES) throw new Error(`Target has ${paths.length} files; revision hashing is limited to ${MAX_FILES}`);
   for (const path of paths) {
     const found = await digestOf(root, path);
     if (!found) continue;
     bytes += found.bytes;
-    if (bytes > MAX_BYTES) throw new Error("Target is larger than 1 GiB; verification snapshots are limited to that");
+    if (bytes > MAX_BYTES) throw new Error("Target is larger than 1 GiB; revision hashing is limited to that");
     files.push({ path, digest: found.digest });
   }
   const head = (await git(root, ["rev-parse", "--verify", "-q", "HEAD"]).catch(() => Buffer.alloc(0))).toString().trim() || null;
@@ -59,32 +58,16 @@ export async function captureTarget(root: string): Promise<TargetManifest> {
   return { revision: revisionOf(files), head, branch, files, bytes };
 }
 
-/** Files of a snapshot whose content differs from the manifest (modified, deleted); untracked outputs are expected and not listed. */
-export async function changedFromManifest(root: string, manifest: Pick<TargetManifest, "files">): Promise<string[]> {
-  const changed: string[] = [];
-  for (const entry of manifest.files) if ((await digestOf(root, entry.path))?.digest !== entry.digest) changed.push(entry.path);
-  return changed;
-}
-
-/**
- * Copies the manifest's files into `dest` (a fresh, disposable directory), makes it a one-commit git repository so the verification skill
- * sees a clean checkout, and links the worktree's node_modules read-only through the sandbox. Throws if the source drifted while copying.
- */
-export async function snapshotTarget(source: string, dest: string, expected: TargetManifest): Promise<void> {
-  await rm(dest, { recursive: true, force: true });
-  await mkdir(dest, { recursive: true, mode: 0o700 });
-  for (const entry of expected.files) {
-    const from = join(source, entry.path), to = join(dest, entry.path), stat = await lstat(from);
-    await mkdir(dirname(to), { recursive: true });
-    if (stat.isSymbolicLink()) await symlink(await readlink(from), to);
-    else { await copyFile(from, to); await chmod(to, stat.mode & 0o777); }
-  }
-  if (existsSync(join(source, "node_modules"))) await symlink(join(source, "node_modules"), join(dest, "node_modules")).catch(() => undefined);
-  const copied = await changedFromManifest(dest, expected);
-  if (copied.length) throw new Error(`Target changed while it was copied (${copied.slice(0, 3).join(", ")}); retry`);
-  await git(dest, ["init", "-q", "-b", "verify-target"]);
-  await git(dest, ["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], Buffer.from(expected.files.map(entry => entry.path).join("\0")));
-  await git(dest, ["-c", "user.name=pi-verify", "-c", "user.email=verify@invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--no-verify", "--allow-empty", "-m", `Verification snapshot of ${expected.revision}`]);
+export type Drift = { added: string[]; removed: string[]; modified: string[] };
+export const driftPaths = (drift: Drift): string[] => [...drift.added, ...drift.removed, ...drift.modified].sort();
+/** What differs between two captures of one tree: files that appeared, vanished or changed content or mode. Ignored files are in neither. */
+export function diffManifests(before: Pick<TargetManifest, "files">, after: Pick<TargetManifest, "files">): Drift {
+  const was = new Map(before.files.map(entry => [entry.path, entry.digest])), now = new Map(after.files.map(entry => [entry.path, entry.digest]));
+  return {
+    added: [...now.keys()].filter(path => !was.has(path)).sort(),
+    removed: [...was.keys()].filter(path => !now.has(path)).sort(),
+    modified: [...now].filter(([path, digest]) => was.has(path) && was.get(path) !== digest).map(([path]) => path).sort(),
+  };
 }
 
 /** Files that define what counts as proof: verification skills, scripts, tests, build and CI config. A worker that edits them can weaken the check it is judged by. */
