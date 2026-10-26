@@ -11,6 +11,8 @@
     "package-lock.json",
     "tsconfig.json",
     "src/host.ts",
+    "src/host-server.ts",
+    "src/host-environment.ts",
     "src/state.ts",
     "src/http.ts",
     "src/client.ts",

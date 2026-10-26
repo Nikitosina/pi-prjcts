@@ -3493,7 +3493,7 @@ function modelGroupsBase(query, value) {
   if (!terms.length) {
     const current = modelCache.get(value), groups = current && !scoped.has(value) && !modelUnavailableScoped.includes(value) ? [{ label: "Current", models: [current], more: 0 }] : [];
     if (scoped.size) groups.push({ label: "Scoped models", models: modelScoped.map(reference => modelCache.get(reference)), more: 0 });
-    if (modelUnavailableScoped.length) groups.push({ label: "Scoped models without credentials", models: modelUnavailableScoped.map(reference => modelCache.get(reference)), more: 0, hint: "Installed, but credentials are unavailable to this host. Check the host's environment and Pi provider configuration. Restarting alone does not supply missing credentials." });
+    if (modelUnavailableScoped.length) groups.push({ label: "Scoped models without credentials", models: modelUnavailableScoped.map(reference => modelCache.get(reference)), more: 0, hint: "Installed, but credentials are unavailable to this host. Check the host's environment and Pi provider configuration. On macOS, restart the host after changing exported zsh startup variables." });
     if (!scoped.size && !modelScopeSet) groups.push(cap(configured, MODEL_ROWS, "Configured models"));
     else groups.push({ label: "", models: [], more: 0, hint: `Type to search all ${configured.length} configured models.` });
     return groups;
