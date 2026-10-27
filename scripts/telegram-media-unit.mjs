@@ -91,8 +91,8 @@ try {
   seed(); sends = []; notices = [notice(1, `![Traversal](${ref('../project.json')}) ![Unknown](artifact:${other}/demo.png) ![Missing](${ref('missing.png')}) ![Large](${ref('large.png')}) ![URL](http://127.0.0.1/private)`)]; start(); await bridge.flush();
   assert(sends.every(s => s.method === 'sendMessage')); assert(sends.filter(s => /unavailable/.test(s.input.text)).length === 5); assert(sends.every(s => !s.input.text.includes('!Traversal'))); bridge.close();
 
-  seed(); sends = []; notices = [notice(1, `${'long text '.repeat(700)} ![${'C'.repeat(1100)}](${ref('demo.png')}) tail`)]; start(); await bridge.flush();
-  assert(sends.filter(s => s.method === 'sendMessage').every(s => s.input.text.length <= 4096)); assert.equal(sends.find(s => s.method === 'sendPhoto').input.caption.length, 1024); assert(sends.some(s => s.input.text?.includes('C'.repeat(76)))); bridge.close();
+  seed(); sends = []; notices = [notice(1, `${'long text '.repeat(700)} ![${'C'.repeat(1023) + '🟦' + 'Z'.repeat(76)}](${ref('demo.png')}) tail`)]; start(); await bridge.flush();
+  assert(sends.filter(s => s.method === 'sendMessage').every(s => s.input.text.length <= 4096)); assert.equal(sends.find(s => s.method === 'sendPhoto').input.caption.length, 1023); assert(sends.some(s => s.input.text?.includes('🟦' + 'Z'.repeat(76)))); bridge.close();
 
   seed(); sends = []; notices = [notice(1, `First ![Retry](${ref('demo.png')}) Last`), notice(2, 'Next notice')]; fault = { method: 'sendPhoto', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 1); bridge.close(); start(); await bridge.flush(); assert.equal(sends.filter(s => s.input.text?.includes('First')).length, 1); assert.equal(sends.filter(s => s.method === 'sendPhoto').length, 1); assert.equal(JSON.parse(sends.find(s => s.method === 'sendPhoto').input.reply_parameters).message_id, sends[0].message_id); assert(sends.at(-1).input.text.includes('Next notice')); assert.equal(sends.at(-1).input.reply_parameters, undefined); bridge.close();
 

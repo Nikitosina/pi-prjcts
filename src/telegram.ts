@@ -226,8 +226,9 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
     for (const match of text.matchAll(/\uE000(\d+)\uE001/g)) {
       for (const chunk of splitTelegramHtml(text.slice(cursor, match.index))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
       const media = extracted.media[Number(match[1])];
-      plan.push({ kind: "media", media: { ...media, caption: media.caption.slice(0, 1024) } });
-      for (const chunk of splitTelegramHtml(escapeHtml(media.caption.slice(1024)))) if (chunk) plan.push({ kind: "text", text: chunk });
+      const caption = media.caption.slice(0, 1024).replace(/[\uD800-\uDBFF]$/, "");
+      plan.push({ kind: "media", media: { ...media, caption } });
+      for (const chunk of splitTelegramHtml(escapeHtml(media.caption.slice(caption.length)))) if (chunk) plan.push({ kind: "text", text: chunk });
       cursor = match.index + match[0].length;
     }
     for (const chunk of splitTelegramHtml(text.slice(cursor))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
