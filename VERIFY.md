@@ -1,6 +1,6 @@
 # MVP verification contract
 
-`npm run verify` is the deterministic gate (CI runs it): `tsc --noEmit` plus the fake-model host checks `e2e:durable-runtime`, `e2e:durable-knowledge`, `e2e:coordinator-efficiency` and `e2e:quota-status`. Each check writes a dated evidence directory under `artifacts/`. Failure modes for a script live beside it in `scripts/<name>-failures.md`, written before the code.
+`npm run verify` is the deterministic gate used by CI. It runs `tsc --noEmit`, the existing runtime/knowledge/coordinator/quota/status checks, and the worker quota recovery, known-reset, reset-unit, retry-receipt and settlement-race regressions. The runner uses three jobs and a 240-second limit per script, with serial retries for failures. CI limits the whole job to 15 minutes. Browser-only quota settings remain a targeted local check, `node scripts/worker-quota-settings-ui-e2e.mjs`. Each check writes a dated evidence directory under `artifacts/`. Failure modes for a script live beside it in `scripts/<name>-failures.md`, written before the code.
 
 The gate does not cover the browser UI, simulators or real model credentials. Run the matching `scripts/*-e2e.mjs` by hand for those (`node scripts/<name>-e2e.mjs`), and list the checks you did not run in your report. Several of them still hardcode paths under `/Users/nikitarat`.
 
