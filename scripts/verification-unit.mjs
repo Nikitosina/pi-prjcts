@@ -18,6 +18,9 @@ try {
   // Criteria: the delegation's bullet list, else the whole brief as one criterion.
   const brief = 'Do the thing\n\nAcceptance criteria (done means all are met):\n- first thing works\n- second thing works\n';
   check('criteria come from the acceptance list, numbered c1..', JSON.stringify(model.parseCriteria(brief)) === JSON.stringify([{ id: 'c1', text: 'first thing works' }, { id: 'c2', text: 'second thing works' }]));
+  for (const heading of ['Acceptance criteria', 'Acceptance array (pass all individually verbatim)']) {
+    check(`${heading} retains numbered criteria individually`, JSON.stringify(model.parseCriteria(`Do the thing\n\n${heading}:\n1. first thing works\n2. second thing works\n`)) === JSON.stringify([{ id: 'c1', text: 'first thing works' }, { id: 'c2', text: 'second thing works' }]));
+  }
   check('a brief without a list is one criterion', model.parseCriteria('Just fix it').length === 1 && model.parseCriteria('Just fix it')[0].text === 'Just fix it');
 
   // Verdict rules.

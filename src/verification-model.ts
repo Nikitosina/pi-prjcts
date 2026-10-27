@@ -39,11 +39,11 @@ export type Verification = {
 /** A verdict answers criteria by id c1..c20, and the verifier's brief carries the whole task. Beyond these the cycle is refused (blocked), never cut short. */
 export const MAX_CRITERIA = 20;
 export const MAX_TASK_CHARS = 24000;
-const HEADER = /^Acceptance criteria\b[^\n]*:\s*$/m;
-/** Criteria are the bullet list the delegation appended to the brief; a brief without one is a single criterion. Nothing is truncated: the caller refuses what does not fit. */
+const HEADER = /^Acceptance (?:criteria|array)\b[^\n]*:\s*$/m;
+/** Criteria are the explicit acceptance list (bulleted or numbered); a brief without one is a single criterion. Nothing is truncated: the caller refuses what does not fit. */
 export function parseCriteria(brief: string): Criterion[] {
   const header = HEADER.exec(brief);
-  const items = header ? brief.slice(header.index + header[0].length).split("\n").map(line => /^\s*[-*]\s+(.+)$/.exec(line)?.[1]?.trim()).filter((item): item is string => Boolean(item)) : [];
+  const items = header ? brief.slice(header.index + header[0].length).split("\n").map(line => /^\s*(?:[-*]|\d+[.)])\s+(.+)$/.exec(line)?.[1]?.trim()).filter((item): item is string => Boolean(item)) : [];
   const texts = items.length ? items : [brief.trim() || "The task as briefed"];
   return texts.map((text, index) => ({ id: `c${index + 1}`, text }));
 }
