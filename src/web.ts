@@ -109,6 +109,11 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
     ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
   ]);
+  // PROTOTYPE (web/PROTOTYPE-SIDEBAR-NOTES.md): opt-in ?variant= sidebar/tabs prototype, never served in production.
+  if (process.env.NODE_ENV !== "production") {
+    assets.set("/prototype-sidebar.js", { path: "prototype-sidebar.js", mime: "text/javascript; charset=utf-8" });
+    assets.set("/prototype-sidebar.css", { path: "prototype-sidebar.css", mime: "text/css; charset=utf-8" });
+  }
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",

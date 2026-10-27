@@ -4092,3 +4092,9 @@ const markSettingsNav = () => {
 document.querySelector(".body").addEventListener("scroll", markSettingsNav, { passive: true });
 new MutationObserver(markSettingsNav).observe(document.querySelector('[data-panel="settings"]'), { attributes: true, attributeFilter: ["hidden"] });
 
+
+// PROTOTYPE (web/PROTOTYPE-SIDEBAR-NOTES.md): opt-in only. Without ?variant= nothing below runs; the files are not served in production.
+if (initial.searchParams.has("variant")) {
+  document.head.append(Object.assign(document.createElement("link"), { rel: "stylesheet", href: "/prototype-sidebar.css" }));
+  document.body.append(Object.assign(document.createElement("script"), { src: "/prototype-sidebar.js" }));
+}
