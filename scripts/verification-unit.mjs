@@ -21,6 +21,17 @@ try {
   for (const heading of ['Acceptance criteria', 'Acceptance array (pass all individually verbatim)']) {
     check(`${heading} retains numbered criteria individually`, JSON.stringify(model.parseCriteria(`Do the thing\n\n${heading}:\n1. first thing works\n2. second thing works\n`)) === JSON.stringify([{ id: 'c1', text: 'first thing works' }, { id: 'c2', text: 'second thing works' }]));
   }
+  const extractionCases = [
+    ['multiline permission clause', 'Acceptance criteria:\n1. Save the record\n   without changing existing permissions.', ['Save the record\n   without changing existing permissions.']],
+    ['nested numbered examples', 'Acceptance criteria:\n1. Preserve examples:\n   1. first example\n   2. second example\n2. Save the record', ['Preserve examples:\n   1. first example\n   2. second example', 'Save the record']],
+    ['following Findings section', 'Acceptance criteria:\n1. real requirement\n\nFindings:\n1. repair advice', ['real requirement']],
+    ['unsupported example heading', 'Acceptance array examples:\n1. not a declared criterion', ['Acceptance array examples:\n1. not a declared criterion']],
+    ['many nested examples', 'Acceptance criteria:\n- Preserve these examples:\n' + Array.from({ length: 25 }, (_, i) => `  ${i + 1}. example`).join('\n'), ['Preserve these examples:\n' + Array.from({ length: 25 }, (_, i) => `  ${i + 1}. example`).join('\n')]],
+    ['indented list and section boundary', 'Acceptance criteria:\n  * Save the record\n    without changing permissions.\n  * Keep audit history\n\nFindings:\n- repair advice', ['Save the record\n    without changing permissions.', 'Keep audit history']],
+  ];
+  const extractionResults = extractionCases.map(([name, input, expected]) => ({ name, actual: model.parseCriteria(input).map(c => c.text), expected }));
+  if (process.env.PI_ARTIFACTS_DIR) writeFileSync(join(process.env.PI_ARTIFACTS_DIR, 'parser-cases.json'), JSON.stringify(extractionResults, null, 2));
+  check('acceptance extraction retains parent clauses and stops at the next section', extractionResults.every(c => JSON.stringify(c.actual) === JSON.stringify(c.expected)));
   check('a brief without a list is one criterion', model.parseCriteria('Just fix it').length === 1 && model.parseCriteria('Just fix it')[0].text === 'Just fix it');
 
   // Verdict rules.

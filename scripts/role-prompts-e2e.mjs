@@ -11,7 +11,7 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
   if (role === 'coordinator' && user === 'SKILL-READ' && results.length < 3) return call('projects_skill_file', results.length === 1 ? { skill: 'code-review' } : { skill: 'pr-review', ...(results.length === 2 ? { path: 'references/bugs-performance.md' } : {}) });
   if (role === 'coordinator' && user === 'ROUND' && !results.length) return call('projects_delegate', { task: 'ROUND-PARENT' });
   if (role === 'coordinator' && user === 'SCOUT' && !results.length) return call('projects_delegate', { role: 'scout', task: 'SCOUT-PROBE' });
-  if (role === 'coordinator' && user === 'VERIFY' && !results.length) return call('projects_delegate', { task: 'VERIFY-PROBE', acceptance: ['node exits zero'] });
+  if (role === 'coordinator' && user === 'VERIFY' && !results.length) return call('projects_delegate', { task: 'VERIFY-PROBE', acceptance: ['node exits zero\nwithout changing source files'] });
   if (role === 'worker' && user === 'ROUND-PARENT') {
     if (results.length < 3) return call('projects_delegate_child', { role: 'reviewer', task: `Pinned review axis ${axes[results.length]}` });
     if (results.length === 3) return call('projects_delegate_child', { role: 'reviewer', task: 'FOURTH-MUST-BLOCK' });
@@ -59,6 +59,8 @@ await kit.run(async () => {
   await kit.ask(id, 'SCOUT');
   await kit.updateSettings(id, { models: { verifier: 'fake/fake-model' }, verification: { enabled: true, skill: 'mini-verify' } });
   await kit.ask(id, 'VERIFY');
+  const verified = Object.values((await kit.rpc({ action: 'plan-snapshot', id })).verification ?? {});
+  kit.check('structured multiline acceptance keeps its constraint in one frozen criterion', verified.some(cycle => cycle.criteria.length === 1 && cycle.criteria[0].text === 'node exits zero\n  without changing source files'));
   const live = Object.fromEntries(Object.keys(DEFAULT_ROLE_PROMPTS).map(role => [role, kit.result.calls.find(c => role === 'verifier' ? c.tools.includes('projects_verify_run') : c.role === role)]));
   for (const [role, request] of Object.entries(live)) {
     assert.ok(request, `missing live ${role}`); assert.ok(request.system.includes(DEFAULT_ROLE_PROMPTS[role]), `default not assembled for ${role}`);
