@@ -94,6 +94,7 @@
     const id = state.active; if (!id || !text.trim()) return;
     (state.extra[id] ??= []).push({ who: "you", text });
     state.drafts[id] = "";
+    const box = shell.querySelector("textarea"); if (box) box.value = "";
     draw(true);
     setTimeout(() => { (state.extra[id] ??= []).push({ who: "coord", text: "Noted. This is a prototype: no model is called and nothing is saved." }); draw(true); }, 500);
   }
@@ -154,7 +155,7 @@
     }
     // Keep the typed draft, focus and scroll positions across a full re-render.
     const old = shell.querySelector("textarea"), hadFocus = old && document.activeElement === old;
-    if (old && state.active) state.drafts[state.active] = old.value;
+    if (old && shell.dataset.active) state.drafts[shell.dataset.active] = old.value; // the coordinator that was on screen, not the new active one
     const scrolls = { side: shell.querySelector(".pp-tree")?.scrollTop ?? 0, convo: shell.querySelector(".pp-scroll")?.scrollTop ?? 0, tabs: shell.querySelector(".pp-tabs")?.scrollLeft ?? 0, id: shell.dataset.active };
     const hit = state.active && byId(m, state.active);
     shell.dataset.v = state.variant; shell.dataset.active = state.active ?? "";
