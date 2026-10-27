@@ -100,6 +100,7 @@ let view = null;
 let knowledgeDocs = [];
 // One SSE reader for the selected project; frames from other projects are dropped.
 let liveStream = null;
+// Explicit chat switches clear the frame; reconnects keep the last received preview readable.
 let liveFrame = null;
 let liveRetryMs = 1000;
 // Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
@@ -280,6 +281,7 @@ function ensureLive() {
   liveStream = stream;
   void readLive(stream).finally(() => {
     if (liveStream !== stream) return;
+    renderLive(true);
     liveStream = null;
     if (stream.controller.signal.aborted) return;
     // Runtime closed or the network dropped: back off, then reconnect through the next refresh.
@@ -312,12 +314,16 @@ async function readLive(stream) {
 async function applyLive(frame) {
   const previous = liveFrame;
   liveFrame = frame;
+  if (frame.text !== previous?.text) {
+    const now = performance.now();
+    liveRevealDeadline = now + 120;
+    if (liveRenderedText === previous?.text) liveRevealTime = now;
+  }
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
   const settled = previous && (previous.entries !== frame.entries || previous.running !== frame.running);
   const selection = settled ? captureLiveSelection() : null;
   if (settled) await settledRefresh();
-  // SSE can deliver a large burst in one task. Paint at most once per frame without delaying the first chunk or the final text.
-  if (settled) { renderLive(); restoreLiveSelection(selection); } else scheduleLiveRender();
+  if (settled) { renderLive(true); restoreLiveSelection(selection); } else if (document.hidden) renderLive(true); else scheduleLiveRender();
 }
 let liveRenderFrame = null;
 function scheduleLiveRender() {
@@ -389,18 +395,68 @@ function liveStatus(frame) {
   return thought ? `Thinking · ${thought}` : "Thinking…";
 }
 function renderWorkingPill() {
-  const pill = document.querySelector("#working-pill"), frame = liveStream?.id === projectId ? liveFrame : null;
+  const pill = document.querySelector("#working-pill"), frame = liveFrame;
   const status = frame?.running ? liveStatus(frame) : "";
   pill.hidden = !status || stickToBottom;
   pill.querySelector(".pill-text").textContent = status;
 }
 
-let liveRenderedText = null;
-function renderLive() {
+const streamMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let liveRenderedText = null, liveRevealDeadline = 0, liveRevealTime = 0;
+
+function newLiveText(value, animate) {
+  if (!animate || !value) return document.createTextNode(value);
+  const span = document.createElement("span");
+  span.className = "stream-fragment"; span.textContent = value;
+  return span;
+}
+
+function patchLiveText(target, source, animate) {
+  let current = target.firstChild;
+  for (const next of source.childNodes) {
+    if (next.nodeType === Node.TEXT_NODE) {
+      const run = [], value = next.data;
+      while (current && (current.nodeType === Node.TEXT_NODE || current.nodeType === Node.ELEMENT_NODE && current.matches(".stream-fragment"))) {
+        run.push(current); current = current.nextSibling;
+      }
+      const before = run.map(node => node.textContent).join("");
+      if (!value.startsWith(before)) { for (const node of run) node.remove(); }
+      const added = value.startsWith(before) ? value.slice(before.length) : value;
+      if (added) target.insertBefore(newLiveText(added, animate), current);
+    } else if (current?.nodeType === Node.ELEMENT_NODE && current.tagName === next.tagName && current.getAttributeNames().length === next.getAttributeNames().length && next.getAttributeNames().every(name => current.getAttribute(name) === next.getAttribute(name))) {
+      if (!current.isEqualNode(next)) patchLiveText(current, next, animate);
+      current = current.nextSibling;
+    } else {
+      const node = next.cloneNode(true), walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) texts.push(text);
+      for (const text of texts) text.replaceWith(newLiveText(text.data, animate));
+      target.insertBefore(node, current);
+    }
+  }
+  while (current) { const next = current.nextSibling; current.remove(); current = next; }
+}
+
+function clearLiveFades() {
+  const root = document.querySelector("#live-reply"), selection = document.getSelection();
+  if (selection && !selection.isCollapsed && (root.contains(selection.anchorNode) || root.contains(selection.focusNode))) return;
+  for (const span of root.querySelectorAll(".stream-fragment")) span.replaceWith(document.createTextNode(span.textContent));
+  root.normalize();
+}
+document.querySelector("#live-reply").addEventListener("animationend", event => {
+  if (event.animationName !== "stream-in") return;
+  const span = event.target, selection = document.getSelection(), root = document.querySelector("#live-reply");
+  if (selection && !selection.isCollapsed && (root.contains(selection.anchorNode) || root.contains(selection.focusNode))) return;
+  const parent = span.parentNode;
+  span.replaceWith(document.createTextNode(span.textContent)); parent?.normalize();
+});
+document.addEventListener("visibilitychange", () => { clearLiveFades(); renderLive(true); });
+streamMotion.addEventListener("change", () => { clearLiveFades(); renderLive(true); });
+
+function renderLive(immediate = false) {
   if (liveRenderFrame !== null) { cancelAnimationFrame(liveRenderFrame); liveRenderFrame = null; }
   const node = document.querySelector("#live-reply");
-  const frame = liveStream?.id === projectId ? liveFrame : null;
-  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; liveRenderedText = null; renderWorkingPill(); return; }
+  const frame = liveFrame;
+  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; liveRenderedText = null; liveRevealTime = 0; renderWorkingPill(); return; }
   const selection = document.getSelection();
   if (selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
   if (!node.querySelector(".text")) {
@@ -411,22 +467,28 @@ function renderLive() {
   thought.hidden = !summary;
   const thoughtTextNode = thought.querySelector(".thought-text");
   if (thoughtTextNode.textContent !== summary) thoughtTextNode.textContent = summary;
-  if (liveRenderedText !== frame.text) {
-    const text = node.querySelector(".text"), next = document.createElement("template");
-    // Close only the preview's open fence so code does not change from paragraphs to a block at completion.
-    const markdown = frame.text + (frame.text.split("```").length % 2 === 0 ? "```" : "");
-    next.innerHTML = renderMarkdown(markdown, { refs: {} });
-    // Keep completed blocks, including their layout and selection, while the unfinished tail grows.
-    let kept = 0;
-    while (next.content.firstChild && text.childNodes[kept]?.isEqualNode(next.content.firstChild)) {
-      kept++; next.content.firstChild.remove();
-    }
-    while (text.childNodes.length > kept) text.lastChild.remove();
-    text.append(next.content);
-    liveRenderedText = frame.text;
+  const now = performance.now(), animate = !immediate && !document.hidden && !streamMotion.matches;
+  let shown = frame.text;
+  if (animate && now < liveRevealDeadline) {
+    const start = liveRenderedText && frame.text.startsWith(liveRenderedText) ? liveRenderedText.length : 0;
+    // Spread provider bursts over a short catch-up window, not a fixed typing speed that can fall behind.
+    const elapsed = Math.min(50, now - liveRevealTime || 16);
+    let end = Math.min(frame.text.length, start + Math.max(1, Math.ceil((frame.text.length - start) * elapsed / Math.max(16, liveRevealDeadline - now))));
+    if (end < frame.text.length && /[\uD800-\uDBFF]/.test(frame.text[end - 1])) end++;
+    shown = frame.text.slice(0, end);
   }
+  liveRevealTime = now;
+  if (liveRenderedText !== shown) {
+    const text = node.querySelector(".text"), next = document.createElement("template");
+    // Close the preview fence without adding text to the code block.
+    const markdown = shown + (shown.split("```").length % 2 === 0 ? "```" : "");
+    next.innerHTML = renderMarkdown(markdown, { refs: {} });
+    text.normalize(); patchLiveText(text, next.content, animate);
+    liveRenderedText = shown;
+  }
+  if (shown !== frame.text) scheduleLiveRender();
   node.querySelector(".text").hidden = !frame.text;
-  node.querySelector(".live-limit").hidden = !frame.textTruncated;
+  node.querySelector(".live-limit").hidden = !frame.textTruncated || shown !== frame.text;
   const status = node.querySelector(".live-status span:last-child"), label = liveStatus(frame);
   if (status.textContent !== label) status.textContent = label;
   node.hidden = false;
@@ -3088,7 +3150,7 @@ const transcriptResize = new ResizeObserver(() => {
 for (const selector of ["#transcript", "#messages", "#live-reply", "#questions"]) transcriptResize.observe(document.querySelector(selector));
 document.addEventListener("selectionchange", () => {
   const selection = document.getSelection(), live = document.querySelector("#live-reply");
-  if (selection?.isCollapsed && live.contains(selection.anchorNode)) scheduleLiveRender();
+  if (selection?.isCollapsed && (live.contains(selection.anchorNode) || liveFrame?.running && liveRenderedText !== liveFrame.text)) scheduleLiveRender();
 });
 for (const id of ["attach-input", "upload-input"]) document.querySelector(`#${id}`).addEventListener("change", event => {
   const files = [...event.target.files]; event.target.value = "";

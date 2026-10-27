@@ -1141,8 +1141,10 @@ a.button-link:hover { background: var(--hover); }
   .body > [data-panel="coordinator"].grid2 { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
   .body > [data-panel="coordinator"] > .col { display: none; }
 }
+@keyframes stream-in { from { opacity: .3; } to { opacity: 1; } }
+.stream-fragment { animation: stream-in 180ms ease-out both; }
 @media (prefers-reduced-motion: reduce) {
-  .live-dot, .search-focus, .artifact-file.fresh { animation: none; }
+  .stream-fragment, .live-dot, .search-focus, .artifact-file.fresh { animation: none; }
   .app.side-animate, .side .side-text { transition: none; }
 }
 
