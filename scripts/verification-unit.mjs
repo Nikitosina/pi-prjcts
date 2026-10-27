@@ -33,6 +33,16 @@ try {
     const malformed = `Acceptance criteria:\n- Save record\n${marker}\n  Preserve permissions\n- Keep audit history`;
     check(`empty peer marker ${marker} cannot freeze a partial list`, JSON.stringify(model.parseCriteria(malformed)) === JSON.stringify([{ id: 'c1', text: malformed }]));
   }
+  const malformedOverflow = [0, 10, 21].map(position => {
+    const lines = Array.from({ length: 21 }, (_, i) => `- Requirement ${i + 1}`);
+    lines.splice(position, 0, '- ');
+    const task = `Acceptance criteria:\n${lines.join('\n')}`;
+    return { position, task, criteria: model.parseCriteria(task), problem: model.criteriaProblem(task, model.parseCriteria(task)) };
+  });
+  if (process.env.PI_ARTIFACTS_DIR) writeFileSync(join(process.env.PI_ARTIFACTS_DIR, 'malformed-overflow.json'), JSON.stringify(malformedOverflow, null, 2));
+  check('empty markers cannot hide overflow before, within or after real peer criteria', malformedOverflow.every(row => /21 acceptance criteria/.test(row.problem)));
+  const malformedShort = 'Acceptance criteria:\n- Save record\n- \n- Preserve permissions\n- Keep audit history';
+  check('a malformed short list cannot approve requirements as one fallback criterion', /empty.*item/i.test(model.criteriaProblem(malformedShort, model.parseCriteria(malformedShort))));
   const extractionResults = extractionCases.map(([name, input, expected]) => ({ name, actual: model.parseCriteria(input).map(c => c.text), expected }));
   if (process.env.PI_ARTIFACTS_DIR) writeFileSync(join(process.env.PI_ARTIFACTS_DIR, 'parser-cases.json'), JSON.stringify(extractionResults, null, 2));
   check('acceptance extraction retains parent clauses and stops at the next section', extractionResults.every(c => JSON.stringify(c.actual) === JSON.stringify(c.expected)));

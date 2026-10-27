@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createKit, call, say } from './lib/e2e-kit.mjs';
+import { createKit, call, say, randomUUID } from './lib/e2e-kit.mjs';
 import { DEFAULT_ROLE_PROMPTS, SHARED_ROLE_RULES } from '../src/role-prompts.ts';
 
 let release, parentHeld = false, readProof, verificationCriteriaCount = 1;
@@ -10,6 +10,16 @@ const structuredCases = [
   { name: 'whitespace-multiline', input: [' \t Save record\nwithout changing content', '\t \n  Preserve permissions\n  across resets', 'Keep audit history\nwith original actor'], expected: ['Save record\n  without changing content', 'Preserve permissions\n    across resets', 'Keep audit history\n  with original actor'] },
   { name: 'twenty', input: ['Save record', '\nPreserve permissions', ...Array.from({ length: 18 }, (_, i) => `Keep audit history ${i}`)], expected: ['Save record', 'Preserve permissions', ...Array.from({ length: 18 }, (_, i) => `Keep audit history ${i}`)] },
 ];
+const textualCases = [
+  { name: 'empty-last', count: 21, position: 21 },
+  { name: 'empty-first', count: 21, position: 0 },
+  { name: 'empty-middle', count: 21, position: 10 },
+  { name: 'malformed-below-limit', count: 3, position: 1 },
+].map(fixture => {
+  const lines = Array.from({ length: fixture.count }, (_, i) => `- Requirement ${i + 1}`);
+  lines.splice(fixture.position, 0, '- ');
+  return { ...fixture, task: `TEXTUAL-${fixture.name}\nAcceptance criteria:\n${lines.join('\n')}` };
+});
 const hold = new Promise(ok => { release = ok; });
 const axes = ['Standards', 'Spec', 'Bugs/performance'];
 const kit = await createKit('role-prompts', { handler: async ({ role, user, results, tools }) => {
@@ -18,6 +28,7 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
   if (role === 'coordinator' && user === 'SCOUT' && !results.length) return call('projects_delegate', { role: 'scout', task: 'SCOUT-PROBE' });
   if (role === 'coordinator' && user === 'VERIFY' && !results.length) return call('projects_delegate', { task: 'VERIFY-PROBE', acceptance: ['node exits zero\nwithout changing source files'] });
   if (role === 'coordinator' && user.startsWith('PREFIX-') && !results.length) return call('projects_delegate', { task: user, acceptance: user === 'PREFIX-overlimit' ? Array.from({ length: 21 }, (_, i) => `Requirement ${i}`) : structuredCases.find(c => user === `PREFIX-${c.name}`).input });
+  if (role === 'coordinator' && user.startsWith('TEXTUAL-') && !results.length) return call('projects_delegate', { task: textualCases.find(c => user === `TEXTUAL-${c.name}`).task });
   if (role === 'worker' && user === 'ROUND-PARENT') {
     if (results.length < 3) return call('projects_delegate_child', { role: 'reviewer', task: `Pinned review axis ${axes[results.length]}` });
     if (results.length === 3) return call('projects_delegate_child', { role: 'reviewer', task: 'FOURTH-MUST-BLOCK' });
@@ -81,6 +92,23 @@ await kit.run(async () => {
   const beforeLimit = (await kit.plan(id)).length;
   await kit.ask(id, 'PREFIX-overlimit');
   kit.check('structured 21-item input is refused, never truncated', (await kit.plan(id)).length === beforeLimit && kit.lastCall('coordinator', 'PREFIX-overlimit').results.some(r => /20/.test(r)));
+  const followupThread = (await kit.plan(id)).find(w => w.role === 'worker' && w.text.startsWith('VERIFY-PROBE\n')).threadId;
+  for (const fixture of textualCases) {
+    for (const route of ['task', 'followup']) {
+      const verifierCount = (await kit.plan(id)).filter(w => w.role === 'verifier').length;
+      if (route === 'task') await kit.ask(id, `TEXTUAL-${fixture.name}`);
+      else {
+        await kit.rpc({ action: 'thread-send', id, threadId: followupThread, requestId: randomUUID(), text: fixture.task });
+        await kit.settle(id);
+      }
+      const plan = await kit.rpc({ action: 'plan-snapshot', id });
+      const work = plan.work.find(w => w.role === 'worker' && w.text === fixture.task && (route === 'followup' ? w.threadId === followupThread : w.threadId !== followupThread));
+      const cycle = plan.verification[work.threadId];
+      writeFileSync(join(kit.artifacts, `textual-${route}-${fixture.name}.json`), JSON.stringify({ input: fixture.task, work, cycle }, null, 2));
+      kit.check(`textual ${route} refuses ${fixture.name} without a verifier or placeholder criteria`, work.status === 'blocked' && cycle.outcome === 'escalated' && cycle.attempts.length === 0 && cycle.criteria.length === 0 && plan.work.filter(w => w.role === 'verifier').length === verifierCount, { work, cycle });
+      kit.check(`textual ${route} explains ${fixture.name} refusal`, fixture.count > 20 ? /21 acceptance criteria/.test(cycle.reason) : /empty.*item/i.test(cycle.reason), cycle.reason);
+    }
+  }
   const live = Object.fromEntries(Object.keys(DEFAULT_ROLE_PROMPTS).map(role => [role, kit.result.calls.find(c => role === 'verifier' ? c.tools.includes('projects_verify_run') : c.role === role)]));
   for (const [role, request] of Object.entries(live)) {
     assert.ok(request, `missing live ${role}`); assert.ok(request.system.includes(DEFAULT_ROLE_PROMPTS[role]), `default not assembled for ${role}`);

@@ -42,36 +42,45 @@ export const MAX_TASK_CHARS = 24000;
 const HEADER = /^Acceptance (?:criteria|array)(?:[ \t]+\([^\r\n]*\))?:[ \t]*\r?$/m;
 const EMPTY_ITEM = /^([ \t]*)(?:[-*]|\d+[.)])[ \t]*$/;
 const ITEM = /^([ \t]*)(?:[-*]|\d+[.)])[ \t]+(\S.*)$/;
-/** Parse one acceptance list. Same-indent markers start criteria; deeper lines stay verbatim with their parent. The next nonblank dedented line ends the section. */
-export function parseCriteria(brief: string): Criterion[] {
+/** Same-indent markers are peers; deeper lines belong to their parent. Stop at the next nonblank dedented section. */
+function acceptanceList(brief: string) {
   const header = HEADER.exec(brief), items: string[] = [];
+  let malformed = false;
   if (header) {
     const lines = brief.slice(header.index + header[0].length).split("\n");
     const start = lines.findIndex(line => line.trim());
-    const first = ITEM.exec(lines[start] ?? "");
+    const first = ITEM.exec(lines[start] ?? "") ?? EMPTY_ITEM.exec(lines[start] ?? "");
     if (first) {
       const [, indent = "", body = ""] = first;
       let current = body;
+      malformed = !body;
       for (const line of lines.slice(start + 1)) {
-        const item = ITEM.exec(line);
+        const item = ITEM.exec(line) ?? EMPTY_ITEM.exec(line);
         if (item && item[1] === indent) {
-          items.push(current.trimEnd());
+          if (current.trim()) items.push(current.trimEnd());
           current = item[2] ?? "";
-        } else if (EMPTY_ITEM.exec(line)?.[1] === indent) {
-          return [{ id: "c1", text: brief.trim() }];
+          malformed ||= !current;
         } else if (!line.trim() || line.startsWith(indent) && /^[ \t]/.test(line.slice(indent.length))) {
           current += `\n${line}`;
         } else break;
       }
-      items.push(current.trimEnd());
+      if (current.trim()) items.push(current.trimEnd());
     }
   }
-  const texts = items.length ? items : [brief.trim() || "The task as briefed"];
+  return { items, malformed };
+}
+/** Malformed lists retain the whole brief, but criteriaProblem refuses them before verification. */
+export function parseCriteria(brief: string): Criterion[] {
+  const { items, malformed } = acceptanceList(brief);
+  const texts = items.length && !malformed ? items : [brief.trim() || "The task as briefed"];
   return texts.map((text, index) => ({ id: `c${index + 1}`, text }));
 }
 /** Why a brief cannot be verified intact, or null. */
 export function criteriaProblem(task: string, criteria: readonly Criterion[]): string | null {
-  if (criteria.length > MAX_CRITERIA) return `The task lists ${criteria.length} acceptance criteria and a verdict can answer ${MAX_CRITERIA}; none were dropped, so it is not verified. Split the task`;
+  const { items, malformed } = acceptanceList(task);
+  const count = Math.max(criteria.length, items.length);
+  if (count > MAX_CRITERIA) return `The task lists ${count} acceptance criteria and a verdict can answer ${MAX_CRITERIA}; none were dropped, so it is not verified. Split the task`;
+  if (malformed) return "The acceptance list has an empty peer item; give every criterion a nonempty first line before verification";
   if (task.length > MAX_TASK_CHARS) return `The task brief is ${task.length} characters; a verifier receives at most ${MAX_TASK_CHARS} intact, so it is not verified. Shorten or split the task`;
   return null;
 }
