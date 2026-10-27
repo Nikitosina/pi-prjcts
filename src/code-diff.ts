@@ -22,12 +22,13 @@ export async function codeDiff(root: string, base?: string, page: DiffPage = {})
   const text = async (result: Promise<CliResult>, what: string, tolerate = false) => { const out = await result; if (out.code && !(tolerate && out.stdout)) throw new Error(`${what} failed: ${out.stderr.trim().slice(-300) || `exit ${out.code}`}`); return out.stdout; };
   const git = (...args: string[]) => runCli(cli.git(), ["-C", vcs.root, "--literal-pathspecs", ...args]);
   const only = path === undefined ? [] : [path];
-  let mergeBase: string, changed: string, diff: string, untracked: string[] = [];
+  let mergeBase: string, changed: string, diff: string, revision = "", untracked: string[] = [];
   if (vcs.kind === "git") {
     let chosen = base;
     for (const candidate of base ? [] : DEFAULT_BASES) if (!chosen && (await git("rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`)).code === 0) chosen = candidate;
     if (!chosen) throw new Error("Could not find a default branch to diff against (tried origin/HEAD, origin/main, origin/master, main, master); pass base");
     mergeBase = (await text(git("merge-base", "--end-of-options", chosen, "HEAD"), `git merge-base ${chosen} HEAD`)).trim();
+    revision = (await text(git("rev-parse", "--verify", "HEAD^{commit}"), "git rev-parse HEAD")).trim();
     const flags = ["--no-ext-diff", "--no-textconv", "--no-color"];
     changed = await text(git("diff", ...flags, "--stat=200", mergeBase, "--", ...only), "git diff --stat", true);
     diff = await text(git("diff", ...flags, mergeBase, "--", ...only), "git diff", true);
@@ -43,7 +44,7 @@ export async function codeDiff(root: string, base?: string, page: DiffPage = {})
     ({ mergeBase, changed, diff, untracked } = await provider.codeDiff(vcs.root, base, { text, cap: CODE_DIFF_CAP }));
   }
   if (offset > diff.length) throw new Error(`offset ${offset} is past the end of the ${diff.length}-character diff`);
-  const head = ellipsize(`Diff of this checkout (${vcs.kind}) against merge-base ${mergeBase.slice(0, 12)}${base ? ` with ${base}` : ""}${path ? `, limited to ${path}` : ""}, including uncommitted changes.${untracked.length ? ` ${untracked.length} new untracked file(s): ${untracked.slice(0, 12).join(", ")}${untracked.length > 12 ? ", ..." : ""}.` : ""}`, HEAD_BYTES);
+  const head = ellipsize(`Diff of this checkout (${vcs.kind})${revision ? ` at HEAD ${revision}` : ""} against merge-base ${mergeBase.slice(0, 12)}${base ? ` with ${base}` : ""}${path ? `, limited to ${path}` : ""}, including uncommitted changes.${untracked.length ? ` ${untracked.length} new untracked file(s): ${untracked.slice(0, 12).join(", ")}${untracked.length > 12 ? ", ..." : ""}.` : ""}`, HEAD_BYTES);
   if (!diff.trim() && !untracked.length) return `${head}\nNo changes.`;
   // Page 0 leads with the changed-file list; later pages are the bare continuation.
   const lead = offset === 0 ? `${head}\nChanged files:\n${shortList(changed.trim() || "(none tracked)")}\n\n` : "";

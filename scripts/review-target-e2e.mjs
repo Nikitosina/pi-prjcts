@@ -86,6 +86,7 @@ await kit.run(async () => {
   const [featRead, featDiff] = reviewerOut('git-R1');
   check('git F7: reviewer with a ref sees that ref\'s content', featRead?.includes('FEATURE-ONLY'), featRead);
   check('git: code_diff on a ref snapshot shows its change against base', featDiff?.includes('+FEATURE-ONLY'), featDiff);
+  check('git: read-only diff identifies the full candidate HEAD, not just its merge-base', featDiff?.includes(`HEAD ${kit.git(kit.workspace, 'rev-parse', 'feature-x').trim()}`), featDiff);
   const missing = await delegate(git, { role: 'reviewer', ref: 'nope/not-there', task: 'x' }, 'git-R2');
   check('git F7: unresolvable ref fails the delegation (no trunk fallback)', /not found/.test(missing), missing);
 
