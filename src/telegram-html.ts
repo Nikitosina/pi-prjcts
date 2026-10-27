@@ -88,3 +88,24 @@ export function splitTelegramHtml(html: string, limit = TELEGRAM_LIMIT): string[
   if (htmlToPlain(current).trim()) parts.push(current + closers());
   return parts;
 }
+
+/** Caption limit is parsed characters, not serialized HTML. Spillover uses the text-message limit. */
+export function splitTelegramCaption(html: string): string[] {
+  const parts: string[] = [], stack: { name: string; open: string }[] = [];
+  let current = "", length = 0;
+  const close = () => stack.map(tag => `</${tag.name}>`).reverse().join("");
+  const flush = () => { parts.push(current + close()); current = stack.map(tag => tag.open).join(""); length = 0; };
+  for (const token of html.replace(/\r\n?/g, "\n").match(/<[^>]+>|&(?:lt|gt|amp|quot|#\d+);|[^<&]|[<&]/gu) ?? []) {
+    if (token.startsWith("<") && token.endsWith(">")) {
+      const end = /^<\//.test(token), name = /^<\/?([\w-]+)/.exec(token)?.[1];
+      if (end) { current += token; stack.pop(); }
+      else if (name) { stack.push({ name, open: token }); current += token; }
+      continue;
+    }
+    const size = Array.from(htmlToPlain(token)).length;
+    if (length + size > (parts.length ? TELEGRAM_LIMIT : 1024)) flush();
+    current += token; length += size;
+  }
+  if (length) parts.push(current + close());
+  return parts;
+}

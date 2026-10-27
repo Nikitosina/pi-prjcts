@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
+import { extractTelegramMedia } from "./telegram-media.ts";
 import { PR_NOTICE_TITLE } from "./pr-notices.ts";
 import { loadAutomations } from "./project-automations.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
@@ -95,7 +96,7 @@ export function startNotifier(options: { owner: (project: Project) => Promise<Du
         if (quiet) continue;
         // Watchdog checks are internal coordinator turns, never an owner-facing "Finished".
         if (submission.requestId?.startsWith("event:watchdog:")) continue;
-        if (submission.status === "done" && submission.text?.trim() && !working.has(chat.id) && !submissions.slice(index + 1).some(later => later.requestId?.startsWith("plan-report:") || later.answerId !== null && later.answerId === submission.answerId)) push({ ...base, chatId: chat.id, chat: chat.title, kind: "result", title: "Finished", text: clip(submission.text.trim()) });
+        if (submission.status === "done" && submission.text?.trim() && !working.has(chat.id) && !submissions.slice(index + 1).some(later => later.requestId?.startsWith("plan-report:") || later.answerId !== null && later.answerId === submission.answerId)) push({ ...base, chatId: chat.id, chat: chat.title, kind: "result", title: "Finished", text: extractTelegramMedia(submission.text).media.some(media => media.ref.startsWith("artifact:")) ? submission.text.trim() : clip(submission.text.trim()) });
         else if (submission.status === "unanswered" && submission.reason !== "aborted") push({ ...base, chatId: chat.id, chat: chat.title, kind: "error", title: "Coordinator turn failed", text: clip(`${submission.reason ?? "failed"}${submission.detail ? `: ${submission.detail}` : ""}`) });
       }
       entry.chats[chat.id] = last;
