@@ -395,16 +395,40 @@ function renderWorkingPill() {
   pill.querySelector(".pill-text").textContent = status;
 }
 
+let liveRenderedText = null;
 function renderLive() {
   if (liveRenderFrame !== null) { cancelAnimationFrame(liveRenderFrame); liveRenderFrame = null; }
   const node = document.querySelector("#live-reply");
   const frame = liveStream?.id === projectId ? liveFrame : null;
-  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; renderWorkingPill(); return; }
-  // Once text streams, the reasoning summary steps aside into a quiet line above it, as in the transcript.
+  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; liveRenderedText = null; renderWorkingPill(); return; }
   const selection = document.getSelection();
   if (selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
-  const status = liveStatus(frame), thought = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
-  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${thought ? `<p class="thought live"><span class="thought-mark">Thinking</span>${esc(thought)}</p>` : ""}${frame.text ? `<div class="text">${renderMarkdown(frame.text, { refs: {} })}</div>` : ""}<p class="live-status"><span class="live-dot"></span><span>${esc(status)}</span></p>`;
+  if (!node.querySelector(".text")) {
+    node.innerHTML = '<div class="who">Coordinator <small class="inline">live</small></div><p class="thought live" hidden><span class="thought-mark">Thinking</span><span class="thought-text"></span></p><div class="text"></div><p class="note live-limit" hidden>Live preview limit reached. The full reply will appear when it finishes.</p><p class="live-status"><span class="live-dot"></span><span></span></p>';
+    liveRenderedText = null;
+  }
+  const thought = node.querySelector(".thought"), summary = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
+  thought.hidden = !summary;
+  const thoughtTextNode = thought.querySelector(".thought-text");
+  if (thoughtTextNode.textContent !== summary) thoughtTextNode.textContent = summary;
+  if (liveRenderedText !== frame.text) {
+    const text = node.querySelector(".text"), next = document.createElement("template");
+    // Close only the preview's open fence so code does not change from paragraphs to a block at completion.
+    const markdown = frame.text + (frame.text.split("```").length % 2 === 0 ? "```" : "");
+    next.innerHTML = renderMarkdown(markdown, { refs: {} });
+    // Keep completed blocks, including their layout and selection, while the unfinished tail grows.
+    let kept = 0;
+    while (next.content.firstChild && text.childNodes[kept]?.isEqualNode(next.content.firstChild)) {
+      kept++; next.content.firstChild.remove();
+    }
+    while (text.childNodes.length > kept) text.lastChild.remove();
+    text.append(next.content);
+    liveRenderedText = frame.text;
+  }
+  node.querySelector(".text").hidden = !frame.text;
+  node.querySelector(".live-limit").hidden = !frame.textTruncated;
+  const status = node.querySelector(".live-status span:last-child"), label = liveStatus(frame);
+  if (status.textContent !== label) status.textContent = label;
   node.hidden = false;
   followTranscript();
   renderWorkingPill();
@@ -416,10 +440,10 @@ function selectionOffset(root, node, offset) {
   range.setEnd(node, offset);
   return range.toString().length;
 }
-function selectionPoint(root, offset) {
+function selectionPoint(root, offset, end) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (offset <= node.length) return { node, offset };
+    if (offset < node.length || end && offset === node.length) return { node, offset };
     offset -= node.length;
   }
   return null;
@@ -432,7 +456,8 @@ function captureLiveSelection() {
 function restoreLiveSelection(saved) {
   if (!saved || saved.projectId !== projectId || saved.chatId !== chatId) return;
   const root = [...document.querySelectorAll("#messages .msg.them .text")].reverse().find(node => node.textContent.startsWith(saved.text));
-  const anchor = root && selectionPoint(root, saved.anchor), focus = root && selectionPoint(root, saved.focus);
+  // At block boundaries, start inside the next text node rather than selecting a rendered line break.
+  const anchor = root && selectionPoint(root, saved.anchor, saved.anchor > saved.focus), focus = root && selectionPoint(root, saved.focus, saved.focus > saved.anchor);
   if (!anchor || !focus) return;
   document.getSelection().setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
 }

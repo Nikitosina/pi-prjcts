@@ -7,8 +7,27 @@ const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id: 'fake', ob
 let finishSelectionStream;
 const selectionGate = new Promise(resolve => { finishSelectionStream = resolve; });
 const selectionText = 'Select this live paragraph while the reply is still running.';
+const longBlock = i => `## Stable section ${i}\n\nReading marker ${i}. ${'Keep this paragraph readable while later output arrives. '.repeat(8)}\n\n\`\`\`sh\nprintf 'stable code ${i}\\n'\nnpm run check\n\`\`\`\n\n`;
+const longPrefix = Array.from({ length: 10 }, (_, i) => longBlock(i)).join('');
+const longMiddle = Array.from({ length: 20 }, (_, i) => longBlock(i + 10)).join('') + '```text\n' + 'growing code line '.repeat(2200) + '\n```\n\n';
+const longExtra = Array.from({ length: 20 }, (_, i) => longBlock(i + 70)).join('');
+const longText = longPrefix + longMiddle + longExtra;
+let continueLong, extendLong, finishLong;
+const longGates = [new Promise(r => { continueLong = r; }), new Promise(r => { extendLong = r; }), new Promise(r => { finishLong = r; })];
 const k = await createKit('streaming-scroll-viewport', { handler: async ({ role, user }) => {
   if (role !== 'coordinator') return undefined;
+  if (user.includes('MARK-LONG')) return (async function* () {
+    yield chunk({ role: 'assistant', content: longPrefix });
+    await longGates[0];
+    for (let at = 0; at < longMiddle.length; at += 2000) {
+      yield chunk({ content: longMiddle.slice(at, at + 2000) });
+      await delay(120);
+    }
+    await longGates[1];
+    yield chunk({ content: longExtra });
+    await longGates[2];
+    yield chunk({}, 'stop') + 'data: [DONE]\n\n';
+  })();
   if (user.includes('MARK-SELECTION')) return (async function* () {
     yield chunk({ role: 'assistant', content: selectionText });
     await selectionGate;
@@ -141,6 +160,53 @@ await k.run(async () => {
   k.check('R8T selected stream final browser text exactly matches host', selectedHost === selectionText + ' The final paragraph arrived.' && selectedBrowser === selectedHost, { selectedHost, selectedBrowser });
   k.check('R8L streaming completion moves selection into the matching committed message', settledSelection.hidden && settledSelection.selected === settledSelection.expected && settledSelection.connected && settledSelection.inFinal, { ...settledSelection, expected: settledSelection.expected.slice(0, 100), selected: settledSelection.selected.slice(0, 100) });
   await page.evaluate(`getSelection().removeAllRanges()`);
+
+  // Read an early code block while a >4,000-character reply grows past the bounded preview.
+  await page.evaluate(`(() => {
+    window.__liveBudget = { frames: 0, maxText: 0, maxBytes: 0, parses: 0, maxParseMs: 0 };
+    window.__originalApplyLive = applyLive; window.__originalMarkdown = renderMarkdown;
+    applyLive = async frame => { const b = window.__liveBudget; b.frames++; b.maxText = Math.max(b.maxText, frame.text.length); b.maxBytes = Math.max(b.maxBytes, new TextEncoder().encode(JSON.stringify(frame)).length); return window.__originalApplyLive(frame); };
+    renderMarkdown = (...args) => { const start = performance.now(), result = window.__originalMarkdown(...args), b = window.__liveBudget; if (String(args[0]).startsWith('## Stable section 0')) { b.parses++; b.maxParseMs = Math.max(b.maxParseMs, performance.now() - start); } return result; };
+    document.querySelector('#compose textarea').focus();
+  })()`);
+  await page.cdp('Input.insertText', { text: 'MARK-LONG' });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.waitFor(`document.querySelector('#live-reply .text')?.innerText.includes('Stable section 9')`, 'long prefix visible');
+  const beforeLong = await page.evaluate(`(() => {
+    const t = document.querySelector('#transcript'), code = document.querySelector('#live-reply pre');
+    t.scrollTop += code.getBoundingClientRect().top - t.getBoundingClientRect().top - 35; t.dispatchEvent(new Event('scroll'));
+    window.__readingCode = code;
+    return { text: code.textContent, top: code.getBoundingClientRect().top, gap: t.scrollHeight - t.scrollTop - t.clientHeight };
+  })()`);
+  k.check('L1 reading starts inside a >4000-character live reply and is unfollowed', longPrefix.length > 4000 && beforeLong.gap > 100, beforeLong);
+  continueLong();
+  await page.waitFor(`!document.querySelector('#live-reply .live-limit')?.hidden`, 'bounded preview reached');
+  const duringLong = await page.evaluate(`(() => {
+    const code = window.__readingCode;
+    return { text: code.textContent, top: code.getBoundingClientRect().top, connected: code.isConnected, stillFirst: document.querySelector('#live-reply pre') === code, budget: { ...window.__liveBudget }, visible: code.getBoundingClientRect().top >= document.querySelector('#transcript').getBoundingClientRect().top };
+  })()`);
+  k.check('L2 long stream keeps the same visible code text, DOM node and position, not just scrollTop', duringLong.connected && duringLong.stillFirst && duringLong.visible && duringLong.text === beforeLong.text && Math.abs(duringLong.top - beforeLong.top) < 2, { beforeLong, duringLong });
+  extendLong();
+  await delay(1000);
+  const capped = await page.evaluate(`({ ...window.__liveBudget })`);
+  k.check('L3 preview bounds transport and skips markdown parsing after the cap', capped.maxText === 32768 && capped.maxBytes < 40000 && capped.parses === duringLong.budget.parses && capped.maxParseMs < 100, { during: duringLong.budget, capped });
+  const cappedSelection = await page.evaluate(`(() => {
+    const range = document.createRange(); range.selectNodeContents(window.__readingCode);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(range);
+    return { selected: s.toString(), lastCode: document.querySelector('#live-reply .text pre:last-child')?.textContent.slice(-40) };
+  })()`);
+  k.check('L3C fixture caps the preview inside an unfinished code line', cappedSelection.lastCode && !cappedSelection.lastCode.endsWith('\\n'), cappedSelection);
+  finishLong();
+  await page.waitFor(`document.querySelector('#live-reply').hidden && document.querySelector('#messages').innerText.includes('Stable section 89')`, 'full long reply committed');
+  const restoredCode = await page.evaluate(`(() => { const s = getSelection(), root = [...document.querySelectorAll('#messages .msg.them .text')].at(-1); return { selected: s.toString(), inFinal: root.contains(s.anchorNode) }; })()`);
+  k.check('L3S selected early code survives completion when the preview cap cuts a later code line', restoredCode.selected === cappedSelection.selected && restoredCode.inFinal, { cappedSelection, restoredCode });
+  await page.evaluate(`getSelection().removeAllRanges()`);
+  const longHost = (await k.rpc({ action: 'show', id })).messages.findLast(m => m.role === 'assistant')?.text;
+  const finalLong = await page.evaluate(`(() => { const last = [...document.querySelectorAll('#messages .msg.them .text')].at(-1), expected = document.createElement('div'); expected.innerHTML = window.__originalMarkdown(${JSON.stringify(longText)}); return { html: last.innerHTML, expected: expected.innerHTML, text: last.textContent }; })()`);
+  k.check('L4 full long reply is stored exactly and browser matches complete rendered host markdown', longHost === longText && finalLong.html === finalLong.expected && finalLong.text.includes('Stable section 0') && finalLong.text.includes('Stable section 89'), { hostLength: longHost?.length, expectedLength: longText.length, browserLength: finalLong.text.length });
+  result.measurements.longStream = { beforeLong, duringLong, capped, hostLength: longHost.length };
+  await page.evaluate(`applyLive = window.__originalApplyLive; renderMarkdown = window.__originalMarkdown`);
 
   // Explicit chat switches intentionally open at newest and must replace selected old-chat content.
   await page.evaluate(`(() => { const text = [...document.querySelectorAll('#messages .msg.them .text p')].at(-1); const r = document.createRange(); r.selectNodeContents(text); const s = getSelection(); s.removeAllRanges(); s.addRange(r); })()`);
