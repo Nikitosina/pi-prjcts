@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import { createKit, call, say } from './lib/e2e-kit.mjs';
 import { DEFAULT_ROLE_PROMPTS, SHARED_ROLE_RULES } from '../src/role-prompts.ts';
 
-let release, parentHeld = false, readProof;
+let release, parentHeld = false, readProof, verificationCriteriaCount = 1;
+const structuredCases = [
+  { name: 'leading-newline', input: ['Save record', '\nPreserve permissions', 'Keep audit history'], expected: ['Save record', 'Preserve permissions', 'Keep audit history'] },
+  { name: 'whitespace-multiline', input: [' \t Save record\nwithout changing content', '\t \n  Preserve permissions\n  across resets', 'Keep audit history\nwith original actor'], expected: ['Save record\n  without changing content', 'Preserve permissions\n    across resets', 'Keep audit history\n  with original actor'] },
+  { name: 'twenty', input: ['Save record', '\nPreserve permissions', ...Array.from({ length: 18 }, (_, i) => `Keep audit history ${i}`)], expected: ['Save record', 'Preserve permissions', ...Array.from({ length: 18 }, (_, i) => `Keep audit history ${i}`)] },
+];
 const hold = new Promise(ok => { release = ok; });
 const axes = ['Standards', 'Spec', 'Bugs/performance'];
 const kit = await createKit('role-prompts', { handler: async ({ role, user, results, tools }) => {
@@ -12,6 +17,7 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
   if (role === 'coordinator' && user === 'ROUND' && !results.length) return call('projects_delegate', { task: 'ROUND-PARENT' });
   if (role === 'coordinator' && user === 'SCOUT' && !results.length) return call('projects_delegate', { role: 'scout', task: 'SCOUT-PROBE' });
   if (role === 'coordinator' && user === 'VERIFY' && !results.length) return call('projects_delegate', { task: 'VERIFY-PROBE', acceptance: ['node exits zero\nwithout changing source files'] });
+  if (role === 'coordinator' && user.startsWith('PREFIX-') && !results.length) return call('projects_delegate', { task: user, acceptance: user === 'PREFIX-overlimit' ? Array.from({ length: 21 }, (_, i) => `Requirement ${i}`) : structuredCases.find(c => user === `PREFIX-${c.name}`).input });
   if (role === 'worker' && user === 'ROUND-PARENT') {
     if (results.length < 3) return call('projects_delegate_child', { role: 'reviewer', task: `Pinned review axis ${axes[results.length]}` });
     if (results.length === 3) return call('projects_delegate_child', { role: 'reviewer', task: 'FOURTH-MUST-BLOCK' });
@@ -20,7 +26,7 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
   if (tools.includes('projects_verify_run')) {
     if (!results.length) return call('projects_skill_file', { skill: 'mini-verify' });
     if (results.length === 1) return call('projects_verify_run', { command: 'node -e "process.exit(0)"' });
-    if (results.length === 2) return call('projects_verification_verdict', { summary: 'Observed zero exit.', criteria: [{ id: 'c1', status: 'pass', reason: 'node exits zero', evidence: [{ runId: JSON.parse(results[1]).runId }] }] });
+    if (results.length === 2) return call('projects_verification_verdict', { summary: 'Observed zero exit.', criteria: Array.from({ length: verificationCriteriaCount }, (_, i) => ({ id: `c${i + 1}`, status: 'pass', reason: 'Observed fixture command', evidence: [{ runId: JSON.parse(results[1]).runId }] })) });
     return say('Recorded.');
   }
   if (user === 'SKILL-READ' && results.length === 3) readProof = results.map(r => JSON.parse(r));
@@ -61,6 +67,20 @@ await kit.run(async () => {
   await kit.ask(id, 'VERIFY');
   const verified = Object.values((await kit.rpc({ action: 'plan-snapshot', id })).verification ?? {});
   kit.check('structured multiline acceptance keeps its constraint in one frozen criterion', verified.some(cycle => cycle.criteria.length === 1 && cycle.criteria[0].text === 'node exits zero\n  without changing source files'));
+  for (const fixture of structuredCases) {
+    verificationCriteriaCount = fixture.expected.length;
+    await kit.ask(id, `PREFIX-${fixture.name}`);
+    const plan = await kit.rpc({ action: 'plan-snapshot', id });
+    const work = plan.work.find(w => w.role === 'worker' && w.text.startsWith(`PREFIX-${fixture.name}\n`));
+    const cycle = plan.verification[work.threadId];
+    writeFileSync(join(kit.artifacts, `structured-${fixture.name}.json`), JSON.stringify({ input: fixture.input, expected: fixture.expected, cycle }, null, 2));
+    kit.check(`host freezes every structured requirement: ${fixture.name}`, JSON.stringify(cycle.criteria.map(c => c.text)) === JSON.stringify(fixture.expected), cycle.criteria);
+    kit.check(`host settles all structured criterion IDs: ${fixture.name}`, cycle.outcome === 'verified' && cycle.attempts[0].criteria.length === fixture.expected.length);
+  }
+  verificationCriteriaCount = 1;
+  const beforeLimit = (await kit.plan(id)).length;
+  await kit.ask(id, 'PREFIX-overlimit');
+  kit.check('structured 21-item input is refused, never truncated', (await kit.plan(id)).length === beforeLimit && kit.lastCall('coordinator', 'PREFIX-overlimit').results.some(r => /20/.test(r)));
   const live = Object.fromEntries(Object.keys(DEFAULT_ROLE_PROMPTS).map(role => [role, kit.result.calls.find(c => role === 'verifier' ? c.tools.includes('projects_verify_run') : c.role === role)]));
   for (const [role, request] of Object.entries(live)) {
     assert.ok(request, `missing live ${role}`); assert.ok(request.system.includes(DEFAULT_ROLE_PROMPTS[role]), `default not assembled for ${role}`);

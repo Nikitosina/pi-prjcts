@@ -29,6 +29,10 @@ try {
     ['many nested examples', 'Acceptance criteria:\n- Preserve these examples:\n' + Array.from({ length: 25 }, (_, i) => `  ${i + 1}. example`).join('\n'), ['Preserve these examples:\n' + Array.from({ length: 25 }, (_, i) => `  ${i + 1}. example`).join('\n')]],
     ['indented list and section boundary', 'Acceptance criteria:\n  * Save the record\n    without changing permissions.\n  * Keep audit history\n\nFindings:\n- repair advice', ['Save the record\n    without changing permissions.', 'Keep audit history']],
   ];
+  for (const marker of ['- ', '*', '2. ', '2)']) {
+    const malformed = `Acceptance criteria:\n- Save record\n${marker}\n  Preserve permissions\n- Keep audit history`;
+    check(`empty peer marker ${marker} cannot freeze a partial list`, JSON.stringify(model.parseCriteria(malformed)) === JSON.stringify([{ id: 'c1', text: malformed }]));
+  }
   const extractionResults = extractionCases.map(([name, input, expected]) => ({ name, actual: model.parseCriteria(input).map(c => c.text), expected }));
   if (process.env.PI_ARTIFACTS_DIR) writeFileSync(join(process.env.PI_ARTIFACTS_DIR, 'parser-cases.json'), JSON.stringify(extractionResults, null, 2));
   check('acceptance extraction retains parent clauses and stops at the next section', extractionResults.every(c => JSON.stringify(c.actual) === JSON.stringify(c.expected)));

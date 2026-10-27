@@ -40,6 +40,7 @@ export type Verification = {
 export const MAX_CRITERIA = 20;
 export const MAX_TASK_CHARS = 24000;
 const HEADER = /^Acceptance (?:criteria|array)(?:[ \t]+\([^\r\n]*\))?:[ \t]*\r?$/m;
+const EMPTY_ITEM = /^([ \t]*)(?:[-*]|\d+[.)])[ \t]*$/;
 const ITEM = /^([ \t]*)(?:[-*]|\d+[.)])[ \t]+(\S.*)$/;
 /** Parse one acceptance list. Same-indent markers start criteria; deeper lines stay verbatim with their parent. The next nonblank dedented line ends the section. */
 export function parseCriteria(brief: string): Criterion[] {
@@ -56,6 +57,8 @@ export function parseCriteria(brief: string): Criterion[] {
         if (item && item[1] === indent) {
           items.push(current.trimEnd());
           current = item[2] ?? "";
+        } else if (EMPTY_ITEM.exec(line)?.[1] === indent) {
+          return [{ id: "c1", text: brief.trim() }];
         } else if (!line.trim() || line.startsWith(indent) && /^[ \t]/.test(line.slice(indent.length))) {
           current += `\n${line}`;
         } else break;
