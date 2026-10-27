@@ -4,8 +4,17 @@ import { createKit, delay } from './lib/e2e-kit.mjs';
 
 const burstText = Array.from({ length: 32 }, (_, i) => `Burst paragraph ${i}: ${'readable text '.repeat(8)}`).join('\n\n');
 const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+let finishSelectionStream;
+const selectionGate = new Promise(resolve => { finishSelectionStream = resolve; });
+const selectionText = 'Select this live paragraph while the reply is still running.';
 const k = await createKit('streaming-scroll-viewport', { handler: async ({ role, user }) => {
   if (role !== 'coordinator') return undefined;
+  if (user.includes('MARK-SELECTION')) return (async function* () {
+    yield chunk({ role: 'assistant', content: selectionText });
+    await selectionGate;
+    yield chunk({ content: '\n\nThe final paragraph arrived.' });
+    yield chunk({}, 'stop') + 'data: [DONE]\n\n';
+  })();
   if (user.includes('MARK-BURST')) {
     // Deliberately deliver the entire sequence as one bursty HTTP response.
     return chunk({ role: 'assistant', content: '' }) + burstText.split(/(?<= )/).map(content => chunk({ content })).join('') + chunk({}, 'stop') + 'data: [DONE]\n\n';
@@ -111,15 +120,25 @@ await k.run(async () => {
   k.check('R8S sending from scrolled-up state resumes following', afterSend.gap < 40, { beforeSend, afterSend });
   result.measurements.burst = burst;
 
-  // Exercise the exact settled-live path with identical live and committed markdown: selection moves
-  // to the final message rather than disappearing when the live bubble is hidden.
-  const settledSelection = await page.evaluate(`(() => {
-    const source = [...document.querySelectorAll('#messages .msg.them .text')].at(-1), live = document.querySelector('#live-reply');
-    live.innerHTML = '<div class="text">' + source.innerHTML + '</div>'; live.hidden = false;
-    const paragraph = live.querySelector('p'), range = document.createRange(); range.selectNodeContents(paragraph); const s = getSelection(); s.removeAllRanges(); s.addRange(range);
-    const expected = s.toString(), saved = captureLiveSelection(); renderLive(); restoreLiveSelection(saved);
-    return { expected, hidden: live.hidden, selected: s.toString(), connected: s.anchorNode?.isConnected === true, inFinal: document.querySelector('#messages').contains(s.anchorNode) };
+  // Hold only this test stream open so selection happens before the real SSE completion.
+  await page.evaluate(`document.querySelector('#compose textarea').focus()`);
+  await page.cdp('Input.insertText', { text: 'MARK-SELECTION' });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.waitFor(`!document.querySelector('#live-reply').hidden && document.querySelector('#live-reply .text p')?.textContent === ${JSON.stringify(selectionText)}`, 'live selection paragraph');
+  await page.evaluate(`(() => {
+    const range = document.createRange(); range.selectNodeContents(document.querySelector('#live-reply .text p'));
+    const s = getSelection(); s.removeAllRanges(); s.addRange(range);
   })()`);
+  finishSelectionStream();
+  await page.waitFor(`document.querySelector('#live-reply').hidden && document.querySelector('#messages').innerText.includes('The final paragraph arrived.')`, 'selected stream commits');
+  const settledSelection = await page.evaluate(`(() => {
+    const s = getSelection();
+    return { expected: ${JSON.stringify(selectionText)}, hidden: document.querySelector('#live-reply').hidden, selected: s.toString(), connected: s.anchorNode?.isConnected === true, inFinal: document.querySelector('#messages').contains(s.anchorNode) };
+  })()`);
+  const selectedHost = (await k.rpc({ action: 'show', id })).messages.findLast(m => m.role === 'assistant')?.text;
+  const selectedBrowser = await page.evaluate(`[...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerText`);
+  k.check('R8T selected stream final browser text exactly matches host', selectedHost === selectionText + '\n\nThe final paragraph arrived.' && selectedBrowser === selectedHost, { selectedHost, selectedBrowser });
   k.check('R8L streaming completion moves selection into the matching committed message', settledSelection.hidden && settledSelection.selected === settledSelection.expected && settledSelection.connected && settledSelection.inFinal, { ...settledSelection, expected: settledSelection.expected.slice(0, 100), selected: settledSelection.selected.slice(0, 100) });
   await page.evaluate(`getSelection().removeAllRanges()`);
 
@@ -129,7 +148,16 @@ await k.run(async () => {
   await page.waitFor(`!!document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]')`, 'side chat');
   await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]').click()`);
   await page.waitFor(`document.querySelector('#chat-list .chat.on')?.dataset.chat === '${side.id}'`, 'side selected');
+  await page.waitFor(`getSelection().isCollapsed && !document.querySelector('#messages').innerText.includes('Burst paragraph 31')`, 'old selected transcript replaced');
   k.check('R9S explicit chat switch clears selection and never retains old-chat messages', await page.evaluate(`getSelection().isCollapsed && !document.querySelector('#messages').innerText.includes('Burst paragraph 31')`));
+  await page.evaluate(`document.querySelector('#compose textarea').focus()`);
+  await page.cdp('Input.insertText', { text: 'MARK-SIDE-DESTINATION' });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await page.waitFor(`document.querySelector('#messages').innerText.includes('DONE coordinator')`, 'side reply');
+  const sideHost = await k.rpc({ action: 'show', id, chatId: side.id });
+  const mainHost = await k.rpc({ action: 'show', id, chatId: 'main' });
+  k.check('R9D selected chat and send destination agree after switching selected text', sideHost.messages.some(m => m.text === 'MARK-SIDE-DESTINATION') && !mainHost.messages.some(m => m.text === 'MARK-SIDE-DESTINATION') && await page.evaluate(`document.querySelector('#chat-list .chat.on')?.textContent.includes('Side')`), { sideChat: sideHost.chatId, mainChat: mainHost.chatId });
   await page.evaluate(`document.querySelector('[data-action="chat-select"][data-chat="main"]').click()`);
   await page.waitFor(`document.querySelector('#messages').innerText.includes('Burst paragraph 31')`, 'main selected');
   const switched = await anchored(page);
@@ -172,7 +200,12 @@ await k.run(async () => {
   const wideMetrics = await metrics(page);
   k.check('V6 coarse-pointer landscape tablet above 1024px follows visual viewport', wideTablet.coarse && wideTablet.layoutWidth === 1180 && wideMetrics.composerBottom <= wideMetrics.visualTop + wideMetrics.visualHeight - 27 && Math.abs(wideMetrics.statusBottom - (wideMetrics.visualTop + wideMetrics.visualHeight)) < 2, { wideTablet, wideMetrics });
   await page.shot('05-wide-tablet', { force: true });
-  result.measurements.viewports = { phone, keyboardSized, landscape, tablet, independent, wideTablet: { ...wideTablet, ...wideMetrics } };
+  await page.evaluate(`delete visualViewport.height; visualViewport.dispatchEvent(new Event('resize'))`);
+  await page.cdp('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await page.viewport(1440, 1000, false); await delay(150);
+  const desktop = await metrics(page);
+  k.check('V7 fine-pointer desktop retains its layout and visible composer', await page.evaluate(`!matchMedia('(pointer: coarse)').matches && getComputedStyle(document.querySelector('.app')).position !== 'fixed'`) && desktop.composerBottom <= 973 && !desktop.horizontalOverflow, desktop);
+  result.measurements.viewports = { phone, keyboardSized, landscape, tablet, independent, wideTablet: { ...wideTablet, ...wideMetrics }, desktop };
 
   await page.cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   k.check('A1 reduced motion disables live and layout animation', await page.evaluate(`getComputedStyle(document.querySelector('.live-dot')).animationName === 'none' && getComputedStyle(document.querySelector('.app')).transitionDuration === '0s'`));
