@@ -22,6 +22,7 @@ import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
 import { artifactSummary, coordinatorArtifactTools } from "./artifacts.ts";
 import { createBackgroundCommands } from "./background-commands.ts";
+import { workspaceReceipts } from "./workspace-isolation.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
 import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
@@ -509,7 +510,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
           try { assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier"); } catch (error) { return error instanceof Error ? error.message : String(error); }
           return null;
         },
-        capture: (key: string, source: string) => captureAttemptTarget(dir, key, source),
+        capture: async (key: string, source: string) => {
+          const receipt = (await workspaceReceipts(root)).find(item => item.state === "allocated" && item.scope.provider === "git" && item.workspacePath === source);
+          if (!receipt) throw new Error("The frozen workspace allocation base is unavailable; proof changes cannot be established");
+          return captureAttemptTarget(dir, key, source, receipt.scope.baseRevision);
+        },
         revision: async (path: string) => { await input.testBeforeVerifierRevision?.(path); return (await captureTarget(path)).revision; },
         drain: async (verifierThreadId: string) => { settlingVerifiers.set(verifierThreadId, (settlingVerifiers.get(verifierThreadId) ?? 0) + 1); await background.killThread(verifierThreadId); },
         release: async (verifierThreadId: string, attemptTaskId: number) => {

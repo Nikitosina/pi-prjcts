@@ -17,11 +17,11 @@ export type AttemptPaths = { dir: string; manifest: string };
 export const attemptPaths = (controlRoot: string, key: string): AttemptPaths => ({ dir: join(controlRoot, "verification", key), manifest: join(controlRoot, "verification", key, "manifest.json") });
 
 /** Records the exact revision of the worker's tree that one attempt verifies. Idempotent per key: a replayed settlement rewrites the same manifest. */
-export async function captureAttemptTarget(controlRoot: string, key: string, sourcePath: string): Promise<{ manifest: TargetManifest; proof: ProofChanges }> {
+export async function captureAttemptTarget(controlRoot: string, key: string, sourcePath: string, baseRevision: string): Promise<{ manifest: TargetManifest; proof: ProofChanges }> {
   const paths = attemptPaths(controlRoot, key), manifest = await captureTarget(sourcePath);
   await mkdir(paths.dir, { recursive: true, mode: 0o700 });
   await writeManifest(paths.manifest, manifest);
-  return { manifest, proof: await proofChanges(sourcePath, manifest) };
+  return { manifest, proof: await proofChanges(sourcePath, manifest, baseRevision) };
 }
 
 /** Shell policy the verifier's commands pass through: the one of the worker whose work is checked, or why the host cannot apply it. */

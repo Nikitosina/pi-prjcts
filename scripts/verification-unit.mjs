@@ -120,8 +120,9 @@ try {
   // The proof the verifier runs: edits to skills, scripts and tests are surfaced.
   const proofRepo = join(root, 'proof'); mkdirSync(join(proofRepo, 'scripts'), { recursive: true }); mkdirSync(join(proofRepo, 'src'));
   git(proofRepo, 'init', '-q', '-b', 'main'); writeFileSync(join(proofRepo, 'scripts/check.mjs'), 'process.exit(1)\n'); writeFileSync(join(proofRepo, 'src/a.ts'), 'a\n'); git(proofRepo, 'add', '-A'); git(proofRepo, 'commit', '-qm', 'base');
+  const proofBase = git(proofRepo, 'rev-parse', 'HEAD').trim();
   writeFileSync(join(proofRepo, 'scripts/check.mjs'), 'process.exit(0) // weakened\n'); writeFileSync(join(proofRepo, 'src/a.ts'), 'b\n'); writeFileSync(join(proofRepo, 'scripts/new-test.mjs'), 'x\n');
-  const proof = await target.proofChanges(proofRepo, await target.captureTarget(proofRepo));
+  const proof = await target.proofChanges(proofRepo, await target.captureTarget(proofRepo), proofBase);
   check('files that define the proof show in a diff, and ordinary source does not', proof.paths.join() === 'scripts/check.mjs,scripts/new-test.mjs' && /weakened/.test(proof.diff) && !/src\/a\.ts/.test(proof.diff));
   // Settings: the verifier model is never assumed.
   const base = { version: 1, id: '11111111-1111-4111-8111-111111111111', name: 'p', objective: 'o', model: 'fake/m', models: {}, createdAt: 'x', cwd: root, runtime: 'durable', phase: 'ready', problem: null };
