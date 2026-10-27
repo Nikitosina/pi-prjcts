@@ -34,14 +34,14 @@ Everything is host-side (`src/usage-limits.ts`). The browser calls the authentic
 
 `claude-bridge` (`src/provider-extensions.ts`) spawns Claude Code as a subprocess, so no HTTP response passes through Pi and **its headers are unreachable**. Turns made through the bridge produce no passive samples; the Claude item then relies on the endpoint below, using the Anthropic login Pi holds.
 
-**2. Read-only usage endpoints with the login Pi or the CLI already has.** Used only when no passive sample is fresher than 5 min. At most one request per provider per 5 min (the bar's refresh button polls immediately, bypassing the minimum and any backoff, with a 15 s per-provider cooldown), exponential backoff to 15 min after failures, `Retry-After` honoured, 10 s timeout, no token refresh and no writes.
+**2. Read-only usage endpoints with the login Pi or the CLI already has.** Used only when no passive sample is fresher than 5 min. At most one request per provider per 5 min (the bar's refresh button otherwise bypasses the minimum and backoff, with a 15 s per-provider cooldown), exponential backoff to 15 min after failures, 10 s timeout and no writes. Delta-seconds and HTTP-date `Retry-After` holds apply to automatic, manual and visibility-triggered polling; the backoff cap never shortens them.
 
 | Endpoint | Credential | Documented? |
 |---|---|---|
 | `GET https://api.anthropic.com/api/oauth/usage` | `anthropic.access` from Pi's `auth.json` | **No, undocumented.** Same call Claude Code and Orca make. |
 | `GET https://chatgpt.com/backend-api/wham/usage` | `openai-codex.access` + `accountId` from Pi's `auth.json`, else `~/.codex/auth.json` | **No, undocumented.** Same call the Codex app and Orca make. |
 
-Claude and Codex logins are read through Pi's own credential resolver, which renews an expiring OAuth token under the auth-store lock (the path a model request takes), so a token that expired while Pi was idle is renewed instead of being sent stale. The token is read again on every attempt and never cached; after a 401/403 it is re-read once and a different token is tried. Only a real 401/403 (or no login at all) shows "sign-in rejected" / "Not connected". A network error, timeout, 5xx or 429 shows "Couldn't reach Claude, will retry" (or the provider's own wording), keeps the last numbers, and follows the normal backoff (5 min doubling to 15 min, or the provider's Retry-After). The refresh button always fetches (15 s cooldown per provider), and a page load or the tab becoming visible retries a provider that shows an error instead of waiting out its backoff. Cursor still reads its token from disk.
+Claude and Codex logins are read through Pi's own credential resolver, which renews an expiring OAuth token under the auth-store lock (the path a model request takes), so a token that expired while Pi was idle is renewed instead of being sent stale. The token is read again on every attempt and never cached; after a 401/403 it is re-read once and a different token is tried. Only a real 401/403 (or no login at all) shows "sign-in rejected" / "Not connected". A network error, timeout, 5xx or 429 shows "Couldn't reach Claude, will retry" (or the provider's own wording), keeps the last numbers, and follows the normal backoff (5 min doubling to 15 min, or the provider's Retry-After). Outside a `Retry-After` hold, the refresh button fetches (15 s cooldown per provider), and a page load or the tab becoming visible retries a provider that shows an error instead of waiting out its backoff. Cursor still reads its token from disk.
 
 **3. Cursor: monthly percentage, with "Connect Cursor" in the page.** Cursor's quota is a monthly billing cycle, so its window is `mo` and the bar shows `Cursor 61% month`.
 
@@ -51,7 +51,9 @@ Claude and Codex logins are read through Pi's own credential resolver, which ren
 - *Sources checked:* the `cursor-agent` CLI is not installed on this machine, and there is no `~/.cursor/auth.json`, so its file format was not verified locally; Orca's source and the `pi-cursor` package were read instead. If the sign-in has expired the item says "Cursor sign-in expired. Use Connect Cursor" and sends nothing.
 - *Not built:* a "paste your session cookie" form. It is unnecessary because the token already exists, and it would make users handle a credential by hand.
 
-**No invented numbers.** No sample means `—`; hover says "No data yet" with the reason and the time of the last attempt. A reading whose reset time has passed is dimmed and shown as `—` until a new reading arrives.
+**4. Eliza: actual USD month-to-date cost.** The item immediately after Cursor reads `Eliza $X.XX`. The host calls the documented `GET https://api.eliza.yandex.net/v2/usage` with the existing `ELIZA_TOKEN` and sums `usage.*.stats.monthly.cost` across the returned usage buckets. Eliza's `EffectiveUsage` implementation partitions those buckets so chain and dedicated-model spend is counted once. The request-start time selects the UTC month; a response that crosses a month boundary is discarded and retried. The tooltip names the account, optional pool, USD, UTC calendar-month period and fetch time. See [Eliza USD usage](eliza-usage.md) for the source documentation, verified response shape and limitations.
+
+**No invented numbers.** No sample means `—`; hover says "No data yet" with the reason and the time of the last attempt. A reading whose reset time has passed is dimmed and shown as `—` until a new reading arrives. Eliza's empty or malformed response never becomes $0.
 
 ## Checks
 

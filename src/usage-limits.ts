@@ -10,28 +10,31 @@ import { join } from "node:path";
  *   headers  - rate-limit headers on responses Pi already receives (pi-ai `onResponse`)
  *   endpoint - read-only GET of the provider's own usage endpoint with the login Pi or the Codex CLI already holds
  */
-export type LimitProvider = "claude" | "codex" | "cursor";
+export type LimitProvider = "claude" | "codex" | "cursor" | "eliza";
 /** "mo" is Cursor's monthly billing cycle. */
 export type LimitWindow = "5h" | "7d" | "mo";
 export type LimitSample = { provider: LimitProvider; window: LimitWindow; usedPercent: number; resetsAt: number | null; observedAt: number };
 export type LimitSource = "headers" | "endpoint";
-export type ProviderLimits = { provider: LimitProvider; label: string; samples: Array<LimitSample & { source: LimitSource }>; status: "ok" | "no-data" | "unavailable"; reason: string | null; lastAttemptAt: number | null; nextAttemptAt: number | null; /** Cursor only: the in-page sign-in flow. */ connect?: CursorConnect };
+export type ElizaUsage = { amountUsd: number; periodStartAt: number; periodEndAt: number; account: string; pool: string | null; observedAt: number };
+export type ProviderLimits = { provider: LimitProvider; label: string; samples: Array<LimitSample & { source: LimitSource }>; status: "ok" | "no-data" | "unavailable"; reason: string | null; lastAttemptAt: number | null; nextAttemptAt: number | null; /** Cursor only: the in-page sign-in flow. */ connect?: CursorConnect; /** Eliza only: actual month-to-date cost from its usage endpoint. */ usage?: ElizaUsage | null };
 export type CursorConnect = { state: "idle" | "waiting" | "failed"; loginUrl: string | null; error: string | null };
 
-const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor" };
-/** The endpoints are undocumented; never poll them more often than this, and back off on failure. */
+const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", eliza: "Eliza" };
+/** Never poll an endpoint more often than this, and back off on failure. */
 export const MIN_POLL_MS = 5 * 60_000, MANUAL_COOLDOWN_MS = 15_000, MAX_BACKOFF_MS = 15 * 60_000, REQUEST_TIMEOUT_MS = 10_000;
 /** A passive header sample keeps the poll away while it is this fresh. */
 const PASSIVE_FRESH_MS = MIN_POLL_MS;
 const WINDOW_SECONDS = { "5h": 5 * 3600, "7d": 7 * 86400 };
 
 type Polled = Array<Omit<LimitSample, "provider" | "observedAt">>;
+type ElizaReading = Omit<ElizaUsage, "observedAt">;
+type PollResult = { samples: Polled; usage?: ElizaReading | null };
 type Stored = LimitSample & { source: LimitSource };
-type OwnState = { samples: Map<LimitWindow, Stored>; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; lastManualAt: number; nextAttemptAt: number; failures: number; holdUntil: number; inflight?: Promise<void> };
+type OwnState = { samples: Map<LimitWindow, Stored>; usage: ElizaUsage | null; reason: string | null; unavailable: boolean; lastAttemptAt: number | null; lastManualAt: number; nextAttemptAt: number; failures: number; holdUntil: number; inflight?: Promise<void> };
 const state = new Map<LimitProvider, OwnState>();
 const entry = (provider: LimitProvider) => {
   let value = state.get(provider);
-  if (!value) state.set(provider, value = { samples: new Map(), reason: null, unavailable: false, lastAttemptAt: null, lastManualAt: 0, nextAttemptAt: 0, failures: 0, holdUntil: 0 });
+  if (!value) state.set(provider, value = { samples: new Map(), usage: null, reason: null, unavailable: false, lastAttemptAt: null, lastManualAt: 0, nextAttemptAt: 0, failures: 0, holdUntil: 0 });
   return value;
 };
 
@@ -122,12 +125,19 @@ class Retry extends Error {
   constructor(message: string, afterMs: number | null = null, signedOut = false) { super(message); this.afterMs = afterMs; this.signedOut = signedOut; }
 }
 const unreachable = (what: string) => new Retry(`Couldn't reach ${what}, will retry`);
-const retryAfter = (response: Response) => { const seconds = Number(response.headers.get("retry-after")); return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 24 * 3600_000) : null; };
-async function getJson(url: string, headers: Record<string, string>, what: string): Promise<any> {
+const retryAfter = (response: Response, now = Date.now()) => {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds > 0 ? seconds * 1000 : null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at > now ? at - now : null;
+};
+async function getJson(url: string, headers: Record<string, string>, what: string, authHint = "Pi renews it before it expires; if this stays, sign in again"): Promise<any> {
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => { throw unreachable(what); });
-  if (response.status === 401 || response.status === 403) { await response.body?.cancel(); throw new Retry(`${what} rejected the sign-in (HTTP ${response.status}). Pi renews it before it expires; if this stays, sign in again`, null, true); }
+  if (response.status === 401 || response.status === 403) { await response.body?.cancel(); throw new Retry(`${what} rejected the sign-in (HTTP ${response.status}). ${authHint}`, null, true); }
   if (response.status === 429) { await response.body?.cancel(); throw new Retry(`${what} rate limited the usage request, will retry`, retryAfter(response)); }
-  if (response.status >= 500) { await response.body?.cancel(); throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`); }
+  if (response.status >= 500) { await response.body?.cancel(); throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`, retryAfter(response)); }
   if (!response.ok) { await response.body?.cancel(); throw new Retry(`${what} usage request failed (HTTP ${response.status})`); }
   // The timeout also covers the body; a connection that dies mid-body is the network, not a bad response.
   const text = await response.text().catch(() => { throw unreachable(what); });
@@ -193,45 +203,78 @@ async function pollCursor(): Promise<Polled> {
   return [{ window: "mo", usedPercent: clamp(used), resetsAt: typeof data.billingCycleEnd === "string" ? Date.parse(data.billingCycleEnd) || null : null }];
 }
 
-/** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> with { claude: [{ window, usedPercent, resetsAt }], codex: [...] } replaces the Claude and Codex endpoints (Cursor always uses its real poller). `claudeFail` / `codexFail` ("unreachable" or "auth") make that poll fail the way the real one does. */
-const fixture = (provider: LimitProvider): (() => Promise<Polled>) | undefined => process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" ? async () => {
+const utcMonth = (at: number) => { const date = new Date(at), year = date.getUTCFullYear(), month = date.getUTCMonth(); return [Date.UTC(year, month, 1), Date.UTC(year, month + 1, 1)] as const; };
+/** EffectiveUsage partitions spending across the returned buckets, so their monthly stats sum to actual spend. */
+export function parseElizaUsage(data: unknown, startedAt = Date.now(), finishedAt = startedAt): ElizaReading | null {
+  const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : null;
+  const root = record(data), account = root?.account, pool = root?.pool, usage = record(root?.usage);
+  if (!root || typeof account !== "string" || !account || typeof pool !== "string" || !usage) throw new Retry("Eliza returned an unreadable usage response");
+  let amountUsd = 0, buckets = 0;
+  for (const bucket of Object.values(usage)) {
+    const monthly = record(record(bucket)?.stats)?.monthly, rawCost = record(monthly)?.cost;
+    const cost = typeof rawCost === "number" || typeof rawCost === "string" && rawCost.trim() ? finite(rawCost) : null;
+    if (cost === null || cost < 0) throw new Retry("Eliza returned an unreadable usage response");
+    amountUsd += cost; buckets++;
+  }
+  const [periodStartAt, periodEndAt] = utcMonth(startedAt);
+  if (utcMonth(finishedAt)[0] !== periodStartAt) throw new Retry("Eliza usage crossed the UTC month boundary, will retry");
+  if (!buckets) return null;
+  if (!Number.isFinite(amountUsd)) throw new Retry("Eliza returned an unreadable usage response");
+  return { amountUsd, periodStartAt, periodEndAt, account, pool: pool || null };
+}
+const elizaUsageUrl = () => process.env.PI_PROJECTS_ELIZA_USAGE_URL ?? "https://api.eliza.yandex.net/v2/usage";
+async function pollEliza(): Promise<PollResult> {
+  const token = process.env.ELIZA_TOKEN?.trim();
+  if (!token) throw new Retry("No Eliza OAuth token found. Set ELIZA_TOKEN on the host", null, true);
+  const startedAt = Date.now();
+  const data = await getJson(elizaUsageUrl(), { Authorization: `OAuth ${token}` }, "Eliza", "Set a current ELIZA_TOKEN on the host");
+  return { samples: [], usage: parseElizaUsage(data, startedAt, Date.now()) };
+}
+
+/** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> replaces provider endpoints with local data. Cursor always uses its own fake/real poller. */
+const fixture = (provider: LimitProvider): (() => Promise<PollResult>) | undefined => process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" ? async (): Promise<PollResult> => {
   const data = await readJson(process.env.PI_PROJECTS_LIMITS_FIXTURE!), fail = data?.[`${provider}Fail`];
   if (fail === "unreachable") throw unreachable(LABELS[provider]);
   if (fail === "auth") throw new Retry(`${LABELS[provider]} rejected the sign-in (HTTP 401). Pi renews it before it expires; if this stays, sign in again`, null, true);
-  return data?.[provider] ?? [];
+  return { samples: provider === "eliza" ? [] : data?.[provider] ?? [], ...(provider === "eliza" ? { usage: data?.eliza ? parseElizaUsage(data.eliza) : null } : {}) };
 } : undefined;
-const pollerOf = (provider: LimitProvider): (() => Promise<Polled>) => fixture(provider) ?? (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor);
+const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) => fixture(provider) ?? (provider === "eliza" ? pollEliza : async () => ({ samples: await (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor)() }));
 
 /**
- * `manual` (the refresh button) skips the minimum interval, the failure backoff and the passive-sample shortcut, but is rate-limited per provider.
- * `visit` (a page load or the tab coming back) retries a provider that is in a failure state instead of showing its old error until the backoff ends;
- * it still waits out a provider's own Retry-After and the per-provider cooldown. Otherwise only the normal schedule applies.
+ * Every mode waits out the provider's Retry-After. `manual` (the refresh button) otherwise skips the minimum interval, failure backoff
+ * and passive-sample shortcut, but is rate-limited per provider. `visit` retries a provider in a failure state before the backoff ends,
+ * subject to the per-provider cooldown. Otherwise only the normal schedule applies.
  */
 type RefreshMode = "auto" | "manual" | "visit";
 function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode = "auto"): Promise<void> {
   const own = entry(provider);
   if (own.inflight) return own.inflight;
+  if (now < own.holdUntil) return Promise.resolve();
   if (mode === "manual") {
     if (now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
     own.lastManualAt = now;
   } else if (mode === "visit" && own.failures > 0) {
-    if (now < own.holdUntil || now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
+    if (now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
   } else {
     const fresh = [...own.samples.values()].some(sample => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
     if (now < own.nextAttemptAt || fresh) return Promise.resolve();
   }
   own.lastAttemptAt = now;
   own.nextAttemptAt = now + MIN_POLL_MS;
-  own.inflight = pollerOf(provider)().then(samples => {
-    record(provider, "endpoint", samples);
-    own.failures = 0; own.holdUntil = 0; own.reason = samples.length ? null : "The provider returned no usage windows"; own.unavailable = false;
+  const startedAt = Date.now();
+  own.inflight = pollerOf(provider)().then(result => {
+    record(provider, "endpoint", result.samples);
+    if (provider === "eliza") own.usage = result.usage ? { ...result.usage, observedAt: Date.now() } : null;
+    const hasData = result.samples.length > 0 || own.usage !== null;
+    own.failures = 0; own.holdUntil = 0; own.reason = hasData ? null : provider === "eliza" ? "Eliza returned no usage data" : "The provider returned no usage windows"; own.unavailable = false;
   }, error => {
     own.failures++;
     own.reason = error instanceof Error ? error.message : "Usage request failed";
     own.unavailable = error instanceof Retry && error.signedOut;
     const afterMs = error instanceof Retry ? error.afterMs : null;
-    own.holdUntil = afterMs ? Date.now() + afterMs : 0;
-    own.nextAttemptAt = Date.now() + Math.min(MAX_BACKOFF_MS, Math.max(afterMs ?? 0, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
+    const failedAt = now + Date.now() - startedAt;
+    own.holdUntil = afterMs !== null ? failedAt + afterMs : 0;
+    own.nextAttemptAt = Math.max(own.holdUntil, failedAt + Math.min(MAX_BACKOFF_MS, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
   }).finally(() => { own.inflight = undefined; });
   return own.inflight;
 }
@@ -282,8 +325,8 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
 export async function limitsSnapshot(now = Date.now(), refresh: boolean | "visit" = false): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
   await Promise.all((Object.keys(LABELS) as LimitProvider[]).map(provider => refreshProvider(provider, now, refresh === true ? "manual" : refresh === "visit" ? "visit" : "auto")));
   const providers = (Object.keys(LABELS) as LimitProvider[]).map((provider): ProviderLimits => {
-    const own = entry(provider), samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window));
-    return { provider, label: LABELS[provider], samples, status: samples.length ? "ok" : own.unavailable ? "unavailable" : "no-data", reason: own.reason, lastAttemptAt: own.lastAttemptAt, nextAttemptAt: own.nextAttemptAt || null, ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}) };
+    const own = entry(provider), samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window)), hasData = samples.length > 0 || own.usage !== null;
+    return { provider, label: LABELS[provider], samples, status: hasData ? "ok" : own.unavailable ? "unavailable" : "no-data", reason: own.reason, lastAttemptAt: own.lastAttemptAt, nextAttemptAt: own.nextAttemptAt || null, ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}), ...(provider === "eliza" ? { usage: own.usage } : {}) };
   });
   return { providers, observedAt: Date.now() };
 }
