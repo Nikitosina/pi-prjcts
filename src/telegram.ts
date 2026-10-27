@@ -5,6 +5,7 @@ import { inbox } from "./inbox.ts";
 import { errorText, home, listProjects, loadProject, projectDir, saveJson, type Request } from "./state.ts";
 import type { Notice, Notifier } from "./notify.ts";
 import type { DurableChat } from "./durable-runtime.ts";
+import { extractTelegramMedia, loadTelegramMedia, telegramMediaForm, type TelegramPart } from "./telegram-media.ts";
 import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml } from "./telegram-html.ts";
 
 type Action =
@@ -17,7 +18,7 @@ type State = {
   version: 1; token: string | null; bot: { id: number; username: string } | null;
   owner: { chatId: number; name: string } | null; pairing: { code: string; expiresAt: number; wrong: number } | null;
   /** `sentPart`: parts of notice `seq` already sent, so a retry after a mid-way failure does not repeat them. */
-  offset: number; sentSeq: number; sentPart?: { seq: number; parts: number }; route: { projectId: string; chatId: string } | null;
+  offset: number; sentSeq: number; sentPart?: { seq: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean }; route: { projectId: string; chatId: string } | null;
   /** Inline-button payloads by short key (callback_data is capped at 64 bytes) and sent messages by id, both bounded. */
   keys: Record<string, Action>; messages: Record<string, Target>;
   lastError: string | null; lastPollAt: number | null;
@@ -27,6 +28,7 @@ type Message = { message_id: number; chat: { id: number; type: string; first_nam
 type Button = { text: string; callback_data: string };
 class TelegramError extends Error { code: number; retryAfter?: number; constructor(message: string, code: number, retryAfter?: number) { super(message); this.code = code; this.retryAfter = retryAfter; } }
 
+const UNCERTAIN_MEDIA = "Telegram attachment delivery is uncertain. Automatic resend blocked to avoid duplicates; verify in Telegram before resolving the outbox.";
 const PAIR_MS = 10 * 60_000, PAIR_TRIES = 5, KEEP = 500, LIMIT = 4000;
 const LABEL: Record<Notice["kind"], string> = { question: "Question", approval: "Approval", result: "Finished", error: "Error", pr: "Pull request" };
 const clip = (text: string, max = LIMIT) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -49,10 +51,10 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
   let closed = false, rejected = false, polling = false, poll: AbortController | null = null, wake: (() => void) | null = null, flushing: Promise<void> | null = null, flushAgain = false, sendFailures = 0, retry: NodeJS.Timeout | undefined;
   const sleep = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(done, ms); function done() { clearTimeout(timer); if (wake === done) wake = null; resolve(); } wake = done; });
 
-  async function call<T>(method: string, body: Record<string, unknown>, signal?: AbortSignal, token = state.token): Promise<T> {
+  async function call<T>(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal, token = state.token): Promise<T> {
     if (!token) throw new TelegramError("No Telegram bot is set", 0);
     let response: Response;
-    try { response = await fetch(`${base}/bot${token}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: signal ?? AbortSignal.timeout(30_000) }); }
+    try { response = await fetch(`${base}/bot${token}/${method}`, { method: "POST", ...(body instanceof FormData ? { body } : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(body instanceof FormData ? 120_000 : 30_000) }); }
     catch (error) { throw new TelegramError(redact(`Telegram ${method} failed: ${errorText(error)}`, token), 0); }
     const data = await response.json().catch(() => null) as { ok?: boolean; result?: T; description?: string; error_code?: number; parameters?: { retry_after?: number } } | null;
     if (!data?.ok) throw new TelegramError(redact(`Telegram ${method}: ${data?.description ?? `HTTP ${response.status}`}`, token), data?.error_code ?? response.status, data?.parameters?.retry_after);
@@ -209,7 +211,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
 
   /** Notice text is model Markdown, sent as Telegram HTML; the header and footer are ours, escaped. */
   function format(notice: Notice): { text: string; buttons: Button[][] } {
-    const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`)}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" || notice.kind === "pr" ? "" : `: ${notice.title}`}`)}\n\n` + markdownToTelegramHtml(notice.text);
+    const head = `<b>${escapeHtml(`${notice.project} · ${notice.chat}`.replace(/[\uE000\uE001]/g, ""))}</b>\n${escapeHtml(`${LABEL[notice.kind]}${notice.kind === "result" || notice.kind === "question" || notice.kind === "pr" ? "" : `: ${notice.title}`}`.replace(/[\uE000\uE001]/g, ""))}\n\n` + markdownToTelegramHtml(notice.text);
     if (notice.kind === "question") return { text: head + "\n\n<i>Tap an answer, or reply to this message in your own words.</i>", buttons: (notice.choices ?? []).map(choice => [{ text: choice.slice(0, 60), callback_data: key({ t: "answer", projectId: notice.projectId, entryId: notice.entryId!, text: choice }) }]) };
     if (notice.kind === "approval") return { text: head, buttons: [[{ text: "Approve record only", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
     return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };
@@ -217,17 +219,71 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
   /** Sends one notice as HTML parts under 4096, buttons on the last; a part Telegram cannot parse goes as plain text instead. Every part routes replies. */
   async function sendNotice(notice: Notice) {
     if (!state.owner) return;
-    const { text, buttons } = format(notice), parts = splitTelegramHtml(text);
+    const extracted = extractTelegramMedia(notice.text);
+    const { text, buttons } = format({ ...notice, text: extracted.markdown });
+    const plan: TelegramPart[] = [];
+    let cursor = 0;
+    for (const match of text.matchAll(/\uE000(\d+)\uE001/g)) {
+      for (const chunk of splitTelegramHtml(text.slice(cursor, match.index))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
+      const media = extracted.media[Number(match[1])];
+      plan.push({ kind: "media", media: { ...media, caption: media.caption.slice(0, 1024) } });
+      for (const chunk of splitTelegramHtml(escapeHtml(media.caption.slice(1024)))) if (chunk) plan.push({ kind: "text", text: chunk });
+      cursor = match.index + match[0].length;
+    }
+    for (const chunk of splitTelegramHtml(text.slice(cursor))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
+    if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, parts: 0, plan };
+    const parts = state.sentPart.plan ?? plan;
+    state.sentPart.plan = parts;
+    persist();
+    if (state.sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
     const target: Target = { projectId: notice.projectId, chatId: notice.chatId, ...(notice.kind === "question" ? { entryId: notice.entryId } : {}) };
     for (let index = state.sentPart?.seq === notice.seq ? state.sentPart.parts : 0; index < parts.length; index++) {
       const markup = index === parts.length - 1 && buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
       let sent: { message_id: number };
-      try { sent = await call("sendMessage", { chat_id: state.owner.chatId, text: parts[index], parse_mode: "HTML", ...markup }); }
-      catch (error) {
-        if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
-        sent = await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(parts[index]), ...markup });
+      const part = parts[index];
+      if (part.kind === "media") {
+        let media: ReturnType<typeof loadTelegramMedia>;
+        try {
+          const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(part.media.ref);
+          if (!match) throw new Error("Invalid attachment");
+          const project = loadProject(notice.projectId);
+          if (project.deleted || project.archived) throw new Error("Project is no longer active");
+          await options.dispatch({ action: "thread-history", id: notice.projectId, threadId: match[1], offset: 0, limit: 1, textLimit: 1 });
+          media = loadTelegramMedia(projectDir(notice.projectId), part.media.ref);
+        } catch {
+          sent = await call("sendMessage", { chat_id: state.owner.chatId, text: `${part.media.caption || "Attachment"} [attachment unavailable, unauthorized, or exceeds 50 MB]`, ...markup });
+          state.messages[String(sent.message_id)] = target; state.sentPart.parts = index + 1; persist();
+          continue;
+        }
+        state.sentPart.pendingMedia = true; persist();
+        try {
+          const upload = telegramMediaForm(media, state.owner.chatId, part.media.caption);
+          if ("reply_markup" in markup) upload.body.set("reply_markup", JSON.stringify(markup.reply_markup));
+          try { sent = await call(upload.method, upload.body); }
+          catch (error) {
+            if (!(error instanceof TelegramError && error.code === 400 && media.method !== "sendDocument")) throw error;
+            const fallback = telegramMediaForm(media, state.owner.chatId, part.media.caption, true);
+            if ("reply_markup" in markup) fallback.body.set("reply_markup", JSON.stringify(markup.reply_markup));
+            sent = await call(fallback.method, fallback.body);
+          }
+        } catch (error) {
+          // Only explicit rejection proves Telegram did not create a message.
+          if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
+            delete state.sentPart.pendingMedia; persist();
+            if (error.code === 400 || error.code === 413) {
+              sent = await call("sendMessage", { chat_id: state.owner.chatId, text: `${part.media.caption || "Attachment"} [Telegram rejected this attachment]`, ...markup });
+            } else throw error;
+          } else throw error;
+        }
+        delete state.sentPart.pendingMedia;
+      } else {
+        try { sent = await call("sendMessage", { chat_id: state.owner.chatId, text: part.text, parse_mode: "HTML", ...markup }); }
+        catch (error) {
+          if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
+          sent = await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(part.text), ...markup });
+        }
       }
-      state.messages[String(sent.message_id)] = target; state.sentPart = { seq: notice.seq, parts: index + 1 }; persist();
+      state.messages[String(sent.message_id)] = target; state.sentPart.parts = index + 1; persist();
     }
   }
   /** Sends feed notices after `sentSeq` in order; a failure stops the batch and retries with backoff, so nothing is skipped or sent twice. */
@@ -241,7 +297,8 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
           if (!next) break;
           try { await sendNotice(next); sendFailures = 0; }
           catch (error) {
-            sendFailures++; state.lastError = redact(errorText(error)); persist();
+            sendFailures++; state.lastError = state.sentPart?.pendingMedia ? UNCERTAIN_MEDIA : redact(errorText(error)); persist();
+            if (state.sentPart?.pendingMedia) return;
             clearTimeout(retry); retry = setTimeout(() => void flush(), Math.min(60_000, backoffMs * 2 ** Math.min(sendFailures - 1, 10))); retry.unref();
             return;
           }
