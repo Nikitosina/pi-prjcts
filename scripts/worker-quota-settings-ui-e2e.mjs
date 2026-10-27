@@ -11,7 +11,7 @@ await kit.run(async () => {
   kit.initRepo();
   const id = await kit.createProject('Quota settings');
   const page = await kit.openPage(await kit.webUrl(id, 'settings'));
-  await page.waitFor(`document.querySelector('#settings-button') && !document.querySelector('#settings-button').disabled`, 'project settings');
+  await page.waitFor(`document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`, 'project settings loaded');
   await page.evaluate(`document.querySelector('#settings-button').click()`);
   await page.waitFor(`document.querySelectorAll('#dialog [data-settings-form] .mp').length === 7`, 'quota settings form');
   kit.check('settings explain reset waiting and explicit per-role fallback', (await page.evaluate(`document.querySelector('#dialog').innerText`)).includes('Paused or stopped workers never restart automatically'));
