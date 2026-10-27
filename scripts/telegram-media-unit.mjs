@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { startTelegram } from '../src/telegram.ts';
 import { loadTelegramMedia, extractTelegramMedia } from '../src/telegram-media.ts';
 import { image, video } from './telegram-media-fixtures.mjs';
+import { htmlToPlain, splitTelegramCaption } from '../src/telegram-html.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'telegram-media-'));
 process.env.PI_PROJECTS_HOME = root;
@@ -39,8 +40,17 @@ const server = createServer(async (req, res) => {
   if (multipart) {
     const data = await new Response(bytes, { headers: { 'content-type': req.headers['content-type'] } }).formData();
     input = Object.fromEntries(data);
-    const file = input.photo ?? input.video ?? input.document;
-    input.file = { bytes: Buffer.from(await file.arrayBuffer()), mime: file.type, name: file.name };
+    if (input.caption) { input.caption = input.caption.replaceAll('\r\n', '\n'); assert(Array.from(htmlToPlain(input.caption)).length <= 1024); }
+    if (method === 'sendMediaGroup') {
+      input.media = JSON.parse(input.media);
+      input.files = await Promise.all(input.media.map(async item => {
+        const file = input[item.media.slice('attach://'.length)];
+        return { bytes: Buffer.from(await file.arrayBuffer()), mime: file.type, name: file.name };
+      }));
+    } else {
+      const file = input.photo ?? input.video ?? input.document;
+      input.file = { bytes: Buffer.from(await file.arrayBuffer()), mime: file.type, name: file.name };
+    }
   } else input = JSON.parse(bytes.toString());
   const reply = value => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
   if (method === 'getUpdates') return reply({ ok: true, result: [] });
@@ -48,9 +58,12 @@ const server = createServer(async (req, res) => {
   if (fault?.method === method) {
     const code = fault.code; fault = null;
     if (code === 0) return req.socket.destroy();
+    if (code === 200) return reply({ ok: true, result: [] });
     return reply({ ok: false, error_code: code, description: 'test rejection' });
   }
-  const message_id = ++id; sends.push({ method, input, message_id }); reply({ ok: true, result: { message_id } });
+  const message_ids = Array.from({ length: method === 'sendMediaGroup' ? input.media.length : 1 }, () => ++id);
+  sends.push({ method, input, message_id: message_ids[0], message_ids });
+  reply({ ok: true, result: method === 'sendMediaGroup' ? message_ids.map(message_id => ({ message_id })) : { message_id: message_ids[0] } });
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 process.env.PI_PROJECTS_TELEGRAM_API = `http://127.0.0.1:${server.address().port}`;
@@ -62,40 +75,95 @@ function start() {
   bridge = startTelegram({ receiveUpdates: false, dispatch: async input => { assert.equal(input.id, project); if (input.threadId !== thread) throw Error('unauthorized'); return {}; }, chats: async () => [], notifier: { seq: () => notices.length, feed: after => ({ items: notices.filter(n => n.seq > after) }) }, report: () => {} });
 }
 const notice = (seq, text) => ({ seq, at: 0, projectId: project, project: 'Test', chatId: 'main', chat: 'Main', kind: 'result', title: 'Finished', text });
-try {
-  seed(); notices = [notice(1, `Before ![Image caption](${ref('demo.png')}) between ![Video caption](${ref('demo.mp4')}) after ![Other format](${ref('demo.webm')}) End`)]; start();
-  await bridge.flush();
-  assert.deepEqual(sends.map(s => s.method), ['sendMessage', 'sendPhoto', 'sendMessage', 'sendVideo', 'sendMessage', 'sendDocument', 'sendMessage']);
-  const anchor = sends[0].message_id;
-  assert.match(sends[0].input.text, /<b>Test · Main<\/b>\nFinished\n\nBefore /);
-  assert.equal(sends[0].input.reply_parameters, undefined);
-  for (const send of sends.slice(1)) {
-    const reply = typeof send.input.reply_parameters === 'string' ? JSON.parse(send.input.reply_parameters) : send.input.reply_parameters;
-    assert.equal(reply.message_id, anchor); assert.equal(reply.allow_sending_without_reply, true);
-  }
+const reset = text => { bridge?.close(); seed(); sends = []; attempts = []; fault = null; notices = [notice(1, text)]; };
+const mapped = (expected = { projectId: project, chatId: 'main' }) => {
   const mappings = JSON.parse(readFileSync(statePath)).messages;
-  for (const send of sends) assert.deepEqual(mappings[send.message_id], { projectId: project, chatId: 'main' });
-  assert.deepEqual(sends[1].input.file.bytes, image); assert.equal(sends[1].input.file.mime, 'image/png'); assert.equal(sends[1].input.caption, 'Image caption');
-  assert.deepEqual(sends[3].input.file.bytes, video); assert.equal(sends[3].input.file.mime, 'video/mp4'); assert.equal(sends[3].input.caption, 'Video caption');
-  const count = sends.length; await bridge.flush(); assert.equal(sends.length, count); bridge.close(); start(); await bridge.flush(); assert.equal(sends.length, count); bridge.close();
+  for (const send of sends) for (const id of send.message_ids) assert.deepEqual(mappings[id], expected);
+};
+try {
+  reset(`Before **bold** ![Image caption](${ref('demo.png')}) after`); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendPhoto']);
+  assert.match(sends[0].input.caption, /^<b>Test · Main<\/b>\nFinished\n\nBefore <b>bold<\/b> Image caption after/);
+  assert.match(sends[0].input.caption, /Reply to this message to write to this chat/);
+  assert.equal(sends[0].input.parse_mode, 'HTML'); assert.equal(sends[0].input.show_caption_above_media, 'true');
+  assert.equal(sends[0].input.reply_parameters, undefined);
+  assert.deepEqual(sends[0].input.file.bytes, image); assert.equal(sends[0].input.file.mime, 'image/png'); mapped();
+  await bridge.flush(); assert.equal(sends.length, 1); bridge.close(); start(); await bridge.flush(); assert.equal(sends.length, 1);
 
-  seed(); sends = []; fault = { method: 'sendPhoto', code: 400 }; notices = [notice(1, `![Fallback](${ref('demo.png')})`)]; start(); await bridge.flush();
-  assert(sends.some(s => s.method === 'sendDocument' && s.input.file.bytes.equals(image))); bridge.close();
+  reset(`Before ![Video caption](${ref('demo.mp4')}) after`); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendVideo']); assert.deepEqual(sends[0].input.file.bytes, video); assert.equal(sends[0].input.file.mime, 'video/mp4'); mapped();
 
-  seed(); sends = []; fault = { method: 'sendPhoto', code: 400 };
-  notices = [{ ...notice(1, `![Approval attachment](${ref('Screenshot (1 (copy)).png')})`), kind: 'approval', operationId: randomUUID(), fingerprint: 'a'.repeat(64) }]; start(); await bridge.flush();
-  const approval = sends.find(s => s.method === 'sendDocument');
-  assert(approval); assert.equal(JSON.parse(approval.input.reply_markup).inline_keyboard[0].length, 2); bridge.close();
-  seed(); sends = []; notices = [{ ...notice(1, 'Metadata marker test'), project: '\uE0000\uE001', chat: '\uE00099\uE001' }]; start(); await bridge.flush(); assert.equal(sends.length, 1); bridge.close();
+  reset(`Question ![Image](${ref('demo.png')})`);
+  notices[0] = { ...notices[0], kind: 'question', entryId: 'question-id', choices: ['yes', 'no'] };
+  start(); await bridge.flush(); assert.equal(sends.length, 1); assert.equal(JSON.parse(sends[0].input.reply_markup).inline_keyboard.length, 2); assert.match(sends[0].input.caption, /Tap an answer/); mapped({ projectId: project, chatId: 'main', entryId: 'question-id' });
 
-  seed(); sends = []; notices = [notice(1, `![Traversal](${ref('../project.json')}) ![Unknown](artifact:${other}/demo.png) ![Missing](${ref('missing.png')}) ![Large](${ref('large.png')}) ![URL](http://127.0.0.1/private)`)]; start(); await bridge.flush();
-  assert(sends.every(s => s.method === 'sendMessage')); assert(sends.filter(s => /unavailable/.test(s.input.text)).length === 5); assert(sends.every(s => !s.input.text.includes('!Traversal'))); bridge.close();
+  reset(`Approval ![Attachment](${ref('Screenshot (1 (copy)).png')})`);
+  notices[0] = { ...notices[0], kind: 'approval', operationId: randomUUID(), fingerprint: 'a'.repeat(64) };
+  start(); await bridge.flush(); assert.deepEqual(sends.map(s => s.method), ['sendPhoto']); assert.equal(JSON.parse(sends[0].input.reply_markup).inline_keyboard[0].length, 2); mapped();
 
-  seed(); sends = []; notices = [notice(1, `${'long text '.repeat(700)} ![${'C'.repeat(1023) + '🟦' + 'Z'.repeat(76)}](${ref('demo.png')}) tail`)]; start(); await bridge.flush();
-  assert(sends.filter(s => s.method === 'sendMessage').every(s => s.input.text.length <= 4096)); assert.equal(sends.find(s => s.method === 'sendPhoto').input.caption.length, 1023); assert(sends.some(s => s.input.text?.includes('🟦' + 'Z'.repeat(76)))); bridge.close();
+  reset(`![Fallback](${ref('demo.png')})`); fault = { method: 'sendPhoto', code: 400 }; start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendDocument']); assert(sends[0].input.file.bytes.equals(image)); assert.match(sends[0].input.caption, /Fallback/);
 
-  seed(); sends = []; notices = [notice(1, `First ![Retry](${ref('demo.png')}) Last`), notice(2, 'Next notice')]; fault = { method: 'sendPhoto', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 1); bridge.close(); start(); await bridge.flush(); assert.equal(sends.filter(s => s.input.text?.includes('First')).length, 1); assert.equal(sends.filter(s => s.method === 'sendPhoto').length, 1); assert.equal(JSON.parse(sends.find(s => s.method === 'sendPhoto').input.reply_parameters).message_id, sends[0].message_id); assert(sends.at(-1).input.text.includes('Next notice')); assert.equal(sends.at(-1).input.reply_parameters, undefined); bridge.close();
+  reset(`Before ![Photo](${ref('demo.png')}) between ![Video](${ref('demo.mp4')}) after`); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup']);
+  assert.deepEqual(sends[0].input.media.map(m => m.type), ['photo', 'video']);
+  assert.match(sends[0].input.media[0].caption, /Before Photo between Video after/);
+  assert.equal(sends[0].input.media[0].parse_mode, 'HTML'); assert.equal(sends[0].input.media[1].caption, undefined);
+  assert.deepEqual(sends[0].input.files.map(f => f.bytes), [image, video]); assert.deepEqual(sends[0].input.files.map(f => f.mime), ['image/png', 'video/mp4']); mapped();
 
-  seed(); sends = []; notices = [notice(1, `Start ![Uncertain](${ref('demo.mp4')}) Stop`), notice(2, 'Must wait')]; fault = { method: 'sendVideo', code: 0 }; start(); await bridge.flush(); const attemptsBefore = attempts.length; await bridge.flush(); bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, attemptsBefore); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia); bridge.close();
-  console.log('PASS Telegram multipart bytes/MIME/captions/photo/video/document, traversal/symlink/missing/unauthorized/size/URL, chunking, retry/order/restart, uncertain-delivery duplicate guard');
+  reset(Array.from({ length: 11 }, (_, i) => `![${i}](${ref('demo.png')})`).join(' ')); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup', 'sendPhoto']); assert.equal(sends[0].input.media.length, 10); assert.equal(sends[1].input.caption, ''); mapped();
+
+  reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); fault = { method: 'sendMediaGroup', code: 400 }; start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup']); assert(sends[0].input.media.every(m => m.type === 'document')); mapped();
+
+  reset(`Before ![Photo](${ref('demo.png')}) middle ![WebM](${ref('demo.webm')}) after`); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendDocument']); assert.match(sends[0].input.caption, /Before Photo middle WebM after/); assert.equal(sends[1].input.caption, ''); mapped();
+
+  reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices[0] = { ...notices[0], kind: 'approval', operationId: randomUUID(), fingerprint: 'a'.repeat(64) }; start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendVideo']); assert.equal(sends[0].input.reply_markup, undefined); assert.equal(JSON.parse(sends[1].input.reply_markup).inline_keyboard[0].length, 2); mapped();
+
+  reset('Metadata marker test'); notices[0].project = '\uE0000\uE001'; notices[0].chat = '\uE00099\uE001'; start(); await bridge.flush(); assert.equal(sends.length, 1);
+
+  reset(`![Traversal](${ref('../project.json')}) ![Unknown](artifact:${other}/demo.png) ![Missing](${ref('missing.png')}) ![Large](${ref('large.png')}) ![URL](http://127.0.0.1/private)`); start(); await bridge.flush();
+  assert.equal(sends.length, 5); assert(sends.every(s => s.method === 'sendMessage' && /unavailable/.test(s.input.text))); assert(sends.every(s => !s.input.text.includes('!Traversal')));
+
+  reset(`${'x'.repeat(960)} ![](${ref('demo.png')})`); start(); await bridge.flush();
+  assert.equal(sends.length, 1); assert(sends[0].input.caption.includes('x'.repeat(960))); assert.match(sends[0].input.caption, /Reply to chat/);
+
+  for (const body of ['🟦'.repeat(600), '**' + '&'.repeat(900) + '**']) {
+    reset(`${body} ![](${ref('demo.png')})`); start(); await bridge.flush(); assert.deepEqual(sends.map(s => s.method), ['sendPhoto']);
+  }
+
+  const exactBody = 'x'.repeat(1024 - Array.from('Test · Main\nFinished\n\n \n\nReply to this message to write to this chat.').length);
+  reset(`${exactBody} ![](${ref('demo.png')})`); start(); await bridge.flush(); assert.equal(sends.length, 1); assert.equal(Array.from(htmlToPlain(sends[0].input.caption)).length, 1024);
+
+  const body = 'long text '.repeat(700) + '🟦' + 'Z'.repeat(76);
+  reset(`${body} ![Image](${ref('demo.png')}) tail`); start(); await bridge.flush();
+  assert.equal(sends[0].method, 'sendPhoto');
+  const all = [sends[0].input.caption, ...sends.slice(1).map(s => s.input.text)];
+  assert.equal(all.map(htmlToPlain).join(''), `Test · Main\nFinished\n\n${body} Image tail\n\nReply to chat.`);
+  assert(Array.from(htmlToPlain(all[0])).length <= 1024); assert(all.slice(1).every(t => htmlToPlain(t).length <= 4096));
+  assert.equal(sends.length, 1 + Math.ceil((all.map(htmlToPlain).join('').length - 1024) / 4096));
+  for (const send of sends.slice(1)) assert.equal(send.input.reply_parameters.message_id, sends[0].message_id); mapped();
+  const unicode = splitTelegramCaption('<b>' + 'x'.repeat(1023) + '🟦&amp;</b>'); assert.equal(Array.from(htmlToPlain(unicode[0])).length, 1024); assert.equal(unicode.map(htmlToPlain).join(''), 'x'.repeat(1023) + '🟦&');
+  assert.equal(splitTelegramCaption('<b>' + '&amp;'.repeat(1024) + '</b>').length, 1);
+
+  reset(`${'a'.repeat(1800)} ![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')}) end`); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup', 'sendMessage']); assert.equal((sends[0].input.media[0].caption + sends[1].input.text).match(/<b>Test · Main/g).length, 1); mapped();
+
+  reset(`First ![Retry](${ref('demo.png')}) Last`); notices.push(notice(2, 'Next notice')); fault = { method: 'sendPhoto', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 0); bridge.close(); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendMessage']); assert.equal(sends.at(-1).input.reply_parameters, undefined);
+
+  reset(`${'long '.repeat(500)} ![](${ref('demo.png')}) end`); fault = { method: 'sendMessage', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 1); bridge.close(); start(); await bridge.flush();
+  assert.equal(sends.length, 2); assert.equal(sends[1].input.reply_parameters.message_id, sends[0].message_id);
+
+  reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Next notice')); fault = { method: 'sendMediaGroup', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 0); bridge.close(); start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup', 'sendMessage']); mapped();
+
+  for (const code of [0, 200]) {
+    reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Must wait')); fault = { method: 'sendMediaGroup', code }; start(); await bridge.flush(); const before = attempts.length; await bridge.flush(); bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  }
+  reset(`Start ![Uncertain](${ref('demo.mp4')}) Stop`); fault = { method: 'sendVideo', code: 0 }; start(); await bridge.flush(); const before = attempts.length; bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  console.log('PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty');
 } finally { bridge?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); }

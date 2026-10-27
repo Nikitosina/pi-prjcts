@@ -5,8 +5,8 @@ import { inbox } from "./inbox.ts";
 import { errorText, home, listProjects, loadProject, projectDir, saveJson, type Request } from "./state.ts";
 import type { Notice, Notifier } from "./notify.ts";
 import type { DurableChat } from "./durable-runtime.ts";
-import { extractTelegramMedia, loadTelegramMedia, telegramMediaForm, type TelegramPart } from "./telegram-media.ts";
-import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml } from "./telegram-html.ts";
+import { extractTelegramMedia, inspectTelegramMedia, loadTelegramMedia, telegramMediaForm, telegramAlbumForm, TELEGRAM_FILE_LIMIT, type TelegramPart } from "./telegram-media.ts";
+import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml, splitTelegramCaption } from "./telegram-html.ts";
 
 type Action =
   | { t: "project"; projectId: string }
@@ -216,80 +216,115 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
     if (notice.kind === "approval") return { text: head, buttons: [[{ text: "Approve record only", callback_data: key({ t: "approve", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }, { text: "Reject", callback_data: key({ t: "reject", projectId: notice.projectId, operationId: notice.operationId!, fingerprint: notice.fingerprint! }) }]] };
     return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };
   }
-  /** Sends one notice as HTML parts under 4096, buttons on the last; a part Telegram cannot parse goes as plain text instead. Every part routes replies. */
+  async function authorizeArtifact(projectId: string, ref: string) {
+    const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(ref);
+    if (!match) throw new Error("Invalid attachment");
+    const project = loadProject(projectId);
+    if (project.deleted || project.archived) throw new Error("Project is no longer active");
+    await options.dispatch({ action: "thread-history", id: projectId, threadId: match[1], offset: 0, limit: 1, textLimit: 1 });
+  }
+  /** Caption-first media/album delivery; only text exceeding caption capacity spills over. Every returned message routes replies. */
   async function sendNotice(notice: Notice) {
     if (!state.owner) return;
     const extracted = extractTelegramMedia(notice.text);
-    const { text, buttons } = format({ ...notice, text: extracted.markdown });
-    const plan: TelegramPart[] = [];
-    let cursor = 0;
-    for (const match of text.matchAll(/\uE000(\d+)\uE001/g)) {
-      for (const chunk of splitTelegramHtml(text.slice(cursor, match.index))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
-      const media = extracted.media[Number(match[1])];
-      const caption = media.caption.slice(0, 1024).replace(/[\uD800-\uDBFF]$/, "");
-      plan.push({ kind: "media", media: { ...media, caption } });
-      for (const chunk of splitTelegramHtml(escapeHtml(media.caption.slice(caption.length)))) if (chunk) plan.push({ kind: "text", text: chunk });
-      cursor = match.index + match[0].length;
+    const formatted = format({ ...notice, text: extracted.markdown });
+    const buttons = formatted.buttons;
+    let text = formatted.text.replace(/\uE000(\d+)\uE001/g, (_, index: string) => escapeHtml(extracted.media[Number(index)].caption));
+    if (extracted.media.length && Array.from(htmlToPlain(text)).length > 1024 && notice.kind !== "approval") {
+      text = text.replace(/<i>[^<]*<\/i>$/, notice.kind === "question" ? "<i>Reply or choose an answer.</i>" : "<i>Reply to chat.</i>");
     }
-    for (const chunk of splitTelegramHtml(text.slice(cursor))) if (chunk.trim()) plan.push({ kind: "text", text: chunk });
+    const plan: TelegramPart[] = [];
+    if (!extracted.media.length) {
+      for (const chunk of splitTelegramHtml(text)) plan.push({ kind: "text", text: chunk });
+    } else {
+      const [caption = "", ...overflow] = splitTelegramCaption(text);
+      let album = extracted.media.length > 1 && !buttons.length;
+      let total = 0;
+      if (album) for (const media of extracted.media) {
+        try {
+          await authorizeArtifact(notice.projectId, media.ref);
+          const meta = inspectTelegramMedia(projectDir(notice.projectId), media.ref);
+          total += meta.size;
+          if (meta.method === "sendDocument" || total > TELEGRAM_FILE_LIMIT) album = false;
+        } catch { album = false; }
+        if (!album) break;
+      }
+      for (let index = 0; index < extracted.media.length;) {
+        const refs = extracted.media.slice(index, index + (album ? 10 : 1)).map(media => media.ref);
+        plan.push(refs.length > 1 ? { kind: "album", refs, caption: index === 0 ? caption : "" } : { kind: "media", ref: refs[0], caption: index === 0 ? caption : "" });
+        index += refs.length;
+      }
+      for (const chunk of overflow) plan.push({ kind: "text", text: chunk });
+    }
     if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, parts: 0, plan };
     const parts = state.sentPart.plan ?? plan;
     state.sentPart.plan = parts;
     persist();
     if (state.sentPart.pendingMedia) throw new Error(UNCERTAIN_MEDIA);
-    const hasMedia = parts.some(part => part.kind === "media");
+    const hasMedia = parts.some(part => part.kind !== "text");
     const target: Target = { projectId: notice.projectId, chatId: notice.chatId, ...(notice.kind === "question" ? { entryId: notice.entryId } : {}) };
     for (let index = state.sentPart?.seq === notice.seq ? state.sentPart.parts : 0; index < parts.length; index++) {
       const markup = index === parts.length - 1 && buttons.length ? { reply_markup: { inline_keyboard: buttons } } : {};
-      // One visible envelope per notice. Its other parts reply to it, even after a retry/restart.
+      // Only spillover or ungrouped items reply to the first media message.
       const reply = hasMedia && state.sentPart.anchorMessageId ? { reply_parameters: { message_id: state.sentPart.anchorMessageId, allow_sending_without_reply: true } } : {};
-      let sent: { message_id: number };
+      let sent: { message_id: number }[];
       const part = parts[index];
-      if (part.kind === "media") {
-        let media: ReturnType<typeof loadTelegramMedia>;
+      if (part.kind !== "text") {
+        const refs = part.kind === "album" ? part.refs : [part.ref];
+        let media: ReturnType<typeof loadTelegramMedia>[] = [];
         try {
-          const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(part.media.ref);
-          if (!match) throw new Error("Invalid attachment");
-          const project = loadProject(notice.projectId);
-          if (project.deleted || project.archived) throw new Error("Project is no longer active");
-          await options.dispatch({ action: "thread-history", id: notice.projectId, threadId: match[1], offset: 0, limit: 1, textLimit: 1 });
-          media = loadTelegramMedia(projectDir(notice.projectId), part.media.ref);
-        } catch {
-          sent = await call("sendMessage", { chat_id: state.owner.chatId, text: `${part.media.caption || "Attachment"} [attachment unavailable, unauthorized, or exceeds 50 MB]`, ...markup, ...reply });
-          state.messages[String(sent.message_id)] = target; state.sentPart.anchorMessageId ??= sent.message_id; state.sentPart.parts = index + 1; persist();
-          continue;
-        }
-        state.sentPart.pendingMedia = true; persist();
-        try {
-          const upload = telegramMediaForm(media, state.owner.chatId, part.media.caption);
-          if ("reply_markup" in markup) upload.body.set("reply_markup", JSON.stringify(markup.reply_markup));
-          if ("reply_parameters" in reply) upload.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
-          try { sent = await call(upload.method, upload.body); }
-          catch (error) {
-            if (!(error instanceof TelegramError && error.code === 400 && media.method !== "sendDocument")) throw error;
-            const fallback = telegramMediaForm(media, state.owner.chatId, part.media.caption, true);
-            if ("reply_markup" in markup) fallback.body.set("reply_markup", JSON.stringify(markup.reply_markup));
-            if ("reply_parameters" in reply) fallback.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
-            sent = await call(fallback.method, fallback.body);
+          let total = 0;
+          for (const ref of refs) {
+            await authorizeArtifact(notice.projectId, ref);
+            if (total + inspectTelegramMedia(projectDir(notice.projectId), ref).size > TELEGRAM_FILE_LIMIT) throw new Error("Upload exceeds memory bound");
+            const file = loadTelegramMedia(projectDir(notice.projectId), ref);
+            total += file.size;
+            if (total > TELEGRAM_FILE_LIMIT) throw new Error("Upload exceeds memory bound");
+            media.push(file);
           }
-        } catch (error) {
-          // Only explicit rejection proves Telegram did not create a message.
-          if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
-            delete state.sentPart.pendingMedia; persist();
-            if (error.code === 400 || error.code === 413) {
-              sent = await call("sendMessage", { chat_id: state.owner.chatId, text: `${part.media.caption || "Attachment"} [Telegram rejected this attachment]`, ...markup, ...reply });
+        } catch { media = []; }
+        if (!media.length) {
+          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`, ...markup, ...reply })];
+        } else {
+          state.sentPart.pendingMedia = true; persist();
+          const upload = async (document = false): Promise<{ message_id: number }[]> => {
+            const form = part.kind === "album" ? telegramAlbumForm(media, state.owner!.chatId, part.caption, document || media.some(file => file.method === "sendDocument")) : telegramMediaForm(media[0], state.owner!.chatId, part.caption, document);
+            if ("reply_markup" in markup) form.body.set("reply_markup", JSON.stringify(markup.reply_markup));
+            if ("reply_parameters" in reply) form.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
+            const result = await call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
+            const messages = Array.isArray(result) ? result : [result];
+            if (messages.length !== refs.length || messages.some(message => !message || !Number.isSafeInteger(message.message_id) || message.message_id <= 0) || new Set(messages.map(message => message.message_id)).size !== messages.length) throw new TelegramError("Telegram upload response is incomplete; delivery uncertain", 0);
+            return messages;
+          };
+          try {
+            try { sent = await upload(); }
+            catch (error) {
+              if (!(error instanceof TelegramError && error.code === 400) || media.some(file => file.method === "sendDocument")) throw error;
+              sent = await upload(true);
+            }
+          } catch (error) {
+            // Only explicit rejection proves Telegram did not create a message or album.
+            if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
+              delete state.sentPart.pendingMedia; persist();
+              if (error.code === 400 || error.code === 413) {
+                sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: `${htmlToPlain(part.caption)}\n[Telegram rejected this attachment]`, ...markup, ...reply })];
+              } else throw error;
             } else throw error;
-          } else throw error;
+          }
+          delete state.sentPart.pendingMedia;
         }
-        delete state.sentPart.pendingMedia;
       } else {
-        try { sent = await call("sendMessage", { chat_id: state.owner.chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply }); }
+        try { sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: part.text, parse_mode: "HTML", ...markup, ...reply })]; }
         catch (error) {
           if (!(error instanceof TelegramError && error.code === 400 && /can't parse entities/i.test(error.message))) throw error;
-          sent = await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(part.text), ...markup, ...reply });
+          sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: htmlToPlain(part.text), ...markup, ...reply })];
         }
       }
-      state.messages[String(sent.message_id)] = target; state.sentPart.anchorMessageId ??= sent.message_id; state.sentPart.parts = index + 1; persist();
+      for (const message of sent) {
+        state.messages[String(message.message_id)] = target;
+        state.sentPart.anchorMessageId ??= message.message_id;
+      }
+      state.sentPart.parts = index + 1; persist();
     }
   }
   /** Sends feed notices after `sentSeq` in order; a failure stops the batch and retries with backoff, so nothing is skipped or sent twice. */

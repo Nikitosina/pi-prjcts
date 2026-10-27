@@ -1,34 +1,48 @@
 # Telegram artifact attachments
 
-Coordinator results enter the persistent notification feed in `src/notify.ts`. The Telegram bridge used to pass the entire result through the HTML converter. That converter drops non-public link targets, leaving the image marker and caption as `!caption`. Telegram never received a file.
+Coordinator results enter the persistent notification feed in `src/notify.ts`. Previously the Telegram HTML converter dropped private artifact link targets and left `!caption`, without uploading a file. The bridge now extracts `![caption](artifact:<threadUUID>/<path>)`, authorizes the project's thread through existing `thread-history` dispatch, and reads actual bytes through `openArtifact`. It never fetches private artifact URLs, arbitrary URLs, or arbitrary host paths. Code examples remain text.
 
-The bridge now extracts `![caption](artifact:<threadUUID>/<path>)` before HTML conversion, saves an ordered text/media plan in its existing outbox cursor, checks thread ownership using the project's existing `thread-history` dispatch, and reads bytes using `openArtifact`. No browser artifact URLs, remote URLs, or arbitrary host paths are fetched. Code examples remain text. Other image URLs produce an explicit unavailable-attachment message.
+## Message layout and counts
 
-## Formats and limits
+A short illustrated coordinator reply is **one media message**, not a header message followed by attachment replies. Its formatted HTML caption contains the usual project/chat identity, notice label, complete response, artifact label and reply guidance. Buttons and origin reply routing are on that same photo, video or document. Photo/video captions request display above the media. No separate header/footer message is emitted.
 
-- PNG and JPEG use `sendPhoto` up to 10,000,000 bytes.
-- MP4 uses `sendVideo` up to 50,000,000 bytes. Playback still depends on the codecs and Telegram clients.
-- Other files, including WebM, GIF and WebP, use `sendDocument` up to 50,000,000 bytes. Photos over 10 MB also use documents.
-- A rejected photo/video, including an unsupported codec or photo dimensions, falls back to a document only after an explicit Bot API 400 rejection. If Telegram also rejects the document, the bridge sends an honest failure message.
-- Empty, missing, unauthorized, unsafe or oversized files produce a text explanation, never a private URL. Paths must pass the artifact store's traversal and symlink checks.
-- Captions use plain text, at most 1024 UTF-16 code units. Longer caption text follows as ordinary chunks. Surrounding text keeps the existing HTML conversion and 4096-character splitting. The normal project/chat identity and notice label appear once in the first text message. Every later media or text part uses Telegram reply linkage to that message. Captions are not padded with duplicate headers. The envelope message ID is checkpointed across retries/restarts. Replies to every part route back to the originating project chat; actions remain on the final part.
+If the normal wrapper would cause overflow, the bridge first shortens only reply guidance, for example to "Reply to chat." It never cuts response text to make room for boilerplate. Artifact labels appear in their original text positions, and files retain reference order.
 
-These limits are conservative byte caps from the current public Bot API, not the optional local Bot API server limits. Source: https://core.telegram.org/bots/api#sendphoto, https://core.telegram.org/bots/api#sendvideo, https://core.telegram.org/bots/api#senddocument.
+- One attachment with fitting text: one `sendPhoto`, `sendVideo` or `sendDocument` call, one message.
+- Two through ten compatible photos/videos without buttons: one `sendMediaGroup` call, one visually grouped album with a shared formatted caption on its first item. Telegram returns a separate message ID for each item; every ID is mapped to the originating coordinator chat. No separate wrapper messages.
+- More than ten compatible items: albums of up to ten, with a final single media message if one remains. Identity, response and footer occur only once, in the first caption.
+- Albums have no `reply_markup` parameter. Notices with actions use individual media messages, putting actions on the last part instead of losing them or inventing an extra action-only wrapper. Unsupported/document formats also use individual messages. The first caption contains the shared response; later captions are empty rather than repeating it.
+- Album byte buffering is capped at 50,000,000 bytes total. Larger collections use individual uploads. This is our memory bound, not a Telegram album limit.
+- Long text: the first media/album caption carries the first caption-sized part; only remaining text spills into messages of up to 4096 parsed characters. There is no repeated header/footer or truncation. For a 6500-character response, this normally means one media message plus two text messages, rather than wrapping every attachment in separate messages. Spillover and ungrouped later media reply to the first media item for context.
+
+Telegram documents captions as **0–1024 characters after entity parsing**, including HTML-formatted captions. Tags and escaped entity spelling do not consume the text budget. Splitting closes/reopens tags and never cuts an entity or Unicode character. The budget counts Unicode code points, not UTF-16 entity offsets. Multipart CRLF is normalized to LF as Telegram does. The text-only converter/splitter remains unchanged. The notifier preserves complete artifact-bearing coordinator results rather than applying its existing 3500-character text-only preview cap.
+
+## Formats, failures and security
+
+PNG/JPEG use `sendPhoto` through 10,000,000 bytes. MP4 uses `sendVideo` through 50,000,000 bytes; playback still depends on codecs and clients. Other files, including WebM/GIF/WebP, and photos over 10 MB use `sendDocument` through 50,000,000 bytes. Telegram also restricts photo dimensions to a width-plus-height of at most 10000 and an aspect ratio of at most 20.
+
+An explicit native-media 400 rejection can fall back to a document, or an all-document album for a rejected photo/video album. Missing, unauthorized, empty, oversized or unsafe artifacts produce an honest failure message, never a URL. Symlinks/traversal are refused by the existing artifact store. Surrounding response text is retained even on failure. No album is selected unless all refs pass authorized metadata checks; files are checked again before upload.
+
+Sources checked against the current public Bot API:
+- https://core.telegram.org/bots/api#sendphoto
+- https://core.telegram.org/bots/api#sendvideo
+- https://core.telegram.org/bots/api#senddocument
+- https://core.telegram.org/bots/api#sendmediagroup
+
+Telegram's TDLib `process_input_caption` checks `utf8_length` against the caption limit, and `fix_formatted_text` removes carriage returns: https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp and https://github.com/tdlib/td/blob/master/td/telegram/MessageEntity.cpp.
 
 ## Retry and restart
 
-The saved plan keeps part numbering stable if files disappear during a retry. Successful parts are checkpointed before later parts. An explicit rejection such as 429 can retry without replaying earlier parts.
+The existing outbox cursor saves the selected plan, successful part count, and first message ID for spillover linkage. An album checkpoints every returned message ID together. An explicit 429 rejection can retry without duplicating successful parts or headers.
 
-Telegram has no client idempotency key for media sends. The bridge saves a pending-media flag *before* upload. A network failure, server error, or crash before the successful response is checkpointed leaves the flag set. Automatic resend and later notices stop rather than risk a duplicate. Settings reports an uncertain-delivery error. An operator must inspect the actual linked Telegram conversation before resolving this cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or retry blindly. This change does not add automatic recovery for that fundamentally ambiguous case. Existing text-only delivery and its retry behavior are unchanged.
+Telegram has no client idempotency key for uploads. A pending-media flag is saved before each media or album request. A network/server failure, incomplete success response or crash before the success checkpoint blocks automatic resend and later notices, rather than risk duplicate media. Settings reports uncertain delivery. An operator must inspect the actual linked conversation before resolving the cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or resend blindly. Text-only delivery behavior is unchanged.
 
-## Verification
+## Verification and live-demo scope
 
-`node scripts/telegram-media-unit.mjs` runs the actual bridge against an isolated mocked multipart Bot API. It verifies file bytes/MIME, photo/video/document methods, captions, size/traversal/symlink/missing/unauthorized/URL rejection, text chunking, explicit-rejection retry ordering and uncertain-delivery blocking across restart. It uses fake credentials only. `npm run verify` includes this test.
+`telegram-media-unit` uses the actual bridge against a mocked multipart endpoint. It covers one-call formatted captions/envelopes/actions/routing, album bytes/MIME/shared caption/per-item mappings, album limits/fallbacks, long-text preservation, Unicode/entities, security, ordering, rejection retries and ambiguous media/album blocking across restart.
 
-## Envelope verification and demo scope
+`telegram-media-e2e` runs an isolated real host from an incoming Telegram update through coordinator/worker execution, artifact storage, notifier and outbox. Only the model and Bot API are fake. It verifies one-message photo/video results, a one-call mixed album, full long responses surviving the notifier, replies to a photo and a second album item reaching their original chat after the selected route changes, and no replay after restart. Both scripts run in deterministic CI without a browser.
 
-The first owner-authorized live image/video demos used the loader/form builder directly. The owner confirmed visibility/playback, but those transport-only demos did not exercise the notifier, `sendNotice`, identity header, footer, or reply routing. They are not evidence for the regular coordinator journey.
+The first live demos proved native photo/video visibility only. The later live wrapper/reply experiment was rejected by the owner as excessive splitting. Neither is evidence for this corrected caption-first UX. No more live sends are authorized unless the owner requests them. No deployment or owner-host restart is part of this PR.
 
-`node scripts/telegram-media-e2e.mjs` now drives an isolated real host from an incoming linked-owner Telegram update through actual coordinator/worker execution, artifact storage, notifier feed, outbox and multipart sends. Only the model and Bot API endpoint are fake. It asserts one normal project/chat header, surrounding text in order, caption bytes/MIME, reply linkage to the header, the usual footer, retry without duplicate wrappers, and replies to the photo reaching the originating chat after the selected inbound route changes. Host restart must not replay uploads. It runs in deterministic CI without a browser.
-
-For a bounded authorized transport verification without competing with the running host's inbound poller, `startTelegram` accepts `receiveUpdates: false`. This only suppresses polling in that invocation, not the normal notice formatting, outbox, authorization or reply mappings. It does not change host settings. An isolated invocation's reply mappings are isolated too; it cannot prove that the unchanged production host will route replies to those test messages. The complete routing assertion belongs to the isolated end-to-end test until this PR is deployed under separate authorization.
+`startTelegram({ receiveUpdates: false, ... })` remains available for bounded isolated outbound verification without competing with the running host's poller. It does not change host settings. Its reply mappings are local to that invocation, not installed in the unchanged production host.
