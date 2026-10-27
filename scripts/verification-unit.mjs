@@ -98,10 +98,11 @@ try {
   // The shell a verifier uses is its worker's: same policy, from the same function.
   const binding = await import('../src/durable-workspace-binding.ts');
   const ownerCheckout = join(root, 'owner'), workDir = join(root, 'owner-worktrees', 'w1'); mkdirSync(ownerCheckout, { recursive: true }); mkdirSync(workDir, { recursive: true });
-  const project = provider => ({ workspaceAuthorization: { provider, owner: 'o', repositories: [{ repositoryId: 'r1', provider, ownerCheckout, approvedRoot: join(root, 'owner-worktrees'), fileOwnershipPrefix: 'x' }], scopes: [{ id: 's1', repositoryId: 'r1' }] } });
+  const project = (provider, wholeRepository = true) => ({ workspaceAuthorization: { provider, owner: 'o', repositories: [{ repositoryId: 'r1', provider, ownerCheckout, approvedRoot: join(root, 'owner-worktrees'), fileOwnershipPrefix: 'x' }], scopes: [{ id: 's1', repositoryId: 'r1', ...(wholeRepository ? { wholeRepository: true } : {}) }] } });
   const shell = binding.verifierShell(project('github'), 's1', workDir, 'pi/feature');
   check('a git workspace scope gives the verifier the worker\'s shell policy', 'guard' in shell);
   check('that policy keeps pushes off protected branches and commands out of the owner checkout', /Blocked/.test(shell.guard('git push origin main')) && /exit 126/.test(shell.guard(`echo x > ${ownerCheckout}/a.txt`)) && shell.guard('npm test') === 'npm test' && shell.guard('git push origin pi/feature') === 'git push origin pi/feature');
+  check('a folder-limited git worker cannot gain general shell through verification', 'refusal' in binding.verifierShell(project('github', false), 's1', workDir, 'pi/feature'));
   check('a plugin workspace provider, an unknown scope and a project without grants are refused, not run under a weaker policy', 'refusal' in binding.verifierShell(project('arcadia'), 's1', workDir, null) && 'refusal' in binding.verifierShell(project('github'), 'nope', workDir, null) && 'refusal' in binding.verifierShell({}, 's1', workDir, null));
 
   // Full criteria survive; what cannot fit is refused, never cut.

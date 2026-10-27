@@ -296,7 +296,7 @@ function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<st
   };
 }
 
-export async function openDurableProject(input: { project: Project; dir: string; configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader; /** A freshly built catalog of everything installed now (global, project-local, packages). Without it the open-time loader is all there is. */ discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>; knowledgeAccess?: KnowledgeAccess; /** Explicit bindings; registry presence never grants worker access. */ workerTools?: DurableWorkerToolBindings; workerCap?: number; onReport?: (report: DurableRuntimeReport) => void; onModelRequest?: (request: DurableModelRequest) => void; /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver; /** Test-only observer after genuine scoped preparation and before it returns to planning; detached metadata only. */ testAfterWorkerPreparation?: (prepared: Readonly<{ conversationId: number; workId: string; threadId: string; cwd: string; bindingRevision: string }>) => Promise<void>; /** Test-only scoped-worker rendezvous; never persisted or model-visible. */ beforeScopedSubmit?: () => Promise<void>; /** Direct-runtime test rendezvous; never host/model exposed or persisted. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>) => Promise<void>; beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>; afterPausePersisted?: (value: Readonly<{ paused: boolean; pausing: boolean; rootConversationId: number }>) => Promise<void> }): Promise<DurableProjectRuntime> {
+export async function openDurableProject(input: { project: Project; dir: string; configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader; /** A freshly built catalog of everything installed now (global, project-local, packages). Without it the open-time loader is all there is. */ discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>; knowledgeAccess?: KnowledgeAccess; /** Explicit bindings; registry presence never grants worker access. */ workerTools?: DurableWorkerToolBindings; workerCap?: number; onReport?: (report: DurableRuntimeReport) => void; onModelRequest?: (request: DurableModelRequest) => void; /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver; /** Test-only observer after genuine scoped preparation and before it returns to planning; detached metadata only. */ testAfterWorkerPreparation?: (prepared: Readonly<{ conversationId: number; workId: string; threadId: string; cwd: string; bindingRevision: string }>) => Promise<void>; /** Test-only scoped-worker rendezvous; never persisted or model-visible. */ beforeScopedSubmit?: () => Promise<void>; /** Direct-runtime test rendezvous; never host/model exposed or persisted. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; /** Direct-runtime final-verifier-revision rendezvous; never persisted or model-visible. */ testBeforeVerifierRevision?: (sourcePath: string) => Promise<void>; /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>) => Promise<void>; beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>; afterPausePersisted?: (value: Readonly<{ paused: boolean; pausing: boolean; rootConversationId: number }>) => Promise<void> }): Promise<DurableProjectRuntime> {
   const project = parse(ProjectSchema, input.project);
   const dir = resolve(input.dir);
   const knowledgeAccess = input.knowledgeAccess ?? project.knowledgeAccess ?? "read-only";
@@ -476,7 +476,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       return leases.length || commands.length ? { holds: { leases, background: commands } } : {};
     };
     const ownLease = (threadId?: string) => (holder: { projectId: string; threadId: string }) => holder.projectId === project.id && !holder.threadId.startsWith("plugin:") && (threadId === undefined || holder.threadId === threadId);
-    stopCommands = async () => { hostLeases.releaseWhere(ownLease()); try { await background.killAll(); } finally { await commands.close(); } };
+    stopCommands = async () => { try { await background.killAll(); } finally { hostLeases.releaseWhere(ownLease()); await commands.close(); } };
     const binder = durableWorkspaceBinding({ project, configuredSkillLoader: input.configuredSkillLoader, projectStanding: standing, commands, commandApprovals: () => approvals, isClosed: () => closed, environment: { leases: hostLeases, background }, conversation: () => { if (!rootReference) throw new Error("Durable root is unavailable for workspace allocation"); return rootReference; }, controlRoot: dir });
     const prepareWorkerEnvironment = binder === undefined ? undefined : async (request: Readonly<{ conversationId: number; workId: string; threadId: string; role: DurableRole; workspaceScopeId: string }>) => { const environment = await binder(request); await input.testAfterWorkerPreparation?.({ conversationId: request.conversationId, workId: request.workId, threadId: request.threadId, cwd: environment.cwd, bindingRevision: environment.bindingRevision }); return environment; };
     const heads = readHeads(project.cwd, dir, { projectId: project.id, project: () => loadProject(project.id) });
@@ -490,6 +490,8 @@ export async function openDurableProject(input: { project: Project; dir: string;
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
     // Opt-in verification loop: tools only verifier threads are bound to, plus the host hooks planning calls at the end of a worker turn.
     // A verifier is trusted like its worker: its commands use the worker's shell policy, the host's lease table and the background-command runner.
+    // A paused verifier can resume while its earlier settlement still checks the target.
+    const settlingVerifiers = new Map<string, number>();
     const verification = {
       tools: buildVerificationTools({ projectId: project.id, planRoot: () => rootReference?.id, controlRoot: dir, background, leases: hostLeases, shell: (scopeId, cwd, branch) => verifierShell(loadProject(project.id), scopeId, cwd, branch), isClosed: () => closed }),
       hooks: {
@@ -508,8 +510,24 @@ export async function openDurableProject(input: { project: Project; dir: string;
           return null;
         },
         capture: (key: string, source: string) => captureAttemptTarget(dir, key, source),
-        revision: async (path: string) => (await captureTarget(path)).revision,
-        finish: async (verifierThreadId: string) => { try { await background.killThread(verifierThreadId); } finally { hostLeases.releaseWhere(ownLease(verifierThreadId)); } },
+        revision: async (path: string) => { await input.testBeforeVerifierRevision?.(path); return (await captureTarget(path)).revision; },
+        drain: async (verifierThreadId: string) => { settlingVerifiers.set(verifierThreadId, (settlingVerifiers.get(verifierThreadId) ?? 0) + 1); await background.killThread(verifierThreadId); },
+        release: async (verifierThreadId: string, attemptTaskId: number) => {
+          const remaining = (settlingVerifiers.get(verifierThreadId) ?? 1) - 1;
+          if (remaining > 0) settlingVerifiers.set(verifierThreadId, remaining);
+          else {
+            settlingVerifiers.delete(verifierThreadId);
+            try {
+              await schedules.mutex.run(async () => {
+                const resumed = await root.commit(async tx => Object.values((await tx.doc(DurablePlanning, root.id)).work).some(work => work.threadId === verifierThreadId && work.taskId !== Number(attemptTaskId) && (work.status === "queued" || work.status === "running")), context);
+                if (!resumed) hostLeases.releaseWhere(ownLease(verifierThreadId));
+              });
+            } catch (error) {
+              try { await background.killThread(verifierThreadId); } finally { hostLeases.releaseWhere(ownLease(verifierThreadId)); }
+              throw error;
+            }
+          }
+        },
       },
     };
     const planning = planningRuntime({ projectId: project.id, models: roleModelNow, fallbackModels: { verifier: null, get worker() { return fallbackModels.worker ?? null; }, get scout() { return fallbackModels.scout ?? null; }, get reviewer() { return fallbackModels.reviewer ?? null; } }, quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined, quotaResetAt, testBeforeWorkSettlement: input.testBeforeWorkSettlement, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => role === "verifier" ? [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) : delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${roleStanding("scout")}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${roleStanding("reviewer")}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; }, get verifier() { return verifierInstructions(project, standing.text); } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role === "verifier" ? "reviewer" : role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, verifierTools: verification.tools, verification: verification.hooks, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
@@ -641,10 +659,19 @@ export async function openDurableProject(input: { project: Project; dir: string;
     })();
     const cleanupWake = setInterval(() => { void (async () => { if (closed || (await planning.snapshot(root)).paused) return; await cleanup(); })().catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_WORKTREE_CLEANUP_MS) || 1_800_000);
     cleanupWake.unref();
-    // Leases follow the running work: a holder (or queued waiter) whose thread has no running work lost it to settle, stop, pause or crash.
+    async function retainedLeaseThreads(): Promise<Set<string>> {
+      return root.commit(async tx => {
+        const state = await tx.doc(DurablePlanning, root.id);
+        const held = new Set(Object.values(state.work).filter(work => work.status === "running").map(work => work.threadId));
+        for (const thread of Object.values(state.threads)) if (thread.verification?.open) for (const attempt of thread.verification.attempts) if (attempt.endedAt === undefined) held.add(attempt.verifierThreadId);
+        for (const threadId of settlingVerifiers.keys()) held.add(threadId);
+        return held;
+      }, context);
+    }
+    // An interrupted verifier still owns its final validation; the sweeper must not release its leases early.
     const leaseWake = setInterval(() => { void (async () => {
       if (closed || !hostLeases.held(ownLease()).length) return;
-      const running = new Set((await planning.snapshot(root)).work.filter(work => work.status === "running").map(work => work.threadId));
+      const running = await retainedLeaseThreads();
       hostLeases.releaseWhere(holder => ownLease()(holder) && !running.has(holder.threadId));
     })().catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_LEASE_SWEEP_MS) || 1000);
     leaseWake.unref();
@@ -738,7 +765,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
     async function drainWorker(threadId: string, stopped: Awaited<ReturnType<typeof planning.stop>>): Promise<void> {
       await Promise.all(stopped.taskIds.map(id => openedHarness.abortTask(id, context)));
       await Promise.all(stopped.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true })));
+      const targets = (await planning.threadIdentities(root)).filter(thread => stopped.conversationIds.includes(thread.conversationId)).map(thread => thread.threadId);
+      await Promise.all(targets.map(id => background.killThread(id)));
       if (!closed) await schedules.mutex.run(() => planning.completeStop(root, threadId, stopped.stopId));
+      const retained = await retainedLeaseThreads();
+      hostLeases.releaseWhere(holder => ownLease()(holder) && targets.includes(holder.threadId) && !retained.has(holder.threadId));
       if (!closed) await cleanup().catch(error => report(input.onReport, project.id, error));
     }
 
@@ -845,8 +876,6 @@ export async function openDurableProject(input: { project: Project; dir: string;
       stop: async threadId => {
         const stopped = await schedules.mutex.run(() => { assertOpen(); return planning.stop(root, threadId); });
         await drainWorker(threadId, stopped);
-        const children = (await planning.snapshot(root)).work.filter(work => work.parentThreadId === threadId).map(work => work.threadId);
-        for (const id of new Set([threadId, ...children])) { hostLeases.releaseWhere(ownLease(id)); await background.killThread(id); }
       },
       pauseWorker: async threadId => {
         const stopped = await admitting(() => planning.pauseWorker(root, threadId));

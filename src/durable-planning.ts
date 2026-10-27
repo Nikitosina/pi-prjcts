@@ -146,12 +146,14 @@ export type VerificationHooks = {
   capture: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; proof: { paths: string[]; diff: string } }>;
   /** Content revision of a tree now, uncommitted and untracked work included. */
   revision: (sourcePath: string) => Promise<string>;
-  /** Frees what a verifier thread holds: its leases and background commands. */
-  finish: (verifierThreadId: string) => Promise<void>;
+  /** Stops verifier jobs before final target validation, without releasing its leases. */
+  drain: (verifierThreadId: string) => Promise<void>;
+  /** Releases leases after settlement, unless the verifier resumed newer work. */
+  release: (verifierThreadId: string, attemptTaskId: TaskId) => Promise<void>;
 };
 type PreparedVerification =
   | { kind: "none" }
-  | { kind: "revision"; current: string | null }
+  | { kind: "revision"; current: string | null; verifierThreadId: string }
   | { kind: "escalate"; reason: string }
   | { kind: "start"; n: number; model: string; skill: string; key: string; scopeId: string; sourcePath: string; manifest: TargetManifest; proof: { paths: string[]; diff: string }; criteria: Criterion[]; task: string };
 
@@ -216,74 +218,79 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         const [outcome] = await runtime.outcomes([task.input.attemptTaskId], context);
         const result = outcome?.status === "completed" && isAttemptResult(outcome.result) ? outcome.result : undefined;
         await options.testBeforeWorkSettlement?.(task.input.workId);
-        const prepared = await prepareVerification(runtime.conversationId, change => runtime.commit(change, context), task.input.workId, result?.status === "completed");
-        await runtime.commit(async tx => {
-          const state = await tx.doc(DurablePlanning, runtime.conversationId);
-          const work = state.work[task.input.workId];
-          // A paused, stopped, or resumed attempt must not replace the newer thread state.
-          if (work?.status === "running" && work.taskId === Number(task.input.attemptTaskId)) {
-            const quota = result?.status === "failed" && result.reason && providerFailure(result.reason) === "quota_exceeded" ? failureBlocker(result.reason, work.attempt?.model) : undefined;
-            const recovery = work.quotaRecovery ?? { retryAt: 0, attempts: 0, lastError: "" };
-            if (quota && work.role !== "verifier" && recovery.attempts < QUOTA_RETRY_LIMIT && !state.paused && !state.threads[work.threadId]?.paused && !state.threads[work.threadId]?.stopping) {
-              const attempt = work.attempt;
-              if (!attempt || work.conversationId === null) throw new Error("Quota recovery lost its frozen worker profile");
-              const configuredFallback = attempt.quotaFallback;
-              const switchModel = configuredFallback && configuredFallback !== attempt.model && !attempt.modelTransitions?.length ? configuredFallback : undefined;
-              let fallbackModel: ModelRef | undefined;
-              if (switchModel) {
-                try { fallbackModel = frozenModel({ ...attempt, model: switchModel }, work.role); }
-                catch { /* A removed fallback must not strand settlement; wait for the frozen model instead. */ }
+        let prepared: PreparedVerification = { kind: "none" };
+        try {
+          prepared = await prepareVerification(runtime.conversationId, change => runtime.commit(change, context), task.input.workId, result?.status === "completed", task.input.attemptTaskId);
+          await runtime.commit(async tx => {
+            const state = await tx.doc(DurablePlanning, runtime.conversationId);
+            const work = state.work[task.input.workId];
+            // A paused, stopped, or resumed attempt must not replace the newer thread state.
+            if (work?.status === "running" && work.taskId === Number(task.input.attemptTaskId)) {
+              const quota = result?.status === "failed" && result.reason && providerFailure(result.reason) === "quota_exceeded" ? failureBlocker(result.reason, work.attempt?.model) : undefined;
+              const recovery = work.quotaRecovery ?? { retryAt: 0, attempts: 0, lastError: "" };
+              if (quota && work.role !== "verifier" && recovery.attempts < QUOTA_RETRY_LIMIT && !state.paused && !state.threads[work.threadId]?.paused && !state.threads[work.threadId]?.stopping) {
+                const attempt = work.attempt;
+                if (!attempt || work.conversationId === null) throw new Error("Quota recovery lost its frozen worker profile");
+                const configuredFallback = attempt.quotaFallback;
+                const switchModel = configuredFallback && configuredFallback !== attempt.model && !attempt.modelTransitions?.length ? configuredFallback : undefined;
+                let fallbackModel: ModelRef | undefined;
+                if (switchModel) {
+                  try { fallbackModel = frozenModel({ ...attempt, model: switchModel }, work.role); }
+                  catch { /* A removed fallback must not strand settlement; wait for the frozen model instead. */ }
+                }
+                if (switchModel && fallbackModel) {
+                  const from = attempt.model;
+                  await configure(tx, work.conversationId, { model: fallbackModel });
+                  attempt.model = switchModel;
+                  attempt.modelTransitions = [...(attempt.modelTransitions ?? []), { at: Date.now(), from, to: switchModel, reason: "quota_exceeded" }];
+                  // Queued follow-ups share this conversation's model, but completed attempts keep their history.
+                  for (const pending of Object.values(state.work)) if (pending.id !== work.id && pending.threadId === work.threadId && pending.status === "queued" && pending.attempt) {
+                    pending.attempt.model = switchModel;
+                    pending.attempt.modelTransitions = attempt.modelTransitions.map(item => ({ ...item }));
+                  }
+                }
+                const attempts = recovery.attempts + 1, now = Date.now();
+                const resetAt = options.quotaResetAt?.(attempt.model, now);
+                const retryAt = fallbackModel ? now : resetAt ?? now + retryDelay(attempts, options.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS);
+                work.status = "queued"; work.taskId = null; work.startedAt = null; work.endedAt = null;
+                work.quotaRecovery = { retryAt, attempts, lastError: quota };
+                work.blocker = quotaWaitBlocker(work);
+                attempt.startedAt = null; attempt.endedAt = null;
+                const activeThread = state.threads[work.threadId]; if (activeThread?.activeWorkId === work.id) activeThread.activeWorkId = null;
+                state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
+                return { status: "terminal", outcome: { status: "completed", result: null } };
               }
-              if (switchModel && fallbackModel) {
-                const from = attempt.model;
-                await configure(tx, work.conversationId, { model: fallbackModel });
-                attempt.model = switchModel;
-                attempt.modelTransitions = [...(attempt.modelTransitions ?? []), { at: Date.now(), from, to: switchModel, reason: "quota_exceeded" }];
-                // Queued follow-ups share this conversation's model, but completed attempts keep their history.
-                for (const pending of Object.values(state.work)) if (pending.id !== work.id && pending.threadId === work.threadId && pending.status === "queued" && pending.attempt) {
-                  pending.attempt.model = switchModel;
-                  pending.attempt.modelTransitions = attempt.modelTransitions.map(item => ({ ...item }));
+              work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
+              work.endedAt = Date.now();
+              work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
+              if (work.status === "failed" && recovery.attempts >= QUOTA_RETRY_LIMIT && quota) work.blocker = `quota_recovery_exhausted: ${QUOTA_RETRY_LIMIT} automatic retries did not restore quota. ${work.blocker}`;
+              work.attempt &&= { ...work.attempt, endedAt: work.endedAt };
+              const thread = state.threads[work.threadId];
+              if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
+              const resultText = result?.text ?? work.blocker ?? "No text result.";
+              if (result?.text) work.result = result.text;
+              const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
+              // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
+              const held = work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")));
+              // A repair turn that fails ends its cycle (a pause-interrupted one keeps it open for the resume); earlier completed turns stop counting as complete and their dependents block.
+              if (work.status === "failed" && work.role === "worker" && state.threads[work.threadId]?.verification?.open) abandonCycle(state, work.threadId, `The worker's repair turn failed: ${work.blocker ?? "no reason recorded"}`);
+              const verifying = work.status !== "interrupted" && work.role === "verifier" ? await settleVerifier(tx, runtime.conversationId, state, work, prepared, String(task.input.attemptTaskId)) : work.status === "completed" && !held && await startVerification(tx, runtime.conversationId, state, work, prepared, resultText, String(task.input.attemptTaskId));
+              if (!verifying && work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
+                if (held) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
+                else {
+                  const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
+                  const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
+                  work.report = { requestId: `plan-report:${work.id}:${task.input.attemptTaskId}`, delivered: false, text: reportText(work, resultText, others) };
+                  await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
                 }
               }
-              const attempts = recovery.attempts + 1, now = Date.now();
-              const resetAt = options.quotaResetAt?.(attempt.model, now);
-              const retryAt = fallbackModel ? now : resetAt ?? now + retryDelay(attempts, options.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS);
-              work.status = "queued"; work.taskId = null; work.startedAt = null; work.endedAt = null;
-              work.quotaRecovery = { retryAt, attempts, lastError: quota };
-              work.blocker = quotaWaitBlocker(work);
-              attempt.startedAt = null; attempt.endedAt = null;
-              const activeThread = state.threads[work.threadId]; if (activeThread?.activeWorkId === work.id) activeThread.activeWorkId = null;
-              state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
-              return { status: "terminal", outcome: { status: "completed", result: null } };
+              if (!state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
             }
-            work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
-            work.endedAt = Date.now();
-            work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
-            if (work.status === "failed" && recovery.attempts >= QUOTA_RETRY_LIMIT && quota) work.blocker = `quota_recovery_exhausted: ${QUOTA_RETRY_LIMIT} automatic retries did not restore quota. ${work.blocker}`;
-            work.attempt &&= { ...work.attempt, endedAt: work.endedAt };
-            const thread = state.threads[work.threadId];
-            if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
-            const resultText = result?.text ?? work.blocker ?? "No text result.";
-            if (result?.text) work.result = result.text;
-            const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
-            // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
-            const held = work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")));
-            // A repair turn that fails ends its cycle (a pause-interrupted one keeps it open for the resume); earlier completed turns stop counting as complete and their dependents block.
-            if (work.status === "failed" && work.role === "worker" && state.threads[work.threadId]?.verification?.open) abandonCycle(state, work.threadId, `The worker's repair turn failed: ${work.blocker ?? "no reason recorded"}`);
-            const verifying = work.status !== "interrupted" && work.role === "verifier" ? await settleVerifier(tx, runtime.conversationId, state, work, prepared, String(task.input.attemptTaskId)) : work.status === "completed" && !held && await startVerification(tx, runtime.conversationId, state, work, prepared, resultText, String(task.input.attemptTaskId));
-            if (!verifying && work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
-              if (held) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
-              else {
-                const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
-                const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
-                work.report = { requestId: `plan-report:${work.id}:${task.input.attemptTaskId}`, delivered: false, text: reportText(work, resultText, others) };
-                await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
-              }
-            }
-            if (!state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
-          }
-          return { status: "terminal", outcome: { status: "completed", result: null } };
-        }, context);
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }, context);
+        } finally {
+          if (prepared.kind === "revision") await options.verification?.release(prepared.verifierThreadId, task.input.attemptTaskId);
+        }
       },
     },
     abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
@@ -433,13 +440,13 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     return (own.findLast(item => item.id === work.id) ?? own.at(-1) ?? work).text;
   }
   /** Reads what the settlement needs, then does the file work (revision of the tree) outside the transaction. */
-  async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean): Promise<PreparedVerification> {
+  async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean, attemptTaskId: TaskId): Promise<PreparedVerification> {
     const hooks = options.verification;
     if (!hooks) return { kind: "none" };
     let seen: { role: DurableRole; top: boolean; scopeId: string | null; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string } | undefined;
     await read(async tx => {
       const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
-      if (work) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work) };
+      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work) };
       return undefined;
     });
     if (!seen) return { kind: "none" };
@@ -447,8 +454,9 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       const attempt = seen.verification?.attempts.find(item => item.verifierWorkId === workId);
       if (!attempt) return { kind: "none" };
       // Stop leftover verifier jobs before the last drift read and before the worker can repair.
-      await hooks.finish(seen.threadId);
-      return { kind: "revision", current: await hooks.revision(attempt.sourcePath).catch(() => null) };
+      let current: string | null = null;
+      try { await hooks.drain(seen.threadId); current = await hooks.revision(attempt.sourcePath); } catch { /* An unavailable final check cannot validate the verdict. */ }
+      return { kind: "revision", current, verifierThreadId: seen.threadId };
     }
     if (!completed || seen.role !== "worker" || !seen.top) return { kind: "none" };
     const open = seen.verification?.open ? seen.verification : undefined;
@@ -456,10 +464,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     // Verification is on but this worker has no workspace scope and worktree to verify: it is reported as not verified, never as plain completion.
     if (seen.scopeId === null || !seen.cwd) return { kind: "escalate", reason: "Verification does not apply: this worker has no isolated worktree (only scoped top-level workers are verified)" };
     if ((open?.attempts.length ?? 0) >= MAX_VERIFICATION_ATTEMPTS) return { kind: "escalate", reason: "Verification attempts are exhausted" };
-    const problem = open ? null : hooks.scopeCheck(seen.scopeId) ?? await hooks.check();
+    const problem = hooks.scopeCheck(seen.scopeId) ?? (open ? null : await hooks.check());
     if (problem) return { kind: "escalate", reason: problem };
     let model: string;
-    try { const ref = options.models.verifier; model = `${ref.provider}/${ref.modelId}`; } catch (error) { return { kind: "escalate", reason: error instanceof Error ? error.message : "No verifier model is configured" }; }
+    try { const ref = open ? frozenModel(open, "verifier") : options.models.verifier; model = `${ref.provider}/${ref.modelId}`; } catch (error) { return { kind: "escalate", reason: error instanceof Error ? error.message : "No verifier model is configured" }; }
     const criteria = open?.criteria ?? parseCriteria(seen.task), tooBig = open ? null : criteriaProblem(seen.task, criteria);
     if (tooBig) return { kind: "escalate", reason: tooBig };
     const key = workId;
@@ -482,7 +490,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const cycle = state.threads[workerThreadId]?.verification;
     if (!cycle) return;
     cycle.open = false; cycle.outcome = outcome; cycle.reason = reason;
-    for (const attempt of cycle.attempts) if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); void options.verification?.finish(attempt.verifierThreadId).catch(() => undefined); }
+    for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
     const finished = cycle.workIds.map(id => state.work[id]).filter((item): item is StoredWork => item !== undefined), last = finished.at(-1);
     if (outcome === "escalated") for (const item of finished) if (item.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; }
     if (!last) return;
@@ -521,7 +529,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function settleVerifier(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, tag: string): Promise<boolean> {
     const workerThreadId = work.parentThreadId, cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined, attempt = cycle?.attempts.find(item => item.verifierWorkId === work.id);
     if (!workerThreadId || !cycle || !attempt || !cycle.open || attempt.endedAt !== undefined) return true;
-    if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = work.status === "completed" ? "The verifier finished without recording a verdict" : `The verifier did not finish: ${work.blocker ?? work.status}`; }
+    if (prepared.kind === "revision" && prepared.current === null) { attempt.state = "blocked"; attempt.reason = "Final target validation or verifier job cleanup failed; the verdict cannot be used"; }
+    else if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = work.status === "completed" ? "The verifier finished without recording a verdict" : `The verifier did not finish: ${work.blocker ?? work.status}`; }
     else if (prepared.kind === "revision" && prepared.current !== (attempt.finalRevision ?? attempt.revision) && attempt.state !== "stale") { attempt.state = "stale"; attempt.reason = "The worker's tree changed before the verdict was used, so it is rejected"; }
     attempt.endedAt = Date.now();
     const last = state.work[cycle.workIds.at(-1)!], answer = last?.result ?? "";
@@ -545,7 +554,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined;
     if (!cycle?.open) return;
     cycle.open = false; cycle.outcome = "escalated"; cycle.reason = reason;
-    for (const attempt of cycle.attempts) if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); void options.verification?.finish(attempt.verifierThreadId).catch(() => undefined); }
+    for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
     for (const id of cycle.workIds) { const item = state.work[id]; if (item?.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; } }
   }
   // An unscoped worker under exactly one whole-repository grant gets that grant; anything less clear stays explicit.
@@ -557,7 +566,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   const workspaceCatalog = options.workspaceCatalog ? defineTool({ name: "projects_workspace_catalog", description: "Read owner-authorized workspace scopes. Delegate with an existing workspaceScopeId and omit requiredTools for scoped read/write/publication. The host binds those tools after allocation; their generated names are not global tool names.", parameters: Type.Object({}), replay: "safe", async execute() { return { content: [{ type: "text", text: JSON.stringify({ scopes: options.workspaceCatalog?.() ?? [] }) }] }; } }) : undefined;
   extension = defineExtension({ name: "projects.durable-planning", tools: [delegate, ...(workspaceCatalog ? [workspaceCatalog] : [])], tasks: [Attempt, ScopedAttempt, Settlement, Report, Dispatcher] });
 
-  function frozenModel(profile: StoredAttempt, role: DurableRole): ModelRef {
+  function frozenModel(profile: Pick<StoredAttempt, "model">, role: DurableRole): ModelRef {
     const model = options.resolveModel?.(profile.model, role) ?? Object.values(options.models).find(value => `${value.provider}/${value.modelId}` === profile.model);
     if (!model || `${model.provider}/${model.modelId}` !== profile.model) throw new Error("Frozen thread model is unavailable; restore its configured provider/model before continuing");
     return model;
@@ -595,12 +604,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     // Scouts and reviewers are read-only: a scope passed for them is ignored (their code root is the checkout, a PR head or the parent's worktree).
     const workspaceScopeId = work.role !== "worker" && !existing ? null : work.workspaceScopeId ?? null;
     const missing = selected.filter(name => !bindings.has(name));
-    let model = options.models[work.role];
+    let model: ModelRef;
     if (work.frozen) {
       const pinned = options.resolveModel?.(work.frozen.model, work.role);
       if (!pinned || `${pinned.provider}/${pinned.modelId}` !== work.frozen.model) throw new Error("The verification cycle's frozen verifier model is unavailable; nothing falls back to another model");
       model = pinned;
-    }
+    } else model = options.models[work.role];
     const instructions = options.instructions[work.role];
     let profile: StoredAttempt = { id: crypto.randomUUID(), projectId: options.projectId, model: `${model.provider}/${model.modelId}`, quotaFallback: work.role === "verifier" ? null : options.fallbackModels?.[work.role] ?? null, thinking: "medium", instructions, skills: work.frozen ? [work.frozen.skill] : options.skillNames?.(work.role), cwd: options.cwd, toolNames: selected, bindingRevision, capabilityBindingRevision: bindingRevision, standingRevision: options.standingRevision, startedAt: null, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } };
     if (missing.length) return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: null, workspaceConfigured: false, status: "blocked", blocker: `Missing required tool bindings: ${missing.join(", ")}`, conversationId: null, taskId: null, attempt: profile };
@@ -632,9 +641,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: existing?.workspaceBindingRevision ?? null, workspaceConfigured: workspaceScopeId === null ? (existing?.workspaceConfigured ?? true) : Boolean(existing?.workspaceConfigured && continuationAttempt), status: "queued", blocker: null, conversationId, taskId: null, attempt: profile };
   }
   function verifierPending(state: PlanningState, threadId: string): boolean {
-    return state.threads[threadId]?.verification?.attempts.some(attempt => {
+    const cycle = state.threads[threadId]?.verification;
+    return cycle?.attempts.some(attempt => {
       const work = state.work[attempt.verifierWorkId];
-      return work?.status === "queued" || work?.status === "running";
+      return work?.status === "queued" || work?.status === "running" || Boolean(state.threads[attempt.verifierThreadId]?.stopping) || Boolean(cycle.open && attempt.endedAt === undefined);
     }) ?? false;
   }
   async function admit(tx: Tx, parent: ConversationId, work: DurablePlanWork, kick: boolean, chat?: ConversationId): Promise<StoredWork> {

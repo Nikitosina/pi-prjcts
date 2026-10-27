@@ -170,6 +170,7 @@ export function verifierShell(project: Project, scopeId: string, workDir: string
   const authorization = project.workspaceAuthorization, scope = authorization?.scopes.find(item => item.id === scopeId), repository = authorization?.repositories.find(item => item.repositoryId === scope?.repositoryId);
   if (!authorization || !scope || !repository) return { refusal: "The worker's workspace scope is no longer authorized for this project" };
   if (authorization.provider !== "github") return { refusal: `Verification covers git workspaces. The "${authorization.provider}" workspace provider keeps its shell policy in its plugin, which verifiers cannot use, so its workers are not verified` };
+  if (scope.wholeRepository !== true) return { refusal: "Verification requires the worker's whole-repository shell grant; folder-limited workers cannot gain general shell through a verifier" };
   const publication = project.githubAuthorization?.find(item => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(project));
   return { guard: workerShellGuard({ branch: branch ?? "", workDir, ownerCheckout: repository.ownerCheckout, publication }) };
 }

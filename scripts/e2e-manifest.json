@@ -95,7 +95,8 @@
     ],
     "src/durable-*.ts": [
       "durable-runtime-e2e",
-      "durable-threads-e2e"
+      "durable-threads-e2e",
+      "verification-*"
     ],
     "src/github-*.ts": [
       "github-*",
