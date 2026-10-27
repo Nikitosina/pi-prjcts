@@ -105,7 +105,7 @@ async function launch() {
     const portFile = join(scratch, 'fake-provider.port'), providerFd = openSync(run.providerLog, 'a');
     await spawnTracked(run, 'fakeProvider', process.execPath, [join(here, 'fake-provider.mjs'), portFile, run.requestLog], { stdio: ['ignore', providerFd, providerFd] });
     run.fakePort = Number(await until(() => existsSync(portFile) && readFileSync(portFile, 'utf8'), 'fake provider port'));
-    writeFileSync(join(run.agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${run.fakePort}/v1`, apiKey: 'fake', api: 'openai-completions', models: [{ id: 'fake-model', name: 'Fake', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 }] } } }));
+    writeFileSync(join(run.agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${run.fakePort}/v1`, apiKey: 'fake', api: 'openai-completions', models: ['fake-model', 'fallback-model'].map(id => ({ id, name: id === 'fake-model' ? 'Fake' : 'Fallback fake', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 })) } } }));
     // Host: private HOME, project home (hence a private socket), offline, inherited PI_PROJECTS_* stripped.
     const logFd = openSync(run.hostLog, 'a');
     const { child: host, exited } = await spawnTracked(run, 'host', process.execPath, [join(repo, 'src/host.ts')], { cwd: repo, env: hostEnv(run), stdio: ['ignore', logFd, logFd] });
@@ -216,6 +216,41 @@ async function openBrowser(run, sinks) {
 }
 
 const journeys = {
+  // Feature: features/quota-settings.md
+  async 'quota-settings'(run, page, record, dir) {
+    const url = new URL(run.webUrl); url.searchParams.set('tab', 'settings');
+    await page.navigate(url.toString());
+    await page.waitFor(`document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`, 'settings available');
+    await page.click('#settings-button');
+    const picker = '.mp[data-role="worker-fallback"]';
+    await page.waitFor(`!!document.querySelector('${picker}')`, 'quota fallback picker');
+    await page.evaluate(`document.querySelector('${picker}').scrollIntoView({ block: 'center' })`);
+    await page.shot(dir, '01-before');
+    await page.click(`${picker} .mp-current`);
+    await page.click(`${picker} .mp-search`);
+    await page.cdp('Input.insertText', { text: 'Fallback fake' });
+    await page.waitFor(`!!document.querySelector('${picker} .mp-row[data-ref="fake/fallback-model"]')`, 'configured fallback result');
+    await page.shot(dir, '02-typed');
+    await page.click(`${picker} .mp-row[data-ref="fake/fallback-model"]`);
+    await page.click('[data-settings-form] button[type=submit]');
+    await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, 'save review');
+    const review = await page.evaluate(`document.querySelector('#dialog').innerText`);
+    if (!review.includes('Worker quota fallback') || !review.includes('fake/fallback-model')) throw Error('review omitted fallback selection');
+    await page.shot(dir, '03-review');
+    await page.click('[data-settings-confirm] button[type=submit]');
+    await page.waitFor(`!document.querySelector('#dialog').open`, 'save completed');
+    await page.reload();
+    await page.waitFor(`document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`, 'settings after reload');
+    await page.click('#settings-button');
+    await page.waitFor(`!!document.querySelector('${picker}[data-value="fake/fallback-model"]')`, 'persisted fallback');
+    await page.evaluate(`document.querySelector('${picker}').scrollIntoView({ block: 'center' })`);
+    await page.shot(dir, '04-saved');
+    const view = await rpc(run, { action: 'show', id: run.projectId });
+    writeFileSync(join(dir, 'host-show-proof.json'), JSON.stringify(view, null, 2));
+    if (view.project.fallbackModels?.worker !== 'fake/fallback-model' || view.project.models.worker !== 'fake/fake-model') throw Error('host state differs from UI selection');
+    writeFileSync(join(dir, 'host-plan-proof.json'), JSON.stringify(await rpc(run, { action: 'plan-snapshot', id: run.projectId }), null, 2));
+    record('verified', 'pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model');
+  },
   // Feature: features/message-coordinator.md
   async 'message-coordinator'(run, page, record, dir) {
     const prompt = `VERIFY-PING ${run.id}`, composer = 'textarea[aria-label="Message coordinator"]';
