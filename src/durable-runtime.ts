@@ -65,7 +65,7 @@ import { searchKnowledge } from "./knowledge-search.ts";
 import { fitJson } from "./response-limit.ts";
 import { UPLOAD_IMAGE_INLINE_BYTES, listUploads, uploadBytes, uploadText } from "./uploads.ts";
 import { durableDecisions } from "./durable-decisions.ts";
-import { observeLimitHeaders } from "./usage-limits.ts";
+import { observeLimitHeaders, quotaResetAt } from "./usage-limits.ts";
 import { operationApprovals, type OperationApprovals } from "./operation-approvals.ts";
 import { githubReadSnapshot, githubWriteSnapshot, githubWriteInspector, type GithubWriteInspectionInput } from "./github-worker.ts";
 
@@ -192,8 +192,8 @@ export type DurableProjectRuntime = {
   worktrees(): Promise<WorktreeInventory>;
   /** Live context/compaction settings (read on every generation; no reopen). */
   applyContext(settings: ContextSettings | undefined): void;
-  /** Coordinator and role-model selection, live. New workers use it; existing threads keep their frozen model. Refused while any chat is working. */
-  applyModels(project: Pick<Project, "model" | "models">): Promise<void>;
+  /** Coordinator, role-model and explicit quota-fallback selection, live. Existing threads change model only through audited quota recovery. */
+  applyModels(project: Pick<Project, "model" | "models" | "fallbackModels">): Promise<void>;
   /** The owner's worker limit, live; running work is never aborted. */
   applyWorkerCap(cap: number): Promise<void>;
   /** Manual compaction of one chat ("Compact now"); refuses while paused or already compacting. */
@@ -372,11 +372,12 @@ export async function openDurableProject(input: { project: Project; dir: string;
     }) as typeof models.getModel;
     // A role without its own model follows the coordinator, read each time a worker is admitted.
     const explicitModels = (selection: Pick<Project, "models">): Partial<Record<"worker" | "scout" | "reviewer", ReturnType<typeof modelRef>>> => Object.fromEntries(Object.entries(selection.models).flatMap(([role, value]) => value ? [[role, modelRef(value)]] : []));
-    let roleModels = explicitModels(project);
+    let roleModels = explicitModels(project), fallbackModels = project.fallbackModels ?? {};
     const roleModel = (role: "worker" | "scout" | "reviewer") => roleModels[role] ?? coordinatorModel;
     const roleModelNow = { get worker() { return roleModel("worker"); }, get scout() { return roleModel("scout"); }, get reviewer() { return roleModel("reviewer"); } };
     assertConfiguredModel(models, coordinatorModel.provider, coordinatorModel.modelId, "Coordinator");
     for (const [role, ref] of Object.entries(roleModels)) assertConfiguredModel(models, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
+    for (const [role, reference] of Object.entries(fallbackModels)) if (reference) { const selected = modelRef(reference); assertConfiguredModel(models, selected.provider, selected.modelId, `${role} quota fallback`); }
 
     let rootReference: Conversation | undefined;
     let runtimeReference: DurableProjectRuntime | undefined;
@@ -481,7 +482,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => { throw new Error("Project runtime is not open"); };
     const reviewerTools = reviewVerdictTools({ planRoot: () => rootReference?.id, repositories: () => { const current = loadProject(project.id); return [...(current.githubAuthorization ?? []).map(item => item.repositoryId), ...plugins.followProviders().flatMap(provider => { const repo = provider.repository(current); return repo ? [repo.repositoryId] : []; })]; }, onVerdict: () => kickFollow() });
-    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
+    const planning = planningRuntime({ projectId: project.id, models: roleModelNow, fallbackModels: { get worker() { return fallbackModels.worker ?? null; }, get scout() { return fallbackModels.scout ?? null; }, get reviewer() { return fallbackModels.reviewer ?? null; } }, quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined, quotaResetAt, resolveModel: (value, role) => { const selected = modelRef(value); assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`); return selected; }, cwd: project.cwd, refreshSkills: refreshDelegatedSkills, skillNames: role => delegatedSkills[role].map(skill => skill.name), instructions: { get worker() { return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`; }, get scout() { return `${workerStanding}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`; }, get reviewer() { return `${workerStanding}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`; } }, standingRevision: standing.revision, workspaceInstructions: (role, selectedStanding) => `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role)}`, knowledgeTools: workerKnowledge, skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension }, mcp, readOnlyCode, reviewerTools, workerPolicy: policy, workerTools: input.workerTools, workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP, workspaceCatalog: () => catalog(project), prepareWorkerEnvironment, publishWorkerEnvironment: extension => registry.install(extension), beforeScopedSubmit: input.beforeScopedSubmit, planRoot: () => rootReference?.id, readHead: ref => heads.ensure(ref), resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId), artifactSummary: thread => artifactSummary(dir, thread) });
     registry.install(policy);
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
@@ -616,7 +617,11 @@ export async function openDurableProject(input: { project: Project; dir: string;
       hostLeases.releaseWhere(holder => ownLease()(holder) && !running.has(holder.threadId));
     })().catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_LEASE_SWEEP_MS) || 1000);
     leaseWake.unref();
+    // Persisted deadlines make quota recovery survive restarts; paused/stopped work stays untouched.
+    const quotaWake = setInterval(() => { if (!closed && dispatchReady) void schedules.mutex.run(() => planning.recoverQuota(root)).catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_QUOTA_SWEEP_MS) || 30_000);
+    quotaWake.unref();
     stopMonitors = async () => {
+      clearInterval(quotaWake);
       clearInterval(leaseWake); clearInterval(cleanupWake); await cleaning?.catch(() => {});
       clearInterval(followWake); follow.abort(); clearInterval(prMonitorWake);
       clearInterval(watchdogWake); await watchdog.idle();
@@ -878,13 +883,14 @@ export async function openDurableProject(input: { project: Project; dir: string;
       applyWorkerCap: cap => schedules.mutex.run(async () => { assertOpen(); await planning.setWorkerCap(root, cap); }),
       applyModels: async selection => schedules.mutex.run(async () => {
         assertOpen();
-        const next = modelRef(selection.model), roles = explicitModels(selection);
+        const next = modelRef(selection.model), roles = explicitModels(selection), fallbacks = selection.fallbackModels ?? {};
         const moved = next.provider !== coordinatorModel.provider || next.modelId !== coordinatorModel.modelId;
         await refreshModels(candidate => {
           assertConfiguredModel(candidate, next.provider, next.modelId, "Coordinator");
           for (const [role, ref] of Object.entries(roles)) assertConfiguredModel(candidate, ref.provider, ref.modelId, role[0]!.toUpperCase() + role.slice(1));
+          for (const [role, reference] of Object.entries(fallbacks)) if (reference) { const selected = modelRef(reference); assertConfiguredModel(candidate, selected.provider, selected.modelId, `${role} quota fallback`); }
         });
-        coordinatorModel = next; roleModels = roles;
+        coordinatorModel = next; roleModels = roles; fallbackModels = fallbacks;
         if (!moved) return;
         // Durable pins in-flight request models; configure changes only subsequent requests.
         await root.configure({ model: next }, context);

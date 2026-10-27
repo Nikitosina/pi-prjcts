@@ -653,7 +653,7 @@ function renderPanels() {
   setHtml("#owner-steps", [...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `1. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `1. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "1. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
   if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
-  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
+  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}${Object.entries(p.fallbackModels ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} quota fallback</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
 
@@ -2811,7 +2811,7 @@ async function submit(form) {
     const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings saved. New threads use them; running threads keep what they started with.");
     validateSettings(result);
     for (const [field, changed] of Object.entries(proposal.changes)) {
-      if (field === "models" ? Object.entries(changed).some(([role, reference]) => (result.values.models[role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
+      if (field === "models" || field === "fallbackModels" ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
     }
     for (const key of proposal.draftKeys) {
       const draft = settingsDrafts.get(key), field = key.slice(key.indexOf(":") + 1);
@@ -3207,7 +3207,7 @@ async function usageList(offset = 0) {
 }
 function validateSettings(value) {
   const v = value?.values;
-  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
+  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer, v.fallbackModels?.worker, v.fallbackModels?.scout, v.fallbackModels?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
 }
 function captureSettingsDraft() {
   const form = dialog.querySelector("[data-settings-form]");
@@ -3361,11 +3361,14 @@ const settingsAccess = {
 };
 let settingsPending = null, modelScoped = [], modelUnavailableScoped = [], modelScopeSet = false, modelExtensionErrors = [];
 const scopeKey = refs => [...refs].sort().join("\n");
-const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", workerFallback: values.fallbackModels?.worker ?? "", scoutFallback: values.fallbackModels?.scout ?? "", reviewerFallback: values.fallbackModels?.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
   const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
   for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
-  for (const [role] of settingsRoles) flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+  for (const [role] of settingsRoles) {
+    flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+    if (role !== "coordinator") flat[`${role}Fallback`] = form.querySelector(`.mp[data-role="${role}-fallback"]`).dataset.value;
+  }
   flat.scoped = scopeKey([...form.querySelectorAll("[data-scope-ref]:checked")].map(box => box.dataset.scopeRef));
   return flat;
 }
@@ -3374,7 +3377,10 @@ function settingsChanges(flat, values) {
   for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess", "githubCli"]) if (flat[field] !== was[field]) changes[field] = flat[field];
   if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
   if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
-  for (const role of ["worker", "scout", "reviewer"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
+  for (const role of ["worker", "scout", "reviewer"]) {
+    if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
+    if (flat[`${role}Fallback`] !== was[`${role}Fallback`]) (changes.fallbackModels ??= {})[role] = flat[`${role}Fallback`] === "" ? null : flat[`${role}Fallback`];
+  }
   if (flat.scoped !== was.scoped) changes.scopedModels = flat.scoped === "" ? null : flat.scoped.split("\n");
   return changes;
 }
@@ -3410,6 +3416,7 @@ async function settingsList(keep = false) {
   const shown = { ...flatSettings(value.values), ...Object.fromEntries(["name", "objective"].filter(field => draftOf(field)).map(field => [field, draftOf(field).text])), ...pending };
   const draftNote = field => { const draft = draftOf(field); return draft && draft.text !== value.values[field] ? `<span class="field-draft">Unsent edit kept${draft.expectedRevision !== value.revision ? " from an older version of these settings. Saving it is checked and may be rejected" : ""}. ${dlgBtn("Discard edit…", { action: "settings-discard", project: id, field }, "ghost small")}</span>` : ""; };
   const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}${role === "coordinator" ? "" : " Follows the coordinator unless you pick a model."}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const fallbackField = ([role, label]) => `<div class="field" data-field="${role}Fallback"><span class="flabel">${label} quota fallback</span><span class="fhelp">Only this model is used after quota exhaustion. Leave empty to wait for quota reset. Other frozen permissions stay unchanged.</span>${modelPickerHtml(`${role}-fallback`, shown[`${role}Fallback`], pickerError, "Wait for quota reset")}</div>`;
   const chosenScope = shown.scoped ? shown.scoped.split("\n") : [], scopeRows = [...modelCache.values()].filter(model => model.configured || chosenScope.includes(model.reference));
   const scopeField = `<div class="field" data-field="scoped"><span class="flabel">Scoped models</span><span class="fhelp">The models the model button and Ctrl+P cycle through, in list order. Leave all unchecked to use your Pi scope.</span><details class="scope-editor"${chosenScope.length ? " open" : ""}><summary>${chosenScope.length ? `${chosenScope.length} chosen for this project` : "Your Pi scope"}</summary><input type="search" class="scope-filter" data-scope-filter placeholder="Filter ${scopeRows.length} models…" aria-label="Filter scoped models" autocomplete="off"><div class="scope-list">${scopeRows.map(model => `<label class="scope-row"><input type="checkbox" data-scope-ref="${esc(model.reference)}"${chosenScope.includes(model.reference) ? " checked" : ""}${model.configured ? "" : " disabled"}><span>${esc(model.name)}</span><small class="mono">${esc(model.reference)}</small></label>`).join("") || '<p class="note">No models are available.</p>'}</div>${dlgBtn("Use my Pi scope", { action: "scope-clear" }, "ghost small")}</details></div>`;
   const accessField = ([field, [label, help, options]]) => `<div class="field" data-field="${field}"><label><span class="flabel">${label}</span><select name="${field}">${options.map(([option, text]) => `<option value="${option}"${shown[field] === option ? " selected" : ""}>${text}</option>`).join("")}</select></label><span class="fhelp">${help}</span></div>`;
@@ -3418,6 +3425,7 @@ async function settingsList(keep = false) {
 <div class="field" data-field="objective"><label><span class="flabel">Objective</span><span class="fhelp">What this project is for. The coordinator reads it in every new conversation.</span><textarea name="objective" rows="5" maxlength="32000">${esc(shown.objective)}</textarea></label>${draftNote("objective")}</div>
 <h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with. The coordinator can be switched from the model button in the chat.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
 <div class="field-grid">${settingsRoles.map(roleField).join("")}</div>${scopeField}
+<h3>Quota recovery</h3><p class="note">New threads freeze these fallback choices. After a recognized quota error, work continues on the same thread with its fallback. Without one, it waits for a known reset or retries with bounded exponential backoff. Paused or stopped workers never restart automatically.</p><div class="field-grid">${settingsRoles.slice(1).map(fallbackField).join("")}</div>
 <h3>Workers</h3>
 <div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
 <details class="advanced"><summary>Access to project functions</summary><div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}</div></details>
@@ -3434,7 +3442,10 @@ function settingsDiffRows(changes, values) {
   if ("name" in changes) rows.push(["Project name", emptyText(values.name), emptyText(changes.name)]);
   if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
   if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
-  for (const [role, label] of settingsRoles.slice(1)) if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? ""), modelText(changes.models[role] ?? "")]);
+  for (const [role, label] of settingsRoles.slice(1)) {
+    if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? ""), modelText(changes.models[role] ?? "")]);
+    if (changes.fallbackModels && role in changes.fallbackModels) rows.push([`${label} quota fallback`, modelText(values.fallbackModels?.[role] ?? ""), modelText(changes.fallbackModels[role] ?? "")]);
+  }
   if ("scopedModels" in changes) rows.push(["Scoped models", scopeText(values.scopedModels), scopeText(changes.scopedModels)]);
   for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
   if ("workerCap" in changes) rows.push(["Workers at once", String(values.workerCap), String(changes.workerCap)]);
@@ -3452,7 +3463,7 @@ function settingsReview(revision, changes) {
   if (!settingsCache || settingsCache.projectId !== projectId || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("Reopen the project settings");
   const stale = revision !== settingsCache.revision, rows = settingsDiffRows(changes, settingsCache.values);
   const proposal = { projectId, revision, changes, draftKeys: ["name", "objective"].filter(field => field in changes).map(field => `${projectId}:${field}`) };
-  showDialog("Save these changes?", `<div class="diff-list">${rows.map(diffItem).join("")}</div>${stale ? '<p class="note-box warn">One edit was started on an older version of these settings. If they changed since, the host rejects the save and your edit is kept.</p>' : ""}<p class="note">Applies to new threads. Running threads keep their model and instructions. The project must be idle. No model request, command, publication or merge happens here.</p><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back to editing", { action: "settings-back" }), '<button type="submit" class="primary">Save changes</button>')}</form>`, `Project ${view.project.name}. Nothing is saved until you confirm.`);
+  showDialog("Save these changes?", `<div class="diff-list">${rows.map(diffItem).join("")}</div>${stale ? '<p class="note-box warn">One edit was started on an older version of these settings. If they changed since, the host rejects the save and your edit is kept.</p>' : ""}<p class="note">Role models apply to new threads. New threads freeze their quota fallback choice. Quota fallback is the only automatic model change and keeps the thread, tools and instructions. The project must be idle for non-model changes. No model request, command, publication or merge happens here.</p><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back to editing", { action: "settings-back" }), '<button type="submit" class="primary">Save changes</button>')}</form>`, `Project ${view.project.name}. Nothing is saved until you confirm.`);
   settingsConfirmation = proposal; disableActions();
 }
 
@@ -3471,21 +3482,22 @@ async function loadModelPicker() {
   modelScopeSet = data.scopeSet === true;
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
-function modelButton(reference, disabled = false) {
+function modelButton(reference, disabled = false, emptyLabel = "Inherit coordinator") {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
-  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? "Inherit coordinator" : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
+  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? emptyLabel : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
 }
-function modelPickerHtml(role, reference, unavailable) {
+function modelPickerHtml(role, reference, unavailable, emptyLabel = "Inherit coordinator") {
   const configured = [...modelCache.values()].filter(model => model.configured).length;
-  return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable))}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
+  return `<div class="mp" data-role="${role}" data-empty-label="${esc(emptyLabel)}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable), emptyLabel)}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
 }
 const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
 const INHERIT_MODEL = { reference: "", name: "Inherit coordinator", contextWindow: null, reasoning: false, configured: true };
 // Worker, scout and reviewer pickers start with "Inherit coordinator" (stored as no model); the coordinator picker does not.
 function modelGroups(query, value, role) {
   const groups = modelGroupsBase(query, value);
-  if (!role || role === "coordinator" || query.trim() && !"inherit coordinator".includes(query.trim().toLowerCase())) return groups;
-  return [{ label: "", models: [INHERIT_MODEL], more: 0 }, ...groups];
+  const fallback = role.endsWith("-fallback"), emptyName = fallback ? "Wait for quota reset" : "Inherit coordinator";
+  if (!role || role === "coordinator" || query.trim() && !modelNorm(emptyName).includes(modelNorm(query.trim()))) return groups;
+  return [{ label: "", models: [{ ...INHERIT_MODEL, name: emptyName }], more: 0 }, ...groups];
 }
 function modelGroupsBase(query, value) {
   const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
@@ -3536,7 +3548,7 @@ function mpOpen(mp) {
 }
 function mpPick(mp, reference) {
   if (reference !== "" && !modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
-  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference);
+  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference, false, mp.dataset.emptyLabel);
   mpClose(mp, true); settingsSync();
 }
 function mpKey(event, mp) {
