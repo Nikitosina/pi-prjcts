@@ -38,6 +38,7 @@ await kit.run(async () => {
   for (const item of snapshot.roles) assert.equal(item.effective, DEFAULT_ROLE_PROMPTS[item.role]);
   kit.check('all five distinct defaults are exposed by the host', new Set(snapshot.roles.map(r => r.effective)).size === 5);
   await kit.ask(id, 'SKILL-READ');
+  kit.check('coordinator distinguishes a successful command from host-confirmed verification', kit.lastCall('coordinator', 'SKILL-READ').system.includes("Use the host's VERIFIED completion report to claim verification"));
   writeFileSync(join(kit.artifacts, 'skill-read-proof.json'), JSON.stringify(readProof, null, 2));
   kit.check('live skill graph reads local review skills and Bugs/performance reference through authorized names', readProof?.length === 3 && readProof.every(r => r.nextOffset === null) && readProof[0].text.includes('Use these reviewers in independent fresh contexts') && readProof[1].text.includes('Mysterious Name') && readProof[2].text.includes('Bugs and performance review'));
   await kit.ask(id, '/skill:pr-review explicit review trigger');
