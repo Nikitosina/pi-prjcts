@@ -1,61 +1,96 @@
-# THROWAWAY — agent desktop coordinator layouts
+# Throwaway agent coordinator interaction models
 
-## Question
+## Question and owner correction
 
-How could the existing Pi Projects coordinator feel more like the Pi coding-agent TUI or Hermes Agent desktop, without losing project context, worker state, tool activity, compaction, and owner decisions?
+Can coordinator supervision work as a keyboard-first TUI, a desktop session workspace, or a decision desk? These should differ in how people work, not just in color or cards.
 
-Three structurally different renderings live on the existing coordinator route (`/`) under `?variant=terminal|desktop|dispatch`. The normal app and production host do not load these files. Only the explicit isolated prototype command serves them; there is no production default or production switcher.
+The owner asked for more native interaction and drastic changes. This revision takes over the previous worker's committed prototype and uncommitted app/CSS redesign. Each model now replaces the Projects header/sidebar entirely. All three remain on `/`, selected by `?variant=terminal|desktop|dispatch`. The production app does not load these files.
 
-## Run
+## Run and review server
 
 ```sh
 npm run prototype:agent-desktop
 ```
 
-Open <http://127.0.0.1:4179/?variant=terminal>. `PORT=4180 npm run prototype:agent-desktop` chooses another port. Stop with Ctrl+C, or `kill <pid>` for the recorded background process.
+- A: <http://127.0.0.1:4179/?variant=terminal>
+- B: <http://127.0.0.1:4179/?variant=desktop>
+- C: <http://127.0.0.1:4179/?variant=dispatch>
 
-Current review instance: loopback port **4179**, background task `bg-d5d7f9db`, wrapper PID **48542**. It stays available for this review; clean it up with `kill 48542` (or stop background task `bg-d5d7f9db`). This process is only the prototype server, never the owner's Pi host.
+`PORT=4180 npm run prototype:agent-desktop` selects another port. Reload clears memory. The floating switcher retains the query parameter and displays variant/action state.
 
-The server binds to loopback and serves only static files. It reuses the real `web/index.html` shell and `web/styles.css`, but replaces `app.js` with the prototype script. Content Security Policy sets `connect-src 'none'` and `form-action 'none'`. There is no token, host socket, persistence, backend dispatch, real mutation, or model call. Message forms and decisions update memory only; all other controls are stubs. Reload resets in-memory changes while `?variant=` remains stable.
+The existing review instance was verified, not restarted: wrapper PID **48542**, Node PID **48569**, prior background task `bg-d5d7f9db`. Node's cwd matches this worker worktree and its command is `node web/prototype-agent-desktop/serve.mjs`. It listens only on `127.0.0.1:4179`. This is not the owner's production host. Keep it running for review. Before eventual cleanup, recheck the PID command/cwd and listener identity, then stop that prototype process or its background task. Never kill an unrelated or reused PID.
 
-## Variants
+## Safety boundary
 
-### A — Pi terminal workbench
+Static files and memory-only actions. No persistence, production imports, API requests, socket, token, shell calls, model calls, or real mutations. Displayed bash commands and tool output are fixture text. CSP has `connect-src 'none'` and `form-action 'none'`. The static host reuses `web/index.html` as a mount point and swaps the production script for this isolated script. No production routing/default behavior changed. Do not promote this code.
 
-A dense, monospaced event stream: user/coordinator turns, tool calls and output, compaction, live command progress, and an owner question share one transcript. A process-tree rail shows workers, context, branch, lease, and latest output. The composer and status line echo coding-agent terminal ergonomics.
+## A: modal terminal
 
-**Tradeoff:** strongest operational density and scanability; weakest separation between narrative and machine output. The narrow worker rail disappears on small screens, so mobile relies on the transcript rather than exposing every process detail.
+The primary action is to navigate the transcript or queue a steer, not to manage project cards.
 
-### B — Hermes-inspired desktop
+Walkthrough:
 
-Chat remains primary, with session tabs, a quiet flat transcript, attached Changes/Activity/Context working pane, compact composer, model/token footer, and worker list. It borrows information architecture rather than claiming an exact visual reproduction.
+1. Press `?` for help or click the help hint. `j/k` selects visible transcript blocks in order; `o` expands/collapses a selected tool. `d` toggles the inline diff and `w` toggles workers.
+2. Press `f`, type `delegat`, and inspect the filtered transcript. Escape clears it. Press `s`, filter `mobile`, and Enter to open its mock session; repeat for `release`.
+3. Press `i` to edit. Type `/` for slash completion, filter `/di`, then Tab or Enter to run `/diff`. Available commands include `/steer`, `/compact`, `/sessions`, and `/help`.
+4. Type a steer and Enter to queue it locally. Send another, then use Up/Down in the empty prompt to traverse history. Shift+Enter inserts a newline. Escape leaves insert mode.
+5. In normal mode `/` opens a filterable command palette. `y` records the displayed local retry choice; `n` opens the decision desk's consequence view.
 
-**Tradeoff:** calmer reading and useful chat-plus-preview workflow; more navigation and less status visible at once than A. The working pane disappears on small screens.
+Compact statuses show running/paused state, queue length, tokens, cost and context. The worker rail disappears on narrow screens. This is a modal browser mock, not a terminal emulator or exact Pi reproduction.
 
-### C — Decision-first dispatch
+Tradeoff: compact and useful for active pairing, but mode switching and mixed narrative/tool output demand more learning.
 
-A daily release brief leads. The left agenda ranks owner decisions and work in motion; the center gives one decision room for evidence and choices, with coordinator notes secondary; the right pulse summarizes objective, phase, context, and results. This changes hierarchy rather than re-skinning a chat.
+## B: Hermes-inspired workspace
 
-**Tradeoff:** best for owners who supervise rather than pair-program; weakest for following a long technical conversation. The decision detail can hide useful chronology.
+The primary action is to work within a session while inspecting its files and activity.
+
+Walkthrough:
+
+1. Select Mobile verification, return to Release coordination, or use `+` to create an empty local session. Filter sessions with the sidebar input. Typed messages belong to the selected session and reset on reload.
+2. Use the inspector tabs Diff, Files, Activity and Context. Choose a fixture file, open host.ts from the diff, or compact mock context to change its meter.
+3. Pause/resume mock tasks, attach/remove retry-policy.md, or switch the mock model in the composer. These change local state only.
+4. Open the palette with Cmd+Shift+P or Ctrl+Shift+P. Filter `files` and Enter. `[` toggles sessions, `]` toggles the inspector; F6 cycles available workspace focus targets.
+5. Drag the inspector separator to resize it, or focus it and use Left/Right. These keys resize rather than switching variants.
+
+At tablet width sessions become a drawer. On mobile the inspector is a closeable overlay, initially closed, and sessions remain available as a drawer. The reference files/diffs are fixtures, not a real filesystem. Workspace identity and settings controls explicitly report their mock limitations.
+
+Tradeoff: useful chat-plus-working-context layout, with more pane navigation and less operational detail visible at once than A.
+
+## C: decision desk
+
+There is no chat or project-navigation shell. A two-item owner queue leads to one question, its evidence/consequence tabs, choices and an undoable local ledger. Worker status remains secondary.
+
+Click either queue entry, inspect evidence or consequence, then choose an option. Alternatively `j/k` switches question, `1/2` records a choice, and `u` undoes it. No worker is actually unblocked and no approval or handoff is sent. The copy deliberately separates local recording from real execution.
+
+Tradeoff: useful for intermittent supervision, but omits detailed chronology and conversational steering.
 
 ## References and assumptions
 
-Researched 2026-11-02 from public upstream files:
+The earlier research pass used these public sources. Reference images remain in artifacts `54784fc7-1bc3-4268-8617-d14a43eabe50/references/`.
 
-- Pi coding-agent / Pi TUI, installed package identity in this repository: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` 1.0.2. A uses known terminal conventions from that environment: dense turn/tool stream, command/output lines, compaction marker, token/context/cost footer, and steering composer. It is an interpretation, not a terminal emulator or pixel match.
-- Official Hermes desktop: <https://github.com/NousResearch/hermes-agent/tree/main/apps/desktop>. Its `README.md` describes streaming chat, side-by-side previews, file browser, and shared sessions. Its `DESIGN.md` says “Chat is the home surface,” panes are working context, and “Flat, not boxed.” The official `pr-assets/session-source-folders.png` shows the airy light shell, session sidebar, quiet composer, and compact status footer.
-- Community Hermes One desktop: <https://github.com/fathah/hermes-desktop>. `previews/chat.png` and `previews/sessions.png` were checked for session tabs, grouped sessions, tool progress, and model/token composer treatment. B does not reproduce its brand or claim exact parity.
+- Pi coding-agent/TUI package identity in this repository: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` 1.0.2. A interprets terminal conventions: dense turns/tools, prompt history, slash commands, compaction and token/context/cost status. The specific modal bindings are prototype choices, not claims about Pi's actual bindings.
+- Official Hermes desktop: <https://github.com/NousResearch/hermes-agent/tree/main/apps/desktop>. Its README describes streaming chat, side-by-side previews, file browser and shared sessions. Its DESIGN.md says "Chat is the home surface" and "Flat, not boxed." The official `pr-assets/session-source-folders.png` informed the quiet session navigation and composer.
+- Community Hermes One: <https://github.com/fathah/hermes-desktop>. `previews/chat.png` and `previews/sessions.png` informed session grouping, tool summaries and model/token treatment. This prototype borrows ideas; it does not claim exact Hermes features, branding, bindings or parity.
 
-Assumptions: the owner wants coordinator supervision more than a general-purpose chat client; decisions, compaction and worker/tool state deserve first-class visibility; the existing project sidebar/header should remain recognizable. Every person, project, timestamp, token count, tool result, diff, worker and status in this prototype is mock content, not runtime evidence.
+Assumptions: coordinator supervision matters more than general chat; owner decisions and worker/tool context must remain available. All names, projects, timestamps, models, costs, token counts, results, diffs, workers and statuses are invented fixtures, not runtime evidence.
 
-## Visual inspection
+## Inspection and evidence
 
-Headless Chrome used a fresh temporary profile against the isolated host. Captures cover all three variants at 1440×1000 and A/B at 800×1100 and 390×844. Browser checks confirmed previous/next switching, arrow-key switching, arrow exclusion in a textarea, URL reload stability, in-memory messages resetting on reload, no production `app.js`, and no API/live/change requests. There were no browser runtime errors. `npm run check` passed. These are mock-layout screenshots, not host-state or real-model proof.
+Fresh headless Chrome, private temporary profile, real CDP key events, text insertion and hit-tested pointer clicks against the isolated static host. No test infrastructure was added to the repository. This is an unscripted prototype inspection recorded with an artifact-only driver, not a production host or real-model verification.
 
-## Verdict
+Evidence folder: `artifact:09fc0baf-f57e-4382-8b6e-f489c0955283/prototype-agent-desktop/`.
 
-**Pending owner selection.** No variant has been promoted or merged into production. Useful feedback can mix parts (for example A’s tool density with B’s working pane).
+- `desktop-terminal.png`, `desktop-desktop.png`, `desktop-dispatch.png`: revised models at 1440×1000.
+- `tablet-terminal.png`, `tablet-desktop.png`: 800×1100.
+- `mobile-terminal.png`, `mobile-desktop.png`, `mobile-desktop-inspector.png`: 390×844.
+- `terminal-shortcuts.png`, `terminal-slash-completion.png`, `terminal-command-palette.png`, `terminal-queued-steers.png`.
+- `desktop-shortcuts.png`, `desktop-command-palette.png`, `desktop-files.png`, `desktop-activity.png`.
+- `dispatch-recorded-decision.png`, `walkthrough.mp4`, `report.json`. `responsive.png` and `commands.png` combine the responsive and keyboard captures; `gallery.html` indexes all evidence.
 
-## Cleanup plan
+Inspection covers tool expansion, transcript ordering/search, filtered session/palette selection, slash completion, queue/history, input/browser modifier exclusions, variant keys/clicks, files/activity/context, pause/attach, per-session messages, F6 and resize arrows, local decision recording/undo and reload reset. All 48 inspection checks passed. A separate source review found cross-variant retry-choice targeting, Tab/Enter focus selection, history editing, diff-tab and resized-pane edge cases; these were fixed and checked with real inputs, including widths 700, 821 and 1050. No runtime exceptions, horizontal overflow at captured sizes, production app.js loading, API or nonlocal requests were observed. Requests were limited to the loopback static assets and a harmless favicon request. `npm run check`, `node --check` and `git diff --check` passed.
 
-After the owner picks a direction, rewrite the chosen ideas in the real coordinator with production data, permissions, streaming and tests. Then delete `web/prototype-agent-desktop/` and the `prototype:agent-desktop` package script. Do not promote these throwaway components directly. Stop the private server before deletion.
+## Verdict and cleanup
+
+Pending owner selection. No variant has been promoted, merged or deployed. The review question is whether A's command flow, B's session-and-inspector workflow, or C's decision queue should guide a production redesign. Parts can be mixed after feedback.
+
+After a decision, record the chosen interaction and its tradeoffs, implement it with real permissions/data/streaming/tests, then delete `web/prototype-agent-desktop/` and the `prototype:agent-desktop` package script. Stop only the verified private prototype server before deletion. Do not absorb these fixture components directly.
