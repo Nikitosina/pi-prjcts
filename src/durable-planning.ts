@@ -148,8 +148,8 @@ export type VerificationHooks = {
   revision: (sourcePath: string) => Promise<string>;
   /** Stops verifier jobs before final target validation, without releasing its leases. */
   drain: (verifierThreadId: string) => Promise<void>;
-  /** Releases leases after settlement, unless the verifier resumed newer work. */
-  release: (verifierThreadId: string, attemptTaskId: TaskId) => Promise<void>;
+  /** Releases leases only when no verification or stop drain still owns them. */
+  release: (verifierThreadId: string) => Promise<void>;
 };
 type PreparedVerification =
   | { kind: "none" }
@@ -289,7 +289,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
             return { status: "terminal", outcome: { status: "completed", result: null } };
           }, context);
         } finally {
-          if (prepared.kind === "revision") await options.verification?.release(prepared.verifierThreadId, task.input.attemptTaskId);
+          if (prepared.kind === "revision") await options.verification?.release(prepared.verifierThreadId);
         }
       },
     },

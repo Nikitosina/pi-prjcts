@@ -297,7 +297,7 @@ function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<st
   };
 }
 
-export async function openDurableProject(input: { project: Project; dir: string; configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader; /** A freshly built catalog of everything installed now (global, project-local, packages). Without it the open-time loader is all there is. */ discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>; knowledgeAccess?: KnowledgeAccess; /** Explicit bindings; registry presence never grants worker access. */ workerTools?: DurableWorkerToolBindings; workerCap?: number; onReport?: (report: DurableRuntimeReport) => void; onModelRequest?: (request: DurableModelRequest) => void; /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver; /** Test-only observer after genuine scoped preparation and before it returns to planning; detached metadata only. */ testAfterWorkerPreparation?: (prepared: Readonly<{ conversationId: number; workId: string; threadId: string; cwd: string; bindingRevision: string }>) => Promise<void>; /** Test-only scoped-worker rendezvous; never persisted or model-visible. */ beforeScopedSubmit?: () => Promise<void>; /** Direct-runtime test rendezvous; never host/model exposed or persisted. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; /** Direct-runtime final-verifier-revision rendezvous; never persisted or model-visible. */ testBeforeVerifierRevision?: (sourcePath: string) => Promise<void>; /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>) => Promise<void>; beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>; afterPausePersisted?: (value: Readonly<{ paused: boolean; pausing: boolean; rootConversationId: number }>) => Promise<void> }): Promise<DurableProjectRuntime> {
+export async function openDurableProject(input: { project: Project; dir: string; configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader; /** A freshly built catalog of everything installed now (global, project-local, packages). Without it the open-time loader is all there is. */ discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>; knowledgeAccess?: KnowledgeAccess; /** Explicit bindings; registry presence never grants worker access. */ workerTools?: DurableWorkerToolBindings; workerCap?: number; onReport?: (report: DurableRuntimeReport) => void; onModelRequest?: (request: DurableModelRequest) => void; /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver; /** Test-only observer after genuine scoped preparation and before it returns to planning; detached metadata only. */ testAfterWorkerPreparation?: (prepared: Readonly<{ conversationId: number; workId: string; threadId: string; cwd: string; bindingRevision: string }>) => Promise<void>; /** Test-only scoped-worker rendezvous; never persisted or model-visible. */ beforeScopedSubmit?: () => Promise<void>; /** Direct-runtime test rendezvous; never host/model exposed or persisted. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; /** Direct-runtime stop-abort rendezvous; never persisted or model/host exposed. */ testBeforeWorkerAbort?: () => Promise<void>; /** Direct-runtime final-verifier-revision rendezvous; never persisted or model-visible. */ testBeforeVerifierRevision?: (sourcePath: string) => Promise<void>; /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>) => Promise<void>; beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>; afterPausePersisted?: (value: Readonly<{ paused: boolean; pausing: boolean; rootConversationId: number }>) => Promise<void> }): Promise<DurableProjectRuntime> {
   const project = parse(ProjectSchema, input.project);
   const dir = resolve(input.dir);
   const knowledgeAccess = input.knowledgeAccess ?? project.knowledgeAccess ?? "read-only";
@@ -517,20 +517,12 @@ export async function openDurableProject(input: { project: Project; dir: string;
         },
         revision: async (path: string) => { await input.testBeforeVerifierRevision?.(path); return (await captureTarget(path)).revision; },
         drain: async (verifierThreadId: string) => { settlingVerifiers.set(verifierThreadId, (settlingVerifiers.get(verifierThreadId) ?? 0) + 1); await background.killThread(verifierThreadId); },
-        release: async (verifierThreadId: string, attemptTaskId: number) => {
+        release: async (verifierThreadId: string) => {
           const remaining = (settlingVerifiers.get(verifierThreadId) ?? 1) - 1;
           if (remaining > 0) settlingVerifiers.set(verifierThreadId, remaining);
           else {
             settlingVerifiers.delete(verifierThreadId);
-            try {
-              await schedules.mutex.run(async () => {
-                const resumed = await root.commit(async tx => Object.values((await tx.doc(DurablePlanning, root.id)).work).some(work => work.threadId === verifierThreadId && work.taskId !== Number(attemptTaskId) && (work.status === "queued" || work.status === "running")), context);
-                if (!resumed) hostLeases.releaseWhere(ownLease(verifierThreadId));
-              });
-            } catch (error) {
-              try { await background.killThread(verifierThreadId); } finally { hostLeases.releaseWhere(ownLease(verifierThreadId)); }
-              throw error;
-            }
+            await releaseIdleLeases(new Set([verifierThreadId]));
           }
         },
       },
@@ -669,15 +661,21 @@ export async function openDurableProject(input: { project: Project; dir: string;
         const state = await tx.doc(DurablePlanning, root.id);
         const held = new Set(Object.values(state.work).filter(work => work.status === "running").map(work => work.threadId));
         for (const thread of Object.values(state.threads)) if (thread.verification?.open) for (const attempt of thread.verification.attempts) if (attempt.endedAt === undefined) held.add(attempt.verifierThreadId);
+        for (const [threadId, thread] of Object.entries(state.threads)) if (thread.stopping) held.add(threadId);
         for (const threadId of settlingVerifiers.keys()) held.add(threadId);
         return held;
       }, context);
     }
-    // An interrupted verifier still owns its final validation; the sweeper must not release its leases early.
+    async function releaseIdleLeases(targets?: ReadonlySet<string>): Promise<void> {
+      await schedules.mutex.run(async () => {
+        const retained = await retainedLeaseThreads();
+        hostLeases.releaseWhere(holder => ownLease()(holder) && (!targets || targets.has(holder.threadId)) && !retained.has(holder.threadId));
+      });
+    }
+    // Stop admission and lease release share the mutex: no stale sweep can bypass the stopping marker.
     const leaseWake = setInterval(() => { void (async () => {
       if (closed || !hostLeases.held(ownLease()).length) return;
-      const running = await retainedLeaseThreads();
-      hostLeases.releaseWhere(holder => ownLease()(holder) && !running.has(holder.threadId));
+      await releaseIdleLeases();
     })().catch(error => report(input.onReport, project.id, error)); }, Number(process.env.PI_PROJECTS_LEASE_SWEEP_MS) || 1000);
     leaseWake.unref();
     // Persisted deadlines make quota recovery survive restarts; paused/stopped work stays untouched.
@@ -767,15 +765,38 @@ export async function openDurableProject(input: { project: Project; dir: string;
       });
     }
 
+    /** Joins terminally stopped verifier settlements, including obsolete attempts on a resumed thread. Pauses stay resumable. */
+    async function joinStoppedVerifierSettlements(targets: ReadonlySet<string>): Promise<void> {
+      const workIds = await root.commit(async tx => new Set(Object.values((await tx.doc(DurablePlanning, root.id)).work).filter(work => targets.has(work.threadId) && work.role === "verifier" && work.status === "stopped").map(work => work.id)), context);
+      if (!workIds.size) return;
+      let cursor: Awaited<ReturnType<Storage["scanTasks"]>>["next"];
+      do {
+        const page = await openedStorage.scanTasks({ conversationId: root.id, kind: "projects.plan-settlement" }, 100, cursor, context);
+        const settlements = page.items.filter(task => {
+          const input = task.input;
+          return input !== null && typeof input === "object" && "workId" in input && typeof input.workId === "string" && workIds.has(input.workId);
+        });
+        await Promise.all(settlements.map(task => openedHarness.waitForTask(task.id, context)));
+        cursor = page.next;
+      } while (cursor);
+    }
+
     async function drainWorker(threadId: string, stopped: Awaited<ReturnType<typeof planning.stop>>): Promise<void> {
-      await Promise.all(stopped.taskIds.map(id => openedHarness.abortTask(id, context)));
-      await Promise.all(stopped.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true })));
-      const targets = (await planning.threadIdentities(root)).filter(thread => stopped.conversationIds.includes(thread.conversationId)).map(thread => thread.threadId);
-      await Promise.all(targets.map(id => background.killThread(id)));
-      if (!closed) await schedules.mutex.run(() => planning.completeStop(root, threadId, stopped.stopId));
-      const retained = await retainedLeaseThreads();
-      hostLeases.releaseWhere(holder => ownLease()(holder) && targets.includes(holder.threadId) && !retained.has(holder.threadId));
-      if (!closed) await cleanup().catch(error => report(input.onReport, project.id, error));
+      const targets = new Set((await planning.threadIdentities(root)).filter(thread => stopped.conversationIds.includes(thread.conversationId)).map(thread => thread.threadId));
+      try {
+        await input.testBeforeWorkerAbort?.();
+        await Promise.all(stopped.taskIds.map(id => openedHarness.abortTask(id, context)));
+      } finally {
+        try {
+          await Promise.all(stopped.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true })));
+        } finally {
+          await Promise.all([...targets].map(id => background.killThread(id)));
+          await joinStoppedVerifierSettlements(targets);
+          if (!closed) await schedules.mutex.run(() => planning.completeStop(root, threadId, stopped.stopId));
+          await releaseIdleLeases(targets);
+          if (!closed) await cleanup().catch(error => report(input.onReport, project.id, error));
+        }
+      }
     }
 
     async function chatList(): Promise<DurableChat[]> {
