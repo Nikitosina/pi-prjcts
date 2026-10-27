@@ -22,6 +22,23 @@ const find = (snapshot, provider) => snapshot.providers.find(item => item.provid
 const october = Date.parse('2026-10-26T18:00:00Z');
 const elizaBody = { account: 'owner', pool: '', usage: { all: { stats: { monthly: { requests: 58, cost: 5.25 } } }, 'chain:top_opensource': { stats: { monthly: { requests: 10, cost: 0.095 } } } } };
 assert.deepEqual(parseElizaUsage(elizaBody, october), { amountUsd: 5.345, periodStartAt: Date.parse('2026-10-01T00:00:00Z'), periodEndAt: Date.parse('2026-11-01T00:00:00Z'), account: 'owner', pool: null });
+// EffectiveUsage caps the chain bucket at 300 and moves its 200 overflow into all. The
+// dedicated claude bucket is separate. 220 + 300 + 50 therefore counts the 500 chain spend once.
+const bucket = cost => ({ stats: { monthly: { requests: 1, cost } } });
+const overlapping = parseElizaUsage({ ...elizaBody, usage: {
+  all: { ...bucket(220), by_family: { gpt: { monthly: { requests: 1, cost: 20 } } } },
+  'chain:kimi_zai': { ...bucket(300), by_family: { kimi: { monthly: { requests: 1, cost: 500 } } } },
+  claude: bucket(50),
+} }, october);
+assert.equal(overlapping.amountUsd, 570, 'chain overflow and dedicated buckets are not double counted');
+assert.throws(
+  () => parseElizaUsage(elizaBody, Date.parse('2026-10-31T23:59:59Z'), Date.parse('2026-11-01T00:00:01Z')),
+  /crossed the UTC month boundary/,
+  'a response crossing the boundary is discarded rather than assigned to the new month',
+);
+const beforeBoundary = parseElizaUsage(elizaBody, Date.parse('2026-10-31T23:59:59Z'), Date.parse('2026-10-31T23:59:59.500Z'));
+assert.equal(beforeBoundary.periodStartAt, Date.parse('2026-10-01T00:00:00Z'));
+assert.equal(beforeBoundary.periodEndAt, Date.parse('2026-11-01T00:00:00Z'));
 assert.equal(parseElizaUsage({ ...elizaBody, usage: {} }, october), null, 'an empty usage object is no data, not a fabricated zero');
 for (const bad of [{ ...elizaBody, account: '' }, { ...elizaBody, pool: null }, { ...elizaBody, usage: { all: { stats: { monthly: { cost: -1 } } } } }, { ...elizaBody, usage: { all: { stats: { monthly: {} } } } }, { ...elizaBody, usage: { all: { stats: { monthly: { cost: null } } } } }]) assert.throws(() => parseElizaUsage(bad, october), /unreadable usage response/);
 

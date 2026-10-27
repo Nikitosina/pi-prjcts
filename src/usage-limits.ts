@@ -125,12 +125,19 @@ class Retry extends Error {
   constructor(message: string, afterMs: number | null = null, signedOut = false) { super(message); this.afterMs = afterMs; this.signedOut = signedOut; }
 }
 const unreachable = (what: string) => new Retry(`Couldn't reach ${what}, will retry`);
-const retryAfter = (response: Response) => { const seconds = Number(response.headers.get("retry-after")); return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 24 * 3600_000) : null; };
+const retryAfter = (response: Response, now = Date.now()) => {
+  const value = response.headers.get("retry-after")?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds > 0 ? seconds * 1000 : null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at > now ? at - now : null;
+};
 async function getJson(url: string, headers: Record<string, string>, what: string, authHint = "Pi renews it before it expires; if this stays, sign in again"): Promise<any> {
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }).catch(() => { throw unreachable(what); });
   if (response.status === 401 || response.status === 403) { await response.body?.cancel(); throw new Retry(`${what} rejected the sign-in (HTTP ${response.status}). ${authHint}`, null, true); }
   if (response.status === 429) { await response.body?.cancel(); throw new Retry(`${what} rate limited the usage request, will retry`, retryAfter(response)); }
-  if (response.status >= 500) { await response.body?.cancel(); throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`); }
+  if (response.status >= 500) { await response.body?.cancel(); throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`, retryAfter(response)); }
   if (!response.ok) { await response.body?.cancel(); throw new Retry(`${what} usage request failed (HTTP ${response.status})`); }
   // The timeout also covers the body; a connection that dies mid-body is the network, not a bad response.
   const text = await response.text().catch(() => { throw unreachable(what); });
@@ -196,8 +203,9 @@ async function pollCursor(): Promise<Polled> {
   return [{ window: "mo", usedPercent: clamp(used), resetsAt: typeof data.billingCycleEnd === "string" ? Date.parse(data.billingCycleEnd) || null : null }];
 }
 
-/** Eliza reports actual cost for the current UTC day and calendar month, grouped by quota bucket. Sum each bucket's monthly stats, not token counts. */
-export function parseElizaUsage(data: unknown, now = Date.now()): ElizaReading | null {
+const utcMonth = (at: number) => { const date = new Date(at), year = date.getUTCFullYear(), month = date.getUTCMonth(); return [Date.UTC(year, month, 1), Date.UTC(year, month + 1, 1)] as const; };
+/** EffectiveUsage partitions spending across the returned buckets, so their monthly stats sum to actual spend. */
+export function parseElizaUsage(data: unknown, startedAt = Date.now(), finishedAt = startedAt): ElizaReading | null {
   const record = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : null;
   const root = record(data), account = root?.account, pool = root?.pool, usage = record(root?.usage);
   if (!root || typeof account !== "string" || !account || typeof pool !== "string" || !usage) throw new Retry("Eliza returned an unreadable usage response");
@@ -210,15 +218,17 @@ export function parseElizaUsage(data: unknown, now = Date.now()): ElizaReading |
   }
   if (!buckets) return null;
   if (!Number.isFinite(amountUsd)) throw new Retry("Eliza returned an unreadable usage response");
-  const date = new Date(now), periodStartAt = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1);
-  return { amountUsd, periodStartAt, periodEndAt: Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1), account, pool: pool || null };
+  const [periodStartAt, periodEndAt] = utcMonth(startedAt);
+  if (utcMonth(finishedAt)[0] !== periodStartAt) throw new Retry("Eliza usage crossed the UTC month boundary, will retry");
+  return { amountUsd, periodStartAt, periodEndAt, account, pool: pool || null };
 }
 const elizaUsageUrl = () => process.env.PI_PROJECTS_ELIZA_USAGE_URL ?? "https://api.eliza.yandex.net/v2/usage";
 async function pollEliza(): Promise<PollResult> {
   const token = process.env.ELIZA_TOKEN?.trim();
   if (!token) throw new Retry("No Eliza OAuth token found. Set ELIZA_TOKEN on the host", null, true);
+  const startedAt = Date.now();
   const data = await getJson(elizaUsageUrl(), { Authorization: `OAuth ${token}` }, "Eliza", "Set a current ELIZA_TOKEN on the host");
-  return { samples: [], usage: parseElizaUsage(data) };
+  return { samples: [], usage: parseElizaUsage(data, startedAt, Date.now()) };
 }
 
 /** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> replaces provider endpoints with local data. Cursor always uses its own fake/real poller. */
@@ -231,25 +241,27 @@ const fixture = (provider: LimitProvider): (() => Promise<PollResult>) | undefin
 const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) => fixture(provider) ?? (provider === "eliza" ? pollEliza : async () => ({ samples: await (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor)() }));
 
 /**
- * `manual` (the refresh button) skips the minimum interval, the failure backoff and the passive-sample shortcut, but is rate-limited per provider.
- * `visit` (a page load or the tab coming back) retries a provider that is in a failure state instead of showing its old error until the backoff ends;
- * it still waits out a provider's own Retry-After and the per-provider cooldown. Otherwise only the normal schedule applies.
+ * Every mode waits out the provider's Retry-After. `manual` (the refresh button) otherwise skips the minimum interval, failure backoff
+ * and passive-sample shortcut, but is rate-limited per provider. `visit` retries a provider in a failure state before the backoff ends,
+ * subject to the per-provider cooldown. Otherwise only the normal schedule applies.
  */
 type RefreshMode = "auto" | "manual" | "visit";
 function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode = "auto"): Promise<void> {
   const own = entry(provider);
   if (own.inflight) return own.inflight;
+  if (now < own.holdUntil) return Promise.resolve();
   if (mode === "manual") {
     if (now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
     own.lastManualAt = now;
   } else if (mode === "visit" && own.failures > 0) {
-    if (now < own.holdUntil || now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
+    if (now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
   } else {
     const fresh = [...own.samples.values()].some(sample => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
     if (now < own.nextAttemptAt || fresh) return Promise.resolve();
   }
   own.lastAttemptAt = now;
   own.nextAttemptAt = now + MIN_POLL_MS;
+  const startedAt = Date.now();
   own.inflight = pollerOf(provider)().then(result => {
     record(provider, "endpoint", result.samples);
     if (provider === "eliza") own.usage = result.usage ? { ...result.usage, observedAt: Date.now() } : null;
@@ -260,8 +272,9 @@ function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode
     own.reason = error instanceof Error ? error.message : "Usage request failed";
     own.unavailable = error instanceof Retry && error.signedOut;
     const afterMs = error instanceof Retry ? error.afterMs : null;
-    own.holdUntil = afterMs ? Date.now() + afterMs : 0;
-    own.nextAttemptAt = Date.now() + Math.min(MAX_BACKOFF_MS, Math.max(afterMs ?? 0, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
+    const failedAt = now + Date.now() - startedAt;
+    own.holdUntil = afterMs !== null ? failedAt + afterMs : 0;
+    own.nextAttemptAt = Math.max(own.holdUntil, failedAt + Math.min(MAX_BACKOFF_MS, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
   }).finally(() => { own.inflight = undefined; });
   return own.inflight;
 }
