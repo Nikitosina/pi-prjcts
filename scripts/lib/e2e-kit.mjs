@@ -57,6 +57,12 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       const system = contentText(msgs.find(m => m.role === 'system' || m.role === 'developer')?.content);
       result.calls.push({ at: Date.now(), model: input.model, url: req.url, role, user: user.slice(0, 3000), results: results.map(r => r.slice(0, 4000)), resultLengths: results.map(r => r.length), userLength: user.length, tools, system });
       const out = await handler({ role, model: input.model, user, results, tools, system, msgs });
+      // Async iterables let browser tests hold a stream open until an interaction finishes.
+      if (out?.[Symbol.asyncIterator]) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        for await (const part of out) res.write(part);
+        return res.end();
+      }
       // Objects can supply response headers for quota/reset tests, with either an error body or a stream.
       if (out !== null && typeof out === 'object') { res.writeHead(out.status, { 'content-type': out.stream ? 'text/event-stream' : 'application/json', ...out.headers }); return res.end(out.stream ?? JSON.stringify(out.body)); }
       res.writeHead(200, { 'content-type': 'text/event-stream' });

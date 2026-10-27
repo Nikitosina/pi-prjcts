@@ -10,6 +10,18 @@ if (supplied) {
 initial.hash = "";
 history.replaceState(null, "", initial);
 const token = localStorage.getItem(key) || "";
+// iOS Safari's layout viewport does not always follow its visible viewport when the toolbar or keyboard moves.
+// Size the whole shell from VisualViewport so neither the composer nor the separate limits bar is stranded mid-screen.
+function syncVisualViewport() {
+  const viewport = window.visualViewport;
+  document.documentElement.style.setProperty("--visual-viewport-height", `${viewport?.height ?? innerHeight}px`);
+  document.documentElement.style.setProperty("--visual-viewport-top", `${viewport?.offsetTop ?? 0}px`);
+}
+window.visualViewport?.addEventListener("resize", syncVisualViewport);
+window.visualViewport?.addEventListener("scroll", syncVisualViewport);
+addEventListener("resize", syncVisualViewport);
+syncVisualViewport();
+const scrollBehavior = () => matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 const signIn = document.querySelector("#sign-in");
 signIn.addEventListener("cancel", event => event.preventDefault());
 signIn.querySelector("form").addEventListener("submit", async event => {
@@ -88,10 +100,28 @@ let view = null;
 let knowledgeDocs = [];
 // One SSE reader for the selected project; frames from other projects are dropped.
 let liveStream = null;
+// Explicit chat switches clear the frame; reconnects keep the last received preview readable.
 let liveFrame = null;
 let liveRetryMs = 1000;
 // Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
 let stickToBottom = true;
+let transcriptAnchor = null;
+function captureTranscriptAnchor() {
+  const transcript = document.querySelector("#transcript"), box = transcript.getBoundingClientRect();
+  const row = [...transcript.querySelectorAll("[data-index]")].find(node => {
+    const rect = node.getBoundingClientRect();
+    return rect.bottom > box.top && rect.top < box.bottom;
+  });
+  return row ? { index: row.dataset.index, offset: row.getBoundingClientRect().top - box.top } : null;
+}
+function restoreTranscriptAnchor(anchor = transcriptAnchor) {
+  if (!anchor || stickToBottom) return;
+  const transcript = document.querySelector("#transcript"), row = transcript.querySelector(`[data-index="${anchor.index}"]`);
+  if (!row) return;
+  const delta = row.getBoundingClientRect().top - transcript.getBoundingClientRect().top - anchor.offset;
+  if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
+  transcriptAnchor = captureTranscriptAnchor();
+}
 let showArchived = false, allWork = false;
 // The worker view: a main-area page for one worker (?worker=<threadId>) that replaces the coordinator chat until Back or Escape.
 const threadPane = document.querySelector("#inline-thread");
@@ -110,7 +140,12 @@ window.addEventListener("popstate", () => {
   if (!wanted && workerChat) { closeWorkerDetail(); ensureChanges(); dialogVersion++; renderArtifactBrowser(); render(); }
   else if (wanted && workerChat?.threadId !== wanted && plan?.work.some(work => work.threadId === wanted)) void inspectThread(wanted).catch(report);
 });
-function followTranscript() { if (stickToBottom) { const node = document.querySelector("#transcript"); node.scrollTop = node.scrollHeight; } }
+function followTranscript() {
+  if (!stickToBottom) return;
+  const node = document.querySelector("#transcript"), top = node.scrollHeight - node.clientHeight;
+  if (Math.abs(node.scrollTop - top) > 0.5) node.scrollTop = top;
+  transcriptAnchor = null;
+}
 let selected = null;
 let generation = 0;
 let polling = null;
@@ -246,6 +281,7 @@ function ensureLive() {
   liveStream = stream;
   void readLive(stream).finally(() => {
     if (liveStream !== stream) return;
+    renderLive(true);
     liveStream = null;
     if (stream.controller.signal.aborted) return;
     // Runtime closed or the network dropped: back off, then reconnect through the next refresh.
@@ -278,9 +314,21 @@ async function readLive(stream) {
 async function applyLive(frame) {
   const previous = liveFrame;
   liveFrame = frame;
+  if (frame.text !== previous?.text) {
+    const now = performance.now();
+    liveRevealDeadline = now + 120;
+    if (liveRenderedText === previous?.text) liveRevealTime = now;
+  }
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
-  if (previous && (previous.entries !== frame.entries || previous.running !== frame.running)) await settledRefresh();
-  renderLive();
+  const settled = previous && (previous.entries !== frame.entries || previous.running !== frame.running);
+  const selection = settled ? captureLiveSelection() : null;
+  if (settled) await settledRefresh();
+  if (settled) { renderLive(true); restoreLiveSelection(selection); } else if (document.hidden) renderLive(true); else scheduleLiveRender();
+}
+let liveRenderFrame = null;
+function scheduleLiveRender() {
+  if (liveRenderFrame !== null) return;
+  liveRenderFrame = requestAnimationFrame(() => { liveRenderFrame = null; renderLive(); });
 }
 
 // A refresh that starts after this call and finishes. A plain refresh() only queues while a poll is in flight, which used to hide the bubble before the transcript caught up.
@@ -347,25 +395,159 @@ function liveStatus(frame) {
   return thought ? `Thinking · ${thought}` : "Thinking…";
 }
 function renderWorkingPill() {
-  const pill = document.querySelector("#working-pill"), frame = liveStream?.id === projectId ? liveFrame : null;
+  const pill = document.querySelector("#working-pill"), frame = liveFrame;
   const status = frame?.running ? liveStatus(frame) : "";
   pill.hidden = !status || stickToBottom;
   pill.querySelector(".pill-text").textContent = status;
 }
 
-function renderLive() {
+const streamMotion = matchMedia("(prefers-reduced-motion: reduce)");
+let liveRenderedText = null, liveRevealDeadline = 0, liveRevealTime = 0;
+
+function newLiveText(value, animate) {
+  if (!animate || !value) return document.createTextNode(value);
+  const span = document.createElement("span");
+  span.className = "stream-fragment"; span.textContent = value;
+  return span;
+}
+
+function patchLiveText(target, source, animate) {
+  let current = target.firstChild;
+  for (const next of source.childNodes) {
+    if (next.nodeType === Node.TEXT_NODE) {
+      const run = [], value = next.data;
+      while (current && (current.nodeType === Node.TEXT_NODE || current.nodeType === Node.ELEMENT_NODE && current.matches(".stream-fragment"))) {
+        run.push(current); current = current.nextSibling;
+      }
+      const before = run.map(node => node.textContent).join("");
+      let kept = before.length;
+      if (!value.startsWith(before)) {
+        // Closing inline markdown can shorten a text run. Keep its prefix instead of re-fading the paragraph.
+        kept = 0;
+        while (kept < before.length && kept < value.length && before[kept] === value[kept]) kept++;
+        if (/[\uD800-\uDBFF]/.test(before[kept - 1])) kept--;
+        let remaining = kept;
+        for (const node of run) {
+          const length = node.textContent.length;
+          if (!remaining) node.remove();
+          else if (remaining < length) {
+            const text = node.nodeType === Node.TEXT_NODE ? node : node.firstChild;
+            text.deleteData(remaining, text.length - remaining);
+          }
+          remaining = Math.max(0, remaining - length);
+        }
+        animate = false;
+      }
+      const added = value.slice(kept);
+      if (added) target.insertBefore(newLiveText(added, animate && !current), current);
+    } else if (current?.nodeType === Node.ELEMENT_NODE && current.tagName === next.tagName && current.getAttributeNames().length === next.getAttributeNames().length && next.getAttributeNames().every(name => current.getAttribute(name) === next.getAttribute(name))) {
+      if (!current.isEqualNode(next)) patchLiveText(current, next, animate);
+      current = current.nextSibling;
+    } else {
+      const node = next.cloneNode(true), walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) texts.push(text);
+      for (const text of texts) text.replaceWith(newLiveText(text.data, animate && !current));
+      target.insertBefore(node, current);
+    }
+  }
+  while (current) { const next = current.nextSibling; current.remove(); current = next; }
+}
+
+function clearLiveFades() {
+  const root = document.querySelector("#live-reply"), selection = document.getSelection();
+  if (selection && !selection.isCollapsed && (root.contains(selection.anchorNode) || root.contains(selection.focusNode))) return;
+  for (const span of root.querySelectorAll(".stream-fragment")) span.replaceWith(document.createTextNode(span.textContent));
+  root.normalize();
+}
+document.querySelector("#live-reply").addEventListener("animationend", event => {
+  if (event.animationName !== "stream-in") return;
+  const span = event.target, selection = document.getSelection(), root = document.querySelector("#live-reply");
+  if (selection && !selection.isCollapsed && (root.contains(selection.anchorNode) || root.contains(selection.focusNode))) return;
+  const parent = span.parentNode;
+  span.replaceWith(document.createTextNode(span.textContent)); parent?.normalize();
+});
+document.addEventListener("visibilitychange", () => { clearLiveFades(); renderLive(true); });
+streamMotion.addEventListener("change", () => { clearLiveFades(); renderLive(true); });
+
+function renderLive(immediate = false) {
+  if (liveRenderFrame !== null) { cancelAnimationFrame(liveRenderFrame); liveRenderFrame = null; }
   const node = document.querySelector("#live-reply");
-  const frame = liveStream?.id === projectId ? liveFrame : null;
-  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; renderWorkingPill(); return; }
-  // Once text streams, the reasoning summary steps aside into a quiet line above it, as in the transcript.
-  const status = liveStatus(frame), thought = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
-  node.innerHTML = `<div class="who">Coordinator <small class="inline">live</small></div>${thought ? `<p class="thought live"><span class="thought-mark">Thinking</span>${esc(thought)}</p>` : ""}${frame.text ? `<div class="text">${renderMarkdown(frame.text, { refs: {} })}</div>` : ""}<p class="live-status"><span class="live-dot"></span><span>${esc(status)}</span></p>`;
+  const frame = liveFrame;
+  if (!frame?.running) { node.hidden = true; node.innerHTML = ""; liveRenderedText = null; liveRevealTime = 0; renderWorkingPill(); return; }
+  const selection = document.getSelection();
+  if (selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
+  if (!node.querySelector(".text")) {
+    node.innerHTML = '<div class="who">Coordinator <small class="inline">live</small></div><p class="thought live" hidden><span class="thought-mark">Thinking</span><span class="thought-text"></span></p><div class="text"></div><p class="note live-limit" hidden>Live preview limit reached. The full reply will appear when it finishes.</p><p class="live-status"><span class="live-dot"></span><span></span></p>';
+    liveRenderedText = null;
+  }
+  const thought = node.querySelector(".thought"), summary = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
+  thought.hidden = !summary;
+  const thoughtTextNode = thought.querySelector(".thought-text");
+  if (thoughtTextNode.textContent !== summary) thoughtTextNode.textContent = summary;
+  const now = performance.now(), animate = !immediate && !document.hidden && !streamMotion.matches;
+  let shown = frame.text;
+  if (animate && now < liveRevealDeadline) {
+    const start = liveRenderedText && frame.text.startsWith(liveRenderedText) ? liveRenderedText.length : 0;
+    // Spread provider bursts over a short catch-up window, not a fixed typing speed that can fall behind.
+    const elapsed = Math.min(50, now - liveRevealTime || 16);
+    let end = Math.min(frame.text.length, start + Math.max(1, Math.ceil((frame.text.length - start) * elapsed / Math.max(16, liveRevealDeadline - now))));
+    if (end < frame.text.length && /[\uD800-\uDBFF]/.test(frame.text[end - 1])) end++;
+    shown = frame.text.slice(0, end);
+  }
+  liveRevealTime = now;
+  if (liveRenderedText !== shown) {
+    const text = node.querySelector(".text"), next = document.createElement("template");
+    // Close the preview fence without adding text to the code block.
+    const markdown = shown + (shown.split("```").length % 2 === 0 ? "```" : "");
+    next.innerHTML = renderMarkdown(markdown, { refs: {} });
+    text.normalize(); patchLiveText(text, next.content, animate);
+    liveRenderedText = shown;
+  }
+  if (shown !== frame.text) scheduleLiveRender();
+  node.querySelector(".text").hidden = !frame.text;
+  node.querySelector(".live-limit").hidden = !frame.textTruncated || shown !== frame.text;
+  const status = node.querySelector(".live-status span:last-child"), label = liveStatus(frame);
+  if (status.textContent !== label) status.textContent = label;
   node.hidden = false;
   followTranscript();
   renderWorkingPill();
 }
 
+function selectionOffset(root, node, offset) {
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+function selectionPoint(root, offset, end) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (offset < node.length || end && offset === node.length) return { node, offset };
+    offset -= node.length;
+  }
+  return null;
+}
+function captureLiveSelection() {
+  const root = document.querySelector("#live-reply .text"), selection = document.getSelection();
+  if (!root || !selection?.rangeCount || selection.isCollapsed || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) return null;
+  return { projectId, chatId, text: root.textContent, anchor: selectionOffset(root, selection.anchorNode, selection.anchorOffset), focus: selectionOffset(root, selection.focusNode, selection.focusOffset) };
+}
+function restoreLiveSelection(saved) {
+  if (!saved || saved.projectId !== projectId || saved.chatId !== chatId) return;
+  const root = [...document.querySelectorAll("#messages .msg.them .text")].reverse().find(node => node.textContent.startsWith(saved.text));
+  // At block boundaries, start inside the next text node rather than selecting a rendered line break.
+  const anchor = root && selectionPoint(root, saved.anchor, saved.anchor > saved.focus), focus = root && selectionPoint(root, saved.focus, saved.focus > saved.anchor);
+  if (!anchor || !focus) return;
+  document.getSelection().setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+}
+
+function clearTranscriptSelection() {
+  const selection = document.getSelection(), transcript = document.querySelector("#transcript");
+  if (selection && transcript && (transcript.contains(selection.anchorNode) || transcript.contains(selection.focusNode))) selection.removeAllRanges();
+}
+
 function changeProject(id, chat = "main") {
+  clearTranscriptSelection();
   generation++;
   workerChat = null; searchFocus = null; workerFocus = null;
   projectId = id; chatId = chat; linksReady = false;
@@ -398,6 +580,7 @@ function changeProject(id, chat = "main") {
 // Switching chats keeps the project, plan and rail; only the transcript, live stream and draft change.
 function changeChat(chat) {
   if (chat === chatId && view?.chatId === chat) return;
+  clearTranscriptSelection();
   generation++;
   chatId = chat;
   if (searchFocus?.chat !== chat) searchFocus = null;
@@ -539,7 +722,9 @@ function render() {
   setHtml("#notes", topics.length ? knowledgeTree(topics, true) : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`);
   setHtml("#knowledge-inline", knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>');
   setHtml("#uploads-inline", uploadsHtml()); renderAttachments();
+  const readingAnchor = stickToBottom ? null : captureTranscriptAnchor();
   setHtml("#messages", transcriptHtml(waiting.answered) || `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`);
+  if (!stickToBottom) restoreTranscriptAnchor(readingAnchor);
   setHtml("#questions", waiting.here.map(questionCard).join("") + waiting.elsewhere.map(({ item, chat }) => `<p class="question-away"><span>Question waiting in chat <b>${esc(chat.title)}</b>: ${esc(clip(item.title, 90))}</span><button type="button" class="small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button></p>`).join(""));
   const reply = view.messages.findLast(message => message.role === "assistant" && message.text.trim());
   setHtml("#reply-summary", reply ? `<div class="reply-text">${renderMarkdown(reply.text.slice(0, 500))}</div><button type="button" class="ghost small" data-action="conversation">Read conversation ↗</button>` : "");
@@ -618,11 +803,7 @@ function renderPanels() {
   const p = view.project, work = plan?.work ?? [];
   const count = status => work.filter(item => item.status === status).length;
   const transcript = document.querySelector("#transcript");
-  if (transcript.dataset.count !== String(view.messages.length)) {
-    // The owner's own send always returns them to the newest message.
-    if (view.messages.findLast(message => message.text?.trim() || message.kind === "tool")?.role === "user") stickToBottom = true;
-    transcript.dataset.count = String(view.messages.length);
-  }
+  transcript.dataset.count = String(view.messages.length);
   followTranscript();
   setHtml("#evidence-inline", view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
@@ -1970,7 +2151,11 @@ async function openSearchHit(i) {
   else await uploadOpen(hit.uploadId, focus);
 }
 function badge(value) { return `<span class="badge ${esc(value)}"><span class="dot"></span>${esc(value)}</span>`; }
-function setHtml(selector, text) { const node = document.querySelector(selector); if (html.get(selector) === text || node.contains(document.activeElement)) return; node.innerHTML = text; html.set(selector, text); }
+function setHtml(selector, text) {
+  const node = document.querySelector(selector), selection = document.getSelection();
+  if (html.get(selector) === text || node.contains(document.activeElement) || selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
+  node.innerHTML = text; html.set(selector, text);
+}
 function admissionBlocked() { return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived); }
 function disableActions() {
   document.querySelectorAll('#letter button, #letter textarea, #questions textarea, .panel button').forEach(node => { node.disabled = busy || !view || node.hasAttribute('data-off'); }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
@@ -2435,7 +2620,7 @@ async function action(node) {
       const version = showDialog("Adopt this old answer draft?", `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Copy draft only, do not send</button></form>`);
       answerAdoption = { projectId, entryId: entry.id, text, version }; break;
     }
-    case "questions-jump": document.querySelector("#questions").scrollIntoView({ block: "center", behavior: "smooth" }); document.querySelector("#questions .question-card textarea")?.focus({ preventScroll: true }); break;
+    case "questions-jump": document.querySelector("#questions").scrollIntoView({ block: "center", behavior: scrollBehavior() }); document.querySelector("#questions .question-card textarea")?.focus({ preventScroll: true }); break;
     case "answer": {
       const index = Number(node.dataset.choice);
       if (entry?.kind !== "question" || entry.result || !Number.isSafeInteger(index) || index < 0 || index >= entry.choices.length || entry.choices[index] !== node.dataset.choiceText) throw new Error("Displayed choice changed or question is resolved; refresh and choose again");
@@ -2653,7 +2838,7 @@ async function action(node) {
     case "artifact": await inspectArtifact(node.dataset.file); break;
     case "notes": showDialog("Shared project notes", view.notes.map(note => `<article class="message"><div class="eyebrow">${esc(note.author)} · ${esc(new Date(note.at).toLocaleString())}</div><p>${esc(note.text)}</p></article>`).join("") || '<p class="note">No notes yet.</p>'); break;
     case "evidence-list": showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>'); break;
-    case "conversation": document.querySelector(".conversation").open = true; document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: "smooth" }); document.querySelector(".conversation summary").focus(); break;
+    case "conversation": document.querySelector(".conversation").open = true; document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: scrollBehavior() }); document.querySelector(".conversation summary").focus(); break;
     case "close-dialog": closeDialog(); break;
     case "search": openSearch(); break;
     case "search-open": await openSearchHit(Number(node.dataset.i)); break;
@@ -2698,6 +2883,8 @@ async function submit(form) {
     closeCurrentDialog(id, version);
   } else if (form.id === "compose") {
     closeSkillMenu(); searchFocus = null;
+    // Only an explicit send (or Jump to latest) may take a reader back to the bottom. A trailing user message during polling is not a new send.
+    stickToBottom = true; followTranscript();
     const submitted = data.get("message"), chat = chatId, key = draftKey(id, chat);
     const text = submitted.trim(); if (!text) return;
     const list = attachmentDrafts.get(key) ?? [];
@@ -2967,7 +3154,21 @@ try { setSidebar(localStorage.getItem("pi-projects:side-collapsed") === "1", fal
 requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector(".app").classList.add("side-animate")));
 document.addEventListener("click", event => { if (!event.target.closest("[data-side-toggle]")) return; setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
-document.querySelector("#transcript").addEventListener("scroll", event => { const node = event.currentTarget; stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40; renderWorkingPill(); }, { passive: true });
+document.querySelector("#transcript").addEventListener("scroll", event => {
+  const node = event.currentTarget;
+  stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
+  transcriptAnchor = stickToBottom ? null : captureTranscriptAnchor();
+  renderWorkingPill();
+}, { passive: true });
+// Images, diagrams and markdown can settle after the DOM render. Keep a reading anchor still; keep following only if it was already requested.
+const transcriptResize = new ResizeObserver(() => {
+  if (stickToBottom) followTranscript(); else restoreTranscriptAnchor();
+});
+for (const selector of ["#transcript", "#messages", "#live-reply", "#questions"]) transcriptResize.observe(document.querySelector(selector));
+document.addEventListener("selectionchange", () => {
+  const selection = document.getSelection(), live = document.querySelector("#live-reply");
+  if (selection?.isCollapsed && (live.contains(selection.anchorNode) || liveFrame?.running && liveRenderedText !== liveFrame.text)) scheduleLiveRender();
+});
 for (const id of ["attach-input", "upload-input"]) document.querySelector(`#${id}`).addEventListener("change", event => {
   const files = [...event.target.files]; event.target.value = "";
   if (files.length) void uiAction(() => id === "attach-input" ? attachFiles(files) : uploadToKnowledge(files));
@@ -4100,7 +4301,7 @@ document.addEventListener("click", event => {
   const link = event.target.closest(".set-nav a");
   if (!link) return;
   event.preventDefault();
-  document.querySelector(link.getAttribute("href"))?.scrollIntoView({ block: "start", behavior: "smooth" });
+  document.querySelector(link.getAttribute("href"))?.scrollIntoView({ block: "start", behavior: scrollBehavior() });
 });
 const markSettingsNav = () => {
   const sections = [...document.querySelectorAll(".set-section")], body = document.querySelector(".body");

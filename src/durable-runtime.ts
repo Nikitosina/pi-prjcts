@@ -257,8 +257,9 @@ export type DurableLiveFrame = {
   entries: number;
   running: boolean;
   attempt: number | null;
-  /** Tail of the streamed partial answer; bounded so a frame stays small. */
+  /** Stable prefix of the partial answer; bounded to limit transport and markdown work. */
   text: string;
+  textTruncated: boolean;
   thinking: boolean;
   /** Tail of the streamed reasoning summary; empty when the model shares none. */
   thinkingText: string;
@@ -267,7 +268,7 @@ export type DurableLiveFrame = {
   compacting: boolean;
 };
 
-const LIVE_TEXT_LIMIT = 4000;
+const LIVE_TEXT_LIMIT = 32_768;
 const THINKING_LIMIT = 300;
 
 function thinkingText(content: unknown): string {
@@ -283,7 +284,8 @@ function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<st
     entries: view.entries.length,
     running: live.run !== undefined,
     attempt: live.generation?.attempt ?? null,
-    text: text.length > LIVE_TEXT_LIMIT ? `…${text.slice(-LIVE_TEXT_LIMIT)}` : text,
+    text: text.slice(0, LIVE_TEXT_LIMIT),
+    textTruncated: text.length > LIVE_TEXT_LIMIT,
     thinking: content.some(part => part.type === "thinking"),
     thinkingText: thinkingText(content).slice(-THINKING_LIMIT),
     tools: (live.tools ?? []).slice(-8).map(tool => ({ name: String(tool.name).slice(0, 100), status: String(tool.status) })),
