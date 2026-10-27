@@ -19,7 +19,7 @@ All commands below are `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs 
 
 ## Drive
 
-`V drive --run <scratch> <feature>` runs one scripted journey through headless Chrome (raw CDP over a pipe, real `Input.insertText` and clicks). Scripted today: `quota-settings` selects, reviews and saves a worker fallback, then verifies reload persistence and read-only host state; `message-coordinator` (pointer clicks via `Input.dispatchMouseEvent` after a hit test, asserts both bubbles, composer clear and reload persistence). Each drive writes to its own `drive-<feature>-<timestamp>/` folder inside the evidence dir. Other features in `features/` are manual recipes; use the same CDP approach with the ids they list, and say in your report that they are unscripted. Add a journey by extending the `journeys` map in `scripts/verify.mjs` and updating the feature file.
+`V drive --run <scratch> <feature>` runs one scripted journey through headless Chrome (raw CDP over a pipe, real `Input.insertText` and clicks). Scripted today: `verification-settings` verifies opt-in, explicit verifier selection, persistence and disable; `quota-settings` selects, reviews and saves a worker fallback, then verifies reload persistence and read-only host state; `message-coordinator` (pointer clicks via `Input.dispatchMouseEvent` after a hit test, asserts both bubbles, composer clear and reload persistence). Each drive writes to its own `drive-<feature>-<timestamp>/` folder inside the evidence dir. Other features in `features/` are manual recipes; use the same CDP approach with the ids they list, and say in your report that they are unscripted. Add a journey by extending the `journeys` map in `scripts/verify.mjs` and updating the feature file.
 
 ## Evidence
 

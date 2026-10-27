@@ -20,8 +20,8 @@ Covers C1 (reporting), C10 (coordinator repository instructions), C11 (b) child 
 - Q13 A broken standing file (symlink, too large) now prevents the project from opening although workers already refuse it the same way (inspection: same loader, same errors as workers).
 
 ## Child fan-out (C11 b)
-- Q14 A parent can still queue 4 children; the cap is not 2.
-- Q15 Nothing tells workers to keep children for independent parallel work and to use one reviewer per head.
+- Q14 A parent can still queue 4 children; the ordinary cap is not 2 or a three-reviewer round cannot be admitted.
+- Q15 Nothing tells workers to keep children for independent parallel work and to coordinate independent Standards, Spec and Bugs/performance axes while deduplicating identical rounds.
 
 ## Plan-first prompting (C11 e)
 - Q16 Coordinator instructions still say "Summarize each result for the user and decide the next step" and contain no plan-first / prefer-follow-up / no-micro-delegation guidance.

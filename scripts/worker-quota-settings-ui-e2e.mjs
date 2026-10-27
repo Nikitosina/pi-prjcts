@@ -13,7 +13,7 @@ await kit.run(async () => {
   const page = await kit.openPage(await kit.webUrl(id, 'settings'));
   await page.waitFor(`document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`, 'project settings loaded');
   await page.evaluate(`document.querySelector('#settings-button').click()`);
-  await page.waitFor(`document.querySelectorAll('#dialog [data-settings-form] .mp').length === 7`, 'quota settings form');
+  await page.waitFor(`document.querySelectorAll('#dialog [data-settings-form] .mp').length === 8 && !!document.querySelector('.mp[data-role="verifier"]') && !document.querySelector('.mp[data-role="verifier-fallback"]')`, 'quota settings form');
   kit.check('settings explain reset waiting and explicit per-role fallback', (await page.evaluate(`document.querySelector('#dialog').innerText`)).includes('Paused or stopped workers never restart automatically'));
   await page.shot('01-quota-settings-before', { force: true });
 

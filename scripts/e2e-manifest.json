@@ -95,7 +95,8 @@
     ],
     "src/durable-*.ts": [
       "durable-runtime-e2e",
-      "durable-threads-e2e"
+      "durable-threads-e2e",
+      "verification-*"
     ],
     "src/github-*.ts": [
       "github-*",
@@ -123,6 +124,26 @@
     "src/machine-status.ts": [
       "machine-status-unit",
       "status-dots-e2e"
+    ],
+    "src/role-prompts.ts": [
+      "role-prompts",
+      "quiet-coordinator",
+      "workspace-defaults",
+      "skill-reload-runtime",
+      "verification-loop",
+      "verification-trusted-browser"
+    ],
+    ".agents/skills/pr-review/**": [
+      "repo-skill-overrides-unit",
+      "role-prompts"
+    ],
+    ".agents/skills/code-review/**": [
+      "repo-skill-overrides-unit",
+      "role-prompts"
+    ],
+    ".agents/skills/ask-user/**": [
+      "repo-skill-overrides-unit",
+      "role-prompts"
     ]
   },
   "knownFailing": [

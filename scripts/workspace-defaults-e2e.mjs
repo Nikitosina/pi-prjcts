@@ -3,7 +3,7 @@
 //  - whole-repository workspace scope is granted automatically; the first worker has shell tools; existing projects migrate on open
 //  - a follow-up to a worker that was created without a workspace fails with a clear "start a new worker" message (issue #3)
 //  - editable system prompts: save, customized marker, reset, effective use, and no widening of permissions
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createKit, call, say, randomUUID, delay } from './lib/e2e-kit.mjs';
 
@@ -124,14 +124,14 @@ await kit.run(async () => {
   // Settings: no workspace step, and the prompt editor.
   await page.navigate(await kit.webUrl(id));
   await page.waitFor(`document.querySelector('#owner-steps')?.innerText.length > 0`, 'owner steps');
-  await page.waitFor(`document.querySelectorAll('#prompts [data-prompt]').length === 4`, `prompt editors: ${await page.evaluate("document.querySelector('#prompts')?.innerText.slice(0, 200)")}`);
+  await page.waitFor(`document.querySelectorAll('#prompts [data-prompt]').length === 5`, `prompt editors: ${await page.evaluate("document.querySelector('#prompts')?.innerText.slice(0, 200)")}`);
   const steps = await page.evaluate(`document.querySelector('#owner-steps').innerText`);
   check('W8 Settings no longer has the workspace authorization step', !/Workspace/i.test(steps) && !/edit this repo/i.test(steps) && !(await page.evaluate(`!!document.querySelector('[data-action="workspace-quick"]')`)), steps);
   await page.evaluate(`document.querySelector('#set-setup').scrollIntoView()`); await page.shot('04-settings-no-workspace-step');
 
   const before = { coordinator: result.calls.filter(c => c.role === 'coordinator').at(-1), worker: result.calls.filter(c => c.role === 'worker').at(-1) };
   const snapshot = await rpc({ action: 'prompts-snapshot', id });
-  check('P1 the snapshot lists coordinator, worker, scout and reviewer with defaults and no overrides', snapshot.roles.map(r => r.role).join() === 'coordinator,worker,scout,reviewer' && snapshot.roles.every(r => r.override === null && r.effective === r.default && r.default.length > 50), snapshot.roles.map(r => [r.role, r.override]));
+  check('P1 the snapshot lists all five roles with defaults and no overrides', snapshot.roles.map(r => r.role).join() === 'coordinator,worker,scout,reviewer,verifier' && snapshot.roles.every(r => r.override === null && r.effective === r.default && r.default.length > 50), snapshot.roles.map(r => [r.role, r.override]));
   const scopeText = await page.evaluate(`document.querySelector('#set-advanced').innerText`);
   check('P2 the UI says the scope (this project) and when changes apply', /per project/i.test(scopeText) && /new coordinator turns and new worker threads/i.test(scopeText), scopeText.slice(0, 400));
   const shown = await page.evaluate(`document.querySelector('[data-prompt="coordinator"]').value`);
@@ -145,7 +145,7 @@ await kit.run(async () => {
   await kit.eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.prompts?.coordinator === OVERRIDE_C, 'coordinator prompt not saved', 100);
   await page.waitFor(`!!document.querySelector('[data-prompt="coordinator"]')?.closest('fieldset').querySelector('.prompt-custom')`, 'customized marker');
   check('P3 saving shows a Customized marker on that prompt only', await page.evaluate(`document.querySelectorAll('#prompts .prompt-custom').length`) === 1);
-  check('P3 Reset to default is enabled only for the customized prompt', await page.evaluate(`[...document.querySelectorAll('#prompts [data-action="prompt-reset"]')].map(b => b.disabled).join()`) === 'false,true,true,true');
+  check('P3 Reset to default is enabled only for the customized prompt', await page.evaluate(`[...document.querySelectorAll('#prompts [data-action="prompt-reset"]')].map(b => b.disabled).join()`) === 'false,true,true,true,true');
   await edit('worker', OVERRIDE_W);
   await kit.eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.prompts?.worker === OVERRIDE_W, 'worker prompt not saved', 100);
   await page.waitFor(`document.querySelectorAll('#prompts .prompt-custom').length === 2`, 'two markers');
@@ -173,4 +173,36 @@ await kit.run(async () => {
   await rpc({ action: 'thread-send', id, threadId: withScope.threadId, text: 'FOLLOW-AFTER-OVERRIDE', requestId: randomUUID() }); await delay(300); await kit.settle(id);
   const old = kit.lastCall('worker', 'FOLLOW-AFTER-OVERRIDE');
   check('P8 a thread that started before the override keeps its prompt', old && !old.system.includes('CUSTOM-WORKER') && old.system === kit.lastCall('worker', 'W-TASK after-migration').system, old ? { custom: old.system.includes('CUSTOM-WORKER'), same: old.system === kit.lastCall('worker', 'W-TASK after-migration').system, a: old.system.slice(0, 300) } : { none: true, work: (await kit.plan(id)).filter(work => work.threadId === withScope.threadId).map(work => [work.text.slice(0, 30), work.status, work.blocker]) });
+  const click = async selector => {
+    await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'center' })`);
+    const point = await page.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await page.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
+    await page.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
+  };
+  await page.viewport(1440, 1000);
+  const beforeVerifierNav = await page.evaluate('performance.timeOrigin');
+  await page.navigate(await kit.webUrl(id));
+  await page.waitFor(`performance.timeOrigin > ${beforeVerifierNav} && !!document.querySelector('[data-prompt="verifier"]')`, 'verifier editor');
+  await click('[data-prompt="verifier"]');
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', modifiers: 4, commands: ['selectAll'] });
+  await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 4 });
+  await page.cdp('Input.insertText', { text: 'CUSTOM-VERIFIER: inspect independent functional evidence.' });
+  const typedVerifier = await page.evaluate(`document.querySelector('[data-prompt="verifier"]').value`);
+  check('P9 native input replaced verifier prompt', typedVerifier === 'CUSTOM-VERIFIER: inspect independent functional evidence.', typedVerifier);
+  await click('[data-action="prompt-save"][data-role="verifier"]');
+  await kit.eventually(async () => (await rpc({ action: 'settings-snapshot', id })).values.prompts?.verifier === 'CUSTOM-VERIFIER: inspect independent functional evidence.', 'verifier prompt saved');
+  const beforeVerifierReload = await page.evaluate('performance.timeOrigin');
+  await page.reload();
+  await page.waitFor(`performance.timeOrigin > ${beforeVerifierReload} && document.querySelector('[data-prompt="verifier"]')?.value === 'CUSTOM-VERIFIER: inspect independent functional evidence.'`, 'verifier persists after reload');
+  check('P9 verifier prompt saves through pointer input and persists without changing worker override', (await rpc({ action: 'settings-snapshot', id })).values.prompts?.worker === OVERRIDE_W);
+  await page.evaluate(`document.querySelector('[data-prompt="verifier"]').scrollIntoView({ block: 'center' })`);
+  const verifierShot = await page.cdp('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+  writeFileSync(join(kit.artifacts, '07-verifier-prompt-saved.png'), Buffer.from(verifierShot.data, 'base64'));
+  writeFileSync(join(kit.artifacts, 'host-verifier-settings.json'), JSON.stringify(await rpc({ action: 'settings-snapshot', id }), null, 2));
+  await click('[data-action="prompt-reset"][data-role="verifier"]');
+  await kit.eventually(async () => !(await rpc({ action: 'settings-snapshot', id })).values.prompts?.verifier, 'verifier reset');
+  check('P9 verifier reset restores its distinct default and keeps other customizations', (await rpc({ action: 'prompts-snapshot', id })).roles.find(r => r.role === 'verifier').effective === snapshot.roles.find(r => r.role === 'verifier').default && (await rpc({ action: 'settings-snapshot', id })).values.prompts.worker === OVERRIDE_W);
+
 });
+
+if (process.env.PI_ARTIFACTS_DIR) cpSync(kit.artifacts, join(process.env.PI_ARTIFACTS_DIR, "workspace-defaults"), { recursive: true });

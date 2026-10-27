@@ -32,4 +32,5 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Create a project](./create-project.md) — New project dialog with folder trust. Recipe only.
 - [Search a project](./search.md) — search dialog over chats. Recipe only.
 - [Knowledge topics](./knowledge.md) — create and read a knowledge document. Recipe only.
+- [Verification settings](./verification-settings.md) — opt in to the automatic verifier loop in Project settings. Scripted.
 - [Quota fallback settings](./quota-settings.md) — worker fallback selection, review, save and reload. Scripted.

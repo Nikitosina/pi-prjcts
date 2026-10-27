@@ -8,12 +8,14 @@ import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts"
 import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
-export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
+export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
-export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText) }, { additionalProperties: false });
+export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText), verifier: Type.Optional(promptText) }, { additionalProperties: false });
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_WORKER_CAP = 5;
+export const VerificationSettings = Type.Object({ enabled: Type.Boolean(), skill: Type.String({ maxLength: 128 }) }, { additionalProperties: false });
+export type VerificationSettings = Static<typeof VerificationSettings>;
 /** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
 export const ContextSettings = Type.Object({
   contextWindow: Type.Optional(Type.Integer({ minimum: 4096, maximum: 10_000_000 })),
@@ -98,7 +100,9 @@ export const Project = Type.Object({
   contextSettings: Type.Optional(ContextSettings),
   createdAt: text, model: text,
   /** Role models; an absent role inherits the coordinator model when each worker is admitted. */
-  models: Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) }),
+  models: Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text), verifier: Type.Optional(text) }),
+  /** Opt-in verification loop: a fresh verifier runs this skill against each finished worker task. Needs models.verifier; neither has a default. */
+  verification: Type.Optional(VerificationSettings),
   /** Explicit quota fallback per role; absent means wait for the selected model's quota to reset. */
   fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
   /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
@@ -236,8 +240,10 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("settings-update"), id: Id, confirm: Id, expectedRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }), changes: Type.Object({
     name: Type.Optional(text), objective: Type.Optional(Type.String({ maxLength: 32000 })), model: Type.Optional(text),
     /** null returns a role to inheriting the coordinator model. */
-    models: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
-    /** Explicit quota fallback per role; null removes it and restores reset waiting. */
+    models: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])), verifier: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
+    /** null turns the verification loop off and forgets its skill. */
+    verification: Type.Optional(Type.Union([VerificationSettings, Type.Null()])),
+  /** Explicit quota fallback per role; null removes it and restores reset waiting. */
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
     /** null restores Pi's enabledModels as the scope. */
     scopedModels: Type.Optional(Type.Union([Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true }), Type.Null()])),
@@ -247,7 +253,7 @@ export const Request = Type.Union([
     /** null removes every MCP server. */
     mcp: Type.Optional(Type.Union([McpSettings, Type.Null()])),
     /** A role set to null returns to the built-in text. */
-    prompts: Type.Optional(Type.Object({ coordinator: Type.Optional(Type.Union([promptText, Type.Null()])), worker: Type.Optional(Type.Union([promptText, Type.Null()])), scout: Type.Optional(Type.Union([promptText, Type.Null()])), reviewer: Type.Optional(Type.Union([promptText, Type.Null()])) }, { additionalProperties: false })),
+    prompts: Type.Optional(Type.Object({ coordinator: Type.Optional(Type.Union([promptText, Type.Null()])), worker: Type.Optional(Type.Union([promptText, Type.Null()])), scout: Type.Optional(Type.Union([promptText, Type.Null()])), reviewer: Type.Optional(Type.Union([promptText, Type.Null()])), verifier: Type.Optional(Type.Union([promptText, Type.Null()])) }, { additionalProperties: false })),
     /** "" removes the worktree setup command. */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     /** null restores the defaults (catalog window, pi-durable compaction policy). */

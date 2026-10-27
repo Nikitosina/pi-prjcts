@@ -8,7 +8,7 @@
 // Features: message-coordinator
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, openSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, openSync } from 'node:fs';
 import { request } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -21,7 +21,7 @@ const CHROME = process.env.VERIFY_CHROME ?? '/Applications/Google Chrome.app/Con
 const CDP_TIMEOUT = Number(process.env.VERIFY_CDP_TIMEOUT_MS ?? 15000);
 const PROJECT_NAME = 'Verify seed';
 // Read-only host actions the `rpc` command forwards; anything else (including `web`, which returns the auth token) is refused.
-const RPC_ALLOWLIST = new Set(['list', 'show', 'plan-snapshot', 'knowledge-list', 'knowledge-read', 'knowledge-history', 'search']);
+const RPC_ALLOWLIST = new Set(['list', 'show', 'plan-snapshot', 'knowledge-list', 'knowledge-read', 'knowledge-history', 'search', 'settings-snapshot']);
 
 const [command, ...rest] = process.argv.slice(2);
 const flag = name => { const i = rest.indexOf(`--${name}`); return i >= 0 ? rest[i + 1] : undefined; };
@@ -100,7 +100,10 @@ async function launch() {
     // Seed workspace: a one-commit git repo, with git's global/system config and HOME cut off from the owner's.
     const gitEnv = { ...process.env, HOME: run.userHome, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_SYSTEM: '/dev/null' };
     const git = (...args) => execFileSync('/usr/bin/git', ['-C', run.workspace, '-c', 'commit.gpgsign=false', '-c', 'user.email=verify@example.invalid', '-c', 'user.name=Verify', ...args], { encoding: 'utf8', env: gitEnv });
-    git('init', '-q', '-b', 'main'); writeFileSync(join(run.workspace, 'README.md'), 'verification workspace\n'); git('add', '.'); git('commit', '-qm', 'seed');
+    git('init', '-q', '-b', 'main'); writeFileSync(join(run.workspace, 'README.md'), 'verification workspace\n');
+    // The project's own verification skill is part of the seed, so Settings can name an installed skill.
+    cpSync(join(here, '..'), join(run.workspace, '.agents/skills/verify-pi-prjcts'), { recursive: true, filter: source => !source.includes('node_modules') });
+    git('add', '.'); git('commit', '-qm', 'seed');
     // Fake model provider (the only external-model seam): its own detached process group.
     const portFile = join(scratch, 'fake-provider.port'), providerFd = openSync(run.providerLog, 'a');
     await spawnTracked(run, 'fakeProvider', process.execPath, [join(here, 'fake-provider.mjs'), portFile, run.requestLog], { stdio: ['ignore', providerFd, providerFd] });
@@ -160,7 +163,7 @@ async function rpcCommand() {
 // Raw CDP over a pipe, as scripts/lib/e2e-kit.mjs does. Chrome is tracked in run.json before any CDP call, so a crash anywhere still leaves it recorded for cleanup.
 async function openBrowser(run, sinks) {
   const label = `chrome-${Date.now()}`;
-  const { child: chrome, exited } = await spawnTracked(run, label, CHROME, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', `--user-data-dir=${join(run.scratch, 'chrome-profile')}`, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
+  const { child: chrome, exited } = await spawnTracked(run, label, CHROME, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--use-mock-keychain', `--user-data-dir=${join(run.scratch, 'chrome-profile')}`, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
   let id = 0, buffer = ''; const pending = new Map();
   const page = {
     close: async () => {
@@ -216,6 +219,71 @@ async function openBrowser(run, sinks) {
 }
 
 const journeys = {
+  // Feature: features/verification-settings.md
+  async 'verification-settings'(run, page, record, dir, sinks) {
+    const origin = new URL(run.webUrl).origin, snap = async () => rpc(run, { action: 'settings-snapshot', id: run.projectId });
+    await page.navigate(run.webUrl);
+    await page.waitFor(`document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)}) && !document.querySelector('#sign-in')?.open`, 'seeded project shown');
+    const open = async () => { await page.click('button[data-tab=settings]'); await page.waitFor(`!document.querySelector('#settings-button')?.hidden`, 'settings tab with its edit button'); await page.click('#settings-button'); await page.waitFor(`!!document.querySelector('[data-settings-form]')`, 'settings form'); };
+    const review = async () => { await page.click('[data-settings-form] [type=submit]'); await page.waitFor(`!!document.querySelector('[data-settings-confirm]')`, 'review dialog'); };
+    record('entry', `opened ${origin}; Project settings dialog`);
+    await open();
+    if ((await snap()).values.verification !== null) throw Error('verification must be off in a fresh project');
+    const trust = await page.evaluate(`document.querySelector('[data-verify-trust]')?.innerText ?? ''`), emptyModel = await page.evaluate(`document.querySelector('.mp[data-role=verifier] .mp-current')?.innerText ?? ''`);
+    if (!/trusted like the worker, not sandboxed/.test(trust) || !/not a security boundary/.test(trust)) throw Error(`trusted execution disclosure is missing or misleading: ${trust}`);
+    if (!/No verifier model/.test(emptyModel)) throw Error(`empty verifier model is not labelled clearly: ${emptyModel}`);
+    record('visible', 'verification discloses trusted shell execution and no security boundary; the empty verifier model is labelled');
+    await page.shot(dir, '01-settings-off');
+    // 1. Opting in without a verifier model is refused by the host; nothing is stored.
+    await page.click('input[name=verifyEnabled]');
+    await page.click('input[name=verifySkill]'); await page.cdp('Input.insertText', { text: 'verify-pi-prjcts' });
+    await page.shot(dir, '02-enabled-no-model');
+    await review();
+    await page.shot(dir, '03-review-diff');
+    const diff = await page.evaluate(`document.querySelector('.diff-list').innerText`);
+    if (!/Verification/.test(diff) || !/verify-pi-prjcts/.test(diff)) throw Error(`review dialog does not show the verification change: ${diff}`);
+    await page.click('[data-settings-confirm] [type=submit]');
+    await page.waitFor(`/own verifier model/.test(document.body.innerText)`, 'host refusal visible');
+    await page.shot(dir, '04-refused-without-model');
+    record('action', 'enabled verification with skill verify-pi-prjcts and no verifier model, reviewed and saved');
+    record('visible', 'the host refused: verification needs its own verifier model');
+    // The refusal is an HTTP 400 by design: take exactly that one out of the error sinks, so any other error still fails the drive.
+    const bad = sinks.httpErrors.findIndex(item => item.status === 400); if (bad < 0) throw Error('expected the refusal to be an HTTP 400'); sinks.httpErrors.splice(bad, 1);
+    const log = sinks.errors.findIndex(item => /status of 400/.test(item)); if (log >= 0) sinks.errors.splice(log, 1);
+    if ((await snap()).values.verification !== null) throw Error('refused update must not store anything');
+    record('side-effect', 'settings-snapshot still reports verification: null');
+    // 2. Pick the verifier model, save again.
+    await page.navigate(run.webUrl);
+    await page.waitFor(`document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)})`, 'project shown again');
+    await open();
+    await page.click('.mp[data-role=verifier] .mp-current');
+    await page.waitFor(`!!document.querySelector('.mp[data-role=verifier] .mp-row[data-ref="fake/fake-model"]')`, 'verifier options');
+    await page.click('.mp[data-role=verifier] .mp-row[data-ref="fake/fake-model"]');
+    await page.click('input[name=verifyEnabled]');
+    await page.click('input[name=verifySkill]'); await page.cdp('Input.insertText', { text: 'verify-pi-prjcts' });
+    await page.shot(dir, '05-model-and-skill');
+    await review();
+    await page.click('[data-settings-confirm] [type=submit]');
+    await page.waitFor(`!document.querySelector('dialog[open]')`, 'saved');
+    const saved = (await snap()).values;
+    if (!saved.verification?.enabled || saved.verification.skill !== 'verify-pi-prjcts' || saved.models.verifier !== 'fake/fake-model') throw Error(`not stored: ${JSON.stringify(saved.verification)} ${saved.models.verifier}`);
+    writeFileSync(join(dir, 'host-settings-snapshot.json'), JSON.stringify({ verification: saved.verification, models: saved.models }, null, 2));
+    record('side-effect', `settings-snapshot: verification ${JSON.stringify(saved.verification)}, verifier model ${saved.models.verifier}`);
+    // 3. Persistence: reopen after a reload, and turn it off again.
+    await page.reload();
+    await page.waitFor(`document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)})`, 'project after reload');
+    await open();
+    const shown = await page.evaluate(`({ on: document.querySelector('input[name=verifyEnabled]').checked, skill: document.querySelector('input[name=verifySkill]').value })`);
+    if (!shown.on || shown.skill !== 'verify-pi-prjcts') throw Error(`settings dialog after reload: ${JSON.stringify(shown)}`);
+    await page.shot(dir, '06-after-reload');
+    record('persist', 'after reload the dialog shows verification on with the skill');
+    await page.click('input[name=verifyEnabled]');
+    await review(); await page.click('[data-settings-confirm] [type=submit]');
+    await page.waitFor(`!document.querySelector('dialog[open]')`, 'turned off');
+    if ((await snap()).values.verification !== null) throw Error('verification did not turn off');
+    await page.shot(dir, '07-turned-off');
+    record('side-effect', 'turning it off stores verification: null again; the verifier model choice stays');
+  },
   // Feature: features/quota-settings.md
   async 'quota-settings'(run, page, record, dir) {
     const url = new URL(run.webUrl); url.searchParams.set('tab', 'settings');
@@ -307,7 +375,7 @@ async function drive() {
   let page, failure;
   try {
     page = await openBrowser(run, sinks);
-    await journey(run, page, record, dir);
+    await journey(run, page, record, dir, sinks);
   } catch (error) {
     failure = error;
     try { await page?.shot(dir, '99-failure'); } catch {}

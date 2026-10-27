@@ -1,7 +1,8 @@
 import type { Extension, ToolRegistration } from "@earendil-works/pi-durable";
 import type { DurableStanding } from "./durable-standing.ts";
+import type { VerificationSummary } from "./verification-model.ts";
 
-export type DurableRole = "worker" | "scout" | "reviewer";
+export type DurableRole = "worker" | "scout" | "reviewer" | "verifier";
 export type DurableThreadStatus = "idle" | "running" | "blocked" | "stopped" | "interrupted" | "completed" | "failed";
 export type DurablePlanWorkStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped";
 
@@ -25,6 +26,8 @@ export type DurablePlanWork = Readonly<{
   workspaceFrom?: string;
   /** Worker continuing an existing branch (host-resolved and authorized): its worktree starts on this branch at this tip. */
   continueBranch?: Readonly<{ name: string; sha: string }>;
+  /** Verifier (host-set): the model and skill the verification cycle froze when it started; a later Settings change does not apply. */
+  frozen?: Readonly<{ model: string; skill: string }>;
 }>;
 export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork[] }>;
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */
@@ -43,7 +46,7 @@ export type DurablePlanWorkSnapshot = Readonly<{
 }>;
 /** Shared resources a running worker thread holds right now (leases and background commands). */
 export type DurableHolds = Readonly<{ leases: readonly { resource: string; until: string }[]; background: readonly { id: string; label: string }[] }>;
-export type DurablePlanSnapshot = Readonly<{ paused: boolean; pausing: boolean; workerCap: number | null; work: readonly DurablePlanWorkSnapshot[] }>;
+export type DurablePlanSnapshot = Readonly<{ paused: boolean; pausing: boolean; workerCap: number | null; work: readonly DurablePlanWorkSnapshot[]; /** Automatic verification per worker thread (projects that opted in). */ verification?: Readonly<Record<string, VerificationSummary>> }>;
 
 /** Actual ModelRuntime stream lifecycle. traceId is locally generated and deliberately has no Durable thread/conversation meaning. */
 export type DurableGenerationLifecycle = Readonly<{ phase: "started" | "ended"; projectId: string; traceId: string; model: string; at: number; outcome?: "completed" | "failed" | "aborted" }>;

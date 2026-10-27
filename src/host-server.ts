@@ -35,7 +35,8 @@ import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } 
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
-import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { type DurableProjectRuntime } from "./durable-runtime.ts";
+import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
 import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 
@@ -68,7 +69,13 @@ const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
 /** Settings read at use time, so a change needs no reopen. */
-const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "workerCap"]);
+/** Turning verification on needs an installed skill, whichever settings path carries the change. */
+async function validateVerificationChange(id: string, changes: { verification?: { enabled: boolean; skill: string } | null }): Promise<void> {
+  if (!changes.verification?.enabled) return;
+  const skill = changes.verification.skill.trim();
+  if (!(await configuredSkills(id)).getSkills().skills.some(item => item.name === skill)) throw new Error(`Verification skill "${skill}" is not installed for this project`);
+}
+const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "verification", "workerCap"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -296,7 +303,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "prompts-snapshot": {
-      const project = loadProject(input.id), defaults = { coordinator: COORDINATOR_ROLE_TEXT, worker: DEFAULT_WORKER_RULES, scout: DEFAULT_WORKER_RULES, reviewer: DEFAULT_WORKER_RULES };
+      const project = loadProject(input.id), defaults = DEFAULT_ROLE_PROMPTS;
       return { scope: "project", roles: PROMPT_ROLES.map(role => ({ role, default: defaults[role], override: project.prompts?.[role] ?? null, effective: project.prompts?.[role] ?? defaults[role] })) };
     }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };
@@ -314,6 +321,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
       if (Object.keys(input.changes).every(key => LIVE_SETTINGS.has(key))) {
         await validateProjectModelChanges(input.changes);
+        await validateVerificationChange(input.id, input.changes);
         return withProjectLock(input.id, async () => {
           const project = updateProjectSettings(loadProject(input.id), input);
           const running = durableRuntimes.get(input.id);
@@ -328,6 +336,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         });
       }
       await validateProjectModelChanges(input.changes);
+      await validateVerificationChange(input.id, input.changes);
       let existing: Promise<DurableProjectRuntime> | undefined;
       await withProjectLock(input.id, async () => {
         updateProjectSettings(loadProject(input.id), input);

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { FAKE_MODEL, startFakeModel } from './fake-model.mjs';
@@ -15,7 +16,7 @@ const { BACKGROUND_CONTEXT } = await import('@earendil-works/chord/context');
 const { openDurableProject } = await import('../src/durable-runtime.ts');
 const { loadProjectResourceLoader } = await import('../src/project-resources.ts');
 const { projectDir, saveProject } = await import('../src/state.ts');
-const id = randomUUID(), dir = projectDir(id), workspace = join(base, 'workspace');
+const id = randomUUID(), dir = projectDir(id), workspace = join(realpathSync(mkdtempSync(join(tmpdir(), 'skill-reload-'))), 'workspace'); // outside the checkout: skills are discovered in ancestor directories, so a workspace inside a repo that ships its own skills would see them
 const skill = (name, description) => { const folder = join(workspace, '.pi', 'skills', name); mkdirSync(folder, { recursive: true }); writeFileSync(join(folder, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\nBODY-${name}\n`); };
 skill('first-skill', 'Present when the runtime opened.');
 const model = FAKE_MODEL;

@@ -7,6 +7,8 @@ import { Type } from "typebox";
 import type { DurablePlan, DurablePlanSnapshot, DurablePlanWork, DurablePlanWorkSnapshot, DurablePrepareWorkerEnvironment, DurablePublishWorkerEnvironment, DurableResolvedAttempt, DurableRole, DurableWorkerToolBindings, DurableWorkspaceInstructions } from "./durable-plan-types.ts";
 import type { WorkspaceCatalogEntry } from "./workspace-authorization.ts";
 import { fitJson } from "./response-limit.ts";
+import { criteriaProblem, parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary } from "./verification-model.ts";
+import type { TargetManifest } from "./verification-target.ts";
 
 export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type DurablePlanWorkSnapshot, type DurableResolvedAttempt, type DurableRole, type DurableGenerationLifecycle, type DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
 
@@ -28,7 +30,7 @@ function profileMismatches(first: StoredAttempt, next: StoredAttempt): string[] 
 type RetryReceipt = { requestId: string; workId: string; attemptId: string; threadId: string };
 type QuotaRecovery = { retryAt: number; attempts: number; lastError: string };
 type StoredWork = { id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; quotaRecovery?: QuotaRecovery; /** Legacy single receipt, imported into retryReceipts before new admissions. */ manualRetryRequestId?: string; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
-export type PlanningState = { retryReceipts?: RetryReceipt[]; paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string } }>; dispatcherTaskIds: TaskId[] };
+export type PlanningState = { retryReceipts?: RetryReceipt[]; paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string }; /** Automatic verification of this worker's finished work (opt-in project setting). */ verification?: Verification }>; dispatcherTaskIds: TaskId[] };
 
 export const DurablePlanning = defineDoc<PlanningState>({ kind: "projects.durable-planning", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ paused: false, pausing: false, workerCap: null, work: {}, threads: {}, dispatcherTaskIds: [] }) });
 
@@ -133,7 +135,29 @@ const Attempt = defineTask<AttemptInput, AttemptState, { status: "completed" | "
  */
 const ARCHIVABLE = new Set(["completed", "failed", "stopped", "blocked"]);
 
-export function planningRuntime(options: { projectId: string; models: Record<DurableRole, ModelRef>; /** Owner-configured quota fallback; null waits for the frozen model. */ fallbackModels?: Record<DurableRole, string | null>; /** Test override for unknown-reset backoff. */ quotaRetryBaseMs?: number; /** Cached provider reset only; never polls or reads credentials. */ quotaResetAt?: (model: string, now: number) => number | undefined; /** Direct-runtime test rendezvous before settlement reads mutable plan state. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; resolveModel?: (model: string, role: DurableRole) => ModelRef; cwd: string; instructions: Record<DurableRole, string>; /** Host-only: rebuilds the skill index before a new thread freezes its instructions. */ refreshSkills?: () => Promise<void>; /** Host-only: names of the skills a new thread of this role may read, in step with its instructions. */ skillNames?: (role: DurableRole) => string[]; standingRevision: string; workspaceInstructions?: DurableWorkspaceInstructions; knowledgeTools: readonly ToolRegistration[]; /** Scout and reviewer only: read-only checkout tools and their extension. */ readOnlyCode?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; /** Reviewer only: the review-verdict tool and its extension. */ reviewerTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerPolicy: ReturnType<typeof defineExtension>; /** Every role: the profile-restricted skill reader. */ skillFiles?: { tool: ToolRegistration; extension: ReturnType<typeof defineExtension> }; /** Every role: the MCP gateway tools (servers are filtered per role at call time). */ mcp?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerTools?: DurableWorkerToolBindings; workerCap: number; workspaceCatalog?: () => readonly WorkspaceCatalogEntry[]; /** Host-only scoped-worker preparation; absent means every workspace scope is denied. */ prepareWorkerEnvironment?: DurablePrepareWorkerEnvironment; /** Host-only registry publication, invoked after post-preparation authorization validation. */ publishWorkerEnvironment?: DurablePublishWorkerEnvironment; beforeScopedSubmit?: () => Promise<void>; /** Root conversation owning the shared plan, so delegation from any chat admits into one pool. */ planRoot?: () => ConversationId | undefined; /** Host-only: fetch a ref into a read-only snapshot for scout/reviewer threads. */ readHead?: (ref: string) => Promise<{ root: string; sha: string }>; /** Host-only: resolve and authorize an existing branch / PR for a worker to continue; rejects branches the owner does not own. */ resolveBranch?: (ref: string, workspaceScopeId: string | undefined) => Promise<{ name: string; sha: string }>; /** Host-only: short listing of a thread's artifacts folder for its report (empty when none). */ artifactSummary?: (threadId: string) => string }) {
+export type VerificationHooks = {
+  /** Read fresh at the end of each worker turn. */
+  config: () => { enabled: boolean; skill: string };
+  /** A problem that makes verification impossible right now (missing skill or model), or null. */
+  check: () => Promise<string | null>;
+  /** Why verifier commands cannot run under this worker's shell policy (e.g. a workspace provider that owns it), or null. */
+  scopeCheck: (scopeId: string) => string | null;
+  /** Records the exact revision of the worker's tree that one attempt verifies; idempotent per key. */
+  capture: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; proof: { paths: string[]; diff: string } }>;
+  /** Content revision of a tree now, uncommitted and untracked work included. */
+  revision: (sourcePath: string) => Promise<string>;
+  /** Stops verifier jobs before final target validation, without releasing its leases. */
+  drain: (verifierThreadId: string) => Promise<void>;
+  /** Releases leases only when no verification or stop drain still owns them. */
+  release: (verifierThreadId: string) => Promise<void>;
+};
+type PreparedVerification =
+  | { kind: "none" }
+  | { kind: "revision"; current: string | null; verifierThreadId: string }
+  | { kind: "escalate"; reason: string }
+  | { kind: "start"; n: number; model: string; skill: string; key: string; scopeId: string; sourcePath: string; manifest: TargetManifest; proof: { paths: string[]; diff: string }; criteria: Criterion[]; task: string };
+
+export function planningRuntime(options: { projectId: string; models: Record<DurableRole, ModelRef>; /** Owner-configured quota fallback; null waits for the frozen model. */ fallbackModels?: Record<DurableRole, string | null>; /** Test override for unknown-reset backoff. */ quotaRetryBaseMs?: number; /** Cached provider reset only; never polls or reads credentials. */ quotaResetAt?: (model: string, now: number) => number | undefined; /** Direct-runtime test rendezvous before settlement reads mutable plan state. */ testBeforeWorkSettlement?: (workId: string) => Promise<void>; resolveModel?: (model: string, role: DurableRole) => ModelRef; cwd: string; instructions: Record<DurableRole, string>; /** Host-only: rebuilds the skill index before a new thread freezes its instructions. */ refreshSkills?: () => Promise<void>; /** Host-only: names of the skills a new thread of this role may read, in step with its instructions. */ skillNames?: (role: DurableRole) => string[]; standingRevision: string; workspaceInstructions?: DurableWorkspaceInstructions; knowledgeTools: readonly ToolRegistration[]; /** Scout and reviewer only: read-only checkout tools and their extension. */ readOnlyCode?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; /** Reviewer only: the review-verdict tool and its extension. */ reviewerTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerPolicy: ReturnType<typeof defineExtension>; /** Every role: the profile-restricted skill reader. */ skillFiles?: { tool: ToolRegistration; extension: ReturnType<typeof defineExtension> }; /** Every role: the MCP gateway tools (servers are filtered per role at call time). */ mcp?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerTools?: DurableWorkerToolBindings; /** Host hooks of the opt-in verification loop; absent means the project cannot verify. */ verification?: VerificationHooks; /** Verifier-only tools (trusted run, verdict, leases/background), offered to verifier threads and nobody else. */ verifierTools?: { tools: readonly ToolRegistration[]; extension: ReturnType<typeof defineExtension> }; workerCap: number; workspaceCatalog?: () => readonly WorkspaceCatalogEntry[]; /** Host-only scoped-worker preparation; absent means every workspace scope is denied. */ prepareWorkerEnvironment?: DurablePrepareWorkerEnvironment; /** Host-only registry publication, invoked after post-preparation authorization validation. */ publishWorkerEnvironment?: DurablePublishWorkerEnvironment; beforeScopedSubmit?: () => Promise<void>; /** Root conversation owning the shared plan, so delegation from any chat admits into one pool. */ planRoot?: () => ConversationId | undefined; /** Host-only: fetch a ref into a read-only snapshot for scout/reviewer threads. */ readHead?: (ref: string) => Promise<{ root: string; sha: string }>; /** Host-only: resolve and authorize an existing branch / PR for a worker to continue; rejects branches the owner does not own. */ resolveBranch?: (ref: string, workspaceScopeId: string | undefined) => Promise<{ name: string; sha: string }>; /** Host-only: short listing of a thread's artifacts folder for its report (empty when none). */ artifactSummary?: (threadId: string) => string }) {
   if (!Number.isSafeInteger(options.workerCap) || options.workerCap < 1) throw new Error("workerCap must be a positive integer");
   if (options.workerTools && (!options.workerTools.revision || options.workerTools.revision.length > 256)) throw new Error("Worker capability bindings require a revision");
   const bindings = new Map((options.workerTools?.tools ?? []).map(tool => [tool.name, tool]));
@@ -194,69 +218,79 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         const [outcome] = await runtime.outcomes([task.input.attemptTaskId], context);
         const result = outcome?.status === "completed" && isAttemptResult(outcome.result) ? outcome.result : undefined;
         await options.testBeforeWorkSettlement?.(task.input.workId);
-        await runtime.commit(async tx => {
-          const state = await tx.doc(DurablePlanning, runtime.conversationId);
-          const work = state.work[task.input.workId];
-          // A paused, stopped, or resumed attempt must not replace the newer thread state.
-          if (work?.status === "running" && work.taskId === Number(task.input.attemptTaskId)) {
-            const quota = result?.status === "failed" && result.reason && providerFailure(result.reason) === "quota_exceeded" ? failureBlocker(result.reason, work.attempt?.model) : undefined;
-            const recovery = work.quotaRecovery ?? { retryAt: 0, attempts: 0, lastError: "" };
-            if (quota && recovery.attempts < QUOTA_RETRY_LIMIT && !state.paused && !state.threads[work.threadId]?.paused && !state.threads[work.threadId]?.stopping) {
-              const attempt = work.attempt;
-              if (!attempt || work.conversationId === null) throw new Error("Quota recovery lost its frozen worker profile");
-              const configuredFallback = attempt.quotaFallback;
-              const switchModel = configuredFallback && configuredFallback !== attempt.model && !attempt.modelTransitions?.length ? configuredFallback : undefined;
-              let fallbackModel: ModelRef | undefined;
-              if (switchModel) {
-                try { fallbackModel = frozenModel({ ...attempt, model: switchModel }, work.role); }
-                catch { /* A removed fallback must not strand settlement; wait for the frozen model instead. */ }
-              }
-              if (switchModel && fallbackModel) {
-                const from = attempt.model;
-                await configure(tx, work.conversationId, { model: fallbackModel });
-                attempt.model = switchModel;
-                attempt.modelTransitions = [...(attempt.modelTransitions ?? []), { at: Date.now(), from, to: switchModel, reason: "quota_exceeded" }];
-                // Queued follow-ups share this conversation's model, but completed attempts keep their history.
-                for (const pending of Object.values(state.work)) if (pending.id !== work.id && pending.threadId === work.threadId && pending.status === "queued" && pending.attempt) {
-                  pending.attempt.model = switchModel;
-                  pending.attempt.modelTransitions = attempt.modelTransitions.map(item => ({ ...item }));
+        let prepared: PreparedVerification = { kind: "none" };
+        try {
+          prepared = await prepareVerification(runtime.conversationId, change => runtime.commit(change, context), task.input.workId, result?.status === "completed", task.input.attemptTaskId);
+          await runtime.commit(async tx => {
+            const state = await tx.doc(DurablePlanning, runtime.conversationId);
+            const work = state.work[task.input.workId];
+            // A paused, stopped, or resumed attempt must not replace the newer thread state.
+            if (work?.status === "running" && work.taskId === Number(task.input.attemptTaskId)) {
+              const quota = result?.status === "failed" && result.reason && providerFailure(result.reason) === "quota_exceeded" ? failureBlocker(result.reason, work.attempt?.model) : undefined;
+              const recovery = work.quotaRecovery ?? { retryAt: 0, attempts: 0, lastError: "" };
+              if (quota && work.role !== "verifier" && recovery.attempts < QUOTA_RETRY_LIMIT && !state.paused && !state.threads[work.threadId]?.paused && !state.threads[work.threadId]?.stopping) {
+                const attempt = work.attempt;
+                if (!attempt || work.conversationId === null) throw new Error("Quota recovery lost its frozen worker profile");
+                const configuredFallback = attempt.quotaFallback;
+                const switchModel = configuredFallback && configuredFallback !== attempt.model && !attempt.modelTransitions?.length ? configuredFallback : undefined;
+                let fallbackModel: ModelRef | undefined;
+                if (switchModel) {
+                  try { fallbackModel = frozenModel({ ...attempt, model: switchModel }, work.role); }
+                  catch { /* A removed fallback must not strand settlement; wait for the frozen model instead. */ }
                 }
+                if (switchModel && fallbackModel) {
+                  const from = attempt.model;
+                  await configure(tx, work.conversationId, { model: fallbackModel });
+                  attempt.model = switchModel;
+                  attempt.modelTransitions = [...(attempt.modelTransitions ?? []), { at: Date.now(), from, to: switchModel, reason: "quota_exceeded" }];
+                  // Queued follow-ups share this conversation's model, but completed attempts keep their history.
+                  for (const pending of Object.values(state.work)) if (pending.id !== work.id && pending.threadId === work.threadId && pending.status === "queued" && pending.attempt) {
+                    pending.attempt.model = switchModel;
+                    pending.attempt.modelTransitions = attempt.modelTransitions.map(item => ({ ...item }));
+                  }
+                }
+                const attempts = recovery.attempts + 1, now = Date.now();
+                const resetAt = options.quotaResetAt?.(attempt.model, now);
+                const retryAt = fallbackModel ? now : resetAt ?? now + retryDelay(attempts, options.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS);
+                work.status = "queued"; work.taskId = null; work.startedAt = null; work.endedAt = null;
+                work.quotaRecovery = { retryAt, attempts, lastError: quota };
+                work.blocker = quotaWaitBlocker(work);
+                attempt.startedAt = null; attempt.endedAt = null;
+                const activeThread = state.threads[work.threadId]; if (activeThread?.activeWorkId === work.id) activeThread.activeWorkId = null;
+                state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
+                return { status: "terminal", outcome: { status: "completed", result: null } };
               }
-              const attempts = recovery.attempts + 1, now = Date.now();
-              const resetAt = options.quotaResetAt?.(attempt.model, now);
-              const retryAt = fallbackModel ? now : resetAt ?? now + retryDelay(attempts, options.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS);
-              work.status = "queued"; work.taskId = null; work.startedAt = null; work.endedAt = null;
-              work.quotaRecovery = { retryAt, attempts, lastError: quota };
-              work.blocker = quotaWaitBlocker(work);
-              attempt.startedAt = null; attempt.endedAt = null;
-              const activeThread = state.threads[work.threadId]; if (activeThread?.activeWorkId === work.id) activeThread.activeWorkId = null;
-              state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
-              return { status: "terminal", outcome: { status: "completed", result: null } };
-            }
-            work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
-            work.endedAt = Date.now();
-            work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
-            if (work.status === "failed" && recovery.attempts >= QUOTA_RETRY_LIMIT && quota) work.blocker = `quota_recovery_exhausted: ${QUOTA_RETRY_LIMIT} automatic retries did not restore quota. ${work.blocker}`;
-            work.attempt &&= { ...work.attempt, endedAt: work.endedAt };
-            const thread = state.threads[work.threadId];
-            if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
-            const resultText = result?.text ?? work.blocker ?? "No text result.";
-            if (result?.text) work.result = result.text;
-            if (work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
+              work.status = result?.status === "completed" ? "completed" : result?.status === "interrupted" ? "interrupted" : "failed";
+              work.endedAt = Date.now();
+              work.blocker = work.status === "completed" ? null : result?.reason ? failureBlocker(result.reason, work.attempt?.model) : `Durable task ${outcome?.status ?? "missing"}`;
+              if (work.status === "failed" && recovery.attempts >= QUOTA_RETRY_LIMIT && quota) work.blocker = `quota_recovery_exhausted: ${QUOTA_RETRY_LIMIT} automatic retries did not restore quota. ${work.blocker}`;
+              work.attempt &&= { ...work.attempt, endedAt: work.endedAt };
+              const thread = state.threads[work.threadId];
+              if (thread?.activeWorkId === work.id) thread.activeWorkId = null;
+              const resultText = result?.text ?? work.blocker ?? "No text result.";
+              if (result?.text) work.result = result.text;
               const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
               // A parent's answer while its children still run (or a later child result waits on its thread) is held: only its last answer reports.
-              if (work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")))) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
-              else {
-                const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
-                const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
-                work.report = { requestId: `plan-report:${work.id}:${task.input.attemptTaskId}`, delivered: false, text: reportText(work, resultText, others) };
-                await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
+              const held = work.status === "completed" && nests(work) && Object.values(state.work).some(other => active(other) && (other.parentThreadId === work.threadId || other.threadId === work.threadId && other.requestId?.startsWith("child-report:")));
+              // A repair turn that fails ends its cycle (a pause-interrupted one keeps it open for the resume); earlier completed turns stop counting as complete and their dependents block.
+              if (work.status === "failed" && work.role === "worker" && state.threads[work.threadId]?.verification?.open) abandonCycle(state, work.threadId, `The worker's repair turn failed: ${work.blocker ?? "no reason recorded"}`);
+              const verifying = work.status !== "interrupted" && work.role === "verifier" ? await settleVerifier(tx, runtime.conversationId, state, work, prepared, String(task.input.attemptTaskId)) : work.status === "completed" && !held && await startVerification(tx, runtime.conversationId, state, work, prepared, resultText, String(task.input.attemptTaskId));
+              if (!verifying && work.status !== "interrupted" && !(work.parentThreadId && await reportToParent(tx, runtime.conversationId, state, work, String(task.input.attemptTaskId), resultText))) {
+                if (held) work.report = { requestId: `held:${work.id}:${task.input.attemptTaskId}`, delivered: true, text: resultText.slice(0, 2000) };
+                else {
+                  const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
+                  const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
+                  work.report = { requestId: `plan-report:${work.id}:${task.input.attemptTaskId}`, delivered: false, text: reportText(work, resultText, others) };
+                  await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
+                }
               }
+              if (!state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
             }
-            if (!state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
-          }
-          return { status: "terminal", outcome: { status: "completed", result: null } };
-        }, context);
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }, context);
+        } finally {
+          if (prepared.kind === "revision") await options.verification?.release(prepared.verifierThreadId);
+        }
       },
     },
     abort: (_task, runtime, context) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
@@ -299,7 +333,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   const delegate = defineTool({ name: "projects_delegate", description: "Admit bounded durable worker work. Choose role worker, scout, or reviewer for the task. For an owner-authorized workspace, pass workspaceScopeId and omit requiredTools; a worker without one uses the project's only whole-repository scope when exactly one exists, and the receipt names the scope used. Roles select model/instructions; scout and reviewer also get read-only code tools (code_read, code_grep, code_find, code_ls) and ignore workspaceScopeId. Their code root is the project checkout unless you pass a target: threadId of an existing worker thread (they read that worker's worktree, including its uncommitted edits; use this to review a worker's PR or work), or ref: a branch (e.g. a project PR branch pi/...), pull/<number> or a commit SHA; the host fetches it from origin (or the project's checkout provider) into a read-only snapshot so they read the PR head, not the owner's checkout. They also get code_diff (changed files and unified diff against the merge-base). Give every reviewer of a PR or worker's change a threadId or ref. An unknown threadId or unresolvable ref fails the call. A new worker normally starts a fresh branch from trunk. To continue earlier work in a new thread (prefer a follow-up to the same thread when possible), pass fromThread (take over a settled worker thread's worktree with its commits and uncommitted changes; the old thread can no longer work) or branch (an existing branch or PR of the owner; the worker's pushes update that PR). Never move patches between threads through artifacts. Independent delegations run concurrently up to the project worker cap. Completion or failure sends a result back to this coordinator. The host supplies exact scoped read/write and authorized publication tools after allocation. requiredTools selects only additional global tool names explicitly advertised by the host; never invent aliases such as workspace_read, workspace_write or projects_github. Missing capabilities remain blocked.", parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])), requiredTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 64 })), workspaceScopeId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$" })), ref: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Scout/reviewer only: branch, pull/<number> or commit SHA to read instead of the project checkout." })), threadId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$", description: "Scout/reviewer only: UUID of an existing worker thread whose worktree to read (read-only)." })), fromThread: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$", description: "Worker only: UUID of a settled worker thread whose worktree (branch, commits and uncommitted changes) the new thread takes over. The old thread can no longer work." })), branch: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Worker only: existing branch or PR number the new thread continues, so its pushes update that PR. git: a project branch; checkout provider plugins apply their own ownership rules." })), acceptance: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 20, description: "Acceptance criteria: what done means and the evidence expected. Appended to the brief; the worker keeps going until they are met or it is genuinely blocked." })) }), replay: "unsafe", async execute(args, api, context) {
     const role = args.role ?? "worker";
     await options.refreshSkills?.();
-    const brief = args.acceptance?.length ? `${args.task}\n\nAcceptance criteria (done means all are met, with the evidence named; keep working until then, stop only for a real blocker):\n${args.acceptance.map(item => `- ${item}`).join("\n")}` : args.task;
+    const brief = args.acceptance?.length ? `${args.task}\n\nAcceptance criteria (done means all are met, with the evidence named; keep working until then, stop only for a real blocker):\n${args.acceptance.map(item => `- ${item.trimStart().replaceAll("\n", "\n  ")}`).join("\n")}` : args.task;
     if (brief.length > 32000) throw new Error("Task plus acceptance criteria exceed 32000 characters");
     if (args.ref !== undefined && role === "worker") throw new Error("ref is for scout and reviewer; to continue an existing branch with a worker pass branch (or fromThread to take over a worker thread's worktree)");
     if (args.threadId !== undefined && role === "worker") throw new Error("threadId is for scout and reviewer; a worker is continued with a follow-up to its thread");
@@ -331,7 +365,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   } });
   // One level of nesting: top-level worker threads may delegate children; children never get this tool and are refused if they call it.
   const MAX_ACTIVE_CHILDREN = 2;
-  const delegateChild = defineTool({ name: "projects_delegate_child", description: `Delegate a bounded sub-task to a child thread: worker (gets your workspace scope), scout or reviewer (read-only code tools on your worktree, so they see your current changes). Children share the project worker pool and cannot delegate further. Delegate only genuinely independent work that should run in parallel with yours; do small reads, checks and status questions yourself. Use at most one reviewer per head. A child's result comes back to you as a new message in this thread after it finishes, not to the coordinator: end your turn after delegating if you need the result, then continue when it arrives. Only your answer after the last child result reaches the coordinator. At most ${MAX_ACTIVE_CHILDREN} of your children may be queued or running.`, parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])) }), replay: "unsafe", async execute(args, api, context) {
+  const MAX_REVIEW_CHILDREN = 3;
+  const delegateChild = defineTool({ name: "projects_delegate_child", description: `Delegate a bounded sub-task to a child thread: worker (gets your workspace scope), scout or reviewer (read-only code tools on your worktree, so they see your current changes). Children share the project worker pool and cannot delegate further. Delegate only genuinely independent work that should run in parallel with yours; do small reads, checks and status questions yourself. For coordinated review, admit independent Standards, Spec and Bugs/performance axes before awaiting results. Deduplicate identical rounds, not distinct coverage at the same head. A child's result comes back to you as a new message in this thread after it finishes, not to the coordinator: end your turn after delegating if you need the result, then continue when it arrives. Only your answer after the last child result reaches the coordinator. At most ${MAX_ACTIVE_CHILDREN} children may be queued or running, or ${MAX_REVIEW_CHILDREN} when all are independent reviewers.`, parameters: Type.Object({ task: Type.String({ minLength: 1, maxLength: 32000 }), role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])) }), replay: "unsafe", async execute(args, api, context) {
     const owner = options.planRoot?.();
     if (owner === undefined) throw new Error("Project plan is unavailable");
     // A new child sees the catalog as it is now; the parent's own frozen prompt and skill list are not touched.
@@ -343,8 +378,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (thread.parentThreadId) throw new Error("Child threads cannot delegate further (one level of nesting)");
       if (latest?.role !== "worker") throw new Error("Only worker threads can delegate child work");
       if (thread.stopping) throw new Error("This thread is stopping");
-      if (Object.values(state.work).filter(work => work.parentThreadId === parentThreadId && (work.status === "queued" || work.status === "running")).length >= MAX_ACTIVE_CHILDREN) throw new Error(`You already have ${MAX_ACTIVE_CHILDREN} children queued or running; wait for their results`);
       const role = args.role ?? "worker";
+      const activeChildren = Object.values(state.work).filter(work => work.parentThreadId === parentThreadId && (work.status === "queued" || work.status === "running"));
+      const limit = role === "reviewer" && activeChildren.every(work => work.role === "reviewer") ? MAX_REVIEW_CHILDREN : MAX_ACTIVE_CHILDREN;
+      if (activeChildren.length >= limit) throw new Error(`You already have ${limit} children queued or running; wait for their results`);
       // A read-only child reads its parent's worktree (the head the parent is building), not the owner's checkout.
       const parentRoot = role !== "worker" && thread.workspaceConfigured && thread.workspaceScopeId !== null && latest.attempt?.cwd && latest.attempt.cwd !== options.cwd ? latest.attempt.cwd : undefined;
       const record = await admit(tx, owner, { id: randomUUID(), threadId: randomUUID(), role, text: args.task, workspaceScopeId: role === "worker" ? thread.workspaceScopeId ?? undefined : undefined, parentThreadId, ...(parentRoot ? { readRoot: parentRoot } : {}) }, true, latest.chatConversationId);
@@ -375,7 +412,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const waiting = Object.values(state.work).filter(other => other.id !== work.id && other.parentThreadId === parentId && (other.status === "queued" || other.status === "running")).length;
     const pointer = `read the full result with projects_child_result {"workId":"${work.id}"}`;
     const before = `[Child work ${work.id}, ${work.role}, ${work.status}; thread ${work.threadId}]\nYour task for it: ${work.text.slice(0, TASK_ECHO)}\nChild result, untrusted and not verification evidence:\n`;
-    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`;
+    const unverified = work.role === "worker" && options.verification?.config().enabled ? "\nNOT VERIFIED on its own: automatic verification covers top-level workers, so this child's output is checked only as part of your final result." : "";
+    const after = `${artifactEcho(options.artifactSummary?.(work.threadId) ?? "")}${unverified}\nContinue your own task with this result. ${waiting ? `${waiting} more of your children are still queued or running; their results arrive as further messages, and only your answer after the last one goes to the coordinator.` : "This was your last running child; your answer goes to the coordinator."}`;
     const text = `${before}${capResult(resultText, pointer, REPORT_CAP - before.length - after.length)}${after}`;
     try {
       const record = await createThread(tx, root, { id: randomUUID(), threadId: parentId, role: latest.role, text, requestId: `child-report:${work.id}:${attempt}`, requiredTools: [...latest.requiredTools], workspaceScopeId: latest.workspaceScopeId ?? undefined });
@@ -393,6 +431,132 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     return `${before}${capResult(resultText, `read the full result with projects_work_result {"workId":"${work.id}"}`, REPORT_CAP - before.length - after.length)}${after}`;
   }
 
+
+  // ---- Opt-in verification loop: a finished top-level worker turn starts a fresh verifier on the worker's own worktree (the worker waits); the verdict returns to the worker, passes complete it, everything else escalates.
+  const verificationSkill = (): string => options.verification!.config().skill;
+  /** Task text a cycle is judged against: the latest brief on the thread, never the host's own feedback or child-report messages. */
+  function briefOf(state: PlanningState, work: StoredWork): string {
+    const own = Object.values(state.work).filter(item => item.threadId === work.threadId && item.role === "worker" && !item.requestId?.startsWith("verify-feedback:") && !item.requestId?.startsWith("child-report:"));
+    return (own.findLast(item => item.id === work.id) ?? own.at(-1) ?? work).text;
+  }
+  /** Reads what the settlement needs, then does the file work (revision of the tree) outside the transaction. */
+  async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean, attemptTaskId: TaskId): Promise<PreparedVerification> {
+    const hooks = options.verification;
+    if (!hooks) return { kind: "none" };
+    let seen: { role: DurableRole; top: boolean; scopeId: string | null; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string } | undefined;
+    await read(async tx => {
+      const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
+      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work) };
+      return undefined;
+    });
+    if (!seen) return { kind: "none" };
+    if (seen.role === "verifier") {
+      const attempt = seen.verification?.attempts.find(item => item.verifierWorkId === workId);
+      if (!attempt) return { kind: "none" };
+      // Stop leftover verifier jobs before the last drift read and before the worker can repair.
+      let current: string | null = null;
+      try { await hooks.drain(seen.threadId); current = await hooks.revision(attempt.sourcePath); } catch { /* An unavailable final check cannot validate the verdict. */ }
+      return { kind: "revision", current, verifierThreadId: seen.threadId };
+    }
+    if (!completed || seen.role !== "worker" || !seen.top) return { kind: "none" };
+    const open = seen.verification?.open ? seen.verification : undefined;
+    if (!open && !hooks.config().enabled) return { kind: "none" };
+    // Verification is on but this worker has no workspace scope and worktree to verify: it is reported as not verified, never as plain completion.
+    if (seen.scopeId === null || !seen.cwd) return { kind: "escalate", reason: "Verification does not apply: this worker has no isolated worktree (only scoped top-level workers are verified)" };
+    if ((open?.attempts.length ?? 0) >= MAX_VERIFICATION_ATTEMPTS) return { kind: "escalate", reason: "Verification attempts are exhausted" };
+    const problem = hooks.scopeCheck(seen.scopeId) ?? (open ? null : await hooks.check());
+    if (problem) return { kind: "escalate", reason: problem };
+    let model: string;
+    try { const ref = open ? frozenModel(open, "verifier") : options.models.verifier; model = `${ref.provider}/${ref.modelId}`; } catch (error) { return { kind: "escalate", reason: error instanceof Error ? error.message : "No verifier model is configured" }; }
+    const criteria = open?.criteria ?? parseCriteria(seen.task), tooBig = open ? null : criteriaProblem(seen.task, criteria);
+    if (tooBig) return { kind: "escalate", reason: tooBig };
+    const key = workId;
+    try {
+      const { manifest, proof } = await hooks.capture(key, seen.cwd);
+      return { kind: "start", n: (open?.attempts.length ?? 0) + 1, model: open?.model ?? model, skill: open?.skill ?? hooks.config().skill, key, scopeId: seen.scopeId, sourcePath: seen.cwd, manifest, proof, criteria, task: seen.task };
+    } catch (error) { return { kind: "escalate", reason: `The work's revision could not be recorded for verification: ${error instanceof Error ? error.message : String(error)}` }; }
+  }
+  /** Queues the report of a worker whose cycle ended; `text` is the complete message and is kept as the work's result. */
+  async function queueReport(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, text: string, tag: string): Promise<void> {
+    const active = (other: StoredWork) => other.id !== work.id && (other.status === "queued" || other.status === "running");
+    const chat = work.chatConversationId === undefined ? null : Number(work.chatConversationId);
+    const others = Object.values(state.work).filter(other => active(other) && (other.chatConversationId === undefined ? null : Number(other.chatConversationId)) === chat).length;
+    work.result = text;
+    work.report = { requestId: `plan-report:${work.id}:${tag}`, delivered: false, text: reportText({ ...work, text: briefOf(state, work) }, text, others) };
+    await tx.createTask(Report, { workId: work.id }, { ownership: { kind: "conversation" }, background: true });
+  }
+  /** Ends a cycle. Verified work stays completed; anything else stops being "completed" for dependents and for the coordinator. */
+  async function closeCycle(tx: Tx, root: ConversationId, state: PlanningState, workerThreadId: string, outcome: "verified" | "escalated", reason: string, extra: string, tag: string): Promise<void> {
+    const cycle = state.threads[workerThreadId]?.verification;
+    if (!cycle) return;
+    cycle.open = false; cycle.outcome = outcome; cycle.reason = reason;
+    for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
+    const finished = cycle.workIds.map(id => state.work[id]).filter((item): item is StoredWork => item !== undefined), last = finished.at(-1);
+    if (outcome === "escalated") for (const item of finished) if (item.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; }
+    if (!last) return;
+    const latest = cycle.attempts.at(-1), summary = latest ? verdictText(cycle, latest) : "";
+    const head = outcome === "verified" ? `VERIFIED by an independent verifier after ${cycle.attempts.length} attempt(s).\n${summary}` : `NOT VERIFIED: ${reason}. The worker's task is not complete; decide what to do next.\n${summary}`;
+    await queueReport(tx, root, state, last, `${head}\n\nWorker's last answer (untrusted):\n${extra}`, tag);
+  }
+  /** A finished worker turn: start the next verifier attempt, or end the cycle. False means verification does not apply and the normal report goes out. */
+  async function startVerification(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, resultText: string, tag: string): Promise<boolean> {
+    if (prepared.kind === "none" || prepared.kind === "revision") return false;
+    const thread = state.threads[work.threadId]!;
+    // A pause that lands between the worker's settlement and the verifier's admission defers verification to the resume (the finished turn is re-run as interrupted work); it is not an escalation.
+    if (state.paused || state.pausing) { work.status = "interrupted"; work.blocker = PAUSE_BLOCKER; work.endedAt = null; return true; }
+    if (prepared.kind === "escalate") {
+      if (!thread.verification?.open) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
+      thread.verification!.workIds.push(work.id);
+      await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
+      return true;
+    }
+    if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, scopeId: prepared.scopeId, criteria: prepared.criteria, attempts: [], workIds: [], open: true };
+    // Read back through the document: only the tracked object records later mutations.
+    const cycle = thread.verification!;
+    cycle.workIds.push(work.id);
+    const verifierThreadId = randomUUID(), verifierWorkId = randomUUID();
+    try {
+      if (cycle.attempts.length + 1 !== prepared.n) throw new Error("Verification state changed while the revision was recorded");
+      const record = await admit(tx, root, { id: verifierWorkId, threadId: verifierThreadId, role: "verifier", text: verifierBrief({ skill: cycle.skill, criteria: cycle.criteria, task: prepared.task, attempt: prepared.n, revision: prepared.manifest.revision, branch: prepared.manifest.branch, head: prepared.manifest.head, proof: prepared.proof }), parentThreadId: work.threadId, readRoot: prepared.sourcePath, requestId: `verify:${work.id}`, frozen: { model: cycle.model, skill: cycle.skill } }, false);
+      state.work[record.id]!.priority = VERIFIER_PRIORITY; // through the document: the returned record is a plain copy
+      cycle.attempts.push({ n: prepared.n, verifierWorkId, verifierThreadId, key: prepared.key, revision: prepared.manifest.revision, head: prepared.manifest.head, branch: prepared.manifest.branch, sourcePath: prepared.sourcePath, proofFiles: [...prepared.proof.paths], state: "running", runs: [], startedAt: Date.now() });
+    } catch (error) {
+      await closeCycle(tx, root, state, work.threadId, "escalated", `The verifier could not be started: ${error instanceof Error ? error.message : String(error)}`, resultText, tag);
+    }
+    return true;
+  }
+  /** A verifier's thread ended: turn its recorded verdict into the next step. Always true (a verifier never reports on its own). */
+  async function settleVerifier(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, prepared: PreparedVerification, tag: string): Promise<boolean> {
+    const workerThreadId = work.parentThreadId, cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined, attempt = cycle?.attempts.find(item => item.verifierWorkId === work.id);
+    if (!workerThreadId || !cycle || !attempt || !cycle.open || attempt.endedAt !== undefined) return true;
+    if (prepared.kind === "revision" && prepared.current === null) { attempt.state = "blocked"; attempt.reason = "Final target validation or verifier job cleanup failed; the verdict cannot be used"; }
+    else if (attempt.state === "running") { attempt.state = "blocked"; attempt.reason = work.status === "completed" ? "The verifier finished without recording a verdict" : `The verifier did not finish: ${work.blocker ?? work.status}`; }
+    else if (prepared.kind === "revision" && prepared.current !== (attempt.finalRevision ?? attempt.revision) && attempt.state !== "stale") { attempt.state = "stale"; attempt.reason = "The worker's tree changed before the verdict was used, so it is rejected"; }
+    attempt.endedAt = Date.now();
+    const last = state.work[cycle.workIds.at(-1)!], answer = last?.result ?? "";
+    const step = nextStep(cycle, attempt);
+    if (step.kind === "verified") { await closeCycle(tx, root, state, workerThreadId, "verified", "", answer, tag); return true; }
+    if (step.kind === "retry" && last) {
+      const text = `[Automatic verification failed]\n${verdictText(cycle, attempt)}\n\nFix what failed in your worktree, then finish as usual; a fresh verifier checks your next result (${MAX_VERIFICATION_ATTEMPTS - attempt.n} attempt(s) left). The original task and criteria stay authoritative: leave them, the checks and the verification skill as they are. Your completion is decided by the verifier, not by your own report.`;
+      try {
+        const record = await createThread(tx, root, { id: randomUUID(), threadId: workerThreadId, role: "worker", text, requestId: `verify-feedback:${work.id}`, requiredTools: [...last.requiredTools], workspaceScopeId: last.workspaceScopeId ?? undefined });
+        if (last.chatConversationId !== undefined) record.chatConversationId = last.chatConversationId;
+        state.work[record.id] = record;
+        return true;
+      } catch (error) { await closeCycle(tx, root, state, workerThreadId, "escalated", `The failure could not be handed back to the worker: ${error instanceof Error ? error.message : String(error)}`, answer, tag); return true; }
+    }
+    await closeCycle(tx, root, state, workerThreadId, "escalated", step.kind === "escalate" ? step.reason : "Verification ended", answer, tag);
+    return true;
+  }
+
+  /** Ends an open verification cycle without a report (the owner stopped the worker or its verifier). */
+  function abandonCycle(state: PlanningState, workerThreadId: string | undefined, reason: string): void {
+    const cycle = workerThreadId ? state.threads[workerThreadId]?.verification : undefined;
+    if (!cycle?.open) return;
+    cycle.open = false; cycle.outcome = "escalated"; cycle.reason = reason;
+    for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
+    for (const id of cycle.workIds) { const item = state.work[id]; if (item?.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; } }
+  }
   // An unscoped worker under exactly one whole-repository grant gets that grant; anything less clear stays explicit.
   function defaultWorkerScope(role: DurableRole, requiredTools: readonly string[] | undefined): string | undefined {
     if (role !== "worker" || requiredTools?.length) return undefined;
@@ -402,7 +566,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   const workspaceCatalog = options.workspaceCatalog ? defineTool({ name: "projects_workspace_catalog", description: "Read owner-authorized workspace scopes. Delegate with an existing workspaceScopeId and omit requiredTools for scoped read/write/publication. The host binds those tools after allocation; their generated names are not global tool names.", parameters: Type.Object({}), replay: "safe", async execute() { return { content: [{ type: "text", text: JSON.stringify({ scopes: options.workspaceCatalog?.() ?? [] }) }] }; } }) : undefined;
   extension = defineExtension({ name: "projects.durable-planning", tools: [delegate, ...(workspaceCatalog ? [workspaceCatalog] : [])], tasks: [Attempt, ScopedAttempt, Settlement, Report, Dispatcher] });
 
-  function frozenModel(profile: StoredAttempt, role: DurableRole): ModelRef {
+  function frozenModel(profile: Pick<StoredAttempt, "model">, role: DurableRole): ModelRef {
     const model = options.resolveModel?.(profile.model, role) ?? Object.values(options.models).find(value => `${value.provider}/${value.modelId}` === profile.model);
     if (!model || `${model.provider}/${model.modelId}` !== profile.model) throw new Error("Frozen thread model is unavailable; restore its configured provider/model before continuing");
     return model;
@@ -440,9 +604,14 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     // Scouts and reviewers are read-only: a scope passed for them is ignored (their code root is the checkout, a PR head or the parent's worktree).
     const workspaceScopeId = work.role !== "worker" && !existing ? null : work.workspaceScopeId ?? null;
     const missing = selected.filter(name => !bindings.has(name));
-    let model = options.models[work.role];
+    let model: ModelRef;
+    if (work.frozen) {
+      const pinned = options.resolveModel?.(work.frozen.model, work.role);
+      if (!pinned || `${pinned.provider}/${pinned.modelId}` !== work.frozen.model) throw new Error("The verification cycle's frozen verifier model is unavailable; nothing falls back to another model");
+      model = pinned;
+    } else model = options.models[work.role];
     const instructions = options.instructions[work.role];
-    let profile: StoredAttempt = { id: crypto.randomUUID(), projectId: options.projectId, model: `${model.provider}/${model.modelId}`, quotaFallback: options.fallbackModels?.[work.role] ?? null, thinking: "medium", instructions, skills: options.skillNames?.(work.role), cwd: options.cwd, toolNames: selected, bindingRevision, capabilityBindingRevision: bindingRevision, standingRevision: options.standingRevision, startedAt: null, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } };
+    let profile: StoredAttempt = { id: crypto.randomUUID(), projectId: options.projectId, model: `${model.provider}/${model.modelId}`, quotaFallback: work.role === "verifier" ? null : options.fallbackModels?.[work.role] ?? null, thinking: "medium", instructions, skills: work.frozen ? [work.frozen.skill] : options.skillNames?.(work.role), cwd: options.cwd, toolNames: selected, bindingRevision, capabilityBindingRevision: bindingRevision, standingRevision: options.standingRevision, startedAt: null, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } };
     if (missing.length) return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: null, workspaceConfigured: false, status: "blocked", blocker: `Missing required tool bindings: ${missing.join(", ")}`, conversationId: null, taskId: null, attempt: profile };
     let conversationId: ConversationId; let continuationAttempt: StoredAttempt | undefined;
     if (existing) {
@@ -457,10 +626,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     } else {
       const child = await tx.createConversation({ ownership: { kind: "ownerless" } });
       conversationId = child.id;
-      const readOnly = work.role === "worker" ? undefined : options.readOnlyCode, review = work.role === "reviewer" ? options.reviewerTools : undefined, nested = nests(work);
-      const exactTools = [...options.knowledgeTools, ...(readOnly?.tools ?? []), ...(review?.tools ?? []), ...(nested ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? []), ...selected.map(name => bindings.get(name)! )];
+      const readOnly = work.role === "worker" ? undefined : options.readOnlyCode, review = work.role === "reviewer" ? options.reviewerTools : undefined, verify = work.role === "verifier" ? options.verifierTools : undefined, nested = nests(work);
+      if (work.role === "verifier" && (!verify || !readOnly)) throw new Error("This project cannot run verifiers");
+      // A verifier gets code reading, its skill and verification/environment tools; no knowledge, MCP, delegation, editing or publication capabilities.
+      const exactTools = work.role === "verifier" ? [...readOnly!.tools, ...verify!.tools, ...(options.skillFiles ? [options.skillFiles.tool] : [])] : [...options.knowledgeTools, ...(readOnly?.tools ?? []), ...(review?.tools ?? []), ...(nested ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? []), ...selected.map(name => bindings.get(name)! )];
       profile.boundTools = exactTools.map(tool => tool.name);
-      if (workspaceScopeId === null) await configure(tx, child.id, { model, thinkingLevel: "medium", cwd: options.cwd, tools: exactTools, extensions: [options.workerPolicy, capabilities, ...(readOnly ? [readOnly.extension] : []), ...(review ? [review.extension] : []), ...(nested ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions });
+      if (workspaceScopeId === null) await configure(tx, child.id, { model, thinkingLevel: "medium", cwd: options.cwd, tools: exactTools, extensions: [options.workerPolicy, capabilities, ...(readOnly ? [readOnly.extension] : []), ...(review ? [review.extension] : []), ...(verify ? [verify.extension] : []), ...(nested ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(work.role !== "verifier" && options.mcp ? [options.mcp.extension] : [])], instructions });
       state.threads[work.threadId] = { conversationId, activeWorkId: null, workspaceScopeId, workspaceBindingRevision: null, workspaceConfigured: workspaceScopeId === null, ...(work.role === "worker" && work.workspaceFrom ? { workspaceFrom: work.workspaceFrom } : {}), ...(work.role === "worker" && work.continueBranch ? { continueBranch: { ...work.continueBranch } } : {}) };
     }
     if (work.role !== "worker" && work.readRoot) { const thread = state.threads[work.threadId]!; thread.readRoot = work.readRoot; if (work.readSha) thread.readSha = work.readSha; else delete thread.readSha; }
@@ -469,10 +640,18 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (existing && existing.workspaceScopeId !== workspaceScopeId) throw new Error("Existing durable thread workspace scope does not match frozen scope binding");
     return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: existing?.workspaceBindingRevision ?? null, workspaceConfigured: workspaceScopeId === null ? (existing?.workspaceConfigured ?? true) : Boolean(existing?.workspaceConfigured && continuationAttempt), status: "queued", blocker: null, conversationId, taskId: null, attempt: profile };
   }
+  function verifierPending(state: PlanningState, threadId: string): boolean {
+    const cycle = state.threads[threadId]?.verification;
+    return cycle?.attempts.some(attempt => {
+      const work = state.work[attempt.verifierWorkId];
+      return work?.status === "queued" || work?.status === "running" || Boolean(state.threads[attempt.verifierThreadId]?.stopping) || Boolean(cycle.open && attempt.endedAt === undefined);
+    }) ?? false;
+  }
   async function admit(tx: Tx, parent: ConversationId, work: DurablePlanWork, kick: boolean, chat?: ConversationId): Promise<StoredWork> {
     const state = await tx.doc(DurablePlanning, parent);
     if (await hasUncertainVcsOperations(tx, parent)) throw new Error("A VCS operation has an uncertain outcome; worker admission is denied");
     if (state.paused) throw new Error("Project plan is paused; new worker admission is denied");
+    if (work.role === "worker" && verifierPending(state, work.threadId)) throw new Error("This worker is being verified; its tree is frozen until the verifier finishes");
     if (state.workerCap === null) state.workerCap = options.workerCap;
     rejectRetryRequest(state, work.requestId);
     const same = state.work[work.id];
@@ -508,10 +687,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     for (const { work } of queue) {
       if (started.length >= slots) break;
       if (state.threads[work.threadId]?.activeWorkId !== null || state.threads[work.threadId]?.stopping || state.threads[work.threadId]?.paused) continue;
+      // A recorded verdict is not settled until background cleanup and the final drift check finish.
+      if (work.role === "worker" && verifierPending(state, work.threadId)) continue;
       if (Object.values(state.work).some(other => other.id !== work.id && other.threadId === work.threadId && other.status === "queued" && other.quotaRecovery)) continue;
       const parents = work.dependsOn.map(id => state.work[id]);
       if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
-      if (!parents.every(parentWork => parentWork?.status === "completed")) continue;
+      if (!parents.every(parentWork => parentWork?.status === "completed" && !state.threads[parentWork.threadId]?.verification?.open)) continue;
       if (work.quotaRecovery && work.quotaRecovery.retryAt > Date.now()) continue;
       const recoveryText = work.quotaRecovery ? `The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last quota error: ${work.quotaRecovery.lastError.slice(0, 500)}` : undefined;
       const scoped = work.workspaceScopeId !== null; const id = await tx.createTask(scoped ? ScopedAttempt : Attempt, { workId: work.id, conversationId: work.conversationId!, planConversationId: parent, text: recoveryText ?? (work.resumes ? `The project was paused and has resumed. Continue this task from where it stopped:\n\n${work.text}` : work.text), requestId: `${work.requestId ?? `plan:${work.id}`}${work.resumes ? `:resume-${work.resumes}` : ""}${work.quotaRecovery ? `:quota-${work.quotaRecovery.attempts}` : ""}`, threadId: work.threadId, role: work.role, workspaceScopeId: work.workspaceScopeId ?? undefined }, { ownership: { kind: "conversation" }, background: true, ...(scoped ? { conversationId: work.conversationId! } : {}) });
@@ -579,9 +760,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     }, BACKGROUND_CONTEXT);
   }
   async function pause(root: Conversation): Promise<{ snapshot: DurablePlanSnapshot; taskIds: TaskId[]; conversationIds: ConversationId[] }> { return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.paused = true; state.pausing = true; const taskIds: TaskId[] = [...state.dispatcherTaskIds]; state.dispatcherTaskIds = [];  const conversationIds: ConversationId[] = []; for (const work of Object.values(state.work)) if (work.status === "queued" || work.status === "running" || (work.status === "interrupted" && (work.taskId !== null || work.conversationId !== null)) || (work.status === "stopped" && state.threads[work.threadId]?.stopping)) { if (work.taskId !== null) taskIds.push(work.taskId); if (work.conversationId !== null) conversationIds.push(work.conversationId); if (work.status !== "stopped") { work.status = "interrupted"; work.blocker = state.threads[work.threadId]?.paused ? WORKER_PAUSE_BLOCKER : PAUSE_BLOCKER; } state.threads[work.threadId].activeWorkId = null; } return { snapshot: projectSnapshot(state), taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)] }; }, BACKGROUND_CONTEXT); }
-  async function completePause(root: Conversation): Promise<void> { await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.pausing = false; for (const thread of Object.values(state.threads)) delete thread.stopping; }, BACKGROUND_CONTEXT); }
+  /** Completing project pause does not complete independently owned thread stops. */
+  async function completePause(root: Conversation): Promise<void> { await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.pausing = false; }, BACKGROUND_CONTEXT); }
   /** Re-enumerate persisted pause targets after a crash, before reopening dispatch. */
-  async function recoverPause(root: Conversation): Promise<{ taskIds: TaskId[]; conversationIds: ConversationId[] }> {
+  async function recoverPause(root: Conversation): Promise<{ taskIds: TaskId[]; conversationIds: ConversationId[]; stops: { threadId: string; stopId: NonNullable<PlanningState["threads"][string]["stopping"]> }[] }> {
     return root.commit(async tx => {
       const state = await tx.doc(DurablePlanning, root.id);
       state.paused = true; state.pausing = true;
@@ -593,7 +775,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         if (work.status !== "stopped") { work.status = "interrupted"; work.blocker = state.threads[work.threadId]?.paused ? WORKER_PAUSE_BLOCKER : PAUSE_BLOCKER; }
         const thread = state.threads[work.threadId]; if (thread) thread.activeWorkId = null;
       }
-      return { taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)] };
+      const stops = Object.entries(state.threads).flatMap(([threadId, thread]) => thread.stopping ? [{ threadId, stopId: thread.stopping }] : []);
+      return { taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)], stops };
     }, BACKGROUND_CONTEXT);
   }
   /** Resume continues work the pause (or restart recovery) interrupted, on the same thread, and unblocks its dependents. */
@@ -619,6 +802,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         const current = state.threads[target]!;
         current.stopping = stopId;
         delete current.paused;
+        // Stopping a worker or its verifier ends the automatic loop; nothing is reported on, the owner stopped it.
+        abandonCycle(state, current.verification?.open ? target : Object.values(state.work).findLast(item => item.threadId === target)?.role === "verifier" ? current.parentThreadId : undefined, "Stopped explicitly");
         for (const work of Object.values(state.work)) if (work.threadId === target && (work.status === "queued" || work.status === "running" || work.status === "interrupted")) {
           if (work.taskId !== null) taskIds.push(work.taskId);
           work.status = "stopped"; work.blocker = target === threadId ? "Stopped explicitly" : "Stopped with its parent worker";
@@ -629,7 +814,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       return { stopId, taskIds: [...new Set(taskIds)], conversationIds };
     }, BACKGROUND_CONTEXT);
   }
-  async function completeStop(root: Conversation, threadId: string, stopId: string): Promise<void> {
+  async function completeStop(root: Conversation, threadId: string, stopId: NonNullable<PlanningState["threads"][string]["stopping"]>): Promise<void> {
     await root.commit(async tx => {
       const thread = (await tx.doc(DurablePlanning, root.id)).threads[threadId];
       if (!thread) throw new Error("Unknown durable thread UUID");
@@ -741,7 +926,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   function workReceipt(work: StoredWork): { workId: string; threadId: string; status: StoredWork["status"]; blocker: string | null; workspaceScopeId: string | null } { return { workId: work.id, threadId: work.threadId, status: work.status, blocker: work.blocker, workspaceScopeId: work.workspaceScopeId }; }
   function numberRecord(source: Record<string, number>): Record<string, number> { return Object.fromEntries(Object.entries(source).map(([key, value]) => [key, value])); }
   function attemptSnapshot(work: StoredWork): DurableResolvedAttempt | null { const attempt = work.attempt; return attempt === null ? null : { id: attempt.id, projectId: attempt.projectId, threadId: work.threadId, role: work.role, model: attempt.model, modelTransitions: attempt.modelTransitions?.map(item => ({ ...item })) ?? [], thinking: attempt.thinking, instructions: attempt.instructions, cwd: attempt.cwd, toolNames: [...(attempt.boundTools ?? attempt.toolNames)], bindingRevision: attempt.bindingRevision, standingRevision: attempt.standingRevision, startedAt: attempt.startedAt, endedAt: attempt.endedAt, usage: { baseline: numberRecord(attempt.usage.baseline), final: numberRecord(attempt.usage.final), delta: numberRecord(attempt.usage.delta) } }; }
-  function projectSnapshot(state: PlanningState): DurablePlanSnapshot { return { paused: state.paused, pausing: state.pausing, workerCap: state.workerCap, work: Object.values(state.work).map(work => ({ id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...work.dependsOn], status: work.status, blocker: work.blocker, startedAt: work.startedAt ?? work.attempt?.startedAt ?? null, endedAt: work.endedAt ?? work.attempt?.endedAt ?? null, archived: work.archivedAt !== undefined, chatConversationId: work.chatConversationId === undefined ? null : Number(work.chatConversationId), parentThreadId: work.parentThreadId ?? null, attempt: attemptSnapshot(work), ...(work.steering ? { steering: true } : {}) })) }; }
+  function projectSnapshot(state: PlanningState): DurablePlanSnapshot { return { paused: state.paused, pausing: state.pausing, workerCap: state.workerCap, work: Object.values(state.work).map(work => ({ id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...work.dependsOn], status: work.status, blocker: work.blocker, startedAt: work.startedAt ?? work.attempt?.startedAt ?? null, endedAt: work.endedAt ?? work.attempt?.endedAt ?? null, archived: work.archivedAt !== undefined, chatConversationId: work.chatConversationId === undefined ? null : Number(work.chatConversationId), parentThreadId: work.parentThreadId ?? null, attempt: attemptSnapshot(work), ...(work.steering ? { steering: true } : {}) })), ...verificationSnapshot(state) }; }
+  function verificationSnapshot(state: PlanningState): { verification?: Record<string, VerificationSummary> } { const cycles = Object.entries(state.threads).flatMap(([id, thread]) => thread.verification ? [[id, summarizeVerification(thread.verification)] as const] : []); return cycles.length ? { verification: Object.fromEntries(cycles) } : {}; }
   /** Hide terminal work from default views. `terminal` selects every unarchived terminal item. Nothing is deleted. */
   async function archiveWork(root: Conversation, selection: { workIds?: readonly string[]; terminal?: boolean }): Promise<{ archived: string[] }> {
     if (!selection.terminal && !selection.workIds?.length) throw new Error("Pass workIds or terminal: true");

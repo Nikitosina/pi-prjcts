@@ -164,7 +164,7 @@ try {
   const parentCalls = result.calls.filter(c => c.role === 'parent');
   const third = parentCalls.find(c => c.results.length === 3)?.results[2] ?? '';
   check('Q14 a parent may have at most 2 children queued or running; the third is refused', /already have 2 children/.test(third), third);
-  check('Q15 the child-delegation tool tells workers to keep children for independent parallel work and one reviewer per head', parentCalls.every(c => /genuinely independent/.test(c.delegateChildDescription ?? '') && /at most one reviewer per head/i.test(c.delegateChildDescription ?? '')), parentCalls[0]?.delegateChildDescription);
+  check('Q15 the child-delegation tool supports independent multi-axis rounds and deduplicates identical rounds', parentCalls.every(c => /genuinely independent/.test(c.delegateChildDescription ?? '') && /Standards, Spec and Bugs\/performance/.test(c.delegateChildDescription ?? '') && /Deduplicate identical rounds/.test(c.delegateChildDescription ?? '')), parentCalls[0]?.delegateChildDescription);
 
   const coord = result.calls.filter(c => c.role === 'coordinator');
   const reportTurns = coord.filter(c => c.user.startsWith('[Durable work') && c.results.length === 0);
@@ -186,7 +186,7 @@ try {
 
   const sys = coord[0].system;
   check('Q11 the coordinator system prompt carries the repository AGENTS.md', sys.includes('REPO-RULE-ALPHA') && sys.includes('Repository instructions'), sys.slice(0, 300));
-  check('Q16 plan-first prompting: decompose up front, prefer follow-ups, no micro-delegation, report only at the end', /Plan first/.test(sys) && /Prefer continuing an existing thread/.test(sys) && /Do not micro-delegate/.test(sys) && /Report to the owner only at the end/.test(sys) && !/Summarize each result for the user/.test(sys));
+  check('Q16 plan-first prompting: decompose up front, prefer follow-ups, no micro-delegation, report only at the end', /Plan first/.test(sys) && /Continue the same worker for repairs/.test(sys) && /Avoid micro-delegation/.test(sys) && /While work or actionable gaps remain, continue silently/.test(sys) && /Contact the owner for consequential decisions, missing authority or genuine blockers/.test(sys) && !/Summarize each result for the user/.test(sys));
 
   await eventually(async () => (await rpc({ action: 'notify-feed', after: 0 })).items.filter(item => item.projectId === id).slice(feedBefore).some(item => item.kind === 'result'), 'no result notice reached the feed', 300); // the notice scan runs on a tick; a loaded machine can be late
   const feed = (await rpc({ action: 'notify-feed', after: 0 })).items.filter(item => item.projectId === id).slice(feedBefore);

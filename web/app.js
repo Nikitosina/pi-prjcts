@@ -996,7 +996,7 @@ document.addEventListener("input", event => {
 });
 
 // Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
-const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer" };
+const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer", verifier: "Verifier" };
 let promptsState = null;
 async function loadPrompts(force = false) {
   const id = projectId, current = generation, node = document.querySelector("#prompts");
@@ -2998,7 +2998,7 @@ async function submit(form) {
     const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings saved. New threads use them; running threads keep what they started with.");
     validateSettings(result);
     for (const [field, changed] of Object.entries(proposal.changes)) {
-      if (field === "models" || field === "fallbackModels" ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
+      if (field === "verification" ? JSON.stringify(result.values.verification) !== JSON.stringify(changed) : field === "models" || field === "fallbackModels" ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
     }
     for (const key of proposal.draftKeys) {
       const draft = settingsDrafts.get(key), field = key.slice(key.indexOf(":") + 1);
@@ -3408,7 +3408,7 @@ async function usageList(offset = 0) {
 }
 function validateSettings(value) {
   const v = value?.values;
-  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer, v.fallbackModels?.worker, v.fallbackModels?.scout, v.fallbackModels?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
+  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer, v.models?.verifier, v.fallbackModels?.worker, v.fallbackModels?.scout, v.fallbackModels?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || v.verification !== null && (typeof v.verification?.enabled !== "boolean" || typeof v.verification.skill !== "string") || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
 }
 function captureSettingsDraft() {
   const form = dialog.querySelector("[data-settings-form]");
@@ -3553,7 +3553,7 @@ async function ownerProfileRead(target, profileId) {
 }
 
 // Project settings: one form (name, objective, models, access, worker limit), then one confirmation that shows every before → after.
-const settingsRoles = [["coordinator", "Coordinator", "Plans the work and talks to you."], ["worker", "Worker", "Writes code in its own worktree."], ["scout", "Scout", "Reads the repository and reports back."], ["reviewer", "Reviewer", "Checks changes and pull requests."]];
+const settingsRoles = [["coordinator", "Coordinator", "Plans the work and talks to you."], ["worker", "Worker", "Writes code in its own worktree."], ["scout", "Scout", "Reads the repository and reports back."], ["reviewer", "Reviewer", "Checks changes and pull requests."], ["verifier", "Verifier", "Runs the verification skill against finished work. Needed when verification is on."]];
 const settingsAccess = {
   knowledgeAccess: ["Workers and project knowledge", "The coordinator always keeps the knowledge notes up to date.", [["read-only", "Workers can read it"], ["maintain", "Workers can read and update it"]]],
   libraryAccess: ["Uploaded files and evidence", "Whether the coordinator may open the project library.", [["none", "Coordinator cannot open them"], ["coordinator", "Coordinator can open them"]]],
@@ -3562,13 +3562,13 @@ const settingsAccess = {
 };
 let settingsPending = null, modelScoped = [], modelUnavailableScoped = [], modelScopeSet = false, modelExtensionErrors = [];
 const scopeKey = refs => [...refs].sort().join("\n");
-const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", workerFallback: values.fallbackModels?.worker ?? "", scoutFallback: values.fallbackModels?.scout ?? "", reviewerFallback: values.fallbackModels?.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", verifier: values.models.verifier ?? "", verifyEnabled: values.verification?.enabled ? "on" : "off", verifySkill: values.verification?.skill ?? "", workerFallback: values.fallbackModels?.worker ?? "", scoutFallback: values.fallbackModels?.scout ?? "", reviewerFallback: values.fallbackModels?.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
-  const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value };
+  const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value, verifyEnabled: form.elements.verifyEnabled.checked ? "on" : "off", verifySkill: form.elements.verifySkill.value.trim() };
   for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
   for (const [role] of settingsRoles) {
     flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
-    if (role !== "coordinator") flat[`${role}Fallback`] = form.querySelector(`.mp[data-role="${role}-fallback"]`).dataset.value;
+    if (role !== "coordinator" && role !== "verifier") flat[`${role}Fallback`] = form.querySelector(`.mp[data-role="${role}-fallback"]`).dataset.value;
   }
   flat.scoped = scopeKey([...form.querySelectorAll("[data-scope-ref]:checked")].map(box => box.dataset.scopeRef));
   return flat;
@@ -3582,11 +3582,14 @@ function settingsChanges(flat, values) {
     if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
     if (flat[`${role}Fallback`] !== was[`${role}Fallback`]) (changes.fallbackModels ??= {})[role] = flat[`${role}Fallback`] === "" ? null : flat[`${role}Fallback`];
   }
+  if (flat.verifier !== was.verifier) (changes.models ??= {}).verifier = flat.verifier === "" ? null : flat.verifier;
+  if (flat.verifyEnabled !== was.verifyEnabled || flat.verifyEnabled === "on" && flat.verifySkill !== was.verifySkill) changes.verification = flat.verifyEnabled === "on" ? { enabled: true, skill: flat.verifySkill } : null;
   if (flat.scoped !== was.scoped) changes.scopedModels = flat.scoped === "" ? null : flat.scoped.split("\n");
   return changes;
 }
 function validateSettingsChanges(changes) {
   if ("name" in changes && (!changes.name.trim() || !editableKnowledge(changes.name)) || "objective" in changes && !editableKnowledge(changes.objective)) throw new Error("The name cannot be empty, and name and objective cannot contain control characters. Your edits are kept.");
+  if (changes.verification?.enabled && !changes.verification.skill) throw new Error("Name the verification skill to run, or turn verification off. Your edits are kept.");
   if ("workerCap" in changes && (!Number.isSafeInteger(changes.workerCap) || changes.workerCap < 1 || changes.workerCap > 32)) throw new Error("Workers at once must be a whole number from 1 to 32.");
 }
 // The request must use the revision each retained text edit started from, so a stale edit is rejected by the host instead of being rebased.
@@ -3616,7 +3619,7 @@ async function settingsList(keep = false) {
   const draftOf = field => settingsDrafts.get(`${id}:${field}`), pending = settingsPending?.projectId === id ? settingsPending.flat : {};
   const shown = { ...flatSettings(value.values), ...Object.fromEntries(["name", "objective"].filter(field => draftOf(field)).map(field => [field, draftOf(field).text])), ...pending };
   const draftNote = field => { const draft = draftOf(field); return draft && draft.text !== value.values[field] ? `<span class="field-draft">Unsent edit kept${draft.expectedRevision !== value.revision ? " from an older version of these settings. Saving it is checked and may be rejected" : ""}. ${dlgBtn("Discard edit…", { action: "settings-discard", project: id, field }, "ghost small")}</span>` : ""; };
-  const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}${role === "coordinator" ? "" : " Follows the coordinator unless you pick a model."}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}${role === "coordinator" ? "" : role === "verifier" ? " No default: pick one to turn verification on." : " Follows the coordinator unless you pick a model."}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
   const fallbackField = ([role, label]) => `<div class="field" data-field="${role}Fallback"><span class="flabel">${label} quota fallback</span><span class="fhelp">Only this model is used after quota exhaustion. Leave empty to wait for quota reset. Other frozen permissions stay unchanged.</span>${modelPickerHtml(`${role}-fallback`, shown[`${role}Fallback`], pickerError, "Wait for quota reset")}</div>`;
   const chosenScope = shown.scoped ? shown.scoped.split("\n") : [], scopeRows = [...modelCache.values()].filter(model => model.configured || chosenScope.includes(model.reference));
   const scopeField = `<div class="field" data-field="scoped"><span class="flabel">Scoped models</span><span class="fhelp">The models the model button and Ctrl+P cycle through, in list order. Leave all unchecked to use your Pi scope.</span><details class="scope-editor"${chosenScope.length ? " open" : ""}><summary>${chosenScope.length ? `${chosenScope.length} chosen for this project` : "Your Pi scope"}</summary><input type="search" class="scope-filter" data-scope-filter placeholder="Filter ${scopeRows.length} models…" aria-label="Filter scoped models" autocomplete="off"><div class="scope-list">${scopeRows.map(model => `<label class="scope-row"><input type="checkbox" data-scope-ref="${esc(model.reference)}"${chosenScope.includes(model.reference) ? " checked" : ""}${model.configured ? "" : " disabled"}><span>${esc(model.name)}</span><small class="mono">${esc(model.reference)}</small></label>`).join("") || '<p class="note">No models are available.</p>'}</div>${dlgBtn("Use my Pi scope", { action: "scope-clear" }, "ghost small")}</details></div>`;
@@ -3626,9 +3629,11 @@ async function settingsList(keep = false) {
 <div class="field" data-field="objective"><label><span class="flabel">Objective</span><span class="fhelp">What this project is for. The coordinator reads it in every new conversation.</span><textarea name="objective" rows="5" maxlength="32000">${esc(shown.objective)}</textarea></label>${draftNote("objective")}</div>
 <h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with. The coordinator can be switched from the model button in the chat.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
 <div class="field-grid">${settingsRoles.map(roleField).join("")}</div>${scopeField}
-<h3>Quota recovery</h3><p class="note">New threads freeze these fallback choices. After a recognized quota error, work continues on the same thread with its fallback. Without one, it waits for a known reset or retries with bounded exponential backoff. Paused or stopped workers never restart automatically.</p><div class="field-grid">${settingsRoles.slice(1).map(fallbackField).join("")}</div>
+<h3>Quota recovery</h3><p class="note">New threads freeze these fallback choices. After a recognized quota error, work continues on the same thread with its fallback. Without one, it waits for a known reset or retries with bounded exponential backoff. Paused or stopped workers never restart automatically.</p><div class="field-grid">${settingsRoles.filter(([role]) => role !== "coordinator" && role !== "verifier").map(fallbackField).join("")}</div>
 <h3>Workers</h3>
 <div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
+<h3>Verification</h3>
+<div class="field-grid"><div class="field" data-field="verifyEnabled"><label><span class="flabel">Verify finished workers</span><span class="fhelp">Off by default. When on, a fresh verifier (the Verifier model above, never a fallback) runs the skill against the worker's exact result, uncommitted files included. A failure goes back to the same worker, up to 3 verifier attempts; then it comes to you.</span><span class="fhelp" data-verify-trust><b>The verifier is trusted like the worker, not sandboxed.</b> It runs shell commands in the worker's worktree as you, with the worker's shell policy and the host's resource leases. It can do what a worker's shell can do. Checking the revision and the files it changed keeps the evidence honest; it is not a security boundary. Only workers in a git workspace scope are verified; any other worker ends as not verified.</span><input name="verifyEnabled" type="checkbox"${shown.verifyEnabled === "on" ? " checked" : ""}></label></div><div class="field" data-field="verifySkill"><label><span class="flabel">Verification skill</span><span class="fhelp">Name of an installed project skill, for example verify-pi-prjcts.</span><input name="verifySkill" maxlength="128" autocomplete="off" value="${esc(shown.verifySkill)}"></label></div></div>
 <details class="advanced"><summary>Access to project functions</summary><div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}</div></details>
 <p class="note">Model changes apply to the next request without interrupting current work. New threads use the current role selections. The worker limit applies at once and never stops running work. Other changes need an idle project. You review every change before it is saved.</p>
 ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { action: "close-dialog" }), '<button type="submit" class="primary" data-off disabled>Review changes</button>')}</form>`);
@@ -3636,7 +3641,9 @@ ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { acti
 }
 const accessText = (field, value) => settingsAccess[field][2].find(([option]) => option === value)?.[1] ?? value;
 const scopeText = refs => refs?.length ? refs.map(ref => esc(modelCache.get(ref)?.name ?? ref)).join(", ") : "<small>Your Pi scope</small>";
-const modelText = ref => { if (ref === "") return "Inherit coordinator"; const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
+const modelText = (ref, role = "") => { if (ref === "") return emptyModelName(role); const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
+const verifyText = value => value?.enabled ? `On: skill <b>${esc(value.skill)}</b>, verifier model above` : "Off";
+const verificationNote = cycle => cycle ? `<p class="note" data-verification>Verification ${cycle.open ? "running" : esc(cycle.outcome ?? "ended")} (skill ${esc(cycle.skill)}, model ${esc(cycle.model)}): ${cycle.attempts.map(item => `attempt ${item.n} ${esc(item.state)}`).join(", ") || "no attempt yet"}${cycle.reason ? `. ${esc(cycle.reason)}` : ""}</p>` : "";
 const emptyText = text => text ? esc(text) : "<small>empty</small>";
 function settingsDiffRows(changes, values) {
   const rows = [];
@@ -3644,11 +3651,12 @@ function settingsDiffRows(changes, values) {
   if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
   if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
   for (const [role, label] of settingsRoles.slice(1)) {
-    if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? ""), modelText(changes.models[role] ?? "")]);
+    if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? "", role), modelText(changes.models[role] ?? "", role)]);
     if (changes.fallbackModels && role in changes.fallbackModels) rows.push([`${label} quota fallback`, modelText(values.fallbackModels?.[role] ?? ""), modelText(changes.fallbackModels[role] ?? "")]);
   }
   if ("scopedModels" in changes) rows.push(["Scoped models", scopeText(values.scopedModels), scopeText(changes.scopedModels)]);
   for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
+  if ("verification" in changes) rows.push(["Verification", verifyText(values.verification), verifyText(changes.verification)]);
   if ("workerCap" in changes) rows.push(["Workers at once", String(values.workerCap), String(changes.workerCap)]);
   return rows;
 }
@@ -3683,20 +3691,22 @@ async function loadModelPicker() {
   modelScopeSet = data.scopeSet === true;
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
+const emptyModelName = role => role === "verifier" ? "No verifier model" : "Inherit coordinator";
 function modelButton(reference, disabled = false, emptyLabel = "Inherit coordinator") {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
   return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? emptyLabel : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
 }
-function modelPickerHtml(role, reference, unavailable, emptyLabel = "Inherit coordinator") {
+function modelPickerHtml(role, reference, unavailable, emptyLabel = emptyModelName(role)) {
   const configured = [...modelCache.values()].filter(model => model.configured).length;
   return `<div class="mp" data-role="${role}" data-empty-label="${esc(emptyLabel)}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable), emptyLabel)}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
 }
 const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
 const INHERIT_MODEL = { reference: "", name: "Inherit coordinator", contextWindow: null, reasoning: false, configured: true };
+const NO_VERIFIER_MODEL = { ...INHERIT_MODEL, name: "No verifier model (verification off)" };
 // Worker, scout and reviewer pickers start with "Inherit coordinator" (stored as no model); the coordinator picker does not.
 function modelGroups(query, value, role) {
   const groups = modelGroupsBase(query, value);
-  const fallback = role.endsWith("-fallback"), emptyName = fallback ? "Wait for quota reset" : "Inherit coordinator";
+  const fallback = role?.endsWith("-fallback"), emptyName = fallback ? "Wait for quota reset" : role === "verifier" ? NO_VERIFIER_MODEL.name : "Inherit coordinator";
   if (!role || role === "coordinator" || query.trim() && !modelNorm(emptyName).includes(modelNorm(query.trim()))) return groups;
   return [{ label: "", models: [{ ...INHERIT_MODEL, name: emptyName }], more: 0 }, ...groups];
 }
@@ -4071,7 +4081,7 @@ function durableResults() {
 }
 function threadList() {
   if (!plan) throw new Error("Durable plan is not loaded");
-  showDialog("Durable work and reusable threads", `<p>Work items sharing a thread UUID reuse its conversation. Status is not verification evidence.</p>${plan.work.toReversed().map(work => `<article class="task">${badge(work.status)}<strong>${esc(work.text)}</strong><p>Role ${esc(work.role)} · Work ${esc(work.id)}<br>Thread ${esc(work.threadId)}<br>${esc(work.blocker ?? "")}</p><button data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}">Read owned history</button></article>`).join("") || '<p>No retained work items.</p>'}`);
+  showDialog("Durable work and reusable threads", `<p>Work items sharing a thread UUID reuse its conversation. Status is not verification evidence.</p>${plan.work.toReversed().map(work => `<article class="task">${badge(work.status)}<strong>${esc(work.text)}</strong><p>Role ${esc(work.role)} · Work ${esc(work.id)}<br>Thread ${esc(work.threadId)}<br>${esc(work.blocker ?? "")}</p>${verificationNote(plan.verification?.[work.threadId])}<button data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}">Read owned history</button></article>`).join("") || '<p>No retained work items.</p>'}`);
 }
 function workerDetailHtml(chat, page, work) {
   const threadId = chat.threadId, draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`), role = work?.role ?? "worker";
