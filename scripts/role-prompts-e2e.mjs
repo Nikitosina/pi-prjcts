@@ -40,6 +40,7 @@ await kit.run(async () => {
   await kit.ask(id, 'SKILL-READ');
   kit.check('coordinator distinguishes a successful command from host-confirmed verification', kit.lastCall('coordinator', 'SKILL-READ').system.includes("Use the host's VERIFIED completion report to claim verification"));
   kit.check('coordinator preserves explicit criteria in repair handoffs', kit.lastCall('coordinator', 'SKILL-READ').system.includes('every acceptance criterion verbatim'));
+  kit.check('coordinator uses the structured acceptance field and supported repair list format', kit.lastCall('coordinator', 'SKILL-READ').system.includes('projects_delegate.acceptance') && kit.lastCall('coordinator', 'SKILL-READ').system.includes('Acceptance criteria: bulleted list'));
   writeFileSync(join(kit.artifacts, 'skill-read-proof.json'), JSON.stringify(readProof, null, 2));
   kit.check('live skill graph reads local review skills and Bugs/performance reference through authorized names', readProof?.length === 3 && readProof.every(r => r.nextOffset === null) && readProof[0].text.includes('Use these reviewers in independent fresh contexts') && readProof[1].text.includes('Mysterious Name') && readProof[2].text.includes('Bugs and performance review'));
   await kit.ask(id, '/skill:pr-review explicit review trigger');
