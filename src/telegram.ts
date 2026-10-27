@@ -283,6 +283,12 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
             media.push(file);
           }
         } catch { media = []; }
+        if (!media.length && part.kind === "album") {
+          // No request started: checkpoint individual fallbacks so one missing file cannot hide valid ones.
+          parts.splice(index, 1, ...refs.map((ref, item): TelegramPart => ({ kind: "media", ref, caption: item === 0 ? part.caption : "" })));
+          state.sentPart.plan = parts; persist();
+          index--; continue;
+        }
         if (!media.length) {
           sent = [await call("sendMessage", { chat_id: state.owner.chatId, text: `${htmlToPlain(part.caption)}\n[Attachment unavailable, unauthorized, or exceeds upload limits]`, ...markup, ...reply })];
         } else {

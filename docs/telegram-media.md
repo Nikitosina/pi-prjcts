@@ -21,7 +21,7 @@ Telegram documents captions as **0–1024 characters after entity parsing**, inc
 
 PNG/JPEG use `sendPhoto` through 10,000,000 bytes. MP4 uses `sendVideo` through 50,000,000 bytes; playback still depends on codecs and clients. Other files, including WebM/GIF/WebP, and photos over 10 MB use `sendDocument` through 50,000,000 bytes. Telegram also restricts photo dimensions to a width-plus-height of at most 10000 and an aspect ratio of at most 20.
 
-An explicit native-media 400 rejection can fall back to a document, or an all-document album for a rejected photo/video album. Missing, unauthorized, empty, oversized or unsafe artifacts produce an honest failure message, never a URL. Symlinks/traversal are refused by the existing artifact store. Surrounding response text is retained even on failure. No album is selected unless all refs pass authorized metadata checks; files are checked again before upload.
+An explicit native-media 400 rejection can fall back to a document, or an all-document album for a rejected photo/video album. Missing, unauthorized, empty, oversized or unsafe artifacts produce an honest failure message, never a URL. Symlinks/traversal are refused by the existing artifact store. Surrounding response text is retained even on failure. No album is selected unless all refs pass authorized metadata checks; files are checked again before upload. If a saved album loses a member before an upload or explicit-rejection retry, its plan is safely expanded into individual parts before any request. Valid files still send in order, and only unavailable items get failure explanations.
 
 Sources checked against the current public Bot API:
 - https://core.telegram.org/bots/api#sendphoto

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, openSync, ftruncateSync, closeSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, symlinkSync, openSync, ftruncateSync, closeSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -160,6 +160,14 @@ try {
 
   reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Next notice')); fault = { method: 'sendMediaGroup', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 0); bridge.close(); start(); await bridge.flush();
   assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup', 'sendMessage']); mapped();
+
+  writeFileSync(join(dir, 'gone.png'), image);
+  reset(`Before ![First](${ref('demo.png')}) ![Gone](${ref('gone.png')}) ![Last](${ref('demo.mp4')}) after`);
+  fault = { method: 'sendMediaGroup', code: 429 }; start(); await bridge.flush(); assert.equal(sends.length, 0); bridge.close();
+  unlinkSync(join(dir, 'gone.png')); fault = { method: 'sendVideo', code: 429 }; start(); await bridge.flush();
+  assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendMessage']); assert.match(sends[1].input.text, /unavailable/); bridge.close();
+  start(); await bridge.flush(); assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendMessage', 'sendVideo']);
+  assert.deepEqual(sends[2].input.file.bytes, video); assert.match(sends[0].input.caption, /Before First Gone Last after/); mapped();
 
   for (const code of [0, 200]) {
     reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Must wait')); fault = { method: 'sendMediaGroup', code }; start(); await bridge.flush(); const before = attempts.length; await bridge.flush(); bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
