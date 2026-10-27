@@ -69,6 +69,7 @@ await kit.run(async () => {
     writeFileSync(join(kit.artifacts, `effective-${role}.txt`), request.system);
   }
   kit.check('actual provider requests contain all five defaults, shared rules and standing context', true);
+  kit.check('review handoffs name source evidence available to fresh contexts', live.coordinator.system.includes('Reviewers do not inherit this conversation: include the source spec itself or its exact repository document path.'));
   const reviewer = live.reviewer;
   kit.check('reviewers retain generated read-only tools and no execution tools', reviewer.tools.includes('code_read') && !reviewer.tools.some(t => ['bash', 'write', 'edit', 'projects_verify_run'].includes(t)));
   kit.check('verifier retains structured verdict tools without implementation or delegation tools', live.verifier.tools.includes('projects_verification_verdict') && !live.verifier.tools.includes('projects_delegate_child'));
