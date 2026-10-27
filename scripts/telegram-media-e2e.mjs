@@ -31,12 +31,13 @@ const api = createServer(async (req, res) => {
     }
     if (input.reply_parameters) input.reply_parameters = JSON.parse(input.reply_parameters);
   } else input = JSON.parse(bytes.toString());
-  const reply = data => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
+  const reply = data => { res.writeHead(data.ok ? 200 : data.error_code ?? 500, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
   if (method === 'getUpdates') {
     const ready = updates.filter(u => u.update_id >= input.offset);
     if (!ready.length) await new Promise(resolve => setTimeout(resolve, 100));
     return reply({ ok: true, result: ready });
   }
+  if (method === 'sendMediaGroup' && new Set(input.media.map(item => item.show_caption_above_media ?? false)).size > 1) return reply({ ok: false, error_code: 400, description: 'Bad Request: Parameter show_caption_above_media must be the same for all messages' });
   if (method === 'sendMediaGroup' && rejectPhoto) { rejectPhoto = false; return reply({ ok: false, error_code: 429, description: 'Fixture rate limit', parameters: { retry_after: 1 } }); }
   assert(['sendMessage', 'sendPhoto', 'sendVideo', 'sendDocument', 'sendMediaGroup'].includes(method));
   const message_ids = Array.from({ length: method === 'sendMediaGroup' ? input.media.length : 1 }, () => nextMessage++);
@@ -81,7 +82,7 @@ await k.run(async () => {
     assert.match(caption, /^<b>Media envelope · Attachment context<\/b>\nFinished\n\nCOORDINATOR-MEDIA before/);
     assert.match(caption, /COORDINATOR-MEDIA between/); assert.match(caption, /COORDINATOR-MEDIA after/); assert.match(caption, /Reply to this message to write to this chat/);
     assert.deepEqual(album.input.files.map(f => f.bytes), [image, video]); assert.deepEqual(album.input.files.map(f => f.mime), ['image/png', 'video/mp4']);
-    assert.deepEqual(album.input.media.map(m => m.type), ['photo', 'video']); assert.equal(album.input.media[1].caption, undefined);
+    assert.deepEqual(album.input.media.map(m => m.type), ['photo', 'video']); assert(album.input.media.every(m => m.show_caption_above_media === true)); assert.equal(album.input.media[1].caption, undefined);
     assert.equal(album.input.reply_parameters, undefined);
     assert.equal(sends.filter(s => s.input.text?.includes('COORDINATOR-MEDIA')).length, 0);
     const feed = JSON.parse(readFileSync(join(k.home, 'notifications.json'), 'utf8')).feed;

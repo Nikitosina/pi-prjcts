@@ -10,6 +10,7 @@ If the normal wrapper would cause overflow, the bridge first shortens only reply
 
 - One attachment with fitting text: one `sendPhoto`, `sendVideo` or `sendDocument` call, one message.
 - Two through ten compatible photos/videos without buttons: one `sendMediaGroup` call, one visually grouped album with a shared formatted caption on its first item. Telegram returns a separate message ID for each item; every ID is mapped to the originating coordinator chat. No separate wrapper messages.
+- Album caption placement must be uniform on **every** item, even when only the first has caption text. Telegram's TDLib rejects mixed `show_caption_above_media` values with `Parameter show_caption_above_media must be the same for all messages`. Native albums set it true on every item; document fallback albums omit it everywhere. The caption and HTML parse mode still occur only once.
 - More than ten compatible items: albums of up to ten, with a final single media message if one remains. Identity, response and footer occur only once, in the first caption.
 - Albums have no `reply_markup` parameter. Notices with actions use individual media messages, putting actions on the last part instead of losing them or inventing an extra action-only wrapper. Unsupported/document formats also use individual messages. The first caption contains the shared response; later captions are empty rather than repeating it.
 - Album byte buffering is capped at 50,000,000 bytes total. Larger collections use individual uploads. This is our memory bound, not a Telegram album limit.
@@ -29,19 +30,25 @@ Sources checked against the current public Bot API:
 - https://core.telegram.org/bots/api#senddocument
 - https://core.telegram.org/bots/api#sendmediagroup
 
-Telegram's TDLib `process_input_caption` checks `utf8_length` against the caption limit, and `fix_formatted_text` removes carriage returns: https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp and https://github.com/tdlib/td/blob/master/td/telegram/MessageEntity.cpp.
+Telegram's TDLib `process_input_caption` checks `utf8_length` against the caption limit, and `fix_formatted_text` removes carriage returns: https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp and https://github.com/tdlib/td/blob/master/td/telegram/MessageEntity.cpp. The album placement constraint is in `check_message_group_message_contents` in the same MessageContent.cpp source.
 
 ## Retry and restart
 
 The existing outbox cursor saves the selected plan, successful part count, and first message ID for spillover linkage. An album checkpoints every returned message ID together. An explicit 429 rejection can retry without duplicating successful parts or headers.
 
-Telegram has no client idempotency key for uploads. A pending-media flag is saved before each media or album request. A network/server failure, incomplete success response or crash before the success checkpoint blocks automatic resend and later notices, rather than risk duplicate media. Settings reports uncertain delivery. An operator must inspect the actual linked conversation before resolving the cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or resend blindly. A partially delivered artifact notice from the pre-media production release has only a text-chunk cursor, not a caption plan. It is also held for inspection rather than guessing which content to replay after upgrade. Existing text-only cursors resume unchanged.
+Telegram has no client idempotency key for uploads. A pending-media flag is saved before each media or album request. A network/server failure, incomplete success response or crash before the success checkpoint blocks automatic resend and later notices, rather than risk duplicate media. Settings reports uncertain delivery.
+
+A trusted transport guard that blocks a request **before forwarding it** uses `TelegramRequestNotSentError`, not a generic network exception. That clears the current pending flag and stops automatic retry; it must never be used for a timeout or a request that may have reached Telegram. An explicit API 400 is a confirmed rejection. A locally blocked fallback after that rejection is not evidence that the rejected original upload might have succeeded.
+
+An operator must inspect the actual linked conversation before resolving the cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or resend blindly. A partially delivered artifact notice from the pre-media production release has only a text-chunk cursor, not a caption plan. It is also held for inspection rather than guessing which content to replay after upgrade. Existing text-only cursors resume unchanged.
 
 ## Verification and live-demo scope
 
 `telegram-media-unit` uses the actual bridge against a mocked multipart endpoint. It covers one-call formatted captions/envelopes/actions/routing, album bytes/MIME/shared caption/per-item mappings, album limits/fallbacks, long-text preservation, Unicode/entities, security, ordering, rejection retries and ambiguous media/album blocking across restart.
 
 `telegram-media-e2e` runs an isolated real host from an incoming Telegram update through coordinator/worker execution, artifact storage, notifier and outbox. Only the model and Bot API are fake. It verifies one-message photo/video results, a one-call mixed album, full long responses surviving the notifier, replies to a photo and a second album item reaching their original chat after the selected route changes, and no replay after restart. Both scripts run in deterministic CI without a browser.
+
+The caption-first live album attempt returned HTTP 400. Its receipt did not save Telegram's description, and the temporary outbox was removed, so the historical error text is unavailable. Offline audit found and reproduced the inconsistent caption-placement flags against TDLib's exact 400 validation. The one-request guard then blocked the unsent fallback with a generic fetch error, so the outbox conservatively held it as uncertain. That flag does not make the original explicit 400 rejection ambiguous. The guard now uses the explicit not-sent error and records sanitized error code/description; it was not rerun.
 
 The first live demos proved native photo/video visibility only. The later live wrapper/reply experiment was rejected by the owner as excessive splitting. Neither is evidence for this corrected caption-first UX. No more live sends are authorized unless the owner requests them. No deployment or owner-host restart is part of this PR.
 

@@ -26,6 +26,9 @@ type State = {
 type Update = { update_id: number; message?: Message; callback_query?: { id: string; from: { id: number }; message?: Message; data?: string } };
 type Message = { message_id: number; chat: { id: number; type: string; first_name?: string; username?: string; title?: string }; from?: { id: number; first_name?: string; username?: string }; text?: string; reply_to_message?: { message_id: number } };
 type Button = { text: string; callback_data: string };
+/** A trusted transport guard may throw this only before forwarding a request, never after a timeout. */
+export class TelegramRequestNotSentError extends Error {}
+
 class TelegramError extends Error { code: number; retryAfter?: number; constructor(message: string, code: number, retryAfter?: number) { super(message); this.code = code; this.retryAfter = retryAfter; } }
 
 const UNCERTAIN_MEDIA = "Telegram attachment delivery is uncertain. Automatic resend blocked to avoid duplicates; verify in Telegram before resolving the outbox.";
@@ -55,7 +58,10 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
     if (!token) throw new TelegramError("No Telegram bot is set", 0);
     let response: Response;
     try { response = await fetch(`${base}/bot${token}/${method}`, { method: "POST", ...(body instanceof FormData ? { body } : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(body instanceof FormData ? 120_000 : 30_000) }); }
-    catch (error) { throw new TelegramError(redact(`Telegram ${method} failed: ${errorText(error)}`, token), 0); }
+    catch (error) {
+      if (error instanceof TelegramRequestNotSentError) throw new TelegramRequestNotSentError(redact(error.message, token));
+      throw new TelegramError(redact(`Telegram ${method} failed: ${errorText(error)}`, token), 0);
+    }
     const data = await response.json().catch(() => null) as { ok?: boolean; result?: T; description?: string; error_code?: number; parameters?: { retry_after?: number } } | null;
     if (!data?.ok) throw new TelegramError(redact(`Telegram ${method}: ${data?.description ?? `HTTP ${response.status}`}`, token), data?.error_code ?? response.status, data?.parameters?.retry_after);
     return data.result as T;
@@ -313,6 +319,9 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
               sent = await upload(true);
             }
           } catch (error) {
+            if (error instanceof TelegramRequestNotSentError) {
+              delete state.sentPart.pendingMedia; persist(); throw error;
+            }
             // Only explicit rejection proves Telegram did not create a message or album.
             if (error instanceof TelegramError && error.code >= 400 && error.code < 500) {
               delete state.sentPart.pendingMedia; persist();
@@ -349,7 +358,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
           try { await sendNotice(next); sendFailures = 0; }
           catch (error) {
             sendFailures++; state.lastError = state.sentPart?.pendingMedia ? UNCERTAIN_MEDIA : redact(errorText(error)); persist();
-            if (state.sentPart?.pendingMedia) return;
+            if (state.sentPart?.pendingMedia || error instanceof TelegramRequestNotSentError) return;
             clearTimeout(retry); retry = setTimeout(() => void flush(), Math.min(60_000, backoffMs * 2 ** Math.min(sendFailures - 1, 10))); retry.unref();
             return;
           }

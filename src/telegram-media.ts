@@ -82,7 +82,7 @@ export function telegramAlbumForm(media: ReturnType<typeof loadTelegramMedia>[],
   body.set("media", JSON.stringify(media.map((file, index) => {
     const name = `file${index}`;
     body.set(name, new Blob([new Uint8Array(file.bytes)], { type: file.mime }), file.filename);
-    return { type: document ? "document" : file.method === "sendPhoto" ? "photo" : "video", media: `attach://${name}`, ...(index === 0 ? { caption, parse_mode: "HTML", ...(!document ? { show_caption_above_media: true } : {}) } : {}) };
+    return { type: document ? "document" : file.method === "sendPhoto" ? "photo" : "video", media: `attach://${name}`, ...(!document ? { show_caption_above_media: true } : {}), ...(index === 0 ? { caption, parse_mode: "HTML" } : {}) };
   })));
   return { method: "sendMediaGroup", body };
 }

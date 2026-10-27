@@ -4,8 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, symlin
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { startTelegram } from '../src/telegram.ts';
-import { loadTelegramMedia, extractTelegramMedia } from '../src/telegram-media.ts';
+import { startTelegram, TelegramRequestNotSentError } from '../src/telegram.ts';
+import { loadTelegramMedia, extractTelegramMedia, telegramAlbumForm } from '../src/telegram-media.ts';
 import { image, video } from './telegram-media-fixtures.mjs';
 import { htmlToPlain, splitTelegramCaption } from '../src/telegram-html.ts';
 
@@ -53,9 +53,11 @@ const server = createServer(async (req, res) => {
       input.file = { bytes: Buffer.from(await file.arrayBuffer()), mime: file.type, name: file.name };
     }
   } else input = JSON.parse(bytes.toString());
-  const reply = value => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
+  const reply = value => { res.writeHead(value.ok ? 200 : value.error_code ?? 500, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); };
   if (method === 'getUpdates') return reply({ ok: true, result: [] });
   attempts.push({ method, input });
+  // TDLib check_message_group_message_contents requires uniform placement even on items without captions.
+  if (method === 'sendMediaGroup' && new Set(input.media.map(item => item.show_caption_above_media ?? false)).size > 1) return reply({ ok: false, error_code: 400, description: 'Bad Request: Parameter show_caption_above_media must be the same for all messages' });
   if (fault?.method === method) {
     const code = fault.code; fault = null;
     if (code === 0) return req.socket.destroy();
@@ -82,6 +84,15 @@ const mapped = (expected = { projectId: project, chatId: 'main' }) => {
   for (const send of sends) for (const id of send.message_ids) assert.deepEqual(mappings[id], expected);
 };
 try {
+  const mixedPlacementForm = telegramAlbumForm([loadTelegramMedia(join(root, project), ref('demo.png')), loadTelegramMedia(join(root, project), ref('demo.mp4'))], 1, '<b>Test · Main</b>\nDemo');
+  const mixedPlacementItems = JSON.parse(mixedPlacementForm.body.get('media'));
+  delete mixedPlacementItems[1].show_caption_above_media;
+  mixedPlacementForm.body.set('media', JSON.stringify(mixedPlacementItems));
+  const rejected = await fetch(`${process.env.PI_PROJECTS_TELEGRAM_API}/botfake-contract-only/sendMediaGroup`, { method: 'POST', body: mixedPlacementForm.body });
+  assert.equal(rejected.status, 400);
+  assert.equal((await rejected.json()).description, 'Bad Request: Parameter show_caption_above_media must be the same for all messages');
+  assert.equal(sends.length, 0);
+
   reset(`Before **bold** ![Image caption](${ref('demo.png')}) after`); start(); await bridge.flush();
   assert.deepEqual(sends.map(s => s.method), ['sendPhoto']);
   assert.match(sends[0].input.caption, /^<b>Test · Main<\/b>\nFinished\n\nBefore <b>bold<\/b> Image caption after/);
@@ -109,6 +120,7 @@ try {
   assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup']);
   assert.deepEqual(sends[0].input.media.map(m => m.type), ['photo', 'video']);
   assert.match(sends[0].input.media[0].caption, /Before Photo between Video after/);
+  assert(sends[0].input.media.every(item => item.show_caption_above_media === true));
   assert.equal(sends[0].input.media[0].parse_mode, 'HTML'); assert.equal(sends[0].input.media[1].caption, undefined);
   assert.deepEqual(sends[0].input.files.map(f => f.bytes), [image, video]); assert.deepEqual(sends[0].input.files.map(f => f.mime), ['image/png', 'video/mp4']); mapped();
 
@@ -116,7 +128,7 @@ try {
   assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup', 'sendPhoto']); assert.equal(sends[0].input.media.length, 10); assert.equal(sends[1].input.caption, ''); mapped();
 
   reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); fault = { method: 'sendMediaGroup', code: 400 }; start(); await bridge.flush();
-  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup']); assert(sends[0].input.media.every(m => m.type === 'document')); mapped();
+  assert.deepEqual(sends.map(s => s.method), ['sendMediaGroup']); assert(sends[0].input.media.every(m => m.type === 'document' && m.show_caption_above_media === undefined)); mapped();
 
   reset(`Before ![Photo](${ref('demo.png')}) middle ![WebM](${ref('demo.webm')}) after`); start(); await bridge.flush();
   assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendDocument']); assert.match(sends[0].input.caption, /Before Photo middle WebM after/); assert.equal(sends[1].input.caption, ''); mapped();
@@ -169,6 +181,27 @@ try {
   assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendMessage']); assert.match(sends[1].input.text, /unavailable/); bridge.close();
   start(); await bridge.flush(); assert.deepEqual(sends.map(s => s.method), ['sendPhoto', 'sendMessage', 'sendVideo']);
   assert.deepEqual(sends[2].input.file.bytes, video); assert.match(sends[0].input.caption, /Before First Gone Last after/); mapped();
+
+  reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`);
+  fault = { method: 'sendMediaGroup', code: 400 };
+  const forward = globalThis.fetch;
+  let forwarded = false, guardedCalls = 0;
+  const oldBackoff = process.env.PI_PROJECTS_TELEGRAM_BACKOFF_MS;
+  process.env.PI_PROJECTS_TELEGRAM_BACKOFF_MS = '1';
+  globalThis.fetch = async (url, init) => {
+    guardedCalls++;
+    if (forwarded) throw new TelegramRequestNotSentError('One-write guard: follow-up NOT transmitted after confirmed 400 rejection; fake-test-only');
+    forwarded = true; return forward(url, init);
+  };
+  try {
+    start(); await bridge.flush();
+    const state = JSON.parse(readFileSync(statePath));
+    assert.equal(attempts.length, 1); assert.equal(sends.length, 0);
+    assert.equal(state.sentPart.pendingMedia, undefined); assert.match(state.lastError, /NOT transmitted after confirmed 400/);
+    assert(!state.lastError.includes('delivery is uncertain')); assert.equal(state.sentSeq, 0);
+    assert(!state.lastError.includes('fake-test-only')); assert(state.lastError.includes('[token]'));
+    await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(guardedCalls, 2);
+  } finally { bridge.close(); globalThis.fetch = forward; process.env.PI_PROJECTS_TELEGRAM_BACKOFF_MS = oldBackoff; }
 
   for (const code of [0, 200]) {
     reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Must wait')); fault = { method: 'sendMediaGroup', code }; start(); await bridge.flush(); const before = attempts.length; await bridge.flush(); bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
