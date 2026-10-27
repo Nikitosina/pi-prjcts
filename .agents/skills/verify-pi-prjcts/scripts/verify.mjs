@@ -163,7 +163,7 @@ async function rpcCommand() {
 // Raw CDP over a pipe, as scripts/lib/e2e-kit.mjs does. Chrome is tracked in run.json before any CDP call, so a crash anywhere still leaves it recorded for cleanup.
 async function openBrowser(run, sinks) {
   const label = `chrome-${Date.now()}`;
-  const { child: chrome, exited } = await spawnTracked(run, label, CHROME, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', `--user-data-dir=${join(run.scratch, 'chrome-profile')}`, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
+  const { child: chrome, exited } = await spawnTracked(run, label, CHROME, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--use-mock-keychain', `--user-data-dir=${join(run.scratch, 'chrome-profile')}`, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
   let id = 0, buffer = ''; const pending = new Map();
   const page = {
     close: async () => {

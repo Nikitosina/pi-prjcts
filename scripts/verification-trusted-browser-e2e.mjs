@@ -12,10 +12,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 const repo = process.cwd();
 const artifacts = process.env.VERIFY_LOOP_EVIDENCE ?? join(repo, 'artifacts', `verification-trusted-browser-${new Date().toISOString().replaceAll(':', '-')}`);
 const root = join(realpathSync(tmpdir()), `verification-trusted-browser-${randomUUID()}`);
-const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent');
+const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir = join(root, 'agent'), userHome = join(root, 'userhome');
 if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
 if (!existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') && !process.env.VERIFY_CHROME) throw Error('Google Chrome is required (or set VERIFY_CHROME)');
-for (const dir of [artifacts, root, home, workspace, agentDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+for (const dir of [artifacts, root, home, workspace, agentDir, userHome]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 const result = { root, checks: [], requests: [], reports: [], provider: 'deterministic fake at the existing OpenAI-completions model seam' };
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
@@ -82,7 +82,7 @@ await new Promise(ok => model.listen(0, '127.0.0.1', ok));
 const modelEntry = { id: 'fake-model', name: 'fake-model', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096 };
 writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { fake: { baseUrl: `http://127.0.0.1:${model.address().port}/v1`, apiKey: 'fake', api: 'openai-completions', models: [modelEntry] } } }));
 const socket = join(tmpdir(), `pi-projects-${process.getuid?.() ?? 'user'}-${createHash('sha256').update(home).digest('hex').slice(0, 12)}.sock`);
-const env = { ...process.env, PI_PROJECTS_HOME: home, PI_PROJECTS_HOST: '1', PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1' };
+const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: join(userHome, '.config'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PI_PROJECTS_HOME: home, PI_PROJECTS_HOST: '1', PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1' };
 for (const key of Object.keys(env)) if (key.startsWith('PI_SUBAGENT') || key === 'PI_SESSION_FILE') delete env[key];
 const log = createWriteStream(join(artifacts, 'host.log'), { flags: 'a', mode: 0o600 });
 let host, hostExit;
@@ -104,7 +104,7 @@ async function startHost() {
   hostExit = new Promise(ok => host.once('exit', ok));
   await eventually(async () => { try { return (await rpc()).pid === host.pid; } catch { return false; } }, 'owned outer host did not start');
 }
-const git = (cwd, ...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+const git = (cwd, ...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8', env }).trim();
 const plan = id => rpc({ action: 'plan-snapshot', id });
 const settingsUpdate = async (id, changes) => rpc({ action: 'settings-update', id, confirm: id, expectedRevision: (await rpc({ action: 'settings-snapshot', id })).revision, changes });
 const check = (name, ok, detail) => { assert.ok(ok, `${name}${detail === undefined ? '' : ` :: ${JSON.stringify(detail).slice(0, 800)}`}`); result.checks.push(name); process.stderr.write(`PASS ${name}\n`); };
@@ -153,7 +153,7 @@ try {
 } finally {
   // A provider error or assertion can interrupt the scripted cleanup. Never leave a canonical detached host/provider/browser behind.
   for (const state of verification.runs.values()) if (state.scratch && existsSync(join(state.scratch, 'run.json'))) {
-    try { execFileSync(process.execPath, [join(repo, '.agents/skills/verify-pi-prjcts/scripts/verify.mjs'), 'cleanup', '--run', state.scratch], { stdio: 'pipe' }); }
+    try { execFileSync(process.execPath, [join(repo, '.agents/skills/verify-pi-prjcts/scripts/verify.mjs'), 'cleanup', '--run', state.scratch], { stdio: 'pipe', env }); }
     catch (error) { result.cleanupErrors ??= []; result.cleanupErrors.push(String(error)); process.exitCode = 1; }
   }
   save();
