@@ -68,7 +68,7 @@ const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
 /** Settings read at use time, so a change needs no reopen. */
-const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "scopedModels", "workerCap"]);
+const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "workerCap"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -266,6 +266,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           version: 1, id, name: input.name, cwd, objective: input.objective ?? "", createdAt: new Date().toISOString(),
           model: input.model ?? "openai-codex/gpt-5.6-sol",
           models: {},
+          fallbackModels: {},
           runtime: "durable", ...(input.requestId ? { creation: { requestId: input.requestId, fingerprint } } : {}),
           ...(input.knowledgeAccess === undefined ? {} : { knowledgeAccess: input.knowledgeAccess }), libraryAccess: "coordinator", decisionAccess: "coordinator", phase: "ready", problem: null,
         });
@@ -318,7 +319,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           const running = durableRuntimes.get(input.id);
           if (running) {
             const owner = await running;
-            if (input.changes.model !== undefined || input.changes.models !== undefined) await owner.applyModels(project);
+            if (input.changes.model !== undefined || input.changes.models !== undefined || input.changes.fallbackModels !== undefined) await owner.applyModels(project);
             if (input.changes.context !== undefined) owner.applyContext(project.contextSettings);
             if (input.changes.workerCap !== undefined) await owner.applyWorkerCap(input.changes.workerCap);
           }
