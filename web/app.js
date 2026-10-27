@@ -410,27 +410,31 @@ function renderLive() {
   renderWorkingPill();
 }
 
-function selectionPath(root, node) {
-  const path = [];
-  for (let current = node; current && current !== root; current = current.parentNode) path.unshift(Array.prototype.indexOf.call(current.parentNode.childNodes, current));
-  return path;
+function selectionOffset(root, node, offset) {
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  range.setEnd(node, offset);
+  return range.toString().length;
 }
-function selectionNode(root, path) {
-  let node = root;
-  for (const index of path) { node = node?.childNodes[index]; if (!node) return null; }
-  return node;
+function selectionPoint(root, offset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (offset <= node.length) return { node, offset };
+    offset -= node.length;
+  }
+  return null;
 }
 function captureLiveSelection() {
   const root = document.querySelector("#live-reply .text"), selection = document.getSelection();
   if (!root || !selection?.rangeCount || selection.isCollapsed || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) return null;
-  return { projectId, chatId, text: root.textContent, anchor: selectionPath(root, selection.anchorNode), anchorOffset: selection.anchorOffset, focus: selectionPath(root, selection.focusNode), focusOffset: selection.focusOffset };
+  return { projectId, chatId, text: root.textContent, anchor: selectionOffset(root, selection.anchorNode, selection.anchorOffset), focus: selectionOffset(root, selection.focusNode, selection.focusOffset) };
 }
 function restoreLiveSelection(saved) {
   if (!saved || saved.projectId !== projectId || saved.chatId !== chatId) return;
   const root = [...document.querySelectorAll("#messages .msg.them .text")].reverse().find(node => node.textContent.startsWith(saved.text));
-  const anchor = root && selectionNode(root, saved.anchor), focus = root && selectionNode(root, saved.focus);
+  const anchor = root && selectionPoint(root, saved.anchor), focus = root && selectionPoint(root, saved.focus);
   if (!anchor || !focus) return;
-  document.getSelection().setBaseAndExtent(anchor, saved.anchorOffset, focus, saved.focusOffset);
+  document.getSelection().setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
 }
 
 function clearTranscriptSelection() {

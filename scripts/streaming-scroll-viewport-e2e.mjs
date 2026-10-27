@@ -12,7 +12,7 @@ const k = await createKit('streaming-scroll-viewport', { handler: async ({ role,
   if (user.includes('MARK-SELECTION')) return (async function* () {
     yield chunk({ role: 'assistant', content: selectionText });
     await selectionGate;
-    yield chunk({ content: '\n\nThe final paragraph arrived.' });
+    yield chunk({ content: ' The final paragraph arrived.' });
     yield chunk({}, 'stop') + 'data: [DONE]\n\n';
   })();
   if (user.includes('MARK-BURST')) {
@@ -138,7 +138,7 @@ await k.run(async () => {
   })()`);
   const selectedHost = (await k.rpc({ action: 'show', id })).messages.findLast(m => m.role === 'assistant')?.text;
   const selectedBrowser = await page.evaluate(`[...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerText`);
-  k.check('R8T selected stream final browser text exactly matches host', selectedHost === selectionText + '\n\nThe final paragraph arrived.' && selectedBrowser === selectedHost, { selectedHost, selectedBrowser });
+  k.check('R8T selected stream final browser text exactly matches host', selectedHost === selectionText + ' The final paragraph arrived.' && selectedBrowser === selectedHost, { selectedHost, selectedBrowser });
   k.check('R8L streaming completion moves selection into the matching committed message', settledSelection.hidden && settledSelection.selected === settledSelection.expected && settledSelection.connected && settledSelection.inFinal, { ...settledSelection, expected: settledSelection.expected.slice(0, 100), selected: settledSelection.selected.slice(0, 100) });
   await page.evaluate(`getSelection().removeAllRanges()`);
 
