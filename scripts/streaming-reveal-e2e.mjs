@@ -5,14 +5,20 @@ const chunk = (text, finish = null) => `data: ${JSON.stringify({ id: 'reveal', o
 const intro = '# Smooth stream\n\nAn earlier paragraph stays readable and never fades again.\n\n```js\nconst ready = true;\n```\n\n';
 const bursts = ['New text arrives in a burst. '.repeat(100), 'Later words keep the same paragraph alive. '.repeat(100), '\n\n```sh\nprintf "complete code\\n"\n```\n\nFinal readable paragraph.'];
 const gates = [], release = [];
-for (let i = 0; i < 5; i++) gates.push(new Promise(resolve => { release.push(resolve); }));
+for (let i = 0; i < 7; i++) gates.push(new Promise(resolve => { release.push(resolve); }));
 const cancelled = 'Cancellation keeps the latest received preview safe. '.repeat(80);
+const formatStart = 'Earlier stable phrase **unfinished';
+const formatEnd = ' bold** and new words.';
 const k = await createKit('streaming-reveal', { handler: async ({ user, role }) => {
   if (role !== 'coordinator') return;
   if (user.includes('MARK-SMOOTH')) return (async function* () {
     yield chunk(intro);
     for (let i = 0; i < bursts.length; i++) { await gates[i]; yield chunk(bursts[i]); }
     await gates[3]; yield chunk('', 'stop') + 'data: [DONE]\n\n';
+  })();
+  if (user.includes('MARK-FORMAT')) return (async function* () {
+    yield chunk(formatStart); await gates[5]; yield chunk(formatEnd);
+    await gates[6]; yield chunk('', 'stop') + 'data: [DONE]\n\n';
   })();
   if (user.includes('MARK-CANCEL')) return (async function* () {
     yield chunk(cancelled); await gates[4]; yield chunk('', 'stop') + 'data: [DONE]\n\n';
@@ -88,6 +94,20 @@ await k.run(async () => {
   const final = await page.evaluate(`(() => { const root=[...document.querySelectorAll('#messages .msg.them .text')].at(-1), e=document.createElement('div'); e.innerHTML=renderMarkdown(${JSON.stringify(expected)}); return { equal:root.innerHTML===e.innerHTML, selected:getSelection().toString(), pending:liveRenderFrame }; })()`);
   k.check('S7 completion is exact, retains selection and leaves no reveal queue', host === expected && final.equal && final.selected === selected && final.pending === null, final);
   await page.evaluate(`getSelection().removeAllRanges()`);
+  await send('MARK-FORMAT');
+  await page.waitFor(`liveRenderedText === ${JSON.stringify(formatStart)}`, 'unfinished inline markdown');
+  await delay(250);
+  await page.evaluate(`(() => {
+    window.__formatText = document.querySelector('#live-reply .text p').firstChild;
+    window.__formatRefades = 0;
+    document.querySelector('#live-reply').addEventListener('animationstart', e => { if(e.animationName === 'stream-in' && e.target.textContent.includes('Earlier stable phrase')) window.__formatRefades++; });
+  })()`);
+  release[5]();
+  await page.waitFor(`liveRenderedText === ${JSON.stringify(formatStart + formatEnd)}`, 'inline markdown closes');
+  await delay(200);
+  k.check('S8 closing inline markdown preserves earlier text nodes without re-fading old words', await page.evaluate(`window.__formatText.isConnected && window.__formatText.data === 'Earlier stable phrase ' && window.__formatRefades === 0 && document.querySelector('#live-reply strong')?.textContent === 'unfinished bold'`));
+  release[6]();
+  await page.waitFor(`document.querySelector('#live-reply').hidden`, 'formatting reply committed');
   await send('MARK-CANCEL');
   await page.waitFor(`liveFrame?.text === ${JSON.stringify(cancelled)}`, 'cancellable live reply');
   await page.evaluate(`document.querySelector('#project-pause').click()`);
@@ -96,9 +116,9 @@ await k.run(async () => {
   await page.waitFor(`document.querySelector('#live-reply').hidden && liveRenderFrame === null`, 'cancellation clears live reveal');
   release[4]();
   await delay(250);
-  k.check('S8 cancellation clears queued reveal and no animation resurrects the bubble', await page.evaluate(`document.querySelector('#live-reply').hidden && liveRenderFrame === null && !document.querySelector('#live-reply .stream-fragment')`));
+  k.check('S9 cancellation clears queued reveal and no animation resurrects the bubble', await page.evaluate(`document.querySelector('#live-reply').hidden && liveRenderFrame === null && !document.querySelector('#live-reply .stream-fragment')`));
   const cancelHost = (await k.rpc({ action: 'show', id })).messages.findLast(m => m.role === 'assistant')?.text;
   const cancelBrowser = await page.evaluate(`document.querySelector('#messages').innerText`);
-  k.check('S9 cancellation retains the received partial text in storage and the transcript', cancelHost === cancelled && cancelBrowser.includes(cancelled.trim()), { hostLength: cancelHost?.length, expectedLength: cancelled.length });
+  k.check('S10 cancellation retains the received partial text in storage and the transcript', cancelHost === cancelled && cancelBrowser.includes(cancelled.trim()), { hostLength: cancelHost?.length, expectedLength: cancelled.length });
   k.result.measurements = { first, reduced, final, responseLength: expected.length, cancelledLength: cancelHost.length };
 });

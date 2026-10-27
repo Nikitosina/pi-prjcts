@@ -420,16 +420,33 @@ function patchLiveText(target, source, animate) {
         run.push(current); current = current.nextSibling;
       }
       const before = run.map(node => node.textContent).join("");
-      if (!value.startsWith(before)) { for (const node of run) node.remove(); }
-      const added = value.startsWith(before) ? value.slice(before.length) : value;
-      if (added) target.insertBefore(newLiveText(added, animate), current);
+      let kept = before.length;
+      if (!value.startsWith(before)) {
+        // Closing inline markdown can shorten a text run. Keep its prefix instead of re-fading the paragraph.
+        kept = 0;
+        while (kept < before.length && kept < value.length && before[kept] === value[kept]) kept++;
+        if (/[\uD800-\uDBFF]/.test(before[kept - 1])) kept--;
+        let remaining = kept;
+        for (const node of run) {
+          const length = node.textContent.length;
+          if (!remaining) node.remove();
+          else if (remaining < length) {
+            const text = node.nodeType === Node.TEXT_NODE ? node : node.firstChild;
+            text.deleteData(remaining, text.length - remaining);
+          }
+          remaining = Math.max(0, remaining - length);
+        }
+        animate = false;
+      }
+      const added = value.slice(kept);
+      if (added) target.insertBefore(newLiveText(added, animate && !current), current);
     } else if (current?.nodeType === Node.ELEMENT_NODE && current.tagName === next.tagName && current.getAttributeNames().length === next.getAttributeNames().length && next.getAttributeNames().every(name => current.getAttribute(name) === next.getAttribute(name))) {
       if (!current.isEqualNode(next)) patchLiveText(current, next, animate);
       current = current.nextSibling;
     } else {
       const node = next.cloneNode(true), walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT), texts = [];
       for (let text = walker.nextNode(); text; text = walker.nextNode()) texts.push(text);
-      for (const text of texts) text.replaceWith(newLiveText(text.data, animate));
+      for (const text of texts) text.replaceWith(newLiveText(text.data, animate && !current));
       target.insertBefore(node, current);
     }
   }
