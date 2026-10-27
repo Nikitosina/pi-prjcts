@@ -59,19 +59,22 @@
 
   // ---- actions ----
   function toggle(pid) { state.expanded.has(pid) ? state.expanded.delete(pid) : state.expanded.add(pid); draw(); }
+  // Real project: use the app's own project switch (read-only navigation) so the page below follows the active tab; tabs live here and survive it.
+  function followActive() {
+    const hit = state.active && byId(model(), state.active);
+    if (hit?.p.real && typeof projectId !== "undefined" && hit.p.id !== projectId) document.querySelector(`#project-list [data-select-project="${CSS.escape(hit.p.id)}"]`)?.click();
+  }
   function open(id) {
     if (!state.tabs.includes(id)) state.tabs.push(id);
     state.active = id;
-    const hit = byId(model(), id);
-    // Real project: use the app's own project switch (read-only navigation) so the page below matches; tabs live here and survive it.
-    if (hit?.p.real && typeof projectId !== "undefined" && hit.p.id !== projectId) document.querySelector(`#project-list [data-select-project="${CSS.escape(hit.p.id)}"]`)?.click();
+    followActive();
     draw();
   }
   function close(id) {
     const at = state.tabs.indexOf(id);
     if (at < 0) return;
     state.tabs.splice(at, 1);
-    if (state.active === id) state.active = state.tabs[at] ?? state.tabs[at - 1] ?? null; // right neighbour, else left, else empty
+    if (state.active === id) { state.active = state.tabs[at] ?? state.tabs[at - 1] ?? null; followActive(); } // right neighbour, else left, else empty
     draw();
   }
   function setVariant(key) {

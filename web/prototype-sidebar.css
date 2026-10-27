@@ -1,5 +1,6 @@
 /* PROTOTYPE — wipe me. Styles for web/prototype-sidebar.js. Everything is scoped to body[data-proto-variant]. */
-body[data-proto-variant] #project-list, body[data-proto-variant] .side-label, body[data-proto-variant] .side .quiet { display: none; }
+body[data-proto-variant] .side > * { flex-shrink: 0; }
+body[data-proto-variant] #chat-bar, body[data-proto-variant] #project-list, body[data-proto-variant] .side-label, body[data-proto-variant] .side .quiet { display: none; }
 #proto-nav button, #proto-tabs, #proto-detail { font: inherit; color: inherit; }
 #proto-nav button { border: 0; background: transparent; text-align: left; cursor: pointer; }
 .pp-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--k-b9b4a5); }

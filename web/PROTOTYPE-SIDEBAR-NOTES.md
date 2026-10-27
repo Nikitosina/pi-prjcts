@@ -10,7 +10,9 @@ Three variants on the existing inbox route, opt-in with `?variant=A|B|C` (sub-sh
 
 Run (existing runner): `npm run inbox`, then open the launch link (`npm run projects -- ui-url`) with `&variant=A` (or `B`, `C`) added before the `#token=` fragment, e.g. `http://127.0.0.1:<port>/?variant=B#token=…`. Switch with the bottom pill, or ←/→ (ignored while typing). Other search params are kept.
 
-Prototype behaviour: all state (expansion, open tabs, active tab) is in memory in `prototype-sidebar.js`; reload resets it, the variant stays in the URL. Coordinators are sample data (archived ones are in the data and filtered out). Real projects come from the host list; the list is padded with sample projects so cross-project tabs work on a one-project host. Opening a coordinator of a real project that is not open switches the page to it with the app's own project switch (navigation only). No host mutations. The pill also prints expanded/open/active state.
+The top tab bar replaces the legacy coordinator bar (Main / + New chat / Rename): `#chat-bar` is hidden only while a variant is mounted.
+
+Prototype behaviour: all state (expansion, open tabs, active tab) is in memory in `prototype-sidebar.js`; reload resets it, the variant stays in the URL. Coordinators are sample data (archived ones are in the data and filtered out). Real projects come from the host list; the list is padded with sample projects so cross-project tabs work on a one-project host. Activating a coordinator of a real project (open, tab click, or fallback after closing the active tab) switches the page to that project with the app's own project switch (navigation only); tabs survive it. No host mutations. The pill also prints expanded/open/active state.
 
 Production: `src/web.ts` serves `prototype-sidebar.js`/`.css` only when `NODE_ENV !== "production"`, so the switcher never loads there.
 
