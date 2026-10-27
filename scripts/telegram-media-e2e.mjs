@@ -37,7 +37,7 @@ const api = createServer(async (req, res) => {
     if (!ready.length) await new Promise(resolve => setTimeout(resolve, 100));
     return reply({ ok: true, result: ready });
   }
-  if (method === 'sendMediaGroup' && new Set(input.media.map(item => item.show_caption_above_media ?? false)).size > 1) return reply({ ok: false, error_code: 400, description: 'Bad Request: Parameter show_caption_above_media must be the same for all messages' });
+  if (method === 'sendMediaGroup' && new Set(input.media.map(item => item.show_caption_above_media ?? false)).size > 1) return reply({ ok: false, error_code: 400, description: 'Bad Request: parameter show_caption_above_media must be the same for all messages' });
   if (method === 'sendMediaGroup' && rejectPhoto) { rejectPhoto = false; return reply({ ok: false, error_code: 429, description: 'Fixture rate limit', parameters: { retry_after: 1 } }); }
   assert(['sendMessage', 'sendPhoto', 'sendVideo', 'sendDocument', 'sendMediaGroup'].includes(method));
   const message_ids = Array.from({ length: method === 'sendMediaGroup' ? input.media.length : 1 }, () => nextMessage++);

@@ -30,7 +30,9 @@ Sources checked against the current public Bot API:
 - https://core.telegram.org/bots/api#senddocument
 - https://core.telegram.org/bots/api#sendmediagroup
 
-Telegram's TDLib `process_input_caption` checks `utf8_length` against the caption limit, and `fix_formatted_text` removes carriage returns: https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp and https://github.com/tdlib/td/blob/master/td/telegram/MessageEntity.cpp. The album placement constraint is in `check_message_group_message_contents` in the same MessageContent.cpp source.
+Telegram's TDLib `process_input_caption` checks `utf8_length` against the caption limit, and `fix_formatted_text` removes carriage returns: https://github.com/tdlib/td/blob/bc9c263e2bfee06aaab41e82db51a103376030bc/td/telegram/MessageContent.cpp and https://github.com/tdlib/td/blob/bc9c263e2bfee06aaab41e82db51a103376030bc/td/telegram/MessageEntity.cpp. The album placement constraint is in `check_message_group_message_contents` in the same MessageContent.cpp source.
+
+The [HTTP 400 investigation](telegram-media-investigation.md) includes pinned source links, compiled original/corrected payload validation, the exact expected API error wording and remaining proof limits.
 
 ## Retry and restart
 
@@ -41,6 +43,8 @@ Telegram has no client idempotency key for uploads. A pending-media flag is save
 A trusted transport guard that blocks a request **before forwarding it** uses `TelegramRequestNotSentError`, not a generic network exception. That clears the current pending flag and stops automatic retry; it must never be used for a timeout or a request that may have reached Telegram. An explicit API 400 is a confirmed rejection. A locally blocked fallback after that rejection is not evidence that the rejected original upload might have succeeded.
 
 An operator must inspect the actual linked conversation before resolving the cursor in `telegram.json`, with the host stopped under separate authorization. Do not clear the flag or resend blindly. A partially delivered artifact notice from the pre-media production release has only a text-chunk cursor, not a caption plan. It is also held for inspection rather than guessing which content to replay after upgrade. Existing text-only cursors resume unchanged.
+
+The transport also saves the latest 20 redacted `deliveryErrors` before fallback and exposes them in its snapshot. API entries preserve the provided description, HTTP status and API code. Later errors do not erase earlier entries. Network, incomplete-response and not-sent entries remain distinct. The history excludes request bodies and response message/file/chat objects; tests verify token/chat-ID redaction and persistence across restart.
 
 ## Verification and live-demo scope
 

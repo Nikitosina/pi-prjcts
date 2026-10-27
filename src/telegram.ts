@@ -1,3 +1,5 @@
+import { Type } from "typebox";
+import { Compile } from "typebox/compile";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +16,10 @@ type Action =
   | { t: "answer"; projectId: string; entryId: string; text: string }
   | { t: "approve" | "reject"; projectId: string; operationId: string; fingerprint: string };
 type Target = { projectId: string; chatId: string; entryId?: string };
+type DeliveryError = { at: number; method: string; description: string } & (
+  | { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean }
+  | { kind: "network" | "not-sent" | "incomplete-response" }
+);
 type State = {
   version: 1; token: string | null; bot: { id: number; username: string } | null;
   owner: { chatId: number; name: string } | null; pairing: { code: string; expiresAt: number; wrong: number } | null;
@@ -21,7 +27,7 @@ type State = {
   offset: number; sentSeq: number; sentPart?: { seq: number; parts: number; plan?: TelegramPart[]; pendingMedia?: boolean; anchorMessageId?: number }; route: { projectId: string; chatId: string } | null;
   /** Inline-button payloads by short key (callback_data is capped at 64 bytes) and sent messages by id, both bounded. */
   keys: Record<string, Action>; messages: Record<string, Target>;
-  lastError: string | null; lastPollAt: number | null;
+  lastError: string | null; lastPollAt: number | null; deliveryErrors?: DeliveryError[];
 };
 type Update = { update_id: number; message?: Message; callback_query?: { id: string; from: { id: number }; message?: Message; data?: string } };
 type Message = { message_id: number; chat: { id: number; type: string; first_name?: string; username?: string; title?: string }; from?: { id: number; first_name?: string; username?: string }; text?: string; reply_to_message?: { message_id: number } };
@@ -30,6 +36,22 @@ type Button = { text: string; callback_data: string };
 export class TelegramRequestNotSentError extends Error {}
 
 class TelegramError extends Error { code: number; retryAfter?: number; constructor(message: string, code: number, retryAfter?: number) { super(message); this.code = code; this.retryAfter = retryAfter; } }
+
+const telegramResponse = Compile(Type.Object({
+  ok: Type.Boolean(), result: Type.Optional(Type.Unknown()), description: Type.Optional(Type.String()), error_code: Type.Optional(Type.Integer()),
+  parameters: Type.Optional(Type.Object({ retry_after: Type.Optional(Type.Number()) }, { additionalProperties: true })),
+}, { additionalProperties: true }));
+
+/** Keep the error wording, but never persist credentials or chat identifiers from an API echo. */
+export function redactTelegramError(text: string, token: string | null, identifiers: readonly (string | number)[]): string {
+  if (token) for (const value of [token, encodeURIComponent(token)]) text = text.split(value).join("[token]");
+  text = text.replace(/https?:\/\/api\.telegram\.org\/bot[^/\s"']+/gi, "https://api.telegram.org/bot[token]");
+  for (const id of [...new Set(identifiers.map(String))].filter(Boolean).sort((a, b) => b.length - a.length)) {
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(`(?<![\\w-])${escaped}(?!\\w)`, "g"), "[chat]");
+  }
+  return text.replace(/(\bchat(?:[_ -]?id)?["']?\s*(?:[:=]\s*)?["']?)-?\d+/gi, "$1[chat]").replace(/-100\d{6,}\b/g, "[chat]");
+}
 
 const UNCERTAIN_MEDIA = "Telegram attachment delivery is uncertain. Automatic resend blocked to avoid duplicates; verify in Telegram before resolving the outbox.";
 const PAIR_MS = 10 * 60_000, PAIR_TRIES = 5, KEEP = 500, LIMIT = 4000;
@@ -50,20 +72,29 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
   const path = join(home(), "telegram.json");
   const state: State = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { version: 1, token: null, bot: null, owner: null, pairing: null, offset: 0, sentSeq: 0, route: null, keys: {}, messages: {}, lastError: null, lastPollAt: null };
   const persist = () => { bounded(state.keys); bounded(state.messages); saveJson(path, state); };
-  const redact = (text: string, token = state.token) => token ? text.split(token).join("[token]") : text;
+  const redact = (text: string, token = state.token, chatId?: unknown) => redactTelegramError(text, token, [state.owner?.chatId, state.bot?.id, chatId].flatMap(id => typeof id === "string" || typeof id === "number" ? [id] : []));
+  const recordError = (error: DeliveryError) => { state.deliveryErrors = [...state.deliveryErrors ?? [], error].slice(-20); persist(); };
   let closed = false, rejected = false, polling = false, poll: AbortController | null = null, wake: (() => void) | null = null, flushing: Promise<void> | null = null, flushAgain = false, sendFailures = 0, retry: NodeJS.Timeout | undefined;
   const sleep = (ms: number) => new Promise<void>(resolve => { const timer = setTimeout(done, ms); function done() { clearTimeout(timer); if (wake === done) wake = null; resolve(); } wake = done; });
 
   async function call<T>(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal, token = state.token): Promise<T> {
     if (!token) throw new TelegramError("No Telegram bot is set", 0);
+    const chatId = body instanceof FormData ? body.get("chat_id") : body.chat_id;
     let response: Response;
     try { response = await fetch(`${base}/bot${token}/${method}`, { method: "POST", ...(body instanceof FormData ? { body } : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), signal: signal ?? AbortSignal.timeout(body instanceof FormData ? 120_000 : 30_000) }); }
     catch (error) {
-      if (error instanceof TelegramRequestNotSentError) throw new TelegramRequestNotSentError(redact(error.message, token));
-      throw new TelegramError(redact(`Telegram ${method} failed: ${errorText(error)}`, token), 0);
+      const description = redact(errorText(error), token, chatId);
+      recordError({ kind: error instanceof TelegramRequestNotSentError ? "not-sent" : "network", at: Date.now(), method, description });
+      if (error instanceof TelegramRequestNotSentError) throw new TelegramRequestNotSentError(description);
+      throw new TelegramError(`Telegram ${method} failed: ${description}`, 0);
     }
-    const data = await response.json().catch(() => null) as { ok?: boolean; result?: T; description?: string; error_code?: number; parameters?: { retry_after?: number } } | null;
-    if (!data?.ok) throw new TelegramError(redact(`Telegram ${method}: ${data?.description ?? `HTTP ${response.status}`}`, token), data?.error_code ?? response.status, data?.parameters?.retry_after);
+    const raw: unknown = await response.json().catch(() => null);
+    const data = telegramResponse.Check(raw) ? raw : null;
+    if (!data?.ok) {
+      const description = redact(data?.description ?? `HTTP ${response.status}`, token, chatId), code = data?.error_code ?? response.status;
+      recordError({ kind: "api", at: Date.now(), method, httpStatus: response.status, code, description, descriptionProvided: data?.description !== undefined });
+      throw new TelegramError(`Telegram ${method}: ${description}`, code, data?.parameters?.retry_after);
+    }
     return data.result as T;
   }
   const key = (action: Action) => { const id = randomBytes(6).toString("hex"); state.keys[id] = action; return `k:${id}`; };
@@ -309,7 +340,11 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
             if ("reply_parameters" in reply) form.body.set("reply_parameters", JSON.stringify(reply.reply_parameters));
             const result = await call<{ message_id: number } | { message_id: number }[]>(form.method, form.body);
             const messages = Array.isArray(result) ? result : [result];
-            if (messages.length !== refs.length || messages.some(message => !message || !Number.isSafeInteger(message.message_id) || message.message_id <= 0) || new Set(messages.map(message => message.message_id)).size !== messages.length) throw new TelegramError("Telegram upload response is incomplete; delivery uncertain", 0);
+            if (messages.length !== refs.length || messages.some(message => !message || !Number.isSafeInteger(message.message_id) || message.message_id <= 0) || new Set(messages.map(message => message.message_id)).size !== messages.length) {
+              const description = "Telegram upload response is incomplete; delivery uncertain";
+              recordError({ kind: "incomplete-response", at: Date.now(), method: form.method, description });
+              throw new TelegramError(description, 0);
+            }
             return messages;
           };
           try {
@@ -371,7 +406,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
 
   async function snapshot() {
     const route = state.route ? { ...state.route, name: await routeName() } : null;
-    return { configured: Boolean(state.token), botUsername: state.bot?.username ?? null, paired: Boolean(state.owner), owner: state.owner?.name ?? null, pairing: state.pairing && state.pairing.expiresAt > Date.now() ? { code: state.pairing.code, expiresAt: state.pairing.expiresAt } : null, route, lastError: state.lastError, lastPollAt: state.lastPollAt, polling: polling && !rejected };
+    return { configured: Boolean(state.token), botUsername: state.bot?.username ?? null, paired: Boolean(state.owner), owner: state.owner?.name ?? null, pairing: state.pairing && state.pairing.expiresAt > Date.now() ? { code: state.pairing.code, expiresAt: state.pairing.expiresAt } : null, route, lastError: state.lastError, deliveryErrors: state.deliveryErrors ?? [], lastPollAt: state.lastPollAt, polling: polling && !rejected };
   }
   const restart = () => { poll?.abort(); wake?.(); };
   return {
@@ -382,7 +417,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
       try { bot = await call<{ id: number; username: string }>("getMe", {}, undefined, token); }
       catch (error) { throw new Error(error instanceof TelegramError && error.code === 401 ? "Telegram rejected this token (401 Unauthorized)" : errorText(error).split(token).join("[token]")); }
       const same = state.bot?.id === bot.id;
-      Object.assign(state, { token, bot: { id: bot.id, username: bot.username }, lastError: null }, same ? {} : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {} });
+      Object.assign(state, { token, bot: { id: bot.id, username: bot.username }, lastError: null }, same ? {} : { owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, deliveryErrors: [] });
       rejected = false; persist(); restart(); void flush();
       return snapshot();
     },
@@ -392,7 +427,7 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
       return snapshot();
     },
     unpair() { state.owner = null; state.pairing = null; persist(); return snapshot(); },
-    remove() { Object.assign(state, { token: null, bot: null, owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, lastError: null }); persist(); restart(); return snapshot(); },
+    remove() { Object.assign(state, { token: null, bot: null, owner: null, pairing: null, offset: 0, route: null, keys: {}, messages: {}, lastError: null, deliveryErrors: [] }); persist(); restart(); return snapshot(); },
     close() { closed = true; clearTimeout(retry); restart(); },
   };
 }

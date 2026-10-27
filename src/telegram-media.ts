@@ -79,6 +79,7 @@ export function telegramMediaForm(media: ReturnType<typeof loadTelegramMedia>, c
 export function telegramAlbumForm(media: ReturnType<typeof loadTelegramMedia>[], chatId: number, caption: string, document = false) {
   const body = new FormData();
   body.set("chat_id", String(chatId));
+  // TDLib requires the same caption position on every item, even those without caption text.
   body.set("media", JSON.stringify(media.map((file, index) => {
     const name = `file${index}`;
     body.set(name, new Blob([new Uint8Array(file.bytes)], { type: file.mime }), file.filename);
