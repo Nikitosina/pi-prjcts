@@ -30,6 +30,7 @@ assert.equal(loadTelegramMedia(join(root, project), ref('medium.png')).method, '
 for (const path of ['../project.json', 'missing.png', 'link.png', 'large.png', '%2e%2e/no', '/etc/passwd', 'a\\b']) assert.throws(() => loadTelegramMedia(join(root, project), ref(path)));
 assert.equal(extractTelegramMedia('`![example](x)`\n```\n![code](y)\n```').media.length, 0);
 assert.equal(extractTelegramMedia('\uE0000\uE001').markdown, '0');
+for (const fence of ['```', '~~~']) assert.equal(extractTelegramMedia(`${fence}\n![example](${ref('demo.png')})`).media.length, 0);
 let fault = null, sends = [], attempts = [], id = 0;
 const server = createServer(async (req, res) => {
   const chunks = []; for await (const chunk of req) chunks.push(chunk);

@@ -14,7 +14,7 @@ export function extractTelegramMedia(markdown: string): { markdown: string; medi
   const media: MediaRef[] = [];
   markdown = markdown.replace(/[\uE000\uE001]/g, "");
   let text = "", cursor = 0;
-  for (const match of markdown.matchAll(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)|!\[([^\]\n]*)\]\(/g)) {
+  for (const match of markdown.matchAll(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)|!\[([^\]\n]*)\]\(/g)) {
     if (match[1] || match.index < cursor) continue;
     const start = match.index + match[0].length;
     let end = start, depth = 1;
