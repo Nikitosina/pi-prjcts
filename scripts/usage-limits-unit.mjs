@@ -36,6 +36,11 @@ assert.throws(
   /crossed the UTC month boundary/,
   'a response crossing the boundary is discarded rather than assigned to the new month',
 );
+assert.throws(
+  () => parseElizaUsage({ ...elizaBody, usage: {} }, Date.parse('2026-10-31T23:59:59Z'), Date.parse('2026-11-01T00:00:01Z')),
+  /crossed the UTC month boundary/,
+  'an empty boundary-crossing response also retries instead of clearing the cache',
+);
 const beforeBoundary = parseElizaUsage(elizaBody, Date.parse('2026-10-31T23:59:59Z'), Date.parse('2026-10-31T23:59:59.500Z'));
 assert.equal(beforeBoundary.periodStartAt, Date.parse('2026-10-01T00:00:00Z'));
 assert.equal(beforeBoundary.periodEndAt, Date.parse('2026-11-01T00:00:00Z'));

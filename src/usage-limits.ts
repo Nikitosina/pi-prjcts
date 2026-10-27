@@ -216,10 +216,10 @@ export function parseElizaUsage(data: unknown, startedAt = Date.now(), finishedA
     if (cost === null || cost < 0) throw new Retry("Eliza returned an unreadable usage response");
     amountUsd += cost; buckets++;
   }
-  if (!buckets) return null;
-  if (!Number.isFinite(amountUsd)) throw new Retry("Eliza returned an unreadable usage response");
   const [periodStartAt, periodEndAt] = utcMonth(startedAt);
   if (utcMonth(finishedAt)[0] !== periodStartAt) throw new Retry("Eliza usage crossed the UTC month boundary, will retry");
+  if (!buckets) return null;
+  if (!Number.isFinite(amountUsd)) throw new Retry("Eliza returned an unreadable usage response");
   return { amountUsd, periodStartAt, periodEndAt, account, pool: pool || null };
 }
 const elizaUsageUrl = () => process.env.PI_PROJECTS_ELIZA_USAGE_URL ?? "https://api.eliza.yandex.net/v2/usage";
