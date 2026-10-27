@@ -35,7 +35,8 @@ import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } 
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
-import { COORDINATOR_ROLE_TEXT, DEFAULT_WORKER_RULES, type DurableProjectRuntime } from "./durable-runtime.ts";
+import { type DurableProjectRuntime } from "./durable-runtime.ts";
+import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
 import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 
@@ -301,7 +302,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read": return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot": return projectSettings(loadProject(input.id));
     case "prompts-snapshot": {
-      const project = loadProject(input.id), defaults = { coordinator: COORDINATOR_ROLE_TEXT, worker: DEFAULT_WORKER_RULES, scout: DEFAULT_WORKER_RULES, reviewer: DEFAULT_WORKER_RULES };
+      const project = loadProject(input.id), defaults = DEFAULT_ROLE_PROMPTS;
       return { scope: "project", roles: PROMPT_ROLES.map(role => ({ role, default: defaults[role], override: project.prompts?.[role] ?? null, effective: project.prompts?.[role] ?? defaults[role] })) };
     }
     case "coordinator-skills": return { skills: listSkills(await configuredSkills(input.id)) };

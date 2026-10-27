@@ -71,7 +71,7 @@ try {
     assert.equal(typeof event.conversationId, "number", "observer has numeric conversationId");
     assert.ok(Array.isArray(event.messages), "observer has prepared request messages");
     const messages = redactMessages(event.messages);
-    assert.ok(!/(sk-[A-Za-z0-9]|Bearer\s+[A-Za-z0-9])/.test(JSON.stringify(messages)), "request artifact has no credential value");
+    assert.ok(!/(\bsk-[A-Za-z0-9]|Bearer\s+[A-Za-z0-9])/.test(JSON.stringify(messages)), "request artifact has no credential value");
     requests.push({ conversationId: event.conversationId, messages }); save("model-requests.json", requests);
   };
   const options = access => ({ knowledgeAccess: access, onModelRequest: observe, onReport: report => { reports.push(report); save("reports.json", reports); } });

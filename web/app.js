@@ -815,7 +815,7 @@ document.addEventListener("input", event => {
 });
 
 // Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
-const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer" };
+const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer", verifier: "Verifier" };
 let promptsState = null;
 async function loadPrompts(force = false) {
   const id = projectId, current = generation, node = document.querySelector("#prompts");

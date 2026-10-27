@@ -128,7 +128,7 @@ export function verdictText(verification: Verification, attempt: VerificationAtt
   return `Verification attempt ${attempt.n} of ${MAX_VERIFICATION_ATTEMPTS} (verifier thread ${attempt.verifierThreadId}) on revision ${attempt.revision.slice(0, 12)}${attempt.branch ? ` (${attempt.branch}` + (attempt.head ? ` @ ${attempt.head.slice(0, 9)}, plus uncommitted work)` : ")") : ""}: ${attempt.state.toUpperCase()}${attempt.reason ? ` (${attempt.reason})` : ""}${attempt.proofFiles?.length ? `\nProof files the worker changed (skills, scripts, tests, CI; review them): ${attempt.proofFiles.slice(0, 12).join(", ")}${attempt.proofFiles.length > 12 ? ", …" : ""}` : ""}${attempt.sourceWrites?.length ? `\nChanges the verifier's commands left in the worktree (declared by the verifier): ${attempt.sourceWrites.slice(0, 12).map(write => `${write.path} (${write.reason.slice(0, 120)})`).join("; ")}` : ""}\n${attempt.verdict ? `${clip(attempt.verdict.summary, 1200)}\n${lines.join("\n")}` : "No verdict was recorded."}`;
 }
 
-/** Role text of every verifier thread. Fixed in code: the verifier's behavior is part of the loop's guarantees, not a Settings prompt. */
+/** Host protocol appended even when the owner customizes verifier role text. */
 export const VERIFIER_RULES = `Role profile: verifier.
 You decide whether finished work meets its criteria, by running the project's verification skill against the worker's worktree. Your evidence decides, whatever the worker claimed.
 You are trusted like the worker: projects_verify_run runs shell commands as the same user, with the same environment and shell policy as the worker's bash, in the worker's worktree. Nothing confines them, so read a command before you run it, and use only what the skill and the criteria call for.
@@ -138,7 +138,7 @@ You are trusted like the worker: projects_verify_run runs shell commands as the 
 4. Judge each criterion by its own wording. A pass cites the run that shows the behavior.
 5. Report; do not fix. You have no edit or write tools. If your commands leave files changed in the worktree (a test runner writing coverage or snapshots), list each path with its reason in sourceWrites; a change you do not declare makes the attempt stale.
 6. Call projects_verification_verdict once, answering every criterion id.
-Fail means the work is wrong. Blocked means you cannot tell (skill missing, tool failing, resource unavailable). Your verdict goes back to the worker automatically.`;
+Fail means the work is wrong. Blocked means you cannot tell (skill missing, tool failing, resource unavailable). Your verdict goes back to the worker automatically. Recording it does not release the worker: finish skill cleanup, stop your background jobs and end your turn. The host drains remaining jobs before its final drift check and settlement. Do not repair implementation or publish from commands.`;
 
 export function verifierBrief(input: { proof?: { paths: string[]; diff: string }; skill: string; criteria: readonly Criterion[]; task: string; attempt: number; revision: string; branch: string | null; head: string | null }): string {
   return `Verify the finished work of a worker thread. Attempt ${input.attempt} of ${MAX_VERIFICATION_ATTEMPTS}; you start with no memory of earlier attempts.

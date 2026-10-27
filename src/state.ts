@@ -8,9 +8,9 @@ import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts"
 import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
-export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
+export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
-export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText) }, { additionalProperties: false });
+export const PromptOverrides = Type.Object({ coordinator: Type.Optional(promptText), worker: Type.Optional(promptText), scout: Type.Optional(promptText), reviewer: Type.Optional(promptText), verifier: Type.Optional(promptText) }, { additionalProperties: false });
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_WORKER_CAP = 5;
@@ -249,7 +249,7 @@ export const Request = Type.Union([
     /** null removes every MCP server. */
     mcp: Type.Optional(Type.Union([McpSettings, Type.Null()])),
     /** A role set to null returns to the built-in text. */
-    prompts: Type.Optional(Type.Object({ coordinator: Type.Optional(Type.Union([promptText, Type.Null()])), worker: Type.Optional(Type.Union([promptText, Type.Null()])), scout: Type.Optional(Type.Union([promptText, Type.Null()])), reviewer: Type.Optional(Type.Union([promptText, Type.Null()])) }, { additionalProperties: false })),
+    prompts: Type.Optional(Type.Object({ coordinator: Type.Optional(Type.Union([promptText, Type.Null()])), worker: Type.Optional(Type.Union([promptText, Type.Null()])), scout: Type.Optional(Type.Union([promptText, Type.Null()])), reviewer: Type.Optional(Type.Union([promptText, Type.Null()])), verifier: Type.Optional(Type.Union([promptText, Type.Null()])) }, { additionalProperties: false })),
     /** "" removes the worktree setup command. */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     /** null restores the defaults (catalog window, pi-durable compaction policy). */
