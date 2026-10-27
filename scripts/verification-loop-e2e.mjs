@@ -46,7 +46,8 @@ const model = createServer((req, res) => {
       if (role === 'worker') {
         if (marker === 'MARK-NOCHANGE' && stage === 0) return reply(call('bash', { command: 'echo nope > feature.txt' }));
         if (/^\[Automatic verification failed\]/.test(user) && marker !== 'MARK-NOCHANGE' && stage === 0) { return reply(call('bash', { command: 'echo done > feature.txt' })); }
-        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-BG' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
+        if (marker === 'MARK-FREEZEPASS' && !user.startsWith('Frozen follow-up') && stage > 0) await gate('worker-ready').wait;
+        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-BG' || marker === 'MARK-FREEZEPASS' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
         return reply(say(`Worker finished ${marker}`));
       }
       if (role === 'verifier') {
@@ -64,6 +65,7 @@ const model = createServer((req, res) => {
           const evidence = [{ runId: run.runId }, ...(existsSync(join(home, '..', 'unused')) ? [] : [])];
           return reply(call('projects_verification_verdict', { summary: pass ? 'check.mjs exits 0 on the worktree.' : 'check.mjs fails on the worktree.', criteria: [{ id: 'c1', status: pass ? 'pass' : 'fail', reason: pass ? 'feature.txt says done' : 'feature.txt does not say done', evidence }, { id: 'c2', status: pass ? 'pass' : 'fail', reason: pass ? 'exit 0' : `exit ${run.exitCode}`, evidence }] }));
         }
+        if (marker === 'MARK-FREEZEPASS' || marker === 'MARK-FREEZEFAIL') await gate(`${marker}-verdict`).wait;
         return reply(say('Verdict recorded.'));
       }
       return reply(say('ok'));
@@ -194,6 +196,34 @@ try {
   await delay(1200);
   const backgroundTree = background.snapshot.work.find(w => w.id === background.worker.id).attempt.cwd;
   check('V5c a leftover verifier background process cannot change the tree after a pass or overlap the worker', background.cycle.outcome === 'verified' && readFileSync(join(backgroundTree, 'feature.txt'), 'utf8') === 'done\n', background.cycle);
+
+  // V5d: leave a slot free so the freeze guard, not the pool cap, holds a queued follow-up.
+  await settingsUpdate(id, { workerCap: 2 });
+  const freezePass = await delegateTask(id, 'MARK-FREEZEPASS');
+  await eventually(async () => result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-FREEZEPASS' && r.stage === 1), 'worker held before completion');
+  await rpc({ action: 'thread-send', id, threadId: freezePass.threadId, requestId: randomUUID(), text: 'Frozen follow-up must wait for settlement\n\nAcceptance criteria:\n- feature.txt says done\n- node check.mjs exits 0' });
+  gate('worker-ready').open();
+  await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-FREEZEPASS' && r.stage === 3), 'pass recorded, verifier held');
+  await waitCycle(id, 'MARK-GOOD'); // Its admission and settlement drive dispatch while the pass remains held.
+  const heldPass = await plan(id);
+  writeFileSync(join(artifacts, 'held-pass-plan.json'), JSON.stringify(heldPass, null, 2));
+  check('V5d recorded pass keeps queued parent follow-up frozen with a free pool slot', cycleOf(heldPass, freezePass).open && cycleOf(heldPass, freezePass).attempts[0].state === 'pass' && heldPass.work.find(w => w.text.startsWith('Frozen follow-up')).status === 'queued' && !result.requests.some(r => r.role === 'worker' && r.user.startsWith('Frozen follow-up')));
+  await assert.rejects(rpc({ action: 'thread-send', id, threadId: freezePass.threadId, requestId: randomUUID(), text: 'Must not enter after pass' }), /tree is frozen/);
+  check('V5d recorded pass still refuses new parent admission and reports no completion', !reportFor('MARK-FREEZEPASS', 'VERIFIED by'));
+  gate('MARK-FREEZEPASS-verdict').open();
+  await eventually(async () => (await plan(id)).work.find(w => w.text.startsWith('Frozen follow-up'))?.status === 'completed' && settled(await plan(id), freezePass), 'queued follow-up completes after settlement');
+  check('V5d queued follow-up runs after settlement without a stale pass', cycleOf(await plan(id), freezePass).outcome === 'verified');
+
+  await settingsUpdate(id, { workerCap: 1 });
+  const freezeFail = await delegateTask(id, 'MARK-FREEZEFAIL');
+  await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-FREEZEFAIL' && r.stage === 3), 'fail recorded, verifier held');
+  const heldFail = await plan(id);
+  writeFileSync(join(artifacts, 'held-fail-plan.json'), JSON.stringify(heldFail, null, 2));
+  await assert.rejects(rpc({ action: 'thread-send', id, threadId: freezeFail.threadId, requestId: randomUUID(), text: 'Must not enter after fail' }), /tree is frozen/);
+  check('V5d recorded fail keeps parent frozen and does not start repair before settlement', cycleOf(heldFail, freezeFail).open && cycleOf(heldFail, freezeFail).attempts[0].state === 'fail' && heldFail.work.filter(w => w.threadId === freezeFail.threadId).length === 1 && !reportFor('MARK-FREEZEFAIL', 'VERIFIED by'));
+  gate('MARK-FREEZEFAIL-verdict').open();
+  const repaired = await eventually(async () => settled(await plan(id), freezeFail), 'cap 1 repair and fresh verifier complete');
+  check('V5d settlement releases its own repair at cap 1, then a fresh verifier passes', repaired.outcome === 'verified' && repaired.attempts.map(a => a.state).join() === 'fail,pass', repaired);
 
   // V6: a missing skill or model at the end of a turn escalates; nothing is claimed complete.
   rmSync(join(workspace, '.agents/skills/mini-verify'), { recursive: true });

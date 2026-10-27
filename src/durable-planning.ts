@@ -586,11 +586,17 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (existing && existing.workspaceScopeId !== workspaceScopeId) throw new Error("Existing durable thread workspace scope does not match frozen scope binding");
     return { id: work.id, threadId: work.threadId, role: work.role, text: work.text, dependsOn: [...new Set(work.dependsOn ?? [])], requestId: work.requestId ?? null, requiredTools: selected, workspaceScopeId, workspaceBindingRevision: existing?.workspaceBindingRevision ?? null, workspaceConfigured: workspaceScopeId === null ? (existing?.workspaceConfigured ?? true) : Boolean(existing?.workspaceConfigured && continuationAttempt), status: "queued", blocker: null, conversationId, taskId: null, attempt: profile };
   }
+  function verifierPending(state: PlanningState, threadId: string): boolean {
+    return state.threads[threadId]?.verification?.attempts.some(attempt => {
+      const work = state.work[attempt.verifierWorkId];
+      return work?.status === "queued" || work?.status === "running";
+    }) ?? false;
+  }
   async function admit(tx: Tx, parent: ConversationId, work: DurablePlanWork, kick: boolean, chat?: ConversationId): Promise<StoredWork> {
     const state = await tx.doc(DurablePlanning, parent);
     if (await hasUncertainVcsOperations(tx, parent)) throw new Error("A VCS operation has an uncertain outcome; worker admission is denied");
     if (state.paused) throw new Error("Project plan is paused; new worker admission is denied");
-    if (work.role === "worker" && state.threads[work.threadId]?.verification?.attempts.some(attempt => attempt.state === "running")) throw new Error("This worker is being verified; its tree is frozen until the verifier finishes");
+    if (work.role === "worker" && verifierPending(state, work.threadId)) throw new Error("This worker is being verified; its tree is frozen until the verifier finishes");
     if (state.workerCap === null) state.workerCap = options.workerCap;
     const same = state.work[work.id];
     if (same) {
@@ -627,8 +633,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     for (const { work } of queue) {
       if (started.length >= slots) break;
       if (state.threads[work.threadId]?.activeWorkId !== null || state.threads[work.threadId]?.stopping || state.threads[work.threadId]?.paused) continue;
-      // The worker's tree is frozen while a verifier runs commands in it.
-      if (work.role === "worker" && state.threads[work.threadId]?.verification?.attempts.some(attempt => attempt.state === "running")) continue;
+      // A recorded verdict is not settled until background cleanup and the final drift check finish.
+      if (work.role === "worker" && verifierPending(state, work.threadId)) continue;
       const parents = work.dependsOn.map(id => state.work[id]);
       if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
       if (!parents.every(parentWork => parentWork?.status === "completed" && !state.threads[parentWork.threadId]?.verification?.open)) continue;
