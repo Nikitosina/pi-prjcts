@@ -103,6 +103,8 @@ export const Project = Type.Object({
   models: Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text), verifier: Type.Optional(text) }),
   /** Opt-in verification loop: a fresh verifier runs this skill against each finished worker task. Needs models.verifier; neither has a default. */
   verification: Type.Optional(VerificationSettings),
+  /** Explicit quota fallback per role; absent means wait for the selected model's quota to reset. */
+  fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
   /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
   scopedModels: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true })),
   /** Retired legacy-runtime fields (always null / empty); accepted so existing project files load. */
@@ -241,6 +243,8 @@ export const Request = Type.Union([
     models: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])), verifier: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
     /** null turns the verification loop off and forgets its skill. */
     verification: Type.Optional(Type.Union([VerificationSettings, Type.Null()])),
+  /** Explicit quota fallback per role; null removes it and restores reset waiting. */
+    fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(Type.Union([text, Type.Null()])), scout: Type.Optional(Type.Union([text, Type.Null()])), reviewer: Type.Optional(Type.Union([text, Type.Null()])) }, { additionalProperties: false })),
     /** null restores Pi's enabledModels as the scope. */
     scopedModels: Type.Optional(Type.Union([Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true }), Type.Null()])),
     knowledgeAccess: Type.Optional(Type.Union([Type.Literal("read-only"), Type.Literal("maintain")])), libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])), githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])), workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),

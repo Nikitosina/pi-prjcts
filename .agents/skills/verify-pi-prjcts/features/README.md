@@ -5,7 +5,7 @@ Maintained source for verifying what a user does in the Pi Projects browser inbo
 ## Baseline preconditions
 
 - Launch with `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch`. It starts a private host (own `HOME`, project home, agent dir, loopback port, socket) from empty data, plus a fake model provider.
-- The seeded state is one project named `Verify seed` (folder: a one-commit git repo), all roles pinned to `fake/fake-model`, no chats, no knowledge beyond the starter `MEMORY.md` and `preferences.md`.
+- The seeded state is one project named `Verify seed` (folder: a one-commit git repo), all roles pinned to `fake/fake-model`, a second configured `fake/fallback-model`, no chats, no knowledge beyond the starter `MEMORY.md` and `preferences.md`.
 - Run `doctor --run <scratch>` and require `ok: true` before driving.
 - Drive only the instance this run launched. Never open the owner's inbox URL or use its token.
 
@@ -33,3 +33,4 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Search a project](./search.md) — search dialog over chats. Recipe only.
 - [Knowledge topics](./knowledge.md) — create and read a knowledge document. Recipe only.
 - [Verification settings](./verification-settings.md) — opt in to the automatic verifier loop in Project settings. Scripted.
+- [Quota fallback settings](./quota-settings.md) — worker fallback selection, review, save and reload. Scripted.

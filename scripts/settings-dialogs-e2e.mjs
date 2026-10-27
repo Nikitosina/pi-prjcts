@@ -71,7 +71,7 @@ await kit.run(async () => {
   const jargon = /offline catalog|Review this single change|Explicit grants|Retained Durable|knowledgeAccess|workerCap|Exact operation binding/;
 
   // ---- Project settings + model picker ----
-  await open(`document.querySelector('#settings-button').click()`, `!!document.querySelector('#dialog [data-settings-form]') && document.querySelectorAll('#dialog .mp').length === 4`, 'settings form');
+  await open(`document.querySelector('#settings-button').click()`, `!!document.querySelector('#dialog [data-settings-form]') && document.querySelectorAll('#dialog .mp').length === 7`, 'settings form');
   check('settings: plain title + subtitle, inline current values, no jargon, Review disabled', await dlg(`d.querySelector('h2').textContent === 'Project settings' && d.querySelector('.dialog-sub').textContent.length > 10 && d.querySelector('[name=name]').value === 'Mari' && d.querySelector('[name=workerCap]').value === '3' && !${jargon}.test(d.innerText) && d.querySelector('[type=submit]').disabled`));
   check('settings: current model names are shown on the picker buttons', (await dlg(`[...d.querySelectorAll('.mp-current')].map(b => b.innerText).join('|')`)).includes('fake/fake-model'));
   await capture('settings-form');

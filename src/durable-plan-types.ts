@@ -33,7 +33,10 @@ export type DurablePlan = Readonly<{ id?: string; work: readonly DurablePlanWork
 /** Usage snapshots are Durable UsageDoc counters flattened by path, attributed to this project/thread/attempt/model. */
 export type DurableUsageDelta = Readonly<{ baseline: Readonly<Record<string, number>>; final: Readonly<Record<string, number>>; delta: Readonly<Record<string, number>> }>;
 export type DurableResolvedAttempt = Readonly<{
-  id: string; projectId: string; threadId: string; role: DurableRole; model: string; thinking: "low" | "medium" | "high";
+  id: string; projectId: string; threadId: string; role: DurableRole; model: string;
+  /** Owner-approved exception to the frozen model, recorded when quota fallback configures it. */
+  modelTransitions: readonly { at: number; from: string; to: string; reason: "quota_exceeded" }[];
+  thinking: "low" | "medium" | "high";
   instructions: string; cwd: string; toolNames: readonly string[]; bindingRevision: string; standingRevision: string;
   startedAt: number | null; endedAt: number | null; usage: DurableUsageDelta;
 }>;

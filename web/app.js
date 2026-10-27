@@ -653,7 +653,7 @@ function renderPanels() {
   setHtml("#owner-steps", [...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]), (pluginProvider ? (providerCard ? step(providerCard.state === "connected", `1. ${providerCard.title}`, providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.") + (wholeRepository && providerCard.state === "available" && providerCard.connect ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>` : "") : step(false, `1. ${pluginProvider}`, view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.")) : step(grants > 0, "1. GitHub", grants ? `Draft PRs on ${p.githubAuthorization.map(grant => grant.repositoryId).join(", ")}` : wholeRepository ? "Workers cannot open draft PRs yet." : "Not connected.") + (wholeRepository && !grants ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>' : "")), ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]), step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default.")].join(""));
   if (tab === "settings" && plan) { void loadAutomationStrip(); void loadEventsIn(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); void loadContextSettings(); }
   if (tab === "settings" && !telegramView) void loadTelegram();
-  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
+  setHtml("#settings-summary", `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`).join("")}${Object.entries(p.fallbackModels ?? {}).map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} quota fallback</span><b>${esc(model)}</b>`).join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`);
   if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
 
@@ -2811,7 +2811,7 @@ async function submit(form) {
     const result = await mutate({ action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes }, "Settings saved. New threads use them; running threads keep what they started with.");
     validateSettings(result);
     for (const [field, changed] of Object.entries(proposal.changes)) {
-      if (field === "verification" ? JSON.stringify(result.values.verification) !== JSON.stringify(changed) : field === "models" ? Object.entries(changed).some(([role, reference]) => (result.values.models[role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
+      if (field === "verification" ? JSON.stringify(result.values.verification) !== JSON.stringify(changed) : field === "models" || field === "fallbackModels" ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference) : field === "scopedModels" ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed) : result.values[field] !== changed) throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
     }
     for (const key of proposal.draftKeys) {
       const draft = settingsDrafts.get(key), field = key.slice(key.indexOf(":") + 1);
@@ -3207,7 +3207,7 @@ async function usageList(offset = 0) {
 }
 function validateSettings(value) {
   const v = value?.values;
-  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer, v.models?.verifier].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || v.verification !== null && (typeof v.verification?.enabled !== "boolean" || typeof v.verification.skill !== "string") || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
+  if (!value || !/^[a-f0-9]{64}$/.test(value.revision) || !v || [v.name, v.objective, v.model].some(text => typeof text !== "string") || [v.models?.worker, v.models?.scout, v.models?.reviewer, v.models?.verifier, v.fallbackModels?.worker, v.fallbackModels?.scout, v.fallbackModels?.reviewer].some(text => text !== undefined && typeof text !== "string") || v.scopedModels !== null && !Array.isArray(v.scopedModels) || !["read-only", "maintain"].includes(v.knowledgeAccess) || !["none", "coordinator"].includes(v.libraryAccess) || !["none", "coordinator"].includes(v.decisionAccess) || v.verification !== null && (typeof v.verification?.enabled !== "boolean" || typeof v.verification.skill !== "string") || !Number.isSafeInteger(v.workerCap) || v.workerCap < 1 || v.workerCap > 32) throw new Error("Invalid settings snapshot/receipt");
 }
 function captureSettingsDraft() {
   const form = dialog.querySelector("[data-settings-form]");
@@ -3361,11 +3361,14 @@ const settingsAccess = {
 };
 let settingsPending = null, modelScoped = [], modelUnavailableScoped = [], modelScopeSet = false, modelExtensionErrors = [];
 const scopeKey = refs => [...refs].sort().join("\n");
-const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", verifier: values.models.verifier ?? "", verifyEnabled: values.verification?.enabled ? "on" : "off", verifySkill: values.verification?.skill ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
+const flatSettings = values => ({ name: values.name, objective: values.objective, coordinator: values.model, worker: values.models.worker ?? "", scout: values.models.scout ?? "", reviewer: values.models.reviewer ?? "", verifier: values.models.verifier ?? "", verifyEnabled: values.verification?.enabled ? "on" : "off", verifySkill: values.verification?.skill ?? "", workerFallback: values.fallbackModels?.worker ?? "", scoutFallback: values.fallbackModels?.scout ?? "", reviewerFallback: values.fallbackModels?.reviewer ?? "", scoped: scopeKey(values.scopedModels ?? []), knowledgeAccess: values.knowledgeAccess, libraryAccess: values.libraryAccess, decisionAccess: values.decisionAccess, githubCli: values.githubCli ?? "full", workerCap: String(values.workerCap) });
 function settingsFormValues(form) {
   const flat = { name: form.elements.name.value, objective: form.elements.objective.value, workerCap: form.elements.workerCap.value, verifyEnabled: form.elements.verifyEnabled.checked ? "on" : "off", verifySkill: form.elements.verifySkill.value.trim() };
   for (const field of Object.keys(settingsAccess)) flat[field] = form.elements[field].value;
-  for (const [role] of settingsRoles) flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+  for (const [role] of settingsRoles) {
+    flat[role] = form.querySelector(`.mp[data-role="${role}"]`).dataset.value;
+    if (role !== "coordinator" && role !== "verifier") flat[`${role}Fallback`] = form.querySelector(`.mp[data-role="${role}-fallback"]`).dataset.value;
+  }
   flat.scoped = scopeKey([...form.querySelectorAll("[data-scope-ref]:checked")].map(box => box.dataset.scopeRef));
   return flat;
 }
@@ -3374,7 +3377,11 @@ function settingsChanges(flat, values) {
   for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess", "githubCli"]) if (flat[field] !== was[field]) changes[field] = flat[field];
   if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
   if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
-  for (const role of ["worker", "scout", "reviewer", "verifier"]) if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
+  for (const role of ["worker", "scout", "reviewer"]) {
+    if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
+    if (flat[`${role}Fallback`] !== was[`${role}Fallback`]) (changes.fallbackModels ??= {})[role] = flat[`${role}Fallback`] === "" ? null : flat[`${role}Fallback`];
+  }
+  if (flat.verifier !== was.verifier) (changes.models ??= {}).verifier = flat.verifier === "" ? null : flat.verifier;
   if (flat.verifyEnabled !== was.verifyEnabled || flat.verifyEnabled === "on" && flat.verifySkill !== was.verifySkill) changes.verification = flat.verifyEnabled === "on" ? { enabled: true, skill: flat.verifySkill } : null;
   if (flat.scoped !== was.scoped) changes.scopedModels = flat.scoped === "" ? null : flat.scoped.split("\n");
   return changes;
@@ -3412,6 +3419,7 @@ async function settingsList(keep = false) {
   const shown = { ...flatSettings(value.values), ...Object.fromEntries(["name", "objective"].filter(field => draftOf(field)).map(field => [field, draftOf(field).text])), ...pending };
   const draftNote = field => { const draft = draftOf(field); return draft && draft.text !== value.values[field] ? `<span class="field-draft">Unsent edit kept${draft.expectedRevision !== value.revision ? " from an older version of these settings. Saving it is checked and may be rejected" : ""}. ${dlgBtn("Discard edit…", { action: "settings-discard", project: id, field }, "ghost small")}</span>` : ""; };
   const roleField = ([role, label, help]) => `<div class="field" data-field="${role}"><span class="flabel">${label} model</span><span class="fhelp">${help}${role === "coordinator" ? "" : role === "verifier" ? " No default: pick one to turn verification on." : " Follows the coordinator unless you pick a model."}</span>${modelPickerHtml(role, shown[role], pickerError)}</div>`;
+  const fallbackField = ([role, label]) => `<div class="field" data-field="${role}Fallback"><span class="flabel">${label} quota fallback</span><span class="fhelp">Only this model is used after quota exhaustion. Leave empty to wait for quota reset. Other frozen permissions stay unchanged.</span>${modelPickerHtml(`${role}-fallback`, shown[`${role}Fallback`], pickerError, "Wait for quota reset")}</div>`;
   const chosenScope = shown.scoped ? shown.scoped.split("\n") : [], scopeRows = [...modelCache.values()].filter(model => model.configured || chosenScope.includes(model.reference));
   const scopeField = `<div class="field" data-field="scoped"><span class="flabel">Scoped models</span><span class="fhelp">The models the model button and Ctrl+P cycle through, in list order. Leave all unchecked to use your Pi scope.</span><details class="scope-editor"${chosenScope.length ? " open" : ""}><summary>${chosenScope.length ? `${chosenScope.length} chosen for this project` : "Your Pi scope"}</summary><input type="search" class="scope-filter" data-scope-filter placeholder="Filter ${scopeRows.length} models…" aria-label="Filter scoped models" autocomplete="off"><div class="scope-list">${scopeRows.map(model => `<label class="scope-row"><input type="checkbox" data-scope-ref="${esc(model.reference)}"${chosenScope.includes(model.reference) ? " checked" : ""}${model.configured ? "" : " disabled"}><span>${esc(model.name)}</span><small class="mono">${esc(model.reference)}</small></label>`).join("") || '<p class="note">No models are available.</p>'}</div>${dlgBtn("Use my Pi scope", { action: "scope-clear" }, "ghost small")}</details></div>`;
   const accessField = ([field, [label, help, options]]) => `<div class="field" data-field="${field}"><label><span class="flabel">${label}</span><select name="${field}">${options.map(([option, text]) => `<option value="${option}"${shown[field] === option ? " selected" : ""}>${text}</option>`).join("")}</select></label><span class="fhelp">${help}</span></div>`;
@@ -3420,6 +3428,7 @@ async function settingsList(keep = false) {
 <div class="field" data-field="objective"><label><span class="flabel">Objective</span><span class="fhelp">What this project is for. The coordinator reads it in every new conversation.</span><textarea name="objective" rows="5" maxlength="32000">${esc(shown.objective)}</textarea></label>${draftNote("objective")}</div>
 <h3>Models</h3><p class="note">New threads use these. Threads that are already running keep the model they started with. The coordinator can be switched from the model button in the chat.${pickerError ? ` The model list is unavailable (${esc(pickerError)}).` : " Scoped models come from your Pi settings; search finds every configured model."}</p>
 <div class="field-grid">${settingsRoles.map(roleField).join("")}</div>${scopeField}
+<h3>Quota recovery</h3><p class="note">New threads freeze these fallback choices. After a recognized quota error, work continues on the same thread with its fallback. Without one, it waits for a known reset or retries with bounded exponential backoff. Paused or stopped workers never restart automatically.</p><div class="field-grid">${settingsRoles.filter(([role]) => role !== "coordinator" && role !== "verifier").map(fallbackField).join("")}</div>
 <h3>Workers</h3>
 <div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
 <h3>Verification</h3>
@@ -3440,7 +3449,10 @@ function settingsDiffRows(changes, values) {
   if ("name" in changes) rows.push(["Project name", emptyText(values.name), emptyText(changes.name)]);
   if ("objective" in changes) rows.push(["Objective", emptyText(values.objective), emptyText(changes.objective)]);
   if ("model" in changes) rows.push(["Coordinator model", modelText(values.model), modelText(changes.model)]);
-  for (const [role, label] of settingsRoles.slice(1)) if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? "", role), modelText(changes.models[role] ?? "", role)]);
+  for (const [role, label] of settingsRoles.slice(1)) {
+    if (changes.models && role in changes.models) rows.push([`${label} model`, modelText(values.models[role] ?? "", role), modelText(changes.models[role] ?? "", role)]);
+    if (changes.fallbackModels && role in changes.fallbackModels) rows.push([`${label} quota fallback`, modelText(values.fallbackModels?.[role] ?? ""), modelText(changes.fallbackModels[role] ?? "")]);
+  }
   if ("scopedModels" in changes) rows.push(["Scoped models", scopeText(values.scopedModels), scopeText(changes.scopedModels)]);
   for (const field of Object.keys(settingsAccess)) if (field in changes) rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
   if ("verification" in changes) rows.push(["Verification", verifyText(values.verification), verifyText(changes.verification)]);
@@ -3459,7 +3471,7 @@ function settingsReview(revision, changes) {
   if (!settingsCache || settingsCache.projectId !== projectId || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("Reopen the project settings");
   const stale = revision !== settingsCache.revision, rows = settingsDiffRows(changes, settingsCache.values);
   const proposal = { projectId, revision, changes, draftKeys: ["name", "objective"].filter(field => field in changes).map(field => `${projectId}:${field}`) };
-  showDialog("Save these changes?", `<div class="diff-list">${rows.map(diffItem).join("")}</div>${stale ? '<p class="note-box warn">One edit was started on an older version of these settings. If they changed since, the host rejects the save and your edit is kept.</p>' : ""}<p class="note">Applies to new threads. Running threads keep their model and instructions. The project must be idle. No model request, command, publication or merge happens here.</p><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back to editing", { action: "settings-back" }), '<button type="submit" class="primary">Save changes</button>')}</form>`, `Project ${view.project.name}. Nothing is saved until you confirm.`);
+  showDialog("Save these changes?", `<div class="diff-list">${rows.map(diffItem).join("")}</div>${stale ? '<p class="note-box warn">One edit was started on an older version of these settings. If they changed since, the host rejects the save and your edit is kept.</p>' : ""}<p class="note">Role models apply to new threads. New threads freeze their quota fallback choice. Quota fallback is the only automatic model change and keeps the thread, tools and instructions. The project must be idle for non-model changes. No model request, command, publication or merge happens here.</p><form data-settings-confirm data-project="${esc(projectId)}" data-revision="${esc(revision)}"><input type="hidden" name="confirm" value="${esc(projectId)}">${dlgActions(dlgBtn("Back to editing", { action: "settings-back" }), '<button type="submit" class="primary">Save changes</button>')}</form>`, `Project ${view.project.name}. Nothing is saved until you confirm.`);
   settingsConfirmation = proposal; disableActions();
 }
 
@@ -3479,13 +3491,13 @@ async function loadModelPicker() {
   modelExtensionErrors = Array.isArray(data.extensionErrors) ? data.extensionErrors : [];
 }
 const emptyModelName = role => role === "verifier" ? "No verifier model" : "Inherit coordinator";
-function modelButton(reference, disabled = false, role = "") {
+function modelButton(reference, disabled = false, emptyLabel = "Inherit coordinator") {
   const model = modelCache.get(reference), context = compactTokens(model?.contextWindow);
-  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? emptyModelName(role) : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
+  return `<button type="button" class="mp-current" data-action="mp-toggle" aria-haspopup="listbox" aria-expanded="false"${disabled ? " disabled" : ""}><span class="mp-main"><span class="mp-name">${esc(reference === "" ? emptyLabel : model?.name ?? reference)}</span>${model ? `<span class="mp-ref mono">${esc(reference)}</span>` : ""}</span>${context ? `<span class="mp-ctx" title="Context window">${context}</span>` : "<span></span>"}<span class="mp-caret" aria-hidden="true">▾</span></button>`;
 }
-function modelPickerHtml(role, reference, unavailable) {
+function modelPickerHtml(role, reference, unavailable, emptyLabel = emptyModelName(role)) {
   const configured = [...modelCache.values()].filter(model => model.configured).length;
-  return `<div class="mp" data-role="${role}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable), role)}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
+  return `<div class="mp" data-role="${role}" data-empty-label="${esc(emptyLabel)}" data-value="${esc(reference)}">${modelButton(reference, Boolean(unavailable), emptyLabel)}${unavailable ? "" : `<div class="mp-pop" hidden><input class="mp-search" type="search" role="combobox" aria-expanded="true" aria-controls="mp-list-${role}" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search ${configured} configured models…" aria-label="Search models for ${role}"><div class="mp-list" id="mp-list-${role}" role="listbox" aria-label="${role} models"></div></div>`}</div>`;
 }
 const MODEL_ROWS = 40, MODEL_UNCONFIGURED_ROWS = 5;
 const INHERIT_MODEL = { reference: "", name: "Inherit coordinator", contextWindow: null, reasoning: false, configured: true };
@@ -3493,9 +3505,9 @@ const NO_VERIFIER_MODEL = { ...INHERIT_MODEL, name: "No verifier model (verifica
 // Worker, scout and reviewer pickers start with "Inherit coordinator" (stored as no model); the coordinator picker does not.
 function modelGroups(query, value, role) {
   const groups = modelGroupsBase(query, value);
-  const none = role === "verifier" ? NO_VERIFIER_MODEL : INHERIT_MODEL;
-  if (!role || role === "coordinator" || query.trim() && !none.name.toLowerCase().includes(query.trim().toLowerCase())) return groups;
-  return [{ label: "", models: [none], more: 0 }, ...groups];
+  const fallback = role?.endsWith("-fallback"), emptyName = fallback ? "Wait for quota reset" : role === "verifier" ? NO_VERIFIER_MODEL.name : "Inherit coordinator";
+  if (!role || role === "coordinator" || query.trim() && !modelNorm(emptyName).includes(modelNorm(query.trim()))) return groups;
+  return [{ label: "", models: [{ ...INHERIT_MODEL, name: emptyName }], more: 0 }, ...groups];
 }
 function modelGroupsBase(query, value) {
   const terms = modelNorm(query).split(/\s+/).filter(Boolean), hit = model => terms.every(term => model.hay.includes(term));
@@ -3546,7 +3558,7 @@ function mpOpen(mp) {
 }
 function mpPick(mp, reference) {
   if (reference !== "" && !modelCache.get(reference)?.configured) throw new Error("That model has no credentials configured");
-  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference, false, mp.dataset.role);
+  mp.dataset.value = reference; mp.querySelector(".mp-current").outerHTML = modelButton(reference, false, mp.dataset.emptyLabel);
   mpClose(mp, true); settingsSync();
 }
 function mpKey(event, mp) {
@@ -3998,7 +4010,7 @@ function untilReset(at) { const ms = at - Date.now(); return ms <= 0 ? "reset pa
 const limitWindowName = { mo: "month" };
 function limitWindow(sample) {
   const stale = sample.resetsAt !== null && sample.resetsAt <= Date.now(), percent = Math.round(sample.usedPercent);
-  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}>${limitWindowName[sample.window] ?? sample.window}<span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
+  return { stale, percent, html: `<span class="lim-win"${stale ? " data-stale" : ""}><span class="lim-win-name">${limitWindowName[sample.window] ?? sample.window}</span><span class="lim-bar"><i style="width:${percent}%"></i></span>${stale ? "—" : `${percent}%`}</span>` };
 }
 // Brand marks, inline (no external assets). Paths are from Simple Icons (CC0, https://simpleicons.org; v16.35.0): claude, openai, cursor. The marks are trademarks of their owners and are shown only to identify the provider.
 // Claude keeps its brand orange, OpenAI follows the text colour, Cursor is its dark tile with a light mark and a faint outline so it stays visible on any bar background. The provider name stays in aria-label and the hover detail.
@@ -4008,7 +4020,16 @@ const providerIcon = {
   codex: iconSvg('<path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>'),
   cursor: iconSvg('<rect x=".5" y=".5" width="23" height="23" rx="5.5" fill="#14120B" stroke="#8a8a8a" stroke-opacity=".55"/><path fill="#fff" transform="translate(4.8 4.8) scale(.6)" d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/>'),
 };
+function elizaItem(provider) {
+  const usage = provider.usage, stale = usage && usage.periodEndAt <= Date.now();
+  const reading = usage ? usage.amountUsd.toLocaleString("en-US", { style: "currency", currency: "USD" }) : null, amount = stale ? null : reading;
+  const failure = usage && provider.reason ? `<small class="lim-error">Last refresh failed: ${esc(provider.reason)}${provider.lastAttemptAt ? ` · ${ago(provider.lastAttemptAt)}` : ""}</small>` : "";
+  const detail = usage ? `<div class="lim-cost-detail"><span>${reading} ${stale ? "previous period" : "month to date"}</span><small>${new Date(usage.periodStartAt).toLocaleString("en-US", { month: "long", year: "numeric", timeZone: "UTC" })} · USD · all usage buckets</small><small>Account ${esc(usage.account)}${usage.pool ? ` · Pool ${esc(usage.pool)}` : ""} · ${untilReset(usage.periodEndAt)} at 00:00 UTC${stale ? " · waiting for a new reading" : ""}</small><small>Fetched ${ago(usage.observedAt)} via GET /v2/usage</small></div>${failure}` : `<small>${provider.status === "unavailable" ? "Not connected" : "No data yet"}${provider.reason ? `: ${esc(provider.reason)}` : ""}${provider.lastAttemptAt ? ` · last tried ${ago(provider.lastAttemptAt)}` : ""}</small>`;
+  const label = `Eliza: ${usage ? stale ? "reset, waiting for new data" : `${amount} month to date` : provider.status === "unavailable" ? "not connected" : "no data yet"}`;
+  return `<div class="lim" tabindex="0" role="group" data-provider="eliza" data-tone="low" aria-label="${esc(label)}"><span class="lim-name" aria-hidden="true">Eliza</span><span class="lim-cost">${amount ?? "—"}</span><span class="lim-pop" role="group" aria-label="Eliza details"><b>Eliza</b>${detail}</span></div>`;
+}
 function limitItem(provider) {
+  if (provider.provider === "eliza") return elizaItem(provider);
   const windows = provider.samples.map(limitWindow), live = windows.filter(win => !win.stale);
   const tone = limitTone(Math.max(0, ...live.map(win => win.percent)));
   const rows = provider.samples.map((sample, i) => {
