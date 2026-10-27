@@ -256,6 +256,10 @@ export function startTelegram(options: { dispatch: (input: Request) => Promise<u
       }
       for (const chunk of overflow) plan.push({ kind: "text", text: chunk });
     }
+    if (extracted.media.length && state.sentPart?.seq === notice.seq && !state.sentPart.plan && state.sentPart.parts > 0) {
+      // A pre-media release checkpointed text chunks, not caption parts. Never guess which content to replay.
+      state.sentPart.pendingMedia = true; persist(); throw new Error(UNCERTAIN_MEDIA);
+    }
     if (state.sentPart?.seq !== notice.seq) state.sentPart = { seq: notice.seq, parts: 0, plan };
     const parts = state.sentPart.plan ?? plan;
     state.sentPart.plan = parts;

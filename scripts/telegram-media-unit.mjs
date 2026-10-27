@@ -173,5 +173,11 @@ try {
     reset(`![Photo](${ref('demo.png')}) ![Video](${ref('demo.mp4')})`); notices.push(notice(2, 'Must wait')); fault = { method: 'sendMediaGroup', code }; start(); await bridge.flush(); const before = attempts.length; await bridge.flush(); bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
   }
   reset(`Start ![Uncertain](${ref('demo.mp4')}) Stop`); fault = { method: 'sendVideo', code: 0 }; start(); await bridge.flush(); const before = attempts.length; bridge.close(); start(); await bridge.flush(); assert.equal(attempts.length, before); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  reset(`Legacy partial ![Image](${ref('demo.png')})`);
+  let legacy = JSON.parse(readFileSync(statePath)); legacy.sentPart = { seq: 1, parts: 1 }; writeFileSync(statePath, JSON.stringify(legacy));
+  start(); await bridge.flush(); assert.equal(sends.length, 0); assert(JSON.parse(readFileSync(statePath)).sentPart.pendingMedia);
+  reset('text-only '.repeat(700)); legacy = JSON.parse(readFileSync(statePath)); legacy.sentPart = { seq: 1, parts: 1 }; writeFileSync(statePath, JSON.stringify(legacy));
+  start(); await bridge.flush(); assert.equal(sends.length, 1); assert.equal(sends[0].method, 'sendMessage'); assert(!sends[0].input.text.includes('Test · Main'));
+
   console.log('PASS one-message native caption/envelope/actions/routing; albums/overflow; byte/MIME/security/fallback; retry/order/restart/uncertainty');
 } finally { bridge?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); }
