@@ -48,7 +48,7 @@ await kit.run(async () => {
   writeFileSync(join(kit.workspace, 'feature.txt'), 'done\n');
   writeFileSync(join(kit.workspace, 'check.mjs'), "import {readFileSync} from 'node:fs'; process.exit(readFileSync('feature.txt','utf8').trim()==='done'?0:1);\n");
   kit.git(kit.workspace, 'add', '.'); kit.git(kit.workspace, 'commit', '-qm', 'verification fixture');
-  const markers = ['CASE-PARTIAL', 'CASE-FREEZE-PASS', 'CASE-FREEZE-FAIL', 'CASE-MODEL', 'CASE-UNAVAILABLE', 'CASE-LEASE-PASS', 'CASE-LEASE-STALE', 'CASE-LEASE-ERROR', 'CASE-LEASE-BLOCKED', 'CASE-LEASE-STOP', 'CASE-LEASE-RESUME', 'CASE-EARLY-PARENT', 'CASE-EARLY-VERIFIER', 'CASE-EARLY-ERROR'];
+  const markers = ['CASE-PARTIAL', 'CASE-FREEZE-PASS', 'CASE-FREEZE-FAIL', 'CASE-MODEL', 'CASE-UNAVAILABLE', 'CASE-LEASE-PASS', 'CASE-LEASE-STALE', 'CASE-LEASE-ERROR', 'CASE-LEASE-BLOCKED', 'CASE-LEASE-STOP', 'CASE-LEASE-RESUME', 'CASE-EARLY-PARENT', 'CASE-EARLY-VERIFIER', 'CASE-EARLY-ERROR', 'CASE-EARLY-PAUSE'];
   const projects = new Map();
   for (const marker of markers) {
     const id = await kit.createProject(marker, { workerCap: 1 });
@@ -148,6 +148,42 @@ await kit.run(async () => {
         } else gate(`${marker}-repair`).release.resolve();
         const c = await ended();
         observe(marker === 'CASE-MODEL' ? 'disable and clear keeps the installed frozen judge for the repair' : 'truly unavailable frozen judge escalates without fallback', marker === 'CASE-MODEL' ? c.outcome === 'verified' && c.model === 'fake/fake-judge' && c.attempts.length === 2 : c.outcome === 'escalated' && /unavailable|not.*(?:found|available|configured)|unknown|not in/i.test(c.reason) && c.attempts.length === 1, c);
+      } else if (marker === 'CASE-EARLY-PAUSE') {
+        await entered(`${marker}-before-drain`);
+        const verifier = (await cycle()).attempts[0].verifierThreadId, job = earlyJobs.get(marker), resource = `verify-${marker}`, contender = { projectId: id, threadId: 'other-holder' };
+        let freed = 0;
+        hostLeases.releaseWhere = function(predicate) { const released = originalReleaseWhere.call(this, predicate); sweeps++; if (released.includes(resource)) freed++; return released; };
+        const stopping = runtime.stop(verifier);
+        await entered(`${marker}-abort`);
+        const owner = await runtime.withRoot(root => root.commit(async tx => (await tx.doc(DurablePlanning, root.id)).threads[verifier].stopping, BACKGROUND_CONTEXT));
+        const pausing = runtime.pausePlan();
+        await runtime.withRoot(root => kit.eventually(() => root.commit(async tx => (await tx.scanTasks({ conversationId: root.id, kind: 'projects.plan-settlement' }, 100)).items.some(t => t.abortRequested && t.state.status !== 'terminal'), BACKGROUND_CONTEXT), 'project pause signals the held settlement abort'));
+        gate(`${marker}-before-drain`).release.resolve();
+        await pausing; await runtime.resumePlan();
+        const retained = await runtime.withRoot(root => root.commit(async tx => (await tx.doc(DurablePlanning, root.id)).threads[verifier].stopping, BACKGROUND_CONTEXT));
+        observe('project pause and resume cannot complete an independently owned stop', retained === owner && Boolean(owner), { owner, retained });
+        let refusal;
+        try { await runtime.followUp(threadId, 'FOLLOWUP forbidden during concurrent project pause and stop', { requestId: randomUUID() }); } catch (error) { refusal = String(error); }
+        observe('concurrent pause leaves the stopped verifier parent frozen', /frozen|stopping|draining/.test(refusal), { refusal });
+        const count = sweeps; await kit.eventually(() => sweeps > count, 'actual sweep after concurrent pause');
+        const before = await hostLeases.acquire(resource, contender, 60000);
+        observe('concurrent pause retains the lease while the pre-abort job lives', !before.acquired && alive(job.pid), { before, job });
+        if (before.acquired) hostLeases.release(resource, contender);
+        gate(`${marker}-before-drain`).release.resolve(); gate(`${marker}-revision`).release.resolve(); gate(`${marker}-abort`).release.resolve();
+        await stopping;
+        await kit.eventually(() => !hostLeases.held(h => h.projectId === id).length, 'concurrent stop cleanup releases');
+        const after = await hostLeases.acquire(resource, contender, 60000);
+        observe('matching stop drains and releases exactly once after project pause', after.acquired && !alive(job.pid) && freed === 1, { after, freed });
+        hostLeases.release(resource, contender);
+        const orphan = randomUUID();
+        await runtime.withRoot(root => root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.paused = true; state.pausing = false; state.threads[verifier].stopping = orphan; }, BACKGROUND_CONTEXT));
+        await runtime.close(); await open();
+        const recovered = await runtime.withRoot(root => root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); return { paused: state.paused, stopping: state.threads[verifier].stopping, stopped: Object.values(state.work).some(w => w.threadId === verifier && w.status === 'stopped') }; }, BACKGROUND_CONTEXT));
+        observe('restart drains an orphan stop even when project pause was already complete', recovered.paused && !recovered.stopping && recovered.stopped, recovered);
+        await runtime.resumePlan(); let accepted = false;
+        try { await runtime.followUp(threadId, 'FOLLOWUP allowed after recovered cancellation', { requestId: randomUUID() }); accepted = true; } catch {}
+        observe('recovered cancellation permits fresh work after explicit resume', accepted);
+        await runtime.stop(threadId);
       } else if (marker.startsWith('CASE-EARLY')) {
         await entered(`${marker}-before-drain`);
         const c = await cycle(), verifier = c.attempts[0].verifierThreadId, job = earlyJobs.get(marker), resource = `verify-${marker}`, contender = { projectId: id, threadId: 'other-holder' };
@@ -213,5 +249,5 @@ await kit.run(async () => {
     }
   }
   kit.result.regressions = observations;
-  kit.check('all verifier authority, freeze, model and lease regressions', observations.length === 36 && observations.every(x => x.ok), observations.filter(x => !x.ok));
+  kit.check('all verifier authority, freeze, model and lease regressions', observations.length === 42 && observations.every(x => x.ok), observations.filter(x => !x.ok));
 });

@@ -706,12 +706,15 @@ export async function openDurableProject(input: { project: Project; dir: string;
       await planning.pause(root);
       initialPlan = await planning.snapshot(root);
     }
-    if (initialPlan.pausing) {
+    if (initialPlan.pausing || threads.some(thread => thread.stopping)) {
       const recovered = await planning.recoverPause(root);
       await Promise.all(recovered.taskIds.map(id => openedHarness.abortTask(id, context)));
       await Promise.all(recovered.conversationIds.map(async id => (await openedHarness.conversation(id, context))?.abort(context, { background: true })));
       await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true });
       await abortChats(openedHarness);
+      await background.killAll();
+      // Only the new exclusive runtime can adopt stop owners left by the previous process.
+      for (const stop of recovered.stops) await planning.completeStop(root, stop.threadId, stop.stopId);
       await planning.completePause(root);
       await schedules.reconcile();
       initialPlan = await planning.snapshot(root);

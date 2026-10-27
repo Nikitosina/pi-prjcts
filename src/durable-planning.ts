@@ -760,9 +760,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     }, BACKGROUND_CONTEXT);
   }
   async function pause(root: Conversation): Promise<{ snapshot: DurablePlanSnapshot; taskIds: TaskId[]; conversationIds: ConversationId[] }> { return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.paused = true; state.pausing = true; const taskIds: TaskId[] = [...state.dispatcherTaskIds]; state.dispatcherTaskIds = [];  const conversationIds: ConversationId[] = []; for (const work of Object.values(state.work)) if (work.status === "queued" || work.status === "running" || (work.status === "interrupted" && (work.taskId !== null || work.conversationId !== null)) || (work.status === "stopped" && state.threads[work.threadId]?.stopping)) { if (work.taskId !== null) taskIds.push(work.taskId); if (work.conversationId !== null) conversationIds.push(work.conversationId); if (work.status !== "stopped") { work.status = "interrupted"; work.blocker = state.threads[work.threadId]?.paused ? WORKER_PAUSE_BLOCKER : PAUSE_BLOCKER; } state.threads[work.threadId].activeWorkId = null; } return { snapshot: projectSnapshot(state), taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)] }; }, BACKGROUND_CONTEXT); }
-  async function completePause(root: Conversation): Promise<void> { await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.pausing = false; for (const thread of Object.values(state.threads)) delete thread.stopping; }, BACKGROUND_CONTEXT); }
+  /** Completing project pause does not complete independently owned thread stops. */
+  async function completePause(root: Conversation): Promise<void> { await root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); state.pausing = false; }, BACKGROUND_CONTEXT); }
   /** Re-enumerate persisted pause targets after a crash, before reopening dispatch. */
-  async function recoverPause(root: Conversation): Promise<{ taskIds: TaskId[]; conversationIds: ConversationId[] }> {
+  async function recoverPause(root: Conversation): Promise<{ taskIds: TaskId[]; conversationIds: ConversationId[]; stops: { threadId: string; stopId: NonNullable<PlanningState["threads"][string]["stopping"]> }[] }> {
     return root.commit(async tx => {
       const state = await tx.doc(DurablePlanning, root.id);
       state.paused = true; state.pausing = true;
@@ -774,7 +775,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         if (work.status !== "stopped") { work.status = "interrupted"; work.blocker = state.threads[work.threadId]?.paused ? WORKER_PAUSE_BLOCKER : PAUSE_BLOCKER; }
         const thread = state.threads[work.threadId]; if (thread) thread.activeWorkId = null;
       }
-      return { taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)] };
+      const stops = Object.entries(state.threads).flatMap(([threadId, thread]) => thread.stopping ? [{ threadId, stopId: thread.stopping }] : []);
+      return { taskIds: [...new Set(taskIds)], conversationIds: [...new Set(conversationIds)], stops };
     }, BACKGROUND_CONTEXT);
   }
   /** Resume continues work the pause (or restart recovery) interrupted, on the same thread, and unblocks its dependents. */
@@ -812,7 +814,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       return { stopId, taskIds: [...new Set(taskIds)], conversationIds };
     }, BACKGROUND_CONTEXT);
   }
-  async function completeStop(root: Conversation, threadId: string, stopId: string): Promise<void> {
+  async function completeStop(root: Conversation, threadId: string, stopId: NonNullable<PlanningState["threads"][string]["stopping"]>): Promise<void> {
     await root.commit(async tx => {
       const thread = (await tx.doc(DurablePlanning, root.id)).threads[threadId];
       if (!thread) throw new Error("Unknown durable thread UUID");
