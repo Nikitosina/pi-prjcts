@@ -28,7 +28,12 @@
     "quota-status",
     "coordinator-gh",
     "machine-status-unit",
-    "usage-limits-recovery-unit"
+    "usage-limits-recovery-unit",
+    "worker-quota-recovery",
+    "worker-quota-known-reset",
+    "worker-quota-reset-unit",
+    "worker-quota-retry-receipts",
+    "worker-quota-settlement-race"
   ],
   "browser": [
     "web/**"

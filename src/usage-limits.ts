@@ -80,6 +80,15 @@ export function observeLimitHeaders(modelProvider: string, headers: Record<strin
   }
 }
 
+/** Latest reset among exhausted windows. Uses cached observations only, never provider requests. */
+export function quotaResetAt(model: string, now = Date.now()): number | undefined {
+  const provider = model.startsWith("anthropic/") ? "claude" : model.startsWith("openai-codex/") ? "codex" : model.startsWith("cursor/") ? "cursor" : undefined;
+  if (!provider) return undefined;
+  const resets = [...(state.get(provider)?.samples.values() ?? [])].flatMap(sample =>
+    sample.usedPercent >= 100 && sample.resetsAt !== null && Number.isFinite(new Date(sample.resetsAt).getTime()) && sample.resetsAt > now && now - sample.observedAt <= MIN_POLL_MS ? [sample.resetsAt] : []);
+  return resets.length ? Math.max(...resets) : undefined;
+}
+
 /**
  * Credentials come from Pi's own resolver when the host provides one (it renews an expiring OAuth login under the auth-store lock, the same
  * path a model request takes, so a token that expired while nobody used the provider is renewed here instead of being sent stale). Without it,

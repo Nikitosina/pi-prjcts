@@ -6,6 +6,7 @@ on:
 jobs:
   verify:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -13,5 +14,6 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
-      # Typecheck plus the deterministic fake-model checks. Browser, simulator and credentialed scripts stay out of CI.
+      # Typecheck plus deterministic fake-model checks, including quota reset/replay/race recovery.
+      # Each script has a 240s budget. Browser, simulator and credentialed scripts stay out of CI.
       - run: npm run verify
