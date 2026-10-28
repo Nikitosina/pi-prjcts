@@ -1,6 +1,6 @@
 # Evidence map for live quota fallback (PR 28)
 
-Spec and the six acceptance criteria are in `docs/quota-fallback-live-apply.md`. This file maps each criterion to tests and recorded evidence. Evidence files are under `docs/evidence/quota-fallback-live-apply/` with a SHA-256 manifest in `MANIFEST.sha256`.
+Spec and the six acceptance criteria are in `docs/quota-fallback-live-apply.md`. This file maps each criterion to tests and recorded evidence. Evidence files are under `docs/evidence/quota-fallback-live-apply/` with a SHA-256 manifest in `MANIFEST.sha256`. The manifest does not list itself. Check it with `cd docs/evidence/quota-fallback-live-apply && shasum -a 256 -c MANIFEST.sha256`.
 
 The candidate commit is the PR head at the time you read this. The evidence was produced on source commit `04385cccc41d07e3e6d3678989b010fbdb8d7d67`. Later commits only add this document and the evidence files, so the source is identical.
 
