@@ -52,12 +52,13 @@ await k.run(async () => {
     await page.waitFor(`!document.querySelector('#live-reply').hidden && document.querySelector('#live-reply').innerText.includes('Paragraph 23')`, `${scenario} stream`);
     await k.waitFor(() => release, 'provider gate', { interval: 100 });
     await delay(300);
+    let programmaticGap = null;
     if (scenario === 'near-bottom-up') {
       const point = await page.evaluate(`(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
       await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: -20 });
       await delay(300);
     } else if (scenario === 'programmatic') {
-      await page.evaluate(`document.querySelector('#transcript').scrollTop -= 20`);
+      programmaticGap = await page.evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop -= 20; return t.scrollHeight - t.clientHeight - t.scrollTop; })()`);
       await delay(300);
     }
     const before = await gap(page);
@@ -79,10 +80,10 @@ await k.run(async () => {
     const host = (await k.rpc({ action: 'show', id })).messages.findLast(m => m.role === 'assistant')?.text;
     const expected = prefix + suffix;
     const browserMatches = await page.evaluate(`(() => { const expected = document.createElement('div'); expected.innerHTML = renderMarkdown(${JSON.stringify(expected)}); return [...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerHTML === expected.innerHTML; })()`);
-    const fixture = scenario === 'pinned' ? before.gap < 2 : before.gap > 5 && before.gap < 40;
+    const fixture = scenario === 'pinned' ? before.gap < 2 : scenario === 'programmatic' ? programmaticGap > 5 && programmaticGap < 40 : before.gap > 5 && before.gap < 40;
     const follows = scenario === 'near-bottom-up' ? after.gap > 5 && Math.abs(after.top - before.top) < 3 : after.gap < 3;
     const ok = fixture && follows && (scenario !== 'pinned' || afterLayout.gap < 3) && host === expected && browserMatches;
-    k.result.measurements ??= {}; k.result.measurements[scenario] = { before, after, afterLayout, fixture, follows, hostMatches: host === expected, browserMatches, video: `${scenario}.mp4` };
+    k.result.measurements ??= {}; k.result.measurements[scenario] = { before, after, afterLayout, programmaticGap, fixture, follows, hostMatches: host === expected, browserMatches, video: `${scenario}.mp4` };
     if (!ok) failures.push(scenario); else k.result.checks.push(`${scenario}: completion and follow intent`);
   }
   k.check('all follow intent cases', failures.length === 0, { failures, measurements: k.result.measurements });
