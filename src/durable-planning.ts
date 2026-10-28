@@ -919,14 +919,24 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       const state = await tx.doc(DurablePlanning, root.id), now = Date.now();
       if (state.paused || state.pausing) return;
       const records = Object.values(state.work);
+      // One pass picks a single candidate per thread: the quota-waiting record if there is one, otherwise the thread's latest record when it failed on quota. Anything older is superseded.
+      const candidates = new Map<string, StoredWork>(), waiting = new Set<string>();
       for (const work of records) {
+        if (work.status === "queued" && work.quotaRecovery) {
+          if (!waiting.has(work.threadId)) { waiting.add(work.threadId); candidates.set(work.threadId, work); }
+        } else if (!waiting.has(work.threadId)) candidates.set(work.threadId, work);
+      }
+      // Role fallbacks come from project settings; read each role once per pass, and only when a quota candidate exists.
+      const fallbacks = new Map<DurableRole, string | null | undefined>();
+      const fallbackFor = (role: DurableRole) => { if (!fallbacks.has(role)) fallbacks.set(role, options.fallbackModels?.[role]); return fallbacks.get(role); };
+      for (const work of candidates.values()) {
+        const quotaError = work.status === "queued" ? work.quotaRecovery?.lastError : work.status === "failed" && /^(?:quota_exceeded:|quota_recovery_exhausted:)/.test(work.blocker ?? "") ? work.blocker : undefined;
+        if (!quotaError) continue;
         const thread = state.threads[work.threadId], attempt = work.attempt;
         if (!thread || thread.paused || thread.stopped || thread.stopping || thread.transferredTo || thread.activeWorkId !== null || work.role === "verifier" || !attempt || work.conversationId === null) continue;
         if (thread.verification?.open || isExhausted(thread.verification) || verifierPending(state, work.threadId)) continue;
-        if (records.slice(records.indexOf(work) + 1).some(other => other.threadId === work.threadId && other.status !== "queued")) continue;
-        const quotaError = work.status === "queued" ? work.quotaRecovery?.lastError : work.status === "failed" && /^(?:quota_exceeded:|quota_recovery_exhausted:)/.test(work.blocker ?? "") ? work.blocker : undefined;
-        const fallback = options.fallbackModels?.[work.role];
-        if (!quotaError || !fallback || fallback === attempt.model || attempt.modelTransitions?.some(transition => transition.to === fallback)) continue;
+        const fallback = fallbackFor(work.role);
+        if (!fallback || fallback === attempt.model || attempt.modelTransitions?.some(transition => transition.to === fallback)) continue;
         try { frozenModel({ ...attempt, model: fallback }, work.role); } catch { continue; }
         if (work.quotaRecovery?.fallbackWake) continue;
         const previous = work.quotaRecovery;

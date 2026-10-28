@@ -37,6 +37,7 @@
     "worker-quota-live-save",
     "worker-quota-live-roles",
     "worker-quota-live-race",
+    "worker-quota-superseded",
     "worker-quota-legacy-save",
     "worker-quota-save-safety",
     "worker-quota-verification-save"
