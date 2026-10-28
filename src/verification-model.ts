@@ -73,8 +73,8 @@ function acceptanceList(brief: string) {
   }
   return { items, malformed };
 }
-/** Whether a message carries its own acceptance list, so it is a brief rather than a nudge. */
-export const hasAcceptanceList = (text: string): boolean => HEADER.test(text);
+/** Whether a message carries its own "Acceptance criteria:" header, so it is a brief rather than a nudge. */
+export const hasAcceptanceHeader = (text: string): boolean => HEADER.test(text);
 /** Malformed lists retain the whole brief, but criteriaProblem refuses them before verification. */
 export function parseCriteria(brief: string): Criterion[] {
   const { items, malformed } = acceptanceList(brief);
