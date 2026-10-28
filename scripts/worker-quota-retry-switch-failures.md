@@ -5,6 +5,8 @@ Covered by `scripts/worker-quota-retry-switch-e2e.mjs`.
 ## Failures the assertions catch
 - A manual retry discards a fallback saved earlier, and the primary model runs again when capacity returns.
 - A fallback removed after the retry is used anyway.
+- A quota-failed record revived by a save behind an occupied slot keeps its failed-origin restoration after an accepted manual retry, so removing the fallback and freeing the slot restores the failure instead of running the retry.
+- Replaying the same retry request id runs another attempt or restores the failure.
 - A later save does not recover the work on the current fallback.
 
 ## Notes

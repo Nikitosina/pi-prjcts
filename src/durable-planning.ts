@@ -968,7 +968,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (previous.status === "queued" && previous.quotaRecovery) {
         previous.quotaRecovery.retryAt = 0;
         // Keep a pending fallback wake so dispatch still re-reads the current fallback; a removed one then falls back to this immediate retry.
-        if (previous.quotaRecovery.fallbackWake) previous.quotaRecovery.fallbackWake.retryAt = 0;
+        // An accepted manual retry also ends failed-origin restoration: a removed fallback must run this retry, not restore the failure.
+        if (previous.quotaRecovery.fallbackWake) { previous.quotaRecovery.fallbackWake.retryAt = 0; delete previous.quotaRecovery.fallbackWake.failed; }
         state.retryReceipts = [...receipts, { requestId, workId, attemptId: previous.id, threadId: previous.threadId }];
         previous.blocker = `quota_reset_wait: manual retry requested; waiting for an available worker slot on ${previous.attempt?.model ?? "the frozen model"}.`;
         if (!state.paused && !state.pausing) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));

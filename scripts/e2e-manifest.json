@@ -39,6 +39,7 @@
     "worker-quota-live-race",
     "worker-quota-superseded",
     "worker-quota-retry-switch",
+    "worker-quota-mixed-save",
     "worker-quota-legacy-save",
     "worker-quota-save-safety",
     "worker-quota-verification-save"
