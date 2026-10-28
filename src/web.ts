@@ -109,8 +109,8 @@ export async function startWeb(dispatch: (input: RequestData) => Promise<unknown
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
     ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
   ]);
-  // PROTOTYPE (web/PROTOTYPE-SIDEBAR-NOTES.md): opt-in ?variant= sidebar/tabs prototype, never served in production.
-  if (process.env.NODE_ENV !== "production") {
+  // PROTOTYPE (web/PROTOTYPE-SIDEBAR-NOTES.md): opt-in ?variant=E sidebar/tabs prototype. Served only when PI_PROTOTYPE_SIDEBAR_E=1 AND the host home is a verify scratch (pi-verify-*), never in production.
+  if (process.env.NODE_ENV !== "production" && process.env.PI_PROTOTYPE_SIDEBAR_E === "1" && /[\\/]pi-verify-/.test(process.env.PI_PROJECTS_HOME ?? "")) {
     assets.set("/prototype-sidebar.js", { path: "prototype-sidebar.js", mime: "text/javascript; charset=utf-8" });
     assets.set("/prototype-sidebar.css", { path: "prototype-sidebar.css", mime: "text/css; charset=utf-8" });
   }
