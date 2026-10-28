@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import type { DurablePlan, DurablePlanSnapshot, DurablePlanWork, DurablePlanWorkSnapshot, DurablePrepareWorkerEnvironment, DurablePublishWorkerEnvironment, DurableResolvedAttempt, DurableRole, DurableWorkerToolBindings, DurableWorkspaceInstructions } from "./durable-plan-types.ts";
 import type { WorkspaceCatalogEntry } from "./workspace-authorization.ts";
 import { fitJson } from "./response-limit.ts";
-import { criteriaProblem, hasAcceptanceList, parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary, type WorkerArtifacts } from "./verification-model.ts";
+import { criteriaProblem, hasAcceptanceList, isExhausted, EXHAUSTED_REASON, parseCriteria, nextStep, verdictText, verifierBrief, MAX_VERIFICATION_ATTEMPTS, VERIFIER_PRIORITY, summarizeVerification, type Criterion, type Verification, type VerificationSummary, type WorkerArtifacts } from "./verification-model.ts";
 import type { TargetManifest } from "./verification-target.ts";
 
 export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type DurablePlanWorkSnapshot, type DurableResolvedAttempt, type DurableRole, type DurableGenerationLifecycle, type DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
@@ -460,6 +460,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       return { kind: "revision", current, verifierThreadId: seen.threadId };
     }
     if (!completed || seen.role !== "worker" || !seen.top) return { kind: "none" };
+    // Checked before the setting, so turning verification off and on cannot clear it.
+    if (isExhausted(seen.verification)) return { kind: "escalate", reason: EXHAUSTED_REASON };
     const open = seen.verification?.open ? seen.verification : undefined;
     if (!open && !hooks.config().enabled) return { kind: "none" };
     // Verification is on but this worker has no workspace scope and worktree to verify: it is reported as not verified, never as plain completion.
@@ -490,7 +492,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function closeCycle(tx: Tx, root: ConversationId, state: PlanningState, workerThreadId: string, outcome: "verified" | "escalated", reason: string, extra: string, tag: string): Promise<void> {
     const cycle = state.threads[workerThreadId]?.verification;
     if (!cycle) return;
-    cycle.open = false; cycle.outcome = outcome; cycle.reason = reason;
+    // An exhausted cycle that blocks a later turn keeps its own outcome and reason.
+    if (cycle.open) { cycle.open = false; cycle.outcome = outcome; cycle.reason = reason; }
     for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
     const finished = cycle.workIds.map(id => state.work[id]).filter((item): item is StoredWork => item !== undefined), last = finished.at(-1);
     if (outcome === "escalated") for (const item of finished) if (item.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; }
@@ -505,8 +508,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const thread = state.threads[work.threadId]!;
     // A pause that lands between the worker's settlement and the verifier's admission defers verification to the resume (the finished turn is re-run as interrupted work); it is not an escalation.
     if (state.paused || state.pausing) { work.status = "interrupted"; work.blocker = PAUSE_BLOCKER; work.endedAt = null; return true; }
+    // The cycle may have run out between preparing this turn and now; the exhausted record is kept, never replaced.
+    if (isExhausted(thread.verification)) prepared = { kind: "escalate", reason: EXHAUSTED_REASON };
     if (prepared.kind === "escalate") {
-      if (!thread.verification?.open) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
+      if (!thread.verification?.open && !isExhausted(thread.verification)) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
       thread.verification!.workIds.push(work.id);
       await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
       return true;

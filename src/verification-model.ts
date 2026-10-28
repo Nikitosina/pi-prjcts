@@ -36,6 +36,10 @@ export type Verification = {
   open: boolean; outcome?: "verified" | "escalated"; reason?: string;
 };
 
+/** A cycle that used all its attempts without a pass is final: the worker thread never gets another budget, and the record stays as it ended. */
+export const isExhausted = (cycle: Verification | undefined): boolean => cycle !== undefined && !cycle.open && cycle.outcome === "escalated" && cycle.attempts.length >= MAX_VERIFICATION_ATTEMPTS;
+export const EXHAUSTED_REASON = `Verification attempts are exhausted (${MAX_VERIFICATION_ATTEMPTS} of ${MAX_VERIFICATION_ATTEMPTS} used); this worker's result cannot be verified again`;
+
 /** A verdict answers criteria by id c1..c20, and the verifier's brief carries the whole task. Beyond these the cycle is refused (blocked), never cut short. */
 export const MAX_CRITERIA = 20;
 export const MAX_TASK_CHARS = 24000;
