@@ -30,7 +30,7 @@ The candidate commit is the PR head at the time you read this. The evidence was 
    - `npm run check` passes (tsc).
    - `logs/npm-run-verify.log`: 21 of 22 passed. The one non-pass is `coordinator-efficiency-e2e`, which is listed in `knownFailing` in `scripts/e2e-manifest.json`.
    - `logs/full-suite.log`: 110 of 173 passed, 62 reported as KNOWN-FAIL, and 1 unexpected failure: `telegram-media-e2e`, which the project already documents as flaky on readiness. It passes inside `npm run verify` and alone (`logs/telegram-media-serial.log`). I did not change or waive it. The earlier load flakes (`status-dots`, `follow-prs`, `verification-trusted-browser`) passed in this run. `scoped-models-e2e` is in the known list but passes, a manifest cleanup unrelated to this PR. The 62 known entries are the manifest's claim, and I did not re-run main.
-   - Screenshots `browser/03-review.png` (confirmation dialog) and `browser/04-saved.png` (saved fallback in settings) were inspected.
+   - Screenshots (bottom desktop status bar cropped out to remove unrelated account and system information) `browser/03-review.png` (confirmation dialog) and `browser/04-saved.png` (saved fallback in settings) were inspected.
 6. Draft PR and no live mutations.
    - Draft PR 28, no merge or deployment.
 
@@ -51,4 +51,4 @@ The independent verifier saw `worker-quota-recovery-e2e` fail waiting for a quot
 
 ## Failure-mode specs
 
-Each regression script has a companion `scripts/<name>-failures.md` listing the failures its assertions catch and its limits. They describe the assertions as they stand now. For the earlier scripts they were written after the code, not before it.
+Each regression script has a companion `scripts/<name>-failures.md` listing the failures its assertions catch and its limits.
