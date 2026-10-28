@@ -30,7 +30,7 @@ function profileHash(value: string): string { let hash = 2166136261; for (let in
 function profileMismatches(first: StoredAttempt, next: StoredAttempt): string[] { const values: Array<[string, string, string]> = [["model", first.model, next.model], ["thinking", first.thinking, next.thinking], ["bindingRevision", first.bindingRevision, next.bindingRevision], ["capabilityBindingRevision", first.capabilityBindingRevision ?? first.bindingRevision, next.capabilityBindingRevision ?? next.bindingRevision], ["standingRevision", first.standingRevision, next.standingRevision], ["cwd", first.cwd, next.cwd], ["instructions", first.instructions, next.instructions], ["toolNames", first.toolNames.join("\u0000"), next.toolNames.join("\u0000")]]; return values.filter(([, left, right]) => left !== right).map(([name, left, right]) => `${name}:${profileHash(left)}!=${profileHash(right)}`); }
 type RetryReceipt = { requestId: string; workId: string; attemptId: string; threadId: string };
 type QuotaRecovery = { retryAt: number; attempts: number; lastError: string };
-type StoredWork = { verificationRequest?: { revision: string; taskId: number }; id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; quotaRecovery?: QuotaRecovery; /** Legacy single receipt, imported into retryReceipts before new admissions. */ manualRetryRequestId?: string; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
+type StoredWork = { recoveredBy?: string; recoveryOf?: string[]; verificationRequest?: { revision: string; taskId: number }; id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; quotaRecovery?: QuotaRecovery; /** Legacy single receipt, imported into retryReceipts before new admissions. */ manualRetryRequestId?: string; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
 export type PlanningState = { retryReceipts?: RetryReceipt[]; paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** What an explicit stop ended; reported once when that stop has drained. */ stopReport?: { stopId: string; workId: string; notes: string[] }; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string }; /** Automatic verification of this worker's finished work (opt-in project setting). */ verification?: Verification }>; dispatcherTaskIds: TaskId[] };
 
 export const DurablePlanning = defineDoc<PlanningState>({ kind: "projects.durable-planning", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ paused: false, pausing: false, workerCap: null, work: {}, threads: {}, dispatcherTaskIds: [] }) });
@@ -472,6 +472,21 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const upTo = own.slice(0, own.findIndex(item => item.id === work.id) + 1 || undefined);
     return (upTo.findLast(item => !item.steering || hasAcceptanceHeader(item.text)) ?? upTo.at(-1) ?? work).text;
   }
+  // A zero-attempt follow-up only carries the still-current blocked cycle, never a later goal.
+  function zeroRecovery(state: PlanningState, work: StoredWork): string[] {
+    const cycle = state.threads[work.threadId]?.verification;
+    if (cycle?.outcome !== "escalated" || cycle.open || cycle.attempts.length || !work.recoveryOf?.length) return [];
+    return work.recoveryOf.filter(id => cycle.workIds.includes(id) && state.work[id]?.status === "blocked" && !state.work[id]?.archivedAt && state.work[id]?.blocker?.startsWith("Verification did not pass:"));
+  }
+  function recordRecovery(state: PlanningState, cycle: Verification): void {
+    if (cycle.open || cycle.outcome !== "verified") return;
+    const last = state.work[cycle.workIds.at(-1) ?? ""];
+    if (last?.status !== "completed") return;
+    for (const id of cycle.workIds) {
+      const work = state.work[id];
+      if (work?.threadId === last.threadId && work.status === "blocked" && !work.archivedAt && work.blocker?.startsWith("Verification did not pass:")) work.recoveredBy = last.id;
+    }
+  }
   /** Reads what the settlement needs, then does the file work (revision of the tree) outside the transaction. */
   async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean, attemptTaskId: TaskId): Promise<PreparedVerification> {
     const hooks = options.verification;
@@ -479,7 +494,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     let seen: { role: DurableRole; top: boolean; scopeId: string | null; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string; explicit: boolean; requested?: string } | undefined;
     await read(async tx => {
       const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
-      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work), explicit: Boolean(work.attempt?.boundTools?.includes("projects_request_verification")), requested: work.verificationRequest?.taskId === work.taskId ? work.verificationRequest.revision : undefined };
+      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, state.work[zeroRecovery(state, work)[0] ?? ""] ?? work), explicit: Boolean(work.attempt?.boundTools?.includes("projects_request_verification")), requested: work.verificationRequest?.taskId === work.taskId ? work.verificationRequest.revision : undefined };
       return undefined;
     });
     if (!seen) return { kind: "none" };
@@ -538,6 +553,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     for (const attempt of cycle.attempts) if (attempt.endedAt === undefined) { attempt.state = "blocked"; attempt.reason = reason; attempt.endedAt = Date.now(); }
     const finished = cycle.workIds.map(id => state.work[id]).filter((item): item is StoredWork => item !== undefined), last = finished.at(-1);
     if (outcome === "escalated") for (const item of finished) if (item.status === "completed") { item.status = "blocked"; item.blocker = `Verification did not pass: ${reason}`; }
+    if (outcome === "verified") recordRecovery(state, cycle);
     if (!last) return;
     const latest = cycle.attempts.at(-1), summary = latest ? verdictText(cycle, latest) : "";
     const head = outcome === "verified" ? `VERIFIED by an independent verifier after ${cycle.attempts.length} attempt(s).\n${summary}` : `NOT VERIFIED: ${reason}. The worker's task is not complete; decide what to do next.\n${summary}`;
@@ -552,8 +568,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     // The cycle may have run out between preparing this turn and now; the exhausted record is kept, never replaced.
     if (isExhausted(thread.verification)) prepared = { kind: "escalate", reason: EXHAUSTED_REASON };
     if (work.verificationRequest && (options.verification?.workerBusy?.(work.threadId) || Object.values(state.work).some(other => other.parentThreadId === work.threadId && (other.status === "queued" || other.status === "running")))) prepared = { kind: "escalate", reason: "The worker has active children, background commands or leases" };
+    if (thread.verification) recordRecovery(state, thread.verification);
+    const recoveryOf = zeroRecovery(state, work);
     if (prepared.kind === "escalate") {
-      if (!thread.verification?.open && !isExhausted(thread.verification) && !(thread.verification?.outcome === "escalated" && thread.verification.attempts.length)) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
+      if (!thread.verification?.open && !isExhausted(thread.verification) && !(thread.verification?.outcome === "escalated" && thread.verification.attempts.length)) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: recoveryOf, open: true };
       thread.verification!.workIds.push(work.id);
       await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
       return true;
@@ -562,7 +580,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       thread.verification.open = true;
       delete thread.verification.outcome;
       delete thread.verification.reason;
-    } else if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, scopeId: prepared.scopeId, criteria: prepared.criteria, attempts: [], workIds: [], open: true };
+    } else if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, scopeId: prepared.scopeId, criteria: prepared.criteria, attempts: [], workIds: recoveryOf, open: true };
     // Read back through the document: only the tracked object records later mutations.
     const cycle = thread.verification!;
     cycle.workIds.push(work.id);
@@ -737,8 +755,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       work = continuations().get(work.id);
       if (!work) return undefined;
     }
+    if (work?.status === "blocked" && !work.archivedAt && work.blocker?.startsWith("Verification did not pass:") && work.recoveredBy) {
+      const recovered = state.work[work.recoveredBy];
+      if (recovered?.status === "completed" && recovered.threadId === work.threadId) return recovered;
+    }
     const cycle = work && state.threads[work.threadId]?.verification;
-    if (work?.status === "blocked" && work.blocker?.startsWith("Verification did not pass:") && cycle?.outcome === "verified" && !cycle.open && cycle.workIds.includes(work.id)) {
+    if (work?.status === "blocked" && !work.archivedAt && work.blocker?.startsWith("Verification did not pass:") && cycle?.outcome === "verified" && !cycle.open && cycle.workIds.includes(work.id)) {
       const recovered = state.work[cycle.workIds.at(-1)!];
       if (recovered?.status === "completed") return recovered;
     }
@@ -815,7 +837,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function followUp(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId): Promise<string> {
     if (!text || text.length > 32000 || !requestId) throw new Error("Follow-up text and requestId are required");
     const id = crypto.randomUUID();
-    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); rejectRetryRequest(state, requestId); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); requireWorkspaceThread(thread); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); return record.id; }, BACKGROUND_CONTEXT);
+    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); rejectRetryRequest(state, requestId); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); requireWorkspaceThread(thread); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); const cycle = state.threads[threadId]?.verification; if (!hasAcceptanceHeader(text) && cycle?.outcome === "escalated" && cycle.attempts.length === 0) state.work[record.id]!.recoveryOf = cycle.workIds.filter(workId => { const item = state.work[workId]; return item?.status === "blocked" && !item.archivedAt && item.blocker?.startsWith("Verification did not pass:"); }); return record.id; }, BACKGROUND_CONTEXT);
   }
   async function steer(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId) {
     if (!text || text.length > 32000 || !requestId) throw new Error("Steering text and requestId are required");
