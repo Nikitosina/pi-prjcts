@@ -1,0 +1,26 @@
+{
+  "feature": "quota-save-recovery",
+  "entry": "browser launch link",
+  "ok": true,
+  "problems": [],
+  "steps": [
+    {
+      "kind": "precondition",
+      "detail": "existing work c8465c7b-c132-47fd-a0cf-0728ac04fb6a entered queued before settings save",
+      "at": "2026-10-28T15:28:13.235Z"
+    },
+    {
+      "kind": "verified",
+      "detail": "pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model",
+      "at": "2026-10-28T15:28:15.208Z"
+    },
+    {
+      "kind": "verified",
+      "detail": "existing quota work completed on the fallback after the browser save",
+      "at": "2026-10-28T15:28:15.211Z"
+    }
+  ],
+  "consoleErrors": [],
+  "httpErrors": [],
+  "revision": "df1df98d16c2eb930f0adc5e07970a85a2ced7b2"
+}
