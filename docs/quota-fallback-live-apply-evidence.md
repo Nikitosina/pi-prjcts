@@ -2,7 +2,7 @@
 
 Spec and the six acceptance criteria are in `docs/quota-fallback-live-apply.md`. This file maps each criterion to tests and recorded evidence. Evidence files are under `docs/evidence/quota-fallback-live-apply/` with a SHA-256 manifest in `MANIFEST.sha256`.
 
-The candidate commit is the PR head at the time you read this. The evidence was produced on source commit `df1df98d16c2eb930f0adc5e07970a85a2ced7b2`. Later commits only add this document and the evidence files, so the source is identical.
+The candidate commit is the PR head at the time you read this. The evidence was produced on source commit `38ef57bdb9a87ae38b68156d78f6e143b0b90b50`. Later commits only add this document and the evidence files, so the source is identical.
 
 ## Criteria to evidence
 
@@ -16,6 +16,7 @@ The candidate commit is the PR head at the time you read this. The evidence was 
    - `worker-quota-verification-save-e2e`: exhausted verification, verifier and paused work are preserved.
    - `worker-quota-recovery-e2e`: manual pause, project pause and stop survive saves, timers and restart.
 3. Changed or removed fallback, repeated saves, concurrency, restart and exhaustion.
+   - `worker-quota-superseded-e2e`: a failed quota record A is followed by a quota-waiting follow-up B on the same thread. After restart and three saves (set, remove, set), only B recovers, once, on the fallback. A is not revived, there is no deadlock, and the plan has no extra records. The same script then adds 20000 completed records and shows an idle sweep stays bounded (about 40 ms, threshold 1500 ms). Without the source fix this script hangs: the due follow-up is rejected because another record on the thread holds quota recovery. I observed that as a timeout, not as a clean assertion failure.
    - `worker-quota-live-race-e2e`: concurrent saves, latest fallback used once, removed fallback not used, restart keeps pending recovery.
    - `worker-quota-settlement-race-e2e`, `worker-quota-retry-receipts-e2e`: races and idempotent retry receipts.
    - `worker-quota-recovery-e2e`: fallback exhaustion fails after a finite number of requests, and no further requests occur under repeated sweeps.
@@ -26,8 +27,8 @@ The candidate commit is the PR head at the time you read this. The evidence was 
    - Source: recovery edits only the conversation model and `attempt.model` (`src/durable-planning.ts`, quota recovery pass), never the instructions, tools, scope or worktree.
 5. Checks and suites.
    - `npm run check` passes (tsc).
-   - `logs/npm-run-verify.log`: 19 of 20 passed. The one non-pass is `coordinator-efficiency-e2e`, which is listed in `knownFailing` in `scripts/e2e-manifest.json`.
-   - `logs/full-suite.log`: 109 of 171 passed, 0 unexpected failures, 62 reported as KNOWN-FAIL. Those 62 are listed as failing on main by the manifest. I did not re-run main to confirm them independently. `scoped-models-e2e` is in the known list but passes, which is a manifest cleanup unrelated to this PR.
+   - `logs/npm-run-verify.log`: 20 of 21 passed. The one non-pass is `coordinator-efficiency-e2e`, which is listed in `knownFailing` in `scripts/e2e-manifest.json`.
+   - `logs/full-suite.log`: 107 of 172 passed, 62 reported as KNOWN-FAIL, and 3 unexpected failures under three-way parallel load: `status-dots-e2e`, `follow-prs-e2e` and `verification-trusted-browser-e2e`. None touch quota code. I re-ran each alone and all three passed (`logs/*-serial.log`). The same suite on the previous head passed all three, so I treat them as load flakes and did not waive or change them. If the verifier sees them fail, rerun them serially. Those 62 are listed as failing on main by the manifest. I did not re-run main to confirm them independently. `scoped-models-e2e` is in the known list but passes, which is a manifest cleanup unrelated to this PR.
    - Screenshots `browser/03-review.png` (confirmation dialog) and `browser/04-saved.png` (saved fallback in settings) were inspected.
 6. Draft PR and no live mutations.
    - Draft PR 28, no merge or deployment.
