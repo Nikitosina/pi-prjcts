@@ -169,7 +169,8 @@ try {
   await waitFor(`window.__samples.some(x => x.messages.includes('STEP-TWO')) && document.querySelector('#live-reply').innerText.includes('Thinking')`, s, 'stage two committed');
   // Held before the final answer: scroll up and the working pill must appear (failure 3).
   await delay(600);
-  await evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop = 0; t.dispatchEvent(new Event('scroll')); })()`, s);
+  const transcriptPoint = await evaluate(`(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`, s);
+  await send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...transcriptPoint, deltaX: 0, deltaY: -5000 }, s);
   await waitFor(`!!document.querySelector('#working-pill') && !document.querySelector('#working-pill').hidden`, s, 'working pill while scrolled up', 40);
   await shot('03-scrolled-working', s);
   await evaluate(`document.querySelector('#working-pill').click()`, s);

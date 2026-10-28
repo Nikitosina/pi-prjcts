@@ -317,6 +317,7 @@ async function applyLive(frame) {
   if (frame.text !== previous?.text) {
     const now = performance.now();
     liveRevealDeadline = now + 120;
+    liveRevealFirstPaint = true;
     if (liveRenderedText === previous?.text) liveRevealTime = now;
   }
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
@@ -403,7 +404,7 @@ function renderWorkingPill() {
 }
 
 const streamMotion = matchMedia("(prefers-reduced-motion: reduce)");
-let liveRenderedText = null, liveRevealDeadline = 0, liveRevealTime = 0;
+let liveRenderedText = null, liveRevealDeadline = 0, liveRevealTime = 0, liveRevealFirstPaint = false;
 
 function newLiveText(value, animate) {
   if (!animate || !value) return document.createTextNode(value);
@@ -487,14 +488,16 @@ function renderLive(immediate = false) {
   if (thoughtTextNode.textContent !== summary) thoughtTextNode.textContent = summary;
   const now = performance.now(), animate = !immediate && !document.hidden && !streamMotion.matches;
   let shown = frame.text;
-  if (animate && now < liveRevealDeadline) {
+  if (animate && (now < liveRevealDeadline || liveRevealFirstPaint)) {
     const start = liveRenderedText && frame.text.startsWith(liveRenderedText) ? liveRenderedText.length : 0;
     // Spread provider bursts over a short catch-up window, not a fixed typing speed that can fall behind.
     const elapsed = Math.min(50, now - liveRevealTime || 16);
     let end = Math.min(frame.text.length, start + Math.max(1, Math.ceil((frame.text.length - start) * elapsed / Math.max(16, liveRevealDeadline - now))));
+    if (liveRevealFirstPaint && end === frame.text.length && end - start > 1) end = start + Math.ceil((end - start) / 2);
     if (end < frame.text.length && /[\uD800-\uDBFF]/.test(frame.text[end - 1])) end++;
     shown = frame.text.slice(0, end);
   }
+  liveRevealFirstPaint = false;
   liveRevealTime = now;
   if (liveRenderedText !== shown) {
     const text = node.querySelector(".text"), next = document.createElement("template");
