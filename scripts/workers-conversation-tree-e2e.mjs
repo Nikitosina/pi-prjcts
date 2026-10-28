@@ -79,7 +79,18 @@ const socket = join(tmpdir(), `pi-projects-${process.getuid?.() ?? 'user'}-${cre
 const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: join(userHome, '.config'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', PI_PROJECTS_HOME: home, PI_PROJECTS_HOST: '1', PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1' };
 for (const key of Object.keys(env)) if (key.startsWith('PI_SUBAGENT') || key === 'PI_SESSION_FILE') delete env[key];
 const log = createWriteStream(join(artifacts, 'host.log'), { flags: 'a', mode: 0o600 });
-let host, hostExit;
+let host, hostExit, chromeExit;
+const processStart = pid => execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' }).trim();
+const processTree = roots => {
+  const rows = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,lstart='], { encoding: 'utf8' }).trim().split('\n').map(line => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    return match && { pid: Number(match[1]), ppid: Number(match[2]), start: match[3] };
+  }).filter(Boolean);
+  const owned = new Set(roots.filter(Boolean));
+  let size;
+  do { size = owned.size; for (const row of rows) if (owned.has(row.ppid)) owned.add(row.pid); } while (owned.size !== size);
+  return rows.filter(row => owned.has(row.pid));
+};
 function rpc(input) {
   return new Promise((resolve, reject) => {
     const req = request({ socketPath: socket, method: input ? 'POST' : 'GET', path: input ? '/api' : '/health', headers: input ? { 'content-type': 'application/json' } : {}, timeout: 60000 }, res => {
@@ -116,7 +127,7 @@ function startChrome() {
   const clog = createWriteStream(join(artifacts, 'chrome.log'), { flags: 'wx', mode: 0o600 });
   chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', `--user-data-dir=${join(root, 'chrome-profile')}`, '--remote-debugging-pipe', 'about:blank'], { stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'] });
   chrome.stdout.pipe(clog); chrome.stderr.pipe(clog);
-  chrome.once('exit', () => { cdpEnded = true; });
+  chromeExit = new Promise(ok => chrome.once('exit', (code, signal) => { cdpEnded = true; ok({ code, signal }); }));
   chrome.stdio[4].on('data', part => {
     buffer += part.toString(); let end;
     while ((end = buffer.indexOf('\0')) >= 0) {
@@ -228,9 +239,26 @@ try {
 } catch (error) { result.status = 'failed'; result.error = String(error?.stack ?? error); process.exitCode = 1; }
 finally {
   gate('worker-ready').open(); gate('MARK-FREEZEPASS-verdict').open();
+  const settlement = { capturedAt: new Date().toISOString(), provider: { pid: process.pid }, hostPid: host?.pid, chromePid: chrome?.pid, processes: [] };
+  let identityError;
+  try { settlement.provider.start = processStart(process.pid); settlement.processes = processTree([host?.pid, chrome?.pid]); } catch (error) { identityError = error; }
   if (chrome && !cdpEnded) { try { await send('Browser.close'); } catch {} if (!cdpEnded) chrome.kill('SIGTERM'); }
-  try { await rpc({ action: 'shutdown' }); await Promise.race([hostExit, delay(10000)]); } catch { host?.kill('SIGKILL'); }
-  model.closeAllConnections(); model.close(); save(); log.end();
+  try { await rpc({ action: 'shutdown' }); } catch { host?.kill('SIGKILL'); }
+  model.closeAllConnections();
+  const providerClosed = new Promise((resolve, reject) => model.close(error => error ? reject(error) : resolve(true)));
+  try {
+    if (identityError) throw identityError;
+    if (!settlement.provider.start || result.status === 'passed' && ![host?.pid, chrome?.pid].every(pid => settlement.processes.some(row => row.pid === pid && row.start))) throw Error('Missing owned process identity');
+    settlement.chromeExit = chromeExit ? await Promise.race([chromeExit, delay(10000).then(() => { throw Error('Chrome did not settle'); })]) : null;
+    settlement.hostExit = hostExit ? await Promise.race([hostExit, delay(10000).then(() => { throw Error('Host did not settle'); })]) : null;
+    settlement.providerClosed = await Promise.race([providerClosed, delay(10000).then(() => { throw Error('Provider did not close'); })]);
+    await eventually(() => settlement.processes.every(({ pid, start }) => {
+      try { return processStart(pid) !== start; } catch (error) { if (error.status === 1) return true; throw error; }
+    }), 'owned child processes did not settle', 200);
+    settlement.settledAt = new Date().toISOString();
+  } catch (error) { settlement.error = String(error); process.exitCode = 1; }
+  writeFileSync(join(artifacts, 'settlement.json'), JSON.stringify(settlement, null, 2) + '\n', { mode: 0o600 });
+  save(); log.end();
   if (!process.exitCode) rmSync(root, { recursive: true, force: true });
 }
 console.log(JSON.stringify({ status: result.status, checks: result.checks, error: result.error, artifacts }, null, 2));

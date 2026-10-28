@@ -12,3 +12,9 @@ Record before implementing the regression journey:
 - The browser tree disagrees with read-only persisted host state, or reports a failed/stopped verifier as passed.
 - Work priority changes dispatch order but the panel presents follow-ups in a misleading order.
 - Refresh returns focus from a Now, queued or history work button to a different work button or the conversation header.
+
+Recipe settlement cases recorded before exercising the cleanup repair:
+
+- Scratch is removed before the owned host, Chrome or observed descendants settle, or before the in-process provider closes.
+- A missing or reused PID is treated as the original live process, or a timeout still reports a successful cleanup.
+- Cleanup failure discards scratch, hides the journey failure, or weakens a UI assertion.
