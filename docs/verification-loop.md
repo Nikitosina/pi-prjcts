@@ -1,12 +1,12 @@
-# Automatic verification loop
+# Worker-owned verification loop
 
 Opt in per project in Settings → Verification. It is off by default. Enabling it requires a separately chosen verifier model and an installed verification skill; neither falls back to the worker or coordinator choices.
 
 ## Flow
 
-1. A top-level, scoped worker finishes a turn. The planner records a content hash of its exact worktree, including modified and untracked non-ignored files, and admits a **fresh verifier thread**. The worker stays paused while that attempt runs.
+1. A top-level scoped worker finishes its candidate and command evidence, waits for children, stops background jobs and releases leases. It calls `projects_request_verification` and yields its turn. The host records the exact worktree revision and admits a **fresh verifier thread** only if the candidate has not drifted. The worker stays paused while that attempt runs. Ending a turn without a request does not start verification and is reported as incomplete when verification is enabled.
 2. The verifier reads the frozen skill and runs it against the worker's worktree with `projects_verify_run`. It records one structured verdict with `projects_verification_verdict`: every criterion is `pass | fail | blocked`, with a reason and evidence (run ids and artifacts). The host derives the overall result; every passing criterion needs a normally finished run.
-3. Pass keeps the work completed and reports `VERIFIED` with commands and log links. A failure with attempts left and visible progress returns the verdict to the **same worker**, whose repair is checked by another fresh verifier. A cycle has at most three attempts.
+3. Pass keeps the work completed and reports `VERIFIED` with commands and log links. A failure with attempts left and visible progress returns the verdict to the **same worker**, which explicitly requests another fresh verifier after repair. A cycle has at most three attempts.
 4. Blocked, stale, no verdict, the same failure twice, a failed repair, or attempt exhaustion escalates as `NOT VERIFIED`. The work is blocked rather than reported complete. Stopping the worker or verifier ends the cycle without a completion report.
 
 ## Trusted execution contract
@@ -18,7 +18,7 @@ The verifier is **trusted like the worker, not sandboxed**. Its commands run as 
 - **Exact target and drift.** Each attempt stores its starting revision and manifest. At the verdict, added, removed and modified files must be declared in `sourceWrites` with reasons. Undeclared drift or an unreadable target makes the attempt stale. Declared drift gets a final revision, which is checked again when the verdict settles; later changes are stale. Ignored dependency/build outputs are outside the content revision.
 - **Evidence.** Commands, combined stdout/stderr logs, screenshots and verdicts belong to the verifier thread and survive attempt cleanup. There is no disposable source snapshot. Revision manifests remain as evidence. The verifier can inspect the parent's worktree and diff; changed proof files are listed in its brief and report.
 - **Capacity and admission.** Verifiers share the bounded worker pool at high priority. A finished worker has released its slot, so cap 1 does not deadlock. Pausing between worker settlement and verifier admission defers the attempt until recovery instead of starting work behind the owner's back.
-- **Durability.** Frozen model, skill and criteria, attempts, revisions, runs, source writes and verdicts live in the planning document. Restart recovery keeps the cycle open and never guesses a result. A settings change mid-cycle does not replace the judge.
+- **Durability.** Frozen model, skill and criteria, attempts, revisions, runs, source writes and verdicts live in the planning document. Restart recovery keeps the cycle open and never guesses a result. A settings change mid-cycle does not replace the judge. An escalated cycle with attempts retains its frozen settings and attempt history if the same worker is continued. An exhausted cycle remains final.
 
 ## Limits
 
@@ -35,3 +35,7 @@ The verifier is **trusted like the worker, not sandboxed**. Its commands run as 
 - `node scripts/verification-recovery-e2e.mjs` (R1–R8): three attempts, restart and frozen settings, saturated scheduling, failed repair, intact criteria, proof diffs, retained evidence and unscoped workers.
 - `node scripts/verification-trusted-browser-e2e.mjs`: the canonical `verify-pi-prjcts` launch/doctor/drive/cleanup path inside verifier attempts, real isolated host and headless Chrome, actual browser failure → same-worker repair → fresh pass, screenshots and independent stored transcript.
 - Browser settings journey: `verify-pi-prjcts` drive `verification-settings`.
+
+## Existing contexts
+
+A worker whose frozen tools predate `projects_request_verification` retains the legacy automatic turn-completion behavior for its open cycle. The host does not rewrite that worker’s frozen tool list or instructions. New worker contexts receive the request tool and worker-owned guidance. Source changes alone do not update a running host or installed skills; rollout requires separate merge, deployment and restart authority.

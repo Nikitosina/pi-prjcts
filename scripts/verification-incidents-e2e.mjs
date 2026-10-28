@@ -13,8 +13,8 @@ const kit = await createKit('verification-incidents', { handler: async ({ role, 
   if (role === 'coordinator' && user === 'DELEGATE-STEERED' && !results.length) return call('projects_delegate', { task: 'STEERED-TASK write proof.txt', acceptance: criteria });
   if (role === 'coordinator' && user === 'DELEGATE-REBRIEF' && !results.length) return call('projects_delegate', { task: 'REBRIEF-TASK write proof.txt', acceptance: criteria });
   if (role === 'worker' && /^(STEERED|REBRIEF)-TASK/.test(user)) { await hold(user.slice(0, 7)).wait; return say('Superseded turn.'); }
-  if (role === 'worker' && user.startsWith('Rebrief')) return results.length ? say('Finished the new brief.') : call('bash', { command: 'echo done > proof.txt' });
-  if (role === 'worker' && user.startsWith('Concrete next step')) return results.length ? say('Finished after the steer.') : call('bash', { command: 'echo done > proof.txt; mkdir -p "$PI_ARTIFACTS_DIR"; echo shot > "$PI_ARTIFACTS_DIR/proof-shot.txt"' });
+  if (role === 'worker' && user.startsWith('Rebrief')) return results.length === 0 ? call('bash', { command: 'echo done > proof.txt' }) : results.length === 1 ? call('projects_request_verification', {}) : say('Finished the new brief.');
+  if (role === 'worker' && user.startsWith('Concrete next step')) return results.length === 0 ? call('bash', { command: 'echo done > proof.txt; mkdir -p "$PI_ARTIFACTS_DIR"; echo shot > "$PI_ARTIFACTS_DIR/proof-shot.txt"' }) : results.length === 1 ? call('projects_request_verification', {}) : say('Finished after the steer.');
   if (tools.includes('projects_verify_run')) return results.length ? say('Recorded.') : call('projects_verification_verdict', { summary: 'Probe only.', criteria: [] });
 } });
 kit.initRepo(); kit.git(kit.workspace, 'remote', 'add', 'origin', 'git@github.com:acme/incident-fixture.git');

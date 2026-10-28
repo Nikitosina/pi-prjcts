@@ -499,6 +499,7 @@ export async function openDurableProject(input: { project: Project; dir: string;
       tools: buildVerificationTools({ projectId: project.id, planRoot: () => rootReference?.id, controlRoot: dir, background, leases: hostLeases, shell: (scopeId, cwd, branch) => verifierShell(loadProject(project.id), scopeId, cwd, branch), isClosed: () => closed }),
       hooks: {
         config: () => { const current = loadProject(project.id).verification; return { enabled: Boolean(current?.enabled), skill: current?.skill ?? "" }; },
+        workerBusy: (threadId: string) => Boolean(holdsOf(threadId).holds),
         scopeCheck: (scopeId: string) => { const shell = verifierShell(loadProject(project.id), scopeId, "/", null); return "refusal" in shell ? shell.refusal : null; },
         check: async () => {
           const skill = loadProject(project.id).verification?.skill ?? "";
@@ -1560,7 +1561,7 @@ function coordinatorInstructions(project: Project, repositoryStanding: string, s
   const standing = repositoryStanding ? `\n\nRepository instructions (the checkout's AGENTS.md and related files; workers get the same):\n${repositoryStanding}\n\n` : "";
   const plugin = plugins.coordinatorTools().filter(provider => provider.applies(project)).map(provider => provider.instructions?.(project) ?? "").join("");
   return `You are the persistent coordinator for ${project.name}. ${rolePrompt(project, "coordinator")}
-${SHARED_ROLE_RULES} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
+${SHARED_ROLE_RULES} Inspect worker results and verifier proofs before reporting completion. Inspect blockers and continue the same worker when a repair is clear and authorized. Record the disposition in maintained project knowledge. Use projects_worker_archive for handled or superseded work; preserve its history. Keep unresolved blockers visible and tracked, not archived just because they are old. Ask only for the specific missing authority or decision. Exhausted verification budgets remain final. Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
 }
 function verifierInstructions(project: Project, repositoryStanding: string): string {
   return `You are a verifier for ${project.name}. Project instructions: ${project.objective}
@@ -1580,5 +1581,5 @@ ${repositoryStanding ? `Repository instructions (frozen for this thread):
 ${repositoryStanding}
 
 ` : ""}${rolePrompt(project, role)}
-${SHARED_ROLE_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
+${SHARED_ROLE_RULES}${role === "worker" ? " When verification is enabled, finish the candidate and command evidence, stop background jobs, release leases and wait for children. Call projects_request_verification, then end your turn. Read verifier feedback, repair in this same thread and request another check within the fixed budget. If blocked, report the specific blocker. A response alone does not verify the task." : ""}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
 }

@@ -18,7 +18,7 @@ const kit = await createKit('verification-exhausted', { handler: async ({ role, 
     }
     return say('Recorded.');
   }
-  if (role === 'worker') return results.length ? say('Finished.') : call('bash', { command: 'echo done > proof.txt' });
+  if (role === 'worker') { if (!results.length) return call('bash', { command: 'echo done > proof.txt' }); if (results.length === 1 && tools.includes('projects_request_verification')) return call('projects_request_verification', {}); return say('Finished.'); }
 } });
 kit.initRepo(); kit.git(kit.workspace, 'remote', 'add', 'origin', 'git@github.com:acme/exhausted-fixture.git');
 mkdirSync(join(kit.workspace, '.agents/skills/mini-verify'), { recursive: true });

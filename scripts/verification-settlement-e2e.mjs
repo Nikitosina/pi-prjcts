@@ -25,8 +25,10 @@ const kit = await createKit('verification-settlement', { env: { PI_PROJECTS_LEAS
     }
     return say('Verdict recorded.');
   }
+  if (marker === 'CASE-PARTIAL' && tools.includes('projects_request_verification') && !results.length) return call('projects_request_verification', {});
   if (role !== 'worker') return say('Finished.');
   if (results.length) {
+    if (results.length === 1 && tools.includes('projects_request_verification')) return call('projects_request_verification', {});
     if (marker.startsWith('CASE-FREEZE') && !user.startsWith('FOLLOWUP')) await wait(`${marker}-worker`);
     return say(`${marker} worker finished`);
   }
@@ -90,6 +92,7 @@ await kit.run(async () => {
         if (marker.endsWith('ERROR')) throw Error('deterministic early abort failure');
       }, testBeforeVerifierRevision: async () => {
         if (!marker.startsWith('CASE-LEASE') && !marker.startsWith('CASE-EARLY')) return;
+        if (!(await runtime.planSnapshot()).verification?.[threadId]?.attempts.length) return;
         await wait(`${marker}-revision`);
         if (marker.endsWith('ERROR')) throw Error('deterministic final revision read failure');
       } });
@@ -240,7 +243,7 @@ await kit.run(async () => {
         observe(`${marker} releases after honest settlement`, after.acquired && ((marker.endsWith('PASS') || marker.endsWith('RESUME')) ? result.outcome === 'verified' : result.outcome === 'escalated') && result.attempts[0].state === ((marker.endsWith('PASS') || marker.endsWith('RESUME')) ? 'pass' : marker.endsWith('STALE') ? 'stale' : 'blocked'), result);
         hostLeases.release(resource, contender);
       }
-    } catch (e) { observations.push({ name: marker, ok: false, error: String(e?.stack ?? e) }); }
+    } catch (e) { console.error(marker, e?.stack ?? e); observations.push({ name: marker, ok: false, error: String(e?.stack ?? e) }); }
     finally {
       hostLeases.releaseWhere = originalReleaseWhere;
       for (const [key, g] of gates) if (key.startsWith(marker)) g.release.resolve();

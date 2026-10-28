@@ -51,6 +51,7 @@ const model = createServer((req, res) => {
         return reply(say('Delegated.'));
       }
       if (role === 'worker') {
+        if (stage === 1 && names.includes('projects_request_verification')) return reply(call('projects_request_verification', {}));
         if (stage > 0) return reply(say(`Worker finished ${marker}`));
         if (marker === 'MARK-REPAIRFAIL' && /^\[Automatic verification failed\]/.test(user)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: { message: 'repair turn refused by the provider', type: 'invalid_request_error' } })); }
         if (marker === 'MARK-PROOF') return reply(call('bash', { command: 'mkdir -p scripts && echo "process.exit(0)" > scripts/check.mjs && echo done > feature.txt' }));

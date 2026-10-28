@@ -46,7 +46,8 @@ const model = createServer((req, res) => {
         return reply(say('Delegated.'));
       }
       if (role === 'worker') {
-        if (stage > 0) return reply(say('Coordinator messaging is ready for verification.'));
+        if (stage === 1) return reply(call('projects_request_verification', {}));
+        if (stage > 1) return reply(say('Coordinator messaging is ready for verification.'));
         return reply(call('bash', { command: user.startsWith('[Automatic verification failed]') ? repair : mutation }));
       }
       if (role === 'verifier') {

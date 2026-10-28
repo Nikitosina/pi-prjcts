@@ -38,16 +38,63 @@ const model = createServer((req, res) => {
     const reply = out => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(out); };
     try {
       if (role === 'coordinator') {
+        if (user === 'UNAUTHORIZED-REQUEST') return stage === 0 ? reply(call('projects_request_verification', {})) : reply(say('Attempt rejected.'));
+        if (user.startsWith('RECOVER ')) {
+          const threadId = user.slice('RECOVER '.length).trim();
+          if (stage === 0) return reply(call('projects_workers', { threadId, all: true }));
+          if (stage === 1) return reply(call('projects_worker_control', { action: 'follow_up', threadId, text: 'Repair and explicitly request verification without changing frozen criteria.' }));
+          return reply(say('Recovery delegated to the same worker.'));
+        }
+        if (user.startsWith('INSPECT-ARCHIVE ')) {
+          const id = user.slice('INSPECT-ARCHIVE '.length).trim();
+          if (stage === 0) return reply(call('projects_workers', { workId: id, all: true }));
+          if (stage === 1) return reply(call('projects_work_result', { workId: id }));
+          if (stage === 2) return reply(call('projects_knowledge_write', { path: 'plans/verification-fixture.md', text: 'Handled: candidate drift was investigated and superseded; keep unrelated blockers open.', expectedRevision: null }));
+          if (stage === 3) return reply(call('projects_worker_archive', { workIds: [id] }));
+          return reply(say('Handled and archived; unresolved work stays tracked.'));
+        }
         if (user.startsWith('[Durable work')) { result.reports.push(user); return reply(say('Noted.')); }
         const task = user.match(/MARK-[A-Z0-9]+/)?.[0];
         if (task && stage === 0) return reply(call('projects_delegate', { task: `${task} write feature.txt`, acceptance: ['feature.txt exists in the repository and contains the word done', 'node check.mjs exits 0'] }));
         return reply(say('Delegated.'));
       }
+      if (role === 'other' && user === 'MARK-CHILD-SCOUT') { await gate('child-ready').wait; return reply(say('child finished')); }
+      if (role === 'worker' && marker === 'MARK-CHILD') {
+        if (user.startsWith('[Child work')) {
+          if (stage === 0) return reply(call('bash', { command: 'echo done > feature.txt' }));
+          if (stage === 1) return reply(call('projects_request_verification', {}));
+          return reply(say('Child result handled.'));
+        }
+        if (stage === 0) return reply(call('projects_delegate_child', { role: 'scout', task: 'MARK-CHILD-SCOUT' }));
+        if (stage === 1) return reply(call('projects_request_verification', {}));
+        return reply(say('Waiting for child.'));
+      }
       if (role === 'worker') {
+        if (marker === 'MARK-WORKERJOB') {
+          if (stage === 0) return reply(call('projects_bg_start', { command: 'sleep 60', label: 'active job' }));
+          if (stage === 1) return reply(call('projects_request_verification', {}));
+          if (stage === 2) return reply(call('projects_bg_stop', { id: JSON.parse(text(turn[0].content)).id }));
+          if (stage === 3) return reply(call('bash', { command: 'echo done > feature.txt' }));
+          if (stage === 4) return reply(call('projects_request_verification', {}));
+          return reply(say('Worker stopped job and requested verification.'));
+        }
+        if (marker === 'MARK-WORKERLEASE') {
+          if (stage === 0) return reply(call('projects_lease_acquire', { resource: 'worker-verification-fixture', ttlMinutes: 1 }));
+          if (stage === 1) return reply(call('projects_request_verification', {}));
+          if (stage === 2) return reply(call('projects_lease_release', { resource: 'worker-verification-fixture' }));
+          if (stage === 3) return reply(call('bash', { command: 'echo done > feature.txt' }));
+          if (stage === 4) return reply(call('projects_request_verification', {}));
+          return reply(say('Worker released lease and requested verification.'));
+        }
         if (marker === 'MARK-NOCHANGE' && stage === 0) return reply(call('bash', { command: 'echo nope > feature.txt' }));
         if (/^\[Automatic verification failed\]/.test(user) && marker !== 'MARK-NOCHANGE' && stage === 0) { return reply(call('bash', { command: 'echo done > feature.txt' })); }
         if (marker === 'MARK-FREEZEPASS' && !user.startsWith('Frozen follow-up') && stage > 0) await gate('worker-ready').wait;
-        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-BG' || marker === 'MARK-FREEZEPASS' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
+        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-GOOD' || marker === 'MARK-INVALID' || marker === 'MARK-DUP' || marker === 'MARK-BG' || marker === 'MARK-FREEZEPASS' ? 'echo done > feature.txt' : 'echo nope > feature.txt' }));
+        if (marker === 'MARK-INVALID' && stage === 1) return reply(call('projects_request_verification', { model: 'attacker', criteria: ['fake'], target: '/tmp' }));
+        if (marker === 'MARK-INVALID' && stage === 2) return reply(call('projects_request_verification', {}));
+        if (stage === 1 && marker !== 'MARK-PROGRESS' && marker !== 'MARK-PLAIN' && names.includes('projects_request_verification')) return reply(call('projects_request_verification', {}));
+        if (marker === 'MARK-DUP' && stage === 2) return reply(call('projects_request_verification', {}));
+        if (marker === 'MARK-STALE' && stage === 2) return reply(call('bash', { command: 'echo changed > feature.txt' }));
         return reply(say(`Worker finished ${marker}`));
       }
       if (role === 'verifier') {
@@ -139,6 +186,32 @@ try {
   const settings = (await rpc({ action: 'settings-snapshot', id })).values;
   check('V1 opt-in needs a separately chosen verifier model and an installed skill; both are stored', settings.verification.enabled && settings.verification.skill === 'mini-verify' && settings.models.verifier === 'fake/fake-judge' && settings.models.worker === 'fake/fake-model');
 
+  // A successful progress turn is not a verification request or task completion.
+  const progress = await delegateTask(id, 'MARK-PROGRESS');
+  const progressState = await eventually(async () => { const snapshot = await plan(id); const work = snapshot.work.find(w => w.id === progress.id); return work && !['queued', 'running'].includes(work.status) ? snapshot : null; }, 'progress turn settles');
+  check('worker progress without a request is blocked without spending a verifier attempt', progressState.work.find(w => w.id === progress.id).status === 'blocked' && !cycleOf(progressState, progress)?.attempts.length && !progressState.work.some(w => w.role === 'verifier' && w.parentThreadId === progress.threadId), progressState.work.find(w => w.id === progress.id));
+
+  const unauthorizedTurn = await rpc({ action: 'message', id, text: 'UNAUTHORIZED-REQUEST' });
+  await eventually(async () => (await rpc({ action: 'show', id })).jobs.find(j => j.id === unauthorizedTurn.id)?.state === 'done', 'unauthorized coordinator call settled');
+  check('coordinator is not offered the worker verification request', result.requests.some(r => r.role === 'coordinator' && r.user === 'UNAUTHORIZED-REQUEST' && !r.tools.includes('projects_request_verification')) && !(await plan(id)).work.some(w => w.role === 'verifier'), result.requests.filter(r => r.user === 'UNAUTHORIZED-REQUEST'));
+  const childParent = await delegateTask(id, 'MARK-CHILD');
+  await eventually(async () => result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-CHILD' && /child work/.test(r.last)), 'premature request refused');
+  const childHeld = await plan(id);
+  check('request with active child is refused without an attempt', !cycleOf(childHeld, childParent)?.attempts.length && !childHeld.work.some(w => w.role === 'verifier' && w.parentThreadId === childParent.threadId), childHeld);
+  gate('child-ready').open();
+  const childCycle = await eventually(async () => settled(await plan(id), childParent), 'child result wakes parent and verifies');
+  check('child result wakes the same parent which explicitly requests verification', childCycle.outcome === 'verified' && childCycle.attempts.length === 1, childCycle);
+  const invalid = await waitCycle(id, 'MARK-INVALID');
+  check('request refuses caller-selected target model and criteria', invalid.cycle.attempts.length === 1 && invalid.cycle.model === 'fake/fake-judge' && invalid.cycle.criteria.length === 2 && result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-INVALID' && r.stage === 2 && /invalid|additional|unexpected|error/i.test(r.last)), invalid.cycle);
+  const workerJob = await waitCycle(id, 'MARK-WORKERJOB');
+  check('request with a worker background job is refused until stopped', workerJob.cycle.attempts.length === 1 && workerJob.cycle.outcome === 'verified' && result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-WORKERJOB' && /background jobs/.test(r.last)), workerJob.cycle);
+  const workerLease = await waitCycle(id, 'MARK-WORKERLEASE');
+  check('request with a worker lease is refused until the worker releases it', workerLease.cycle.attempts.length === 1 && workerLease.cycle.outcome === 'verified' && result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-WORKERLEASE' && /release leases/.test(r.last)), workerLease.cycle);
+  const duplicate = await waitCycle(id, 'MARK-DUP');
+  check('duplicate requests start only one verifier and report rejection', duplicate.cycle.attempts.length === 1 && duplicate.cycle.outcome === 'verified' && result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-DUP' && /already requested/.test(r.last)), duplicate.cycle);
+  const staleRequest = await waitCycle(id, 'MARK-STALE');
+  check('a candidate changed after the request cannot start a verifier', staleRequest.cycle.attempts.length === 0 && staleRequest.cycle.outcome === 'escalated' && /changed after verification/.test(staleRequest.cycle.reason), staleRequest.cycle);
+
   // V2: fail, the worker fixes, a fresh verifier passes (cap 1: the worker's slot is free while it is verified).
   const stopWatching = watcher(id);
   const start = Date.now();
@@ -157,7 +230,7 @@ try {
   await eventually(async () => reportFor('MARK-LOOP', 'VERIFIED by an independent verifier'), 'coordinator told the work is verified');
   check('V2 the coordinator hears of completion only after the passing verdict, with attempt count and evidence', !reportFor('MARK-LOOP', 'NOT VERIFIED') && reportFor('MARK-LOOP', 'after 2 attempt(s)') && reportFor('MARK-LOOP', 'artifact:'), result.reports.at(-1));
   const afterWork = (await plan(id)).work;
-  check('V2 verifier threads are children of the worker thread and share its pool', afterWork.filter(w => w.role === 'verifier').every(w => w.parentThreadId === loop.worker.threadId) && afterWork.filter(w => w.role === 'verifier').length === 2);
+  check('V2 verifier threads are children of the worker thread and share its pool', afterWork.filter(w => w.role === 'verifier' && w.text.includes('MARK-LOOP')).every(w => w.parentThreadId === loop.worker.threadId) && afterWork.filter(w => w.role === 'verifier' && w.parentThreadId === loop.worker.threadId).length === 2);
   const listing = await rpc({ action: 'artifacts-list', id, threadId: second.verifierThreadId });
   check('V2 command logs and a saved artifact are kept for the verifier thread', listing.files.some(f => /^bg\/bg-[a-f0-9]{8}\.log$/.test(f.path)) && listing.files.some(f => f.path === 'feature-seen.txt'), listing.files.map(f => f.path));
   check('V2 the worker\'s worktree holds its fix and nothing from the verifier', readFileSync(join(sourceHead, 'feature.txt'), 'utf8') === 'done\n' && git(sourceHead, 'status', '--porcelain') === '?? feature.txt');
@@ -172,9 +245,20 @@ try {
   await eventually(async () => reportFor('MARK-ESCAPE', 'NOT VERIFIED'), 'escalation reported');
   check('V3 the coordinator is told the work is NOT verified and the work is not completed', (await plan(id)).work.find(w => w.id === escape.worker.id).status === 'blocked' && !reportFor('MARK-ESCAPE', 'VERIFIED by'));
 
+  const unresolved = await waitCycle(id, 'MARK-BLOCKED');
+  const archiveTurn = await rpc({ action: 'message', id, text: `INSPECT-ARCHIVE ${escape.worker.id}` });
+  await eventually(async () => (await rpc({ action: 'show', id })).jobs.find(j => j.id === archiveTurn.id)?.state === 'done', 'coordinator archives handled failure');
+  const archivePlan = await plan(id);
+  const archived = archivePlan.work.find(w => w.id === escape.worker.id), tracked = archivePlan.work.find(w => w.id === unresolved.worker.id);
+  check('coordinator inspects and archives handled blocker without dropping unresolved history', archived.archived && archived.status === 'blocked' && archived.blocker && tracked.status === 'blocked' && !tracked.archived && result.requests.filter(r => r.role === 'coordinator' && r.user.startsWith('INSPECT-ARCHIVE')).length >= 5 && result.requests.some(r => r.role === 'coordinator' && r.user.startsWith('INSPECT-ARCHIVE') && /Handled: candidate drift/.test(r.last)), { archived, tracked });
+
   // V4: blocked verdict escalates immediately (no retry), drift invalidates a verdict.
   const blocked = await waitCycle(id, 'MARK-BLOCKED');
   check('V4 a blocked verdict escalates at once and spends one attempt', blocked.cycle.attempts.length === 1 && blocked.cycle.attempts[0].state === 'blocked' && blocked.cycle.outcome === 'escalated');
+  const blockedOriginal = JSON.stringify({ model: blocked.cycle.model, skill: blocked.cycle.skill, criteria: blocked.cycle.criteria, first: blocked.cycle.attempts[0] });
+  await rpc({ action: 'thread-send', id, threadId: blocked.worker.threadId, requestId: randomUUID(), text: 'Repair the blocker.\n\nAcceptance criteria:\n- replace all criteria' });
+  const resumedBlocked = await eventually(async () => { const cycle = cycleOf(await plan(id), blocked.worker); return cycle && !cycle.open && cycle.attempts.length >= 2 && cycle; }, 'blocked cycle continues without resetting its attempt count');
+  check('a recoverable blocked cycle retains its first attempt and frozen settings on follow-up', JSON.stringify({ model: resumedBlocked.model, skill: resumedBlocked.skill, criteria: resumedBlocked.criteria, first: resumedBlocked.attempts[0] }) === blockedOriginal && resumedBlocked.attempts[1].n === 2, resumedBlocked);
   const driftWorker = await delegateTask(id, 'MARK-DRIFT');
   const liveRevision = await eventually(async () => { const c = cycleOf(await plan(id), driftWorker); return c?.attempts[0]?.state === 'running' && c; }, 'drift verifier running');
   const frozen = await eventually(async () => result.requests.some(r => r.role === 'verifier' && r.marker === 'MARK-DRIFT' && r.stage === 2), 'drift verifier reached its verdict step');

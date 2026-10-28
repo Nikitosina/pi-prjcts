@@ -30,7 +30,7 @@ function profileHash(value: string): string { let hash = 2166136261; for (let in
 function profileMismatches(first: StoredAttempt, next: StoredAttempt): string[] { const values: Array<[string, string, string]> = [["model", first.model, next.model], ["thinking", first.thinking, next.thinking], ["bindingRevision", first.bindingRevision, next.bindingRevision], ["capabilityBindingRevision", first.capabilityBindingRevision ?? first.bindingRevision, next.capabilityBindingRevision ?? next.bindingRevision], ["standingRevision", first.standingRevision, next.standingRevision], ["cwd", first.cwd, next.cwd], ["instructions", first.instructions, next.instructions], ["toolNames", first.toolNames.join("\u0000"), next.toolNames.join("\u0000")]]; return values.filter(([, left, right]) => left !== right).map(([name, left, right]) => `${name}:${profileHash(left)}!=${profileHash(right)}`); }
 type RetryReceipt = { requestId: string; workId: string; attemptId: string; threadId: string };
 type QuotaRecovery = { retryAt: number; attempts: number; lastError: string };
-type StoredWork = { id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; quotaRecovery?: QuotaRecovery; /** Legacy single receipt, imported into retryReceipts before new admissions. */ manualRetryRequestId?: string; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
+type StoredWork = { verificationRequest?: { revision: string }; id: string; threadId: string; role: DurableRole; text: string; dependsOn: string[]; requestId: string | null; steering?: true; quotaRecovery?: QuotaRecovery; /** Legacy single receipt, imported into retryReceipts before new admissions. */ manualRetryRequestId?: string; /** Hidden from default views; record, thread and report are retained. */ archivedAt?: number; retryOf?: string; priority?: number; requiredTools: string[]; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; status: "queued" | "running" | "blocked" | "completed" | "failed" | "interrupted" | "stopped"; blocker: string | null; /** Count of resumes after a pause interruption; each retry needs a fresh submission requestId. */ resumes?: number; startedAt?: number | null; endedAt?: number | null; conversationId: ConversationId | null; taskId: TaskId | null; attempt: StoredAttempt | null; settlementTaskId?: TaskId; report?: { requestId: string; text: string; delivered: boolean }; /** Complete attempt result (capped at generation time), readable through projects_work_result; reports injected into chats are capped. */ result?: string; /** Coordinator chat that admitted this work and receives its report; absent means the root (Main). */ chatConversationId?: ConversationId; /** Child work: its report goes to this parent worker thread as a follow-up, not to a chat. */ parentThreadId?: string };
 export type PlanningState = { retryReceipts?: RetryReceipt[]; paused: boolean; pausing: boolean; workerCap: number | null; work: Record<string, StoredWork>; threads: Record<string, { conversationId: ConversationId; activeWorkId: string | null; /** Scout/reviewer code root: a PR-head snapshot (readSha) or the parent worker's worktree. */ readRoot?: string; readSha?: string; workspaceScopeId: string | null; workspaceBindingRevision: string | null; workspaceConfigured: boolean; paused?: true; stopping?: true | string; /** What an explicit stop ended; reported once when that stop has drained. */ stopReport?: { stopId: string; workId: string; notes: string[] }; /** Set on child threads (one level); children cannot delegate. */ parentThreadId?: string; /** Takeover: the original thread whose worktree allocation (receipt identity) this thread uses. */ workspaceFrom?: string; /** Takeover: the thread that took this thread's worktree; this one may no longer run work. */ transferredTo?: string; /** Existing branch (and tip) this thread's worktree starts on. */ continueBranch?: { name: string; sha: string }; /** Automatic verification of this worker's finished work (opt-in project setting). */ verification?: Verification }>; dispatcherTaskIds: TaskId[] };
 
 export const DurablePlanning = defineDoc<PlanningState>({ kind: "projects.durable-planning", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ paused: false, pausing: false, workerCap: null, work: {}, threads: {}, dispatcherTaskIds: [] }) });
@@ -147,6 +147,8 @@ export type VerificationHooks = {
   capture: (key: string, sourcePath: string) => Promise<{ manifest: TargetManifest; proof: { paths: string[]; diff: string } }>;
   /** Content revision of a tree now, uncommitted and untracked work included. */
   revision: (sourcePath: string) => Promise<string>;
+  /** Whether the author still owns background commands or leases. */
+  workerBusy?: (threadId: string) => boolean;
   /** Stops verifier jobs before final target validation, without releasing its leases. */
   drain: (verifierThreadId: string) => Promise<void>;
   /** Releases leases only when no verification or stop drain still owns them. */
@@ -175,7 +177,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || work.threadId !== task.input.threadId || work.role !== task.input.role || work.workspaceScopeId !== task.input.workspaceScopeId || work.conversationId !== task.input.conversationId || state.threads[work.threadId]?.activeWorkId !== work.id) throw new Error("Scoped attempt identity/active authorization no longer matches its frozen plan work"); const profile = work.attempt; if (!profile) throw new Error("Scoped attempt has no frozen profile"); const model = frozenModel(profile, work.role); if ( profile.model !== `${model.provider}/${model.modelId}` || profile.thinking !== "medium" || profile.standingRevision !== options.standingRevision || (profile.capabilityBindingRevision ?? profile.bindingRevision) !== bindingRevision) throw new Error("Scoped attempt frozen profile differs from current host settings"); frozen = { instructions: profile.instructions, configured: work.workspaceConfigured }; return undefined; }, context);
     if (frozen.configured && (await runtime.agent(context)).instructions !== frozen.instructions) throw new Error("Scoped thread instruction text no longer matches its frozen profile");
     const publish = options.publishWorkerEnvironment; let environment; try { environment = await options.prepareWorkerEnvironment?.({ conversationId: Number(task.input.conversationId), workId: task.input.workId, threadId: task.input.threadId, role: task.input.role, workspaceScopeId: task.input.workspaceScopeId }); if (!environment || !publish) throw new Error("Scoped worker environment was not prepared/publishable by the host"); } catch (error) { return runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: { status: "failed", reason: error instanceof Error ? error.message : String(error) } } }), context); }
-    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || state.threads[work.threadId]?.activeWorkId !== work.id || work.workspaceScopeId !== task.input.workspaceScopeId) throw new Error("Scoped worker binding/active authorization changed before configuration"); if (work.workspaceBindingRevision !== null && work.workspaceBindingRevision !== environment.bindingRevision) throw new Error("Scoped worker binding revision changed"); publish(environment.extension); const needsConfigure = !work.workspaceConfigured || work.attempt?.cwd !== environment.cwd; if (needsConfigure) { const profile = work.attempt; if (!profile) throw new Error("Scoped worker lost its frozen profile before configuration"); if (!frozen.configured && environment.repositoryStanding && !options.workspaceInstructions) throw new Error("Selected repository standing instructions require the host instruction factory"); const rebuiltPrompt = !frozen.configured && environment.repositoryStanding && options.workspaceInstructions; const baseInstructions = rebuiltPrompt ? options.workspaceInstructions!(work.role, environment.repositoryStanding!) : profile.instructions; const instructions = `${baseInstructions}${environment.workerInstructions ?? ""}`; await configure(tx, task.input.conversationId, { model: work.attempt ? frozenModel(work.attempt, work.role) : options.models[work.role], thinkingLevel: "medium", cwd: environment.cwd, tools: [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])], extensions: [options.workerPolicy, capabilities, environment.extension, ...(nests(work) ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions }); profile.instructions = instructions; if (rebuiltPrompt && options.skillNames) profile.skills = options.skillNames(work.role); if (work.attempt) { work.attempt.boundTools = [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])].map(tool => tool.name); work.attempt.cwd = environment.cwd; work.attempt.bindingRevision = environment.bindingRevision; } work.workspaceConfigured = true; work.workspaceBindingRevision = environment.bindingRevision; const thread = state.threads[work.threadId]; if (thread) { thread.workspaceConfigured = true; thread.workspaceBindingRevision = environment.bindingRevision; } } return undefined; }, context);
+    await runtime.commit(async tx => { const state = await tx.doc(DurablePlanning, rootPlanConversationId); const work = state.work[task.input.workId]; if (!work || work.taskId !== Number(runtime.taskId) || work.status !== "running" || state.paused || state.threads[work.threadId]?.activeWorkId !== work.id || work.workspaceScopeId !== task.input.workspaceScopeId) throw new Error("Scoped worker binding/active authorization changed before configuration"); if (work.workspaceBindingRevision !== null && work.workspaceBindingRevision !== environment.bindingRevision) throw new Error("Scoped worker binding revision changed"); publish(environment.extension); const needsConfigure = !work.workspaceConfigured || work.attempt?.cwd !== environment.cwd; if (needsConfigure) { const profile = work.attempt; if (!profile) throw new Error("Scoped worker lost its frozen profile before configuration"); if (!frozen.configured && environment.repositoryStanding && !options.workspaceInstructions) throw new Error("Selected repository standing instructions require the host instruction factory"); const rebuiltPrompt = !frozen.configured && environment.repositoryStanding && options.workspaceInstructions; const baseInstructions = rebuiltPrompt ? options.workspaceInstructions!(work.role, environment.repositoryStanding!) : profile.instructions; const instructions = `${baseInstructions}${environment.workerInstructions ?? ""}`; await configure(tx, task.input.conversationId, { model: work.attempt ? frozenModel(work.attempt, work.role) : options.models[work.role], thinkingLevel: "medium", cwd: environment.cwd, tools: [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult, requestVerification] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])], extensions: [options.workerPolicy, capabilities, environment.extension, ...(nests(work) ? [delegation] : []), ...(options.skillFiles ? [options.skillFiles.extension] : []), ...(options.mcp ? [options.mcp.extension] : [])], instructions }); profile.instructions = instructions; if (rebuiltPrompt && options.skillNames) profile.skills = options.skillNames(work.role); if (work.attempt) { work.attempt.boundTools = [...options.knowledgeTools, ...work.requiredTools.map(name => bindings.get(name)!), ...environment.tools, ...(nests(work) ? [delegateChild, childResult, requestVerification] : []), ...(options.skillFiles ? [options.skillFiles.tool] : []), ...(options.mcp?.tools ?? [])].map(tool => tool.name); work.attempt.cwd = environment.cwd; work.attempt.bindingRevision = environment.bindingRevision; } work.workspaceConfigured = true; work.workspaceBindingRevision = environment.bindingRevision; const thread = state.threads[work.threadId]; if (thread) { thread.workspaceConfigured = true; thread.workspaceBindingRevision = environment.bindingRevision; } } return undefined; }, context);
     await options.beforeScopedSubmit?.(); const baseline = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context)); await runtime.commit(async tx => { const work = (await tx.doc(DurablePlanning, rootPlanConversationId)).work[task.input.workId]; if (work?.attempt) work.attempt.usage.baseline = baseline; return undefined; }, context); let result: AttemptResult;
     try { const submission = await child.submit({ type: "input", content: task.input.text, requestId: task.input.requestId, whenBusy: "followUp" }, context); const answer = await submission.wait(context); result = answer.status === "unanswered" ? { status: answer.reason === "aborted" ? "interrupted" : "failed", reason: unansweredReason(answer) } : { status: "completed", reason: null }; if (answer.status === "done" && answer.type === "input") { await runtime.commit(async tx => { const entry = await tx.entry(AssistantEntry, answer.answer); const message = entry?.model?.[0]; result.text = message?.role === "assistant" ? message.content.flatMap(part => part.type === "text" ? [part.text] : []).join("").slice(0, 16000) : ""; return undefined; }, context); } } catch (error) { result = { status: runtime.signal.aborted ? "interrupted" : "failed", reason: error instanceof Error ? error.message : String(error) }; }
     const final = usageNumbers(await runtime.snapshot(UsageDoc, task.input.conversationId, context)); await runtime.commit(async tx => { const work = (await tx.doc(DurablePlanning, rootPlanConversationId)).work[task.input.workId]; if (work?.attempt) work.attempt.usage = { baseline, final, delta: usageDelta(baseline, final) }; return { status: "terminal", outcome: { status: "completed", result } }; }, context);
@@ -379,6 +381,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (thread.parentThreadId) throw new Error("Child threads cannot delegate further (one level of nesting)");
       if (latest?.role !== "worker") throw new Error("Only worker threads can delegate child work");
       if (thread.stopping) throw new Error("This thread is stopping");
+      if (latest?.verificationRequest) throw new Error("Verification was requested; yield this turn before delegating more work");
       const role = args.role ?? "worker";
       const activeChildren = Object.values(state.work).filter(work => work.parentThreadId === parentThreadId && (work.status === "queued" || work.status === "running"));
       const limit = role === "reviewer" && activeChildren.every(work => work.role === "reviewer") ? MAX_REVIEW_CHILDREN : MAX_ACTIVE_CHILDREN;
@@ -404,7 +407,30 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function workResult(root: Conversation, args: { workId: string; offset?: number; limit?: number }): Promise<string> {
     return root.commit(async tx => resultPage((await tx.doc(DurablePlanning, root.id)).work[args.workId], args), BACKGROUND_CONTEXT);
   }
-  const delegation = defineExtension({ name: "projects.worker-delegation", tools: [delegateChild, childResult] });
+  const requestVerification = defineTool({ name: "projects_request_verification", description: "Request independent verification of the current candidate. Finish your commands and release children, background jobs and leases first. Yield this turn immediately after the request. The host selects the verifier and checks the frozen budget.", parameters: Type.Object({}, { additionalProperties: false }), replay: "unsafe", async execute(_args, api, context) {
+    const root = options.planRoot?.(), hooks = options.verification;
+    if (root === undefined || !hooks) throw new Error("Verification is unavailable");
+    const identity = await api.commit(async tx => {
+      const state = await tx.doc(DurablePlanning, root), entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
+      if (!entry) throw new Error("Only the active top-level worker can request verification");
+      const [threadId, thread] = entry, work = thread.activeWorkId ? state.work[thread.activeWorkId] : undefined;
+      if (!work || work.role !== "worker" || thread.parentThreadId || work.status !== "running" || !work.workspaceConfigured || !work.attempt?.cwd || state.paused || state.pausing || thread.stopping) throw new Error("Only an active scoped top-level worker can request verification");
+      if (work.verificationRequest) throw new Error("Verification was already requested for this turn");
+      if (isExhausted(thread.verification)) throw new Error(EXHAUSTED_REASON);
+      if (!thread.verification?.open && !(thread.verification?.outcome === "escalated" && thread.verification.attempts.length) && !hooks.config().enabled) throw new Error("Verification is disabled");
+      if (verifierPending(state, threadId) || Object.values(state.work).some(other => other.parentThreadId === threadId && (other.status === "queued" || other.status === "running"))) throw new Error("Wait for child work and verification to settle first");
+      if (hooks.workerBusy?.(threadId)) throw new Error("Stop background jobs and release leases before verification");
+      return { threadId, workId: work.id, cwd: work.attempt.cwd };
+    }, context);
+    const revision = await hooks.revision(identity.cwd);
+    await api.commit(async tx => {
+      const state = await tx.doc(DurablePlanning, root), thread = state.threads[identity.threadId], work = state.work[identity.workId];
+      if (!thread || thread.activeWorkId !== identity.workId || work?.status !== "running" || work.verificationRequest || state.paused || state.pausing || thread.stopping || verifierPending(state, identity.threadId) || isExhausted(thread.verification) || hooks.workerBusy?.(identity.threadId) || Object.values(state.work).some(other => other.parentThreadId === identity.threadId && (other.status === "queued" || other.status === "running"))) throw new Error("Worker eligibility changed while recording the request");
+      work.verificationRequest = { revision }; return undefined;
+    }, context);
+    return { content: [{ type: "text", text: "Verification requested for this candidate. End your turn now; the host will start the verifier after settlement." }] };
+  } });
+  const delegation = defineExtension({ name: "projects.worker-delegation", tools: [delegateChild, childResult, requestVerification] });
   const nests = (work: Pick<StoredWork, "role" | "parentThreadId">) => work.role === "worker" && !work.parentThreadId;
   /** A finished child's result becomes a follow-up on its parent thread, whose answer reports as usual. False: parent gone or stopped, so the caller reports to the chat instead. */
   async function reportToParent(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, attempt: string, resultText: string): Promise<boolean> {
@@ -450,10 +476,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function prepareVerification(root: ConversationId, read: (change: (tx: Tx) => Promise<undefined>) => Promise<unknown>, workId: string, completed: boolean, attemptTaskId: TaskId): Promise<PreparedVerification> {
     const hooks = options.verification;
     if (!hooks) return { kind: "none" };
-    let seen: { role: DurableRole; top: boolean; scopeId: string | null; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string } | undefined;
+    let seen: { role: DurableRole; top: boolean; scopeId: string | null; cwd: string | undefined; threadId: string; parentThreadId?: string; verification?: Verification; task: string; explicit: boolean; requested?: string } | undefined;
     await read(async tx => {
       const state = await tx.doc(DurablePlanning, root), work = state.work[workId];
-      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work) };
+      if (work?.taskId === Number(attemptTaskId)) seen = { role: work.role, top: !work.parentThreadId, scopeId: work.workspaceScopeId, cwd: work.attempt?.cwd, threadId: work.threadId, parentThreadId: work.parentThreadId, verification: state.threads[work.parentThreadId ?? work.threadId]?.verification && JSON.parse(JSON.stringify(state.threads[work.parentThreadId ?? work.threadId]!.verification)), task: briefOf(state, work), explicit: Boolean(work.attempt?.boundTools?.includes("projects_request_verification")), requested: work.verificationRequest?.revision };
       return undefined;
     });
     if (!seen) return { kind: "none" };
@@ -468,8 +494,10 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (!completed || seen.role !== "worker" || !seen.top) return { kind: "none" };
     // Checked before the setting, so turning verification off and on cannot clear it.
     if (isExhausted(seen.verification)) return { kind: "escalate", reason: EXHAUSTED_REASON };
-    const open = seen.verification?.open ? seen.verification : undefined;
-    if (!open && !hooks.config().enabled) return { kind: "none" };
+    const open = seen.verification?.open || (seen.verification?.outcome === "escalated" && seen.verification.attempts.length > 0) ? seen.verification : undefined;
+    if (!open && !hooks.config().enabled && !seen.requested) return { kind: "none" };
+    if (seen.explicit && !seen.requested) return { kind: "escalate", reason: "Worker ended without requesting verification; the work remains incomplete" };
+    if (seen.explicit && hooks.workerBusy?.(seen.threadId)) return { kind: "escalate", reason: "Worker still holds a background command or lease" };
     // Verification is on but this worker has no workspace scope and worktree to verify: it is reported as not verified, never as plain completion.
     if (seen.scopeId === null || !seen.cwd) return { kind: "escalate", reason: "Verification does not apply: this worker has no isolated worktree (only scoped top-level workers are verified)" };
     if ((open?.attempts.length ?? 0) >= MAX_VERIFICATION_ATTEMPTS) return { kind: "escalate", reason: "Verification attempts are exhausted" };
@@ -482,6 +510,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const key = workId;
     try {
       const { manifest, proof } = await hooks.capture(key, seen.cwd);
+      if (seen.requested && manifest.revision !== seen.requested) return { kind: "escalate", reason: "The candidate changed after verification was requested" };
       return { kind: "start", n: (open?.attempts.length ?? 0) + 1, model: open?.model ?? model, skill: open?.skill ?? hooks.config().skill, key, scopeId: seen.scopeId, sourcePath: seen.cwd, manifest, proof, criteria, task: seen.task, artifacts: options.workerArtifacts?.(seen.threadId) };
     } catch (error) { return { kind: "escalate", reason: `The work's revision could not be recorded for verification: ${error instanceof Error ? error.message : String(error)}` }; }
   }
@@ -522,13 +551,18 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (state.paused || state.pausing) { work.status = "interrupted"; work.blocker = PAUSE_BLOCKER; work.endedAt = null; return true; }
     // The cycle may have run out between preparing this turn and now; the exhausted record is kept, never replaced.
     if (isExhausted(thread.verification)) prepared = { kind: "escalate", reason: EXHAUSTED_REASON };
+    if (work.verificationRequest && (options.verification?.workerBusy?.(work.threadId) || Object.values(state.work).some(other => other.parentThreadId === work.threadId && (other.status === "queued" || other.status === "running")))) prepared = { kind: "escalate", reason: "The worker has active children, background commands or leases" };
     if (prepared.kind === "escalate") {
-      if (!thread.verification?.open && !isExhausted(thread.verification)) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
+      if (!thread.verification?.open && !isExhausted(thread.verification) && !(thread.verification?.outcome === "escalated" && thread.verification.attempts.length)) thread.verification = { model: "", skill: verificationSkill(), scopeId: "", criteria: [], attempts: [], workIds: [], open: true };
       thread.verification!.workIds.push(work.id);
       await closeCycle(tx, root, state, work.threadId, "escalated", prepared.reason, resultText, tag);
       return true;
     }
-    if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, scopeId: prepared.scopeId, criteria: prepared.criteria, attempts: [], workIds: [], open: true };
+    if (thread.verification?.outcome === "escalated" && thread.verification.attempts.length > 0) {
+      thread.verification.open = true;
+      delete thread.verification.outcome;
+      delete thread.verification.reason;
+    } else if (!thread.verification?.open) thread.verification = { model: prepared.model, skill: prepared.skill, scopeId: prepared.scopeId, criteria: prepared.criteria, attempts: [], workIds: [], open: true };
     // Read back through the document: only the tracked object records later mutations.
     const cycle = thread.verification!;
     cycle.workIds.push(work.id);
@@ -555,7 +589,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const step = nextStep(cycle, attempt);
     if (step.kind === "verified") { await closeCycle(tx, root, state, workerThreadId, "verified", "", answer, tag); return true; }
     if (step.kind === "retry" && last) {
-      const text = `[Automatic verification failed]\n${verdictText(cycle, attempt)}\n\nFix what failed in your worktree, then finish as usual; a fresh verifier checks your next result (${MAX_VERIFICATION_ATTEMPTS - attempt.n} attempt(s) left). The original task and criteria stay authoritative: leave them, the checks and the verification skill as they are. Your completion is decided by the verifier, not by your own report.`;
+      const next = last.attempt?.boundTools?.includes("projects_request_verification") ? "explicitly request verification of the repaired candidate" : "finish the repair; the host will check the next completed turn";
+      const text = `[Automatic verification failed]\n${verdictText(cycle, attempt)}\n\nFix what failed in your worktree, then ${next} (${MAX_VERIFICATION_ATTEMPTS - attempt.n} attempt(s) left). The original task and criteria stay authoritative: leave them, the checks and the verification skill as they are. Your completion is decided by the verifier, not by your own report.`;
       try {
         const record = await createThread(tx, root, { id: randomUUID(), threadId: workerThreadId, role: "worker", text, requestId: `verify-feedback:${work.id}`, requiredTools: [...last.requiredTools], workspaceScopeId: last.workspaceScopeId ?? undefined });
         if (last.chatConversationId !== undefined) record.chatConversationId = last.chatConversationId;
@@ -695,6 +730,19 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     if (kick && !state.paused) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true, conversationId: parent }));
     return record;
   }
+  // A held answer is intermediate. Follow its child-result continuations until the
+  // parent has actually answered after the last child; never release on the held turn.
+  function dependencyResult(state: PlanningState, id: string): StoredWork | undefined {
+    let work = state.work[id];
+    const history = Object.values(state.work);
+    while (work?.report?.requestId.startsWith("held:")) {
+      const index = history.findIndex(item => item.id === work!.id);
+      const continuation = history.slice(index + 1).find(item => item.threadId === work!.threadId && item.requestId?.startsWith("child-report:"));
+      if (!continuation) return undefined;
+      work = continuation;
+    }
+    return work;
+  }
   async function dispatch(tx: Tx, parent: ConversationId): Promise<TaskId[]> {
     const state = await tx.doc(DurablePlanning, parent);
     if (state.paused) return [];
@@ -710,8 +758,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       // A recorded verdict is not settled until background cleanup and the final drift check finish.
       if (work.role === "worker" && verifierPending(state, work.threadId)) continue;
       if (Object.values(state.work).some(other => other.id !== work.id && other.threadId === work.threadId && other.status === "queued" && other.quotaRecovery)) continue;
-      const parents = work.dependsOn.map(id => state.work[id]);
-      if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
+      const parents = work.dependsOn.map(id => dependencyResult(state, id));
+      if (parents.some(parentWork => parentWork && (parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted"))) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
       if (!parents.every(parentWork => parentWork?.status === "completed" && !state.threads[parentWork.threadId]?.verification?.open)) continue;
       if (work.quotaRecovery && work.quotaRecovery.retryAt > Date.now()) continue;
       const recoveryText = work.quotaRecovery ? `The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last quota error: ${work.quotaRecovery.lastError.slice(0, 500)}` : undefined;
