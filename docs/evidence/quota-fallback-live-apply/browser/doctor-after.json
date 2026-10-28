@@ -1,0 +1,45 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "label": "host process is ours and alive",
+      "ok": true
+    },
+    {
+      "label": "fake provider process is ours and alive",
+      "ok": true
+    },
+    {
+      "label": "private socket answers with the pid we started",
+      "ok": true
+    },
+    {
+      "label": "host home is our scratch home",
+      "ok": true
+    },
+    {
+      "label": "not the owner home",
+      "ok": true
+    },
+    {
+      "label": "revision matches checkout HEAD",
+      "ok": true
+    },
+    {
+      "label": "web listener is loopback",
+      "ok": true
+    },
+    {
+      "label": "web page serves",
+      "ok": true
+    },
+    {
+      "label": "web URL belongs to this host (same origin)",
+      "ok": true
+    },
+    {
+      "label": "seeded project listed",
+      "ok": true
+    }
+  ]
+}

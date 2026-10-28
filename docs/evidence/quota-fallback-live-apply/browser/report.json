@@ -6,21 +6,21 @@
   "steps": [
     {
       "kind": "precondition",
-      "detail": "existing work cfa8ac42-e63b-4f9f-a374-03fd520921b0 entered queued before settings save",
-      "at": "2026-10-28T16:22:19.991Z"
+      "detail": "existing work bf48247d-a584-40f7-91cf-bc0b315ab9b4 entered queued before settings save",
+      "at": "2026-10-28T17:05:13.262Z"
     },
     {
       "kind": "verified",
       "detail": "pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model",
-      "at": "2026-10-28T16:22:22.458Z"
+      "at": "2026-10-28T17:05:15.751Z"
     },
     {
       "kind": "verified",
       "detail": "existing quota work completed on the fallback after the browser save",
-      "at": "2026-10-28T16:22:22.461Z"
+      "at": "2026-10-28T17:05:15.753Z"
     }
   ],
   "consoleErrors": [],
   "httpErrors": [],
-  "revision": "04385cccc41d07e3e6d3678989b010fbdb8d7d67"
+  "revision": "aae572a6f85f742242a0626bde0010b604590717"
 }
