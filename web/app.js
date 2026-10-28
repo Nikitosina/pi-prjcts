@@ -689,7 +689,7 @@ function setTab(next) {
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
   ensureChanges();
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(true, true); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -998,14 +998,17 @@ document.addEventListener("input", event => {
 // Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
 const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer", verifier: "Verifier" };
 let promptsState = null;
-async function loadPrompts(force = false) {
+// Opening Settings refetches (keepEdits): a tab left open across a host restart would otherwise keep showing the built-in text of the previous host. Unsaved edits stay in their editors.
+async function loadPrompts(force = false, keepEdits = false) {
   const id = projectId, current = generation, node = document.querySelector("#prompts");
   if (!id || !plan || !force && promptsState?.projectId === id) return;
   try {
     const data = await api({ action: "prompts-snapshot", id });
     if (id !== projectId || current !== generation) return;
+    const edits = keepEdits && promptsState?.projectId === id ? promptsState.roles.flatMap(item => { const text = document.querySelector(`[data-prompt="${item.role}"]`)?.value; return text === undefined || text === item.effective ? [] : [[item.role, text]]; }) : [];
     promptsState = { projectId: id, roles: data.roles, note: "" };
     renderPrompts();
+    for (const [role, text] of edits) document.querySelector(`[data-prompt="${role}"]`).value = text;
   } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`; }
 }
 function renderPrompts() {

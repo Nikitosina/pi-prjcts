@@ -128,6 +128,7 @@
     "src/role-prompts.ts": [
       "role-prompts",
       "quiet-coordinator",
+      "settings-prompts-refresh",
       "workspace-defaults",
       "skill-reload-runtime",
       "verification-loop",
