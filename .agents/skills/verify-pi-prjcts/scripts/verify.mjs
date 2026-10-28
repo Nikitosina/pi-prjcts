@@ -319,6 +319,30 @@ const journeys = {
     writeFileSync(join(dir, 'host-plan-proof.json'), JSON.stringify(await rpc(run, { action: 'plan-snapshot', id: run.projectId }), null, 2));
     record('verified', 'pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model');
   },
+  // Setup uses the private host API; the settings change itself must use the browser.
+  async 'quota-save-recovery'(run, page, record, dir) {
+    const catalog = await rpc(run, { action: 'workspace-catalog', id: run.projectId });
+    const scope = catalog.find(item => item.wholeRepository);
+    if (!scope) throw Error('precondition: seed has no whole-repository workspace scope');
+    const workId = randomUUID(), threadId = randomUUID();
+    await rpc(run, { action: 'work-submit', id: run.projectId, requestId: workId, threadId, workspaceScopeId: scope.id, text: 'VERIFY-QUOTA-RECOVERY-WORK' });
+    const row = async () => {
+      const snapshot = await rpc(run, { action: 'plan-snapshot', id: run.projectId });
+      return (Array.isArray(snapshot) ? snapshot : snapshot.items ?? snapshot.work ?? []).find(item => item.id === workId);
+    };
+    const before = await until(async () => { const item = await row(); return item && (item.status === 'failed' || item.status === 'queued' && item.blocker?.startsWith('quota_reset_wait:')) && item; }, 'existing quota-failed or waiting work');
+    writeFileSync(join(dir, 'attempt-before.json'), JSON.stringify(before, null, 2));
+    if (!readFileSync(run.requestLog, 'utf8').includes('VERIFY-QUOTA-RECOVERY-WORK')) throw Error('precondition: provider did not receive quota work');
+    record('precondition', `existing work ${workId} entered ${before.status} before settings save`);
+    await journeys['quota-settings'](run, page, record, dir);
+    const after = await until(async () => { const item = await row(); return item?.status === 'completed' && item; }, 'existing quota work recovered after browser save');
+    writeFileSync(join(dir, 'attempt-after.json'), JSON.stringify(after, null, 2));
+    if (after.threadId !== threadId || after.attempt?.model !== 'fake/fallback-model') throw Error('recovery did not preserve thread and use fallback model');
+    const calls = readFileSync(run.requestLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    writeFileSync(join(dir, 'model-requests.jsonl'), calls.map(call => JSON.stringify(call)).join('\n') + '\n');
+    if (!calls.some(call => call.model === 'fake-model' && call.user.includes('VERIFY-QUOTA-RECOVERY-WORK')) || !calls.some(call => call.model === 'fallback-model' && call.user.includes('previous model request stopped because its quota was exhausted'))) throw Error('quota failure or fallback recovery provider request missing');
+    record('verified', 'existing quota work completed on the fallback after the browser save');
+  },
   // Feature: features/message-coordinator.md
   async 'message-coordinator'(run, page, record, dir) {
     const prompt = `VERIFY-PING ${run.id}`, composer = 'textarea[aria-label="Message coordinator"]';

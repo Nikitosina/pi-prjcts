@@ -1,0 +1,2 @@
+PASS host-health, event-log, event-log lifecycle
+Artifact: <worktree>/artifacts/observability-host-2026-10-28T17-04-46.305Z

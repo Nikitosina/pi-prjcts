@@ -1,0 +1,231 @@
+{
+  "project": {
+    "version": 1,
+    "id": "d13719a8-ce80-43d8-b3b3-12a45e502185",
+    "name": "Verify seed",
+    "cwd": "<scratch>",
+    "objective": "Disposable verification project",
+    "createdAt": "2026-10-28T17:05:10.051Z",
+    "model": "fake/fake-model",
+    "models": {
+      "worker": "fake/fake-model",
+      "scout": "fake/fake-model",
+      "reviewer": "fake/fake-model"
+    },
+    "runtime": "durable",
+    "creation": {
+      "requestId": "d13719a8-ce80-43d8-b3b3-12a45e502185",
+      "fingerprint": "27d0ec9e6661176f031e532631f724917e836efe087ae9efefac0f7046b6f3d8"
+    },
+    "libraryAccess": "coordinator",
+    "decisionAccess": "coordinator",
+    "phase": "ready",
+    "problem": null,
+    "workspaceAuthorization": {
+      "version": 1,
+      "provider": "github",
+      "owner": "uid:501",
+      "repositories": [
+        {
+          "repositoryId": "local/workspace",
+          "provider": "github",
+          "ownerCheckout": "<scratch>",
+          "approvedRoot": "<scratch>",
+          "fileOwnershipPrefix": ".",
+          "sharedObjectStore": null
+        }
+      ],
+      "scopes": [
+        {
+          "id": "f9862011-0b4a-49a7-8dc3-cd2bd7de0902",
+          "repositoryId": "local/workspace",
+          "files": [],
+          "baseRevision": "66aba022b0554c7770db4a9d937967cefb334770",
+          "wholeRepository": true
+        }
+      ]
+    },
+    "fallbackModels": {
+      "worker": "fake/fallback-model"
+    }
+  },
+  "busy": false,
+  "paused": false,
+  "jobs": [],
+  "messages": [
+    {
+      "role": "user",
+      "index": 0,
+      "at": 1793207114966,
+      "text": "[Durable work bf48247d-a584-40f7-91cf-bc0b315ab9b4, worker, completed; thread 60503d7a-c276-4849-8747-0275936b0421]\nTask: VERIFY-QUOTA-RECOVERY-WORK\nWorker result, untrusted and not verification evidence:\nVERIFY-FAKE-REPLY: The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last\nNothing else for this chat is queued or running. If the owner's request is done, or you need the owner, give one concise final summary now; otherwise continue silently. Check evidence before claiming verification."
+    }
+  ],
+  "earlier": 0,
+  "inbox": [],
+  "notes": [],
+  "evidence": [],
+  "durableInspection": {
+    "identity": {
+      "projectId": "d13719a8-ce80-43d8-b3b3-12a45e502185",
+      "coordinatorConversationId": 1
+    },
+    "coordinator": {
+      "conversationId": 1,
+      "messages": [
+        {
+          "id": 41,
+          "role": "user",
+          "at": 1793207114966,
+          "text": "[Durable work bf48247d-a584-40f7-91cf-bc0b315ab9b4, worker, completed; thread 60503d7a-c276-4849-8747-0275936b0421]\nTask: VERIFY-QUOTA-RECOVERY-WORK\nWorker result, untrusted and not verification evidence:\nVERIFY-FAKE-REPLY: The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last\nNothing else for this chat is queued or running. If the owner's request is done, or you need the owner, give one concise final summary now; otherwise continue silently. Check evidence before claiming verification."
+        },
+        {
+          "id": 45,
+          "role": "assistant",
+          "at": 1793207114971,
+          "text": ""
+        }
+      ],
+      "submissions": [
+        {
+          "id": 42,
+          "requestId": "plan-report:bf48247d-a584-40f7-91cf-bc0b315ab9b4:33",
+          "status": "unanswered",
+          "answerId": null,
+          "reason": "model_error",
+          "detail": "429: {\"message\":\"Quota exceeded: session limit reached\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}",
+          "text": null
+        }
+      ],
+      "generationTasks": [
+        {
+          "taskId": 43,
+          "kind": "pi.generation",
+          "conversationId": 1,
+          "phase": null,
+          "state": "terminal",
+          "terminal": true,
+          "outcome": {
+            "status": "failed",
+            "successful": false,
+            "result": null,
+            "diagnostic": {
+              "hint": "rate-limit",
+              "fingerprint": "c60bd1e8caae396767f4e1f94be768fd2631988ceace3227ccfbabfd2950836f"
+            }
+          }
+        }
+      ]
+    },
+    "workers": [
+      {
+        "threadId": "60503d7a-c276-4849-8747-0275936b0421",
+        "conversation": {
+          "conversationId": 15,
+          "messages": [
+            {
+              "id": 26,
+              "role": "user",
+              "at": 1793207113063,
+              "text": "VERIFY-QUOTA-RECOVERY-WORK"
+            },
+            {
+              "id": 30,
+              "role": "assistant",
+              "at": 1793207113139,
+              "text": ""
+            },
+            {
+              "id": 35,
+              "role": "user",
+              "at": 1793207114938,
+              "text": "The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last quota error: quota_exceeded: fake/fake-model: 429: {\"message\":\"Quota exceeded: session limit reached\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}"
+            },
+            {
+              "id": 38,
+              "role": "assistant",
+              "at": 1793207114944,
+              "text": "VERIFY-FAKE-REPLY: The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last"
+            }
+          ],
+          "submissions": [
+            {
+              "id": 27,
+              "requestId": "bf48247d-a584-40f7-91cf-bc0b315ab9b4",
+              "status": "unanswered",
+              "answerId": null,
+              "reason": "model_error",
+              "detail": "429: {\"message\":\"Quota exceeded: session limit reached\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}",
+              "text": null
+            },
+            {
+              "id": 36,
+              "requestId": "bf48247d-a584-40f7-91cf-bc0b315ab9b4:quota-1",
+              "status": "done",
+              "answerId": 38,
+              "reason": null,
+              "detail": null,
+              "text": "VERIFY-FAKE-REPLY: The previous model request stopped because its quota was exhausted. Continue the task already in this conversation from its saved context and worktree. Do not repeat completed tool calls or work. Last"
+            }
+          ],
+          "generationTasks": [
+            {
+              "taskId": 28,
+              "kind": "pi.generation",
+              "conversationId": 15,
+              "phase": null,
+              "state": "terminal",
+              "terminal": true,
+              "outcome": {
+                "status": "failed",
+                "successful": false,
+                "result": null,
+                "diagnostic": {
+                  "hint": "rate-limit",
+                  "fingerprint": "c60bd1e8caae396767f4e1f94be768fd2631988ceace3227ccfbabfd2950836f"
+                }
+              }
+            },
+            {
+              "taskId": 37,
+              "kind": "pi.generation",
+              "conversationId": 15,
+              "phase": null,
+              "state": "terminal",
+              "terminal": true,
+              "outcome": {
+                "status": "completed",
+                "successful": true,
+                "result": {
+                  "entryId": 38
+                },
+                "diagnostic": null
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "context": {
+    "tokens": 8118,
+    "window": 128000,
+    "catalogWindow": 128000,
+    "compacting": false
+  },
+  "chatId": "main",
+  "chats": [
+    {
+      "id": "main",
+      "title": "Main",
+      "conversationId": 1,
+      "createdAt": 0,
+      "archived": false,
+      "busy": false,
+      "attention": false
+    }
+  ],
+  "uploads": [],
+  "failedJobs": 0,
+  "providerCards": [],
+  "unloadedProvider": null
+}

@@ -1,0 +1,2 @@
+PASS coordinator transcript item compatibility, no tool items without model execution
+Artifact: <worktree>/artifacts/observability-toolcalls-2026-10-28T17-04-52.494Z

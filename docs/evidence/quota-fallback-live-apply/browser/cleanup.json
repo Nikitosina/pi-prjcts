@@ -1,0 +1,13 @@
+{
+  "cleaned": "<scratch>",
+  "skippedReusedPids": [],
+  "evidenceKept": "<home>",
+  "evidenceFiles": [
+    "cleanup.json",
+    "diagnostics",
+    "doctor-after.json",
+    "doctor-before.json",
+    "drive-quota-save-recovery-2026-10-28T17-05-10-704Z",
+    "launch.json"
+  ]
+}

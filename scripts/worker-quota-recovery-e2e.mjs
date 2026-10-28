@@ -36,7 +36,7 @@ const handler = ({ role, model, user, results, msgs }) => {
   }
   return say(`Recovered ${marker ?? 'work'}.`);
 };
-const kit = await createKit('worker-quota-recovery', { env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: '120', PI_PROJECTS_QUOTA_SWEEP_MS: '40' }, handler });
+const kit = await createKit('worker-quota-recovery', { env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: '1500', PI_PROJECTS_QUOTA_RETRY_MAX_MS: '1500', PI_PROJECTS_QUOTA_SWEEP_MS: '40' }, handler });
 const { result, rpc, eventually } = kit;
 result.workerRequests = workerRequests;
 let projectId;
@@ -114,13 +114,24 @@ await kit.run(async () => {
   kit.check('dependency stays queued while its predecessor waits for quota', (await work(childId)).status === 'queued');
   kit.check('dependency runs only after automatic predecessor recovery', (await settled(dependentId)).status === 'completed' && (await settled(childId)).status === 'completed');
 
+  // Saving a fallback should wake an existing quota wait, not create new work.
+  const liveWaiting = await submit('PAUSE live fallback waiting');
+  const beforeLiveWaiting = await waiting(liveWaiting.workId);
+  const liveCount = (await kit.plan(id)).length;
+  await kit.updateSettings(id, { fallbackModels: { worker: 'fake/fallback-model' } });
+  const liveDone = await settled(liveWaiting.workId);
+  kit.check('saving fallback recovers an existing quota wait on its original thread', liveDone.status === 'completed' && liveDone.id === liveWaiting.workId && liveDone.threadId === liveWaiting.threadId && liveDone.attempt.model === 'fake/fallback-model' && liveDone.attempt.modelTransitions?.length === 1 && (await kit.plan(id)).length === liveCount, { beforeLiveWaiting, liveDone });
+  await kit.updateSettings(id, { fallbackModels: { worker: null } });
+
   const paused = await submit('PAUSE must not restart');
   await waiting(paused.workId);
   await control({ action: 'pause', threadId: paused.threadId });
   await eventually(async () => (await work(paused.workId)).status === 'interrupted', 'worker pause did not persist');
   const pausedCalls = callsFor('PAUSE').length;
-  await delay(350);
-  kit.check('manually paused worker never retries automatically', (await work(paused.workId)).status === 'interrupted' && callsFor('PAUSE').length === pausedCalls);
+  await kit.updateSettings(id, { fallbackModels: { worker: 'fake/fallback-model' } });
+  await delay(2000);
+  kit.check('saving fallback does not resume a manually paused worker', (await work(paused.workId)).status === 'interrupted' && callsFor('PAUSE').length === pausedCalls);
+  await kit.updateSettings(id, { fallbackModels: { worker: null } });
   releasePaused = true;
   await control({ action: 'resume', threadId: paused.threadId });
   kit.check('explicit worker resume permits recovery', (await settled(paused.workId)).status === 'completed');
@@ -129,7 +140,7 @@ await kit.run(async () => {
   await waiting(projectPaused.workId);
   await rpc({ action: 'pause', id });
   const projectPauseCalls = callsFor('PROJECT').length;
-  await delay(350);
+  await delay(2000);
   kit.check('project pause suppresses quota timers', (await work(projectPaused.workId)).status === 'interrupted' && callsFor('PROJECT').length === projectPauseCalls);
   await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
   const projectResumed = await settled(projectPaused.workId);
@@ -141,7 +152,7 @@ await kit.run(async () => {
   await control({ action: 'pause', threadId: persistentPause.threadId });
   await eventually(async () => (await work(persistentPause.workId)).status === 'interrupted', 'persistent worker pause missing');
   const pauseBeforeRestart = callsFor('PAUSE').length;
-  // A later owner setting must not redirect a frozen thread when it resumes.
+  // Settings changes must not themselves resume a manually paused thread.
   await kit.updateSettings(id, { fallbackModels: { worker: 'fake/fallback-model' } });
   await kit.updateSettings(id, { fallbackModels: { worker: null } });
   const stopped = await submit('STOP must survive restart');
@@ -150,14 +161,14 @@ await kit.run(async () => {
   const stoppedBefore = callsFor('STOP').length;
   await kit.restartHost();
   await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
-  await delay(350);
+  await delay(2000);
   const stoppedAfter = await work(stopped.workId);
   kit.check('worker pause survives host restart and explicit project resume', (await work(persistentPause.workId)).status === 'interrupted' && callsFor('PAUSE').length === pauseBeforeRestart);
   await kit.updateSettings(id, { fallbackModels: { worker: 'fake/fallback-model' } });
   releasePaused = true;
   await control({ action: 'resume', threadId: persistentPause.threadId });
   const frozenResume = await settled(persistentPause.workId);
-  kit.check('later fallback settings cannot change an existing frozen thread', frozenResume.status === 'completed' && frozenResume.attempt.model === 'fake/fake-model' && frozenResume.attempt.modelTransitions.length === 0, frozenResume);
+  kit.check('explicit resume keeps the healthy primary model', frozenResume.status === 'completed' && frozenResume.attempt.model === 'fake/fake-model' && frozenResume.attempt.modelTransitions.length === 0, frozenResume);
   await kit.updateSettings(id, { fallbackModels: { worker: null } });
   kit.check('stopped work never restarts after its deadline or a host restart', stoppedAfter.status === 'stopped' && callsFor('STOP').length === stoppedBefore);
   kit.check('host restart preserves other recovered work and settings', (await work(fallback.workId)).status === 'completed' && (await rpc({ action: 'settings-snapshot', id })).values.fallbackModels.worker === undefined);
@@ -178,8 +189,17 @@ await kit.run(async () => {
   kit.check('fallback exhaustion never cycles back or selects another model', exhaustedDone.status === 'failed' && exhaustedDone.blocker.startsWith('quota_recovery_exhausted:') && exhaustedDone.attempt.modelTransitions.length === 1 && callsFor('EXHAUST').length === 9 && callsFor('EXHAUST').slice(1).every(call => call.model === 'fallback-model'), exhaustedDone);
   kit.check('unknown reset stops after eight retries on the frozen model', unknownDone.status === 'failed' && unknownDone.blocker.startsWith('quota_recovery_exhausted:') && callsFor('UNKNOWN').length === 9 && unknownDone.attempt.modelTransitions.length === 0, unknownDone);
   const exhaustedCalls = workerRequests.length;
-  await delay(350);
+  await delay(2000);
   kit.check('exhausted recovery stays terminal under repeated timer sweeps', workerRequests.length === exhaustedCalls);
+
+  // A newly configured fallback should also recover a previously quota-failed thread.
+  const failedCount = (await kit.plan(id)).length;
+  await kit.updateSettings(id, { fallbackModels: { worker: 'fake/fallback-model' } });
+  const revived = await eventually(async () => {
+    const row = await work(unknown.workId);
+    return row?.attempt.model === 'fake/fallback-model' ? row : false;
+  }, 'saving fallback did not recover quota-failed work');
+  kit.check('quota-failed recovery retains work and thread identity without duplicates', revived.id === unknown.workId && revived.threadId === unknown.threadId && (await kit.plan(id)).length === failedCount, revived);
 
   const { providerFailure } = await import('../src/durable-planning.ts');
   kit.check('only quota exhaustion triggers recovery', providerFailure('model_error: insufficient_quota') === 'quota_exceeded' && providerFailure('model_error: 429 Too many requests') === 'rate_limited' && providerFailure('model_error: authentication failed') === undefined && providerFailure('model_error: 503 quota service unavailable') === undefined);

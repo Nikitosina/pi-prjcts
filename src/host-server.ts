@@ -332,6 +332,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             if (input.changes.workerCap !== undefined) await owner.applyWorkerCap(input.changes.workerCap);
           }
           saveProject(project);
+          if (running && input.changes.fallbackModels !== undefined) await (await running).recoverQuota();
           return projectSettings(project);
         });
       }
@@ -349,11 +350,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (current.coordinator.busy || current.coordinator.submissions.some(item => item.status === "queued" || item.status === "placed") || plan.pausing || plan.work.some(item => item.status === "queued" || item.status === "running")) throw new Error("Settings changes require an idle coordinator and worker queue");
           await closeLifecycleOwner(input.id, owner);
         }
-        return await withProjectLock(input.id, async () => {
+        const saved = await withProjectLock(input.id, async () => {
           const project = updateProjectSettings(loadProject(input.id), input);
           saveProject(project);
           return projectSettings(project);
         }, true);
+        settingsUpdating.delete(input.id);
+        // A mixed save closed the idle runtime. Reopen it under the normal lifecycle locks so quota-failed work still sees the new fallback; pause controls still apply inside recovery.
+        if (input.changes.fallbackModels !== undefined) await withDurableOwner({ id: input.id, operation: owner => owner.recoverQuota() });
+        return saved;
       } finally { settingsUpdating.delete(input.id); }
     }
     case "worker-skills-catalog": {
