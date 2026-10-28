@@ -108,12 +108,12 @@ try {
       await page.waitFor(`window.__gate.log.includes('snapshot failed')`, 'failed refresh');
       await delay(300);
       const failed = await editors();
-      await page.evaluate(`(document.querySelector('#prompts .prompt-error') ?? document.querySelector('#prompts')).scrollIntoView({ block: 'center' })`); await page.shot('03-refresh-failed', { force: true });
+      await page.evaluate(`(document.querySelector('#prompts .note.bad') ?? document.querySelector('#prompts')).scrollIntoView({ block: 'center' })`); await page.shot('03-refresh-failed', { force: true });
       check('F7 a failed refresh keeps all five editors', Object.keys(failed).length === 5, { roles: Object.keys(failed), html: await page.evaluate(`document.querySelector('#prompts').innerText.slice(0, 200)`) });
       check('F7 a failed refresh keeps the unsaved reviewer edit and the override', failed.reviewer?.text === UNSAVED && failed.scout?.text === CUSTOM_SCOUT && failed.scout.custom, failed);
-      check('F7 the failure is shown next to the editors', /Prompts not refreshed/.test(await page.evaluate(`document.querySelector('#prompts .prompt-error')?.textContent ?? ''`)));
+      check('F7 the failure is shown next to the editors', /Prompts not refreshed/.test(await page.evaluate(`document.querySelector('#prompts .note.bad')?.textContent ?? ''`)));
       await reopen();
-      await page.waitFor(`!document.querySelector('#prompts .prompt-error') && document.querySelectorAll('#prompts [data-prompt]').length === 5`, 'retried refresh');
+      await page.waitFor(`!document.querySelector('#prompts .note.bad') && document.querySelectorAll('#prompts [data-prompt]').length === 5`, 'retried refresh');
       const retried = await editors();
       check('F7 the next opening retries and keeps the unsaved edit', retried.reviewer.text === UNSAVED && retried.coordinator.text === expected.coordinator && retried.scout.custom, retried);
     }
@@ -127,18 +127,18 @@ try {
       const sent = await updates();
       await page.evaluate(`window.__gate.failAction = ${JSON.stringify(action)}`);
       await page.evaluate(`document.querySelector('[data-action="${button}"][data-role="${role}"]').click()`);
-      await page.waitFor(`window.__gate.log.includes('${action} failed') && !!document.querySelector('#prompts .prompt-error')`, `${action} failure note`);
+      await page.waitFor(`window.__gate.log.includes('${action} failed') && !!document.querySelector('#prompts .note.bad')`, `${action} failure note`);
       await delay(300);
       const after = await editors();
       check(`F11 a failed ${action} during ${button} keeps all five editors and every draft`, JSON.stringify(after) === JSON.stringify(drafted), { drafted, after });
-      check(`F11 the ${action} failure is shown`, /Failed to fetch/.test(await page.evaluate(`document.querySelector('#prompts .prompt-error').textContent`)));
+      check(`F11 the ${action} failure is shown`, /Failed to fetch/.test(await page.evaluate(`document.querySelector('#prompts .note.bad').textContent`)));
       check(`F11 the failed ${button} stores nothing`, JSON.stringify(stored().prompts) === JSON.stringify({ scout: CUSTOM_SCOUT }) && await updates() === sent, { stored: stored().prompts, log: await page.evaluate('window.__gate.log') });
     }
-    await page.evaluate(`document.querySelector('#prompts .prompt-error').scrollIntoView({ block: 'center' })`); await page.shot('05-save-and-reset-failed', { force: true });
+    await page.evaluate(`document.querySelector('#prompts .note.bad').scrollIntoView({ block: 'center' })`); await page.shot('05-save-and-reset-failed', { force: true });
     // A later Save and Reset still work, so no save stays counted as in flight.
     await page.evaluate(`document.querySelector('[data-action="prompt-save"][data-role="coordinator"]').click()`);
     await kit.eventually(() => stored().prompts?.coordinator === DRAFTS.coordinator, 'coordinator draft not saved after the failures', 100);
-    await page.waitFor(`!!document.querySelector('[data-prompt="coordinator"]').closest('fieldset').querySelector('.prompt-custom') && !document.querySelector('#prompts .prompt-error')`, 'coordinator Customized after a successful save');
+    await page.waitFor(`!!document.querySelector('[data-prompt="coordinator"]').closest('fieldset').querySelector('.prompt-custom') && !document.querySelector('#prompts .note.bad')`, 'coordinator Customized after a successful save');
     await page.evaluate(`document.querySelector('[data-action="prompt-reset"][data-role="coordinator"]').click()`);
     await kit.eventually(() => !stored().prompts?.coordinator, 'coordinator not reset after the failures', 100);
     await page.waitFor(`document.querySelector('[data-prompt="coordinator"]').value === ${JSON.stringify(expected.coordinator)}`, 'coordinator default after reset');
