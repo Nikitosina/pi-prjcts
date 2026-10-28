@@ -4,7 +4,12 @@ import { DEFAULT_WORKER_CAP, type Project, type Request } from "./state.ts";
 type Update = Extract<Request, { action: "settings-update" }>;
 export function projectSettings(project: Project) {
   const values = { name: project.name, objective: project.objective, model: project.model, models: { ...project.models }, fallbackModels: { ...project.fallbackModels }, knowledgeAccess: project.knowledgeAccess ?? "read-only", libraryAccess: project.libraryAccess ?? "none", decisionAccess: project.decisionAccess ?? "none", githubCli: project.githubCli ?? "full", workerCap: project.workerCap ?? DEFAULT_WORKER_CAP, scopedModels: project.scopedModels ?? null, skills: project.skillProfiles ?? null, mcp: project.mcp ?? null, prompts: project.prompts ?? null, worktreeSetup: project.worktreeSetup ?? "", context: project.contextSettings ?? null, verification: project.verification ?? null };
-  return { values, revision: createHash("sha256").update(JSON.stringify(values)).digest("hex") };
+  return { values, revision: createHash("sha256").update(JSON.stringify(values)).digest("hex"), verificationProblem: project.verification?.enabled ? verificationProviderProblem(project) : null };
+}
+/** Why this project's workers cannot be verified whatever the settings say, or null. */
+export function verificationProviderProblem(project: Project): string | null {
+  const provider = project.workspaceAuthorization?.provider;
+  return provider && provider !== "github" ? `Verification covers git workspaces. The "${provider}" workspace provider keeps its shell policy in its plugin, which verifiers cannot use, so its workers are not verified` : null;
 }
 export function updateProjectSettings(project: Project, input: Update): Project {
   if (input.id !== project.id || input.confirm !== project.id) throw new Error("Settings update requires confirmation matching project id");
@@ -32,6 +37,8 @@ export function updateProjectSettings(project: Project, input: Update): Project 
   const checks = patch.verification === undefined ? verification : patch.verification ?? undefined;
   if (checks?.enabled && !checks.skill.trim()) throw new Error("Verification needs a verification skill");
   if (checks?.enabled && !models.verifier) throw new Error("Verification needs its own verifier model; none is assumed");
+  const unsupported = patch.verification?.enabled ? verificationProviderProblem(project) : null;
+  if (unsupported) throw new Error(`Verification cannot be turned on: ${unsupported}`);
   const setup = (patch.worktreeSetup ?? worktreeSetup ?? "").trim();
   return { ...rest, ...(skills ? { skillProfiles: structuredClone(skills) } : {}), ...(mcpSettings ? { mcp: structuredClone(mcpSettings) } : {}), ...(Object.keys(promptValues).length ? { prompts: promptValues } : {}), ...(setup ? { worktreeSetup: setup } : {}), ...(context ? { contextSettings: structuredClone(context) } : {}), ...(checks ? { verification: { ...checks } } : {}), name: patch.name ?? project.name, objective: patch.objective ?? project.objective, model: patch.model ?? project.model,
     models, ...(Object.keys(fallbacks).length ? { fallbackModels: fallbacks } : {}), ...(scope ? { scopedModels: [...scope] } : {}),

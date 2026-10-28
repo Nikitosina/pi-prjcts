@@ -41,7 +41,7 @@ const server = createServer((request, response) => {
   request.on("data", data => { body += data; });
   request.on("end", () => {
     const marker = /MARK-[A-Z0-9]+/.exec(body)?.[0] ?? "none";
-    const call = { at: Date.now(), marker, resumed: body.includes("paused and has resumed"), held: hold };
+    const call = { at: Date.now(), marker, resumed: body.includes("paused and has resumed"), held: hold, coordinator: body.includes("persistent coordinator") };
     modelCalls.push(call);
     if (!hold) return answer(response);
     held.add(response);
@@ -118,8 +118,10 @@ try {
     assert.ok(modelCalls.some(call => call.marker === "MARK-A" && call.resumed && !call.held));
     pass("F2 resumed work keeps its thread, conversation and worktree", { cwd: cwdBefore, conversations: conversationsFor("MARK-A") });
     assert.equal(byId(done, c.id).status, "stopped");
-    assert.ok(!modelCalls.some(call => call.marker === "MARK-C" && !call.held && !call.observed));
-    pass("F5 explicitly stopped work is not restarted by resume", byId(done, c.id).blocker);
+    // The coordinator is told about the stop (a durable notice naming MARK-C); the stopped worker itself makes no new request.
+    assert.ok(!modelCalls.some(call => call.marker === "MARK-C" && !call.held && !call.observed && !call.coordinator));
+    assert.ok(modelCalls.some(call => call.marker === "MARK-C" && !call.observed && call.coordinator));
+    pass("F5 explicitly stopped work is not restarted by resume; the coordinator hears about the stop", byId(done, c.id).blocker);
     await runtime.close();
   }
   // Scenario 2: host restart while work is running, then resume.

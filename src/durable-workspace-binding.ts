@@ -18,6 +18,7 @@ import { commandExecution, commandResource, commandWorkerTools, hasUncertainComm
 import type { OperationApprovals } from "./operation-approvals.ts";
 import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
 import { worktreeSetup } from "./worktree-maintenance.ts";
+import { verificationProviderProblem } from "./project-settings.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
 import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
@@ -169,7 +170,8 @@ export function workerShellGuard(input: { branch: string; workDir: string; owner
 export function verifierShell(project: Project, scopeId: string, workDir: string, branch: string | null): { guard: (command: string) => string } | { refusal: string } {
   const authorization = project.workspaceAuthorization, scope = authorization?.scopes.find(item => item.id === scopeId), repository = authorization?.repositories.find(item => item.repositoryId === scope?.repositoryId);
   if (!authorization || !scope || !repository) return { refusal: "The worker's workspace scope is no longer authorized for this project" };
-  if (authorization.provider !== "github") return { refusal: `Verification covers git workspaces. The "${authorization.provider}" workspace provider keeps its shell policy in its plugin, which verifiers cannot use, so its workers are not verified` };
+  const unsupported = verificationProviderProblem(project);
+  if (unsupported) return { refusal: unsupported };
   if (scope.wholeRepository !== true) return { refusal: "Verification requires the worker's whole-repository shell grant; folder-limited workers cannot gain general shell through a verifier" };
   const publication = project.githubAuthorization?.find(item => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(project));
   return { guard: workerShellGuard({ branch: branch ?? "", workDir, ownerCheckout: repository.ownerCheckout, publication }) };
