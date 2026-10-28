@@ -60,7 +60,10 @@ await k.run(async () => {
   k.check('S1 provider burst reveals in several paints and catches up within 200ms', new Set(first.paints.map(p => p.length)).size >= 2 && first.lag < 200, first);
   k.check('S2 only new text fades; earlier paragraph is retained and never reanimated', first.oldConnected && first.animations.length > 0 && first.animations.every(a => !a.old) && first.animations.some(a => a.opacity < .95 && a.opacity > 0), first);
 
-  await page.evaluate(`(() => { const t = document.querySelector('#transcript'), p = window.__oldParagraph; t.scrollTop += p.getBoundingClientRect().top - t.getBoundingClientRect().top - 25; t.dispatchEvent(new Event('scroll')); window.__oldTop = p.getBoundingClientRect().top; })()`);
+  const wheel = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(), p = window.__oldParagraph; return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: p.getBoundingClientRect().top - r.top - 25 }; })()`);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', ...wheel, deltaX: 0 });
+  await delay(150);
+  await page.evaluate(`window.__oldTop = window.__oldParagraph.getBoundingClientRect().top`);
   await page.cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   release[1]();
   await page.waitFor(`liveRenderedText === ${JSON.stringify(intro + bursts[0] + bursts[1])}`, 'reduced motion immediate reveal');

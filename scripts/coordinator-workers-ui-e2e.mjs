@@ -231,11 +231,11 @@ try {
   const stillUp = await scrollInfo(s);
   if (stillUp.top > up.top + 5 || stillUp.gap < 100) throw Error('Scrolled-up reader was yanked: ' + JSON.stringify({ up, stillUp }));
   result.checks.push('S2 user scroll-up is respected while chunks arrive');
-  await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: box.x, y: box.y, deltaX: 0, deltaY: 50000 }, s);
+  await evaluate(`document.querySelector('[data-action="jump-latest"]').click()`, s);
   await waitFor(`(document.querySelector('#live-reply')?.innerText ?? '').includes('STREAM-LINE-12')`, s, 'later chunks', 60);
   const resumed = await scrollInfo(s);
   if (resumed.gap > 40) throw Error('Auto-scroll did not resume: ' + JSON.stringify(resumed));
-  result.checks.push('S3 auto-scroll resumes after returning to the bottom');
+  result.checks.push('S3 auto-scroll resumes after Jump to latest');
   await settle(id, slow);
   await waitFor(`document.querySelector('#messages').innerText.includes('STREAM-END') && document.querySelector('#live-reply').hidden`, s, 'final message', 40);
   const final = await scrollInfo(s);
