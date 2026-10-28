@@ -18,7 +18,7 @@
     "e2e:coordinator-gh": "node scripts/coordinator-gh-e2e.mjs",
     "unit:machine-status": "node scripts/machine-status-unit.mjs",
     "unit:usage-limits-recovery": "node scripts/usage-limits-recovery-unit.mjs",
-    "verify": "npm run check && node scripts/run-e2e.mjs --jobs 3 --timeout 240 --retry-failed-serially durable-runtime durable-knowledge coordinator-efficiency quota-status coordinator-gh machine-status-unit usage-limits-recovery-unit worker-quota-recovery worker-quota-known-reset worker-quota-reset-unit worker-quota-retry-receipts worker-quota-settlement-race worker-quota-live-save worker-quota-live-roles worker-quota-live-race worker-quota-legacy-save worker-quota-save-safety worker-quota-superseded worker-quota-verification-save telegram-media-unit telegram-media-e2e",
+    "verify": "npm run check && node scripts/run-e2e.mjs --jobs 3 --timeout 240 --retry-failed-serially durable-runtime durable-knowledge coordinator-efficiency quota-status coordinator-gh machine-status-unit usage-limits-recovery-unit worker-quota-recovery worker-quota-known-reset worker-quota-reset-unit worker-quota-retry-receipts worker-quota-settlement-race worker-quota-live-save worker-quota-live-roles worker-quota-live-race worker-quota-legacy-save worker-quota-save-safety worker-quota-superseded worker-quota-retry-switch worker-quota-verification-save telegram-media-unit telegram-media-e2e",
     "projects": "node src/cli.ts"
   },
   "pi": { "extensions": [] },

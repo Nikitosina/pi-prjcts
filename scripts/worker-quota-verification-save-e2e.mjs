@@ -24,17 +24,18 @@ await kit.run(async () => {
   let runtime;
   try {
     runtime = await openDurableProject({ project: loadProject(id), dir: projectDir(id) });
-    const cases = ['exhausted-worker', 'verifier', 'paused-worker'];
+    const cases = ['exhausted-worker', 'verifier', 'paused-worker', 'pending-open', 'repair-open'];
     const ids = Object.fromEntries(cases.map(name => [name, { work: randomUUID(), thread: randomUUID() }]));
     const verifierParent = randomUUID();
     const cycle = { model: 'fake/fake-model', skill: 'verify', scopeId: 'scope', criteria: [{ id: 'c1', text: 'preserve evidence' }], workIds: [ids['exhausted-worker'].work], open: false, outcome: 'escalated', reason: 'budget exhausted', attempts: [1, 2, 3].map(n => ({ n, verifierWorkId: randomUUID(), verifierThreadId: randomUUID(), key: `key-${n}`, revision: `revision-${n}`, head: null, branch: null, sourcePath: '/fixture', state: 'fail', runs: [], startedAt: n, endedAt: n + 1 })) };
+    const openCycle = attempt => { const { outcome, reason, ...rest } = structuredClone(cycle); return { ...rest, open: true, attempts: [attempt] }; };
     await runtime.withRoot(root => root.commit(async tx => {
       const state = await tx.doc(DurablePlanning, root.id);
       state.paused = true; state.workerCap = 3;
       state.threads[verifierParent] = { conversationId: root.id, activeWorkId: null, workspaceScopeId: null, workspaceBindingRevision: null, workspaceConfigured: true, verification: { ...structuredClone(cycle), open: true, attempts: [{ ...structuredClone(cycle.attempts[0]), verifierWorkId: ids.verifier.work, verifierThreadId: ids.verifier.thread, state: 'running' }] } };
       for (const name of cases) {
         const { work, thread } = ids[name];
-        state.threads[thread] = { conversationId: root.id, activeWorkId: null, workspaceScopeId: null, workspaceBindingRevision: null, workspaceConfigured: true, ...(name === 'paused-worker' ? { paused: true } : {}), ...(name === 'exhausted-worker' ? { verification: structuredClone(cycle) } : {}), ...(name === 'verifier' ? { parentThreadId: verifierParent } : {}) };
+        state.threads[thread] = { conversationId: root.id, activeWorkId: null, workspaceScopeId: null, workspaceBindingRevision: null, workspaceConfigured: true, ...(name === 'paused-worker' ? { paused: true } : {}), ...(name === 'exhausted-worker' ? { verification: structuredClone(cycle) } : {}), ...(name === 'repair-open' ? { verification: openCycle(structuredClone(cycle.attempts[0])) } : {}), ...(name === 'pending-open' ? { verification: openCycle((({ endedAt, ...rest }) => ({ ...rest, state: 'running' }))(structuredClone(cycle.attempts[0]))) } : {}), ...(name === 'verifier' ? { parentThreadId: verifierParent } : {}) };
         state.work[work] = { id: work, threadId: thread, role: name === 'verifier' ? 'verifier' : 'worker', text: name, dependsOn: [], requestId: work, requiredTools: [], workspaceScopeId: null, workspaceBindingRevision: null, workspaceConfigured: true, status: 'queued', blocker: 'quota_reset_wait: fixture', conversationId: root.id, taskId: null, quotaRecovery: { retryAt: 0, attempts: 1, lastError: 'quota exceeded' }, attempt: { id: randomUUID(), projectId: id, model: 'fake/fake-model', modelTransitions: [], quotaFallback: null, thinking: 'medium', instructions: '', cwd: kit.workspace, toolNames: [], bindingRevision: 'fixture', standingRevision: 'fixture', startedAt: 1, endedAt: null, usage: { baseline: {}, final: {}, delta: {} } } };
       }
     }, BACKGROUND_CONTEXT));
@@ -44,7 +45,7 @@ await kit.run(async () => {
     saveProject(updateProjectSettings(before, { action: 'settings-update', id, confirm: id, expectedRevision: projectSettings(before).revision, changes: { fallbackModels: { worker: 'fake/fallback-model' } } }));
     assert.equal(projectSettings(loadProject(id)).values.fallbackModels.worker, 'fake/fallback-model');
     runtime = await openDurableProject({ project: loadProject(id), dir: projectDir(id) });
-    const planning = planningRuntime({ projectId: id, models: {}, fallbackModels: { worker: 'fake/fallback-model' }, cwd: kit.workspace, instructions: {}, standingRevision: 'fixture', knowledgeTools: [], workerPolicy: defineExtension({ name: 'fixture-policy' }), workerCap: 3 });
+    const planning = planningRuntime({ projectId: id, models: { worker: { provider: 'fake', modelId: 'fake-model' }, scout: { provider: 'fake', modelId: 'fallback-model' } }, fallbackModels: { worker: 'fake/fallback-model' }, cwd: kit.workspace, instructions: {}, standingRevision: 'fixture', knowledgeTools: [], workerPolicy: defineExtension({ name: 'fixture-policy' }), workerCap: 3 });
     const read = () => runtime.withRoot(root => root.commit(async tx => JSON.parse(JSON.stringify(await tx.doc(DurablePlanning, root.id))), BACKGROUND_CONTEXT));
     await runtime.withRoot(root => root.commit(async tx => { (await tx.doc(DurablePlanning, root.id)).paused = false; }, BACKGROUND_CONTEXT));
     const initial = await read();
@@ -53,7 +54,10 @@ await kit.run(async () => {
     assert.deepEqual(after.threads[ids['exhausted-worker'].thread].verification, initial.threads[ids['exhausted-worker'].thread].verification, 'verification cycle changed');
     assert.deepEqual(after.threads[verifierParent].verification, initial.threads[verifierParent].verification, 'verifier cycle changed');
     const failures = [];
-    for (const name of cases) {
+    const repair = after.work[ids['repair-open'].work];
+    assert.ok(repair.attempt.model === 'fake/fallback-model' && repair.attempt.modelTransitions.length === 1, `quota-waiting repair with remaining budget was not recovered: ${JSON.stringify({ status: repair.status, blocker: repair.blocker, model: repair.attempt.model })}`);
+    assert.deepEqual(after.threads[ids['repair-open'].thread].verification, initial.threads[ids['repair-open'].thread].verification, 'repair recovery changed the verification cycle');
+    for (const name of cases.filter(name => name !== 'repair-open')) {
       const beforeWork = initial.work[ids[name].work], afterWork = after.work[ids[name].work];
       for (const [label, check] of [['status', () => assert.equal(afterWork.status, beforeWork.status)], ['task', () => assert.equal(afterWork.taskId, beforeWork.taskId)], ['attempt', () => assert.deepEqual(afterWork.attempt, beforeWork.attempt)]]) {
         try { check(); } catch { failures.push(`${name}: ${label} changed`); }
