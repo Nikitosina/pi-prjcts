@@ -1581,5 +1581,5 @@ ${repositoryStanding ? `Repository instructions (frozen for this thread):
 ${repositoryStanding}
 
 ` : ""}${rolePrompt(project, role)}
-${SHARED_ROLE_RULES}${role === "worker" ? " When verification is enabled, finish the candidate and command evidence, stop background jobs, release leases and wait for children. Call projects_request_verification, then end your turn. Read verifier feedback, repair in this same thread and request another check within the fixed budget. If blocked, report the specific blocker. A response alone does not verify the task." : ""}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
+${SHARED_ROLE_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""} ${workRules()}`.trimEnd();
 }

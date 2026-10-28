@@ -69,6 +69,16 @@ const model = createServer((req, res) => {
         if (stage === 1) return reply(call('projects_request_verification', {}));
         return reply(say('Waiting for child.'));
       }
+      if (role === 'worker' && (marker === 'MARK-PAUSENO' || marker === 'MARK-PAUSEYES')) {
+        if (user.startsWith('The project was paused')) {
+          if (marker === 'MARK-PAUSEYES' && stage === 0) return reply(call('bash', { command: 'echo done > feature.txt' }));
+          if (marker === 'MARK-PAUSEYES' && stage === 1) return reply(call('projects_request_verification', {}));
+          return reply(say('Resumed worker finished.'));
+        }
+        if (stage === 0) return reply(call('bash', { command: marker === 'MARK-PAUSEYES' ? 'echo original > feature.txt' : 'echo done > feature.txt' }));
+        if (stage === 1) return reply(call('projects_request_verification', {}));
+        await gate(marker).wait; return reply(say('Old turn.'));
+      }
       if (role === 'worker') {
         if (marker === 'MARK-WORKERJOB') {
           if (stage === 0) return reply(call('projects_bg_start', { command: 'sleep 60', label: 'active job' }));
@@ -201,6 +211,14 @@ try {
   gate('child-ready').open();
   const childCycle = await eventually(async () => settled(await plan(id), childParent), 'child result wakes parent and verifies');
   check('child result wakes the same parent which explicitly requests verification', childCycle.outcome === 'verified' && childCycle.attempts.length === 1, childCycle);
+  for (const marker of ['MARK-PAUSENO', 'MARK-PAUSEYES']) {
+    const work = await delegateTask(id, marker);
+    await eventually(async () => result.requests.some(r => r.marker === marker && r.role === 'worker' && r.stage === 2), `${marker} request recorded`);
+    await rpc({ action: 'pause', id }); gate(marker).open();
+    await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
+    const resumed = await eventually(async () => settled(await plan(id), work), `${marker} resumed`);
+    check(`${marker} resumed requires a fresh request`, marker === 'MARK-PAUSENO' ? resumed.attempts.length === 0 && resumed.outcome === 'escalated' : resumed.attempts.length === 1 && resumed.outcome === 'verified', resumed);
+  }
   const invalid = await waitCycle(id, 'MARK-INVALID');
   check('request refuses caller-selected target model and criteria', invalid.cycle.attempts.length === 1 && invalid.cycle.model === 'fake/fake-judge' && invalid.cycle.criteria.length === 2 && result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-INVALID' && r.stage === 2 && /invalid|additional|unexpected|error/i.test(r.last)), invalid.cycle);
   const workerJob = await waitCycle(id, 'MARK-WORKERJOB');

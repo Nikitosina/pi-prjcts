@@ -7,6 +7,8 @@ import { DEFAULT_ROLE_PROMPTS, SHARED_ROLE_RULES } from '../src/role-prompts.ts'
 let scopeId, release, parentHeld = false, readProof, verificationCriteriaCount = 1;
 const barrierParent = randomUUID(), barrierThread = randomUUID(), barrierDependent = randomUUID();
 let releaseBarrier, barrierChildRunning = false;
+const recoverParent = randomUUID(), recoverThread = randomUUID(), recoverDependent = randomUUID();
+let recoveryAttempts = 0;
 const verifiedParent = randomUUID(), verifiedThread = randomUUID(), verifiedDependent = randomUUID();
 let releaseVerified, verifiedChildRunning = false;
 const verifiedGate = new Promise(ok => { releaseVerified = ok; });
@@ -30,6 +32,8 @@ const hold = new Promise(ok => { release = ok; });
 const axes = ['Standards', 'Spec', 'Bugs/performance'];
 const kit = await createKit('role-prompts', { handler: async ({ role, user, results, tools, msgs }) => {
   if (role === 'coordinator' && user === 'SKILL-READ' && results.length < 3) return call('projects_skill_file', results.length === 1 ? { skill: 'code-review' } : { skill: 'pr-review', ...(results.length === 2 ? { path: 'references/bugs-performance.md' } : {}) });
+  if (role === 'coordinator' && user === 'RECOVER-BARRIER' && !results.length) return call('projects_worker_plan', { work: [{ id: recoverParent, threadId: recoverThread, role: 'worker', workspaceScopeId: scopeId, text: 'RECOVER-PARENT\nAcceptance criteria:\n- node exits zero' }, { id: recoverDependent, threadId: randomUUID(), role: 'scout', text: 'RECOVER-DEPENDENT', dependsOn: [recoverParent] }] });
+  if (role === 'worker' && (user.startsWith('RECOVER-PARENT') || user === 'Repair authorized blocker') && !results.length) return call('projects_request_verification', {});
   if (role === 'coordinator' && user === 'BARRIER-VERIFIED' && !results.length) return call('projects_worker_plan', { work: [{ id: verifiedParent, threadId: verifiedThread, role: 'worker', workspaceScopeId: scopeId, text: 'VERIFIED-PARENT\nAcceptance criteria:\n- node exits zero' }, { id: verifiedDependent, threadId: randomUUID(), role: 'scout', text: 'VERIFIED-DEPENDENT', dependsOn: [verifiedParent] }] });
   if (role === 'reviewer' && user === 'VERIFIED-CHILD') { verifiedChildRunning = true; await verifiedGate; return results.length ? say('Child done.') : call('projects_request_verification', {}); }
   if (tools.includes('projects_delegate_child') && user.startsWith('VERIFIED-PARENT')) return results.length === 0 ? call('projects_delegate_child', { role: 'reviewer', task: 'VERIFIED-CHILD' }) : results.length === 1 ? call('projects_request_verification', {}) : say('Waiting for child.');
@@ -39,6 +43,9 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
   if (role === 'reviewer' && user === 'BARRIER-CHILD') { barrierChildRunning = true; await barrierGate; return say('Child done.'); }
   if (role === 'coordinator' && user === 'ROUND' && !results.length) return call('projects_delegate', { task: 'ROUND-PARENT' });
   if (role === 'coordinator' && user === 'SCOUT' && !results.length) return call('projects_delegate', { role: 'scout', task: 'SCOUT-PROBE' });
+  if (role === 'coordinator' && user === 'CHILD-WORKER' && !results.length) return call('projects_delegate', { task: 'PARENT-WORKER', acceptance: ['node exits zero'] });
+  if (role === 'worker' && user.startsWith('PARENT-WORKER')) return !results.length ? call('projects_delegate_child', { role: 'worker', task: 'CHILD-WORKER-TASK' }) : say('Waiting for child.');
+  if (role === 'worker' && user.startsWith('[Child work') && user.includes('CHILD-WORKER-TASK')) return !results.length ? call('projects_request_verification', {}) : say('Child result handled.');
   if (role === 'coordinator' && user === 'VERIFY' && !results.length) return call('projects_delegate', { task: 'VERIFY-PROBE', acceptance: ['node exits zero\nwithout changing source files'] });
   if (role === 'coordinator' && user.startsWith('PREFIX-') && !results.length) return call('projects_delegate', { task: user, acceptance: user === 'PREFIX-overlimit' ? Array.from({ length: 21 }, (_, i) => `Requirement ${i}`) : structuredCases.find(c => user === `PREFIX-${c.name}`).input });
   if (role === 'coordinator' && user.startsWith('TEXTUAL-') && !results.length) return call('projects_delegate', { task: textualCases.find(c => user === `TEXTUAL-${c.name}`).task });
@@ -48,6 +55,8 @@ const kit = await createKit('role-prompts', { handler: async ({ role, user, resu
     parentHeld = true; await hold; return say('Candidate ready for static review.');
   }
   if (tools.includes('projects_verify_run')) {
+    if (JSON.stringify(msgs).includes('RECOVER-PARENT') && results.length === 1 && recoveryAttempts++ === 0) return call('projects_verification_verdict', { summary: 'Blocked fixture.', criteria: [{ id: 'c1', status: 'blocked', reason: 'fixture blocker' }] });
+    if (JSON.stringify(msgs).includes('RECOVER-PARENT') && results.length === 2 && recoveryAttempts === 1) return say('Blocked recorded.');
     if (!results.length) return call('projects_skill_file', { skill: 'mini-verify' });
     if (results.length === 1) return call('projects_verify_run', { command: 'node -e "process.exit(0)"' });
     if (results.length === 2) return call('projects_verification_verdict', { summary: 'Observed zero exit.', criteria: Array.from({ length: verificationCriteriaCount }, (_, i) => ({ id: `c${i + 1}`, status: 'pass', reason: 'Observed fixture command', evidence: [{ runId: JSON.parse(results[1]).runId }] })) });
@@ -99,6 +108,16 @@ await kit.run(async () => {
   kit.check('cap-one queue drains all review axes without deadlock', children.every(c => complete.find(w => w.id === c.id)?.status === 'completed'));
   await kit.ask(id, 'SCOUT');
   await kit.updateSettings(id, { models: { verifier: 'fake/fake-model' }, verification: { enabled: true, skill: 'mini-verify' } });
+  await kit.ask(id, 'RECOVER-BARRIER');
+  const blockedRecovery = await kit.rpc({ action: 'plan-snapshot', id });
+  kit.check('failed verification blocks its dependent before recovery', blockedRecovery.work.find(w => w.id === recoverParent)?.status === 'blocked' && blockedRecovery.work.find(w => w.id === recoverDependent)?.status === 'blocked', blockedRecovery);
+  await kit.rpc({ action: 'thread-send', id, threadId: recoverThread, requestId: randomUUID(), text: 'Repair authorized blocker' });
+  await kit.settle(id);
+  const fixedRecovery = await kit.rpc({ action: 'plan-snapshot', id });
+  kit.check('recovery releases dependent without relabeling historical blocked work', fixedRecovery.verification?.[recoverThread]?.outcome === 'verified' && fixedRecovery.verification[recoverThread].attempts.length === 2 && fixedRecovery.work.find(w => w.id === recoverParent)?.status === 'blocked' && fixedRecovery.work.find(w => w.id === recoverDependent)?.status === 'completed', fixedRecovery);
+  await kit.ask(id, 'CHILD-WORKER');
+  const childWorker = kit.result.calls.find(c => c.user === 'CHILD-WORKER-TASK');
+  kit.check('child worker returns results to parent and is not instructed to request verification', childWorker && !childWorker.tools.includes('projects_request_verification') && !childWorker.system.includes('Call projects_request_verification') && /parent/i.test(childWorker.system), childWorker);
   await kit.rpc({ action: 'message', id, text: 'BARRIER-VERIFIED' });
   await kit.waitFor(() => verifiedChildRunning, 'verification-enabled child running');
   const heldVerified = await kit.rpc({ action: 'plan-snapshot', id });
@@ -180,6 +199,9 @@ await kit.run(async () => {
   const frozenWorker = kit.result.calls.findLast(c => c.user === 'FROZEN-CONTEXT-CHECK');
   kit.check('reopened old worker retains frozen instructions and tools', frozenWorker.system.includes(DEFAULT_ROLE_PROMPTS.worker) && !frozenWorker.system.includes('OWNER-CUSTOM-WORKER') && frozenWorker.tools.includes('projects_request_verification'));
   await kit.ask(id, 'VERIFY');
+  await kit.ask(id, 'CHILD-WORKER');
+  const reopenedChild = kit.result.calls.findLast(c => c.user === 'CHILD-WORKER-TASK');
+  kit.check('reopened customized child keeps owner text and parent-only handoff', reopenedChild.system.includes('OWNER-CUSTOM-WORKER') && !reopenedChild.tools.includes('projects_request_verification') && !reopenedChild.system.includes('Call projects_request_verification') && reopenedChild.system.includes('Return your evidence and result to your parent worker'));
   const reopenedWorker = kit.result.calls.findLast(c => c.role === 'worker' && c.user.startsWith('VERIFY-PROBE'));
   kit.check('new worker after reopen keeps owner customization and request tool', reopenedWorker.system.includes('OWNER-CUSTOM-WORKER') && reopenedWorker.tools.includes('projects_request_verification'));
   await kit.updateSettings(id, { prompts: { verifier: null } });
