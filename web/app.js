@@ -1009,22 +1009,28 @@ async function loadPrompts(force = false, keepEdits = false) {
     const data = await api({ action: "prompts-snapshot", id });
     if (!fresh()) return;
     const edits = keepEdits && promptsState?.projectId === id ? promptsState.roles.flatMap(item => { const text = document.querySelector(`[data-prompt="${item.role}"]`)?.value; return text === undefined || text === item.effective ? [] : [[item.role, text]]; }) : [];
-    promptsState = { projectId: id, roles: data.roles, note: "" };
+    promptsState = { projectId: id, roles: data.roles };
     renderPrompts();
     for (const [role, text] of edits) document.querySelector(`[data-prompt="${role}"]`).value = text;
   } catch (error) {
     if (!fresh()) return;
     // A failed refresh keeps the editors and their unsaved edits; the next opening of Settings retries.
-    if (promptsState?.projectId === id && node.querySelector("[data-prompt]")) { node.querySelector(".prompt-refresh-note")?.remove(); node.insertAdjacentHTML("beforeend", `<p class="note bad prompt-refresh-note">Prompts not refreshed: ${esc(error.message)}</p>`); }
+    if (promptsState?.projectId === id && node.querySelector("[data-prompt]")) showPromptsError(`Prompts not refreshed: ${error.message}`);
     else node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`;
   }
+}
+// Errors go below the editors without rebuilding them, so unsaved edits survive a failed refresh, Save or Reset; the next successful load clears them.
+function showPromptsError(text) {
+  const node = document.querySelector("#prompts");
+  node.querySelector(".prompt-error")?.remove();
+  node.insertAdjacentHTML("beforeend", `<p class="note bad prompt-error">${esc(text)}</p>`);
 }
 function renderPrompts() {
   const node = document.querySelector("#prompts");
   if (!promptsState || promptsState.projectId !== projectId) return;
   node.innerHTML = promptsState.roles.map(item => `<fieldset class="events-group prompt-role" data-role="${item.role}"><legend>${promptTitles[item.role]} ${item.override ? '<span class="skill-tag prompt-custom">Customized</span>' : '<small class="note">Default</small>'}</legend>
     <label class="field"><span class="sr-only">${promptTitles[item.role]} system prompt</span><textarea class="mono prompt-text" rows="8" maxlength="24000" data-prompt="${item.role}" aria-label="${promptTitles[item.role]} system prompt">${esc(item.effective)}</textarea></label>
-    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("") + (promptsState.note ? `<p class="note bad">${esc(promptsState.note)}</p>` : "");
+    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("");
 }
 async function savePrompt(role, reset) {
   const id = projectId, item = promptsState?.roles.find(entry => entry.role === role);
@@ -1034,7 +1040,7 @@ async function savePrompt(role, reset) {
   try {
     const settings = await api({ action: "settings-snapshot", id });
     await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { prompts: { [role]: reset || !text.trim() || text === item.default ? null : text } } }, reset ? `${promptTitles[role]} prompt reset to default.` : `${promptTitles[role]} prompt saved. New turns and new worker threads use it.`);
-  } catch (error) { promptsState.note = error.message; renderPrompts(); throw error; }
+  } catch (error) { if (id === projectId) showPromptsError(error.message); throw error; }
   finally { promptsSaving--; }
   await loadPrompts(true);
 }

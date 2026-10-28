@@ -3,7 +3,8 @@
 // Fakes only (fake model, private HOME, temp repo). Covers: no override is persisted for defaults, a genuine override and an unsaved edit survive,
 // Reset removes the override, new threads use the current text and a thread started before the restart keeps its frozen prompt.
 // A page-level fetch gate then fails or holds one prompts-snapshot response: a failed refresh keeps the editors and drafts (F7), and a snapshot read
-// before Save (F9) or Reset (F8) cannot bring the old text back. Cases are listed in settings-prompts-refresh-failures.md.
+// before Save (F9) or Reset (F8) cannot bring the old text back. It also fails one Save and one Reset request: the drafts survive (F11).
+// Cases are listed in settings-prompts-refresh-failures.md.
 // E2E_SKIP_CASES=F7 skips a case, so a negative-control run against an older web/app.js can still reach the later cases.
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,6 +36,7 @@ kit.initRepo();
 const CUSTOM_SCOUT = 'CUSTOM-SCOUT: read only the files you were asked about.';
 const UNSAVED = 'UNSAVED-REVIEWER draft text';
 const CUSTOM_COORDINATOR = 'CUSTOM-COORDINATOR: answer in one sentence.';
+const DRAFTS = { coordinator: 'DRAFT-COORDINATOR unsaved', worker: 'DRAFT-WORKER unsaved' };
 const skipped = new Set((process.env.E2E_SKIP_CASES ?? '').split(',').filter(Boolean));
 
 try {
@@ -78,10 +80,13 @@ try {
     await page.evaluate(`document.querySelector('#set-advanced')?.scrollIntoView()`);
     await page.shot('02-settings-after-upgrade', { force: true });
 
-    // The gate fails or holds exactly one prompts-snapshot response, after the host has answered it.
+    // The gate fails or holds exactly one prompts-snapshot response, after the host has answered it, or fails one request of the action in failAction.
     await page.evaluate(`(() => {
-      const real = window.fetch.bind(window), gate = window.__gate = { mode: null, held: [], log: [] };
+      const real = window.fetch.bind(window), gate = window.__gate = { mode: null, failAction: null, held: [], log: [] };
       window.fetch = async (url, init) => {
+        const body = typeof init?.body === 'string' ? init.body : '';
+        if (gate.failAction && body.includes('"action":"' + gate.failAction + '"')) { gate.log.push(gate.failAction + ' failed'); gate.failAction = null; throw new TypeError('Failed to fetch'); }
+        if (body.includes('"action":"settings-update"')) gate.log.push('settings-update sent');
         if (!gate.mode || typeof init?.body !== 'string' || !init.body.includes('"prompts-snapshot"')) return real(url, init);
         const mode = gate.mode; gate.mode = null;
         if (mode === 'fail') { gate.log.push('snapshot failed'); throw new TypeError('Failed to fetch'); }
@@ -103,15 +108,41 @@ try {
       await page.waitFor(`window.__gate.log.includes('snapshot failed')`, 'failed refresh');
       await delay(300);
       const failed = await editors();
-      await page.evaluate(`(document.querySelector('#prompts .prompt-refresh-note') ?? document.querySelector('#prompts')).scrollIntoView({ block: 'center' })`); await page.shot('03-refresh-failed', { force: true });
+      await page.evaluate(`(document.querySelector('#prompts .prompt-error') ?? document.querySelector('#prompts')).scrollIntoView({ block: 'center' })`); await page.shot('03-refresh-failed', { force: true });
       check('F7 a failed refresh keeps all five editors', Object.keys(failed).length === 5, { roles: Object.keys(failed), html: await page.evaluate(`document.querySelector('#prompts').innerText.slice(0, 200)`) });
       check('F7 a failed refresh keeps the unsaved reviewer edit and the override', failed.reviewer?.text === UNSAVED && failed.scout?.text === CUSTOM_SCOUT && failed.scout.custom, failed);
-      check('F7 the failure is shown next to the editors', /Prompts not refreshed/.test(await page.evaluate(`document.querySelector('#prompts .prompt-refresh-note')?.textContent ?? ''`)));
+      check('F7 the failure is shown next to the editors', /Prompts not refreshed/.test(await page.evaluate(`document.querySelector('#prompts .prompt-error')?.textContent ?? ''`)));
       await reopen();
-      await page.waitFor(`!document.querySelector('#prompts .prompt-refresh-note') && document.querySelectorAll('#prompts [data-prompt]').length === 5`, 'retried refresh');
+      await page.waitFor(`!document.querySelector('#prompts .prompt-error') && document.querySelectorAll('#prompts [data-prompt]').length === 5`, 'retried refresh');
       const retried = await editors();
       check('F7 the next opening retries and keeps the unsaved edit', retried.reviewer.text === UNSAVED && retried.coordinator.text === expected.coordinator && retried.scout.custom, retried);
     }
+
+    // F11: a Save whose settings-snapshot preflight fails and a Reset whose settings-update fails keep every draft and store nothing.
+    for (const [role, text] of Object.entries(DRAFTS)) await page.evaluate(`(() => { const t = document.querySelector('[data-prompt="${role}"]'); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    const drafted = await editors();
+    const updates = () => page.evaluate(`window.__gate.log.filter(entry => entry === 'settings-update sent').length`);
+    const failedAttempts = [['settings-snapshot', 'prompt-save', 'coordinator'], ['settings-update', 'prompt-reset', 'scout']];
+    for (const [action, button, role] of failedAttempts) {
+      const sent = await updates();
+      await page.evaluate(`window.__gate.failAction = ${JSON.stringify(action)}`);
+      await page.evaluate(`document.querySelector('[data-action="${button}"][data-role="${role}"]').click()`);
+      await page.waitFor(`window.__gate.log.includes('${action} failed') && !!document.querySelector('#prompts .prompt-error')`, `${action} failure note`);
+      await delay(300);
+      const after = await editors();
+      check(`F11 a failed ${action} during ${button} keeps all five editors and every draft`, JSON.stringify(after) === JSON.stringify(drafted), { drafted, after });
+      check(`F11 the ${action} failure is shown`, /Failed to fetch/.test(await page.evaluate(`document.querySelector('#prompts .prompt-error').textContent`)));
+      check(`F11 the failed ${button} stores nothing`, JSON.stringify(stored().prompts) === JSON.stringify({ scout: CUSTOM_SCOUT }) && await updates() === sent, { stored: stored().prompts, log: await page.evaluate('window.__gate.log') });
+    }
+    await page.evaluate(`document.querySelector('#prompts .prompt-error').scrollIntoView({ block: 'center' })`); await page.shot('05-save-and-reset-failed', { force: true });
+    // A later Save and Reset still work, so no save stays counted as in flight.
+    await page.evaluate(`document.querySelector('[data-action="prompt-save"][data-role="coordinator"]').click()`);
+    await kit.eventually(() => stored().prompts?.coordinator === DRAFTS.coordinator, 'coordinator draft not saved after the failures', 100);
+    await page.waitFor(`!!document.querySelector('[data-prompt="coordinator"]').closest('fieldset').querySelector('.prompt-custom') && !document.querySelector('#prompts .prompt-error')`, 'coordinator Customized after a successful save');
+    await page.evaluate(`document.querySelector('[data-action="prompt-reset"][data-role="coordinator"]').click()`);
+    await kit.eventually(() => !stored().prompts?.coordinator, 'coordinator not reset after the failures', 100);
+    await page.waitFor(`document.querySelector('[data-prompt="coordinator"]').value === ${JSON.stringify(expected.coordinator)}`, 'coordinator default after reset');
+    check('F11 a later Save and Reset work after the failures', JSON.stringify(stored().prompts) === JSON.stringify({ scout: CUSTOM_SCOUT }), stored().prompts);
 
     // Saving an unchanged default stores nothing; Reset removes the override instead of saving a snapshot.
     await page.evaluate(`document.querySelector('[data-action="prompt-save"][data-role="coordinator"]').click()`);

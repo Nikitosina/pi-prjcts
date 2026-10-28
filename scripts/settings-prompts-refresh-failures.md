@@ -1,6 +1,6 @@
 # Settings role prompts after a host restart: failure cases
 
-Verified by `scripts/settings-prompts-refresh-e2e.mjs`.
+F1–F9 and F11 are verified by `scripts/settings-prompts-refresh-e2e.mjs`. F10 is assessed from the source only and is not exercised at runtime.
 
 ## Original cases (retrospective)
 This list was written after commit 1575f20, which shipped without it. It records the cases that commit's test already covered; it does not claim they were written first.
@@ -15,4 +15,7 @@ This list was written after commit 1575f20, which shipped without it. It records
 - F7 The refresh on reopening Settings fails (host restarting, network drop) and replaces the editors with an error, discarding unsaved drafts. A retry after the failure does not restore the editors.
 - F8 A refresh that read an override before Reset arrives after Reset has completed and puts the old text back as Customized; saving then stores it again.
 - F9 A refresh that read the prompts before a Save arrives late and shows the pre-save text.
-- F10 A first load that fails leaves no understandable message, or a later opening of Settings does not retry.
+- F10 (source only, not exercised at runtime) A first load that fails leaves no understandable message, or a later opening of Settings does not retry.
+
+## Second review finding (written before its fix)
+- F11 Save or Reset fails (the settings-snapshot preflight or the settings-update itself) and every editor is rebuilt from the stored values, discarding unsaved drafts although nothing was saved. The error is not shown, or a later Save or Reset no longer works.
