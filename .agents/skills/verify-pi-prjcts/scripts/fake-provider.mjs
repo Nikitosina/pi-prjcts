@@ -13,6 +13,11 @@ const server = createServer((req, res) => {
     const input = JSON.parse(body || '{}'), messages = input.messages ?? [];
     const user = text(messages.findLast(m => m.role === 'user')?.content);
     appendFileSync(requestLog, JSON.stringify({ at: new Date().toISOString(), model: input.model, tools: (input.tools ?? []).map(t => t.function?.name), user }) + '\n');
+    if (input.model === 'fake-model' && messages.some(m => text(m.content).includes('VERIFY-QUOTA-RECOVERY-WORK'))) {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Quota exceeded: session limit reached', type: 'insufficient_quota', code: 'insufficient_quota' } }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end(chunk({ role: 'assistant', content: `VERIFY-FAKE-REPLY: ${user.slice(0, 200)}` }, null) + chunk({}, 'stop') + 'data: [DONE]\n\n');
   });
