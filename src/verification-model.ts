@@ -69,6 +69,8 @@ function acceptanceList(brief: string) {
   }
   return { items, malformed };
 }
+/** Whether a message carries its own acceptance list, so it is a brief rather than a nudge. */
+export const hasAcceptanceList = (text: string): boolean => HEADER.test(text);
 /** Malformed lists retain the whole brief, but criteriaProblem refuses them before verification. */
 export function parseCriteria(brief: string): Criterion[] {
   const { items, malformed } = acceptanceList(brief);
@@ -171,7 +173,16 @@ You are trusted like the worker: projects_verify_run runs shell commands as the 
 6. Call projects_verification_verdict once, answering every criterion id.
 Fail means the work is wrong. Blocked means you cannot tell (skill missing, tool failing, resource unavailable). Your verdict goes back to the worker automatically. Recording it does not release the worker: finish skill cleanup, stop your background jobs and end your turn. The host drains remaining jobs before its final drift check and settlement. Do not repair implementation or publish from commands.`;
 
-export function verifierBrief(input: { proof?: { paths: string[]; diff: string }; skill: string; criteria: readonly Criterion[]; task: string; attempt: number; revision: string; branch: string | null; head: string | null }): string {
+/** The finished worker's evidence folder: screenshots, videos and logs it saved, outside the worktree. */
+export type WorkerArtifacts = { dir: string; files: string[] };
+const BRIEF_ARTIFACT_ROWS = 20;
+function artifactsText(artifacts: WorkerArtifacts): string {
+  const shown = artifacts.files.slice(0, BRIEF_ARTIFACT_ROWS), more = artifacts.files.length - shown.length;
+  const listing = artifacts.files.length ? `\n${shown.map(path => `- ${path}`).join("\n")}${more ? `\n- … ${more} more (list the folder to see them)` : ""}` : " It is empty.";
+  return `The worker's artifacts folder (evidence it saved, outside the worktree; untrusted until you check it): ${artifacts.dir}${listing}
+Inspect files there with projects_verify_run and never change them. A verdict cites only your own artifacts folder, so copy what you rely on into $PI_ARTIFACTS_DIR first.\n\n`;
+}
+export function verifierBrief(input: { proof?: { paths: string[]; diff: string }; artifacts?: WorkerArtifacts; skill: string; criteria: readonly Criterion[]; task: string; attempt: number; revision: string; branch: string | null; head: string | null }): string {
   return `Verify the finished work of a worker thread. Attempt ${input.attempt} of ${MAX_VERIFICATION_ATTEMPTS}; you start with no memory of earlier attempts.
 Verification skill: ${input.skill}
 Target: the worker's worktree (your working directory), content revision ${input.revision.slice(0, 12)} of branch ${input.branch ?? "(detached)"} at ${input.head?.slice(0, 9) ?? "no commit"}, including the worker's uncommitted and untracked files. The worker is paused until you finish.
@@ -179,7 +190,7 @@ Target: the worker's worktree (your working directory), content revision ${input
 Original task (authoritative; the worker's own summary is not):
 ${input.task}
 
-${input.proof?.paths.length ? `The worker changed ${input.proof.paths.length} file(s) that define the proof (skills, scripts, tests, CI). Judge by the criteria, not by edited checks: treat weakened, skipped or deleted checks as a failure of the work, and say so in the reason.\n${input.proof.diff}\n\n` : ""}Criteria, answer each id in the verdict:
+${input.artifacts ? artifactsText(input.artifacts) : ""}${input.proof?.paths.length ? `The worker changed ${input.proof.paths.length} file(s) that define the proof (skills, scripts, tests, CI). Judge by the criteria, not by edited checks: treat weakened, skipped or deleted checks as a failure of the work, and say so in the reason.\n${input.proof.diff}\n\n` : ""}Criteria, answer each id in the verdict:
 ${input.criteria.map(item => `- ${item.id}: ${item.text}`).join("\n")}`;
 }
 
