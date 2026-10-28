@@ -445,6 +445,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     try {
       const record = await createThread(tx, root, { id: randomUUID(), threadId: parentId, role: latest.role, text, requestId: `child-report:${work.id}:${attempt}`, requiredTools: [...latest.requiredTools], workspaceScopeId: latest.workspaceScopeId ?? undefined });
       if (latest.chatConversationId !== undefined) record.chatConversationId = latest.chatConversationId;
+      if (latest.recoveryOf) carryRecovery(state, record, latest.recoveryOf);
       state.work[record.id] = record;
       work.report = { requestId: record.requestId!, text, delivered: true };
       return true;
@@ -477,6 +478,18 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
     const cycle = state.threads[work.threadId]?.verification;
     if (cycle?.outcome !== "escalated" || cycle.open || cycle.attempts.length || !work.recoveryOf?.length) return [];
     return work.recoveryOf.filter(id => cycle.workIds.includes(id) && state.work[id]?.status === "blocked" && !state.work[id]?.archivedAt && state.work[id]?.blocker?.startsWith("Verification did not pass:"));
+  }
+  function carryRecovery(state: PlanningState, target: StoredWork, ids: readonly string[], text?: string): void {
+    const cycle = state.threads[target.threadId]?.verification;
+    if (cycle?.outcome !== "escalated" || cycle.open || cycle.attempts.length) return;
+    const eligible = ids.filter(id => cycle.workIds.includes(id) && state.work[id]?.status === "blocked" && !state.work[id]?.archivedAt && state.work[id]?.blocker?.startsWith("Verification did not pass:"));
+    const original = state.work[eligible[0] ?? ""];
+    if (!original) return;
+    if (text && hasAcceptanceHeader(text)) {
+      const proposed = parseCriteria(text), source = briefOf(state, original), expected = parseCriteria(source);
+      if (!text.includes(source) || criteriaProblem(text, proposed) || JSON.stringify(proposed) !== JSON.stringify(expected)) return;
+    }
+    target.recoveryOf = eligible;
   }
   function recordRecovery(state: PlanningState, cycle: Verification): void {
     if (cycle.open || cycle.outcome !== "verified") return;
@@ -755,12 +768,12 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       work = continuations().get(work.id);
       if (!work) return undefined;
     }
-    if (work?.status === "blocked" && !work.archivedAt && work.blocker?.startsWith("Verification did not pass:") && work.recoveredBy) {
+    if (work?.status === "blocked" && work.blocker?.startsWith("Verification did not pass:") && work.recoveredBy) {
       const recovered = state.work[work.recoveredBy];
       if (recovered?.status === "completed" && recovered.threadId === work.threadId) return recovered;
     }
     const cycle = work && state.threads[work.threadId]?.verification;
-    if (work?.status === "blocked" && !work.archivedAt && work.blocker?.startsWith("Verification did not pass:") && cycle?.outcome === "verified" && !cycle.open && cycle.workIds.includes(work.id)) {
+    if (work?.status === "blocked" && work.blocker?.startsWith("Verification did not pass:") && cycle?.outcome === "verified" && !cycle.open && cycle.workIds.includes(work.id)) {
       const recovered = state.work[cycle.workIds.at(-1)!];
       if (recovered?.status === "completed") return recovered;
     }
@@ -837,7 +850,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   async function followUp(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId): Promise<string> {
     if (!text || text.length > 32000 || !requestId) throw new Error("Follow-up text and requestId are required");
     const id = crypto.randomUUID();
-    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); rejectRetryRequest(state, requestId); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); requireWorkspaceThread(thread); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); const cycle = state.threads[threadId]?.verification; if (!hasAcceptanceHeader(text) && cycle?.outcome === "escalated" && cycle.attempts.length === 0) state.work[record.id]!.recoveryOf = cycle.workIds.filter(workId => { const item = state.work[workId]; return item?.status === "blocked" && !item.archivedAt && item.blocker?.startsWith("Verification did not pass:"); }); return record.id; }, BACKGROUND_CONTEXT);
+    return root.commit(async tx => { const state = await tx.doc(DurablePlanning, root.id); if (!state.threads[threadId]) throw new Error("Unknown durable thread UUID"); rejectRetryRequest(state, requestId); const prior = Object.values(state.work).find(work => work.requestId === requestId); if (prior) { if (prior.threadId !== threadId || prior.text !== text || prior.steering) throw new Error("Conflicting duplicate follow-up requestId"); return prior.id; } const thread = Object.values(state.work).find(work => work.threadId === threadId); if (!thread) throw new Error("Durable thread has no frozen role"); requireWorkspaceThread(thread); const record = await admit(tx, root.id, { id, threadId, role: thread.role, text, requestId, requiredTools: [...thread.requiredTools], workspaceScopeId: thread.workspaceScopeId ?? undefined }, true, chat); const cycle = state.threads[threadId]?.verification; if (cycle) carryRecovery(state, state.work[record.id]!, cycle.workIds, text); return record.id; }, BACKGROUND_CONTEXT);
   }
   async function steer(root: Conversation, threadId: string, text: string, requestId: string, chat?: ConversationId) {
     if (!text || text.length > 32000 || !requestId) throw new Error("Steering text and requestId are required");
@@ -857,6 +870,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       requireWorkspaceThread(previous);
       const record = await admit(tx, root.id, { id: randomUUID(), threadId, role: previous.role, text, requestId, requiredTools: [...previous.requiredTools], workspaceScopeId: previous.workspaceScopeId ?? undefined }, false, chat);
       state.work[record.id].steering = true;
+      const active = Object.values(state.work).findLast(item => item.id !== record.id && item.threadId === threadId && (item.status === "queued" || item.status === "running") && item.recoveryOf?.length);
+      if (active?.recoveryOf) carryRecovery(state, state.work[record.id], active.recoveryOf, text);
       if (record.status === "blocked") return { attemptId: record.id, stop: null };
       const stopId = randomUUID(), taskIds: TaskId[] = [];
       thread.stopping = stopId;
@@ -1020,6 +1035,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       requireWorkspaceThread(previous);
       const record = await admit(tx, root.id, { id: randomUUID(), threadId: previous.threadId, role: previous.role, text: previous.text, requestId, dependsOn: [...previous.dependsOn], requiredTools: [...previous.requiredTools], workspaceScopeId: previous.workspaceScopeId ?? undefined }, true, chat);
       state.work[record.id].retryOf = workId;
+      carryRecovery(state, state.work[record.id], previous.recoveryOf ?? [previous.id]);
       if (previous.priority !== undefined) state.work[record.id].priority = previous.priority;
       state.retryReceipts = [...receipts, { requestId, workId, attemptId: record.id, threadId: record.threadId }];
       return { attemptId: record.id, threadId: record.threadId };

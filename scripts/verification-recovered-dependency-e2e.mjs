@@ -53,6 +53,8 @@ await kit.run(async () => {
     const recovered = await kit.eventually(async () => { const p = await snap(); return p.verification[threadId]?.outcome === 'verified' && p; }, 'recovery passes');
     kit.check('recovery passes once and preserves the blocked original', recovered.verification[threadId].attempts.length === 1 && item(recovered, original).status === 'blocked' && item(recovered, repair).status === 'completed' && item(recovered, dep).status !== 'completed' && recovered.verification[threadId].criteria[0].text === 'proof exists' && recovered.verification[threadId].model === 'fake/fake-model' && recovered.verification[threadId].skill === 'mini-verify', recovered.verification[threadId]);
     await kit.eventually(async () => item(await snap(), immediate)?.status === 'completed', 'zero-attempt recovered predecessor releases immediate dependent', 120);
+    await runtime.archiveWork({ workIds: [original] });
+    kit.check('successful historical blocker can be archived without changing status', item(await snap(), original).archived && item(await snap(), original).status === 'blocked');
     // Replace the verified cycle with a distinct task before the other prerequisite finishes.
     const later = (await runtime.followUp(threadId, 'LATER DISTINCT\n\nAcceptance criteria:\n- another proof exists', { requestId: randomUUID() })).attemptId;
     const replaced = await kit.eventually(async () => { const p = await snap(); return item(p, later)?.status === 'completed' && p.verification[threadId]?.outcome === 'verified' && p.verification[threadId].attempts[0].verifierThreadId !== recovered.verification[threadId].attempts[0].verifierThreadId && p; }, 'later distinct cycle settles');
@@ -66,17 +68,18 @@ await kit.run(async () => {
     const done = await kit.eventually(async () => { const p = await snap(); return item(p, dep)?.status === 'completed' && p; }, 'dependent runs after both predecessors', 120);
     kit.check('dependent runs exactly once and original blocker remains historical', item(done, original).status === 'blocked' && kit.result.calls.filter(c => c.user === 'DEPENDENT').length === 1, done.work);
     const negatives = [];
-    for (const archive of [false, true]) {
+    for (const control of ["distinct", "same-criteria", "archived"]) {
+      const archive = control === "archived";
       const t = randomUUID(), w = randomUUID(), d = randomUUID();
       await runtime.plan({ work: [{ id: w, threadId: t, role: 'worker', workspaceScopeId: scope, text: 'ZERO ORIGINAL CONTROL\n\nAcceptance criteria:\n- proof exists' }, { id: d, threadId: randomUUID(), role: 'scout', text: `CONTROL ${archive}`, dependsOn: [w] }] });
       await kit.eventually(async () => { const p = await snap(); return item(p, w)?.status === 'blocked' && item(p, d)?.status === 'blocked'; }, 'control blocker');
       if (archive) await runtime.archiveWork({ workIds: [w] });
-      const continuation = (await runtime.followUp(t, archive ? 'Repair archived task' : 'A DIFFERENT GOAL\n\nAcceptance criteria:\n- unrelated proof', { requestId: randomUUID() })).attemptId;
+      const continuation = (await runtime.followUp(t, archive ? 'Repair archived task' : control === 'same-criteria' ? 'A DIFFERENT GOAL\n\nAcceptance criteria:\n- proof exists' : 'A DIFFERENT GOAL\n\nAcceptance criteria:\n- unrelated proof', { requestId: randomUUID() })).attemptId;
       const completed = await kit.eventually(async () => { const p = await snap(); return p.verification[t]?.outcome === 'verified' && item(p, continuation)?.status === 'completed' && p; }, 'control continuation verifies');
       kit.check(archive ? 'archived blocker stays blocked and does not release its dependent' : 'a new goal does not recover an unrelated blocker', item(completed, w).status === 'blocked' && item(completed, d).status === 'blocked' && !((await raw()).work[w].recoveredBy), { archive, work: item(completed, w), dependent: item(completed, d) });
-      negatives.push({ archive, original: w, dependent: d, continuation, status: item(completed, d).status });
+      negatives.push({ control, archive, original: w, dependent: d, continuation, status: item(completed, d).status });
     }
     const ids = [original, repair, later, dep, immediate, other];
-    writeFileSync(join(kit.artifacts, 'recovery-summary.json'), JSON.stringify({ original, repair, later, dep, immediate, other, threadId, association: persisted.work[original].recoveredBy, tasks: ids.map(id => ({ id, taskId: persisted.work[id].taskId, status: item(done, id).status, blocker: item(done, id).blocker })), initialCycle: blocked.verification[threadId], recoveredCycle: recovered.verification[threadId], laterCycle: replaced.verification[threadId], dependencyTiming: { beforePass: item(held, dep).status, afterPass: item(recovered, dep).status, afterReplacement: item(replaced, dep).status, afterOther: item(done, dep).status }, negatives }, null, 2));
+    writeFileSync(join(kit.artifacts, 'recovery-summary.json'), JSON.stringify({ original, repair, later, dep, immediate, other, threadId, association: persisted.work[original].recoveredBy, archivedBeforeRecovery: item(blocked, original).archived, archivedAfterRecovery: item(reopened, original).archived, tasks: ids.map(id => ({ id, taskId: persisted.work[id].taskId, status: item(done, id).status, blocker: item(done, id).blocker })), initialCycle: blocked.verification[threadId], recoveredCycle: recovered.verification[threadId], laterCycle: replaced.verification[threadId], dependencyTiming: { beforePass: item(held, dep).status, afterPass: item(recovered, dep).status, afterReplacement: item(replaced, dep).status, afterOther: item(done, dep).status }, negatives }, null, 2));
   } finally { releaseVerifier(); releasePrerequisite(); await runtime?.close(); }
 });
