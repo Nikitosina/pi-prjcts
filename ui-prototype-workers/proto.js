@@ -7,22 +7,22 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;
 
 // One context reading per conversation (thread), never per task.
 const conversations = [
-  { id: "c1", key: "W1", role: "worker", name: "PR #22 repairs", thread: "3f2a91c0", context: { tokens: 134000, window: 200000 }, parent: null },
-  { id: "c2", key: "W2", role: "worker", name: "Usage CSV export", thread: "8b17e4d2", context: { tokens: 62000, window: 200000 }, parent: null },
-  { id: "c3", key: "S1", role: "scout", name: "Quota reset research", thread: "c40de733", context: { tokens: 176000, window: 200000 }, parent: null },
-  { id: "c4", key: "V1", role: "verifier", name: "Verify PR #22 head", thread: "e9a05b18", context: { tokens: 21000, window: 200000 }, parent: "c1" },
+  { id: "c1", key: "W1", role: "worker", name: "Checkout refactor", thread: "3f2a91c0", context: { tokens: 134000, window: 200000 }, parent: null },
+  { id: "c2", key: "W2", role: "worker", name: "Search filters", thread: "8b17e4d2", context: { tokens: 62000, window: 200000 }, parent: null },
+  { id: "c3", key: "S1", role: "scout", name: "Chart library research", thread: "c40de733", context: { tokens: 176000, window: 200000 }, parent: null },
+  { id: "c4", key: "V1", role: "verifier", name: "Verify checkout refactor", thread: "e9a05b18", context: { tokens: 21000, window: 200000 }, parent: "c1" },
 ];
-// Raw text is what the current card clips to a title; title is the readable name a real version would need.
+// All names and tasks are fictional. Raw text is what the current card clips to a title; title is the readable name a real version would need.
 const tasks = [
-  { conv: "c1", status: "running", title: "Finish PR #22 repairs", raw: "## Goal Finish PR #22…", startedMin: 12 },
-  { conv: "c1", status: "queued", order: 1, title: "Fold the final Standards findings", raw: "## Goal Fold the final Standards…" },
-  { conv: "c1", status: "queued", order: 2, title: "Apply the owner's added criterion", raw: "## Goal The owner has added…" },
-  { conv: "c1", status: "blocked", title: "Repair after automatic verification", raw: "[Automatic verification failed]…", reason: "Verifier found no screenshot of the Workers card", endedMin: 41 },
-  { conv: "c1", status: "blocked", title: "Prepare the complete handoff", raw: "## Goal Prepare the complete…", reason: "Needs owner approval to publish", endedMin: 95 },
-  { conv: "c4", status: "running", title: "Verify PR #22 candidate at a1b2c3d", raw: "Fresh verification of …", startedMin: 3 },
-  { conv: "c2", status: "running", title: "Add CSV export to the usage page", raw: "## Goal Add CSV export…", startedMin: 26 },
-  { conv: "c2", status: "completed", title: "Sketch the export columns", raw: "## Goal Sketch…", endedMin: 64 },
-  { conv: "c3", status: "completed", title: "Find when the weekly quota resets", raw: "## Goal Find when…", endedMin: 8 },
+  { conv: "c1", status: "running", title: "Refactor the checkout form", raw: "## Goal Refactor the checkout…", startedMin: 12 },
+  { conv: "c1", status: "queued", order: 1, title: "Add address validation", raw: "## Goal Add address validation…" },
+  { conv: "c1", status: "queued", order: 2, title: "Update the receipt email", raw: "## Goal Update the receipt…" },
+  { conv: "c1", status: "blocked", title: "Fix the price rounding bug", raw: "## Goal Fix the price rounding…", reason: "Verifier could not reproduce the fix", endedMin: 41 },
+  { conv: "c1", status: "blocked", title: "Write the release notes", raw: "## Goal Write the release notes…", reason: "Waiting for an owner decision", endedMin: 95 },
+  { conv: "c4", status: "running", title: "Verify the checkout refactor build", raw: "Fresh verification of …", startedMin: 3 },
+  { conv: "c2", status: "running", title: "Add a date filter to search", raw: "## Goal Add a date filter…", startedMin: 26 },
+  { conv: "c2", status: "completed", title: "Sketch the filter panel", raw: "## Goal Sketch…", endedMin: 64 },
+  { conv: "c3", status: "completed", title: "Compare chart libraries", raw: "## Goal Compare…", endedMin: 8 },
 ];
 const variants = [
   { key: "A", name: "Conversation tree", legend: "Each conversation is a node with its one context ring. Under it: Now, Up next (numbered queue), History (collapsed). Child verifier is its own nested node with its own ring." },
@@ -96,10 +96,10 @@ function chrome() {
   $("#project-list").innerHTML = `<button class="proj on"><span class="avatar sm">DP</span><span class="grow side-text">Demo project</span></button><button class="proj"><span class="avatar sm">SA</span><span class="grow side-text">Sample app</span></button>`;
   $("#connection").textContent = "Prototype · no host";
   $("#chat-bar").innerHTML = `<nav class="chat-list"><button class="chat-tab on ghost small">Main</button></nav>`;
-  $("#messages").innerHTML = `<article class="msg you"><div class="who">You</div><div class="text">Finish the PR #22 repairs and get it verified.</div></article><article class="msg them"><div class="who">Coordinator</div><div class="text">W1 is on the repairs with two follow-ups queued behind it. V1 is verifying the current head. W2 is building the CSV export.</div></article>`;
+  $("#messages").innerHTML = `<article class="msg you"><div class="who">You</div><div class="text">Refactor the checkout flow and get it verified.</div></article><article class="msg them"><div class="who">Coordinator</div><div class="text">W1 is refactoring checkout with two follow-ups queued behind it. V1 is verifying its build. W2 is adding search filters.</div></article>`;
   $("#queue").innerHTML = `<p class="note">Nothing needs you.</p>`;
   $("#notes").innerHTML = `<p class="note">3 documents</p>`;
-  $("#outcomes").innerHTML = `<p class="note">S1 finished: Find when the weekly quota resets</p>`;
+  $("#outcomes").innerHTML = `<p class="note">S1 finished: Compare chart libraries</p>`;
   document.querySelectorAll("#compose textarea, #compose button").forEach(node => { if (node.tagName === "BUTTON") node.disabled = true; });
   const panel = document.createElement("div"); panel.id = "proto-state"; panel.className = "card proto-state";
   $("#workers-card").after(panel);
