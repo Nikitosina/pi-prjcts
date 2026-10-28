@@ -1,0 +1,5 @@
+{
+  "status": "passed",
+  "checks": 2,
+  "artifact": "<worktree>/artifacts/worker-quota-legacy-save-2026-10-28T16-52-21.328Z"
+}

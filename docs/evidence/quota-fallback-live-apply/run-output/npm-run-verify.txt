@@ -1,0 +1,35 @@
+
+> pi-projects-mvp@0.1.0 verify
+> npm run check && node scripts/run-e2e.mjs --jobs 3 --timeout 240 --retry-failed-serially durable-runtime durable-knowledge coordinator-efficiency quota-status coordinator-gh machine-status-unit usage-limits-recovery-unit worker-quota-recovery worker-quota-known-reset worker-quota-reset-unit worker-quota-retry-receipts worker-quota-settlement-race worker-quota-live-save worker-quota-live-roles worker-quota-live-race worker-quota-legacy-save worker-quota-save-safety worker-quota-superseded worker-quota-retry-switch worker-quota-mixed-save worker-quota-verification-save telegram-media-unit telegram-media-e2e
+
+
+> pi-projects-mvp@0.1.0 check
+> tsc --noEmit
+
+Running 23 script(s) with 3 job(s)
+[1/23] PASS worker-quota-save-safety-e2e (30.0s)
+[2/23] PASS quota-status-e2e (33.8s)
+[3/23] KNOWN-FAIL coordinator-efficiency-e2e (14.0s)
+[4/23] PASS worker-quota-recovery-e2e (47.1s)
+[5/23] PASS worker-quota-mixed-save-e2e (19.8s)
+[6/23] PASS worker-quota-superseded-e2e (19.0s)
+[7/23] PASS worker-quota-legacy-save-e2e (23.0s)
+[8/23] PASS worker-quota-known-reset-e2e (21.5s)
+[9/23] PASS worker-quota-live-race-e2e (18.5s)
+[10/23] PASS worker-quota-retry-switch-e2e (19.9s)
+[11/23] PASS telegram-media-e2e (19.1s)
+[12/23] PASS worker-quota-live-roles-e2e (16.4s)
+[13/23] PASS worker-quota-verification-save-e2e (16.2s)
+[14/23] PASS worker-quota-settlement-race-e2e (16.2s)
+[15/23] PASS durable-knowledge-e2e (6.3s)
+[16/23] PASS worker-quota-retry-receipts-e2e (16.1s)
+[17/23] PASS usage-limits-recovery-unit (0.6s)
+[18/23] PASS worker-quota-reset-unit (0.5s)
+[19/23] PASS durable-runtime-e2e (1.8s)
+[20/23] PASS telegram-media-unit (0.4s)
+[21/23] PASS machine-status-unit (0.1s)
+[22/23] PASS worker-quota-live-save-e2e (16.5s)
+[23/23] PASS coordinator-gh-e2e (1.2s)
+
+22/23 passed in 119.7s (sum of script times 357.9s); summary: <worktree>/artifacts/e2e-summary-2026-10-28T16-55-24.345Z.json
+Known-failing on main (not counted): 1

@@ -1,0 +1,5 @@
+{
+  "status": "passed",
+  "checks": 7,
+  "artifact": "<worktree>/artifacts/worker-quota-retry-switch-2026-10-28T16-52-21.309Z"
+}

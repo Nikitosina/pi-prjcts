@@ -1,0 +1,5 @@
+{
+  "status": "passed",
+  "checks": 5,
+  "artifact": "<worktree>/artifacts/worker-quota-superseded-2026-10-28T16-52-21.351Z"
+}
