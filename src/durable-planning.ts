@@ -705,18 +705,16 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (parents.some(parentWork => !parentWork || parentWork.status === "failed" || parentWork.status === "blocked" || parentWork.status === "stopped" || parentWork.status === "interrupted")) { work.status = "blocked"; work.blocker = PREDECESSOR_BLOCKER; continue; }
       if (!parents.every(parentWork => parentWork?.status === "completed" && !state.threads[parentWork.threadId]?.verification?.open)) continue;
       const recovery = work.quotaRecovery;
-      // The current role fallback is re-read whenever a quota record is due, so a manual retry or a timer cannot reuse a stale choice.
-      if (recovery && (recovery.fallbackWake || recovery.retryAt <= Date.now()) && work.attempt && work.conversationId !== null) {
+      // A pending fallback wake re-reads the current role fallback at dispatch, so a changed or removed setting is never reused.
+      if (recovery?.fallbackWake && work.attempt && work.conversationId !== null) {
         const fallback = options.fallbackModels?.[work.role];
         let model: ModelRef | undefined;
         if (fallback && fallback !== work.attempt.model && !work.attempt.modelTransitions?.some(transition => transition.to === fallback)) {
           try { model = frozenModel({ ...work.attempt, model: fallback }, work.role); } catch { /* Retain the original wait if the model is unavailable. */ }
         }
         if (!model || !fallback) {
-          if (recovery.fallbackWake) {
-            if (recovery.fallbackWake.failed) { work.status = "failed"; work.blocker = recovery.lastError; delete work.quotaRecovery; continue; }
-            recovery.retryAt = recovery.fallbackWake.retryAt; delete recovery.fallbackWake; work.blocker = quotaWaitBlocker(work);
-          }
+          if (recovery.fallbackWake.failed) { work.status = "failed"; work.blocker = recovery.lastError; delete work.quotaRecovery; continue; }
+          recovery.retryAt = recovery.fallbackWake.retryAt; delete recovery.fallbackWake; work.blocker = quotaWaitBlocker(work);
         } else {
           await configure(tx, work.conversationId, { model });
           work.attempt.modelTransitions = [...(work.attempt.modelTransitions ?? []), { at: Date.now(), from: work.attempt.model, to: fallback, reason: "quota_exceeded" }];
@@ -969,7 +967,8 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       if (state.threads[previous.threadId]?.paused) throw new Error("Worker is paused; resume it instead of retrying");
       if (previous.status === "queued" && previous.quotaRecovery) {
         previous.quotaRecovery.retryAt = 0;
-        delete previous.quotaRecovery.fallbackWake;
+        // Keep a pending fallback wake so dispatch still re-reads the current fallback; a removed one then falls back to this immediate retry.
+        if (previous.quotaRecovery.fallbackWake) previous.quotaRecovery.fallbackWake.retryAt = 0;
         state.retryReceipts = [...receipts, { requestId, workId, attemptId: previous.id, threadId: previous.threadId }];
         previous.blocker = `quota_reset_wait: manual retry requested; waiting for an available worker slot on ${previous.attempt?.model ?? "the frozen model"}.`;
         if (!state.paused && !state.pausing) state.dispatcherTaskIds.push(await tx.createTask(Dispatcher, null, { ownership: { kind: "conversation" }, background: true }));
