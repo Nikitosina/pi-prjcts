@@ -16,6 +16,7 @@ const home = join(root, 'home'), workspace = join(root, 'workspace'), agentDir =
 if (process.env.NODE_OPTIONS || process.env.PI_PACKAGE_DIR) throw Error('Clear runtime overrides first');
 for (const dir of [artifacts, root, home, workspace, agentDir, userHome]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 const result = { root, checks: [], requests: [], reports: [] };
+const crashPlans = Object.fromEntries(['MARK-CRASHNO', 'MARK-CRASHYES'].map(marker => [marker, { workId: randomUUID(), threadId: randomUUID(), depId: randomUUID(), depThread: randomUUID() }]));
 const save = () => writeFileSync(join(artifacts, 'result.json'), JSON.stringify(result, null, 2) + '\n', { mode: 0o600 });
 const chunk = (delta, finish) => `data: ${JSON.stringify({ id: 'fake', object: 'chat.completion.chunk', created: 0, model: 'fake', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 const call = (name, args) => chunk({ role: 'assistant', tool_calls: [{ index: 0, id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, null) + chunk({}, 'tool_calls') + 'data: [DONE]\n\n';
@@ -38,6 +39,8 @@ const model = createServer((req, res) => {
     const reply = out => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(out); };
     try {
       if (role === 'coordinator') {
+        const crash = Object.keys(crashPlans).find(key => user.startsWith(key));
+        if (crash && stage === 0) { const c = crashPlans[crash]; return reply(call('projects_worker_plan', { work: [{ id: c.workId, threadId: c.threadId, role: 'worker', workspaceScopeId: result.scopeId, text: `${crash}\nAcceptance criteria:\n- feature.txt says done\n- node check.mjs exits 0` }, { id: c.depId, threadId: c.depThread, role: 'scout', text: `dependent for ${crash}`, dependsOn: [c.workId] }] })); }
         if (user === 'UNAUTHORIZED-REQUEST') return stage === 0 ? reply(call('projects_request_verification', {})) : reply(say('Attempt rejected.'));
         if (user.startsWith('RECOVER ')) {
           const threadId = user.slice('RECOVER '.length).trim();
@@ -68,6 +71,21 @@ const model = createServer((req, res) => {
         if (stage === 0) return reply(call('projects_delegate_child', { role: 'scout', task: 'MARK-CHILD-SCOUT' }));
         if (stage === 1) return reply(call('projects_request_verification', {}));
         return reply(say('Waiting for child.'));
+      }
+      if (role === 'worker' && (marker === 'MARK-CRASHNO' || marker === 'MARK-CRASHYES')) {
+        if (user.startsWith('The project was paused')) {
+          if (marker === 'MARK-CRASHYES' && stage === 0) return reply(call('bash', { command: 'echo done > feature.txt' }));
+          if (marker === 'MARK-CRASHYES' && stage === 1) return reply(call('projects_request_verification', {}));
+          return reply(say('Restart continuation finished.'));
+        }
+        if (user.startsWith('[Automatic verification failed]')) {
+          if (stage === 0) return reply(call('bash', { command: marker === 'MARK-CRASHYES' ? 'echo old > feature.txt' : 'echo done > feature.txt' }));
+          if (stage === 1) return reply(call('projects_request_verification', {}));
+          await gate(marker).wait; return reply(say('Original held repair turn.'));
+        }
+        if (stage === 0) return reply(call('bash', { command: 'echo nope > feature.txt' }));
+        if (stage === 1) return reply(call('projects_request_verification', {}));
+        return reply(say('Initial candidate ready.'));
       }
       if (role === 'worker' && (marker === 'MARK-PAUSENO' || marker === 'MARK-PAUSEYES')) {
         if (user.startsWith('The project was paused')) {
@@ -196,14 +214,43 @@ try {
   const settings = (await rpc({ action: 'settings-snapshot', id })).values;
   check('V1 opt-in needs a separately chosen verifier model and an installed skill; both are stored', settings.verification.enabled && settings.verification.skill === 'mini-verify' && settings.models.verifier === 'fake/fake-judge' && settings.models.worker === 'fake/fake-model');
 
+  result.scopeId = (await rpc({ action: 'show', id })).project.workspaceAuthorization.scopes[0].id;
+  for (const marker of ['MARK-CRASHNO', 'MARK-CRASHYES']) {
+    const ids = crashPlans[marker];
+    await rpc({ action: 'message', id, text: `${marker} start` });
+    await eventually(() => result.requests.some(r => r.role === 'worker' && r.marker === marker && r.user.startsWith('[Automatic verification failed]') && r.stage === 2 && /Verification requested/.test(r.last)), `${marker} persisted request acknowledged`);
+    const beforeCrash = await plan(id), original = beforeCrash.work.find(w => w.id === ids.workId);
+    check(`${marker} holds dependent and admits no verifier before restart`, original.status === 'completed' && beforeCrash.work.find(w => w.id === ids.depId).status === 'queued' && cycleOf(beforeCrash, original)?.open && cycleOf(beforeCrash, original)?.attempts.length === 1 && cycleOf(beforeCrash, original).attempts[0].state === 'fail', beforeCrash);
+    const repair = beforeCrash.work.find(w => w.threadId === ids.threadId && w.text.startsWith('[Automatic verification failed]'));
+    check(`${marker} same worker repair is held after its explicit request`, repair?.status === 'running', repair);
+    const killed = { pid: host.pid, lstart: execFileSync('/bin/ps', ['-p', String(host.pid), '-o', 'lstart='], { encoding: 'utf8' }).trim(), signal: 'SIGKILL' }; (result.ownedRestarts ??= []).push(killed); host.kill('SIGKILL'); await hostExit; gate(marker).open();
+    const probe = `import {openDurableProject} from './src/durable-runtime.ts'; import {DurablePlanning} from './src/durable-planning.ts'; import {BACKGROUND_CONTEXT} from '@earendil-works/chord/context'; import {loadProject,projectDir} from './src/state.ts'; import {loadProjectResourceLoader} from './src/project-resources.ts'; const p=loadProject(process.argv[1]), l=await loadProjectResourceLoader(p); const r=await openDurableProject({project:p,dir:projectDir(p.id),configuredSkillLoader:l,discoverSkills:()=>loadProjectResourceLoader(loadProject(p.id))}); const w=await r.withRoot(root=>root.commit(async tx=>JSON.parse(JSON.stringify((await tx.doc(DurablePlanning,root.id)).work[process.argv[2]])),BACKGROUND_CONTEXT)); console.log('RECEIPT '+JSON.stringify(w)); await r.close();`;
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', probe, id, repair.id], { cwd: repo, env, encoding: 'utf8', timeout: 30000 });
+    const stored = JSON.parse(output.split('\n').find(line => line.startsWith('RECEIPT ')).slice(8));
+    (result.restartReceipts ??= []).push({ marker, killed, workId: repair.id, threadId: stored.threadId, taskId: stored.taskId, receipt: stored.verificationRequest, before: beforeCrash.verification[ids.threadId] });
+    check(`${marker} original request and execution identity persisted across process death`, stored.verificationRequest?.taskId === stored.taskId && /^[a-f0-9]{64}$/.test(stored.verificationRequest.revision) && stored.threadId === ids.threadId, { killed, stored });
+    await startHost();
+    const paused = await eventually(async () => { const view = await plan(id); return view.paused && view.work.find(w => w.id === repair.id)?.status === 'interrupted' && view; }, `${marker} restart paused`);
+    check(`${marker} restart retains dependency barrier and frozen thread`, paused.work.find(w => w.id === ids.depId)?.status !== 'completed' && paused.work.find(w => w.id === repair.id)?.threadId === ids.threadId && paused.verification?.[ids.threadId]?.attempts.length === 1 && paused.verification[ids.threadId].attempts[0].verifierThreadId === beforeCrash.verification[ids.threadId].attempts[0].verifierThreadId, paused);
+    await rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
+    const ended = await eventually(async () => settled(await plan(id), original), `${marker} restart settled`);
+    const view = await plan(id);
+    const frozen = c => JSON.stringify({ model: c.model, skill: c.skill, criteria: c.criteria, first: c.attempts[0] });
+    check(`${marker} retains frozen criteria, settings and first attempt across restart`, frozen(ended) === frozen(beforeCrash.verification[ids.threadId]), ended);
+    result.restartReceipts.at(-1).after = ended;
+    if (marker === 'MARK-CRASHYES') await eventually(async () => (await plan(id)).work.find(w => w.id === ids.depId)?.status === 'completed', 'fresh request releases dependent');
+    check(`${marker} restart requires a renewed request`, marker === 'MARK-CRASHNO' ? ended.outcome === 'escalated' && ended.attempts.length === 1 && view.work.find(w => w.id === ids.depId)?.status !== 'completed' : ended.outcome === 'verified' && ended.attempts.length === 2 && ended.model === 'fake/fake-judge' && ended.skill === 'mini-verify' && ended.criteria.length === 2 && ended.attempts[1].revision !== stored.verificationRequest.revision && ended.attempts[0].verifierThreadId === beforeCrash.verification[ids.threadId].attempts[0].verifierThreadId, ended);
+  }
+
   // A successful progress turn is not a verification request or task completion.
   const progress = await delegateTask(id, 'MARK-PROGRESS');
   const progressState = await eventually(async () => { const snapshot = await plan(id); const work = snapshot.work.find(w => w.id === progress.id); return work && !['queued', 'running'].includes(work.status) ? snapshot : null; }, 'progress turn settles');
   check('worker progress without a request is blocked without spending a verifier attempt', progressState.work.find(w => w.id === progress.id).status === 'blocked' && !cycleOf(progressState, progress)?.attempts.length && !progressState.work.some(w => w.role === 'verifier' && w.parentThreadId === progress.threadId), progressState.work.find(w => w.id === progress.id));
 
+  const verifierCountBeforeUnauthorized = (await plan(id)).work.filter(w => w.role === 'verifier').length;
   const unauthorizedTurn = await rpc({ action: 'message', id, text: 'UNAUTHORIZED-REQUEST' });
   await eventually(async () => (await rpc({ action: 'show', id })).jobs.find(j => j.id === unauthorizedTurn.id)?.state === 'done', 'unauthorized coordinator call settled');
-  check('coordinator is not offered the worker verification request', result.requests.some(r => r.role === 'coordinator' && r.user === 'UNAUTHORIZED-REQUEST' && !r.tools.includes('projects_request_verification')) && !(await plan(id)).work.some(w => w.role === 'verifier'), result.requests.filter(r => r.user === 'UNAUTHORIZED-REQUEST'));
+  check('coordinator is not offered the worker verification request', result.requests.some(r => r.role === 'coordinator' && r.user === 'UNAUTHORIZED-REQUEST' && !r.tools.includes('projects_request_verification')) && (await plan(id)).work.filter(w => w.role === 'verifier').length === verifierCountBeforeUnauthorized, result.requests.filter(r => r.user === 'UNAUTHORIZED-REQUEST'));
   const childParent = await delegateTask(id, 'MARK-CHILD');
   await eventually(async () => result.requests.some(r => r.role === 'worker' && r.marker === 'MARK-CHILD' && /child work/.test(r.last)), 'premature request refused');
   const childHeld = await plan(id);
