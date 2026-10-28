@@ -133,7 +133,7 @@ try {
   await delay(2500);
   shown = await lines(s);
   const running = shown.find(line => / · running · /.test(line));
-  if (!/^MARK-HOLD .+ worker · running · \d+s$/.test(running ?? '')) throw new Error('Running line lacks elapsed time: ' + running);
+  if (!/^MARK-HOLD .+ worker · running · thread [a-f0-9]{8} · \d+s$/.test(running ?? '')) throw new Error('Running line lacks elapsed time: ' + running);
   result.checks.push('W2 running line shows elapsed time and live-updates');
   await waitFor(`/^(\\d+%|window unknown)$/.test(document.querySelector('#activity .worker-line.running .ctx-ring')?.innerText.trim() ?? '')`, s, 'running row context indicator');
   result.checks.push('W9 a running row carries a context ring with a percent or "window unknown", never an invented number');
@@ -145,7 +145,7 @@ try {
   await rpc({ action: 'pause', id: project.id });
   await waitFor(`!document.querySelector('#paused-hint').hidden && [...document.querySelectorAll('#activity .worker-line')].some(n => n.classList.contains('interrupted'))`, s, 'paused hint + interrupted line');
   shown = await lines(s);
-  if (!shown.some(line => /^MARK-HOLD .+ worker · interrupted · Interrupted by project pause$/.test(line))) throw new Error('Interrupted line lacks reason: ' + JSON.stringify(shown));
+  if (!shown.some(line => /^MARK-HOLD .+ worker · interrupted · thread [a-f0-9]{8} · Interrupted by project pause$/.test(line))) throw new Error('Interrupted line lacks reason: ' + JSON.stringify(shown));
   result.checks.push('W4 interrupted line shows the pause reason');
   const hint = await evaluate(`document.querySelector('#paused-hint').innerText`, s);
   if (!/Paused/.test(hint) || !(await evaluate(`document.querySelector('#compose textarea').disabled`, s)) || !(await evaluate(`!!document.querySelector('#paused-hint [data-action=resume-project]')`, s))) throw new Error('Paused hint missing: ' + hint);

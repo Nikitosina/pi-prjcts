@@ -2680,7 +2680,13 @@ async function action(node) {
       changeChat(target); break;
     }
     case "thread-list": threadList(); break;
-    case "all-work": allWork = !allWork; render(); break;
+    case "all-work": {
+      allWork = !allWork;
+      node.blur();
+      render();
+      document.querySelector("#activity [data-action=all-work]")?.focus({ preventScroll: true });
+      break;
+    }
     case "history-earlier": node.blur(); await showEarlier(); break;
     case "jump-latest": searchFocus = null; stickToBottom = true; followTranscript(); renderWorkingPill(); break;
     case "skill-pick": pickMenuItem(skillMenu?.items.find(item => item.name === node.dataset.name && item.source === node.dataset.source) ?? { name: node.dataset.name }); break;
@@ -3663,7 +3669,7 @@ const accessText = (field, value) => settingsAccess[field][2].find(([option]) =>
 const scopeText = refs => refs?.length ? refs.map(ref => esc(modelCache.get(ref)?.name ?? ref)).join(", ") : "<small>Your Pi scope</small>";
 const modelText = (ref, role = "") => { if (ref === "") return emptyModelName(role); const model = modelCache.get(ref); return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref); };
 const verifyText = value => value?.enabled ? `On: skill <b>${esc(value.skill)}</b>, verifier model above` : "Off";
-const verificationNote = cycle => cycle ? `<p class="note" data-verification>Verification ${cycle.open ? "running" : esc(cycle.outcome ?? "ended")} (skill ${esc(cycle.skill)}, model ${esc(cycle.model)}): ${cycle.attempts.map(item => `attempt ${item.n} ${esc(item.state)}`).join(", ") || "no attempt yet"}${cycle.reason ? `. ${esc(cycle.reason)}` : ""}</p>` : "";
+const verificationNote = cycle => cycle ? `<p class="note" data-verification>Verification ${cycle.open ? "in progress" : esc(cycle.outcome ?? "ended")} (skill ${esc(cycle.skill)}, model ${esc(cycle.model)}): ${cycle.attempts.map(item => `attempt ${item.n} ${esc(item.state)}`).join(", ") || "no attempt yet"}${cycle.reason ? `. ${esc(cycle.reason)}` : ""}</p>` : "";
 const emptyText = text => text ? esc(text) : "<small>empty</small>";
 function settingsDiffRows(changes, values) {
   const rows = [];
@@ -4054,27 +4060,77 @@ function workChatId(work) {
 }
 const inSelectedChat = work => !view?.chats || workChatId(work) === chatId;
 const archivable = work => ["completed", "failed", "stopped", "blocked"].includes(work.status) && !work.archived;
+// Disclosure state belongs to a project and thread, not to a particular snapshot.
+const workerHistoryOpen = new Set();
+document.querySelector("#activity").addEventListener("toggle", event => {
+  const details = event.target;
+  if (!details.matches("details[data-worker-history]")) return;
+  const key = `${projectId}:${details.dataset.workerHistory}`;
+  if (details.open) workerHistoryOpen.add(key); else workerHistoryOpen.delete(key);
+}, true);
 function durableActivity() {
-  const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
-  // Finished and archived work leave this card for Recent results; "View all work" lists every item of this chat.
-  const pool = allWork ? plan.work.filter(work => showArchived || !work.archived).toReversed() : plan.work.filter(work => !finished(work) && !work.archived).toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  const mine = pool.filter(inSelectedChat), shown = allWork ? mine : mine.slice(0, 12);
-  const detail = work => work.archived ? "archived" : work.status === "running" && work.startedAt ? duration(Date.now() - work.startedAt) : work.blocker ? clip(work.blocker, 80) : "";
-  const item = work => {
-    return `<div class="worker-item${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
+  const available = plan.work.filter(work => inSelectedChat(work) && (showArchived || !work.archived));
+  const groups = new Map();
+  for (const work of available) {
+    if (!groups.has(work.threadId)) groups.set(work.threadId, []);
+    groups.get(work.threadId).push(work);
+  }
+  // Retain parents of visible children even when their last turn has completed.
+  const visible = new Set([...groups].filter(([, items]) => allWork || items.some(work => !finished(work) && !work.archived)).map(([id]) => id));
+  for (const id of [...visible]) {
+    const seen = new Set(); let current = id;
+    while (groups.has(current) && !seen.has(current)) {
+      seen.add(current);
+      const parent = groups.get(current)[0].parentThreadId;
+      if (!parent || !groups.has(parent)) break;
+      visible.add(parent); current = parent;
+    }
+  }
+  const children = new Map();
+  for (const id of visible) {
+    const parent = groups.get(id)[0].parentThreadId;
+    if (parent && visible.has(parent) && parent !== id) {
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(id);
+    }
+  }
+  const row = work => `<div class="conversation-work ${work.archived ? "archived" : ""}"><button class="conversation-task" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span>${badge(work.status)} ${esc(clip(work.text, 200))}</span>${work.blocker ? `<small>${esc(work.blocker)}</small>` : ""}${work.archived ? '<small>Archived</small>' : ""}${holdsBadge(work.holds)}</button>${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
+  const placed = new Set();
+  const tree = id => {
+    if (placed.has(id)) return "";
+    placed.add(id);
+    const items = groups.get(id), first = items[0];
+    const running = items.find(work => work.status === "running");
+    const queued = items.filter(work => work.status === "queued").toSorted((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+    const current = running ?? items.findLast(work => ["blocked", "interrupted"].includes(work.status));
+    const history = items.filter(work => work !== current && work.status !== "queued");
+    const parent = first.parentThreadId;
+    const nested = (children.get(id) ?? []).map(tree).join("");
+    return `<section class="worker-conversation" data-conversation="${esc(id)}"><div class="conversation-header">${workLine({ ...first, holds: current?.holds, status: current?.status ?? (queued.length ? "queued" : "idle") }, `thread ${id.slice(0, 8)}${items.every(work => work.archived) ? " · archived" : ""}${current?.status === "running" && current.startedAt ? ` · ${duration(Date.now() - current.startedAt)}` : current?.blocker ? ` · ${clip(current.blocker, 80)}` : ""}`)}</div>${parent && !visible.has(parent) ? `<p class="note">Parent conversation ${esc(parent)} is not shown.</p>` : ""}<div class="conversation-section"><b>Now</b>${current ? row(current) : '<p class="note">Idle or waiting</p>'}</div>${queued.length ? `<div class="conversation-section"><b>Up next</b>${queued.map(row).join("")}</div>` : ""}<details data-worker-history="${esc(id)}"${workerHistoryOpen.has(`${projectId}:${id}`) ? " open" : ""}><summary>History (${history.length})</summary>${history.length ? history.toReversed().map(row).join("") : '<p class="note">No history yet.</p>'}</details>${verificationNote(plan.verification?.[id])}${nested ? `<div class="work-children" data-parent="${esc(id)}">${nested}</div>` : ""}</section>`;
   };
-  const elsewhere = pool.length - mine.length, total = plan.work.length;
-  // One level of nesting: a parent's sub-agents sit under its newest row; orphans (parent not listed) stay top level.
-  const threads = new Set(shown.map(work => work.threadId)), placed = new Set();
-  const tree = work => {
-    const first = !placed.has(work.threadId); placed.add(work.threadId);
-    const kids = first ? shown.filter(child => child.parentThreadId === work.threadId && child.threadId !== work.threadId) : [];
-    return item(work) + (kids.length ? `<div class="work-children" data-parent="${esc(work.threadId)}">${kids.map(item).join("")}</div>` : "");
-  };
-  return (shown.filter(work => !work.parentThreadId || !threads.has(work.parentThreadId) || work.parentThreadId === work.threadId).map(tree).join("") || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) + (elsewhere ? `<p class="note other-chats">${elsewhere} ${allWork ? "in" : "active in"} other ${elsewhere === 1 ? "chat" : "chats"}</p>` : "") + (total ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${total}) →`}</button>` : "");
+  const roots = [...visible].filter(id => { const parent = groups.get(id)[0].parentThreadId; return !parent || !visible.has(parent) || parent === id; });
+  // A malformed cycle has no root. Render remaining conversations once, without recursion loops.
+  let content = roots.map(tree).join("");
+  for (const id of visible) if (!placed.has(id)) content += tree(id);
+  const elsewhere = plan.work.filter(work => !inSelectedChat(work) && !work.archived).length;
+  return (content || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) + (elsewhere ? `<p class="note other-chats">${elsewhere} in other chats</p>` : "") + (plan.work.length ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${plan.work.length}) →`}</button>` : "");
 }
 function renderWorkers() {
+  const activity = document.querySelector("#activity"), focused = document.activeElement;
+  let focusSelector = null;
+  if (activity.contains(focused)) {
+    const history = focused.closest("details[data-worker-history]");
+    if (focused.matches("summary") && history) focusSelector = `details[data-worker-history="${CSS.escape(history.dataset.workerHistory)}"] > summary`;
+    else if (focused.dataset.action) {
+      const { action, thread, work } = focused.dataset;
+      focusSelector = `[data-action="${CSS.escape(action)}"]${thread ? `[data-thread="${CSS.escape(thread)}"]` : ""}${work ? `[data-work="${CSS.escape(work)}"]` : ""}`;
+    }
+  }
+  const selection = document.getSelection();
+  const selecting = selection && !selection.isCollapsed && (activity.contains(selection.anchorNode) || activity.contains(selection.focusNode));
+  if (focusSelector && !selecting) focused.blur();
   setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
+  if (focusSelector && !selecting) activity.querySelector(focusSelector)?.focus({ preventScroll: true });
   document.querySelector("#archive-toggle").hidden = !allWork;
 }
 // Context use of the workers listed in the card, read host-side; rows show nothing until a reading exists.

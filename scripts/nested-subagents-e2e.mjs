@@ -173,14 +173,26 @@ try {
   const { sessionId: s } = await send('Target.attachToTarget', { targetId, flatten: true });
   for (const method of ['Runtime.enable', 'Log.enable', 'Network.enable', 'Page.enable']) await send(method, {}, s);
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-  const treeState = `(() => { const group = document.querySelector('#activity .work-children[data-parent="${parentA.threadId}"]'); const rows = [...document.querySelectorAll('#activity > .worker-item')]; const parentRows = rows.filter(r => r.querySelector('.worker-line[data-thread="${parentA.threadId}"]')); return { kids: group ? [...group.querySelectorAll('.worker-item.child')].map(r => ({ thread: r.querySelector('.worker-line').dataset.thread, label: !!r.querySelector('.sub-label'), parent: r.dataset.parent })) : [], topChildRows: rows.filter(r => r.classList.contains('child')).length, prevIsParent: !!group && group.previousElementSibling?.querySelector('.worker-line')?.dataset.thread === "${parentA.threadId}", parentRows: parentRows.length }; })()`;
+  const treeState = `(() => { const parent = document.querySelector('#activity [data-conversation="${parentA.threadId}"]'); const group = parent?.querySelector(':scope > .work-children'); const kids = group ? [...group.querySelectorAll(':scope > [data-conversation]')].map(r => ({ thread: r.dataset.conversation, label: !!r.querySelector(':scope > .conversation-header .sub-label'), parent: group.dataset.parent })) : []; return { kids, parentRows: document.querySelectorAll('#activity [data-conversation="${parentA.threadId}"]').length, allRows: [...document.querySelectorAll('#activity [data-conversation]')].map(n => n.dataset.conversation) }; })()`;
   await send('Page.navigate', { url: launch.toString() }, s);
   // The card lists active work only; "View all work" is clicked while it still says so, until the nested rows show.
   await waitFor(`(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('#activity .work-children'); })()`, s, 'workers tree');
   const tree = await evaluate(treeState, s);
-  check('N14 Activity nests both children under the parent\'s newest row, labelled sub-agent; none at top level', tree.kids.length === 2 && tree.kids.every(k => k.label && k.parent === parentA.threadId) && new Set(tree.kids.map(k => k.thread)).size === 2 && tree.kids.some(k => k.thread === workerA.threadId) && tree.topChildRows === 0 && tree.prevIsParent, tree);
+  check('N14 Activity nests both children under one parent conversation, labelled sub-agent', tree.kids.length === 2 && tree.kids.every(k => k.label && k.parent === parentA.threadId) && new Set(tree.kids.map(k => k.thread)).size === 2 && tree.kids.some(k => k.thread === workerA.threadId) && tree.parentRows === 1 && new Set(tree.allRows).size === tree.allRows.length, tree);
+  // Exercise the disclosure through the keyboard and allow a normal polling refresh.
+  const summary = `#activity [data-conversation="${parentA.threadId}"] > details > summary`;
+  await evaluate(`document.querySelector(${JSON.stringify(summary)}).focus()`, s);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 }, s);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 }, s);
+  await waitFor(`document.querySelector(${JSON.stringify(summary)}).parentElement.open`, s, 'history opened with keyboard');
+  await delay(5000);
+  check('history remains open and focused during polling', await evaluate(`document.querySelector(${JSON.stringify(summary)}).parentElement.open && document.activeElement === document.querySelector(${JSON.stringify(summary)})`, s));
   await shot('01-activity-tree', s);
-  await evaluate(`document.querySelector('#activity .work-children [data-thread="${workerA.threadId}"]').click()`, s);
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, s);
+  await delay(300);
+  await shot('01b-activity-dark', s);
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, s);
+  await evaluate(`document.querySelector('#activity [data-conversation="${workerA.threadId}"] .worker-line').click()`, s);
   await waitFor(`!document.querySelector('#inline-thread').hidden && new URL(location.href).searchParams.get('worker') === '${workerA.threadId}'`, s, 'child worker view opened');
   await delay(500);
   check('N16 clicking a child row opens that child\'s worker view (deep-linkable)', await evaluate(`!document.querySelector('#inline-thread').hidden && new URL(location.href).searchParams.get('worker') === '${workerA.threadId}' && !!document.querySelector('#worker-messages')`, s));

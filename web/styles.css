@@ -1159,3 +1159,12 @@ a.button-link:hover { background: var(--hover); }
 #lightbox figcaption { color: #fff; font-size: 13px; text-align: center; max-width: 90vw; overflow-wrap: anywhere; }
 .lightbox-x { position: fixed; top: 12px; right: 12px; z-index: 1; font-size: 16px; line-height: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #fff6; background: #000a; color: #fff; cursor: pointer; }
 .msg .text img { cursor: pointer; }
+
+.worker-conversation { border-bottom: 1px solid var(--line); padding: 4px 0 8px; min-width: 0; }
+.conversation-section { margin: 7px 0; font-size: 12px; }
+.conversation-section > b { color: var(--muted); }
+.conversation-task { display: block; width: 100%; min-width: 0; text-align: left; border: 0; background: transparent; padding: 5px 0; overflow-wrap: anywhere; }
+.conversation-task small { display: block; color: var(--muted); white-space: pre-wrap; }
+.conversation-work.archived { opacity: .6; }
+.worker-conversation summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.worker-conversation .work-children { margin-top: 8px; }
