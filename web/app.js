@@ -689,7 +689,7 @@ function setTab(next) {
   uiPluginCall("tick");
   if (next === "observability") { void loadUsage(); void loadObservability(); }
   ensureChanges();
-  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(); void loadWorktrees(); renderNotify(); }
+  if (next === "settings") { void loadAutomationStrip(); void loadEventsIn(); void loadTelegram(); void loadRemote(); void loadSkillsPicker(); void loadMcpPicker(); void loadPrompts(true, true); void loadWorktrees(); renderNotify(); }
 }
 
 function render() {
@@ -998,30 +998,50 @@ document.addEventListener("input", event => {
 // Advanced: per-project system prompt overrides. The textarea shows the effective prompt (the override, else the built-in text); Save stores an override, Reset returns to the built-in text.
 const promptTitles = { coordinator: "Coordinator", worker: "Worker", scout: "Scout", reviewer: "Reviewer", verifier: "Verifier" };
 let promptsState = null;
-async function loadPrompts(force = false) {
+// Only the newest snapshot request may render, and none while a save is in flight: a snapshot read before Save or Reset must not bring back the old text.
+let promptsSeq = 0, promptsSaving = 0;
+// Opening Settings refetches (keepEdits): a tab left open across a host restart would otherwise keep showing the built-in text of the previous host. Unsaved edits stay in their editors.
+async function loadPrompts(force = false, keepEdits = false) {
   const id = projectId, current = generation, node = document.querySelector("#prompts");
   if (!id || !plan || !force && promptsState?.projectId === id) return;
+  const seq = ++promptsSeq, fresh = () => id === projectId && current === generation && seq === promptsSeq && !promptsSaving;
   try {
     const data = await api({ action: "prompts-snapshot", id });
-    if (id !== projectId || current !== generation) return;
-    promptsState = { projectId: id, roles: data.roles, note: "" };
+    if (!fresh()) return;
+    const edits = keepEdits && promptsState?.projectId === id ? promptsState.roles.flatMap(item => { const text = document.querySelector(`[data-prompt="${item.role}"]`)?.value; return text === undefined || text === item.effective ? [] : [[item.role, text]]; }) : [];
+    promptsState = { projectId: id, roles: data.roles };
     renderPrompts();
-  } catch (error) { if (id === projectId && current === generation) node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`; }
+    for (const [role, text] of edits) document.querySelector(`[data-prompt="${role}"]`).value = text;
+  } catch (error) {
+    if (!fresh()) return;
+    // A failed refresh keeps the editors and their unsaved edits; the next opening of Settings retries.
+    if (promptsState?.projectId === id && node.querySelector("[data-prompt]")) showPromptsError(`Prompts not refreshed: ${error.message}`);
+    else node.innerHTML = `<p class="note">Prompts unavailable: ${esc(error.message)}</p>`;
+  }
+}
+// Errors go below the editors without rebuilding them, so unsaved edits survive a failed refresh, Save or Reset; the next successful load clears them.
+function showPromptsError(text) {
+  const node = document.querySelector("#prompts");
+  node.querySelector(".prompt-error")?.remove();
+  node.insertAdjacentHTML("beforeend", `<p class="note bad prompt-error">${esc(text)}</p>`);
 }
 function renderPrompts() {
   const node = document.querySelector("#prompts");
   if (!promptsState || promptsState.projectId !== projectId) return;
   node.innerHTML = promptsState.roles.map(item => `<fieldset class="events-group prompt-role" data-role="${item.role}"><legend>${promptTitles[item.role]} ${item.override ? '<span class="skill-tag prompt-custom">Customized</span>' : '<small class="note">Default</small>'}</legend>
     <label class="field"><span class="sr-only">${promptTitles[item.role]} system prompt</span><textarea class="mono prompt-text" rows="8" maxlength="24000" data-prompt="${item.role}" aria-label="${promptTitles[item.role]} system prompt">${esc(item.effective)}</textarea></label>
-    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("") + (promptsState.note ? `<p class="note bad">${esc(promptsState.note)}</p>` : "");
+    <div class="row pick-actions"><button class="primary" data-action="prompt-save" data-role="${item.role}">Save</button><button class="ghost" data-action="prompt-reset" data-role="${item.role}" ${item.override ? "" : "disabled data-off"}>Reset to default</button></div></fieldset>`).join("");
 }
 async function savePrompt(role, reset) {
   const id = projectId, item = promptsState?.roles.find(entry => entry.role === role);
   if (!item || promptsState.projectId !== id) throw new Error("Reload Settings before saving prompts");
   const text = document.querySelector(`[data-prompt="${role}"]`).value;
-  const settings = await api({ action: "settings-snapshot", id });
-  try { await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { prompts: { [role]: reset || !text.trim() || text === item.default ? null : text } } }, reset ? `${promptTitles[role]} prompt reset to default.` : `${promptTitles[role]} prompt saved. New turns and new worker threads use it.`); }
-  catch (error) { promptsState.note = error.message; renderPrompts(); throw error; }
+  promptsSaving++; promptsSeq++;
+  try {
+    const settings = await api({ action: "settings-snapshot", id });
+    await mutate({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { prompts: { [role]: reset || !text.trim() || text === item.default ? null : text } } }, reset ? `${promptTitles[role]} prompt reset to default.` : `${promptTitles[role]} prompt saved. New turns and new worker threads use it.`);
+  } catch (error) { if (id === projectId) showPromptsError(error.message); throw error; }
+  finally { promptsSaving--; }
   await loadPrompts(true);
 }
 // Worktrees: the per-project setup command (run once in each new coding worktree) and safe cleanup with reclaimable size.
