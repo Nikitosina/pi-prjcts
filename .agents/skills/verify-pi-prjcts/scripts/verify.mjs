@@ -340,7 +340,7 @@ const journeys = {
     if (after.threadId !== threadId || after.attempt?.model !== 'fake/fallback-model') throw Error('recovery did not preserve thread and use fallback model');
     const calls = readFileSync(run.requestLog, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     writeFileSync(join(dir, 'model-requests.jsonl'), calls.map(call => JSON.stringify(call)).join('\n') + '\n');
-    if (!calls.some(call => call.model === 'fallback-model' && call.user.includes('VERIFY-QUOTA-RECOVERY-WORK'))) throw Error('fallback provider request missing');
+    if (!calls.some(call => call.model === 'fake-model' && call.user.includes('VERIFY-QUOTA-RECOVERY-WORK')) || !calls.some(call => call.model === 'fallback-model' && call.user.includes('previous model request stopped because its quota was exhausted'))) throw Error('quota failure or fallback recovery provider request missing');
     record('verified', 'existing quota work completed on the fallback after the browser save');
   },
   // Feature: features/message-coordinator.md

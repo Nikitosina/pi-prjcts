@@ -33,7 +33,13 @@
     "worker-quota-known-reset",
     "worker-quota-reset-unit",
     "worker-quota-retry-receipts",
-    "worker-quota-settlement-race"
+    "worker-quota-settlement-race",
+    "worker-quota-live-save",
+    "worker-quota-live-roles",
+    "worker-quota-live-race",
+    "worker-quota-legacy-save",
+    "worker-quota-save-safety",
+    "worker-quota-verification-save"
   ],
   "browser": [
     "web/**"

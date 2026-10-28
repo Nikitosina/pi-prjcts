@@ -332,6 +332,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             if (input.changes.workerCap !== undefined) await owner.applyWorkerCap(input.changes.workerCap);
           }
           saveProject(project);
+          if (running && input.changes.fallbackModels !== undefined) await (await running).recoverQuota();
           return projectSettings(project);
         });
       }

@@ -92,7 +92,8 @@ await kit.run(async () => {
 
   const eligible = await submit('ELIGIBLE quota');
   await wait(eligible, work => work.status === 'failed' && work.blocker?.startsWith('quota_recovery_exhausted:'));
+  const fallbackCallsBefore = kit.result.calls.filter(entry => entry.role === 'worker' && entry.model === 'fallback-model').length;
   await save();
   const recovered = await kit.waitFor(async () => { const work = await row(eligible); return work?.status === 'completed' && work; }, 'saving fallback recovers eligible quota-failed work', { timeout: 5000 });
-  kit.check('saving fallback recovers eligible quota-failed work on the same thread', recovered.threadId === eligible.threadId && recovered.attempt.model === 'fake/fallback-model' && calls('ELIGIBLE').some(entry => entry.model === 'fallback-model'), recovered);
+  kit.check('saving fallback recovers eligible quota-failed work on the same thread', recovered.threadId === eligible.threadId && recovered.attempt.model === 'fake/fallback-model' && kit.result.calls.filter(entry => entry.role === 'worker' && entry.model === 'fallback-model').length > fallbackCallsBefore, recovered);
 });
