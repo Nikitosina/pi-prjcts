@@ -56,7 +56,8 @@ const anchored = async page => page.evaluate(`(() => {
   return row ? { index: row.dataset.index, offset: row.getBoundingClientRect().top - box.top, top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight } : null;
 })()`);
 const readOlder = async page => {
-  await page.evaluate(`(() => { const t = document.querySelector('#transcript'); t.scrollTop = Math.min(180, t.scrollHeight - t.clientHeight - 80); t.dispatchEvent(new Event('scroll')); })()`);
+  const box = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: Math.min(180, t.scrollHeight - t.clientHeight - 80) - t.scrollTop }; })()`);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', ...box, deltaX: 0 });
   await delay(150);
   return anchored(page);
 };
@@ -173,12 +174,10 @@ await k.run(async () => {
   await page.cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
   await page.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
   await page.waitFor(`document.querySelector('#live-reply .text')?.innerText.includes('Stable section 9')`, 'long prefix visible');
-  const beforeLong = await page.evaluate(`(() => {
-    const t = document.querySelector('#transcript'), code = document.querySelector('#live-reply pre');
-    t.scrollTop += code.getBoundingClientRect().top - t.getBoundingClientRect().top - 35; t.dispatchEvent(new Event('scroll'));
-    window.__readingCode = code;
-    return { text: code.textContent, top: code.getBoundingClientRect().top, gap: t.scrollHeight - t.scrollTop - t.clientHeight };
-  })()`);
+  const longWheel = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(), code = document.querySelector('#live-reply pre'); window.__readingCode = code; return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: code.getBoundingClientRect().top - r.top - 35 }; })()`);
+  await page.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', ...longWheel, deltaX: 0 });
+  await delay(150);
+  const beforeLong = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), code = window.__readingCode; return { text: code.textContent, top: code.getBoundingClientRect().top, gap: t.scrollHeight - t.scrollTop - t.clientHeight }; })()`);
   k.check('L1 reading starts inside a >4000-character live reply and is unfollowed', longPrefix.length > 4000 && beforeLong.gap > 100, beforeLong);
   continueLong();
   await page.waitFor(`!document.querySelector('#live-reply .live-limit')?.hidden`, 'bounded preview reached');
@@ -197,8 +196,12 @@ await k.run(async () => {
     return { selected: s.toString(), lastCode: document.querySelector('#live-reply .text pre:last-child')?.textContent.slice(-40) };
   })()`);
   k.check('L3C fixture caps the preview inside an unfinished code line', cappedSelection.lastCode && !cappedSelection.lastCode.endsWith('\\n'), cappedSelection);
+  const completionBefore = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), code = window.__readingCode; return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, codeTop: code.getBoundingClientRect().top }; })()`);
   finishLong();
   await page.waitFor(`document.querySelector('#live-reply').hidden && document.querySelector('#messages').innerText.includes('Stable section 89')`, 'full long reply committed');
+  const completionAfter = await page.evaluate(`(() => { const t = document.querySelector('#transcript'), code = [...document.querySelectorAll('#messages .msg.them .text')].at(-1).querySelector('pre'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, codeTop: code.getBoundingClientRect().top }; })()`);
+  result.measurements.completionAnchor = { before: completionBefore, after: completionAfter };
+  k.check('L3A completion preserves the visible early code position', Math.abs(completionAfter.codeTop - completionBefore.codeTop) < 2, { completionBefore, completionAfter });
   const restoredCode = await page.evaluate(`(() => { const s = getSelection(), root = [...document.querySelectorAll('#messages .msg.them .text')].at(-1); return { selected: s.toString(), inFinal: root.contains(s.anchorNode) }; })()`);
   k.check('L3S selected early code survives completion when the preview cap cuts a later code line', restoredCode.selected === cappedSelection.selected && restoredCode.inFinal, { cappedSelection, restoredCode });
   await page.evaluate(`getSelection().removeAllRanges()`);

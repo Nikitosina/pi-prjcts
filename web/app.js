@@ -103,7 +103,7 @@ let liveStream = null;
 // Explicit chat switches clear the frame; reconnects keep the last received preview readable.
 let liveFrame = null;
 let liveRetryMs = 1000;
-// Follow new chat content only while the reader is at the bottom; scrolling up pauses it until they return.
+// Follow until the reader scrolls up; only sending or jumping to latest resumes it.
 let stickToBottom = true;
 let transcriptAnchor = null;
 function captureTranscriptAnchor() {
@@ -322,8 +322,9 @@ async function applyLive(frame) {
   // A committed entry or a finished run means the transcript changed: refresh before hiding the bubble so the final text never blinks out.
   const settled = previous && (previous.entries !== frame.entries || previous.running !== frame.running);
   const selection = settled ? captureLiveSelection() : null;
+  const reading = settled && !stickToBottom ? captureLiveReading() : null;
   if (settled) await settledRefresh();
-  if (settled) { renderLive(true); restoreLiveSelection(selection); } else if (document.hidden) renderLive(true); else scheduleLiveRender();
+  if (settled) { renderLive(true); restoreLiveSelection(selection); restoreLiveReading(reading); } else if (document.hidden) renderLive(true); else scheduleLiveRender();
 }
 let liveRenderFrame = null;
 function scheduleLiveRender() {
@@ -539,6 +540,24 @@ function restoreLiveSelection(saved) {
   const anchor = root && selectionPoint(root, saved.anchor, saved.anchor > saved.focus), focus = root && selectionPoint(root, saved.focus, saved.focus > saved.anchor);
   if (!anchor || !focus) return;
   document.getSelection().setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+}
+
+const liveReadingBlocks = 'pre, p, li, h1, h2, h3, h4, h5, h6';
+function captureLiveReading() {
+  const root = document.querySelector('#live-reply .text');
+  if (!root || document.querySelector('#live-reply').hidden) return null;
+  const box = document.querySelector('#transcript').getBoundingClientRect();
+  const blocks = [...root.querySelectorAll(liveReadingBlocks)];
+  const index = blocks.findIndex(block => { const rect = block.getBoundingClientRect(); return rect.bottom > box.top && rect.top < box.bottom; });
+  return index < 0 ? null : { projectId, chatId, text: root.textContent, index, top: blocks[index].getBoundingClientRect().top };
+}
+function restoreLiveReading(saved) {
+  if (!saved || stickToBottom || saved.projectId !== projectId || saved.chatId !== chatId) return;
+  const root = [...document.querySelectorAll('#messages .msg.them .text')].reverse().find(node => node.textContent.startsWith(saved.text));
+  const block = root?.querySelectorAll(liveReadingBlocks)[saved.index];
+  if (!block) return;
+  document.querySelector('#transcript').scrollTop += block.getBoundingClientRect().top - saved.top;
+  transcriptAnchor = captureTranscriptAnchor();
 }
 
 function clearTranscriptSelection() {
@@ -3174,10 +3193,32 @@ try { setSidebar(localStorage.getItem("pi-projects:side-collapsed") === "1", fal
 requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector(".app").classList.add("side-animate")));
 document.addEventListener("click", event => { if (!event.target.closest("[data-side-toggle]")) return; setSidebar(!document.querySelector(".app").classList.contains("side-collapsed")); });
 document.querySelector("#projects").addEventListener("change", event => changeProject(event.target.value));
-document.querySelector("#transcript").addEventListener("scroll", event => {
-  const node = event.currentTarget;
-  stickToBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
-  transcriptAnchor = stickToBottom ? null : captureTranscriptAnchor();
+const transcript = document.querySelector("#transcript");
+function pauseTranscriptFollow() {
+  if (!stickToBottom) return;
+  stickToBottom = false;
+  transcriptAnchor = captureTranscriptAnchor();
+  renderWorkingPill();
+}
+transcript.addEventListener("wheel", event => { if (event.deltaY < 0) pauseTranscriptFollow(); }, { passive: true });
+let touchY = null, dragTop = null;
+transcript.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY ?? null; }, { passive: true });
+transcript.addEventListener("touchmove", event => {
+  const y = event.touches[0]?.clientY;
+  if (touchY !== null && y !== undefined && y > touchY) pauseTranscriptFollow();
+  touchY = y ?? null;
+}, { passive: true });
+transcript.addEventListener("pointerdown", event => {
+  if (event.pointerType === "mouse" && event.offsetX >= transcript.clientWidth) dragTop = transcript.scrollTop;
+});
+window.addEventListener("pointerup", () => { dragTop = null; });
+transcript.addEventListener("keydown", event => {
+  if (["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey) pauseTranscriptFollow();
+});
+transcript.addEventListener("scroll", () => {
+  if (dragTop !== null && transcript.scrollTop < dragTop) pauseTranscriptFollow();
+  if (dragTop !== null) dragTop = transcript.scrollTop;
+  if (!stickToBottom) transcriptAnchor = captureTranscriptAnchor();
   renderWorkingPill();
 }, { passive: true });
 // Images, diagrams and markdown can settle after the DOM render. Keep a reading anchor still; keep following only if it was already requested.
