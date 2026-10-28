@@ -51,4 +51,4 @@ The independent verifier saw `worker-quota-recovery-e2e` fail waiting for a quot
 
 ## Failure-mode specs
 
-Each regression script has a companion `scripts/<name>-failures.md` listing the failures its assertions catch and its limits. These were added alongside the scripts in the commit that created them, and make no claim about being written earlier.
+Each regression script has a companion `scripts/<name>-failures.md` listing the failures its assertions catch and its limits. They describe the assertions as they stand now. For the earlier scripts they were written after the code, not before it.
