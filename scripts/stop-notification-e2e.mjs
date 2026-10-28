@@ -22,9 +22,9 @@ kit = await createKit('stop-notification', { handler: async ({ role, user, resul
   const mark = markOf(user);
   if (tools.includes('projects_verify_run')) { if (!results.length) await hold(`verifier-${mark}`).wait; return say('Held verifier ended.'); }
   if (role !== 'worker') return;
-  // S2 and S3 finish at once so their verifier starts; the others hold their turn until stopped.
+  // S2 and S3 request verification after writing proof; the others hold their turn until stopped.
   if (mark === 'S7' && user.startsWith('S7 task')) return results.length ? say('S7 waiting for my child.') : call('projects_delegate_child', { role: 'worker', task: 'S7KID write child.txt' });
-  if (mark === 'S2' || mark === 'S3') return results.length ? say('Finished.') : call('bash', { command: 'echo done > proof.txt' });
+  if (mark === 'S2' || mark === 'S3') return results.length === 0 ? call('bash', { command: 'echo done > proof.txt' }) : results.length === 1 ? call('projects_request_verification', {}) : say('Finished.');
   // S1 holds the drain with a background job that takes a second to exit on SIGTERM.
   if (mark === 'S1' && !results.length) return call('projects_bg_start', { label: 'drain barrier', command: `node -e "const fs=require('fs');process.on('SIGTERM',()=>setTimeout(()=>{fs.writeFileSync(process.argv[1],String(Date.now()));process.exit(0)},1000));fs.writeFileSync(process.argv[1]+'.ready','');setInterval(()=>{},1000)" ${join(kit.root, 'drained-S1')}` });
   await hold(`worker-${mark}`).wait; return say('Superseded.');
