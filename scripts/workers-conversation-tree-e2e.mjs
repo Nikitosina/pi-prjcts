@@ -200,6 +200,20 @@ try {
   await waitFor(`document.querySelector(${JSON.stringify(summary)}).parentElement.open`, s, 'history opens');
   await delay(5000);
   check('history and focus survive polling', await evaluate(`document.querySelector(${JSON.stringify(summary)}).parentElement.open && document.activeElement === document.querySelector(${JSON.stringify(summary)})`, s));
+  // Verify an actual redraw, not merely that focus survives while the DOM is unchanged.
+  const focusWork = async (work, label) => {
+    const find = `[...document.querySelectorAll('#activity [data-conversation="${work.threadId}"] .conversation-task')].find(node => node.title === ${JSON.stringify(work.text)})`;
+    await waitFor(`!!(${find})`, s, `${label} row`);
+    await evaluate(`window.focusedWorkBeforeRefresh = ${find}; window.focusedWorkBeforeRefresh.focus()`, s);
+    const text = `Focus redraw ${label}`;
+    await rpc({ action: 'thread-send', id, threadId: worker.threadId, text, requestId: randomUUID() });
+    await eventually(async () => (await plan(id)).work.some(item => item.text === text && item.status === 'queued'), `${label} follow-up persisted`);
+    await waitFor(`!document.contains(window.focusedWorkBeforeRefresh)`, s, `${label} redraw`, 100);
+    check(`${label} work focus stays on the same work after redraw`, await evaluate(`document.activeElement === (${find})`, s));
+  };
+  await focusWork(snapshot.work.find(w => w.id === worker.id), 'Now');
+  await focusWork(queue[1], 'queued follow-up');
+  await focusWork(snapshot.work.find(w => w.threadId === loop.worker.threadId && w.status === 'completed'), 'history');
   check('context appears at most once per conversation, never on work rows', await evaluate(`([...document.querySelectorAll('#activity [data-conversation]')].every(n => n.querySelectorAll(':scope > .conversation-header .ctx-ring').length <= 1 && !n.querySelector(':scope > .conversation-section .ctx-ring, :scope > details .ctx-ring')))` , s));
   await shot('tree-light', s);
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, s); await delay(300); await shot('tree-dark', s);

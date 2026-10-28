@@ -11,3 +11,4 @@ Record before implementing the regression journey:
 - Light, dark or narrow layout obscures controls, and disclosure state is not accessible.
 - The browser tree disagrees with read-only persisted host state, or reports a failed/stopped verifier as passed.
 - Work priority changes dispatch order but the panel presents follow-ups in a misleading order.
+- Refresh returns focus from a Now, queued or history work button to a different work button or the conversation header.

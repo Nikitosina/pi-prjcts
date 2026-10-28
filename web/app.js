@@ -4094,7 +4094,7 @@ function durableActivity() {
       children.get(parent).push(id);
     }
   }
-  const row = work => `<div class="conversation-work ${work.archived ? "archived" : ""}"><button class="conversation-task" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span>${badge(work.status)} ${esc(clip(work.text, 200))}</span>${work.blocker ? `<small>${esc(work.blocker)}</small>` : ""}${work.archived ? '<small>Archived</small>' : ""}${holdsBadge(work.holds)}</button>${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
+  const row = work => `<div class="conversation-work ${work.archived ? "archived" : ""}"><button class="conversation-task" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(work.threadId)}" data-work="${esc(work.id)}" title="${esc(work.text)}"><span>${badge(work.status)} ${esc(clip(work.text, 200))}</span>${work.blocker ? `<small>${esc(work.blocker)}</small>` : ""}${work.archived ? '<small>Archived</small>' : ""}${holdsBadge(work.holds)}</button>${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(projectId)}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
   const placed = new Set();
   const tree = id => {
     if (placed.has(id)) return "";
