@@ -55,6 +55,7 @@ await kit.run(async () => {
   for (const item of snapshot.roles) assert.equal(item.effective, DEFAULT_ROLE_PROMPTS[item.role]);
   kit.check('all five distinct defaults are exposed by the host', new Set(snapshot.roles.map(r => r.effective)).size === 5);
   await kit.ask(id, 'SKILL-READ');
+  kit.check('coordinator receives terminal lifecycle rules', /archive handled and superseded/.test(kit.lastCall('coordinator', 'SKILL-READ').system) && /unknown failures/.test(kit.lastCall('coordinator', 'SKILL-READ').system));
   kit.check('coordinator distinguishes a successful command from host-confirmed verification', kit.lastCall('coordinator', 'SKILL-READ').system.includes("Use the host's VERIFIED completion report to claim verification"));
   kit.check('coordinator preserves explicit criteria in repair handoffs', kit.lastCall('coordinator', 'SKILL-READ').system.includes('every acceptance criterion verbatim'));
   kit.check('coordinator keeps the verifier verdict out of acceptance criteria', kit.lastCall('coordinator', 'SKILL-READ').system.includes("never the verifier's own verdict or the host's VERIFIED report"));
@@ -121,6 +122,7 @@ await kit.run(async () => {
   kit.check('review handoffs name source evidence available to fresh contexts', live.coordinator.system.includes('Reviewers do not inherit this conversation: include the source spec itself or its exact repository document path.'));
   const reviewer = live.reviewer;
   kit.check('reviewers retain generated read-only tools and no execution tools', reviewer.tools.includes('code_read') && !reviewer.tools.some(t => ['bash', 'write', 'edit', 'projects_verify_run'].includes(t)));
+  kit.check('verifier receives journey and evidence routing rules', /missing feature-map entry/.test(live.verifier.system) && /author proof/.test(live.verifier.system) && /diagnostic/.test(live.verifier.system));
   kit.check('verifier retains structured verdict tools without implementation or delegation tools', live.verifier.tools.includes('projects_verification_verdict') && !live.verifier.tools.includes('projects_delegate_child'));
   await kit.updateSettings(id, { prompts: { coordinator: 'OWNER-CUSTOM-COORDINATOR', worker: 'OWNER-CUSTOM-WORKER', verifier: 'OWNER-CUSTOM-VERIFIER' } });
   await kit.updateSettings(id, { prompts: { scout: 'OWNER-CUSTOM-SCOUT' } });
@@ -128,6 +130,16 @@ await kit.run(async () => {
   assert.equal(custom.roles.find(r => r.role === 'coordinator').effective, 'OWNER-CUSTOM-COORDINATOR');
   assert.equal(custom.roles.find(r => r.role === 'worker').effective, 'OWNER-CUSTOM-WORKER');
   assert.equal(custom.roles.find(r => r.role === 'verifier').effective, 'OWNER-CUSTOM-VERIFIER');
+  await kit.ask(id, 'CUSTOM-COORDINATOR');
+  const customCoordinator = kit.lastCall('coordinator', 'CUSTOM-COORDINATOR');
+  kit.check('custom coordinator retains owner text and shared lifecycle', customCoordinator.system.includes('OWNER-CUSTOM-COORDINATOR') && customCoordinator.system.includes('archive handled and superseded'));
+  const chat = await kit.rpc({ action: 'chat-create', id, title: 'Lifecycle chat' });
+  await kit.rpc({ action: 'message', id, chatId: chat.id, text: 'CUSTOM-CHAT' });
+  await kit.settle(id);
+  kit.check('new coordinator chat retains owner text and lifecycle rules', kit.lastCall('coordinator', 'CUSTOM-CHAT')?.system.includes('OWNER-CUSTOM-COORDINATOR') && kit.lastCall('coordinator', 'CUSTOM-CHAT')?.system.includes('archive handled and superseded'));
+  await kit.restartHost();
+  await kit.ask(id, 'CUSTOM-REOPEN');
+  kit.check('reopened coordinator retains owner text and lifecycle rules', kit.lastCall('coordinator', 'CUSTOM-REOPEN')?.system.includes('OWNER-CUSTOM-COORDINATOR') && kit.lastCall('coordinator', 'CUSTOM-REOPEN')?.system.includes('archive handled and superseded'));
   await kit.ask(id, 'VERIFY');
   const customVerifier = kit.result.calls.findLast(c => c.tools.includes('projects_verify_run'));
   kit.check('custom verifier persists and keeps host protocol and shared guardrails', customVerifier.system.includes('OWNER-CUSTOM-VERIFIER') && customVerifier.system.includes(SHARED_ROLE_RULES) && customVerifier.system.includes('projects_verification_verdict once'));

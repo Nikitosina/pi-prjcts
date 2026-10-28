@@ -46,3 +46,8 @@ Verified by `scripts/watchdog-e2e.mjs` unless marked (inspection).
 - D26 A skipped check does not advance the clock, so the next 400 ms tick recomputes digests (git status per worker) and skips again. The interval advances (`lastTickAtMs`, `seq`) whether or not a chat was submitted.
 - D27 The suppression hides an unproductive worker: one unproductive worker among healthy ones in the same chat still submits the whole digest once; a healthy chat next to an unproductive chat gets no submission, the unproductive chat exactly one.
 - D28 A skipped check leaves no trace: Settings and the automation snapshot show `quietChecks`, the number of checks skipped as healthy. `ticks` keeps counting submitted checks only (D24). A stored clock written before this field existed still loads.
+
+## Advancing owned suite
+- Repeated status calls interrupt an owned running suite whose reported completed/total script count advances.
+- Identical or decreasing counts, changed timestamps, foreign jobs, errors and settled jobs must not mask repeated polling.
+- A job running beyond a bounded observation window must not be excused indefinitely.

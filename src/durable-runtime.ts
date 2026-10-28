@@ -58,7 +58,7 @@ import { followRuntime } from "./durable-follow.ts";
 import { omitIdleWatchdogTurns, watchdogRuntime } from "./durable-watchdog.ts";
 import { reviewVerdictTools } from "./durable-review.ts";
 import { captureAttemptTarget, verificationTools as buildVerificationTools } from "./durable-verification.ts";
-import { rolePrompt, SHARED_ROLE_RULES } from "./role-prompts.ts";
+import { rolePrompt, SHARED_ROLE_RULES, COORDINATOR_LIFECYCLE } from "./role-prompts.ts";
 import { VERIFIER_RULES } from "./verification-model.ts";
 import { captureTarget } from "./verification-target.ts";
 import { loadAutomations } from "./project-automations.ts";
@@ -1560,7 +1560,8 @@ function coordinatorInstructions(project: Project, repositoryStanding: string, s
   const standing = repositoryStanding ? `\n\nRepository instructions (the checkout's AGENTS.md and related files; workers get the same):\n${repositoryStanding}\n\n` : "";
   const plugin = plugins.coordinatorTools().filter(provider => provider.applies(project)).map(provider => provider.instructions?.(project) ?? "").join("");
   return `You are the persistent coordinator for ${project.name}. ${rolePrompt(project, "coordinator")}
-${SHARED_ROLE_RULES} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
+${SHARED_ROLE_RULES}
+${COORDINATOR_LIFECYCLE} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
 }
 function verifierInstructions(project: Project, repositoryStanding: string): string {
   return `You are a verifier for ${project.name}. Project instructions: ${project.objective}

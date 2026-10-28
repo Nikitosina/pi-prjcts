@@ -78,7 +78,37 @@ export async function workerDigest(work: DurablePlanWorkSnapshot, entries: reado
   const repeatedErrors = [...errorRepeats.values()].some(count => count >= 2) || errors.length >= 3;
   const noFiles = files === "none uncommitted";
   const stalled = now - started >= everyMs * 2 && tokens > 0 && noFiles;
-  const verdict = repeated.length ? "unproductive: repeated identical calls" : repeatedErrors ? "unproductive: repeated errors" : stalled ? "unproductive: tokens spent with no file changes" : "healthy";
+  // A suite counter is meaningful only in status receipts for a job started by this
+  // thread. Log bytes or timestamps alone are not progress. Bound the exemption.
+  const decode = (text: string): Record<string, unknown> | undefined => {
+    try {
+      const content: unknown = JSON.parse(text);
+      const value: unknown = Array.isArray(content) && typeof content[0]?.text === "string" ? JSON.parse(content[0].text) : content;
+      return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    } catch { return undefined; }
+  };
+  const advancing = repeated.length <= 1 && !repeatedErrors && (() => {
+    const polls = recent.filter(call => call.name === "projects_bg_status" && !call.error && call.result);
+    if (polls.length < 2 || recent.some(call => call.error || (call.name !== "projects_bg_status" && call.name !== "projects_bg_start")) || recent.filter(call => call.name === "projects_bg_start").length > 1) return false;
+    const statuses = polls.map(call => decode(call.result));
+    const lastStatus = statuses.at(-1);
+    if (!lastStatus || lastStatus.state !== "running" || typeof lastStatus.id !== "string" || typeof lastStatus.startedAt !== "number" || now - lastStatus.startedAt > 30 * 60_000 || now < lastStatus.startedAt) return false;
+    const startedJob = calls.some(call => {
+      if (call.name !== "projects_bg_start" || call.error) return false;
+      const start = decode(call.result);
+      return !!start && start.id === lastStatus.id && start.pid === lastStatus.pid && start.lstart === lastStatus.lstart && start.startedAt === lastStatus.startedAt && typeof start.pid === "number" && typeof start.lstart === "string" && start.lstart.length > 0;
+    });
+    if (!startedJob || recent.some(call => call.name === "projects_bg_status" && call.args !== polls[0].args)) return false;
+    const counts = statuses.map((status, i) => {
+      let args: unknown; try { args = JSON.parse(polls[i].args); } catch { return null; }
+      if (!status || typeof args !== "object" || args === null || !("id" in args) || args.id !== lastStatus.id || status?.id !== lastStatus.id || status.state !== "running" || status.pid !== lastStatus.pid || status.lstart !== lastStatus.lstart || status.startedAt !== lastStatus.startedAt || typeof status.tail !== "string") return null;
+      const matches = [...status.tail.matchAll(/\[(\d+)\/(\d+)\] (?:PASS(?: \(was known-failing\))?|KNOWN-FAIL|FAIL) [^\n]+/g)];
+      const match = matches.at(-1);
+      return match ? { done: Number(match[1]), total: Number(match[2]) } : null;
+    });
+    return counts.every((count, i) => count !== null && count.total === counts[0]?.total && count.done > 0 && count.done <= count.total && (i === 0 || count.done > (counts[i - 1]?.done ?? Infinity)));
+  })();
+  const verdict = repeated.length && !advancing ? "unproductive: repeated identical calls" : repeatedErrors ? "unproductive: repeated errors" : stalled && !advancing ? "unproductive: tokens spent with no file changes" : "healthy";
   const text = [
     `- ${work.role} thread ${work.threadId}${parent ? ` (sub-agent of ${parent})` : ""}, work ${work.id}: "${clip(work.text, 160)}"`,
     `  running ${minutes(now - started)}${work.steering ? `; this run is a STEER you sent ${minutes(now - started)} ago (steered since an earlier check)` : "; not steered"}`,
