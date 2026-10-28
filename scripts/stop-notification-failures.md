@@ -13,3 +13,4 @@ Owner report: after "Verification did not pass: Stopped explicitly" and "Stopped
 9. A restart delivers the notice twice, or loses one that was admitted but not delivered.
 10. Stopping an idle thread (nothing queued or running) sends a notice about work that had already reported.
 11. A child stopped with its parent sends its own notice besides the parent's.
+12. A parent worker whose turn already returned while its children run (its answer is held, no verification started) is stopped: the children are cancelled, but nothing reports, because the parent has no running work of its own. Its held answer stays "completed" as if final, or the notice claims a verification was stopped. Verification off must report too.

@@ -14,6 +14,7 @@ export { type DurablePlan, type DurablePlanSnapshot, type DurablePlanWork, type 
 
 const PAUSE_BLOCKER = "Interrupted by project pause";
 const WORKER_PAUSE_BLOCKER = "Interrupted by worker pause";
+const HELD_STOP_BLOCKER = "Stopped explicitly while waiting for its child work";
 const PREDECESSOR_BLOCKER = "A predecessor did not complete";
 const planUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type StoredUsage = { baseline: Record<string, number>; final: Record<string, number>; delta: Record<string, number> };
@@ -492,7 +493,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
   }
   /** One notice per drained explicit stop, through the durable report: a child's goes to its parent worker, anything else (a verifier's on its worker's work) to the chat. */
   async function queueStopReport(tx: Tx, root: ConversationId, state: PlanningState, work: StoredWork, notes: string[], stopId: string): Promise<void> {
-    const outcome = work.status === "stopped" ? "Stopped before finishing: there is no result and it is NOT VERIFIED." : `The turn finished, but its verification was stopped before a verdict: the result is NOT VERIFIED (read it with projects_work_result {"workId":"${work.id}"}).`;
+    const outcome = work.blocker === HELD_STOP_BLOCKER ? `Stopped while waiting for its child work, which was cancelled: its last answer was intermediate, not a final result (read it with projects_work_result {"workId":"${work.id}"}), and it is NOT VERIFIED.` : work.status === "stopped" ? "Stopped before finishing: there is no result and it is NOT VERIFIED." : `The turn finished, but its verification was stopped before a verdict: the result is NOT VERIFIED (read it with projects_work_result {"workId":"${work.id}"}).`;
     const text = `${outcome} The stop has drained; the thread is idle until new work is sent.\n${notes.join("\n")}`;
     if (work.parentThreadId && work.role !== "verifier" && await reportToParent(tx, root, state, work, `stop:${stopId}`, text)) return;
     const task = work.text.length > TASK_ECHO ? `${work.text.slice(0, TASK_ECHO)}…` : work.text;
@@ -817,7 +818,7 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
       // Stopping a parent stops its children too (one level).
       const targets = [threadId, ...Object.entries(state.threads).filter(([id, child]) => child.parentThreadId === threadId && !child.stopping && id !== threadId).map(([id]) => id)];
       const taskIds: TaskId[] = [], conversationIds: ConversationId[] = [], notes: string[] = [];
-      let verified: string | undefined, stopped: string | undefined;
+      let verified: string | undefined, stopped: string | undefined, children = 0;
       for (const target of targets) {
         const current = state.threads[target]!;
         current.stopping = stopId;
@@ -833,12 +834,15 @@ export function planningRuntime(options: { projectId: string; models: Record<Dur
         for (const work of Object.values(state.work)) if (work.threadId === target && (work.status === "queued" || work.status === "running" || work.status === "interrupted")) {
           if (work.taskId !== null) taskIds.push(work.taskId);
           notes.push(`${work.role} work ${work.id} on thread ${target} was ${work.status}; ${target === threadId ? "stopped explicitly" : "stopped with its parent"}.`);
-          if (target === threadId) stopped = work.id;
+          if (target === threadId) stopped = work.id; else children++;
           work.status = "stopped"; work.blocker = target === threadId ? "Stopped explicitly" : "Stopped with its parent worker";
         }
         current.activeWorkId = null;
         conversationIds.push(current.conversationId);
       }
+      // A parent whose turn returned while its children ran has that answer held, and no cycle yet: cancelling the children ends the turn, so it reports instead of standing as final.
+      const latest = Object.values(state.work).findLast(item => item.threadId === threadId);
+      if (!verified && !stopped && children && latest?.status === "completed" && latest.report?.requestId.startsWith("held:")) { latest.status = "stopped"; latest.blocker = HELD_STOP_BLOCKER; stopped = latest.id; }
       // A stop that ended nothing (an idle thread) has nothing to report.
       const carrier = verified ?? stopped;
       if (carrier) thread.stopReport = { stopId, workId: carrier, notes };

@@ -17,10 +17,13 @@ kit = await createKit('stop-notification', { handler: async ({ role, user, resul
     if (user.startsWith('[Durable work ') && !results.length) notices.push({ at: Date.now(), user, drained: existsSync(join(kit.root, 'drained-S1')) ? Number(readFileSync(join(kit.root, 'drained-S1'), 'utf8')) : null });
     return;
   }
+  // S7: the parent hands a held child its work and returns an intermediate answer; the child waits until stopped.
+  if (role === 'worker' && user.startsWith('S7KID')) { await hold('worker-S7KID').wait; return say('Child superseded.'); }
   const mark = markOf(user);
   if (tools.includes('projects_verify_run')) { if (!results.length) await hold(`verifier-${mark}`).wait; return say('Held verifier ended.'); }
   if (role !== 'worker') return;
   // S2 and S3 finish at once so their verifier starts; the others hold their turn until stopped.
+  if (mark === 'S7' && user.startsWith('S7 task')) return results.length ? say('S7 waiting for my child.') : call('projects_delegate_child', { role: 'worker', task: 'S7KID write child.txt' });
   if (mark === 'S2' || mark === 'S3') return results.length ? say('Finished.') : call('bash', { command: 'echo done > proof.txt' });
   // S1 holds the drain with a background job that takes a second to exit on SIGTERM.
   if (mark === 'S1' && !results.length) return call('projects_bg_start', { label: 'drain barrier', command: `node -e "const fs=require('fs');process.on('SIGTERM',()=>setTimeout(()=>{fs.writeFileSync(process.argv[1],String(Date.now()));process.exit(0)},1000));fs.writeFileSync(process.argv[1]+'.ready','');setInterval(()=>{},1000)" ${join(kit.root, 'drained-S1')}` });
@@ -97,10 +100,22 @@ await kit.run(async () => {
   await kit.rpc({ action: 'resume', id, recovery: 'leave-interrupted', confirm: id });
   expect('S6 after a restart and resume the notice arrives once', (await noticed(s6, 'S6 notice')).length === 1);
 
+  // S7: verification off (the owner's mode). The parent's turn returned while its child runs; stopping the parent cancels the child and reports once.
+  await kit.updateSettings(id, { verification: null });
+  const s7 = await delegate('S7');
+  const kid = await kit.eventually(async () => (await plan()).find(w => w.parentThreadId === s7.threadId && w.status === 'running'), 'S7 child running');
+  await kit.eventually(async () => (await plan()).find(w => w.id === s7.id)?.status === 'completed', 'S7 parent answer held');
+  await stop(s7.threadId);
+  const n7 = await noticed(s7, 'S7 notice');
+  const after7 = await plan();
+  expect('S7 stopping a parent that waits on its child sends one notice naming the cancelled child', names(s7, n7, /stopped/i) && (n7[0]?.user ?? '').includes(kid.id) && /child/i.test(n7[0]?.user ?? ''), n7.map(n => n.user));
+  expect('S7 the notice claims no verification and the held answer is not reported as final', !/verifier|verification cycle/i.test(n7[0]?.user ?? '') && /intermediate/i.test(n7[0]?.user ?? '') && after7.find(w => w.id === s7.id).status === 'stopped', { notice: n7[0]?.user, status: after7.find(w => w.id === s7.id).status });
+  expect('S7 the child is stopped, reports nothing and wakes nobody', after7.find(w => w.id === kid.id).status === 'stopped' && noticesOf(kid.id).length === 0 && after7.filter(w => w.threadId === s7.threadId).length === 1, after7.filter(w => w.threadId === s7.threadId || w.id === kid.id).map(w => [w.role, w.status, w.text.slice(0, 40)]));
+
   // Stopping an idle thread again reports nothing new, and a restart replays nothing.
-  await stop(s1.threadId);
+  await stop(s1.threadId); await stop(s7.threadId);
   await kit.stopHost(); kit.startHost(); await kit.waitHost(); await kit.delay(2000);
-  const counts = Object.fromEntries([s1, s2, s3, s4a, s4b, s5, s6].map(w => [w.text.split(' ')[0], noticesOf(w.id).length]));
+  const counts = Object.fromEntries([s1, s2, s3, s4a, s4b, s5, s6, s7].map(w => [w.text.split(' ')[0], noticesOf(w.id).length]));
   expect('every stop is delivered exactly once, also across restarts and a repeated stop of an idle thread', Object.values(counts).every(n => n === 1), counts);
   for (const value of holds.values()) value.release();
   if (failures.length) throw Error(`${failures.length} regression(s):\n${failures.join('\n')}`);
