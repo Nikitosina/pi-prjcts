@@ -43,17 +43,14 @@
     ".agents/skills/ask-user/**": ["repo-skill-overrides-unit"]
   },
   "knownFailing": [
-    "artifacts-e2e",
     "context-settings-e2e",
     "coordinator-efficiency-e2e",
     "coordinator-github-skills-e2e",
     "durable-local-schedule-host-positive-e2e",
     "github-pr-watch-e2e",
-    "inline-refs-e2e",
     "scoped-models-e2e",
     "settings-dialogs-e2e",
     "setup-e2e",
-    "uploads-search-e2e",
     "vcs-plugins-e2e",
     "workspace-quick-grant-ui-e2e"
   ]

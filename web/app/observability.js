@@ -159,9 +159,7 @@ async function loadObservability() {
       api({ action: "event-log", id, offset: eventOffset, limit: 20 }),
       api({ action: "host-health", id }),
       Promise.all(
-        [...new Set(plan.work.map((item) => item.threadId))].map((threadId) =>
-          api({ action: "thread-history", id, threadId, offset: 0, limit: 100, textOffset: 0, textLimit: 1 }),
-        ),
+        [...new Set(plan.work.map((item) => item.threadId))].map((threadId) => api({ action: "thread-history", id, threadId, limit: 100 })),
       ),
     ]);
     if (id !== getProjectId() || current !== getGeneration() || tab !== "observability") return;
@@ -171,7 +169,7 @@ async function loadObservability() {
       events,
       health,
       tools: histories.flatMap((page) =>
-        page.items.filter((item) => item.kind === "tool").map((item) => ({ ...item, threadId: page.threadId })),
+        page.items.filter((item) => item.kind === "tool-call").map((item) => ({ ...item, threadId: page.threadId })),
       ),
     };
     renderHealth(getView().project);

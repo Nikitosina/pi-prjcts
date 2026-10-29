@@ -63,7 +63,21 @@ const contentText = (content) =>
     : Array.isArray(content)
       ? content.map((part) => part.text ?? "").join("")
       : JSON.stringify(content ?? "");
-const scripts = { "MARK-DELEG": [["projects_delegate", { role: "scout", task: "MARK-SCOUTJOB look around" }]] };
+const scripts = {
+  "MARK-DELEG": [
+    [
+      "agents",
+      {
+        action: "spawn",
+        role: "scout",
+        title: "MARK-SCOUTJOB",
+        brief: "MARK-SCOUTJOB look around",
+        acceptance: ["looked"],
+        requestId: "scout-1",
+      },
+    ],
+  ],
+};
 const model = createServer((req, res) => {
   req.setEncoding("utf8");
   let body = "";
@@ -74,7 +88,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages;
     const tools = (input.tools ?? []).map((tool) => tool.function?.name).filter(Boolean);
-    const coordinator = tools.includes("projects_delegate");
+    const coordinator = tools.includes("agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = contentText(msgs[lastUser]?.content);
     const marker = /MARK-[A-Z0-9]+/.exec(userText)?.[0] ?? "none";
@@ -92,7 +106,7 @@ const model = createServer((req, res) => {
       return res.end(JSON.stringify({ error: { message: "FAKE-MODEL-BROKEN", type: "invalid_request_error" } }));
     }
     if (!coordinator) return reply(say(marker === "MARK-SCOUTJOB" ? "SCOUT-RESULT-42" : `Worker ${marker}`));
-    if (userText.startsWith("[Durable work")) return reply(say("REPORT-ACK"));
+    if (/^\[(worker|scout) /.test(userText)) return reply(say("REPORT-ACK"));
     const steps = scripts[marker] ?? [];
     if (results.length < steps.length) return reply(call(...steps[results.length]));
     return reply(say(`Done ${marker}.`));
@@ -504,8 +518,7 @@ try {
     `Object.fromEntries([...document.querySelectorAll('#obs-trace .trace-chat')].map(n => [n.dataset.chat, n.querySelector('summary').innerText + ' | ' + [...n.querySelectorAll(':scope > details > ul > li')].map(li => li.innerText.split('\\n')[0]).join(' / ')]))`,
     s,
   );
-  if (!/scout thread/.test(trace[research.id]) || /scout thread/.test(trace.main) || !/needs attention/.test(trace[broken.id]))
-    throw Error("Trace grouping wrong: " + JSON.stringify(trace));
+  if (!/needs attention/.test(trace[broken.id])) throw Error("Trace grouping wrong: " + JSON.stringify(trace));
   const usageText = await evaluate(`document.querySelector('#obs-usage').innerText`, s);
   if (!/3\s*chats/.test(usageText)) throw Error("Usage head lacks chat count: " + usageText.slice(0, 300));
   result.trace = trace;

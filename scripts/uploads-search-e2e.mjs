@@ -128,7 +128,19 @@ const scripts = {
     (results) => ["projects_upload_read", { uploadId: firstHit(results).uploadId, offset: firstHit(results).offset, limit: 400 }],
   ],
   "MARK-STOP": [["projects_search", { query: "the and of" }]],
-  "MARK-DELEG": [["projects_delegate", { role: "scout", task: "MARK-WSEARCH find the pelican notes" }]],
+  "MARK-DELEG": [
+    [
+      "agents",
+      {
+        action: "spawn",
+        role: "scout",
+        title: "MARK-WSEARCH",
+        brief: "MARK-WSEARCH find the pelican notes",
+        acceptance: ["found"],
+        requestId: "scout-1",
+      },
+    ],
+  ],
   "MARK-CHAT2": [["projects_search", { query: "ostrich" }]],
   "MARK-PENGUIN": [["projects_search", { query: "penguin" }]],
   "MARK-AFTER": [
@@ -147,7 +159,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages;
     const tools = (input.tools ?? []).map((tool) => tool.function?.name).filter(Boolean);
-    const coordinator = tools.includes("projects_delegate");
+    const coordinator = tools.includes("agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = contentText(msgs[lastUser]?.content);
     const images = Array.isArray(msgs[lastUser]?.content)
@@ -176,7 +188,7 @@ const model = createServer((req, res) => {
       if (marker === "MARK-WSEARCH" && results.length === 0) return reply(call("projects_search", { query: "pelican" }));
       return reply(say(marker === "MARK-WSEARCH" ? `WORKER-FOUND ${firstHit(results)?.path ?? "nothing"}` : `Worker ${marker}`));
     }
-    if (userText.startsWith("[Durable work"))
+    if (/^\[(worker|scout) /.test(userText))
       return reply(say(`REPORT-ACK ${/WORKER-FOUND research\/pelican-notes\.md/.test(userText) ? "found" : "missing"}`));
     const steps = scripts[marker] ?? [];
     if (results.length < steps.length) {
@@ -611,7 +623,7 @@ try {
   result.checks.push(`S6/C5 an unknown or other-project upload ID is refused (${uuidRead})`);
 
   // S1/S7: a scout (worker) searches knowledge too, with no library grant.
-  if ((await rpc({ action: "show", id })).project.libraryAccess === "coordinator")
+  if ((await rpc({ action: "settings-snapshot", id })).libraryAccess === "coordinator")
     throw Error("Fixture unexpectedly has the library grant");
   await ask(id, undefined, "MARK-DELEG scout the pelicans");
   await eventually(
@@ -692,10 +704,14 @@ try {
     "C1/C2/C3/C6 picker + drop attach in the composer; the vision coordinator gets the PNG as image content plus a named reference block; chips render in the transcript, open the image, and clear from the composer",
   );
 
-  // C4: an image > 5 MiB is a stored reference only. C3: a text-only coordinator gets no image parts.
+  // C4: an image > 5 MiB reaches the model as a bounded JPEG copy, never the original. C3: a text-only coordinator gets no image parts.
   await ask(id, undefined, "MARK-BIG large photo", { attachments: [big.id] });
   const bigTurn = turns("MARK-BIG").at(-1);
-  if (bigTurn.images.length !== 0 || !bigTurn.user.includes(`upload ${big.id}`) || bigTurn.user.includes(`${big.id} · image attached`))
+  if (
+    bigTurn.images.length !== 1 ||
+    !bigTurn.images[0].startsWith("data:image/jpeg") ||
+    !bigTurn.user.includes(`upload ${big.id} · image attached (reduced copy)`)
+  )
     throw Error("Large image inlined: " + JSON.stringify(bigTurn));
   const own = await upload(textOnly, "diagram.png", fixtures["diagram.png"]);
   await ask(textOnly, undefined, "MARK-TEXTONLY see image", { attachments: [own.reply.data.id] });

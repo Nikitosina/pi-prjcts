@@ -529,7 +529,9 @@ export function startTelegram(options: {
     if (!match) throw new Error("Invalid attachment");
     const project = loadProject(projectId);
     if (project.deleted || project.archived) throw new Error("Project is no longer active");
-    await options.dispatch({ action: "thread-history", id: projectId, threadId: match[1], offset: 0, limit: 1, textLimit: 1 });
+    // A project-scoped ref (a binary result of the coordinator) needs no agent; any other scope must be one of this project's agents.
+    if (match[1] === projectId) return;
+    await options.dispatch({ action: "thread-history", id: projectId, threadId: match[1], limit: 1 });
   }
   /** Caption-first media/album delivery; only text exceeding caption capacity spills over. Every returned message routes replies. */
   async function sendNotice(notice: Notice) {

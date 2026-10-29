@@ -242,6 +242,10 @@ export const Job = Type.Object(
 );
 export type Job = Static<typeof Job>;
 export const ChatId = Type.Union([Type.Literal("main"), Id]);
+/** `<entry id>.<message>` (text) or `<entry id>.<message>.<part>` (image) of a transcript page item. */
+const TranscriptRef = Type.String({ pattern: "^\\d{1,15}\\.\\d{1,6}(\\.\\d{1,6})?$" });
+/** A folder name in an old host's home. */
+const ArchiveProjectId = Type.String({ pattern: "^[A-Za-z0-9-]{1,64}$" });
 /** Owner change to Follow PRs / webhook opt-ins (see project-automations.ts). */
 export const AutomationChange = Type.Object(
   {
@@ -431,25 +435,12 @@ export const Snapshot = Type.Object({
   busy: Type.Boolean(),
   paused: Type.Optional(Type.Boolean()),
   jobs: Type.Array(Job),
-  messages: Type.Array(
-    Type.Object({
-      role: Type.String(),
-      /** Position in the full transcript (search jumps). */ index: Type.Optional(Type.Integer({ minimum: 0 })),
-      at: Type.Number(),
-      text: Type.String(),
-      thinking: Type.Optional(Type.String({ maxLength: 300 })),
-      kind: Type.Optional(Type.Union([Type.Literal("tool"), Type.Literal("compaction")])),
-      name: Type.Optional(Type.String()),
-      argsPreview: Type.Optional(Type.String({ maxLength: 500 })),
-      status: Type.Optional(Type.Union([Type.Literal("ok"), Type.Literal("error"), Type.Literal("pending")])),
-      resultPreview: Type.Optional(Type.String({ maxLength: 500 })),
-    }),
-  ),
-  /** Stored conversational messages older than the window. */ earlier: Type.Optional(Type.Integer({ minimum: 0 })),
+  /** The newest page of the chat's transcript (`TranscriptItem`s, oldest first); `before` is the cursor of the next older page, null at the start. */
+  messages: Type.Array(Type.Unknown()),
+  before: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   inbox: Type.Array(InboxEntry),
   notes: Type.Array(Note),
   evidence: Type.Array(Evidence),
-  durableInspection: Type.Optional(DurableInspection),
   context: Type.Optional(
     Type.Object(
       { tokens: Type.Integer({ minimum: 0 }), window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]) },
@@ -717,12 +708,6 @@ export const Request = Type.Union([
       action: Type.Literal("show"),
       id: Id,
       chatId: Type.Optional(ChatId),
-      /** Transcript index the window must include (search jump). */ focus: Type.Optional(
-        Type.Integer({ minimum: 0, maximum: 10_000_000 }),
-      ),
-      /** Transcript index the window reaches back to (Show earlier messages). */ from: Type.Optional(
-        Type.Integer({ minimum: 0, maximum: 10_000_000 }),
-      ),
     },
     { additionalProperties: false },
   ),
@@ -996,11 +981,71 @@ export const Request = Type.Union([
       action: Type.Literal("thread-history"),
       id: Id,
       threadId: Id,
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-      textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })),
-      textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })),
+      before: Type.Optional(Type.Integer({ minimum: 1 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
       context: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("chat-history"),
+      id: Id,
+      chatId: Type.Optional(ChatId),
+      before: Type.Optional(Type.Integer({ minimum: 1 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("transcript-text"),
+      id: Id,
+      chatId: Type.Optional(ChatId),
+      threadId: Type.Optional(Id),
+      ref: TranscriptRef,
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 100_000_000 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20_000 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("transcript-image"), id: Id, chatId: Type.Optional(ChatId), threadId: Type.Optional(Id), ref: TranscriptRef },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("archive-config"), home: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("archive-projects") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("archive-project"), projectId: ArchiveProjectId }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("archive-history"),
+      projectId: ArchiveProjectId,
+      conversationId: Type.Integer({ minimum: 1 }),
+      before: Type.Optional(Type.Integer({ minimum: 1 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("archive-text"),
+      projectId: ArchiveProjectId,
+      conversationId: Type.Integer({ minimum: 1 }),
+      ref: TranscriptRef,
+      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 100_000_000 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20_000 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("archive-image"),
+      projectId: ArchiveProjectId,
+      conversationId: Type.Integer({ minimum: 1 }),
+      ref: TranscriptRef,
     },
     { additionalProperties: false },
   ),

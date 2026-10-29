@@ -143,17 +143,15 @@ switch (command) {
     input = parse(Request, { action: "thread-stop", id: first, threadId: second });
     break;
   case "thread-history": {
-    const [offset = "0", textOffset = "0"] = rest;
-    if (!first || !second || rest.length > 2 || !/^\d+$/.test(offset) || !/^\d+$/.test(textOffset))
-      throw new Error("Usage: thread-history <project-id> <thread-id> [message-offset] [Unicode-text-offset]");
+    const [before] = rest;
+    if (!first || !second || rest.length > 1 || (before !== undefined && !/^\d+$/.test(before)))
+      throw new Error("Usage: thread-history <project-id> <thread-id> [before-cursor]");
     input = parse(Request, {
       action: "thread-history",
       id: first,
       threadId: second,
-      offset: Number(offset),
-      textOffset: Number(textOffset),
+      ...(before ? { before: Number(before) } : {}),
       limit: 30,
-      textLimit: 4000,
     });
     break;
   }

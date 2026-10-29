@@ -2,18 +2,25 @@
 // Failure modes (written first): scripts/worker-artifacts-browser-failures.md. Artifact: artifacts/worker-artifacts-browser-<stamp>/{result.json,*.png}.
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { kit, delay } from "./notify-kit.mjs";
+import { kit, delay, randomUUID } from "./notify-kit.mjs";
 
 let root;
 const respond = async ({ coordinator, userText, results, tools, say, call }) => {
   if (coordinator) {
     if (/MARK-BROWSE\b/.test(userText)) {
       const steps = [
-        { role: "worker", task: "BROWSE-A produce evidence" },
-        { role: "worker", task: "BROWSE-B second worker" },
-        { role: "worker", task: "BROWSE-C saves nothing" },
+        { title: "BROWSE-A", brief: "BROWSE-A produce evidence" },
+        { title: "BROWSE-B", brief: "BROWSE-B second worker" },
+        { title: "BROWSE-C", brief: "BROWSE-C saves nothing" },
       ];
-      if (results.length < steps.length) return call("projects_delegate", steps[results.length]);
+      if (results.length < steps.length)
+        return call("agents", {
+          action: "spawn",
+          role: "worker",
+          acceptance: ["done"],
+          requestId: `browse-${results.length}`,
+          ...steps[results.length],
+        });
     }
     return undefined;
   }
@@ -52,6 +59,15 @@ const respond = async ({ coordinator, userText, results, tools, say, call }) => 
   return undefined;
 };
 const k = await kit("worker-artifacts-browser", {}, respond);
+// The worker view opens once the page has read the Jobs (they arrive by push after load).
+const openWorker = async (thread, page) => {
+  await k.waitFor(
+    `import('/app/decisions.js').then((m) => !!m.plan?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
+    page,
+    "page knows the worker",
+  );
+  return k.evaluate(`import('/app/workers.js').then((m) => m.inspectThread(${JSON.stringify(thread)}))`, page);
+};
 root = k.root;
 const { rpc, result, eventually, evaluate, waitFor, shot, openPage, send } = k;
 const check = (name, ok, detail) => {
@@ -112,15 +128,15 @@ try {
   const snap = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: snap.workspaceRevision });
   await rpc({ action: "message", id, text: "MARK-BROWSE please produce evidence with three workers" });
-  const plan = await eventually(
+  const agents = await eventually(
     async () => {
-      const p = await rpc({ action: "plan-snapshot", id });
-      return p.work.length >= 3 && p.work.every((w) => ["completed", "failed"].includes(w.status)) && p;
+      const list = (await rpc({ action: "jobs-snapshot", id })).agents;
+      return list.length >= 3 && list.every((agent) => agent.endedAt) && list;
     },
     "workers did not settle",
     1800,
   );
-  const threadOf = (marker) => plan.work.find((w) => w.text.includes(marker)).threadId;
+  const threadOf = (marker) => agents.find((agent) => agent.title === marker).id;
   const [threadA, threadB, threadC] = ["BROWSE-A", "BROWSE-B", "BROWSE-C"].map(threadOf);
   const listingA = await rpc({ action: "artifacts-list", id, threadId: threadA });
   const dirA = join(k.home, id, "artifacts", threadA);
@@ -135,16 +151,11 @@ try {
   const url = new URL(web.url);
   url.searchParams.set("project", id);
   url.searchParams.set("tab", "coordinator");
+  const origin = await evaluate("performance.timeOrigin", s);
   await send("Page.navigate", { url: url.toString() }, s);
-  // The card lists active work only; "View all work" is clicked while it still says so, until the finished worker shows.
-  await waitFor(
-    `(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); return !!document.querySelector('[data-action="thread"][data-thread="${threadA}"]'); })()`,
-    s,
-    "worker A in the list",
-  );
-
+  await waitFor(`performance.timeOrigin !== ${origin}`, s, "new document");
   check("F12 no worker view open: there is no artifact browser", await evaluate(`!document.querySelector('#artifact-pane')`, s));
-  await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
+  await openWorker(threadA, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 5`, s, "artifact tree");
   const layout = await evaluate(
     `(() => { const view = document.querySelector('#inline-thread'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inView: !view.hidden && view.contains(document.querySelector('#artifact-pane')) && !document.querySelector('#workers-card').contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`,
@@ -318,6 +329,9 @@ try {
   const fetchesBefore = await evaluate(`performance.getEntriesByType('resource').filter(e => e.name.includes('readme.md')).length`, s);
   mkdirSync(join(dirA, "late"), { recursive: true });
   writeFileSync(join(dirA, "late", "new-late.txt"), "arrived later");
+  // Nothing polls: the listing is re-read when the worker commits, so a follow-up turn is the "worker still running" case.
+  await delay(4200);
+  await rpc({ action: "thread-send", id, threadId: threadA, requestId: randomUUID(), text: "MARK-LATE one more thing" });
   await waitFor(
     `!!document.querySelector('#artifact-tree .artifact-file[data-path="late/new-late.txt"].fresh')`,
     s,
@@ -441,7 +455,7 @@ try {
   );
   await shot("03-three-columns", s);
 
-  await click(`[data-action="thread"][data-thread="${threadB}"]`, s);
+  await openWorker(threadB, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length === 1 && !!${file("second.txt")}`, s, "worker B files");
   check(
     "F11 switching workers swaps the browser (no files or selection from worker A)",
@@ -450,7 +464,7 @@ try {
       s,
     ),
   );
-  await click(`[data-action="thread"][data-thread="${threadC}"]`, s);
+  await openWorker(threadC, s);
   await waitFor(`document.querySelector('#artifact-tree')?.innerText.includes('No artifacts yet')`, s, "worker C empty state");
   check("F12 a worker without artifacts shows an empty state", true);
   await click('[data-action="thread-close"]', s);
@@ -460,7 +474,7 @@ try {
     "Back closes the worker view",
   );
   check("F12 Back closes the worker view and removes the browser", true);
-  await click(`[data-action="thread"][data-thread="${threadA}"]`, s);
+  await openWorker(threadA, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 10`, s, "worker A again");
 
   await viewport(390, 844, true, s);

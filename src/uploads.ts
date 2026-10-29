@@ -8,8 +8,6 @@ import { Id, parse, readJson, saveJson } from "./state.ts";
 
 /** Owner uploads: project knowledge that coordinator and workers can search and read. Worker evidence stays in the library. */
 export const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
-/** Kept for callers that still size-gate images; models now get a bounded copy made at upload time (`uploadModelCopy`). */
-export const UPLOAD_IMAGE_INLINE_BYTES = 5 * 1024 * 1024;
 const TEXT_MAX_CHARS = 2_000_000;
 export const UploadRecord = Type.Object(
   {

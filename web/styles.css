@@ -5215,3 +5215,19 @@ details.advanced[open] > summary {
 .msg .text img {
   cursor: pointer;
 }
+
+/* Archive and paged transcripts */
+.archive-home { gap: 8px; align-items: end; }
+.archive-home label { flex: 1; }
+.archive-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.archive-row { display: flex; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; text-align: left; }
+.archive-list li { min-width: 0; }
+.archive-row { box-sizing: border-box; max-width: 100%; overflow: hidden; }
+.archive-row b { flex: none; white-space: nowrap; }
+.archive-row small { color: var(--muted, inherit); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-transcript { max-height: 60vh; overflow: auto; }
+.msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.lazy-img { max-width: 100%; border-radius: 6px; background: rgba(127, 127, 127, 0.15); }
+.lazy-img.loaded { max-height: 420px; object-fit: contain; }
+.lazy-img.failed { opacity: 0.4; }
+.full-text { white-space: pre-wrap; overflow-wrap: anywhere; }

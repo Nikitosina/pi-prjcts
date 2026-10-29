@@ -555,7 +555,7 @@ try {
   if ((await rpc({ action: "show", id })).jobs.length !== jobsBefore) throw Error("Enter in the picker sent a message");
   result.checks.push("S8/S9 the picker filters, ↑/↓ move, Esc closes, Enter inserts /skill:<name> without sending");
 
-  // "/" inside a word or path does not open the picker (failure 10); after whitespace it does (inline skills, inline-refs-e2e covers picking there).
+  // "/" inside a word or path does not open the picker (failure 10); after whitespace it does (inline skills).
   await typeText(s, "and then src/");
   if ((await menu(s)).open) throw Error("Picker opened inside a path");
   await evaluate(

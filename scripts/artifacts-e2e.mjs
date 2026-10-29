@@ -4,18 +4,24 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { kit, delay, randomUUID } from "./notify-kit.mjs";
 
-const brain = { workerSystem: [], workerResults: [], childResults: [], coordResults: [], report: "", thread: null, child: null, final: "" };
+const brain = { workerSystem: [], workerResults: [], coordResults: [], report: "", thread: null, child: null, final: "" };
 let root;
 const respond = async ({ coordinator, userText, results, tools, say, call, msgs }) => {
   const system = msgs.find((m) => m.role === "system")?.content ?? "";
   if (coordinator) {
     if (/MARK-ART\b/.test(userText) && results.length === 0)
-      return call("projects_delegate", { role: "worker", task: "ART-WORKER capture evidence of the feature" });
-    if (userText.startsWith("[Durable work") && /ART-WORKER|artifact:/.test(userText)) {
+      return call("agents", {
+        action: "spawn",
+        role: "worker",
+        title: "ART-WORKER",
+        brief: "ART-WORKER capture evidence of the feature",
+        acceptance: ["evidence saved"],
+        requestId: "art-1",
+      });
+    if (userText.startsWith("[worker ") && /ART-WORKER/.test(userText)) {
       brain.report = userText;
       brain.coordResults = results;
-      const thread = (brain.thread =
-        /^\[Durable work [0-9a-f-]+, worker, \w+; thread ([0-9a-f-]{36})\]/.exec(userText)?.[1] ?? brain.thread);
+      const thread = (brain.thread = /^\[worker ([0-9a-f-]{36}) /.exec(userText)?.[1] ?? brain.thread);
       const steps = [
         ["projects_artifacts_list", { threadId: thread }],
         ["projects_artifacts_list", {}],
@@ -32,13 +38,6 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
     return undefined;
   }
   if (!tools.includes("bash")) return undefined;
-  if (/^\[Child work/.test(userText)) return say("ART-PARENT-DONE Saved shot.png, demo.webm, logs/run.log in my artifacts folder.");
-  if (/ART-CHILD/.test(userText)) {
-    if (results.length === 0)
-      return call("bash", { command: 'printf "child evidence" > "$PI_ARTIFACTS_DIR/child.txt" && echo "DIR=$PI_ARTIFACTS_DIR"' });
-    brain.childResults = results;
-    return say("CHILD-DONE saved child.txt");
-  }
   if (/ART-WORKER/.test(userText)) {
     brain.workerSystem.push(String(typeof system === "string" ? system : JSON.stringify(system)));
     if (results.length === 0)
@@ -60,9 +59,9 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
       });
     if (results.length === 1) {
       brain.workerResults = results;
-      return call("projects_delegate_child", { role: "worker", task: "ART-CHILD save child evidence" });
+      return say("ART-PARENT-DONE Saved shot.png, demo.webm, logs/run.log in my artifacts folder.");
     }
-    return say("Waiting for the child.");
+    return undefined;
   }
   return undefined;
 };
@@ -111,7 +110,6 @@ try {
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: snap.workspaceRevision });
   await rpc({ action: "message", id, text: "MARK-ART please verify the feature with evidence" });
   await eventually(() => brain.final, "coordinator never wrote the final answer", 1200);
-  const plan = await rpc({ action: "plan-snapshot", id }).catch(() => null);
   const view = await eventually(
     async () => {
       const v = await rpc({ action: "show", id });
@@ -123,10 +121,9 @@ try {
   const thread = brain.thread;
   const dir = join(k.home, id, "artifacts", thread);
   const bashOut = brain.workerResults[0] ?? "";
-  const childDir = /DIR=(\S+)/.exec(brain.childResults[0] ?? "")?.[1] ?? "";
   const workerDir = /DIR=(\S+)/.exec(bashOut)?.[1] ?? "",
     workerPwd = /PWD=(\S+)/.exec(bashOut)?.[1] ?? "";
-  result.paths = { workerDir, workerPwd, childDir, expected: dir };
+  result.paths = { workerDir, workerPwd, expected: dir };
   check(
     "A1 the worker folder lives in the project home, outside the worktree",
     workerDir.endsWith(`/artifacts/${thread}`) &&
@@ -143,23 +140,8 @@ try {
     system.slice(-1500),
   );
   check(
-    "A5/A6 no dangling projects_evidence instruction; workers told to list saved files",
-    !/projects_evidence/.test(system) && /list the saved files/i.test(system),
-  );
-  check(
-    "A3/A4 the child worker gets its own folder, not the parent's",
-    childDir &&
-      childDir !== workerDir &&
-      /\/artifacts\/[0-9a-f-]{36}$/.test(childDir) &&
-      readFileSync(join(childDir, "child.txt"), "utf8") === "child evidence",
-    result.paths,
-  );
-  check(
-    "A15 the settled report lists the artifacts as references and warns about the cap",
-    brain.report.includes(`artifact:${thread}/shot.png`) &&
-      brain.report.includes(`artifact:${thread}/demo.webm`) &&
-      /cap/i.test(brain.report),
-    brain.report.slice(-1500),
+    "A5/A6 no dangling projects_evidence instruction; workers told to list each saved file as a ref",
+    !/projects_evidence/.test(system) && /list each file in your answer as a ref/i.test(system),
   );
   const [list, overview, log, traversal, leak, image, foreign] = brain.coordResults;
   result.coordResults = brain.coordResults.map((r) => r.slice(0, 1500));
@@ -168,11 +150,7 @@ try {
     /shot\.png/.test(list) && /logs\/run\.log/.test(list) && /demo\.webm/.test(list) && /"size"/.test(list),
     list?.slice(0, 1500),
   );
-  check(
-    "A8 the overview names each thread with its first task, file count and total",
-    /"task":"ART-WORKER/.test(overview) && /"task":"ART-CHILD/.test(overview),
-    overview,
-  );
+  check("A8 the overview names each thread with its first task, file count and total", /"task":"ART-WORKER/.test(overview), overview);
   check(
     "A9 the planted symlinks are skipped, never listed as files",
     (() => {
@@ -273,25 +251,19 @@ try {
     after: await fetches(),
   });
 
-  // Worker pane inside the Workers card.
+  // Worker view (opened once the page has read the Jobs, which arrive by push after load).
   const activity = new URL(web.url);
   activity.searchParams.set("project", id);
   activity.searchParams.set("tab", "coordinator");
+  const origin = await evaluate("performance.timeOrigin", s);
   await send("Page.navigate", { url: activity.toString() }, s);
-  // The card lists active work only: click "View all work" while it says so, then expand the worker once.
-  // Page.navigate resolves before the new document commits; an evaluate that lands mid-commit throws, so retry it.
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await waitFor(
-        `(() => { const all = document.querySelector('#activity [data-action="all-work"]'); if (all?.innerText.startsWith('View all')) all.click(); const row = document.querySelector('[data-action="thread"][data-thread="${thread}"]'); if (row && document.querySelector('#inline-thread').hidden) row.click(); return !!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]'); })()`,
-        s,
-        "artifact browser files",
-      );
-      break;
-    } catch (error) {
-      if (attempt > 3 || !/navigated or closed/.test(String(error))) throw error;
-    }
-  }
+  await waitFor(
+    `performance.timeOrigin !== ${origin} && import('/app/decisions.js').then((m) => !!m.plan?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
+    s,
+    "page knows the worker",
+  );
+  await evaluate(`import('/app/workers.js').then((m) => m.inspectThread(${JSON.stringify(thread)}))`, s);
+  await waitFor(`!!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]')`, s, "artifact browser files");
   await evaluate(`document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]').click()`, s);
   await waitFor(
     `[...document.querySelectorAll('#artifact-preview img.artifact-media')].some(i => i.naturalWidth === 320)`,
@@ -326,7 +298,6 @@ try {
   await shot("02-thread-artifacts", s);
   // Expected refusals in this test: the missing artifact (404) issued by the chat.
   result.httpErrors = result.httpErrors.filter((e) => !(e.url.includes("/artifacts/") && /nope\.png$/.test(e.url)));
-  void plan;
   void view;
   result.status = "passed";
 } catch (error) {

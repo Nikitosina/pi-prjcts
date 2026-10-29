@@ -89,10 +89,12 @@ export function validateEntryId(value: unknown, name = "before"): number | undef
   return value;
 }
 
+/** `display` rewrites a message's full text before it is cut to a preview (the host hides expanded skill bodies this way). */
+export type PageOptions = { before?: number | null; limit?: number; display?: (role: "user" | "assistant", text: string) => string };
 export async function readTranscriptPage(
   source: TranscriptSource,
   conversationId: number,
-  options: { before?: number | null; limit?: number } = {},
+  options: PageOptions = {},
 ): Promise<TranscriptPage> {
   const before = validateEntryId(options.before),
     limit = options.limit ?? PAGE_ENTRIES;
@@ -103,14 +105,14 @@ export async function readTranscriptPage(
     entries = older ? rows.slice(0, limit) : rows;
   return {
     conversationId,
-    items: entries.toReversed().flatMap(entryItems),
+    items: entries.toReversed().flatMap((entry) => entryItems(entry, options.display)),
     before: older ? entries[entries.length - 1]!.id : null,
     entries: entries.length,
   };
 }
 
 /** Items of one entry in display order. Calls come out right after their assistant text. */
-function entryItems(entry: RawEntry): TranscriptItem[] {
+function entryItems(entry: RawEntry, display?: PageOptions["display"]): TranscriptItem[] {
   if (entry.kind === "pi.compaction")
     return [
       {
@@ -129,7 +131,7 @@ function entryItems(entry: RawEntry): TranscriptItem[] {
       ref = `${entry.id}.${index}`;
     if (message.role === "user" || message.role === "assistant") {
       const content = parts(message.content),
-        text = preview(joinText(content), TEXT_PREVIEW_CHARS),
+        text = preview(display ? display(message.role, joinText(content)) : joinText(content), TEXT_PREVIEW_CHARS),
         thinking = message.role === "assistant" ? preview(joinText(content, "thinking"), THINKING_PREVIEW_CHARS).text : "";
       items.push({
         kind: "message",

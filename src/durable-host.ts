@@ -1,14 +1,9 @@
 import { inbox } from "./inbox.ts";
 import { evidence } from "./evidence.ts";
-import {
-  openDurableProject,
-  type DurableCoordinatorMessage,
-  type DurableProjectRuntime,
-  type DurableSubmissionState,
-} from "./durable-runtime.ts";
-import { compactSkillText } from "./coordinator-skills.ts";
+import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionState } from "./durable-runtime.ts";
 import { attachmentContent, listUploads } from "./uploads.ts";
 import { plugins } from "./plugins.ts";
+import { feed } from "./change-feed.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(
@@ -16,15 +11,38 @@ export async function openDurableHost(
   configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader,
   discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>,
 ): Promise<DurableProjectRuntime> {
-  const owner = await openDurableProject({ project, dir: projectDir(project.id), configuredSkillLoader, discoverSkills });
+  // Settling is driven by commits, so reads never write. The owner is not yet known while the first commits arrive; they are caught up below.
+  let settling: Promise<void> = Promise.resolve(),
+    opened: DurableProjectRuntime | undefined;
+  const settle = () => {
+    settling = settling
+      .then(() => (opened ? settleProject(opened, project.id) : undefined))
+      .catch(() => {})
+      .then(() => undefined);
+    return settling;
+  };
+  const owner = await openDurableProject({
+    project,
+    dir: projectDir(project.id),
+    configuredSkillLoader,
+    discoverSkills,
+    onChange: (event) => {
+      // The ledger is settled before the browser is told, so its next read already shows the new state.
+      if (event.topic === "chat") void settle().then(() => feed.publish(project.id, event));
+      else feed.publish(project.id, event);
+    },
+  });
+  opened = owner;
   try {
-    if ((await owner.jobs()).paused) return owner;
-    for (const job of jobs(project.id).filter((job) => job.state === "queued" || job.state === "running")) {
-      await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
-        requestId: job.id,
-        chatId: job.chatId,
-      });
+    if (!(await owner.jobs()).paused) {
+      for (const job of jobs(project.id).filter((job) => job.state === "queued" || job.state === "running")) {
+        await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
+          requestId: job.id,
+          chatId: job.chatId,
+        });
+      }
     }
+    await settle();
     return owner;
   } catch (error) {
     await owner.close();
@@ -70,6 +88,39 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
 
 export type ProjectActivity = { working: boolean; needs: boolean; finishedAt: number };
 
+/** Brings the job ledger of every chat in line with the runtime and records the project's phase and problem. Called by commits, never by a read. */
+export async function settleProject(owner: DurableProjectRuntime, projectId: string): Promise<void> {
+  const chats = await owner.chats(),
+    all = jobs(projectId);
+  for (const chat of chats) {
+    const ledger = all.filter((job) => (job.chatId ?? "main") === chat.id),
+      open = ledger.filter((job) => job.state === "queued" || job.state === "running");
+    if (open.length)
+      settleLedger(
+        projectId,
+        ledger,
+        await owner.ledgerSubmissions(
+          chat.id,
+          open.map((job) => job.id),
+        ),
+        false,
+      );
+  }
+  const project = loadProject(projectId),
+    problem = chatProblems(all, chats);
+  // Per chat, only the newest settled turn decides attention; a later success clears an earlier failure.
+  const phase = problem ? "attention" : chats.some((chat) => chat.busy) ? "busy" : "ready";
+  if (project.problem !== problem || project.phase !== phase) saveProject({ ...project, problem, phase });
+}
+const failureOf = (all: JobLedger, id: string) => {
+  const settled = all.filter((job) => (job.chatId ?? "main") === id).findLast((job) => job.state === "done" || job.state === "failed");
+  return settled?.state === "failed" ? settled.error : null;
+};
+const chatProblems = (all: JobLedger, chats: { id: string; title: string }[], viewed?: string): string | null => {
+  const failing = [chats.find((chat) => chat.id === viewed), ...chats].find((chat) => chat && failureOf(all, chat.id) !== null);
+  return !failing ? null : failing.id === viewed ? failureOf(all, failing.id) : `Chat "${failing.title}": ${failureOf(all, failing.id)}`;
+};
+
 // Live state of one open project for the sidebar, whichever project the browser is looking at: a coordinator turn or worker running or queued,
 // a failed newest turn or a blocked worker, and when anything last finished. Same rules the chat tabs use, so the dots agree.
 export async function durableHostActivity(owner: DurableProjectRuntime, projectId: string): Promise<ProjectActivity> {
@@ -79,8 +130,6 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
     finishedAt = 0;
   for (const chat of chats) {
     const ledger = all.filter((job) => (job.chatId ?? "main") === chat.id);
-    if (ledger.some((job) => job.state === "queued" || job.state === "running"))
-      settleLedger(projectId, ledger, await owner.chatSubmissions(chat.id), false);
     if (ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed") needs = true;
     for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
   }
@@ -93,71 +142,30 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
   };
 }
 
-export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string, focus?: number, from?: number): Promise<Snapshot> {
+/** A pure read of the saved ledger and the newest transcript page; the ledger is kept current by `settleProject`. */
+export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string): Promise<Snapshot> {
   const view = await owner.snapshot(chatId);
   const paused = (await owner.jobs()).paused;
   const project = loadProject(view.project.id);
-  // Each chat has its own ledger; jobs without a chat belong to Main. Unsettled jobs of other chats are settled too, so attention covers every chat.
   const all = jobs(project.id),
     ledgerOf = (id: string) => all.filter((job) => (job.chatId ?? "main") === id);
-  const viewed = ledgerOf(view.chatId);
-  settleLedger(project.id, viewed, view.coordinator.submissions, true);
-  for (const chat of view.chats) {
-    if (chat.id === view.chatId) continue;
-    const ledger = ledgerOf(chat.id);
-    if (ledger.some((job) => job.state === "queued" || job.state === "running"))
-      settleLedger(project.id, ledger, await owner.chatSubmissions(chat.id), false);
-  }
-  // Per chat, only the newest settled turn decides attention; a later success clears an earlier failure.
-  const failure = (id: string) => {
-    const settled = ledgerOf(id).findLast((job) => job.state === "done" || job.state === "failed");
-    return settled?.state === "failed" ? settled.error : null;
-  };
   const finishedAt = (id: string) => ledgerOf(id).findLast((job) => job.state === "done" && job.settledAt !== undefined)?.settledAt;
   const chats = view.chats.map((chat) => ({
     ...chat,
-    attention: failure(chat.id) !== null,
+    attention: failureOf(all, chat.id) !== null,
     ...(finishedAt(chat.id) === undefined ? {} : { finishedAt: finishedAt(chat.id) }),
   }));
-  const failing = [chats.find((chat) => chat.id === view.chatId), ...chats].find((chat) => chat?.attention);
-  project.problem = !failing ? null : failing.id === view.chatId ? failure(failing.id) : `Chat "${failing.title}": ${failure(failing.id)}`;
-  project.phase = project.problem ? "attention" : view.chats.some((chat) => chat.busy) ? "busy" : "ready";
-  saveProject(project);
   const dir = projectDir(project.id);
-  const window = transcriptWindow(view.coordinator.messages, focus, from);
   return {
-    project,
+    project: { ...project, problem: chatProblems(all, chats, view.chatId), phase: project.phase },
     busy: view.coordinator.busy,
     paused,
-    jobs: viewed,
-    messages: window.map(([message, index]) =>
-      "kind" in message && message.kind === "compaction"
-        ? { role: "compaction", index, at: message.at, text: "", kind: message.kind }
-        : "kind" in message
-          ? {
-              role: "tool",
-              index,
-              at: message.at,
-              text: "",
-              kind: message.kind,
-              name: message.name,
-              argsPreview: message.argsPreview,
-              status: message.status,
-              resultPreview: message.resultPreview,
-            }
-          : {
-              role: message.role,
-              index,
-              at: message.at,
-              text: message.role === "user" ? compactSkillText(message.text) : message.text,
-              ...(message.thinking ? { thinking: message.thinking } : {}),
-            },
-    ),
-    earlier: earlierMessages(view.coordinator.messages, window),
+    jobs: ledgerOf(view.chatId),
+    messages: view.coordinator.history.items,
+    before: view.coordinator.history.before,
     inbox: inbox(dir),
     notes: notes(dir),
     evidence: evidence(dir),
-    durableInspection: view.durableInspection,
     context: view.coordinator.context,
     chatId: view.chatId,
     chats,
@@ -171,41 +179,4 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
         ? project.workspaceAuthorization.provider
         : null,
   };
-}
-
-// The last 30 conversational messages and every step between them, so a long tool chain never hides the turn that started it.
-// With `focus` (a search jump), the window also reaches back to that message; older tool rows stay out beyond 400 rows. `from` (Show earlier messages)
-// adds everything from that transcript index on. Compaction dividers sit at their stored position and do not count as messages. Pairs carry the transcript index.
-function transcriptRows(messages: readonly DurableCoordinatorMessage[]): [DurableCoordinatorMessage, number][] {
-  return messages
-    .map((message, index): [DurableCoordinatorMessage, number] => [message, index])
-    .filter(([message]) => "kind" in message || message.text.trim() || message.thinking);
-}
-function transcriptWindow(
-  messages: readonly DurableCoordinatorMessage[],
-  focus?: number,
-  from?: number,
-): [DurableCoordinatorMessage, number][] {
-  const rows = transcriptRows(messages);
-  let start = rows.length;
-  for (let texts = 0; start > 0 && texts < 30; start--) if (!("kind" in rows[start - 1][0])) texts++;
-  const tail = Math.max(start, rows.length - 400),
-    at = focus === undefined ? -1 : rows.findIndex(([, index]) => index >= focus);
-  const base =
-    at < 0 || at >= tail
-      ? rows.slice(tail)
-      : (() => {
-          const first = Math.max(0, at - 3);
-          return rows.filter(
-            ([message], position) => position >= tail || (position >= first && (!("kind" in message) || position <= at + 40)),
-          );
-        })();
-  if (from === undefined) return base;
-  const kept = new Set(base.map(([, index]) => index));
-  return rows.filter(([, index]) => index >= from || kept.has(index));
-}
-// Stored conversational messages that the window leaves out, for the Show earlier messages button.
-function earlierMessages(messages: readonly DurableCoordinatorMessage[], window: readonly [DurableCoordinatorMessage, number][]): number {
-  const shown = new Set(window.map(([, index]) => index));
-  return transcriptRows(messages).filter(([message, index]) => !("kind" in message) && !shown.has(index)).length;
 }

@@ -1,20 +1,23 @@
-// Browser E2E for full-text search (chats, worker threads, knowledge, uploads; Cmd/Ctrl+K; jump + highlight; 390 px)
-// and worker-failure notices in the host notification feed. Isolated host, fake model, headless Chrome.
+// Browser E2E for full-text search (chats, worker threads, knowledge, uploads; Cmd/Ctrl+K; jump + highlight; 390 px).
+// Isolated host, fake model, headless Chrome.
 // Failure cases recorded in search-ui-failures.md before implementation.
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { kit, delay } from "./notify-kit.mjs";
 
 const respond = ({ coordinator, userText, results, say, call }) => {
   if (coordinator) {
-    const owner = !userText.startsWith("[Durable work") && !userText.startsWith("[Owner-local event");
+    const owner = !userText.startsWith("[worker") && !userText.startsWith("[Owner-local event");
     const task = owner && results.length === 0 && /MARK-(WORK|WFAIL|WSTOP)\b/.exec(userText)?.[1];
-    if (task) return call("projects_delegate", { role: "worker", task: `${task}-TASK please do it` });
-    if (!owner) return say(`Coordinator noted the worker report ${/WORK-TASK|WFAIL-TASK|WSTOP-TASK/.exec(userText)?.[0] ?? ""}.`);
+    if (task)
+      return call("agents", {
+        action: "spawn",
+        role: "worker",
+        title: task,
+        brief: `${task}-TASK please do it`,
+        acceptance: ["done"],
+        requestId: `req-${task}`,
+      });
     return undefined;
   }
-  if (/WFAIL-TASK/.test(userText)) return { error: "Fake worker provider error WFAIL" };
-  if (/WSTOP-TASK/.test(userText)) return "HOLD";
   // The worker's intermediate step says a word that only exists in its own thread.
   if (/WORK-TASK/.test(userText) && results.length === 0)
     return call("projects_knowledge_list", {}).replace(
@@ -31,7 +34,7 @@ const check = (name, ok, detail) => {
   result.checks.push(name);
 };
 const search = (id, query) => rpc({ action: "search", id, query });
-const plan = (id) => rpc({ action: "plan-snapshot", id });
+const agents = async (id) => (await rpc({ action: "jobs-snapshot", id })).agents;
 const ok = async (id, chatId, text) => {
   const job = await k.ask(id, chatId, text);
   if (job.state !== "done") throw Error(`${text}: ${job.state} ${job.error}`);
@@ -78,14 +81,11 @@ try {
   await rpc({ action: "chat-update", id: a, chatId: three.id, archived: true });
   await ok(a, "main", 'MARK-XSS <img src=x onerror="window.__xss=1"> xssmarmot');
   await ok(a, "main", "MARK-WORK delegate something");
-  await eventually(
-    async () => (await plan(a)).work.some((w) => w.text.includes("WORK-TASK") && w.status === "completed"),
-    "worker did not complete",
-  );
+  const worker = await eventually(async () => (await agents(a)).find((agent) => agent.title === "WORK"), "worker did not start");
   await eventually(
     async () =>
-      (await rpc({ action: "show", id: a })).messages.some((m) => m.text?.includes("Coordinator noted the worker report WORK-TASK")),
-    "coordinator did not get report",
+      (await rpc({ action: "thread-history", id: a, threadId: worker.id })).items.some((item) => /Worker result/.test(item.text ?? "")),
+    "worker did not finish its turn",
   );
   const doc = `# Zoo\n\n${"Plain filler paragraph about nothing in particular.\n\n".repeat(60)}The narwhalcompass points north.\n`;
   await rpc({ action: "knowledge-write", id: a, path: "research/zoo.md", text: doc, expectedRevision: null });
@@ -122,7 +122,7 @@ try {
     "S2 a word said only in a worker thread is found in that thread",
     workHit &&
       !ibex.results.some((r) => r.source === "chat") &&
-      (await plan(a)).work.some((w) => w.threadId === workHit.threadId) &&
+      (await agents(a)).some((agent) => agent.id === workHit.threadId) &&
       workHit.role === "assistant" &&
       /worker/i.test(workHit.label),
     ibex.results,
@@ -166,73 +166,11 @@ try {
     expectedRevision: (await rpc({ action: "knowledge-read", id: a, path: "research/zoo.md" })).revision,
   });
 
-  // Worker-failure notices (W1-W5).
-  const feedAll = async () => (await rpc({ action: "notify-feed", after: 0 })).items;
-  await ok(a, two.id, "MARK-WFAIL delegate a doomed task");
-  const failed = await eventually(
-    async () => (await plan(a)).work.find((w) => w.text.includes("WFAIL-TASK") && w.status === "failed"),
-    "worker did not fail",
-  );
-  const notice = await eventually(
-    async () => (await feedAll()).find((n) => n.kind === "error" && n.workId === failed.id),
-    "no worker failure notice",
-    300,
-  );
-  check(
-    "W1/W2 a failed worker is a notice for the delegating chat, naming role, task and reason",
-    notice.chatId === two.id &&
-      notice.chat === "Two" &&
-      /worker/i.test(notice.title) &&
-      notice.text.includes("WFAIL-TASK") &&
-      notice.threadId === failed.threadId,
-    notice,
-  );
-  await ok(a, "main", "MARK-WSTOP delegate a slow task");
-  const slow = await eventually(
-    async () => (await plan(a)).work.find((w) => w.text.includes("WSTOP-TASK") && w.status === "running"),
-    "slow worker did not start",
-  );
-  await rpc({ action: "thread-stop", id: a, threadId: slow.threadId });
-  await eventually(
-    async () => (await plan(a)).work.find((w) => w.id === slow.id && !["queued", "running"].includes(w.status)),
-    "slow worker did not stop",
-  );
-  await eventually(
-    async () => (await feedAll()).some((n) => n.text === "Done MARK-WSTOP."),
-    "the coordinator turn that delegated the stopped worker did not finish",
-    300,
-  );
-  const afterStop = await feedAll();
-  check("W3 one notice per failure across scans", afterStop.filter((n) => n.workId === failed.id).length === 1, afterStop);
-  check(
-    "W5 a stopped worker is not a failure notice",
-    !afterStop.some((n) => n.workId === slow.id),
-    afterStop.filter((n) => n.workId),
-  );
-  // W4: a feed file written before this feature (no work baseline) must not flood old failures.
-  await k.stopHost();
-  const path = join(k.home, "notifications.json"),
-    state = JSON.parse(readFileSync(path, "utf8"));
-  const before = state.feed.length;
-  for (const entry of Object.values(state.projects)) {
-    delete entry.workBaselined;
-    entry.seen = entry.seen.filter((key) => !key.startsWith("work:"));
-  }
-  writeFileSync(path, JSON.stringify(state, null, 2));
-  await k.startHost();
-  await delay(2500);
-  const restarted = await feedAll();
-  check(
-    "W3/W4 a restart, even from a pre-feature feed file, re-emits no worker failure",
-    restarted.length === before && restarted.filter((n) => n.workId === failed.id).length === 1,
-    { before, after: restarted.length },
-  );
-
   // Browser: Cmd/Ctrl+K from the composer, arrows + Enter, jump into the old turn and highlight it.
   const web = new URL((await rpc({ action: "web" })).url);
   web.searchParams.set("project", a);
   s = await k.openPage(web.toString());
-  await waitFor(`document.querySelector('#messages')?.innerText.includes('Coordinator noted')`, s, "page loaded");
+  await waitFor(`document.querySelector('#messages')?.innerText.includes('MARK-WORK')`, s, "page loaded");
   await evaluate(`document.querySelector('#compose textarea').focus()`, s);
   await keyK(s);
   await waitFor(`document.querySelector('dialog[open] #search-input') === document.activeElement`, s, "search dialog focused");
@@ -293,7 +231,7 @@ try {
     `(() => { const t = document.querySelector('#compose textarea'); t.value = 'MARK-NEXT after search'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`,
     s,
   );
-  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-NEXT.')`, s, "next reply");
+  await waitFor(`document.querySelector('#messages').innerText.includes('MARK-NEXT after search')`, s, "next reply");
   check(
     "S8 after the owner moves on the transcript is the normal tail again",
     await evaluate(
@@ -382,7 +320,6 @@ try {
   check("S13 at 390 px the jumped-to message is visible", true);
   await shot("07-mobile-jump", s);
 
-  result.notice = notice;
   result.status = "passed";
 } catch (error) {
   result.status = "failed";

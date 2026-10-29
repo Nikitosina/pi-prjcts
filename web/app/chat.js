@@ -67,6 +67,19 @@ import { autosize, closeSkillMenu, draftKey, drafts, refsSplit } from "./compose
 import { toolCallHtml, toolLabel, when } from "./observability.js";
 import { notifyCursor, notifyEnabled, notifyTimer, pollNotify, scheduleNotify, setNotifyTimer } from "./notifications.js";
 import { searchFocus, setSearchFocus } from "./search.js";
+import {
+  bindTranscript,
+  displayMessages,
+  forget,
+  hasOlder,
+  hydrate,
+  imagesHtml,
+  loadOlder,
+  loadedItems,
+  mergeNewest,
+  moreTextHtml,
+  reach,
+} from "./transcript.js";
 
 // Selected coordinator chat; "main" is the project's original coordinator. Drafts are kept per chat.
 export let chatId = /^(main|[a-f0-9-]{36})$/.test(initial.searchParams.get("chat") ?? "") ? initial.searchParams.get("chat") : "main";
@@ -104,75 +117,98 @@ export function followTranscript() {
   transcriptAnchor = null;
 }
 
-// Show earlier messages: per chat, the transcript index the window reaches back to (the host adds everything from there on, so new messages never push it out).
-const historyFrom = new Map();
+// Older pages: the transcript starts at the newest page; scrolling to the top (or the button) loads the next older one and keeps the reading position.
+const windowKey = () => `${getProjectId()}/${chatId}`;
+let earlierLoading = false;
 async function showEarlier() {
-  const first = getView().messages.reduce(
-    (least, message) => (Number.isInteger(message.index) ? Math.min(least, message.index) : least),
-    Infinity,
-  );
-  if (!Number.isFinite(first)) return;
-  const key = `${getProjectId()}/${chatId}`,
+  const key = windowKey(),
     node = document.querySelector("#transcript");
+  if (earlierLoading || !hasOlder(key)) return;
+  earlierLoading = true;
   const before = { height: node.scrollHeight, top: node.scrollTop };
-  historyFrom.set(key, Math.max(0, first - 200));
   stickToBottom = false;
-  await settledRefresh();
-  // The older messages land above the reading position: keep what the owner was looking at where it was.
-  if (`${getProjectId()}/${chatId}` === key) node.scrollTop = before.top + node.scrollHeight - before.height;
+  try {
+    const id = getProjectId(),
+      chat = chatId;
+    const added = await loadOlder(key, (cursor) =>
+      api({ action: "chat-history", id, ...(chat === "main" ? {} : { chatId: chat }), before: cursor }),
+    );
+    if (!added || windowKey() !== key) return;
+    setView({ ...getView(), messages: displayMessages(loadedItems(key)) });
+    render();
+    node.scrollTop = before.top + node.scrollHeight - before.height;
+  } finally {
+    earlierLoading = false;
+  }
 }
-export async function refresh() {
+// What a refresh reads. "chat" re-reads the selected chat (its newest page, the chat list, context, ledger, uploads), "jobs" the Jobs, "knowledge" the documents;
+// a push names the topic that changed, so the others are left alone. No topics = everything (opening, switching, reconnecting).
+const ALL_TOPICS = ["chat", "jobs", "knowledge", "settings"];
+let queuedTopics = new Set();
+export async function refresh(topics = ALL_TOPICS) {
   if (!getProjectId()) return;
   if (polling === getGeneration()) {
+    for (const topic of topics) queuedTopics.add(topic);
     refreshQueued = true;
     return;
   }
   const current = getGeneration();
   const id = getProjectId(),
-    chat = chatId;
+    chat = chatId,
+    wanted = new Set(topics),
+    showing = wanted.has("chat") || wanted.has("settings") || !getView();
   setPolling(current);
   try {
     let next;
-    const focus = searchFocus?.project === id && searchFocus.chat === chat ? { focus: searchFocus.index } : {};
-    const from = historyFrom.get(`${id}/${chat}`);
-    try {
-      next = await api({
-        action: "show",
-        id,
-        ...(chat === "main" ? {} : { chatId: chat }),
-        ...focus,
-        ...(from === undefined ? {} : { from }),
-      });
-    } catch (error) {
-      if (chat !== "main" && /Unknown chat/.test(error.message) && current === getGeneration()) {
-        setPolling(null);
-        changeChat("main");
-        return;
+    if (showing) {
+      try {
+        next = await api({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) });
+      } catch (error) {
+        if (chat !== "main" && /Unknown chat/.test(error.message) && current === getGeneration()) {
+          setPolling(null);
+          changeChat("main");
+          return;
+        }
+        throw error;
       }
-      throw error;
+      if (current !== getGeneration()) return;
+      const key = `${id}/${chat}`,
+        focused = searchFocus?.project === id && searchFocus.chat === chat;
+      // Leaving a search jump returns to the newest page.
+      if (!focused && focusWindow === key) forget(key);
+      focusWindow = focused ? key : null;
+      mergeNewest(key, { items: next.messages, before: next.before });
+      if (focused)
+        await reach(key, searchFocus.index, (cursor) =>
+          api({ action: "chat-history", id, ...(chat === "main" ? {} : { chatId: chat }), before: cursor }),
+        );
+      next = { ...next, messages: displayMessages(loadedItems(key)) };
     }
-    if (current !== getGeneration()) return;
+    const reading = wanted.has("jobs") || wanted.has("chat") || !plan,
+      approving = wanted.has("chat") || wanted.has("jobs") || !approvalPage;
     const [nextPlan, nextApprovals, nextDocs] = await Promise.all([
-      api({ action: "plan-snapshot", id }),
-      api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
-      api({ action: "knowledge-list", id }),
+      reading ? api({ action: "jobs-snapshot", id }) : null,
+      approving ? api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }) : approvalPage,
+      wanted.has("knowledge") || !knowledgeLoaded ? api({ action: "knowledge-list", id }) : null,
     ]);
     if (current !== getGeneration()) return;
-    if (nextPlan && (!Array.isArray(nextPlan.work) || nextPlan.work.some((work) => !uuid(work.id) || !uuid(work.threadId))))
-      throw new Error("Invalid owned Durable work projection");
     if (nextApprovals) {
       validateOperations(nextApprovals, id, 0);
       if (nextApprovals.items.some((record) => record.status !== "pending"))
         throw new Error("Pending approval snapshot includes non-pending history");
     }
-    setView(next);
-    setPlan(nextPlan);
+    if (next) setView(next);
+    // Placeholder until the Jobs UI reads `jobs`/`agents` itself: the legacy readers get an empty `work` list instead of failing.
+    if (nextPlan) setPlan({ work: [], ...nextPlan });
     setApprovalPage(nextApprovals);
-    setKnowledgeDocs(Array.isArray(nextDocs) ? nextDocs.filter((doc) => knowledgePath(doc.path)) : []);
+    if (nextDocs) {
+      setKnowledgeDocs(Array.isArray(nextDocs) ? nextDocs.filter((doc) => knowledgePath(doc.path)) : []);
+      knowledgeLoaded = true;
+    }
     for (const record of nextApprovals?.items ?? []) operationCache.set(record.id, record);
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection");
-    connection.textContent = next.busy ? "Coordinating" : "Connected";
+    connection.textContent = getView().busy ? "Coordinating" : "Connected";
     connection.dataset.state = "up";
     connection.title = `Updated ${new Date().toLocaleTimeString()}`;
     render();
@@ -183,7 +219,7 @@ export async function refresh() {
     if (pendingWorker && plan) {
       const wanted = pendingWorker;
       setPendingWorker(null);
-      if (plan.work.some((work) => work.threadId === wanted)) await inspectThread(wanted);
+      if (plan.agents.some((agent) => agent.id === wanted)) await inspectThread(wanted);
     }
     if (workerChat && tab === "coordinator") await refreshWorkerChat(workerChat);
     void loadWorkerContexts(current);
@@ -193,10 +229,17 @@ export async function refresh() {
     if (polling === current) setPolling(null);
     if (refreshQueued && current === getGeneration()) {
       refreshQueued = false;
-      void refresh();
+      const queued = queuedTopics;
+      queuedTopics = new Set();
+      void refresh(queued.size ? [...queued] : ALL_TOPICS);
     }
   }
 }
+let knowledgeLoaded = false;
+let focusWindow = null;
+onProjectChange(() => {
+  knowledgeLoaded = false;
+});
 
 provideRefresh(refresh);
 let refreshQueued = false;
@@ -287,18 +330,18 @@ async function settledRefresh() {
   await refresh();
 }
 
-// Host-pushed changes (/changes): refresh when the open project, chat or worker conversation changes, read the notice feed when it advances.
+// Host-pushed changes (/changes): one frame per changed topic (chat, jobs, knowledge, settings); only that part is re-read. "sync" (on connect) re-reads everything.
+// The notice feed is read when it advances.
 // A hidden tab closes the stream so the host stops watching for it; showing the tab refreshes and reopens it. While the stream is down, the 30 s poll below keeps the view current.
 export let changeStream = null,
   changeRetryMs = 1000;
 export const POLL_MS = 30000;
-const watchedThread = () => (tab === "coordinator" && workerChat?.id === getProjectId() ? workerChat.threadId : "");
 export function ensureChanges() {
-  if (changeStream?.id === getProjectId() && changeStream.chat === chatId && changeStream.thread === watchedThread()) return;
+  if (changeStream?.id === getProjectId()) return;
   changeStream?.controller.abort();
   changeStream = null;
   if (!getProjectId() || document.hidden) return;
-  const stream = { id: getProjectId(), chat: chatId, thread: watchedThread(), controller: new AbortController(), up: false };
+  const stream = { id: getProjectId(), controller: new AbortController(), up: false };
   changeStream = stream;
   void readChanges(stream).finally(() => {
     stream.up = false;
@@ -315,10 +358,10 @@ export function ensureChanges() {
 }
 async function readChanges(stream) {
   try {
-    const response = await fetch(
-      `/changes?project=${encodeURIComponent(stream.id)}&chat=${encodeURIComponent(stream.chat)}${stream.thread ? `&thread=${encodeURIComponent(stream.thread)}` : ""}`,
-      { headers: { authorization: `Bearer ${token}` }, signal: stream.controller.signal },
-    );
+    const response = await fetch(`/changes?project=${encodeURIComponent(stream.id)}`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: stream.controller.signal,
+    });
     if (!response.ok || !response.body) return;
     stream.up = true;
     changeRetryMs = 1000;
@@ -340,7 +383,8 @@ async function readChanges(stream) {
           .join("\n");
         if (!data || changeStream !== stream) continue;
         const change = JSON.parse(data);
-        if (change.t === "project") void refresh();
+        if (change.t === "sync") void refresh();
+        else if (change.t === "topic") void refresh([change.topic]);
         else if (change.t === "notices" && notifyEnabled() && change.seq !== notifyCursor) {
           clearTimeout(notifyTimer);
           setNotifyTimer(setTimeout(() => void pollNotify(), 0));
@@ -881,6 +925,7 @@ function renderChat() {
       `<div class="empty-chat"><h2>How can the coordinator help with ${esc(getView().project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`,
   );
   if (!stickToBottom) restoreTranscriptAnchor(readingAnchor);
+  hydrate(document.querySelector("#transcript"));
   const reply = getView().messages.findLast((message) => message.role === "assistant" && message.text.trim());
   setHtml(
     "#reply-summary",
@@ -941,7 +986,7 @@ const reportPattern =
   /^\[Durable work ([0-9a-f-]{36}), ([\w-]+), ([\w-]+); thread ([0-9a-f-]{36})\]\nTask: ([\s\S]*?)\nWorker result, untrusted and not verification evidence:\n([\s\S]*?)(?:\nSummarize the result for the user[\s\S]*)?$/;
 function reportHtml(message, match) {
   const [, , role, status, threadId, task, body] = match;
-  const known = plan?.work.some((work) => work.threadId === threadId);
+  const known = plan?.agents?.some((agent) => agent.id === threadId);
   return `<details class="report ${esc(status)}"${indexAttr(message)}><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
@@ -972,11 +1017,11 @@ function indexAttr(message) {
 export function chatMessageHtml(message, assistant) {
   if (message.kind === "compaction")
     return `<div class="compaction-divider" role="separator" aria-label="Context compacted"${indexAttr(message)} title="${esc(when(message.at))}"><span>Context compacted</span></div>`;
-  if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message);
+  if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message) + imagesHtml(message.images) + moreTextHtml(message);
   const thought = message.thinking
     ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>`
     : "";
-  if (!message.text?.trim()) return thought;
+  if (!message.text?.trim()) return thought + imagesHtml(message.images);
   const report = message.role === "user" && reportPattern.exec(message.text);
   if (report) return reportHtml(message, report);
   const event = message.role === "user" && /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text);
@@ -988,7 +1033,7 @@ export function chatMessageHtml(message, assistant) {
   const prs = user ? prChips(attached.text) : { text: attached.text, chips: "", urls: new Map() };
   const refs = user ? refsSplit(prs.text) : { text: prs.text, gone: new Map() };
   const body = renderMarkdown(refs.text, { refs: { prs: prs.urls, gone: refs.gone } }) + prs.chips + attached.chips;
-  return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${message.nextTextOffset != null ? `<p class="note">Text continues at character ${message.nextTextOffset}; use the next text slice.</p>` : ""}</article>`;
+  return `${thought}<article class="msg ${message.role === "user" ? "you" : "them"}"${indexAttr(message)}><div class="who">${esc(label)} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${body}</div>${imagesHtml(message.images)}${moreTextHtml(message)}</article>`;
 }
 // Answered questions stay where they were asked: before the first message sent after the question.
 function transcriptHtml(answered) {
@@ -998,12 +1043,9 @@ function transcriptHtml(answered) {
     while (rest.length && Number.isFinite(message.at) && message.at > Date.parse(rest[0].at)) out.push(answeredCard(rest.shift()));
     out.push(chatMessageHtml(message, "Coordinator"));
   }
-  const earlier =
-    getView().earlier > 0
-      ? [
-          `<button type="button" class="ghost small earlier-messages" data-action="history-earlier">Show earlier messages (${getView().earlier})</button>`,
-        ]
-      : [];
+  const earlier = hasOlder(windowKey())
+    ? [`<button type="button" class="ghost small earlier-messages" data-action="history-earlier">Show earlier messages</button>`]
+    : [];
   return [...earlier, ...out, ...rest.map(answeredCard)].join("");
 }
 export function admissionBlocked() {
@@ -1091,6 +1133,18 @@ registerForms([
   ],
 ]);
 const transcript = document.querySelector("#transcript");
+const chatTarget = () => ({ id: getProjectId(), ...(chatId === "main" ? {} : { chatId }) });
+bindTranscript(transcript, {
+  text: (ref, offset) => api({ action: "transcript-text", ...chatTarget(), ref, offset, limit: 20000 }),
+  image: (ref) => api({ action: "transcript-image", ...chatTarget(), ref }),
+});
+transcript.addEventListener(
+  "scroll",
+  () => {
+    if (transcript.scrollTop < 80 && hasOlder(windowKey())) void showEarlier().catch(showError);
+  },
+  { passive: true },
+);
 function pauseTranscriptFollow() {
   if (!stickToBottom) return;
   stickToBottom = false;
@@ -1169,8 +1223,9 @@ document.querySelector("#refresh").addEventListener("click", () => {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refresh();
 });
+// Only while the push stream is down; with it up, nothing polls.
 setInterval(() => {
-  if (!document.hidden) void refresh();
+  if (!document.hidden && !changeStream?.up) void refresh();
 }, POLL_MS);
 
 export function setStickToBottom(value) {

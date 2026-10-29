@@ -229,7 +229,7 @@ try {
     "oversized Unicode MEMORY.md records memory guard failure before unsafe reply",
     invalid.status === "unanswered" &&
       /3000|MEMORY\.md/i.test(guardEvidence) &&
-      !invalidView.coordinator.messages.some((message) => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN")),
+      !invalidView.coordinator.history.items.some((message) => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN")),
   );
   const damaged = await readKnowledge(primary.dir, "MEMORY.md");
   memory = await writeKnowledge({
@@ -254,7 +254,7 @@ try {
   );
   pass(
     "coordinator retrieves topic only on demand",
-    (await runtime.snapshot()).coordinator.messages.some((message) => message.text?.includes(topic)),
+    (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes(topic)),
   );
   await runtime.say(
     'Use projects_knowledge_read on preferences.md and reply with its exact contents. FAKE-CALL projects_knowledge_read {"path":"preferences.md"}',
@@ -262,7 +262,7 @@ try {
   );
   pass(
     "preferences are absent until demanded",
-    !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.messages.some((message) => message.text?.includes(preference)),
+    !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes(preference)),
   );
   const workerRequestAt = requests.length;
   const spawned = await runtime.spawn(undefined, {
@@ -298,7 +298,7 @@ try {
   );
   pass(
     "human edit is visible on next request",
-    (await runtime.snapshot()).coordinator.messages.some((message) => message.text?.includes("HUMAN_EDIT")),
+    (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes("HUMAN_EDIT")),
   );
   // Read-only gates workers only; the coordinator always maintains knowledge.
   await runtime.say(

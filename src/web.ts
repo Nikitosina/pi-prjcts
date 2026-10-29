@@ -11,6 +11,7 @@ import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
+import { feed, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
 
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
@@ -70,94 +71,39 @@ export async function startWeb(
   upload: (projectId: string, filename: string, bytes: Buffer) => Promise<unknown>,
   noticeSeq: () => number = () => 0,
   remoteAccess: () => RemoteAccess | null = () => null,
+  openProject: (projectId: string) => Promise<unknown> = async () => {},
 ) {
   type Subscriber = { frame: (value: unknown) => void; end: () => void };
-  type Changes = { subscribers: Set<Subscriber>; timer: NodeJS.Timeout; running: boolean; fingerprint: string | null; threadTotal: number };
-  const changes = new Map<string, Changes>();
+  const subscribers = new Set<Subscriber>();
   let closing = false;
   const stopChanges = () => {
     closing = true;
-    for (const watcher of changes.values()) {
-      clearInterval(watcher.timer);
-      for (const subscriber of watcher.subscribers) subscriber.end();
-    }
-    changes.clear();
+    for (const subscriber of [...subscribers]) subscriber.end();
+    subscribers.clear();
   };
-  // `thread` is the worker conversation open in the inbox; its message count and newest message join the fingerprint.
-  const watchChanges = async (id: string, frame: (frame: unknown) => void, end: () => void, chat: string, thread: string) => {
+  const COALESCE_MS = 250;
+  /** Pushes the topics a project's commits touch, batched; the browser refetches only those. No polling: nothing runs while nothing changes. */
+  const watchChanges = async (id: string, frame: (frame: unknown) => void, end: () => void) => {
     if (closing) throw new Error("Browser listener is stopping");
-    const key = `${id}:${chat}:${thread}`;
-    let watcher = changes.get(key);
-    if (!watcher) {
-      const tick = async () => {
-        if (watcher!.running || changes.get(key) !== watcher) return;
-        watcher!.running = true;
-        try {
-          const values = await Promise.allSettled([
-            dispatch({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) }),
-            dispatch({ action: "jobs-snapshot", id }),
-            dispatch({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
-            dispatch({ action: "knowledge-list", id }),
-            ...(thread
-              ? [
-                  dispatch({
-                    action: "thread-history",
-                    id,
-                    threadId: thread,
-                    offset: Math.max(0, watcher!.threadTotal - 1),
-                    limit: 1,
-                    textLimit: 1,
-                  }),
-                ]
-              : []),
-          ]);
-          const history = values[4];
-          // observedAtMs changes on every read; only the count and the newest message mark a change.
-          if (history?.status === "fulfilled") {
-            const { total, items } = history.value as { total: number; items: unknown[] };
-            watcher!.threadTotal = total;
-            history.value = { total, items };
-          }
-          if (changes.get(key) !== watcher) return;
-          const fingerprint = createHash("sha256")
-            .update(
-              JSON.stringify(
-                values.map((value) => (value.status === "fulfilled" ? { value: value.value } : { error: errorText(value.reason) })),
-              ),
-            )
-            .digest("hex");
-          if (watcher!.fingerprint !== fingerprint) {
-            watcher!.fingerprint = fingerprint;
-            for (const subscriber of watcher!.subscribers) subscriber.frame({ t: "project" });
-          }
-        } finally {
-          watcher!.running = false;
-        }
-      };
-      watcher = {
-        subscribers: new Set(),
-        timer: setInterval(() => {
-          void tick().catch(() => {
-            for (const subscriber of watcher!.subscribers) subscriber.end();
-          });
-        }, 2000),
-        running: false,
-        fingerprint: null,
-        threadTotal: 0,
-      };
-      watcher.timer.unref();
-      changes.set(key, watcher);
-    }
+    await openProject(id);
+    const pending = new Map<string, FeedEvent>();
+    let timer: NodeJS.Timeout | undefined;
+    const stopFeed = feed.subscribe(id, (event) => {
+      pending.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
+      timer ??= setTimeout(() => {
+        timer = undefined;
+        for (const item of pending.values()) frame({ t: "topic", ...item });
+        pending.clear();
+      }, COALESCE_MS);
+    });
     const subscriber = { frame, end };
-    watcher.subscribers.add(subscriber);
+    subscribers.add(subscriber);
     frame({ t: "notices", seq: noticeSeq() });
-    frame({ t: "project" });
+    frame({ t: "sync" });
     return () => {
-      watcher!.subscribers.delete(subscriber);
-      if (!watcher!.subscribers.size) {
-        clearInterval(watcher!.timer);
-        if (changes.get(key) === watcher) changes.delete(key);
-      }
+      stopFeed();
+      clearTimeout(timer);
+      subscribers.delete(subscriber);
     };
   };
   // Reuse the previous token (and below, port) when present: a tab left open across a host restart keeps its session and its notifications.
@@ -284,11 +230,9 @@ export async function startWeb(
         if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         const chat = url.searchParams.get("chat") ?? "main";
         if (!/^(main|[a-f0-9-]{36})$/.test(chat)) throw new Error("Invalid chat ID");
-        const thread = url.searchParams.get("thread") ?? "";
-        if (!/^([a-f0-9-]{36})?$/.test(thread)) throw new Error("Invalid thread ID");
         loadProject(id);
         await serveLive(response, headers, (onFrame, onEnd) =>
-          url.pathname === "/changes" ? watchChanges(id, onFrame, onEnd, chat, thread) : watchLive(id, onFrame, onEnd, chat),
+          url.pathname === "/changes" ? watchChanges(id, onFrame, onEnd) : watchLive(id, onFrame, onEnd, chat),
         );
         return;
       }
@@ -409,7 +353,7 @@ export async function startWeb(
   return {
     url,
     noticesChanged: (seq: number) => {
-      for (const watcher of changes.values()) for (const subscriber of watcher.subscribers) subscriber.frame({ t: "notices", seq });
+      for (const subscriber of subscribers) subscriber.frame({ t: "notices", seq });
     },
     close: () => {
       stopChanges();

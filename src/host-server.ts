@@ -34,6 +34,7 @@ import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
+import { feed } from "./change-feed.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
@@ -42,6 +43,15 @@ import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
 import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
+import {
+  archiveConfig,
+  archiveHistory,
+  archiveImage,
+  archiveProject,
+  archiveProjects,
+  archiveText,
+  closeArchives,
+} from "./archive-host.ts";
 import {
   authorizationFingerprint,
   catalog,
@@ -514,6 +524,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "settings-update": {
       updateProjectSettings(loadProject(input.id), input);
+      feed.publish(input.id, { topic: "settings" });
       // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
       if (Object.keys(input.changes).every((key) => LIVE_SETTINGS.has(key))) {
         await validateProjectModelChanges(input.changes);
@@ -627,7 +638,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       }
     }
     case "show":
-      return durableHostSnapshot(await durable(input.id), input.chatId, input.focus, input.from);
+      return durableHostSnapshot(await durable(input.id), input.chatId);
     case "search":
       return searchProject(ownedProjectDir(input.id), input.query, await (await durable(input.id)).searchSources(), input.limit);
     case "chat-create":
@@ -1362,6 +1373,34 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return startCursorLogin();
     case "thread-history":
       return (await durable(input.id)).threadHistory(input.threadId, input);
+    case "chat-history":
+      return (await durable(input.id)).chatHistory(input.chatId, input);
+    case "transcript-text":
+      return (await durable(input.id)).transcriptText(
+        input.threadId ? { threadId: input.threadId } : { chatId: input.chatId ?? "main" },
+        input.ref,
+        input,
+      );
+    case "transcript-image": {
+      const image = await (
+        await durable(input.id)
+      ).transcriptImage(input.threadId ? { threadId: input.threadId } : { chatId: input.chatId ?? "main" }, input.ref);
+      return { mime: image.mime, data: image.bytes.toString("base64") };
+    }
+    case "archive-config":
+      return archiveConfig(input.home);
+    case "archive-projects":
+      return archiveProjects();
+    case "archive-project":
+      return archiveProject(input.projectId);
+    case "archive-history":
+      return archiveHistory(input.projectId, input.conversationId, input);
+    case "archive-text":
+      return archiveText(input.projectId, input.conversationId, input.ref, input);
+    case "archive-image": {
+      const image = await archiveImage(input.projectId, input.conversationId, input.ref);
+      return { mime: image.mime, data: image.bytes.toString("base64") };
+    }
     case "thread-send":
       return withDurableOwner({
         id: input.id,
@@ -1457,14 +1496,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return listKnowledge(await knowledgeDir(input.id));
     case "knowledge-read":
       return readKnowledge(await knowledgeDir(input.id), input.path);
-    case "knowledge-write":
-      return writeKnowledge({
+    case "knowledge-write": {
+      const written = writeKnowledge({
         dir: await knowledgeDir(input.id),
         path: input.path,
         text: input.text,
         expectedRevision: input.expectedRevision,
         author: "owner",
       });
+      feed.publish(input.id, { topic: "knowledge" });
+      return written;
+    }
     case "knowledge-history":
       return historyKnowledge(await knowledgeDir(input.id), input.path);
     case "notify-feed":
@@ -1520,6 +1562,7 @@ const web = await startWeb(
     }),
   () => notifier.seq(),
   () => remote,
+  (id) => durable(id),
 );
 remote = createRemote({
   webUrl: web.url,
@@ -1657,6 +1700,7 @@ process.on("SIGINT", () => {
 function shutdown(): Promise<void> {
   if (shutdownOperation) return shutdownOperation;
   closing = true;
+  closeArchives();
   shutdownOperation = Promise.resolve().then(async () => {
     let failed = ownerCloseFailed.size !== 0;
     const report = (error: unknown) => {
