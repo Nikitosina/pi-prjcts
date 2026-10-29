@@ -102,13 +102,8 @@ switch (command) {
     input = parse(Request, { action: command, id: first });
     break;
   case "resume":
-    if (!first) throw new Error("Usage: resume <project-id> [--leave-interrupted --confirm <same-project-id>]");
-    if (second === undefined) input = { action: "resume", id: first };
-    else {
-      if (second !== "--leave-interrupted" || rest.length !== 2 || rest[0] !== "--confirm" || rest[1] !== first)
-        throw new Error("Usage: resume <project-id> --leave-interrupted --confirm <same-project-id>");
-      input = { action: "resume", id: first, recovery: "leave-interrupted", confirm: rest[1] };
-    }
+    if (!first || second !== undefined) throw new Error("Usage: resume <project-id>");
+    input = { action: "resume", id: first };
     break;
   case "jobs":
     if (!first || second) throw new Error("Usage: jobs <project-id>");

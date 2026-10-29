@@ -248,7 +248,7 @@ try {
   check("X15 Compact now on an archived chat is refused", await fails(() => rpc({ action: "compact", id, chatId: chat.id }), /archived/));
   await rpc({ action: "pause", id });
   check("X15 Compact now while paused is refused", await fails(() => rpc({ action: "compact", id }), /paus/i));
-  await rpc({ action: "resume", id, recovery: "leave-interrupted", confirm: id });
+  await rpc({ action: "resume", id, confirm: id });
 
   // X4/X9: restart keeps the settings; reset restores the catalog window.
   await k.stopHost();

@@ -494,10 +494,7 @@ registerForms([
       if (target !== getProjectId()) throw new Error("The selected project changed. Reopen the resume dialog.");
       const confirm = data.get("confirm").trim();
       if (confirm !== target) throw new Error("Confirmation must match the project ID.");
-      await mutate(
-        { action: "resume", id: target, recovery: "leave-interrupted", confirm },
-        "Project resumed. Interrupted work continues.",
-      );
+      await mutate({ action: "resume", id: target, confirm }, "Project resumed. Interrupted work continues.");
       closeCurrentDialog(target, version);
     },
   ],

@@ -564,7 +564,7 @@ try {
   text(OWNER, "MARK-PAUSED while paused");
   await lastTo(/paused/i, "paused error back", mark);
   if ((await jobs(a, two.id)).some((j) => j.text.includes("MARK-PAUSED"))) throw Error("Paused project admitted text");
-  await rpc({ action: "resume", id: a, recovery: "leave-interrupted", confirm: a });
+  await rpc({ action: "resume", id: a, confirm: a });
   result.checks.push("T15 text to a paused project is not admitted and the error comes back to Telegram");
 
   // T3/T2: switching bots resets pairing and offset; a revoked token stops polling with an error; removing the token stops polling.

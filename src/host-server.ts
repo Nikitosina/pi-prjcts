@@ -785,20 +785,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return lifecycle(
         input.id,
         (project) => {
-          if ("recovery" in input && input.confirm !== input.id) throw new Error("Recovery requires confirmation matching project id");
+          if (input.confirm !== undefined && input.confirm !== input.id) throw new Error("Resume confirmation must match the project id");
           if (project.deleted) throw new Error("Deleted project must be restored before resume");
           if (project.archived) throw new Error("Archived project must be restored before resume");
         },
         async (owner) => {
-          if ("recovery" in input) await owner.pause();
-          else {
-            const plan = await owner.jobs();
-            if (plan.jobs.length !== 0 || (await owner.snapshot()).coordinator.submissions.length !== 0)
-              throw new Error("Project resume with prior work requires an explicit recovery decision");
-          }
           const paused = (await owner.resume()).paused;
           recordHostEvent("lifecycle", `resumed:${input.id}`);
-          return "recovery" in input ? { paused, recovery: input.recovery } : { paused };
+          return { paused };
         },
       );
     case "owner-setup-snapshot": {

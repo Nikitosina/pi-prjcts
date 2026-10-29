@@ -669,7 +669,7 @@ try {
   );
   await delay(1000);
   if (!/paused/.test(paused ?? "") || followCalls().length !== callsPaused) throw Error("Paused project polled");
-  await rpc({ action: "resume", id, recovery: "leave-interrupted", confirm: id });
+  await rpc({ action: "resume", id, confirm: id });
   result.checks.push("F19 a paused project neither polls nor dispatches");
 
   // F3/F5 restart: a change made while the host is down arrives once, nothing old repeats.

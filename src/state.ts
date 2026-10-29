@@ -690,11 +690,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("pause"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("jobs-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("job-approve"), id: Id, jobId: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("resume"), id: Id }, { additionalProperties: false }),
-  Type.Object(
-    { action: Type.Literal("resume"), id: Id, recovery: Type.Literal("leave-interrupted"), confirm: Type.Optional(Id) },
-    { additionalProperties: false },
-  ),
+  Type.Object({ action: Type.Literal("resume"), id: Id, confirm: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("archive"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("restore"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("delete"), id: Id, confirm: Type.Optional(Id) }, { additionalProperties: false }),
