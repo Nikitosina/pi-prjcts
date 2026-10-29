@@ -4,11 +4,12 @@ import { Type } from "typebox";
 import { mcpCatalog, isWriteTool, type McpPool } from "./mcp-servers.ts";
 import { mcpServersFor, type McpSettings } from "./mcp-profiles.ts";
 import type { SkillRole } from "./skill-profiles.ts";
+import { binaryResult, decodeBase64, type BinaryScope } from "./binary-results.ts";
 
 const TEXT_LIMIT = 64 * 1024,
-  IMAGE_LIMIT = 1024 * 1024,
   PAGE = 20;
-export type McpCaller = { role: SkillRole; cwd: string };
+/** `binaries` is where the caller's image results are stored; without it images are dropped rather than written into the transcript. */
+export type McpCaller = { role: SkillRole; cwd: string; binaries?: BinaryScope };
 type Block = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 const text = (value: string): Block[] => [{ type: "text", text: value }];
 const json = (value: unknown) => ({ content: text(JSON.stringify(value)) });
@@ -115,13 +116,16 @@ export function mcpGatewayTools(input: {
       const content: Block[] = [];
       let used = 0;
       for (const block of result.content as unknown as Array<Record<string, unknown>>) {
-        if (block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string")
-          content.push(
-            block.data.length <= IMAGE_LIMIT
-              ? { type: "image", data: block.data, mimeType: block.mimeType }
-              : { type: "text", text: "[image omitted: larger than 1 MiB]" },
-          );
-        else {
+        if (block.type === "image" && typeof block.data === "string") {
+          try {
+            if (!caller.binaries) throw new Error("no artifact folder for this caller");
+            content.push(
+              ...(await binaryResult(caller.binaries, { bytes: decodeBase64(block.data), label: `${args.server}/${args.tool} image` })),
+            );
+          } catch (error) {
+            content.push({ type: "text", text: `[image not kept: ${error instanceof Error ? error.message : String(error)}]` });
+          }
+        } else {
           const raw = block.type === "text" && typeof block.text === "string" ? block.text : JSON.stringify(block),
             room = Math.max(0, TEXT_LIMIT - used);
           content.push({

@@ -1,4 +1,5 @@
 import type { Conversation, HostPluginApi, ToolExecutionApi } from "../../src/plugin-types.ts";
+import { binaryResult } from "../../src/binary-results.ts";
 import { MAX_OWNED, simulatorResource, type Simulators } from "./simulator.ts";
 
 export const COORDINATOR_NOTE = `\n\nYou fully manage this project's iOS simulators; never ask the owner to create, pin, boot or delete one. The project may own up to ${MAX_OWNED} clones at once (for example an iPhone and an iPad). projects_simulator_status lists the owned clones (UDID, state, lease resource, current lease holder, slimming) and the sources you can clone from. projects_simulator_action creates a clone of any shut-down source (sourceUdid: pick the device the task needs, e.g. an iPad for tablet work; default is the owner's pin or the newest shut-down iPhone) and boots, shuts down, resets or deletes one owned clone (udid; required when several are owned). Reset erases the clone's apps and data; delete removes it permanently. Delete clones nobody needs any more. Only the clone a worker has leased is blocked; running workers do not block maintenance of other clones, so tell a worker to release a lease or wait for it instead of stopping the worker. Never touch source simulators, shared runtimes or global caches. Use a fresh stable requestId for each distinct action and reuse it only for the exact same retry. Actions return accepted progress; do not repeatedly poll while other work can proceed. projects_simulator_screenshot returns an actual screenshot of one clone. Give coding workers the exact UDID and its simulator:UDID lease resource. New whole-repository worker threads get projects_worker_simulator_status and projects_worker_simulator_screenshot; existing threads keep their frozen tool set. Workers must acquire the lease before using a clone and release it when finished. simslim disables some simulator services; inspect its status before testing push, StoreKit, iCloud or other affected features. If the owner turned management off, you cannot turn it on: tell them. Unknown outcomes block further management and need owner inspection; never guess or substitute a different simulator.`;
@@ -59,7 +60,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
       replay: "safe",
       async execute(args, api) {
         authorize(api);
-        return image(input.projectId, args.udid);
+        return image(input.projectId, input.projectId, args.udid);
       },
     });
     const rotate = defineTool({
@@ -120,7 +121,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
         const clones = (await simulators.snapshot(input.projectId)).devices.filter((device) => leased.has(simulatorResource(device.udid)));
         const target = args.udid ? clones.find((device) => device.udid === args.udid!.toUpperCase()) : clones[0];
         if (!target) throw Error("Acquire the simulator's canonical lease before inspecting it");
-        return image(input.projectId, target.udid);
+        return image(input.projectId, input.threadId, target.udid);
       },
     });
     const rotate = defineTool({
@@ -148,14 +149,14 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
     });
     return [status, screenshot, rotate];
   }
-  async function image(id: string, udid?: string) {
-    const frame = await simulators.frame(id, udid);
-    return {
-      content: [
-        { type: "text" as const, text: JSON.stringify({ capturedAt: frame.capturedAt, mime: frame.mime }) },
-        { type: "image" as const, data: frame.bytes.toString("base64"), mimeType: frame.mime },
-      ],
-    };
+  /** Frames are stored as artifacts of `scope` (a worker's thread, or the project for the coordinator); the transcript keeps the reference and a small copy. */
+  async function image(projectId: string, scope: string, udid?: string) {
+    const frame = await simulators.frame(projectId, udid);
+    const stored = await binaryResult(
+      { controlRoot: host.projects.dir(projectId), scope },
+      { bytes: frame.bytes, label: `Simulator screenshot ${new Date(frame.capturedAt).toISOString()}` },
+    );
+    return { content: stored };
   }
   return { coordinator: coordinatorSimulatorTools, worker: workerSimulatorTools };
 }
