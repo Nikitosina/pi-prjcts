@@ -475,7 +475,7 @@ await kit.run(async () => {
   check("lifecycle: Back keeps the project untouched", (await rpc({ action: "show", id })).project.archived !== true);
   await ev(`document.querySelector('#dialog').close()`);
 
-  // ---- Usage, approvals, provider receipts, known PR ----
+  // ---- Usage, provider receipts, known PR ----
   await page.navigate(await kit.webUrl(id, "observability"));
   await page.waitFor(`!!document.querySelector('#usage-button')`, "usage button");
   await ev(contrastLib);
@@ -494,28 +494,9 @@ await kit.run(async () => {
   await capture("usage");
   await ev(`document.querySelector('#dialog').close()`);
   await page.navigate(await kit.webUrl(id, "settings"));
-  await page.waitFor(`!!document.querySelector('#approvals-button')`, "settings");
+  await page.waitFor(`!!document.querySelector('#provider-button')`, "settings");
   await delay(1200);
   await ev(contrastLib);
-  await open(`operationsDialog()`, `document.querySelector('#dialog h2')?.textContent === 'Approvals'`, "approvals");
-  await capture("approvals-empty");
-  // A synthetic owned record (fake-only) exercises the detail and decision dialogs.
-  const fp = "a".repeat(64),
-    opId = "11111111-1111-4111-8111-111111111111";
-  await ev(
-    `operationCache.set('${opId}', { id: '${opId}', projectId, fingerprint: '${fp}', status: 'pending', scopeCurrent: true, operation: { provider: 'github', kind: 'merge', repositoryId: 'acme/mari', pullRequest: 7, head: '${"b".repeat(40)}' } }); operationView('${opId}', '${fp}')`,
-  );
-  await delay(300);
-  check(
-    "approval detail: facts + identity under Exact binding, decision buttons keep fingerprint",
-    await dlg(
-      `/acme\\/mari/.test(d.innerText) && !!d.querySelector('details.raw') && d.querySelectorAll('[data-action=operation-decision][data-fingerprint="${fp}"]').length === 3`,
-    ),
-  );
-  await capture("approval-detail");
-  await ev(`document.querySelector('#dialog [data-decision=execution]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Allow this exact executor?'`, "decision confirm");
-  await capture("approval-decision");
   const key = "rec-1";
   await ev(
     `providerCache.set('${key}', { projectId, kind: 'reads', record: { scopeId: '22222222-2222-4222-8222-222222222222', conversationId: 1, taskId: 1, callId: 'c1', operation: 'ci', repositoryId: 'acme/mari', pullRequest: 7, head: '${"b".repeat(40)}', ci: { statusState: 'success', page: 1 } } }); providerRecord('${key}')`,

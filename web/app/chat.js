@@ -40,19 +40,7 @@ import {
 } from "./shell.js";
 import { clip, esc, uuid } from "./format.js";
 import { renderMarkdown } from "./markdown.js";
-import {
-  answeredCard,
-  approvalPage,
-  operationCache,
-  jobChatId,
-  jobsSnap,
-  pendingItems,
-  questionChat,
-  questionPlacement,
-  setApprovalPage,
-  setJobsSnap,
-  validateOperations,
-} from "./decisions.js";
+import { answeredCard, jobChatId, jobsSnap, pendingItems, questionChat, questionPlacement, setJobsSnap } from "./decisions.js";
 import {
   inspectThread,
   loadWorkerContexts,
@@ -185,29 +173,20 @@ export async function refresh(topics = ALL_TOPICS) {
         );
       next = { ...next, messages: displayMessages(loadedItems(key)) };
     }
-    const reading = wanted.has("jobs") || wanted.has("chat") || !jobsSnap,
-      approving = wanted.has("chat") || wanted.has("jobs") || !approvalPage;
-    const [nextJobs, nextApprovals, nextDocs] = await Promise.all([
+    const reading = wanted.has("jobs") || wanted.has("chat") || !jobsSnap;
+    const [nextJobs, nextDocs] = await Promise.all([
       reading ? api({ action: "jobs-snapshot", id }) : null,
-      approving ? api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }) : approvalPage,
       wanted.has("knowledge") || !knowledgeLoaded ? api({ action: "knowledge-list", id }) : null,
     ]);
     if (current !== getGeneration()) return;
     if (nextJobs && (!Array.isArray(nextJobs.jobs) || !Array.isArray(nextJobs.agents) || nextJobs.jobs.some((job) => !uuid(job.id))))
       throw new Error("Invalid Jobs projection");
-    if (nextApprovals) {
-      validateOperations(nextApprovals, id, 0);
-      if (nextApprovals.items.some((record) => record.status !== "pending"))
-        throw new Error("Pending approval snapshot includes non-pending history");
-    }
     if (next) setView(next);
     if (nextJobs) setJobsSnap(nextJobs);
-    setApprovalPage(nextApprovals);
     if (nextDocs) {
       setKnowledgeDocs(Array.isArray(nextDocs) ? nextDocs.filter((doc) => knowledgePath(doc.path)) : []);
       knowledgeLoaded = true;
     }
-    for (const record of nextApprovals?.items ?? []) operationCache.set(record.id, record);
     if (document.querySelector("#error").dataset.source === "connection") document.querySelector("#error").hidden = true;
     const connection = document.querySelector("#connection");
     connection.textContent = getView().busy ? "Coordinating" : "Connected";
@@ -792,7 +771,7 @@ function renderChats() {
 }
 
 // One status dot per chat and per project row, highest priority first: needs you (red) > working (pulsing) > done and not yet checked (green) > idle.
-// Needs you: an unanswered question, a blocked worker admitted by the chat, or a failed coordinator turn (pending approvals count on the project row only).
+// Needs you: an unanswered question, a blocked worker admitted by the chat, or a failed coordinator turn.
 // Done: the coordinator finished, or a worker from the chat completed, after the last time this browser had the chat open.
 const seenKey = (project, chat) => `pi-projects-seen:${project}:${chat}`;
 export function seenAt(project, chat) {
@@ -851,7 +830,7 @@ function chatState(chat) {
 }
 export const stateDot = (state, label, className) =>
   `<span class="${className}" data-state="${state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
-// The open project folds its chats and pending approvals. Every other project comes from the host's list: unanswered questions and its live activity
+// The open project folds its chats. Every other project comes from the host's list: unanswered questions and its live activity
 // (turn or workers running, failure or blocked worker, last finish), so a project keeps showing its own state after you leave it.
 export const PROJECT_SEEN = "__project";
 function projectState(project) {
@@ -875,12 +854,6 @@ function projectState(project) {
   const states = getView()
     .chats.filter((chat) => !chat.archived)
     .map((chat) => chatState(chat));
-  const approvals = approvalPage?.total ?? 0;
-  if (approvals)
-    return {
-      state: "needs",
-      label: `Needs you: ${plural(approvals, "pending approval")}${states.some((item) => item.state === "needs") ? " and chats" : ""}`,
-    };
   return (
     states.toSorted((a, b) => STATE_PRIORITY.indexOf(a.state) - STATE_PRIORITY.indexOf(b.state))[0] ?? { state: "idle", label: "Idle" }
   );

@@ -4,7 +4,6 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Jobs } from "./jobs.ts";
 import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
-import { hasUncertainVcsOperations } from "./vcs-operation-state.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
 type Schedule = {
@@ -144,9 +143,7 @@ export function scheduleRuntime(
 ) {
   const mutex = new AdmissionMutex();
   const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> =>
-    (await hasUncertainGithubWrites(tx, root.id)) ||
-    (await plugins.anyUncertainWrites(tx, root.id)) ||
-    (await hasUncertainVcsOperations(tx, root.id))
+    (await hasUncertainGithubWrites(tx, root.id)) || (await plugins.anyUncertainWrites(tx, root.id))
       ? "uncertain-provider-write"
       : (await hasUncertainCommands(tx, root.id))
         ? "uncertain-command"

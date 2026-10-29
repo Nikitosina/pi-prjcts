@@ -48,9 +48,6 @@ import { createBackgroundCommands } from "./background-commands.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
 import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
-import { coordinatorVcsTools } from "./coordinator-vcs-tools.ts";
-import { vcsOperations } from "./vcs-operations.ts";
-import { hasUncertainVcsOperations, type VcsExecution } from "./vcs-operation-state.ts";
 
 const READ_ONLY_CODE_NOTE =
   "Read code with code_read, code_grep, code_find, code_ls and code_diff: read-only, limited to your code root (a PR head, a worker's worktree or the project checkout), at most 8 KiB per call; continue with offset, limit or path.";
@@ -101,7 +98,6 @@ import { reviewVerdictTools } from "./durable-review.ts";
 import { rolePrompt, SHARED_ROLE_RULES } from "./role-prompts.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
-import { type ExecutionInput } from "./vcs-operations.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
 import { coordinatorLibraryTools } from "./durable-library.ts";
 import { searchKnowledge } from "./knowledge-search.ts";
@@ -118,7 +114,6 @@ import {
 } from "./transcript-reader.ts";
 import { durableDecisions } from "./durable-decisions.ts";
 import { observeLimitHeaders, quotaResetAt } from "./usage-limits.ts";
-import { operationApprovals, type OperationApprovals } from "./operation-approvals.ts";
 import { githubReadSnapshot, githubWriteSnapshot, githubWriteInspector, type GithubWriteInspectionInput } from "./github-worker.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -366,12 +361,7 @@ export type DurableProjectRuntime = {
     kind: string;
     payload: string;
   }): ReturnType<ReturnType<typeof scheduleRuntime>["ingest"]>;
-  operationRequest: OperationApprovals["request"];
-  operationDecide: OperationApprovals["decide"];
-  operationSnapshot: OperationApprovals["snapshot"];
   usageSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof durableUsageSnapshot>;
-  operationExecute(input: ExecutionInput): Promise<VcsExecution>;
-  operationInspect(input: ExecutionInput): Promise<VcsExecution>;
   commandIntentInspect(key: string, confirm: string): ReturnType<typeof commandIntentInspect>;
   commandIntentsSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof commandIntentsSnapshot>;
   githubReadSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof githubReadSnapshot>;
@@ -644,8 +634,6 @@ export async function openDurableProject(input: {
     // Installed always so recorded calls still resolve; offered only while the project has a GitHub authorization.
     const github = coordinatorGithubTools({ projectId: project.id, root: () => rootReference, isCoordinator });
     const shell = coordinatorShellTools({ cwd: project.cwd, isCoordinator });
-    let vcsReference: ReturnType<typeof vcsOperations> | undefined;
-    const vcs = coordinatorVcsTools({ runtime: () => vcsReference, projectId: project.id, isCoordinator });
     // Installed always so recorded calls still resolve; offered unless the owner turned gh access off.
     const gh = coordinatorGhTools({ cwd: project.cwd, dir, isCoordinator });
     // Plugin tools are installed always so recorded calls still resolve; offered only where the provider applies to the project.
@@ -810,7 +798,6 @@ export async function openDurableProject(input: {
       configuredSkillLoader: input.configuredSkillLoader,
       projectStanding: standing,
       commands,
-      commandApprovals: () => approvals,
       isClosed: () => closed,
       environment: { leases: hostLeases, background },
       conversation: () => {
@@ -1028,7 +1015,6 @@ export async function openDurableProject(input: {
     registry.install(github.extension);
     registry.install(shell.extension);
     registry.install(gh.extension);
-    registry.install(vcs.extension);
     for (const extension of pluginExtensions) registry.install(extension);
     registry.install(skillFiles.extension);
     registry.install(mcp.extension);
@@ -1067,7 +1053,6 @@ export async function openDurableProject(input: {
           github.extension,
           shell.extension,
           gh.extension,
-          vcs.extension,
           ...pluginExtensions,
           skillFiles.extension,
           mcp.extension,
@@ -1077,7 +1062,6 @@ export async function openDurableProject(input: {
           ...tools,
           ...workerManagement.tools,
           ...shell.tools,
-          ...vcs.tools,
           ...offeredTools(project),
           skillFiles.tool,
           ...mcp.tools,
@@ -1258,14 +1242,6 @@ export async function openDurableProject(input: {
       (cleaning ??= (async () => {
         try {
           return await worktreeMutex.run(async () => {
-            if (await root.commit((tx) => hasUncertainVcsOperations(tx, root.id), context)) {
-              return {
-                removed: [],
-                kept: (await worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir })).items,
-                failed: [],
-                reclaimedKb: 0,
-              };
-            }
             return cleanupWorktrees({
               project: loadProject(project.id),
               root,
@@ -1370,7 +1346,6 @@ export async function openDurableProject(input: {
       ...COORDINATOR_GITHUB_TOOLS,
       ...shell.tools.map((tool) => tool.name),
       ...gh.tools.map((tool) => tool.name),
-      ...vcs.tools.map((tool) => tool.name),
       ...pluginCoordinator.flatMap((item) => item.tools.map((tool) => tool.name)),
       skillFiles.tool.name,
       ...mcp.tools.map((tool) => tool.name),
@@ -1385,7 +1360,6 @@ export async function openDurableProject(input: {
       ...workerManagement.tools,
       ...jobs.tools.coordinator,
       ...shell.tools,
-      ...vcs.tools,
       ...offeredTools(current),
       skillFiles.tool,
       ...mcp.tools,
@@ -1398,7 +1372,6 @@ export async function openDurableProject(input: {
       github.extension.name,
       shell.extension.name,
       gh.extension.name,
-      vcs.extension.name,
       ...pluginExtensions.map((extension) => extension.name),
       skillFiles.extension.name,
       mcp.extension.name,
@@ -1411,7 +1384,6 @@ export async function openDurableProject(input: {
       github.extension,
       shell.extension,
       gh.extension,
-      vcs.extension,
       ...pluginExtensions,
       skillFiles.extension,
       mcp.extension,
@@ -1419,7 +1391,6 @@ export async function openDurableProject(input: {
     ];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
     if (
-      !recoveredAgent.extensions.some((extension) => extension.name === vcs.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === shell.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === gh.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === github.extension.name) ||
@@ -1464,15 +1435,9 @@ export async function openDurableProject(input: {
     }
     await decisions.recover();
     dispatchReady = !(await jobs.snapshot(openedHarness)).paused;
-    const approvals = operationApprovals({ root, harness: openedHarness, project });
-    const vcsRuntime = vcsOperations({ root, project, approvals, mutex: worktreeMutex, isClosed: () => closed });
-    vcsReference = vcsRuntime;
-    const approvedVcs = async (value: ExecutionInput) => {
-      if ((await approvals.approved(value)).operation.kind !== "vcs") throw new Error("Only VCS operations are executed by the host");
-    };
     const writeInspector = githubWriteInspector(root, project.id);
     stopOperations = async () => {
-      const results = await Promise.allSettled([vcsRuntime.close(), writeInspector.close()]);
+      const results = await Promise.allSettled([writeInspector.close()]);
       const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
       if (errors.length) throw new AggregateError(errors, "Provider operation shutdown failed");
     };
@@ -1931,9 +1896,6 @@ export async function openDurableProject(input: {
           return { deferred };
         });
       },
-      operationRequest: approvals.request,
-      operationDecide: approvals.decide,
-      operationSnapshot: approvals.snapshot,
       usageSnapshot: async (options = {}) => {
         const view = await jobs.snapshot(openedHarness);
         // A subagent's conversation costs tokens too: counted as its own thread.
@@ -1949,14 +1911,6 @@ export async function openDurableProject(input: {
           view.agents.map((agent) => ({ threadId: agent.id, role: agent.role, text: agent.title })),
           await chatList(),
         );
-      },
-      operationExecute: async (value) => {
-        await approvedVcs(value);
-        return vcsRuntime.execute(value);
-      },
-      operationInspect: async (value) => {
-        await approvedVcs(value);
-        return vcsRuntime.inspect(value);
       },
       commandIntentsSnapshot: (options) => commandIntentsSnapshot(root, options),
       commandIntentInspect: (key, confirm) => {

@@ -1032,24 +1032,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return (await durable(input.id)).githubWriteInspect(input);
     case "github-write-snapshot":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.githubWriteSnapshot(input) });
-    case "operation-execute":
-      return (await durable(input.id)).operationExecute(input);
-    case "operation-inspect":
-      return (await durable(input.id)).operationInspect(input);
-    case "operation-snapshot":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.operationSnapshot(input) });
-    case "operation-request":
-    case "operation-decide":
-      return withDurableOwner({
-        id: input.id,
-        validate: (project) => {
-          if (project.deleted || project.archived)
-            throw new Error("Retained project must be restored before recording operation decisions");
-          if (input.action === "operation-decide" && input.decision === "approve" && input.confirm !== input.id)
-            throw new Error("Operation approval requires confirmation matching project id");
-        },
-        operation: (owner) => (input.action === "operation-request" ? owner.operationRequest(input) : owner.operationDecide(input)),
-      });
     case "github-revoke": {
       if (input.confirm !== input.id) throw new Error("GitHub authorization revocation requires confirmation matching project id");
       return lifecycle(
@@ -1546,15 +1528,8 @@ remote = createRemote({
   report: (detail) => recordHostEvent("remote", detail),
   summary: async () => {
     let needs = 0;
-    for (const project of listProjects().filter((project) => !project.deleted && !project.archived)) {
+    for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
       needs += inbox(projectDir(project.id)).filter((item) => !item.result).length;
-      const opening = durableRuntimes.get(project.id);
-      if (opening && !lifecycleChanging.has(project.id) && !settingsUpdating.has(project.id) && !ownerCloseFailed.has(project.id)) {
-        needs += (
-          await (await opening).operationSnapshot({ action: "operation-snapshot", id: project.id, status: "pending", offset: 0, limit: 1 })
-        ).total;
-      }
-    }
     return { needs };
   },
 });

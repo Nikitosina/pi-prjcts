@@ -8,7 +8,7 @@ import { loadAutomations } from "./project-automations.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 
-/** One thing the owner should hear about: a needs-you question or approval, a finished coordinator turn, or a failed one. */
+/** One thing the owner should hear about: a needs-you question, a finished coordinator turn, or a failed one. */
 export type Notice = {
   seq: number;
   at: number;
@@ -16,13 +16,11 @@ export type Notice = {
   project: string;
   chatId: string;
   chat: string;
-  kind: "question" | "approval" | "result" | "error" | "pr";
+  kind: "question" | "result" | "error" | "pr";
   title: string;
   text: string;
   entryId?: string;
   choices?: string[];
-  operationId?: string;
-  fingerprint?: string;
   workId?: string;
   threadId?: string;
   /** A Ready report for this Job; with `mergeable`, Telegram offers Approve. */
@@ -38,8 +36,8 @@ const FEED = 200,
 const clip = (text: string, max = TEXT) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 /**
- * Host-wide notification feed (`<home>/notifications.json`, 0600). A scan every few seconds reads each open Durable project's inbox,
- * pending approvals and, per chat, coordinator input submissions newer than the last one handled; it never depends on catching a busy flag.
+ * Host-wide notification feed (`<home>/notifications.json`, 0600). A scan every few seconds reads each open Durable project's inbox
+ * and, per chat, coordinator input submissions newer than the last one handled; it never depends on catching a busy flag.
  * Projects and chats that existed when the feed was first created are baselined silently; later ones report everything.
  * The feed keeps the newest 200 notices; consumers (browser, Telegram) keep their own cursors on `seq`.
  */
@@ -88,30 +86,6 @@ export function startNotifier(options: {
         text: clip(item.question),
         entryId: item.id,
         choices: [...item.choices],
-      });
-    }
-    for (const record of (
-      await owner.operationSnapshot({ action: "operation-snapshot", id: project.id, status: "pending", offset: 0, limit: 100 })
-    ).items) {
-      const key = `operation:${record.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (silent) continue;
-      const op = record.operation,
-        what = op.kind === "vcs" ? `${op.action} ${op.target}` : `command ${op.effect} in ${op.repositoryId}`;
-      const detail =
-        op.kind === "vcs"
-          ? `\nCheckout: ${op.checkout}\n${op.risks.join("\n")}\nReview the exact state and permit execution in the browser approval inbox.`
-          : "";
-      push({
-        ...base,
-        chatId: "main",
-        chat: chats[0].title,
-        kind: "approval",
-        title: clip(`${op.provider} ${what}`, 300),
-        text: clip(`Approval needed: ${op.provider} ${what}. Decide it in the browser approval inbox.${detail}`),
-        operationId: record.id,
-        fingerprint: record.fingerprint,
       });
     }
     // CI failed / PR merged (Follow PRs and the provider PR monitors): one notice each, in the events chat.

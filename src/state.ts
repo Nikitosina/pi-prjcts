@@ -104,40 +104,6 @@ export const WorkspaceAuthorizationHistory = Type.Array(
   ),
   { maxItems: 2048 },
 );
-export const OperationSpec = Type.Union([
-  Type.Object(
-    {
-      provider: Provider,
-      kind: Type.Literal("command"),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      scopeId: Id,
-      threadId: Id,
-      profileId: Id,
-      profileRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      effect: Type.Union([Type.Literal("destructive"), Type.Literal("deployment")]),
-      receiptId: Id,
-      allocationAttemptId: Id,
-      requestId: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      provider: Provider,
-      kind: Type.Literal("vcs"),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      scopeId: Id,
-      action: Type.Union([Type.Literal("worktree-remove"), Type.Literal("worktree-remount"), Type.Literal("branch-delete")]),
-      checkout: Type.String({ minLength: 1, maxLength: 4096 }),
-      target: Type.String({ minLength: 1, maxLength: 4096 }),
-      expectedState: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      state: Type.String({ minLength: 1, maxLength: 16000 }),
-      risks: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { minItems: 1, maxItems: 8 }),
-    },
-    { additionalProperties: false },
-  ),
-]);
-export type OperationSpec = Static<typeof OperationSpec>;
 export const GithubAuthorization = Type.Object(
   {
     repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
@@ -861,10 +827,6 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
-    { action: Type.Literal("operation-request"), id: Id, requestId: Id, operation: OperationSpec },
-    { additionalProperties: false },
-  ),
-  Type.Object(
     {
       action: Type.Literal("github-read-snapshot"),
       id: Id,
@@ -890,58 +852,6 @@ export const Request = Type.Union([
       id: Id,
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-execute"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      confirm: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-inspect"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      confirm: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-snapshot"),
-      id: Id,
-      status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("approved"), Type.Literal("rejected")])),
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-decide"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      decision: Type.Literal("approve"),
-      confirm: Id,
-      execution: Type.Optional(Type.Literal(true)),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-decide"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      decision: Type.Literal("reject"),
     },
     { additionalProperties: false },
   ),
