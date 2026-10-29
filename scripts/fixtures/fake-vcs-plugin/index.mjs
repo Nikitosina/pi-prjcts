@@ -276,7 +276,6 @@ export default {
           }
           return { state: { baselined: true, prs }, items, failed };
         },
-        autoMerge: async () => null,
       },
       coordinatorTools: {
         applies: isFake,

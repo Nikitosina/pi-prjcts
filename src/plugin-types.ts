@@ -21,7 +21,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - vcs        a checkout kind besides git: root detection, status, diffs, PR-head snapshots, branch continuation.
  *  - workspace  a workspace-grant provider for that kind: one-click grant, worktree backend, worker binding, cleanup facts, setup cards.
  *  - prs        a pull-request provider: card data, detail, `#` refs, watch/hide, transitions for the monitor, notices.
- *  - follow     publication-receipt based Follow PRs for the provider: observe, auto-fix brief, auto-merge.
+ *  - follow     publication-receipt based Follow PRs for the provider: observe, auto-fix brief.
  *  - merge      result acceptance for the checkout kind: inspect a PR, merge at the approved head, auto-merge, pull the main checkout.
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.

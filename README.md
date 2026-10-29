@@ -35,7 +35,7 @@ Without `--no-start` before the command, an API command starts the local host. B
 - Lifecycle: `pause`, `resume`, `archive`, `restore`, `delete`. Archive interrupts work and keeps state. Delete hides the project and keeps its state and workspace; it needs `--confirm <same-project-id>`. Restore leaves the project paused. Plain `resume` refuses when work was interrupted: inspect `jobs` and `show`, then `resume <id> --leave-interrupted --confirm <same-project-id>` allows new work without replaying interrupted requests.
 - `create-once <request-uuid> <name> <workspace> [objective]` uses a stable creation identity. Repeating the exact arguments reuses the project.
 - Threads: `thread-send`, `thread-steer`, `thread-stop` (needs `--confirm`) and `thread-history` take project, thread and request UUIDs.
-- Routines: `schedules`, `monitors`, `schedule-history`, `schedule-once|interval|daily|weekly`, `schedule-enable`, `monitor-enable`, `monitor-create`, `event-opt-in`.
+- Routines: `schedules`, `schedule-history`, `schedule-once|interval|daily|weekly`, `schedule-enable`, `event-opt-in`.
 - Owner setup: `owner-setup <project-id>` shows workspace and GitHub bindings; the other `owner-*` commands authorize, inspect and revoke them. Writes need same-project confirmation.
 - `deploy` restarts the host from its main checkout with a smoke test and rollback. See "Deploy" in `ARCHITECTURE.md`.
 

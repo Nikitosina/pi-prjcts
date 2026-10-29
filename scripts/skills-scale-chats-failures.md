@@ -1,17 +1,6 @@
-# Worker-skills catalog scale + multi-chat follow-ups: failure cases
+# Skill scale + multi-chat follow-ups: failure cases
 
 Written before code. `scripts/skills-scale-chats-e2e.mjs` checks these with a fake model, headless Chrome and a private HOME.
-
-## A. Owner worker-skills catalog above 64 skills (slice 10)
-1. 89 configured skills make `worker-skills-catalog` throw "Configured skill catalog exceeds bounded capture limits" (or the combined "Owner skill catalog exceeds combined capture limits").
-2. The returned catalog validates against a 64-item schema and fails after capture.
-3. The 1 MiB captured-document budget trips before the count does (89 normal skills).
-4. Paging is wrong: offsets above 64 are refused by the request schema, pages overlap or skip, `total` is not 89, `nextOffset` never reaches null.
-5. The revision differs between pages of an unchanged catalog, so a grant built from page 6 is refused.
-6. The UI grant dialog lists only the first 16 skills.
-7. A skill on the last page cannot be granted (`worker-skills-grant-set` recaptures and refuses it).
-8. Repository discovery still caps at 64 candidates, so a repo with more skills fails the same way.
-9. Unbounded growth: a pathological catalog (thousands) is captured without any limit.
 
 ## B. Multi-chat follow-ups
 10. Usage counts only Main and workers; a non-Main chat's tokens are missing from the total and rows.

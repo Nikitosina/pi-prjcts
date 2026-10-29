@@ -36,7 +36,6 @@ Rules:
 The worker commits, pushes a draft PR, records the candidate with `job candidate`, then spawns a fresh verifier on that sha. It repairs and repeats up to `verification.rounds` (project setting, default 3). It runs one review before `ready`, and at most one re-check. Without a verify skill the worker self-verifies and says so in the Ready report. Prompts are in `src/role-prompts.ts` (see `docs/role-prompts.md`); the workflow lives in tool descriptions and these prompts once.
 
 - `src/proof.ts` runs a command for a Job and saves its log under the Job's artifacts, tied to the commit it ran on (`projects_verify_run`). `checkProofRefs` rejects a Ready report whose `r<n>` or `run:r<n>` references name missing runs, runs on another commit, or runs that did not exit 0.
-- `src/durable-review.ts` records a reviewer's verdict on one PR head (`projects_review_verdict`, reviewer threads only); Follow PRs auto-merge needs an `approve` for the head it merges.
 
 Rules:
 - The host never runs a verification cycle or blocks a worker on its result. It only checks proof references.
@@ -114,5 +113,5 @@ Rules:
 - Workspaces: `workspace-types.ts`, `workspace-isolation.ts`, `workspace-capabilities.ts`, `durable-workspace-binding.ts` (per-agent worktree, tools and shell guard), `worktree-maintenance.ts`, `resource-leases.ts`. Only the workspace grant gives a worker repository access.
 - Knowledge: `knowledge.ts`, `knowledge-search.ts`, `knowledge-types.ts`. Markdown under `knowledge/` is the source of truth; a revision is required to write. Preferences, runbooks and decisions only.
 - Skills: `skill-profiles.ts`, `coordinator-skills.ts` (`projects_skill_file` reads a skill body on demand for the roles that have it). Skills are discovered fresh from disk on each catalog request.
-- GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Operation approvals (`operation-approvals.ts`) now gate only fixed command profiles and approved VCS cleanup; they do not merge.
+- GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Approve is the only merge path.
 - Remote access: `remote.ts`, `relay/`, `REMOTE_SPEC.md`.
