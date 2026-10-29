@@ -58,7 +58,7 @@ const model = createServer((req, res) => {
   req.on("end", async () => {
     const input = JSON.parse(body),
       msgs = input.messages;
-    const coordinator = (input.tools ?? []).some((tool) => tool.function?.name === "projects_delegate");
+    const coordinator = (input.tools ?? []).some((tool) => tool.function?.name === "agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = String(
       typeof msgs[lastUser]?.content === "string" ? msgs[lastUser].content : JSON.stringify(msgs[lastUser]?.content ?? ""),
@@ -70,7 +70,7 @@ const model = createServer((req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(text);
     };
-    if (coordinator && userText.startsWith("[Durable work")) return reply(say(`Scout finished. Summary of ${marker}.`));
+    if (coordinator && /^\[(worker|scout|reviewer) /.test(userText)) return reply(say(`Scout finished. Summary of ${marker}.`));
     if (coordinator && marker === "MARK-COORDFAIL") {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Fake coordinator failure" } }));
@@ -78,13 +78,50 @@ const model = createServer((req, res) => {
     }
     if (coordinator) {
       if (marker === "MARK-SCOUT" && stage === 0)
-        return reply(call("projects_delegate", { role: "scout", task: "MARK-SCOUTTASK survey the UI files" }));
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "scout",
+            title: "MARK-SCOUTTASK survey the UI files",
+            brief: "MARK-SCOUTTASK survey the UI files",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
       if (marker === "MARK-FAIL" && stage === 0)
-        return reply(call("projects_delegate", { role: "worker", task: "MARK-FAILTASK will fail" }));
-      if (marker === "MARK-HOLD" && stage === 0) return reply(call("projects_delegate", { role: "worker", task: "MARK-HOLDTASK waits" }));
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "MARK-FAILTASK will fail",
+            brief: "MARK-FAILTASK will fail",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
+      if (marker === "MARK-HOLD" && stage === 0)
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "MARK-HOLDTASK waits",
+            brief: "MARK-HOLDTASK waits",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
       if (marker === "MARK-HOLDTWO" && stage === 0)
-        return reply(call("projects_delegate", { role: "worker", task: "MARK-HOLDTWOTASK waits" }));
-      if (marker === "MARK-BADTOOL" && stage === 0) return reply(call("projects_worker_read", { workId: randomUUID() }));
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "MARK-HOLDTWOTASK waits",
+            brief: "MARK-HOLDTWOTASK waits",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
+      if (marker === "MARK-BADTOOL" && stage === 0) return reply(call("agents", { action: "bogus" }));
       return reply(say(`Answer ${marker}.`));
     }
     if (marker === "MARK-SCOUTTASK")
@@ -323,11 +360,24 @@ const settle = async (id, job) =>
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
-const workFor = async (id, task) =>
-  eventually(async () => (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task)), `work ${task} missing`);
+// Jobs and loose agents (scouts, reviewers) in one list shaped like the old work items.
+const workOf = async (id) => {
+  const snap = await rpc({ action: "jobs-snapshot", id });
+  return [
+    ...snap.jobs.map((j) => ({
+      text: j.title,
+      status: j.status === "running" ? "running" : j.status === "failed" ? "failed" : "completed",
+      threadId: j.id,
+    })),
+    ...snap.agents
+      .filter((a) => a.jobId === null)
+      .map((a) => ({ text: a.title, status: a.endedAt === null ? "running" : "completed", threadId: a.id })),
+  ];
+};
+const workFor = async (id, task) => eventually(async () => (await workOf(id)).find((w) => w.text.startsWith(task)), `work ${task} missing`);
 const terminal = async (id, task, status) =>
   eventually(async () => {
-    const w = (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task));
+    const w = (await workOf(id)).find((w) => w.text.startsWith(task));
     return w?.status === status && w;
   }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
@@ -443,7 +493,7 @@ try {
     `[...document.querySelectorAll('#chat-list .chat-dot')].map(n => ({ state: n.dataset.state, label: n.getAttribute('aria-label'), title: n.title, role: n.getAttribute('role') }))`,
     s,
   );
-  const wanted = { working: /^Working: coordinator|^Working: .*worker/, done: /^Done/, needs: /^Needs you: /, idle: /^Idle$/ };
+  const wanted = { working: /^Working: coordinator|^Working: .*(worker|Job)/, done: /^Done/, needs: /^Needs you: /, idle: /^Idle$/ };
   if (labels.some((item) => !item.label || item.label !== item.title || item.role !== "img" || !wanted[item.state].test(item.label)))
     throw Error("Dot labels wrong: " + JSON.stringify(labels));
   result.checks.push("D2 every dot says its state in words (aria-label and title)");
@@ -478,8 +528,7 @@ try {
   const rowOf = `.proj[data-select-project="${other.id}"] .state-dot`;
   await rpc({ action: "message", id: other.id, text: "MARK-HOLDTWO" });
   await eventually(
-    async () =>
-      (await rpc({ action: "plan-snapshot", id: other.id })).work.find((w) => w.text.startsWith("MARK-HOLDTWOTASK"))?.status === "running",
+    async () => (await workOf(other.id)).find((w) => w.text.startsWith("MARK-HOLDTWOTASK"))?.status === "running",
     "second hold not running",
   );
   await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'working'`, s, "A working while open");
@@ -534,24 +583,24 @@ try {
 
   // Compact worker rows.
   await waitFor(
-    `/^(\\d+%|window unknown)$/.test(document.querySelector('#activity .worker-line .ctx-ring')?.innerText.trim() ?? '')`,
+    `/^(\\d+%|window unknown)$/.test(document.querySelector('#job-tree .job-children .job-row .ctx-ring')?.innerText.trim() ?? '')`,
     s,
     "row context ring",
   );
   const row = await evaluate(
-    `(() => { const n = document.querySelector('#activity .worker-line'); const r = n.getBoundingClientRect(); return { height: r.height, text: n.innerText, expanded: !!document.querySelector('#activity .worker-item.on, #activity #worker-messages, #activity form'), activityTab: !!document.querySelector('[data-tab="activity"]') }; })()`,
+    `(() => { const n = document.querySelector('#job-tree .job-children .job-row'); const r = n.getBoundingClientRect(); return { height: r.height, text: n.innerText, expanded: !!document.querySelector('#job-tree #worker-messages, #job-tree form'), activityTab: !!document.querySelector('[data-tab="activity"]') }; })()`,
     s,
   );
-  if (row.height > 56 || row.expanded || row.activityTab || !/worker · running/.test(row.text.replace(/\\s+/g, " ")))
+  if (row.height > 56 || row.expanded || row.activityTab || !/^worker .*working/i.test(row.text.replace(/\s+/g, " ")))
     throw Error("Worker row not compact: " + JSON.stringify(row));
   result.checks.push(
-    "W1 a worker row is at most two lines (title; role · status · elapsed) with a context ring; no inline expansion; no Activity tab",
+    "W1 a worker row is at most two lines (title; status · plan progress) with a context ring; no inline expansion; no Activity tab",
   );
   await shot("04-workers-card-compact", s);
 
   // Worker view.
   const thread = (await workFor(id, "MARK-HOLDTASK")).threadId;
-  await click("#activity .worker-line", s);
+  await click("#job-tree .job-children .job-open", s);
   await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, "worker view");
   const view = await evaluate(
     `(() => { const v = document.querySelector('#inline-thread'); return { chatHidden: document.querySelector('[data-panel="coordinator"]').hidden, link: new URL(location.href).searchParams.get('worker'), project: new URL(location.href).searchParams.get('project'), status: !!v.querySelector('.worker-head .badge'), model: v.querySelector('.worker-head small').innerText, ring: !!v.querySelector('.worker-head .ctx-ring'), back: !!v.querySelector('[data-action="thread-close"]'), steer: !!v.querySelector('[data-action="thread-steer"]'), stop: !!v.querySelector('[data-action="thread-stop"]'), composer: !!v.querySelector('[data-inline-thread-send]'), artifacts: !!v.querySelector('#artifact-pane'), evidence: !!v.querySelector('#worker-evidence') }; })()`,
@@ -562,7 +611,6 @@ try {
     view.link !== thread ||
     view.project !== id ||
     !view.status ||
-    !/fake/.test(view.model) ||
     !view.ring ||
     !view.back ||
     !view.steer ||
@@ -573,7 +621,7 @@ try {
   )
     throw Error("Worker view incomplete: " + JSON.stringify(view));
   result.checks.push(
-    "V1 clicking a row opens the worker view: status, model, context ring, Back, Steer/Stop, conversation, composer, artifacts, evidence; URL carries ?worker=",
+    "V1 clicking a row opens the worker view: status, context ring, Back, Steer/Stop, conversation, composer, artifacts, evidence; URL carries ?worker=",
   );
   await shot("05-worker-view", s);
   await click('#inline-thread [data-action="thread-close"]', s);
@@ -583,7 +631,7 @@ try {
     "Back to the chat",
   );
   result.checks.push("V2 Back returns to the coordinator chat");
-  await click("#activity .worker-line", s);
+  await click("#job-tree .job-children .job-open", s);
   await waitFor(`!document.querySelector('#inline-thread').hidden`, s, "reopen worker view");
   await evaluate(`history.back()`, s);
   await waitFor(
@@ -861,7 +909,7 @@ try {
   if (narrow.width > 391 || !narrow.bar || narrow.barOverflow) throw Error("Narrow view broken: " + JSON.stringify(narrow));
   result.checks.push("N1 390px: no horizontal overflow, chat dots and the limits bar present");
   await shot("08-narrow-390", s);
-  await click("#activity .worker-line", s);
+  await click("#job-tree .job-children .job-open", s);
   await waitFor(
     `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
     s,
@@ -882,7 +930,7 @@ try {
   try {
     const state = await rpc({ action: "show", id: result.projectId });
     result.chatsAtFailure = state.chats;
-    result.workAtFailure = (await rpc({ action: "plan-snapshot", id: result.projectId })).work.map((w) => ({
+    result.workAtFailure = (await workOf(result.projectId)).map((w) => ({
       text: w.text.slice(0, 24),
       status: w.status,
       chat: w.chatConversationId,

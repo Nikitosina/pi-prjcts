@@ -50,23 +50,29 @@ const model = createServer((req, res) => {
   });
   req.on("end", () => {
     const input = JSON.parse(body);
-    const coordinator = input.messages.some((m) => /persistent coordinator/.test(m.content ?? ""));
-    const marker = /MARK-[A-Z]+/.exec(body)?.[0] ?? "none";
+    const coordinator = (input.tools ?? []).some((tool) => tool.function?.name === "agents");
+    const lastUser = input.messages.findLast((m) => m.role === "user"),
+      marker = /MARK-[A-Z]+/.exec(coordinator ? JSON.stringify(lastUser?.content ?? "") : body)?.[0] ?? "none";
     result.modelCalls.push({ at: Date.now(), marker, coordinator });
     if (hold && marker === "MARK-HOLD") {
       held.add(res);
       res.on("close", () => held.delete(res));
       return;
     }
-    const stage = input.messages.filter((m) => m.role === "tool").length;
+    const stage = (coordinator ? input.messages.slice(input.messages.lastIndexOf(lastUser) + 1) : input.messages).filter(
+      (m) => m.role === "tool",
+    ).length;
     let tool;
-    if (coordinator && marker === "MARK-COORD") {
-      if (stage === 0) tool = { name: "projects_workspace_catalog", arguments: {} };
-      if (stage === 1)
+    if (coordinator && (marker === "MARK-SPAWNHOLD" || marker === "MARK-SPAWNCHAT")) {
+      const text = marker === "MARK-SPAWNHOLD" ? "MARK-HOLD Parallel companion" : "MARK-CHAT Inspect README";
+      if (stage === 0)
         tool = {
-          name: "projects_delegate",
-          arguments: { role: "scout", task: "Must reject invalid scope ID", workspaceScopeId: "not-a-scope" },
+          name: "agents",
+          arguments: { action: "spawn", role: "worker", title: text, brief: text, acceptance: ["it works"], requestId: marker },
         };
+    } else if (coordinator && marker === "MARK-COORD") {
+      if (stage === 0) tool = { name: "projects_workspace_catalog", arguments: {} };
+      if (stage === 1) tool = { name: "agents", arguments: { action: "bogus" } };
     } else if (marker === "MARK-CHAT") {
       if (stage === 0) tool = { name: "read", arguments: { path: "README.md" } };
       if (stage === 1) tool = { name: "read", arguments: { path: "missing.txt" } };
@@ -297,30 +303,20 @@ try {
     id: project.id,
     confirm: project.id,
     expectedRevision: settings.revision,
-    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" }, workerCap: 2 },
+    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
   });
-  const setup = await rpc({ action: "owner-setup-snapshot", id: project.id });
-  await rpc({ action: "workspace-quick-grant", id: project.id, confirm: project.id, expectedRevision: setup.workspaceRevision });
-  const scope = (await rpc({ action: "workspace-catalog", id: project.id })).find((item) => item.wholeRepository).id;
-  result.scopeId = scope;
-  const threadId = randomUUID(),
-    heldThread = randomUUID();
-  await rpc({
-    action: "work-submit",
-    id: project.id,
-    threadId: heldThread,
-    requestId: randomUUID(),
-    workspaceScopeId: scope,
-    text: "MARK-HOLD Parallel companion",
-  });
-  await rpc({
-    action: "work-submit",
-    id: project.id,
-    threadId,
-    requestId: randomUUID(),
-    workspaceScopeId: scope,
-    text: "MARK-CHAT Inspect README",
-  });
+  const jobIdOf = async (title) => {
+    for (let i = 0; i < 200; i++) {
+      const job = (await rpc({ action: "jobs-snapshot", id: project.id })).jobs.find((item) => item.title.startsWith(title));
+      if (job) return job.id;
+      await delay(100);
+    }
+    throw Error(`Job ${title} was not started`);
+  };
+  await rpc({ action: "message", id: project.id, text: "MARK-SPAWNHOLD" });
+  const heldThread = await jobIdOf("MARK-HOLD");
+  await rpc({ action: "message", id: project.id, text: "MARK-SPAWNCHAT" });
+  const threadId = await jobIdOf("MARK-CHAT");
   await rpc({ action: "message", id: project.id, text: "MARK-COORD Inspect scope then try an invalid scoped scout." });
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
@@ -349,9 +345,9 @@ try {
     throw Error("Missing expanded tool result");
   result.checks.push("C1 coordinator tool colors and expandable results");
   await shot("01-coordinator-tools", s);
-  const active = await rpc({ action: "plan-snapshot", id: project.id });
-  if (active.work.filter((w) => w.status === "running").length !== 2) throw Error("Workers were not concurrent");
-  result.checks.push("C7 two workers execute concurrently at cap 2");
+  const active = await rpc({ action: "jobs-snapshot", id: project.id });
+  if (active.jobs.filter((job) => job.status === "running").length !== 2) throw Error("Jobs were not concurrent");
+  result.checks.push("C7 two Jobs run concurrently");
   await evaluate(`document.querySelector('[data-action="thread"][data-thread="${threadId}"]').click()`, s);
   await waitFor(`!!document.querySelector('#worker-messages .tool-call[data-status="pending"]')`, s, "pending worker tool");
   if (!(await evaluate(`document.querySelector('#worker-messages .tool-call[data-status="pending"] .tool-icon')?.innerText === '…'`, s)))
@@ -396,8 +392,8 @@ try {
   for (let i = 0; i < 14; i++) {
     await rpc({ action: "thread-send", id: project.id, threadId, requestId: randomUUID(), text: "History turn " + i });
     for (let j = 0; j < 100; j++) {
-      const p = await rpc({ action: "plan-snapshot", id: project.id });
-      if (!p.work.some((w) => w.threadId === threadId && ["running", "queued"].includes(w.status))) break;
+      const p = await rpc({ action: "jobs-snapshot", id: project.id });
+      if (!p.jobs.some((job) => job.id === threadId && job.working)) break;
       await delay(50);
     }
   }
@@ -415,7 +411,7 @@ try {
   result.failure = redact(error?.stack ?? error);
   try {
     result.diagnostic = await evaluate(
-      `document.querySelector('#activity').innerText + '\\n---\\n' + document.querySelector('#dialog').innerText.slice(0, 2000)`,
+      `document.querySelector('#job-tree').innerText + '\\n---\\n' + document.querySelector('#dialog').innerText.slice(0, 2000)`,
       chromeSession,
     );
   } catch {}

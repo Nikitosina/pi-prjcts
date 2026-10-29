@@ -1,25 +1,16 @@
-// E2E: scoped models, inherited role models, live coordinator model changes, default concurrency 5.
+// E2E: scoped models and live coordinator model changes.
 // Isolated host, local fake provider with three models, no real providers. Failure cases: scripts/scoped-models-failures.md.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { kit, delay } from "./notify-kit.mjs";
 
 const brain = { held: null };
-const respond = async ({ coordinator, marker, results, call, say, userText, request }) => {
+const respond = async ({ coordinator, marker, say }) => {
   if (coordinator) {
-    brain.control = request.tools?.find((tool) => tool.function?.name === "projects_worker_control");
     if (marker === "MARK-BUSY") {
       await brain.held;
       return say("Busy turn done.");
     }
-    const role = { "MARK-DELA": "scout", "MARK-DELB": "scout", "MARK-DELC": "scout" }[marker];
-    if (role && results.length === 0)
-      return call("projects_delegate", { role, task: `${marker}TASK read-only look ${marker === "MARK-DELA" ? "MARK-HOLD" : ""}` });
-    return undefined;
-  }
-  if (/MARK-HOLD/.test(userText)) {
-    await brain.held;
-    return say("Held worker done.");
   }
   return undefined;
 };
@@ -59,13 +50,11 @@ try {
   const settings = () => rpc({ action: "settings-snapshot", id });
   const update = async (changes) =>
     rpc({ action: "settings-update", id, confirm: id, expectedRevision: (await settings()).revision, changes });
-  const plan = () => rpc({ action: "plan-snapshot", id });
   const show = (chatId) => rpc({ action: "show", id, ...(chatId ? { chatId } : {}) });
   const modelsOf = (role) => result.calls.filter((call) => call.coordinator === (role === "coordinator")).map((call) => call.model);
 
   let values = (await settings()).values;
   check("S1 a new project stores no role models (all inherit the coordinator)", JSON.stringify(values.models) === "{}", values.models);
-  check("S2 a new project allows five workers at a time", values.workerCap === 5, values.workerCap);
 
   values = (await update({ models: { worker: "fake/fake-two" } })).values;
   check("S3 an explicit role model is kept", values.models.worker === "fake/fake-two", values.models);
@@ -100,47 +89,8 @@ try {
   );
   check("S17 the refused empty override saved nothing", (await settings()).values.scopedModels === null);
 
-  // Inheritance at admission; running workers keep their model through a live coordinator model change.
-  let release;
-  brain.held = new Promise((ok) => {
-    release = ok;
-  });
-  await rpc({ action: "message", id, text: "MARK-DELA delegate and hold" });
-  await eventually(async () => (await plan()).work.some((work) => work.status === "running"), "held scout never ran");
-  const heldWork = (await plan()).work.find((work) => work.status === "running");
-  check("S4 an inheriting scout gets the coordinator model at admission", heldWork.attempt.model === "fake/fake-model", heldWork.attempt);
-  values = (await update({ model: "fake/fake-two" })).values;
-  check(
-    "S9 the coordinator model changes while a worker runs (no reopen)",
-    values.model === "fake/fake-two" && (await plan()).work.some((work) => work.status === "running"),
-    values.model,
-  );
-  values = (await update({ workerCap: 2 })).values;
-  check(
-    "S19 the worker limit changes while a worker runs, and it keeps running",
-    values.workerCap === 2 &&
-      (await plan()).workerCap === 2 &&
-      (await plan()).work.some((work) => work.id === heldWork.id && work.status === "running"),
-    await plan(),
-  );
-  values = (await update({ workerCap: 5 })).values;
-  check("S19 the limit goes back up live", (await plan()).workerCap === 5 && values.workerCap === 5);
-  check(
-    "S5 the running worker keeps its frozen model",
-    (await plan()).work.find((work) => work.id === heldWork.id).attempt.model === "fake/fake-model",
-  );
-  release();
-  await eventually(
-    async () => (await plan()).work.every((work) => work.status !== "running" && work.status !== "queued"),
-    "held scout did not finish",
-  );
-
-  await k.ask(id, "main", "MARK-DELB after the change");
-  check(
-    "S4 a scout admitted after the change inherits the new coordinator model",
-    (await plan()).work.find((work) => /MARK-DELBTASK/.test(work.text))?.attempt.model === "fake/fake-two",
-    (await plan()).work,
-  );
+  await update({ model: "fake/fake-two" });
+  await k.ask(id, "main", "MARK-PLAIN after the change");
   check("S11 the coordinator now requests the new model", modelsOf("coordinator").at(-1) === "fake-two", modelsOf("coordinator"));
   const chat = await rpc({ action: "chat-create", id, title: "Second" });
   await k.ask(id, chat.id, "MARK-PLAIN in the second chat");
@@ -155,13 +105,6 @@ try {
       .every((model) => model === "fake-three"),
     modelsOf("coordinator"),
   );
-  await update({ models: { scout: "fake/fake-model" } });
-  await k.ask(id, "main", "MARK-DELC with an explicit scout model");
-  check(
-    "S3 an explicit scout model overrides inheritance",
-    (await plan()).work.find((work) => /MARK-DELCTASK/.test(work.text))?.attempt.model === "fake/fake-model",
-  );
-
   // Hold an actual provider request, not just a turn waiting to start.
   let free;
   brain.held = new Promise((ok) => {
@@ -204,14 +147,6 @@ try {
   check("S12 the model survives a host restart", (await settings()).values.model === "fake/fake-two");
   await k.ask(id, "main", "MARK-PLAIN after restart");
   check("S12 the restarted coordinator requests the saved model", modelsOf("coordinator").at(-1) === "fake-two", modelsOf("coordinator"));
-
-  // The worker limit has one owner.
-  const control = brain.control;
-  check(
-    "S13 projects_worker_control no longer offers parallelism",
-    !!control && !JSON.stringify(control).includes("parallelism"),
-    control?.function?.parameters,
-  );
 
   // Browser: the model button cycles the scope; Settings offers inherit and a scope editor.
   await update({ models: { scout: null }, scopedModels: ["fake/fake-model", "fake/fake-two", "fake/fake-three"] });

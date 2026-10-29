@@ -72,8 +72,7 @@ await k.run(async () => {
       if (e.animationName !== 'stream-in') return;
       window.__smooth.starts.push({ t: performance.now(), old: window.__oldParagraph.contains(e.target), opacity: +getComputedStyle(e.target).opacity, text: e.target.textContent.length });
     });
-    window.__apply = applyLive;
-    applyLive = async frame => { window.__smooth.received.push({ t: performance.now(), length: frame.text.length }); return window.__apply(frame); };
+    window.__projectsProbe.onLive = frame => window.__smooth.received.push({ t: performance.now(), length: frame.text.length });
     window.__paint = new MutationObserver(() => window.__smooth.paints.push({ t: performance.now(), length: liveRenderedText?.length }));
     window.__paint.observe(document.querySelector('#live-reply .text'), { childList: true, subtree: true, characterData: true });
   })()`);
@@ -164,7 +163,7 @@ await k.run(async () => {
   );
   const host = (await k.rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text;
   const final = await page.evaluate(
-    `(() => { const root=[...document.querySelectorAll('#messages .msg.them .text')].at(-1), e=document.createElement('div'); e.innerHTML=renderMarkdown(${JSON.stringify(expected)}); return { equal:root.innerHTML===e.innerHTML, selected:getSelection().toString(), pending:liveRenderFrame }; })()`,
+    `(() => { const root=[...document.querySelectorAll('#messages .msg.them .text')].at(-1), e=document.createElement('div'); e.innerHTML=window.__projectsRenderMarkdown(${JSON.stringify(expected)}); return { equal:root.innerHTML===e.innerHTML, selected:getSelection().toString(), pending:liveRenderFrame }; })()`,
   );
   k.check(
     "S7 completion is exact, retains selection and leaves no reveal queue",

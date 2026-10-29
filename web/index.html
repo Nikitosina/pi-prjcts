@@ -56,7 +56,12 @@
           <option>Loading…</option>
         </select>
         <button class="ghost small quiet" data-action="open-retained">Open project by ID…</button>
-        <button class="ghost small quiet" data-action="archive">Archive</button>
+        <div class="side-work" id="side-work">
+          <div class="side-label">Chats</div>
+          <div id="chat-bar" class="chat-bar"></div>
+          <div class="side-label">Jobs</div>
+          <div id="job-tree" class="job-tree" aria-label="Jobs"></div>
+        </div>
         <div class="side-foot">
           <span id="connection" role="status">Connecting…</span><a id="remote-hosts" class="ghost small" href="/" hidden>Hosts</a
           ><button id="refresh" class="ghost small">Refresh</button>
@@ -101,7 +106,6 @@
 
           <section class="panel grid2" data-panel="coordinator">
             <div class="convo">
-              <div id="chat-bar" class="chat-bar"></div>
               <div id="transcript" class="transcript">
                 <div id="messages" aria-live="polite"></div>
                 <div id="live-reply" class="msg them live-reply" aria-live="polite" hidden></div>
@@ -207,22 +211,9 @@
                 <div id="prs"></div>
               </div>
               <div id="plugin-cards"></div>
-              <div class="card" id="workers-card">
-                <div class="row between">
-                  <b>Workers</b
-                  ><label class="row archive-toggle" id="archive-toggle" hidden
-                    ><input type="checkbox" id="show-archived" /> Show archived</label
-                  >
-                </div>
-                <div id="activity"></div>
-              </div>
               <div class="card">
                 <div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div>
                 <div id="notes"></div>
-              </div>
-              <div class="card">
-                <b>Recent results</b>
-                <div id="outcomes"></div>
               </div>
             </aside>
           </section>
@@ -296,8 +287,8 @@
               <a href="#set-setup">Owner setup</a><a href="#set-project">Project</a><a href="#set-skills">Skills</a
               ><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a
               ><a href="#set-advanced">Advanced</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a
-              ><a href="#set-remote">Remote access</a><a href="#set-appearance">Appearance</a><a href="#set-approvals">Approvals</a
-              ><a href="#set-danger" class="danger">Danger zone</a>
+              ><a href="#set-remote">Remote access</a><a href="#set-deploy">Deploy</a><a href="#set-appearance">Appearance</a
+              ><a href="#set-approvals">Approvals</a><a href="#set-danger" class="danger">Danger zone</a>
             </nav>
             <div class="set-main">
               <section class="set-section" id="set-setup">
@@ -468,6 +459,20 @@
                 </header>
                 <div class="card" id="remote-card">
                   <div id="remote"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-deploy">
+                <header class="set-head">
+                  <div>
+                    <h2>Deploy</h2>
+                    <p class="note">
+                      Restart this host from its main checkout. The deploy checks the code first and rolls back to the last good version if
+                      the restarted host fails its smoke test.
+                    </p>
+                  </div>
+                </header>
+                <div class="card" id="deploy-card">
+                  <div id="deploy"><p class="note">Reading…</p></div>
                 </div>
               </section>
               <section class="set-section" id="set-appearance">

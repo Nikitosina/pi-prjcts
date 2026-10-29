@@ -31,7 +31,6 @@ import {
 import { ago, esc, size, uuid } from "./format.js";
 import { renderMarkdown } from "./markdown.js";
 import { admissionBlocked, refresh } from "./chat.js";
-import { setShowArchived, showArchived } from "./workers.js";
 import { draftKey } from "./composer.js";
 import { markAt } from "./search.js";
 

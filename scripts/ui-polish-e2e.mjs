@@ -45,7 +45,7 @@ const model = createServer((req, res) => {
   req.on("end", async () => {
     const input = JSON.parse(body),
       msgs = input.messages;
-    const coordinator = (input.tools ?? []).some((tool) => tool.function?.name === "projects_delegate");
+    const coordinator = (input.tools ?? []).some((tool) => tool.function?.name === "agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = String(
       typeof msgs[lastUser]?.content === "string" ? msgs[lastUser].content : JSON.stringify(msgs[lastUser]?.content ?? ""),
@@ -57,14 +57,42 @@ const model = createServer((req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(text);
     };
-    if (coordinator && userText.startsWith("[Durable work")) return reply(say(`Scout finished. Summary of ${marker}.`));
+    if (coordinator && /^\[(worker|scout|reviewer) /.test(userText)) return reply(say(`Scout finished. Summary of ${marker}.`));
     if (coordinator) {
       if (marker === "MARK-SCOUT" && stage === 0)
-        return reply(call("projects_delegate", { role: "scout", task: "MARK-SCOUTTASK survey the UI files" }));
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "scout",
+            title: "MARK-SCOUTTASK survey the UI files",
+            brief: "MARK-SCOUTTASK survey the UI files",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
       if (marker === "MARK-FAIL" && stage === 0)
-        return reply(call("projects_delegate", { role: "worker", task: "MARK-FAILTASK will fail" }));
-      if (marker === "MARK-HOLD" && stage === 0) return reply(call("projects_delegate", { role: "worker", task: "MARK-HOLDTASK waits" }));
-      if (marker === "MARK-BADTOOL" && stage === 0) return reply(call("projects_worker_read", { workId: randomUUID() }));
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "MARK-FAILTASK will fail",
+            brief: "MARK-FAILTASK will fail",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
+      if (marker === "MARK-HOLD" && stage === 0)
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "MARK-HOLDTASK waits",
+            brief: "MARK-HOLDTASK waits",
+            acceptance: ["it works"],
+            requestId: randomUUID(),
+          }),
+        );
+      if (marker === "MARK-BADTOOL" && stage === 0) return reply(call("agents", { action: "bogus" }));
       return reply(say(`Answer ${marker}.`));
     }
     if (marker === "MARK-SCOUTTASK")
@@ -246,11 +274,24 @@ const settle = async (id, job) =>
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
-const workFor = async (id, task) =>
-  eventually(async () => (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task)), `work ${task} missing`);
+// Jobs and loose agents (scouts, reviewers) in one list shaped like the old work items.
+const workOf = async (id) => {
+  const snap = await rpc({ action: "jobs-snapshot", id });
+  return [
+    ...snap.jobs.map((j) => ({
+      text: j.title,
+      status: j.status === "running" ? "running" : j.status === "failed" ? "failed" : "completed",
+      threadId: j.id,
+    })),
+    ...snap.agents
+      .filter((a) => a.jobId === null)
+      .map((a) => ({ text: a.title, status: a.endedAt === null ? "running" : "completed", threadId: a.id })),
+  ];
+};
+const workFor = async (id, task) => eventually(async () => (await workOf(id)).find((w) => w.text.startsWith(task)), `work ${task} missing`);
 const terminal = async (id, task, status) =>
   eventually(async () => {
-    const w = (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task));
+    const w = (await workOf(id)).find((w) => w.text.startsWith(task));
     return w?.status === status && w;
   }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
@@ -306,7 +347,7 @@ try {
   await terminal(id, "MARK-FAILTASK", "failed");
   await ask("MARK-BADTOOL");
   // A user message that merely looks like a report must stay a plain message (failure 3).
-  await ask("[Durable work but not really] MARK-FAKE");
+  await ask("[worker but not really] MARK-FAKE");
   await ask("MARK-HOLD");
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status === "running", "hold not running");
 
@@ -330,34 +371,30 @@ try {
 
   // Conversation
   const reports = await evaluate(
-    `[...document.querySelectorAll('#messages .report')].map(n => ({ text: n.innerText, thread: n.querySelector('[data-action="thread"]')?.dataset.thread ?? null, open: n.open }))`,
+    `[...document.querySelectorAll('#messages .job-msg')].map(n => ({ text: n.innerText, thread: n.dataset.job }))`,
     s,
   );
   const youText = await evaluate(`[...document.querySelectorAll('#messages .msg.you')].map(n => n.innerText).join('\\n')`, s);
   if (
     reports.length !== 2 ||
-    /\\[Durable work [0-9a-f-]{36}/.test(youText) ||
+    /\\[(worker|scout) [0-9a-f-]{36}/.test(youText) ||
     /Summarize the result for the user/.test(await evaluate(`document.querySelector('#messages').innerText`, s))
   )
     throw Error("Report not rendered as a card: " + JSON.stringify({ reports, youText: youText.slice(0, 400) }));
   const scoutCard = reports.find((r) => r.text.includes("MARK-SCOUTTASK"));
   if (
-    !/scout report/i.test(scoutCard?.text) ||
-    !/completed/i.test(scoutCard.text) ||
+    !/scout answered/i.test(scoutCard?.text) ||
     scoutCard.thread !== scout.threadId ||
-    !reports.some((r) => /worker report/i.test(r.text) && /failed/.test(r.text))
+    !reports.some((r) => /worker failed/i.test(r.text))
   )
     throw Error("Report card header/link wrong: " + JSON.stringify(reports));
-  result.checks.push(
-    "C1 worker report renders as a scout report card linked to its thread, no raw UUID header or coordinator instructions",
-  );
-  await evaluate(`document.querySelector('#messages .report summary').click()`, s);
+  result.checks.push("C1 agent report renders as a regular message linked to its thread, no raw UUID header or coordinator instructions");
   await waitFor(
-    `document.querySelector('#messages .report').open && document.querySelector('#messages .report').innerText.includes('REPORT-BODY') && !!document.querySelector('#messages .report strong')`,
+    `document.querySelector('#messages .job-msg').innerText.includes('REPORT-BODY') && !!document.querySelector('#messages .job-msg strong')`,
     s,
-    "report expands with markdown result",
+    "report shows its markdown result",
   );
-  result.checks.push("C2 report card expands to the markdown-rendered result");
+  result.checks.push("C2 the report message shows the markdown-rendered result");
   if (!/MARK-FAKE/.test(youText)) throw Error("Look-alike user message vanished");
   result.checks.push("C3 a message that only looks like a report stays a plain user message");
   const tools = await evaluate(
@@ -365,7 +402,7 @@ try {
     s,
   );
   const delegate = tools.find((t) => t.label.includes("MARK-SCOUTTASK"));
-  if (!delegate || !/delegated to scout/i.test(delegate.label) || /projects_delegate/.test(delegate.label))
+  if (!delegate || !/started a scout/i.test(delegate.label) || /agents/.test(delegate.label))
     throw Error("Delegate tool call not humanised: " + JSON.stringify(tools));
   const bad = tools.find((t) => t.status === "error");
   if (
@@ -376,7 +413,7 @@ try {
     ))
   )
     throw Error("Errored tool call indistinguishable: " + JSON.stringify(tools));
-  result.checks.push('C4 tool calls are one-line human labels ("Delegated to scout: …"); errors look different');
+  result.checks.push('C4 tool calls are one-line human labels ("Started a scout: …"); errors look different');
   const stamps = await evaluate(`[...document.querySelectorAll('#messages .who small')].map(n => n.innerText)`, s);
   if (!stamps.length || stamps.some((t) => /[A-Z][a-z]{2} \\d/.test(t))) throw Error("Today timestamps still carry a date: " + stamps);
   result.checks.push("C5 messages from today show time only");
@@ -421,35 +458,23 @@ try {
   // Side rail
   if (await evaluate(`!!document.querySelector('#needs-card')?.offsetParent`, s)) throw Error("Empty Needs-you card shown");
   result.checks.push("R1 empty Needs-you card hidden");
-  const rail = await evaluate(
-    `({ workers: document.querySelector('#activity').innerText, results: document.querySelector('#outcomes').innerText })`,
-    s,
-  );
-  if (
-    !rail.results.includes("MARK-SCOUTTASK") ||
-    !/scout/i.test(rail.results) ||
-    !rail.results.includes("MARK-FAILTASK") ||
-    !rail.workers.includes("MARK-HOLDTASK") ||
-    /work items/.test(rail.workers)
-  )
-    throw Error("Rail content wrong: " + JSON.stringify(rail));
-  result.checks.push('R2 Recent results lists completed and failed durable work; Workers shows running; no "work items" grammar');
-  await evaluate(
-    `[...document.querySelectorAll('#outcomes [data-action="thread"]')].find(n => n.innerText.includes('MARK-SCOUTTASK')).click()`,
-    s,
-  );
+  const rail = await evaluate(`document.querySelector('#job-tree').innerText`, s);
+  if (!rail.includes("MARK-FAILTASK") || !rail.includes("MARK-HOLDTASK") || /work items/.test(rail))
+    throw Error("Jobs tree content wrong: " + JSON.stringify(rail));
+  result.checks.push('R2 the Jobs tree lists the failed and the running Job; no "work items" grammar');
+  await evaluate(`document.querySelector('#messages .job-msg[data-status="answered"] [data-action="thread"]').click()`, s);
   await waitFor(
     `!document.querySelector('#inline-thread').hidden && document.querySelector('#inline-thread').innerText.includes('REPORT-BODY')`,
     s,
     "result opens worker view",
   );
   const opened = await evaluate(
-    `({ coordinatorHidden: document.querySelector('[data-panel="coordinator"]').hidden, deepLink: /^[a-f0-9-]{36}$/.test(new URL(location.href).searchParams.get('worker') ?? ''), back: !!document.querySelector('#inline-thread [data-action="thread-close"]'), steer: !!document.querySelector('#inline-thread [data-action="thread-steer"]'), stop: !!document.querySelector('#inline-thread [data-action="thread-stop"]'), composer: !!document.querySelector('#inline-thread [data-inline-thread-send]'), artifacts: !!document.querySelector('#inline-thread #artifact-pane') })`,
+    `({ coordinatorHidden: document.querySelector('[data-panel="coordinator"]').hidden, deepLink: /^[a-f0-9-]{36}$/.test(new URL(location.href).searchParams.get('worker') ?? ''), back: !!document.querySelector('#inline-thread [data-action="thread-close"]'), steer: !!document.querySelector('#inline-thread [data-action="thread-steer"]'), composer: !!document.querySelector('#inline-thread [data-inline-thread-send]'), artifacts: !!document.querySelector('#inline-thread #artifact-pane') })`,
     s,
   );
   if (Object.values(opened).some((value) => value !== true)) throw Error("Worker view incomplete: " + JSON.stringify(opened));
   result.checks.push(
-    "R3 clicking a recent result opens its worker view (deep link, Back, Steer/Stop, composer, artifacts) in place of the chat",
+    "R3 clicking a report's transcript link opens its agent view (deep link, Back, Steer, composer, artifacts) in place of the chat",
   );
   await shot("02-worker-view", s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
@@ -460,31 +485,22 @@ try {
     "Escape returns to the chat",
   );
   result.checks.push("R3b Escape returns to the coordinator chat and drops ?worker");
-  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
-  await waitFor(
-    `document.querySelector('#activity').innerText.includes('Show active only') && document.querySelector('#activity').innerText.includes('MARK-FAILTASK') && !document.querySelector('#dialog').open`,
-    s,
-    "view all lists every item in the card",
-  );
-  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
-  result.checks.push('R4 "View all work" lists finished work in the card instead of a dialog or tab');
-
   // Round 2
   const list = await evaluate(
-    `(() => { const ol = [...document.querySelectorAll('#messages .report ol')]; return ol.map(n => n.children.length); })()`,
+    `(() => { const ol = [...document.querySelectorAll('#messages .job-msg ol')]; return ol.map(n => n.children.length); })()`,
     s,
   );
   if (!list.includes(3)) throw Error("Blank-line separated numbered list split: " + JSON.stringify(list));
   result.checks.push("M1 numbered list with blank lines stays one list");
-  await evaluate(`document.querySelector('#activity [data-action="thread"]').click()`, s);
+  await evaluate(`document.querySelector('#job-tree .job-open').click()`, s);
   await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, "worker view");
   const panes = await evaluate(
-    `(() => ({ chatHidden: document.querySelector('[data-panel="coordinator"]').hidden, outsideCard: !document.querySelector('#workers-card').contains(document.querySelector('#inline-thread')), inlineExpansion: !!document.querySelector('#activity .worker-item.on, #activity #worker-messages'), context: !!document.querySelector('#worker-context') }))()`,
+    `(() => ({ chatHidden: document.querySelector('[data-panel="coordinator"]').hidden, outsideCard: !document.querySelector('#job-tree').contains(document.querySelector('#inline-thread')), inlineExpansion: !!document.querySelector('#job-tree #worker-messages'), context: !!document.querySelector('#worker-context') }))()`,
     s,
   );
   if (!panes.chatHidden || !panes.outsideCard || panes.inlineExpansion || !panes.context)
     throw Error("Worker did not open as its own view: " + JSON.stringify(panes));
-  result.checks.push("A1 a worker opens as its own view, not an inline expansion in the Workers card");
+  result.checks.push("A1 a Job opens as its own view, not an inline expansion in the Jobs tree");
   await shot("04-worker-view", s);
   await evaluate(`document.querySelector('#inline-thread [data-action="thread-close"]').click()`, s);
   await waitFor(

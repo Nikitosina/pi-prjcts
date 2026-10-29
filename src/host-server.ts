@@ -1,12 +1,16 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   PROMPT_ROLES,
   home,
+  loadDeploySettings,
+  saveDeploySettings,
   socketPath,
   Request,
   Project,
@@ -38,6 +42,8 @@ import { feed } from "./change-feed.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
+import { deployPending, idleDeployTick, readDeployState } from "./deploy.ts";
+import { describeAcceptance } from "./result-acceptance.ts";
 import { startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
@@ -668,7 +674,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "job-approve": {
       const result = await (await durable(input.id)).approveJob(input.jobId);
       if ("refused" in result) throw new Error(result.refused);
-      return result.outcome;
+      return { ...result.outcome, line: describeAcceptance(result.outcome) };
     }
     case "artifacts-list": {
       // Owner browsing: one thread's files, or every thread that has some (known threads of this project only).
@@ -1303,7 +1309,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "thread-stop": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
-      await (await durable(input.id)).stopJob(input.threadId, "Stopped by the owner");
+      await (await durable(input.id)).stopJob(input.threadId, input.reason ?? "Stopped by the owner");
       return { stopped: true, threadId: input.threadId };
     }
     case "worker-contexts":
@@ -1472,6 +1478,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "telegram-remove":
       recordHostEvent("telegram", "bot removed");
       return telegram.remove();
+    case "deploy-snapshot":
+      return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
+    case "deploy-settings":
+      saveDeploySettings(input.settings);
+      recordHostEvent(
+        "deploy",
+        `deploy when idle ${input.settings.idle ? "on" : "off"} ${input.settings.startHour}-${input.settings.endHour}`,
+      );
+      return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
+    case "deploy-start":
+      if (deployRunning()) throw new Error("A deploy is already running");
+      startDeploy();
+      recordHostEvent("deploy", "deploy started by the owner");
+      return { settings: loadDeploySettings(), state: readDeployState(), running: true };
     case "shutdown":
       closing = true;
       setTimeout(() => {
@@ -1575,6 +1595,55 @@ async function automationSnapshot(id: string) {
     githubRepositories: (project.githubAuthorization ?? []).map((item) => item.repositoryId),
   };
 }
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+function deployRunning(): boolean {
+  try {
+    const pid = Number(readFileSync(join(home(), "deploy.lock"), "utf8"));
+    process.kill(pid, 0);
+    return Number.isSafeInteger(pid) && pid > 0;
+  } catch {
+    return false;
+  }
+}
+/** The deploy stops this host, so it must outlive it: detached, with its own log. */
+function startDeploy(): void {
+  const log = openSync(join(home(), "deploy.log"), "a", 0o600);
+  const child = spawn(process.execPath, [join(repoRoot, "src", "cli.ts"), "deploy", repoRoot], {
+    detached: true,
+    stdio: ["ignore", log, log],
+    env: { ...process.env, PI_PROJECTS_HOME: home() },
+    cwd: repoRoot,
+  });
+  child.on("error", (error) => recordHostEvent("deploy", `deploy did not start: ${errorText(error)}`));
+  child.unref();
+  closeSync(log);
+}
+/** Idle means no running Job in any project; a project whose runtime is not open has nothing running. */
+async function noRunningJobs(): Promise<boolean> {
+  for (const opening of durableRuntimes.values()) {
+    const snapshot = await (await opening).jobs();
+    if (snapshot.jobs.some((job) => job.status === "running")) return false;
+  }
+  return true;
+}
+const idleDeployTimer = setInterval(
+  () => {
+    const settings = loadDeploySettings();
+    if (closing || !settings.idle) return;
+    idleDeployTick({
+      now: new Date(),
+      window: settings,
+      idle: noRunningJobs,
+      pending: () => deployPending(repoRoot),
+      start() {
+        startDeploy();
+        recordHostEvent("deploy", "deploy started: host idle inside the deploy window");
+      },
+    }).catch((error) => recordHostEvent("deploy", `idle deploy check failed: ${errorText(error)}`));
+  },
+  Number(process.env.PI_PROJECTS_DEPLOY_TICK_MS ?? 5 * 60_000),
+);
+idleDeployTimer.unref();
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");

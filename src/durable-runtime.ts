@@ -1488,10 +1488,14 @@ export async function openDurableProject(input: {
       }));
     /** The conversation an agent id (Job id or scout/reviewer id) names. */
     async function agentConversation(id: string): Promise<Conversation["id"]> {
+      const [agentId, subagentId] = id.split("/");
       const view = await jobs.snapshot(openedHarness);
-      const found = view.agents.find((agent) => agent.id === id);
+      const found = view.agents.find((agent) => agent.id === agentId);
       if (!found) throw new Error("Unknown agent id");
-      return found.conversationId;
+      if (subagentId === undefined) return found.conversationId;
+      const child = view.jobs.find((job) => job.id === agentId)?.children.find((item) => String(item.id) === subagentId);
+      if (!child) throw new Error("Unknown subagent of this Job");
+      return child.id;
     }
     async function transcriptConversation(target: TranscriptTarget): Promise<number> {
       return "chatId" in target

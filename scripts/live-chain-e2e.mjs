@@ -327,6 +327,7 @@ try {
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
   launch.searchParams.set("tab", "coordinator");
+  launch.searchParams.set("e2e", "1");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -353,9 +354,8 @@ try {
     `[...document.querySelectorAll('.col .card')].filter(n => n.offsetParent).map(n => n.querySelector('b')?.innerText)`,
     s,
   );
-  if (order.indexOf("Knowledge") < 0 || order.indexOf("Recent results") < 0 || order.indexOf("Knowledge") > order.indexOf("Recent results"))
-    throw Error("Rail order wrong: " + JSON.stringify(order));
-  result.checks.push("O1 rail shows Knowledge before Recent results");
+  if (order.indexOf("Knowledge") < 0 || order.includes("Recent results")) throw Error("Rail wrong: " + JSON.stringify(order));
+  result.checks.push("O1 rail shows Knowledge; Job results arrive as chat messages, not a card");
   const rail = await evaluate(
     `(() => { const card = document.querySelector('#notes'); const r = card.closest('.card').getBoundingClientRect(); return { folders: [...card.querySelectorAll('.tree-folder > summary .tree-name')].map(n => n.innerText), files: [...card.querySelectorAll('.tree-file .tree-name')].map(n => n.innerText), overflow: [...card.querySelectorAll('.tree-file')].some(n => n.getBoundingClientRect().right > r.right + 1), scroll: card.scrollWidth > card.clientWidth + 1 }; })()`,
     s,

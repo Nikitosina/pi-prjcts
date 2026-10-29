@@ -23,6 +23,13 @@ export const PromptOverrides = Type.Object(
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
+/** Host-wide "deploy when idle" opt-in: hours of the local day, end exclusive (see deploy.ts). */
+export const DeploySettings = Type.Object(
+  { idle: Type.Boolean(), startHour: Type.Integer({ minimum: 0, maximum: 23 }), endHour: Type.Integer({ minimum: 0, maximum: 23 }) },
+  { additionalProperties: false },
+);
+export type DeploySettings = Static<typeof DeploySettings>;
+export const DEFAULT_DEPLOY_SETTINGS: DeploySettings = { idle: false, startHour: 2, endHour: 7 };
 export const DEFAULT_STALL_MINUTES = 20;
 export const VerificationSettings = Type.Object(
   { enabled: Type.Boolean(), skill: Type.String({ maxLength: 128 }), rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) },
@@ -975,12 +982,16 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("thread-steer"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("thread-stop"), id: Id, threadId: Id }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("thread-stop"), id: Id, threadId: Id, reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })) },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("thread-history"),
       id: Id,
-      threadId: Id,
+      /** An agent id, or `<job id>/<conversation id>` for a subagent of a Job. */
+      threadId: Type.String({ pattern: "^[a-f0-9-]{36}(/[0-9]+)?$" }),
       before: Type.Optional(Type.Integer({ minimum: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
       context: Type.Optional(Type.Boolean()),
@@ -1214,6 +1225,9 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("knowledge-history"), id: Id, path: knowledgePath }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("shutdown") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("deploy-snapshot") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("deploy-settings"), settings: DeploySettings }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("deploy-start") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("notify-feed"), after: Type.Optional(Type.Integer({ minimum: 0 })) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-snapshot") }, { additionalProperties: false }),
   Type.Object(
@@ -1261,6 +1275,17 @@ export function saveJson(path: string, value: unknown): void {
   writeFileSync(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
   renameSync(temp, path);
 }
+
+const deploySettingsPath = () => join(home(), "deploy-settings.json");
+/** Defaults when the file is missing or invalid: an unreadable window must never turn into "always". */
+export function loadDeploySettings(): DeploySettings {
+  try {
+    return parse(DeploySettings, JSON.parse(readFileSync(deploySettingsPath(), "utf8")));
+  } catch {
+    return DEFAULT_DEPLOY_SETTINGS;
+  }
+}
+export const saveDeploySettings = (settings: DeploySettings): void => saveJson(deploySettingsPath(), settings);
 
 export function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf8"));

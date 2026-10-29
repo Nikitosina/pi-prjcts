@@ -19,6 +19,7 @@ import {
   onProjectChange,
   onRender,
   pager,
+  probe,
   persistBrowserDrafts,
   persistDraftsSafely,
   registerActions,
@@ -43,9 +44,12 @@ let answerAdoption = null;
 function answerKey(project, entry) {
   return `${project}:${entry}`;
 }
-export let plan = null;
+// The project's Jobs and agents (host action jobs-snapshot); null until the first read.
+export let jobsSnap = null;
 export let approvalPage = null;
 export const operationCache = new Map();
+// E2E runs (?e2e=1) seed and open approval records by name.
+if (probe) Object.assign(window, { operationCache, operationView, operationsDialog });
 let selected = null;
 onProjectChange(() => {
   approvalPage = null;
@@ -114,7 +118,7 @@ function renderInbox() {
         )
         .join(""),
   );
-  document.querySelector("#approvals-button").hidden = !plan;
+  document.querySelector("#approvals-button").hidden = !jobsSnap;
   document.querySelector("#approval-page-note").textContent = approvalPage
     ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.`
     : "";
@@ -417,8 +421,8 @@ function operationLetter(record) {
   return `<article class="letter"><h2>${esc(record.operation.provider)} ${esc(record.operation.kind)}</h2>${badge(record.status)}<p>Project ${esc(record.projectId)}<br>ID ${esc(record.id)}<br>Fingerprint ${esc(record.fingerprint)}<br>Current scope: ${esc(record.scopeCurrent)}</p><pre>${esc(JSON.stringify(record.operation, null, 2))}</pre><p>Plain approval does not authorize execution. VCS execution is limited to the exact recorded action and state. Auto-merge is unavailable; commands execute only through bound worker profiles.</p><div class="row">${record.status === "pending" ? `<button data-action="operation-decision" ${attrs} data-decision="plain">Approve record only</button>${executionConsentAvailable(record) ? `<button class="danger" data-action="operation-decision" ${attrs} data-decision="execution">Permit exact executor</button>` : ""}<button data-action="operation-decision" ${attrs} data-decision="reject">Reject</button>` : `<p>Decision is immutable. Executable approval: ${esc(record.executionApproved === true)}</p>${operationExecutionAvailable(record) ? `<button class="danger" data-action="operation-execute" ${attrs}>${record.operation.kind === "vcs" ? "Execute exact VCS operation" : "Execute exact-head merge"}, separate confirmation</button><button data-action="operation-inspect" ${attrs}>Inspect original outcome, never replay</button>` : ""}`}</div></article>`;
 }
 async function operationsDialog(offset = 0) {
-  if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
-    throw new Error("A loaded Durable plan and valid approval page are required");
+  if (!jobsSnap || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
+    throw new Error("A loaded project and valid approval page are required");
   const id = getProjectId(),
     current = getGeneration(),
     version = showDialog(
@@ -504,8 +508,12 @@ registerDrafts({
     for (const [id, value] of pairs) answers.set(id, value);
   },
 });
-export function setPlan(value) {
-  return (plan = value);
+export function setJobsSnap(value) {
+  return (jobsSnap = value);
+}
+// The chat that spawned a Job (job.chat is the chat's conversation id).
+export function jobChatId(job) {
+  return getView()?.chats?.find((chat) => chat.conversationId === job.chat)?.id ?? "main";
 }
 
 export function setApprovalPage(value) {

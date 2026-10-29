@@ -44,8 +44,17 @@ const contentText = (content) =>
 // Coordinator turns are scripted by marker; each step sees earlier tool results.
 const scripts = {
   "MARK-DELEG": [
-    ["projects_delegate", { role: "scout", task: "MARK-SCOUTJOB look around" }],
-    ["projects_workers", {}],
+    [
+      "agents",
+      {
+        action: "spawn",
+        role: "scout",
+        title: "MARK-SCOUTJOB look around",
+        brief: "MARK-SCOUTJOB look around",
+        requestId: "multi-chat-scout",
+      },
+    ],
+    ["agents", { action: "status" }],
   ],
   "MARK-ASK": [["projects_question", { question: "Pick a colour for chat two?", choices: ["red", "blue"] }]],
 };
@@ -59,7 +68,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages;
     const tools = (input.tools ?? []).map((tool) => tool.function?.name).filter(Boolean);
-    const coordinator = tools.includes("projects_delegate");
+    const coordinator = tools.includes("agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = contentText(msgs[lastUser]?.content);
     const history = msgs
@@ -85,7 +94,7 @@ const model = createServer((req, res) => {
       res.end(text);
     };
     if (!coordinator) return reply(say(marker === "MARK-SCOUTJOB" ? "SCOUT-RESULT-42" : `Worker ${marker}`));
-    if (userText.startsWith("[Durable work"))
+    if (/^\[(worker|scout|reviewer) /.test(userText))
       return reply(say(`REPORT-ACK ${userText.includes("SCOUT-RESULT-42") ? "with-result" : "no-result"}`));
     if (userText.startsWith("Owner answered your question")) return reply(say("ANSWER-ACK"));
     if (marker === "MARK-SLOW") {
@@ -414,26 +423,24 @@ try {
     throw Error("Chat tools differ from Main: " + JSON.stringify({ chat: deleg.tools, main: mainTurn.tools }));
   if (deleg.history.includes("MARK-MAIN")) throw Error("Chat two saw Main history");
   const [receipt, workers] = deleg.results;
-  if (/coordinator-only|Error/.test(receipt + workers) || !JSON.parse(workers).work?.length)
+  if (/coordinator-only|Error/.test(receipt + workers) || !/MARK-SCOUTJOB/.test(workers))
     throw Error("Coordinator tools refused in chat two: " + receipt + workers);
   result.checks.push("F5/F6 a new chat gets the same coordinator tools and they are authorized there; history is separate");
-  const report = result.calls.find((c) => c.coordinator && c.user.startsWith("[Durable work"));
+  const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  const card = await evaluate(`[...document.querySelectorAll('#messages details.report summary')].map(n => n.innerText).join('|')`, s);
-  if (!/Scout report/.test(card)) throw Error("Report card missing in chat two: " + card);
+  const card = await evaluate(`[...document.querySelectorAll('#messages .job-msg .who')].map(n => n.innerText).join('|')`, s);
+  if (!/Scout answered/.test(card)) throw Error("Report message missing in chat two: " + card);
   const mainText = await transcript(id, "main");
-  if (mainText.includes("[Durable work") || mainText.includes("REPORT-ACK")) throw Error("Report also went to Main");
-  result.checks.push("F8 the worker report goes to the delegating chat only and renders as a report card there");
+  if (/\[(worker|scout|reviewer) [0-9a-f-]{36} /.test(mainText) || mainText.includes("REPORT-ACK")) throw Error("Report also went to Main");
+  result.checks.push("F8 the worker report goes to the delegating chat only and renders as a regular message there");
   await shot("02-report-in-chat", s);
 
-  // F6/F16: the shared worker pool is one plan; Activity lists the chat's work.
-  const plan = await rpc({ action: "plan-snapshot", id });
-  if (plan.work.length !== 1 || !plan.work[0].text.includes("MARK-SCOUTJOB")) throw Error("Plan wrong: " + JSON.stringify(plan.work));
-  await click(s, '#activity [data-action="all-work"]');
-  await waitFor(`document.querySelector('#activity').innerText.includes('MARK-SCOUTJOB')`, s, "activity lists chat work");
-  result.checks.push("F6/F16 work delegated from a chat lands in the one shared plan and the Activity tab");
-  await click(s, '[data-tab="coordinator"]');
+  // F6/F16: the shared pool of agents is one list for the project.
+  const snap = await rpc({ action: "jobs-snapshot", id });
+  if (snap.agents.length !== 1 || !snap.agents[0].title.includes("MARK-SCOUTJOB"))
+    throw Error("Agents wrong: " + JSON.stringify(snap.agents));
+  result.checks.push("F6/F16 work delegated from a chat lands in the one shared Jobs snapshot");
 
   // F12: drafts are per chat.
   await setComposer(s, "draft-for-chat-two");
@@ -522,7 +529,7 @@ try {
   await rpc({ action: "chat-update", id, chatId, archived: false });
   await ask(id, chatId, "MARK-AFTER restart");
   const after = turns("MARK-AFTER").at(-1);
-  if (!["projects_delegate", "projects_workers", "projects_question", "projects_knowledge_write"].every((n) => after.tools.includes(n)))
+  if (!["agents", "projects_question", "projects_knowledge_write"].every((n) => after.tools.includes(n)))
     throw Error("Chat lost tools after restart: " + JSON.stringify(after.tools));
   if (!after.history.includes("MARK-DELEG") || after.history.includes("MARK-MAIN")) throw Error("Chat history wrong after restart");
   result.checks.push("F3 after restart chats keep titles, archive state, transcripts and coordinator tools; restore works");

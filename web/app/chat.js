@@ -44,12 +44,13 @@ import {
   answeredCard,
   approvalPage,
   operationCache,
+  jobChatId,
+  jobsSnap,
   pendingItems,
-  plan,
   questionChat,
   questionPlacement,
   setApprovalPage,
-  setPlan,
+  setJobsSnap,
   validateOperations,
 } from "./decisions.js";
 import {
@@ -57,8 +58,8 @@ import {
   loadWorkerContexts,
   pendingWorker,
   refreshWorkerChat,
+  approveLine,
   setPendingWorker,
-  workChatId,
   workerChat,
 } from "./workers.js";
 import { prChips, providerLabels } from "./prs.js";
@@ -184,22 +185,23 @@ export async function refresh(topics = ALL_TOPICS) {
         );
       next = { ...next, messages: displayMessages(loadedItems(key)) };
     }
-    const reading = wanted.has("jobs") || wanted.has("chat") || !plan,
+    const reading = wanted.has("jobs") || wanted.has("chat") || !jobsSnap,
       approving = wanted.has("chat") || wanted.has("jobs") || !approvalPage;
-    const [nextPlan, nextApprovals, nextDocs] = await Promise.all([
+    const [nextJobs, nextApprovals, nextDocs] = await Promise.all([
       reading ? api({ action: "jobs-snapshot", id }) : null,
       approving ? api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }) : approvalPage,
       wanted.has("knowledge") || !knowledgeLoaded ? api({ action: "knowledge-list", id }) : null,
     ]);
     if (current !== getGeneration()) return;
+    if (nextJobs && (!Array.isArray(nextJobs.jobs) || !Array.isArray(nextJobs.agents) || nextJobs.jobs.some((job) => !uuid(job.id))))
+      throw new Error("Invalid Jobs projection");
     if (nextApprovals) {
       validateOperations(nextApprovals, id, 0);
       if (nextApprovals.items.some((record) => record.status !== "pending"))
         throw new Error("Pending approval snapshot includes non-pending history");
     }
     if (next) setView(next);
-    // Placeholder until the Jobs UI reads `jobs`/`agents` itself: the legacy readers get an empty `work` list instead of failing.
-    if (nextPlan) setPlan({ work: [], ...nextPlan });
+    if (nextJobs) setJobsSnap(nextJobs);
     setApprovalPage(nextApprovals);
     if (nextDocs) {
       setKnowledgeDocs(Array.isArray(nextDocs) ? nextDocs.filter((doc) => knowledgePath(doc.path)) : []);
@@ -216,10 +218,11 @@ export async function refresh(topics = ALL_TOPICS) {
     if (Date.now() - projectListAt > 10000 || listedFor !== getProjectId()) void reloadProjects();
     ensureLive();
     ensureChanges();
-    if (pendingWorker && plan) {
+    if (pendingWorker && jobsSnap) {
       const wanted = pendingWorker;
       setPendingWorker(null);
-      if (plan.agents.some((agent) => agent.id === wanted)) await inspectThread(wanted);
+      if (jobsSnap.jobs.some((job) => job.id === wanted) || jobsSnap.agents.some((agent) => agent.id === wanted))
+        await inspectThread(wanted);
     }
     if (workerChat && tab === "coordinator") await refreshWorkerChat(workerChat);
     void loadWorkerContexts(current);
@@ -295,6 +298,7 @@ async function readLive(stream) {
 
 async function applyLive(frame) {
   probe?.live.push(frame);
+  probe?.onLive?.(frame);
   const previous = liveFrame;
   liveFrame = frame;
   if (frame.text !== previous?.text) {
@@ -405,6 +409,20 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// Leaving the page (or freezing it into the back/forward cache) must release both streams, or a few navigations exhaust the browser's connections to this host.
+addEventListener("pagehide", () => {
+  changeStream?.controller.abort();
+  changeStream = null;
+  liveStream?.controller.abort();
+  liveStream = null;
+});
+addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  ensureChanges();
+  ensureLive();
+  void refresh();
+});
+
 function thoughtText(text) {
   return text
     .replace(/\*\*/g, "")
@@ -436,6 +454,18 @@ let liveRenderedText = null,
   liveRevealDeadline = 0,
   liveRevealTime = 0,
   liveRevealFirstPaint = false;
+
+// E2E runs (?e2e=1) read the live preview's state by name, as they did before the page was split into modules.
+if (probe) {
+  const getters = {
+    liveRenderedText: () => liveRenderedText,
+    liveFrame: () => liveFrame,
+    liveRenderFrame: () => liveRenderFrame,
+    liveStream: () => liveStream,
+  };
+  for (const [name, get] of Object.entries(getters)) Object.defineProperty(window, name, { get });
+  window.ensureLive = ensureLive;
+}
 
 function newLiveText(value, animate) {
   if (!animate || !value) return document.createTextNode(value);
@@ -770,19 +800,17 @@ export function markSeen(project, chat) {
     localStorage.setItem(seenKey(project, chat), String(Date.now()));
   } catch {}
 }
-function chatWork(chat) {
-  return plan ? plan.work.filter((work) => !work.archived && workChatId(work) === chat.id) : [];
-}
+const chatJobs = (chat) => (jobsSnap ? jobsSnap.jobs.filter((job) => jobChatId(job) === chat.id) : []);
 const latestFinish = (chat) =>
   Math.max(
     chat.finishedAt ?? 0,
-    ...chatWork(chat)
-      .filter((work) => work.status === "completed")
-      .map((work) => work.endedAt ?? 0),
+    ...chatJobs(chat)
+      .filter((job) => ["ready", "ready-with-gaps", "approved"].includes(job.status))
+      .map((job) => job.endedAt ?? 0),
   );
 // First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its dot.
 function syncSeen() {
-  if (!getView()?.chats || !plan) return;
+  if (!getView()?.chats || !jobsSnap) return;
   markSeen(getProjectId(), PROJECT_SEEN);
   for (const chat of getView().chats) {
     const seen = seenAt(getProjectId(), chat.id);
@@ -795,25 +823,25 @@ function chatState(chat) {
   const questions = getView().inbox.filter(
     (item) => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === chat.id,
   ).length;
-  const work = chatWork(chat),
-    blocked = work.filter((item) => item.status === "blocked").length,
+  const jobs = chatJobs(chat),
+    stalled = jobs.filter((job) => job.status === "running" && job.stalledAt !== null).length,
     seen = seenAt(getProjectId(), chat.id);
   const reasons = [
     questions && `${plural(questions, "unanswered question")}`,
-    blocked && `${plural(blocked, "blocked worker")}`,
+    stalled && `${plural(stalled, "stalled Job")}`,
     chat.attention && "last coordinator turn failed",
   ].filter(Boolean);
   if (reasons.length) return { state: "needs", label: `Needs you: ${reasons.join(", ")}` };
-  const active = work.filter((item) => item.status === "running" || item.status === "queued").length;
+  const active = jobs.filter((job) => job.status === "running").length;
   if (chat.busy || active)
     return {
       state: "working",
-      label: `Working: ${[chat.busy && "coordinator", active && plural(active, "worker")].filter(Boolean).join(" and ")}`,
+      label: `Working: ${[chat.busy && "coordinator", active && plural(active, "Job")].filter(Boolean).join(" and ")}`,
     };
   if (chat.id !== chatId && seen !== null && latestFinish(chat) > seen) return { state: "done", label: "Done, not yet checked" };
   return { state: "idle", label: "Idle" };
 }
-const stateDot = (state, label, className) =>
+export const stateDot = (state, label, className) =>
   `<span class="${className}" data-state="${state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
 // The open project folds its chats and pending approvals. Every other project comes from the host's list: unanswered questions and its live activity
 // (turn or workers running, failure or blocked worker, last finish), so a project keeps showing its own state after you leave it.
@@ -828,7 +856,7 @@ function projectState(project) {
         label: questions
           ? `Needs you: ${plural(questions, "unanswered question")}`
           : activity?.needs
-            ? "Needs you: a chat failed or a worker is blocked"
+            ? "Needs you: a chat failed or a Job is stalled"
             : "Needs you: a chat failed",
       };
     if (activity ? activity.working : project.phase === "busy") return { state: "working", label: "Working" };
@@ -918,6 +946,7 @@ onRender(renderHeader);
 function renderChat() {
   syncSeen();
   renderChats();
+  trackReports();
   const readingAnchor = stickToBottom ? null : captureTranscriptAnchor();
   setHtml(
     "#messages",
@@ -948,12 +977,17 @@ function renderChat() {
       ` <button class="ghost small" data-action="retry-message" data-project="${esc(getView().project.id)}" data-job="${esc(job.id)}">Retry</button>`,
     ),
   );
-  if (plan)
+  if (jobsSnap)
     warnings.push(
-      ...plan.work
-        .filter((work) => work.blocker && !work.archived)
+      ...chatJobs(currentChat() ?? { id: "main" })
+        .filter((job) => job.status === "failed" || (job.status === "running" && job.stalledAt !== null))
         .slice(-3)
-        .map((work) => row(work.id, `${work.role} ${work.threadId}: ${work.blocker}`)),
+        .map((job) =>
+          row(
+            job.id,
+            job.status === "failed" ? `Job "${job.title}" failed: ${job.reason ?? "no reason recorded"}` : `Job "${job.title}" is stalled`,
+          ),
+        ),
     );
   const pending = pendingItems();
   const shownProblem = failures.some((job) => job.error === getView().project.problem);
@@ -981,22 +1015,49 @@ function renderChat() {
   followTranscript();
 }
 onRender(renderChat);
-// Mirrors the report text built in src/durable-planning.ts; anything else stays a plain message.
-const reportPattern =
-  /^\[Durable work ([0-9a-f-]{36}), ([\w-]+), ([\w-]+); thread ([0-9a-f-]{36})\]\nTask: ([\s\S]*?)\nWorker result, untrusted and not verification evidence:\n([\s\S]*?)(?:\nSummarize the result for the user[\s\S]*)?$/;
+// Agent reports reach the chat as owner-role input in the form built by src/jobs.ts: "[worker <id> ready: <title>]" and its report lines.
+const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+): ([^\]\n]*)\]([\s\S]*)$/;
+const reportLabels = ["PR", "Candidate", "Summary", "Proof", "Review", "Not fixed", "Gaps", "Time"];
+// The report is a regular message: label lines become bold run-ins and each section its own paragraph.
+function reportMarkdown(body) {
+  return body
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const label = reportLabels.find((item) => line.startsWith(`${item}:`));
+      return label ? `\n**${label}:**${line.slice(label.length + 1)}` : line;
+    })
+    .join("\n");
+}
+// The newest report of each Job carries the Approve button; older ones for the same Job stay plain.
+let latestReport = new Map();
+function trackReports() {
+  latestReport = new Map();
+  for (const message of getView().messages) {
+    const match = message.role === "user" && reportPattern.exec(message.text ?? "");
+    if (match && Number.isInteger(message.index)) latestReport.set(match[2], message.index);
+  }
+}
+function reportActions(message, jobId) {
+  const job = jobsSnap?.jobs.find((item) => item.id === jobId);
+  if (!job || latestReport.get(jobId) !== message.index) return "";
+  const line = approveLine(jobId);
+  if (job.status === "approved") return `<p class="job-outcome" data-outcome="approved">${esc(line ?? "Approved.")}</p>`;
+  if (!["ready", "ready-with-gaps"].includes(job.status)) return "";
+  const mergeable = Boolean(job.pr && job.candidate);
+  return `<div class="job-actions">${mergeable ? `<button type="button" class="primary small" data-action="job-approve" data-project="${esc(getProjectId())}" data-job="${esc(jobId)}">Approve</button>` : `<small class="note">Nothing to merge: the Job has no PR and candidate.</small>`}${line ? `<p class="job-outcome" data-outcome="pending">${esc(line)}</p>` : ""}</div>`;
+}
 function reportHtml(message, match) {
-  const [, , role, status, threadId, task, body] = match;
-  const known = plan?.agents?.some((agent) => agent.id === threadId);
-  return `<details class="report ${esc(status)}"${indexAttr(message)}><summary><span class="dot"></span><b>${esc(role[0].toUpperCase() + role.slice(1))} report</b><span class="report-status">${esc(status)}</span><span class="report-task">${esc(clip(task.replace(/\s+/g, " ").trim(), 120))}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text">${renderMarkdown(body)}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(threadId)}">Open ${esc(role)} thread ↗</button>` : ""}</div></details>`;
+  const [, role, jobId, status, title, body] = match;
+  const label =
+    status === "ready" ? "Ready" : status === "ready-with-gaps" ? "Ready with gaps" : `${role[0].toUpperCase()}${role.slice(1)} ${status}`;
+  const known = jobsSnap?.jobs.some((job) => job.id === jobId) || jobsSnap?.agents.some((agent) => agent.id === jobId);
+  return `<article class="msg them job-msg" data-job="${esc(jobId)}" data-status="${esc(status)}"${indexAttr(message)}><div class="who">${esc(label)} · ${esc(clip(title, 80))} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${renderMarkdown(reportMarkdown(body))}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(jobId)}">Open ${esc(role)} transcript ↗</button>` : ""}</div>${reportActions(message, jobId)}</article>`;
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
   const github = kind.endsWith(".follow"),
     hook = kind.startsWith("webhook.");
-  if (kind === "worker.watchdog") {
-    const workers = (body.match(/^- \w+ thread /gm) ?? []).length;
-    return `<details class="report event-card watchdog" data-kind="worker.watchdog"${indexAttr(message)}><summary><span class="event-mark">⏱</span><b>Watchdog check</b><span class="report-task">${workers} running worker${workers === 1 ? "" : "s"}</span><small>${esc(when(message.at))}</small></summary><div class="report-body text"><pre class="mono">${esc(body)}</pre></div></details>`;
-  }
   const changes = github ? (body.match(/^- /gm) ?? []).length : 0;
   const title = github
     ? kind === "github.follow"

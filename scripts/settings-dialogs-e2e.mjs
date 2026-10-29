@@ -140,19 +140,18 @@ await kit.run(async () => {
     await theme("light");
     await delay(250);
   };
-  const jargon =
-    /offline catalog|Review this single change|Explicit grants|Retained Durable|knowledgeAccess|workerCap|Exact operation binding/;
+  const jargon = /offline catalog|Review this single change|Explicit grants|Retained Durable|knowledgeAccess|Exact operation binding/;
 
   // ---- Project settings + model picker ----
   await open(
     `document.querySelector('#settings-button').click()`,
-    `!!document.querySelector('#dialog [data-settings-form]') && document.querySelectorAll('#dialog .mp').length === 7`,
+    `!!document.querySelector('#dialog [data-settings-form]') && document.querySelectorAll('#dialog .mp').length === 8`,
     "settings form",
   );
   check(
     "settings: plain title + subtitle, inline current values, no jargon, Review disabled",
     await dlg(
-      `d.querySelector('h2').textContent === 'Project settings' && d.querySelector('.dialog-sub').textContent.length > 10 && d.querySelector('[name=name]').value === 'Mari' && d.querySelector('[name=workerCap]').value === '3' && !${jargon}.test(d.innerText) && d.querySelector('[type=submit]').disabled`,
+      `d.querySelector('h2').textContent === 'Project settings' && d.querySelector('.dialog-sub').textContent.length > 10 && d.querySelector('[name=name]').value === 'Mari' && d.querySelector('[name=stallMinutes]').value === '20' && !${jargon}.test(d.innerText) && d.querySelector('[type=submit]').disabled`,
     ),
   );
   check(
@@ -249,7 +248,7 @@ await kit.run(async () => {
   );
   await ev(`document.querySelector('${pickerOf("scout")} .mp-row[data-ref="alpha/a-one"]').click()`);
   await ev(
-    `(() => { const f = document.querySelector('[data-settings-form]'); f.elements.name.value = 'Mari 2'; f.elements.name.dispatchEvent(new Event('input', { bubbles: true })); f.elements.workerCap.value = '5'; f.elements.workerCap.dispatchEvent(new Event('input', { bubbles: true })); f.elements.knowledgeAccess.value = 'maintain'; f.elements.knowledgeAccess.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+    `(() => { const f = document.querySelector('[data-settings-form]'); f.elements.name.value = 'Mari 2'; f.elements.name.dispatchEvent(new Event('input', { bubbles: true })); f.elements.stallMinutes.value = '45'; f.elements.stallMinutes.dispatchEvent(new Event('input', { bubbles: true })); f.elements.knowledgeAccess.value = 'maintain'; f.elements.knowledgeAccess.dispatchEvent(new Event('change', { bubbles: true })); })()`,
   );
   check("form: 5 changes counted live", await dlg(`/5 unsaved changes/.test(d.querySelector('.hint').textContent)`));
   await capture("settings-form-edited");
@@ -258,7 +257,7 @@ await kit.run(async () => {
   check(
     "review: one before -> after item per changed field, plain labels, no JSON, hidden project confirm",
     await dlg(
-      `d.querySelectorAll('.diff-item').length === 5 && /Workers at once/.test(d.innerText) && d.querySelector('.diff-item .diff-side.before') && d.querySelector('.diff-item .diff-side.after') && !d.querySelector('pre') && d.querySelector('form[data-settings-confirm] input[type=hidden][name=confirm]') && !${jargon}.test(d.innerText)`,
+      `d.querySelectorAll('.diff-item').length === 5 && /Minutes before a stall notice/.test(d.innerText) && d.querySelector('.diff-item .diff-side.before') && d.querySelector('.diff-item .diff-side.after') && !d.querySelector('pre') && d.querySelector('form[data-settings-confirm] input[type=hidden][name=confirm]') && !${jargon}.test(d.innerText)`,
     ),
   );
   await capture("settings-review");
@@ -267,7 +266,7 @@ await kit.run(async () => {
   check(
     "back to editing keeps every edit (name, cap, picks)",
     await dlg(
-      `d.querySelector('[name=name]').value === 'Mari 2' && d.querySelector('[name=workerCap]').value === '5' && d.querySelector('${pickerOf("worker")}').dataset.value === 'alpha/a-two' && d.querySelector('${pickerOf("scout")}').dataset.value === 'alpha/a-one'`,
+      `d.querySelector('[name=name]').value === 'Mari 2' && d.querySelector('[name=stallMinutes]').value === '45' && d.querySelector('${pickerOf("worker")}').dataset.value === 'alpha/a-two' && d.querySelector('${pickerOf("scout")}').dataset.value === 'alpha/a-one'`,
     ),
   );
   await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
@@ -318,7 +317,7 @@ await kit.run(async () => {
   );
   // Real save of picks + cap + access, only changed fields.
   await ev(
-    `(() => { const f = document.querySelector('[data-settings-form]'); f.querySelector('.mp[data-role=worker] .mp-current').click(); const i = f.querySelector('.mp[data-role=worker] .mp-search'); i.value = 'a-two'; i.dispatchEvent(new Event('input', { bubbles: true })); f.querySelector('.mp[data-role=worker] .mp-row[data-ref="alpha/a-two"]').click(); f.elements.workerCap.value = '5'; f.elements.workerCap.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    `(() => { const f = document.querySelector('[data-settings-form]'); f.querySelector('.mp[data-role=worker] .mp-current').click(); const i = f.querySelector('.mp[data-role=worker] .mp-search'); i.value = 'a-two'; i.dispatchEvent(new Event('input', { bubbles: true })); f.querySelector('.mp[data-role=worker] .mp-row[data-ref="alpha/a-two"]').click(); f.elements.stallMinutes.value = '45'; f.elements.stallMinutes.dispatchEvent(new Event('input', { bubbles: true })); })()`,
   );
   await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
   await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "final review");
@@ -326,9 +325,9 @@ await kit.run(async () => {
   await page.waitFor(`!document.querySelector('#dialog').open`, "dialog closes after save");
   const saved = await rpc({ action: "settings-snapshot", id });
   check(
-    "save sends only changed fields: worker model + cap changed, others intact",
+    "save sends only changed fields: worker model + stall minutes changed, others intact",
     saved.values.models.worker === "alpha/a-two" &&
-      saved.values.workerCap === 5 &&
+      saved.values.stallMinutes === 45 &&
       saved.values.model === "fake/fake-model" &&
       saved.values.name === "Mari" &&
       saved.values.objective === "changed elsewhere",

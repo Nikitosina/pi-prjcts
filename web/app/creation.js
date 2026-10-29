@@ -73,11 +73,16 @@ function captureCreationDraft() {
 
 export async function resumeDialog() {
   const id = getProjectId();
-  const version = showDialog("Resume this project?", '<p class="note">Reading the saved plan…</p>');
-  const plan = await api({ action: "plan-snapshot", id });
+  const version = showDialog("Resume this project?", '<p class="note">Reading the Jobs…</p>');
+  const snapshot = await api({ action: "jobs-snapshot", id });
   if (!dialog.open || version !== dialogVersion || id !== getProjectId()) return;
-  dialog.querySelector(".dialog-body").innerHTML =
-    `<details><summary>Saved plan</summary><pre>${esc(JSON.stringify(plan, null, 2))}</pre></details><p>Resume restarts work the pause interrupted, on the same threads and worktrees. Stopped and failed work stays as it is.</p><form data-resume-project data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit" class="primary">Resume and continue work</button></form><hr><p class="note">A project with no prior work can resume without confirmation.</p><button data-action="confirm-resume" data-project="${esc(id)}">Resume idle project</button>`;
+  dialog.querySelector(".dialog-body").innerHTML = `<details><summary>Jobs</summary><pre>${esc(
+    JSON.stringify(
+      snapshot.jobs.map((job) => ({ id: job.id, title: job.title, status: job.status })),
+      null,
+      2,
+    ),
+  )}</pre></details><p>Resume continues the agents the pause aborted, on the same conversations and worktrees. Stopped and failed Jobs stay as they are.</p><form data-resume-project data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}"><button type="submit" class="primary">Resume and continue work</button></form><hr><p class="note">A project with no prior work can resume without confirmation.</p><button data-action="confirm-resume" data-project="${esc(id)}">Resume idle project</button>`;
   disableActions();
 }
 registerActions({

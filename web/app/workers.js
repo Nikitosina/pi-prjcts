@@ -32,19 +32,17 @@ import {
   submitOnEnter,
   tab,
 } from "./shell.js";
-import { badge, clip, duration, esc, uuid } from "./format.js";
-import { admissionBlocked, chatId, chatMessageHtml, ensureChanges } from "./chat.js";
-import { plan, setPlan } from "./decisions.js";
+import { badge, clip, esc, uuid } from "./format.js";
+import { admissionBlocked, chatId, chatMessageHtml, ensureChanges, stateDot } from "./chat.js";
+import { jobsSnap, setJobsSnap } from "./decisions.js";
 import { artifactButton, lightbox, loadWorkerArtifacts, renderArtifactBrowser } from "./artifacts.js";
 import { refMenu } from "./composer.js";
-import { verificationNote } from "./settings.js";
 import { focusNode, setWorkerFocus, workerFocus } from "./search.js";
 import { bindTranscript, displayMessages, hydrate, loadOlder, mergeNewest, reach } from "./transcript.js";
 
 const formDrafts = new Map();
 export let workerChat = null;
-export let showArchived = false,
-  allWork = false;
+export let allJobs = false;
 // The worker view: a main-area page for one worker (?worker=<threadId>) that replaces the coordinator chat until Back or Escape.
 const threadPane = document.querySelector("#inline-thread");
 export let pendingWorker = /^[a-f0-9-]{36}$/.test(initial.searchParams.get("worker") ?? "") ? initial.searchParams.get("worker") : null;
@@ -73,14 +71,13 @@ window.addEventListener("popstate", () => {
     bumpDialogVersion();
     renderArtifactBrowser();
     render();
-  } else if (wanted && workerChat?.threadId !== wanted && plan?.work.some((work) => work.threadId === wanted))
-    void inspectThread(wanted).catch(report);
+  } else if (wanted && workerChat?.threadId !== wanted && nodeInfo(wanted)) void inspectThread(wanted).catch(report);
 });
 onProjectChange(() => {
   workerChat = null;
-  setPlan(null);
+  setJobsSnap(null);
   closeWorkerDetail();
-  for (const selector of ["#activity", "#outcomes"]) document.querySelector(selector).replaceChildren();
+  document.querySelector("#job-tree").replaceChildren();
 });
 onTab((next) => {
   if (next !== "coordinator" && workerChat) closeWorkerDetail();
@@ -88,11 +85,7 @@ onTab((next) => {
   if (next === "coordinator") document.querySelector('[data-panel="coordinator"]').hidden = !threadPane.hidden;
 });
 
-function renderWork() {
-  renderWorkers();
-  setHtml("#outcomes", plan ? durableResults() : "");
-}
-onRender(renderWork);
+onRender(renderJobTree);
 // Stop stays available while paused (the host allows it); steer/send need an admitting project.
 onBusyChange(() => {
   document
@@ -121,19 +114,18 @@ function textDialog(mode, id) {
   );
   dialog.querySelector("textarea").focus();
 }
+// Outcome lines of Approve, kept for this page view: merge-uncertain and auto-merge-pending leave the Job Ready, so the line explains why.
+const approveOutcomes = new Map();
+export const approveLine = (jobId) => approveOutcomes.get(jobId) ?? null;
+const openJobs = new Map();
 registerActions({
-  async "work-archive"(node) {
-    const work = plan?.work.find((item) => item.id === node.dataset.work);
-    if (node.dataset.project !== getProjectId() || !work || work.archived)
-      throw new Error("Displayed work changed; refresh before archiving");
-    await mutate({ action: "work-archive", id: getProjectId(), workIds: [work.id] }, "Work archived. Record and thread kept.");
+  "job-toggle"(node) {
+    openJobs.set(node.dataset.job, node.getAttribute("aria-expanded") !== "true");
+    renderJobTree();
   },
-  "thread-list"() {
-    threadList();
-  },
-  "all-work"() {
-    allWork = !allWork;
-    render();
+  "all-jobs"() {
+    allJobs = !allJobs;
+    renderJobTree();
   },
   "thread-close"() {
     if (history.state?.worker) history.back();
@@ -161,38 +153,48 @@ registerActions({
   },
   "thread-send"(node) {
     requireProject(node.dataset.project);
-    requireThread(node.dataset.thread);
+    requireAgent(node.dataset.thread);
     textDialog("thread-send", node.dataset.thread);
   },
   "thread-steer"(node) {
     requireProject(node.dataset.project);
-    requireThread(node.dataset.thread);
-    showDialog(
-      "Steer this reusable thread?",
-      `<p>Project ${esc(getProjectId())}. Thread ${esc(node.dataset.thread)}. The replacement is recorded before interruption; scope/model/tools stay frozen.</p><button data-action="confirm-thread-steer" data-project="${esc(getProjectId())}" data-thread="${esc(node.dataset.thread)}">Compose replacement</button>`,
-    );
-  },
-  "confirm-thread-steer"(node) {
-    requireProject(node.dataset.project);
+    requireAgent(node.dataset.thread);
     textDialog("thread-steer", node.dataset.thread);
   },
   "thread-stop"(node) {
     requireProject(node.dataset.project);
-    requireThread(node.dataset.thread);
+    const info = requireAgent(node.dataset.thread);
     showDialog(
-      "Stop this reusable thread?",
-      `<p>Conversation, receipts and partial files remain.</p><button class="danger" data-action="confirm-thread-stop" data-project="${esc(getProjectId())}" data-thread="${esc(node.dataset.thread)}">Stop thread ${esc(node.dataset.thread)}</button>`,
+      "Stop this agent?",
+      `<form data-thread-stop data-project="${esc(getProjectId())}" data-thread="${esc(info.id)}"><p>${esc(info.title)}. Its subagents and their background processes stop too. The conversation, files and proof stay.</p><label class="field"><span class="flabel">Why are you stopping it?</span><span class="fhelp">The reason is recorded on the Job and shown in the sidebar.</span><textarea name="reason" rows="3" maxlength="500" required aria-label="Reason for stopping"></textarea></label><div class="row signoff"><button class="danger" type="submit">Stop</button></div></form>`,
     );
+    dialog.querySelector("textarea").focus();
   },
-  async "confirm-thread-stop"(node) {
+  async "job-approve"(node) {
     const id = node.dataset.project,
-      version = dialogVersion;
+      jobId = node.dataset.job;
     requireProject(id);
-    await mutate({ action: "thread-stop", id, threadId: node.dataset.thread }, "Thread stop recorded. History and work retained.");
-    closeCurrentDialog(id, version);
+    const job = jobsSnap?.jobs.find((item) => item.id === jobId);
+    if (!job || !["ready", "ready-with-gaps"].includes(job.status))
+      throw new Error("This Job is no longer ready; refresh before approving");
+    const outcome = await mutate({ action: "job-approve", id, jobId }, (result) => result.line);
+    approveOutcomes.set(jobId, outcome.line);
+    render();
   },
 });
 registerForms([
+  [
+    "[data-thread-stop]",
+    async (form) => {
+      const id = form.dataset.project,
+        version = dialogVersion,
+        reason = new FormData(form).get("reason").trim();
+      requireProject(id);
+      if (!reason) throw new Error("Say why you are stopping it. Your text is kept.");
+      await mutate({ action: "thread-stop", id, threadId: form.dataset.thread, reason }, "Stopped. History and files kept.");
+      closeCurrentDialog(id, version);
+    },
+  ],
   [
     "[data-inline-thread-send]",
     async (form) => {
@@ -201,7 +203,7 @@ registerForms([
       const target = form.dataset.project,
         threadId = form.dataset.thread;
       requireProject(target);
-      requireThread(threadId);
+      requireAgent(threadId);
       const text = data.get("message");
       if (!text.trim()) return;
       const draftKey = `${target}:thread-send:${threadId}`;
@@ -289,96 +291,53 @@ document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented) return;
   submitOnEnter(event, "[data-task-message] textarea, [data-inline-thread-send] textarea");
 });
-document.querySelector("#show-archived").addEventListener("change", (event) => {
-  setShowArchived(event.target.checked);
-  if (getView()) render();
-});
-function requireThread(id) {
-  if (!uuid(id) || !plan?.agents?.some((agent) => agent.id === id)) throw new Error("Unknown owned reusable thread in the current plan");
+// What a thread id names: a Job's worker (its id), a subagent of a Job (`<job id>/<conversation id>`), or a scout/reviewer the coordinator spawned.
+function nodeInfo(id) {
+  if (!jobsSnap || typeof id !== "string") return null;
+  const [agentId, childId] = id.split("/");
+  const job = jobsSnap.jobs.find((item) => item.id === agentId);
+  if (childId !== undefined) {
+    const child = job?.children.find((item) => String(item.id) === childId);
+    return child ? { id, kind: "subagent", job, role: child.role, title: child.title, working: child.working } : null;
+  }
+  if (job) return { id, kind: "worker", job, role: "worker", title: job.title, working: job.working };
+  const agent = jobsSnap.agents.find((item) => item.id === agentId);
+  return agent
+    ? { id, kind: "agent", job: null, role: agent.role, title: agent.title, working: agent.working, ended: agent.endedAt !== null }
+    : null;
 }
-function workLine(work, detail) {
-  return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small>${contextRing(workerContexts.get(work.threadId))}</button>`;
+function requireAgent(id) {
+  const info = nodeInfo(id);
+  if (!info || info.kind === "subagent")
+    throw new Error("Only a Job's worker, a scout or a reviewer takes messages. Subagents are read-only");
+  return info;
 }
-// Shared resources a running worker holds: leases by resource name, and its running background commands.
-function holdsBadge(holds) {
-  if (!holds) return "";
-  const parts = [
-    ...holds.leases.map((lease) => `lease ${lease.resource}`),
-    ...(holds.background.length ? [`${holds.background.length} bg`] : []),
-  ];
-  const title = [
-    ...holds.leases.map((lease) => `${lease.resource} until ${new Date(lease.until).toLocaleTimeString()}`),
-    ...holds.background.map((item) => `background: ${item.label}`),
-  ].join("\n");
-  return ` · <span class="worker-holds" title="${esc(title)}">${esc(parts.join(", "))}</span>`;
+const finishedJob = (job) => job.status !== "running";
+const jobProgress = (job) => (job.eta.total ? `${job.eta.done}/${job.eta.total}` : "no plan yet");
+const jobEta = (job) => (job.status === "running" && job.eta.etaMin !== null ? `~${job.eta.etaMin}m left` : "");
+// One word for each node, and the dot colour that goes with it.
+function jobState(job) {
+  if (job.status === "running")
+    return job.stalledAt !== null
+      ? { label: "stalled", dot: "needs" }
+      : job.quota
+        ? { label: "waiting for quota", dot: "working" }
+        : { label: "running", dot: "working" };
+  if (job.status === "failed") return { label: "failed", dot: "needs" };
+  if (job.status === "stopped") return { label: "stopped", dot: "idle" };
+  return { label: job.status === "ready-with-gaps" ? "ready, gaps" : job.status, dot: "done" };
 }
-const finished = (work) => ["completed", "failed", "stopped"].includes(work.status);
-// The chat that admitted a work item (null chatConversationId means Main). Child work keeps the admitting chat, so parentThreadId plays no part.
-export function workChatId(work) {
-  const chats = getView()?.chats ?? [];
-  const main = chats.find((chat) => chat.id === "main")?.conversationId ?? null;
-  return (chats.find((chat) => chat.conversationId === (work.chatConversationId ?? main)) ?? chats[0])?.id ?? "main";
-}
-const inSelectedChat = (work) => !getView()?.chats || workChatId(work) === chatId;
-const archivable = (work) => ["completed", "failed", "stopped", "blocked"].includes(work.status) && !work.archived;
-function durableActivity() {
-  const order = { running: 0, queued: 1, interrupted: 2, blocked: 3 };
-  // Finished and archived work leave this card for Recent results; "View all work" lists every item of this chat.
-  const pool = allWork
-    ? plan.work.filter((work) => showArchived || !work.archived).toReversed()
-    : plan.work
-        .filter((work) => !finished(work) && !work.archived)
-        .toSorted((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  const mine = pool.filter(inSelectedChat),
-    shown = allWork ? mine : mine.slice(0, 12);
-  const detail = (work) =>
-    work.archived
-      ? "archived"
-      : work.status === "running" && work.startedAt
-        ? duration(Date.now() - work.startedAt)
-        : work.blocker
-          ? clip(work.blocker, 80)
-          : "";
-  const item = (work) => {
-    return `<div class="worker-item${work.archived ? " archived" : ""}${work.parentThreadId ? ` child" data-parent="${esc(work.parentThreadId)}` : ""}">${workLine(work, detail(work))}${allWork && archivable(work) ? `<button class="ghost small archive" data-action="work-archive" data-project="${esc(getProjectId())}" data-work="${esc(work.id)}">Archive</button>` : ""}</div>`;
-  };
-  const elsewhere = pool.length - mine.length,
-    total = plan.work.length;
-  // One level of nesting: a parent's sub-agents sit under its newest row; orphans (parent not listed) stay top level.
-  const threads = new Set(shown.map((work) => work.threadId)),
-    placed = new Set();
-  const tree = (work) => {
-    const first = !placed.has(work.threadId);
-    placed.add(work.threadId);
-    const kids = first ? shown.filter((child) => child.parentThreadId === work.threadId && child.threadId !== work.threadId) : [];
-    return (
-      item(work) + (kids.length ? `<div class="work-children" data-parent="${esc(work.threadId)}">${kids.map(item).join("")}</div>` : "")
-    );
-  };
-  return (
-    (shown
-      .filter((work) => !work.parentThreadId || !threads.has(work.parentThreadId) || work.parentThreadId === work.threadId)
-      .map(tree)
-      .join("") || `<p class="note">${allWork ? "No work from this chat." : "No active workers from this chat."}</p>`) +
-    (elsewhere
-      ? `<p class="note other-chats">${elsewhere} ${allWork ? "in" : "active in"} other ${elsewhere === 1 ? "chat" : "chats"}</p>`
-      : "") +
-    (total
-      ? `<button class="ghost small all-work" data-action="all-work">${allWork ? "Show active only" : `View all work (${total}) →`}</button>`
-      : "")
-  );
-}
-function renderWorkers() {
-  setHtml("#activity", plan ? durableActivity() : '<p class="note">No workers are running.</p>');
-  document.querySelector("#archive-toggle").hidden = !allWork;
-}
-// Context use of the workers listed in the card, read host-side; rows show nothing until a reading exists.
+const workerState = (job) =>
+  job.status !== "running"
+    ? jobState(job)
+    : job.leaf !== null && job.leaf !== job.workerConversation
+      ? { label: "waiting on a subagent", dot: "working" }
+      : { label: job.working ? "working" : "idle", dot: job.working ? "working" : "idle" };
+const subagentState = (child) => ({ label: child.working ? "working" : "done", dot: child.working ? "working" : "done" });
+// Context use of the agents listed in the tree, read host-side; rows show nothing until a reading exists.
 const workerContexts = new Map();
 export async function loadWorkerContexts(current) {
-  const ids = [...new Set([...document.querySelectorAll("#activity .worker-line[data-thread]")].map((node) => node.dataset.thread))].slice(
-    0,
-    40,
-  );
+  const ids = [...new Set([...document.querySelectorAll("#job-tree [data-context]")].map((node) => node.dataset.context))].slice(0, 40);
   if (!ids.length) return;
   const read = await api({ action: "worker-contexts", id: getProjectId(), threadIds: ids }).catch(() => null);
   if (!read || current !== getGeneration()) return;
@@ -388,7 +347,7 @@ export async function loadWorkerContexts(current) {
       workerContexts.set(id, value);
       changed = true;
     }
-  if (changed) renderWorkers();
+  if (changed) renderJobTree();
 }
 // Small ring plus percent; a missing window is said so, never guessed.
 function contextRing(context) {
@@ -398,46 +357,100 @@ function contextRing(context) {
     c = 2 * Math.PI * 6;
   return `<span class="ctx-ring" data-level="${level}" title="${esc(contextLine(context))}"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" class="track"/><circle cx="8" cy="8" r="6" class="fill" stroke-dasharray="${((c * (percent ?? 0)) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 8 8)"/></svg>${percent === null ? "window unknown" : `${percent}%`}</span>`;
 }
-function durableResults() {
-  const done = plan.work
-    .filter((work) => finished(work) && !work.archived)
-    .toSorted((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
-    .slice(0, 5);
-  return (
-    done.map((work) => workLine(work, work.endedAt ? `${duration(Date.now() - work.endedAt)} ago` : "")).join("") ||
-    '<p class="note">Finished work appears here.</p>'
-  );
+// A node of the Jobs tree: status dot, name, then status, plan progress (done/total) and ETA.
+function nodeRow({ id, role, title, state, job, withPlan, stop }) {
+  const meta = [
+    `<span class="job-status">${esc(state.label)}</span>`,
+    ...(withPlan
+      ? [
+          `<span class="job-progress">${esc(jobProgress(job))}</span>`,
+          ...(jobEta(job) ? [`<span class="job-eta">${esc(jobEta(job))}</span>`] : []),
+        ]
+      : []),
+  ].join(" · ");
+  const open = `<button type="button" class="job-open" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(id)}" title="${esc(title)}">${stateDot(state.dot, state.label, "state-dot")}<span class="job-name">${role ? `<span class="sub-label">${esc(role)}</span> ` : ""}${esc(clip(title.replace(/\s+/g, " ").trim(), 60))}</span><small class="job-meta">${meta}</small></button>`;
+  // Context use belongs to the agent that owns a conversation: worker rows and loose scouts/reviewers.
+  const measured = role && /^[a-f0-9-]{36}$/.test(id);
+  const ring = measured ? contextRing(workerContexts.get(id)) : "";
+  return `<div class="job-row" data-thread="${esc(id)}"${measured ? ` data-context="${esc(id)}"` : ""}>${open}${ring}${stop ? `<button type="button" class="ghost small job-stop" data-action="thread-stop" data-project="${esc(getProjectId())}" data-thread="${esc(id)}" aria-label="Stop ${esc(title)}">Stop…</button>` : ""}</div>`;
 }
-function threadList() {
-  if (!plan) throw new Error("Durable plan is not loaded");
-  showDialog(
-    "Durable work and reusable threads",
-    `<p>Work items sharing a thread UUID reuse its conversation. Status is not verification evidence.</p>${
-      plan.work
-        .toReversed()
-        .map(
-          (work) =>
-            `<article class="task">${badge(work.status)}<strong>${esc(work.text)}</strong><p>Role ${esc(work.role)} · Work ${esc(work.id)}<br>Thread ${esc(work.threadId)}<br>${esc(work.blocker ?? "")}</p>${verificationNote(plan.verification?.[work.threadId])}<button data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(work.threadId)}">Read owned history</button></article>`,
-        )
-        .join("") || "<p>No retained work items.</p>"
-    }`,
-  );
+function jobHtml(job) {
+  const expanded = openJobs.get(job.id) ?? job.status === "running",
+    state = jobState(job);
+  const reason = job.reason ? `<p class="job-reason">${esc(clip(job.reason, 200))}</p>` : "";
+  const children = job.children
+    .map((child) => nodeRow({ id: `${job.id}/${child.id}`, role: child.role, title: child.title, state: subagentState(child) }))
+    .join("");
+  return `<div class="job" data-job="${esc(job.id)}" data-status="${esc(job.status)}"><div class="job-head"><button type="button" class="job-toggle" data-action="job-toggle" data-job="${esc(job.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(job.title)}"><span aria-hidden="true">${expanded ? "▾" : "▸"}</span></button>${nodeRow({ id: job.id, title: job.title, state, job, withPlan: true, stop: job.status === "running" })}</div>${reason}${
+    expanded
+      ? `<div class="job-children">${nodeRow({ id: job.id, role: "worker", title: job.title, state: workerState(job), job, withPlan: true })}${children}</div>`
+      : ""
+  }</div>`;
 }
-function workerDetailHtml(chat, page, work) {
+const jobsByRecency = (jobs) =>
+  jobs.toSorted((a, b) => Number(finishedJob(a)) - Number(finishedJob(b)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt));
+export function renderJobTree() {
+  if (!getView()) return;
+  const jobs = jobsByRecency(jobsSnap?.jobs ?? []);
+  const shown = allJobs ? jobs : jobs.filter((job, index) => !finishedJob(job) || index < 8);
+  const loose = (jobsSnap?.agents ?? []).filter((agent) => agent.jobId === null && agent.endedAt === null);
+  const html = !jobsSnap
+    ? '<p class="note">Reading Jobs…</p>'
+    : (shown.map(jobHtml).join("") +
+        loose
+          .map((agent) =>
+            nodeRow({
+              id: agent.id,
+              role: agent.role,
+              title: agent.title,
+              state: agent.working ? { label: "working", dot: "working" } : { label: "waiting", dot: "idle" },
+              stop: true,
+            }),
+          )
+          .join("") || '<p class="note">No Jobs yet. Ask the coordinator for something and it starts one.</p>') +
+      (jobs.length > shown.length || allJobs
+        ? `<button type="button" class="ghost small all-jobs" data-action="all-jobs">${allJobs ? "Show recent only" : `Show all Jobs (${jobs.length})`}</button>`
+        : "");
+  setHtml("#job-tree", html);
+  void loadWorkerContexts(getGeneration());
+}
+function workerDetailHtml(chat, page, info) {
   const threadId = chat.threadId,
     draft = formDrafts.get(`${chat.id}:thread-send:${threadId}`),
-    role = work?.role ?? "worker";
+    role = info.role;
   const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
-  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><span class="row help-line"><small>Reuses this ${esc(role)}'s conversation</small><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
+  const state =
+    info.kind === "worker"
+      ? workerState(info.job)
+      : info.kind === "subagent"
+        ? subagentState(info)
+        : { label: info.working ? "working" : "waiting", dot: "idle" };
+  const takesMessages = info.kind !== "subagent",
+    stoppable = takesMessages && (info.job ? info.job.status === "running" : !info.ended);
+  const job = info.job;
+  const plan = job?.plan.length
+    ? `<ol class="job-plan">${job.plan.map((step) => `<li data-status="${esc(step.status)}"><span class="plan-mark" aria-hidden="true">${step.status === "done" ? "✓" : step.status === "doing" ? "…" : "○"}</span> ${esc(step.title)}${step.estimateMin ? ` <small>${step.estimateMin}m</small>` : ""}</li>`).join("")}</ol>`
+    : "";
+  const head = job
+    ? `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full request">${esc(job.request)}</p><p class="job-summary-line"><span class="job-progress">${esc(jobProgress(job))}</span>${jobEta(job) ? ` · <span class="job-eta">${esc(jobEta(job))}</span>` : ""}${job.reason ? ` · <span class="job-reason-inline">${esc(job.reason)}</span>` : ""}</p>${plan}`
+    : `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(info.title)}</p>`;
+  const title =
+    info.kind === "subagent" ? `${role[0].toUpperCase()}${role.slice(1)} of ${job.title}` : `${role[0].toUpperCase()}${role.slice(1)}`;
+  return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(job?.status ?? state.label)}<b>${esc(title)}</b><small>${esc(state.label)}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions">${takesMessages ? `<button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button>` : ""}${stoppable ? `<button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button>` : ""}</span></div>${head}<p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details>${
+    takesMessages
+      ? `<form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message ${esc(role)}" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><span class="row help-line"><small>Reuses this ${esc(role)}'s conversation</small><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section>`
+      : '<p class="note">Subagents are read-only. Message or stop the Job\'s worker instead.</p>'
+  }<details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. History, partial files and receipts are kept.</p></details>`;
 }
 export async function inspectThread(threadId) {
-  requireThread(threadId);
+  const info = nodeInfo(threadId);
+  if (!info) throw new Error("Unknown agent in the current Jobs");
   if (workerFocus?.threadId !== threadId) setWorkerFocus(null);
   const chat = { id: getProjectId(), generation: getGeneration(), threadId };
   workerChat = chat;
   const target = threadPane;
   target.hidden = false;
-  target.innerHTML = '<p class="note">Reading worker conversation…</p>';
+  target.innerHTML = '<p class="note">Reading transcript…</p>';
   setTab("coordinator");
   setWorkerUrl(threadId);
   document.querySelector(".body").scrollTop = 0;
@@ -445,8 +458,7 @@ export async function inspectThread(threadId) {
   const version = bumpDialogVersion();
   const page = await workerChatPage(chat);
   if (workerChat !== chat || version !== dialogVersion || chat.generation !== getGeneration() || target.hidden) return;
-  const work = plan.work.findLast((item) => item.threadId === threadId);
-  target.innerHTML = workerDetailHtml(chat, page, work);
+  target.innerHTML = workerDetailHtml(chat, page, nodeInfo(threadId) ?? info);
   renderWorkerChat(chat, page, true);
   render();
 }
@@ -500,11 +512,10 @@ function renderWorkerChat(chat, page, opening = false) {
   });
   hydrate(transcript);
   document.querySelector("#worker-evidence").innerHTML = workerChanges(chat.threadId, page.items);
-  void loadWorkerArtifacts(chat);
+  if (document.querySelector("#artifact-pane")) void loadWorkerArtifacts(chat);
 }
 function workerChanges(threadId, items) {
-  const workIds = new Set((plan?.work ?? []).filter((item) => item.threadId === threadId).map((item) => item.id));
-  const linked = getView().evidence.filter((record) => record.native?.workId && workIds.has(record.native.workId));
+  const linked = getView().evidence.filter((record) => record.native?.workId === threadId);
   const legacy = getView().evidence.some((record) => !record.native);
   const writes = items.filter((item) => item.kind === "tool" && /write|edit|patch|create|delete|move|rename/i.test(item.name ?? ""));
   const paths = writes.map((item) => {
@@ -548,7 +559,8 @@ registerDrafts({
 export function setPendingWorker(value) {
   return (pendingWorker = value);
 }
-
-export function setShowArchived(value) {
-  return (showArchived = value);
-}
+// A subagent's transcript has no change feed of its own: re-read it while it is open and working.
+setInterval(() => {
+  if (document.hidden || !workerChat || !workerChat.threadId.includes("/") || workerChat.id !== getProjectId()) return;
+  void refreshWorkerChat(workerChat).catch(() => {});
+}, 4000);
