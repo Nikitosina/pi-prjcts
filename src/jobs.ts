@@ -18,6 +18,7 @@ import {
   type Harness,
   type Session,
 } from "@earendil-works/pi-durable";
+import { providerFailure, QUOTA_RETRY_BASE_MS, QUOTA_RETRY_LIMIT, quotaRetryDelay, unansweredReason } from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -51,6 +52,10 @@ export type Job = {
   acceptance: string[];
   status: JobStatus;
   workerConversation: ConversationId;
+  /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
+  scopeId: string | null;
+  /** Verifier, reviewer and scout subagents the worker started, oldest first. */
+  children: { id: ConversationId; role: AgentRole; title: string }[];
   branch: string | null;
   pr: string | null;
   candidate: string | null;
@@ -76,11 +81,21 @@ export type Agent = {
   endedAt: number | null;
   /** Answers already reported, so steers answered together report once. */
   reported: EntryId[];
+  /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
+  scopeId: string | null;
+  readRef: string | null;
+  /** The host prepared this agent's environment (workspace, tools). */
+  prepared: boolean;
+  /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
+  quota: { attempts: number; retryAt: number; lastError: string } | null;
+  modelMoves: { at: number; from: string; to: string }[];
 };
 export type JobsState = {
   paused: boolean;
   jobs: Record<string, Job>;
   agents: Record<string, Agent>;
+  /** Subagent conversation id -> the Job it serves, so tools and the UI find a Job from any conversation of its tree. */
+  subagents: Record<string, string>;
   /** Spawn request id -> agent id, so a retried spawn returns the same agent. */
   requests: Record<string, string>;
 };
@@ -92,7 +107,7 @@ export const Jobs = defineDoc<JobsState>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
-  initial: () => ({ paused: false, jobs: {}, agents: {}, requests: {} }),
+  initial: () => ({ paused: false, jobs: {}, agents: {}, subagents: {}, requests: {} }),
 });
 
 export const clip = (text: string, max: number): string => {
@@ -144,21 +159,42 @@ export function readyText(job: Job, answer: string): string {
 
 /** What the host supplies; everything project-specific (models, tools, prompts, workspaces, processes) lives behind it. */
 export type JobsHost = {
-  /** Agent setup of a new conversation: model, instructions, tools, cwd. Applied before the Jobs tools are added. */
+  /** Agent setup of a new conversation: model, instructions, tools. Applied before the Jobs tools are added. */
   agentChange(spec: { role: AgentRole; id: string; title: string; jobId: string | null; parent: ConversationId }): AgentChange;
-  /** Stops the background processes of these conversations. */
+  /**
+   * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
+   * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
+   */
+  prepare?(spec: { agent: Agent; job: Job | null }): Promise<AgentChange | void>;
+  /** Stops the background processes and releases the leases of these conversations. */
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
   backgroundSilence?(conversationIds: readonly ConversationId[]): number | null;
+  /** The owner-configured quota fallback model for a role, if any. */
+  fallbackModel?(role: AgentRole): { label: string; change: AgentChange } | null;
+  /** The label of the model an agent runs on now. */
+  modelLabel?(change: AgentChange | undefined): string;
+  /** Cached provider reset time for a model label, if known. */
+  quotaResetAt?(model: string, now: number): number | undefined;
+  /** Why these proof references cannot back a Ready report, or null. */
+  checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
   approver?: { approve(job: AcceptJob): Promise<AcceptanceOutcome> };
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
+  quotaRetryBaseMs?: number;
   now?: () => number;
 };
 
-type Delivery = { agentId: string; conversationId: ConversationId; chat: ConversationId; message: string; followUp: boolean };
-type DeliveryState = { phase: "deliver" } | { phase: "report"; report?: string };
+type Delivery = {
+  agentId: string;
+  conversationId: ConversationId;
+  chat: ConversationId;
+  message: string;
+  followUp: boolean;
+  prepare: boolean;
+};
+type DeliveryState = { phase: "prepare" } | { phase: "deliver"; attempt: number } | { phase: "report"; report?: string };
 
 const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string => {
   const message = entry?.model?.[0] as { content?: { type: string; text?: string }[] } | undefined;
@@ -177,62 +213,126 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
   abort: (_anchor, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
 });
 
-/** Delivers one message to an agent and reports its answer to the chat in full, once. */
-const Reporter = defineTask<Delivery, DeliveryState, null>({
-  name: "projects.agent-reporter",
-  version: 1,
-  initial: () => ({ phase: "deliver" }),
-  phases: {
-    deliver: async (reporter, runtime, taskContext) => {
-      const { agentId, conversationId, message, followUp } = reporter.input;
-      const agent = (await runtime.conversation(conversationId, taskContext))!;
-      const submission = await agent.submit(
-        { type: "input", content: message, whenBusy: followUp ? "followUp" : "steer", requestId: `agent:${reporter.id}` },
-        taskContext,
-      );
-      const settled = await submission.wait(taskContext);
-      await runtime.commit(async (tx) => {
-        const next = (report?: string) => ({ status: "running", checkpoint: { phase: "report", report } }) as const;
-        const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
-        const record = state.agents[agentId];
-        if (!record) return next();
-        const job = record.jobId ? state.jobs[record.jobId] : undefined;
-        if (settled.status === "unanswered") {
-          if (settled.reason === "aborted") return next();
-          if (job && isLive(job.status)) {
-            job.status = "failed";
-            job.reason = `The worker failed: ${settled.reason}`;
-            job.endedAt = Date.now();
+/** Prepares an agent, delivers one message to it and reports its answer to the chat in full, once. */
+const reporterTask = (host: JobsHost) =>
+  defineTask<Delivery, DeliveryState, null>({
+    name: "projects.agent-reporter",
+    version: 1,
+    initial: (input) => (input.prepare ? { phase: "prepare" } : { phase: "deliver", attempt: 0 }),
+    phases: {
+      prepare: async (reporter, runtime, taskContext) => {
+        const { agentId, conversationId } = reporter.input;
+        let change: AgentChange | void = undefined;
+        let failure: string | null = null;
+        try {
+          const state = await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext);
+          const agent = state?.agents[agentId];
+          if (agent)
+            change = await host.prepare?.({
+              agent: agent as Agent,
+              job: agent.jobId ? ((state!.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+            });
+        } catch (error) {
+          if (runtime.signal.aborted) throw error;
+          failure = error instanceof Error ? error.message : String(error);
+        }
+        await runtime.commit(async (tx) => {
+          const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+          const agent = state.agents[agentId];
+          if (!agent) return { status: "running", checkpoint: { phase: "report" } } as const;
+          if (!failure) {
+            if (change) await configure(tx, conversationId, change);
+            agent.prepared = true;
+            return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
-          return next(`[${record.role} ${record.id} failed: ${record.title}] ${settled.reason}`);
+          const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
+          if (job && job.status === "running")
+            Object.assign(job, { status: "failed", reason: `The worker could not start: ${failure}`, endedAt: Date.now() });
+          agent.endedAt = Date.now();
+          return {
+            status: "running",
+            checkpoint: { phase: "report", report: `[${agent.role} ${agent.id} failed to start: ${agent.title}] ${failure}` },
+          } as const;
+        }, taskContext);
+      },
+      deliver: async (reporter, runtime, taskContext) => {
+        const { agentId, conversationId, message, followUp } = reporter.input;
+        const attempt = reporter.state.checkpoint.attempt;
+        const agent = (await runtime.conversation(conversationId, taskContext))!;
+        const submission = await agent.submit(
+          { type: "input", content: message, whenBusy: followUp ? "followUp" : "steer", requestId: `agent:${reporter.id}:${attempt}` },
+          taskContext,
+        );
+        const settled = await submission.wait(taskContext);
+        const failure = settled.status === "unanswered" && settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
+        // Quota: switch once to the owner's fallback model, otherwise wait for the allowance to recover and resend.
+        if (failure && providerFailure(failure) === "quota_exceeded") {
+          const record = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId];
+          const switched = record && record.modelMoves.length === 0 ? host.fallbackModel?.(record.role) : null;
+          const previous = record?.quota?.attempts ?? 0;
+          if (record && (switched || previous < QUOTA_RETRY_LIMIT)) {
+            const now = runtime.now();
+            const stored = record.quota && record.quota.attempts === previous ? record.quota : null;
+            const retryAt = switched
+              ? now
+              : (stored?.retryAt ??
+                host.quotaResetAt?.(record.modelMoves.at(-1)?.to ?? "", now) ??
+                now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
+            const from = host.modelLabel?.(undefined) ?? "";
+            await runtime.commit(async (tx) => {
+              const doc = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
+              if (!doc) return undefined;
+              doc.quota = { attempts: previous + 1, retryAt, lastError: failure.slice(0, 500) };
+              if (switched) {
+                doc.modelMoves.push({ at: now, from, to: switched.label });
+                await configure(tx, conversationId, switched.change);
+              }
+              return { status: "running", checkpoint: { phase: "deliver", attempt: attempt + 1 } } as const;
+            }, taskContext);
+            if (!switched && retryAt > now) await runtime.sleep(retryAt, taskContext);
+            return;
+          }
         }
-        if (settled.type !== "input") return next();
-        if (record.reported.includes(settled.answer)) return next();
-        if (job && job.status === "stopped") return next();
-        const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
-        record.reported.push(settled.answer);
-        if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);
-        if (isLive(job.status)) {
-          job.status = "failed";
-          job.reason = "The worker ended without a Ready report";
-          job.endedAt = Date.now();
-          return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
+        await runtime.commit(async (tx) => {
+          const next = (report?: string) => ({ status: "running", checkpoint: { phase: "report", report } }) as const;
+          const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+          const record = state.agents[agentId];
+          if (!record) return next();
+          record.quota = null;
+          const job = record.jobId ? state.jobs[record.jobId] : undefined;
+          if (settled.status === "unanswered") {
+            if (!failure) return next();
+            if (job && isLive(job.status))
+              Object.assign(job, { status: "failed", reason: `The worker failed: ${failure}`, endedAt: Date.now() });
+            record.endedAt = Date.now();
+            return next(`[${record.role} ${record.id} failed: ${record.title}] ${failure}`);
+          }
+          if (settled.type !== "input") return next();
+          if (record.reported.includes(settled.answer)) return next();
+          if (job && job.status === "stopped") return next();
+          const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
+          record.reported.push(settled.answer);
+          record.endedAt = Date.now();
+          if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);
+          if (isLive(job.status)) {
+            Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });
+            return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
+          }
+          if (job.status === "failed") return next();
+          return next(readyText(job, answer));
+        }, taskContext);
+      },
+      report: async (reporter, runtime, taskContext) => {
+        const report = reporter.state.checkpoint.report;
+        if (report !== undefined) {
+          const chat = await runtime.conversation(reporter.input.chat, taskContext);
+          await chat?.submit({ type: "input", content: report, whenBusy: "followUp", requestId: `report:${reporter.id}` }, taskContext);
         }
-        if (job.status === "failed") return next();
-        return next(readyText(job, answer));
-      }, taskContext);
+        await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
+      },
     },
-    report: async (reporter, runtime, taskContext) => {
-      const report = reporter.state.checkpoint.report;
-      if (report !== undefined) {
-        const chat = await runtime.conversation(reporter.input.chat, taskContext);
-        await chat?.submit({ type: "input", content: report, whenBusy: "followUp", requestId: `report:${reporter.id}` }, taskContext);
-      }
-      await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
-    },
-  },
-  abort: (_reporter, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
-});
+    abort: (_reporter, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
+  });
 
 const acceptanceText = (criteria: readonly string[]) =>
   criteria.length ? `\n\nAcceptance criteria:\n${criteria.map((item) => `- ${item}`).join("\n")}` : "";
@@ -244,11 +344,21 @@ const reply = (text: string, details?: Record<string, string | number>) => ({
 
 export type JobsSnapshot = {
   paused: boolean;
-  jobs: (Job & { conversationId: ConversationId; working: boolean; leaf: ConversationId | null; eta: ReturnType<typeof planEta> })[];
+  jobs: (Omit<Job, "children"> & {
+    conversationId: ConversationId;
+    working: boolean;
+    /** The deepest working conversation of the Job's tree: where its live progress is. */
+    leaf: ConversationId | null;
+    eta: ReturnType<typeof planEta>;
+    children: (Job["children"][number] & { working: boolean })[];
+    quota: Agent["quota"];
+    modelMoves: Agent["modelMoves"];
+  })[];
   agents: (Agent & { working: boolean })[];
 };
 
 export function createJobs(host: JobsHost) {
+  const Reporter = reporterTask(host);
   const clock = () => host.now?.() ?? Date.now();
 
   const working = async (reader: Pick<Session, "snapshot">, id: ConversationId) =>
@@ -297,6 +407,8 @@ export function createJobs(host: JobsHost) {
       title: Type.Optional(Type.String()),
       acceptance: Type.Optional(Type.Array(Type.String())),
       branch: Type.Optional(Type.String()),
+      scopeId: Type.Optional(Type.String()),
+      readRef: Type.Optional(Type.String()),
       requestId: Type.Optional(Type.String()),
       id: Type.Optional(Type.String()),
       message: Type.Optional(Type.String()),
@@ -307,7 +419,13 @@ export function createJobs(host: JobsHost) {
     replay: "unsafe",
     execute: async (args, api, callContext) => {
       const { action, id } = args;
-      const state = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext)) ?? { paused: false, jobs: {}, agents: {}, requests: {} };
+      const state = (await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext)) ?? {
+        paused: false,
+        jobs: {},
+        agents: {},
+        subagents: {},
+        requests: {},
+      };
       if (action === "status") {
         const ids = id ? [id] : Object.keys(state.agents);
         const lines: string[] = [];
@@ -373,6 +491,11 @@ export function createJobs(host: JobsHost) {
           createdAt: now,
           endedAt: null,
           reported: [],
+          scopeId: args.scopeId?.trim() || null,
+          readRef: args.readRef?.trim() || null,
+          prepared: false,
+          quota: null,
+          modelMoves: [],
         };
         if (role === "worker")
           doc.jobs[agentId] = {
@@ -383,6 +506,8 @@ export function createJobs(host: JobsHost) {
             acceptance: args.acceptance!,
             status: "running",
             workerConversation: child.id,
+            scopeId: args.scopeId?.trim() || null,
+            children: [],
             branch: args.branch?.trim() || null,
             pr: null,
             candidate: null,
@@ -401,7 +526,7 @@ export function createJobs(host: JobsHost) {
             : args.brief!;
         await tx.createTask(
           Reporter,
-          { agentId, conversationId: child.id, chat: api.conversationId, message, followUp: false },
+          { agentId, conversationId: child.id, chat: api.conversationId, message, followUp: false, prepare: true },
           background,
         );
         return { text: `Started ${role} ${agentId}.`, id: agentId, conversationId: child.id };
@@ -416,7 +541,7 @@ export function createJobs(host: JobsHost) {
     name: "job",
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
-      "ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
+      "candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
     parameters: Type.Union([
       Type.Object({
         action: Type.Literal("plan"),
@@ -428,6 +553,7 @@ export function createJobs(host: JobsHost) {
           }),
         ),
       }),
+      Type.Object({ action: Type.Literal("candidate"), sha, branch: Type.Optional(Type.String()), pr: Type.Optional(Type.String()) }),
       Type.Object({
         action: Type.Literal("ready"),
         summary: Type.String(),
@@ -441,8 +567,17 @@ export function createJobs(host: JobsHost) {
       }),
     ]),
     replay: "safe",
-    execute: async (args, api, callContext) =>
-      reply(
+    execute: async (args, api, callContext) => {
+      if (args.action === "ready" && host.checkProof) {
+        const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
+          (item) => item.workerConversation === api.conversationId,
+        );
+        const problem = current
+          ? await host.checkProof({ ...current, candidate: args.candidate ?? current.candidate } as Job, args.proof ?? [])
+          : null;
+        if (problem) return reply(`Not recorded: ${problem}`);
+      }
+      return reply(
         await api.commit(async (tx) => {
           const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
           const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
@@ -464,6 +599,12 @@ export function createJobs(host: JobsHost) {
             });
             return `Plan saved: ${job.plan.filter((step) => step.status === "done").length}/${job.plan.length} done.`;
           }
+          if (args.action === "candidate") {
+            job.candidate = args.sha;
+            job.branch = args.branch ?? job.branch;
+            job.pr = args.pr ?? job.pr;
+            return `Candidate ${args.sha.slice(0, 8)} recorded.`;
+          }
           if (!args.summary.trim()) return "ready needs a summary.";
           const gaps = args.gaps ?? [];
           job.ready = {
@@ -482,7 +623,8 @@ export function createJobs(host: JobsHost) {
           job.stalledAt = null;
           return `Ready recorded (${job.status}). End your turn; the report goes to the coordinator.`;
         }, callContext),
-      ),
+      );
+    },
   });
 
   const subagentTool = defineTool({
@@ -497,11 +639,16 @@ export function createJobs(host: JobsHost) {
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
         if (existing) return existing.id;
+        const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+        const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
+        if (!job) throw new Error("subagent belongs to a worker's Job");
         const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+        job.children.push({ id: created.id, role: args.role, title: clip(args.task, 80) });
+        doc.subagents[String(created.id)] = job.id;
         await configure(
           tx,
           created.id,
-          host.agentChange({ role: args.role, id: String(created.id), title: args.role, jobId: null, parent: api.conversationId }),
+          host.agentChange({ role: args.role, id: String(created.id), title: args.role, jobId: job.id, parent: api.conversationId }),
         );
         await configure(tx, created.id, { extensions: { remove: [Worker, Coordinator] } });
         return created.id;
@@ -537,7 +684,11 @@ export function createJobs(host: JobsHost) {
       }
       agent.endedAt = null;
       const background = { ownership: { kind: "conversation" }, background: true, conversationId: agent.chat } as const;
-      await tx.createTask(Reporter, { agentId: id, conversationId: agent.conversationId, chat: agent.chat, message, followUp }, background);
+      await tx.createTask(
+        Reporter,
+        { agentId: id, conversationId: agent.conversationId, chat: agent.chat, message, followUp, prepare: !agent.prepared },
+        background,
+      );
       return `Sent to ${id}.`;
     }, context);
   }
@@ -566,8 +717,52 @@ export function createJobs(host: JobsHost) {
     return `Stopped ${id}.`;
   }
 
+  /** Agents that should be working: running Jobs' workers and scouts or reviewers still answering. */
+  const liveAgents = (doc: Readonly<JobsState>) =>
+    Object.values(doc.agents).filter((agent) => (agent.jobId ? doc.jobs[agent.jobId]?.status === "running" : agent.endedAt === null));
+
+  /** Stop admitting work and abort every live agent, keeping their Jobs running so a resume continues them. */
+  async function pause(harness: Harness): Promise<void> {
+    const live = await harness.commit(async (tx) => {
+      const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      doc.paused = true;
+      return liveAgents(doc).map((agent) => agent.conversationId);
+    }, context);
+    const owned = (await Promise.all(live.map(async (id) => [id, ...(await descendants(harness, id))]))).flat();
+    try {
+      await Promise.all(live.map(async (id) => (await harness.conversation(id, context))?.abort(context, { background: true })));
+    } finally {
+      await host.killProcesses?.(owned);
+    }
+  }
+
+  async function resume(harness: Harness): Promise<void> {
+    const root = await harness.root(context);
+    const live = await harness.commit(async (tx) => {
+      const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      doc.paused = false;
+      return liveAgents(doc).map((agent) => agent.id);
+    }, context);
+    for (const id of live) await sendTo(root, id, "The project was paused and has resumed. Continue where you left off.", true);
+  }
+
+  /** After a reopen, before the scheduler runs: let the host rebuild what live agents need (workspace tools). */
+  async function recover(harness: Harness): Promise<void> {
+    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+    if (!doc) return;
+    for (const agent of liveAgents(doc))
+      if (agent.prepared)
+        await host.prepare?.({ agent: agent as Agent, job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null });
+  }
+
   async function snapshot(harness: Harness): Promise<JobsSnapshot> {
-    const doc = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context)) ?? { paused: false, jobs: {}, agents: {}, requests: {} };
+    const doc = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context)) ?? {
+      paused: false,
+      jobs: {},
+      agents: {},
+      subagents: {},
+      requests: {},
+    };
     const jobs = await Promise.all(
       Object.values(doc.jobs).map(async (job) => {
         const leaf = isLive(job.status) ? await activeLeaf(harness, job.workerConversation) : null;
@@ -577,6 +772,9 @@ export function createJobs(host: JobsHost) {
           working: await working(harness, job.workerConversation),
           leaf,
           eta: planEta(job.plan),
+          children: await Promise.all(job.children.map(async (child) => ({ ...child, working: await working(harness, child.id) }))),
+          quota: doc.agents[job.id]?.quota ?? null,
+          modelMoves: doc.agents[job.id]?.modelMoves ?? [],
         };
       }),
     );
@@ -727,8 +925,9 @@ export function createJobs(host: JobsHost) {
     },
     approve,
     stallTick,
-    setPaused: (harness: Harness, paused: boolean) =>
-      harness.commit(async (tx) => void ((await tx.doc(Jobs, ROOT_CONVERSATION_ID)).paused = paused), context),
+    pause,
+    resume,
+    recover,
   };
 }
 export type JobsRuntime = ReturnType<typeof createJobs>;
