@@ -1,6 +1,6 @@
 # Architecture
 
-Terms are defined in `CONTEXT.md`; owner decisions are in `docs/lean-runtime-plan.md`. This file maps modules to responsibilities and lists the rules a change must keep. It describes `src/` as of the lean-runtime branch. Where the change feed and archive are marked "in progress", read the code before relying on this text.
+Terms are defined in `CONTEXT.md`; owner decisions are in `docs/lean-runtime-plan.md`. This file maps modules to responsibilities and lists the rules a change must keep. It describes `src/` as of the lean-runtime branch.
 
 ## Host and projects
 
@@ -74,16 +74,18 @@ Rule: a failed preparation must leave the running host untouched. Every external
 
 - `src/transcript-reader.ts` pages a conversation's entries newest first (`PAGE_ENTRIES`), with bounded previews and images by reference. A `TranscriptSource` supplies entries, either live (`storageSource`) or from an archive file.
 - `src/binary-results.ts` stores bytes from MCP, simulator, upload and image results as content-addressed artifacts under `artifacts/<scope>/binary/` (25 MiB limit, mime sniffed from bytes). The transcript keeps a markdown reference and a model copy of at most 200 KiB and 1024 px per side.
-- `src/archive-reader.ts` opens an old host's `durable.sqlite` read-only (`readOnly`, `query_only`) and lists its chats and worker transcripts through the transcript reader. Point it at a copy, never at a live home.
+- `src/archive-reader.ts` opens an old host's `durable.sqlite` read-only (`readOnly`, `query_only`) and lists its chats and worker transcripts through the transcript reader. `src/archive-host.ts` keeps the old-home path in `<home>/archive.json` (default `~/.pi/agent/projects-dev`) and a few open readers; `web/app/archive.js` browses it. Host RPCs `chat-history`, `thread-history`, `transcript-text` and `transcript-image` page live conversations the same way (`web/app/transcript.js`).
 
 Rules:
 - Never `JSON.stringify` a whole tool result or entry to build a preview. Touch only the requested page's rows.
 - Never inline base64 image data in a stored transcript.
-- The archive modules are not wired into the host yet; the reads track owns that wiring.
+- The archive never writes: no pi-durable Storage, no migrations, no WAL files.
 
-## Change feed (in progress)
+## Change feed
 
-Today `web.ts` polls: every two seconds it dispatches `show`, `jobs-snapshot`, `operation-snapshot` and `knowledge-list` and pushes a frame when the fingerprint changes. The change feed replaces that with typed topics (chat, jobs, knowledge, settings) pushed from pi-durable's `viewState` and `documentState` watches, so the browser refetches only the topic that changed. Reads must have no side effects. The browser keeps a slow fallback poll. The reads track is building it; check `src/host-server.ts` and `web/app/shell.js` for the current state.
+`src/change-feed.ts` is an in-process pub/sub keyed by project. `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.
+
+Rules: reads (`show`, snapshots, history) have no side effects. Anything that changes a read model publishes its topic.
 
 ## Telegram
 
