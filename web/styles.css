@@ -5133,6 +5133,7 @@ details.advanced[open] > summary {
   .side {
     height: auto;
     flex: none;
+    align-self: stretch;
   }
   .limits-bar {
     position: fixed;

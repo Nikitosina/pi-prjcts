@@ -258,7 +258,7 @@ try {
   const origin = await evaluate("performance.timeOrigin", s);
   await send("Page.navigate", { url: activity.toString() }, s);
   await waitFor(
-    `performance.timeOrigin !== ${origin} && import('/app/decisions.js').then((m) => !!m.plan?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
+    `performance.timeOrigin !== ${origin} && import('/app/decisions.js').then((m) => !!m.jobsSnap?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
     s,
     "page knows the worker",
   );

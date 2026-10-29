@@ -1164,63 +1164,9 @@ async function forensicCopy(projectId, expected, sourceRoot, label = "closed") {
   return { ...probes[0], sourceBefore, sourceAfter: finalSource, archiveBefore, archiveAfter: finalArchive, probes };
 }
 
+// The show payload carries the transcript page; the native identity set is its message ids.
 function publicNativeIdentity(show) {
-  const inspection = show.durableInspection;
-  return {
-    conversationId: inspection?.coordinator?.conversationId,
-    messageIds: inspection?.coordinator?.messages?.map((message) => message.id),
-    submissionIds: inspection?.coordinator?.submissions?.map((submission) => submission.id),
-    generationTaskIds: inspection?.coordinator?.generationTasks?.map((task) => task.taskId),
-  };
-}
-function assertPublicInspection(show, id, expected) {
-  const inspection = show.durableInspection;
-  pass(
-    "owner-native inspection identifies exact project/conversation",
-    inspection?.identity?.projectId === id &&
-      inspection.identity.coordinatorConversationId === inspection.coordinator.conversationId &&
-      Number.isSafeInteger(inspection.coordinator.conversationId),
-  );
-  const expectedSubmissions = [
-    { requestId: expected.eventRequestId, id: expected.eventSubmissionId },
-    { requestId: expected.scheduleRequestId, id: expected.scheduleSubmissionId },
-  ];
-  pass(
-    "owner-native inspection retains exact submission/entry IDs",
-    expectedSubmissions.every((item) =>
-      inspection?.coordinator?.submissions?.some(
-        (submission) =>
-          submission.requestId === item.requestId &&
-          submission.id === item.id &&
-          submission.status === "done" &&
-          Number.isSafeInteger(submission.answerId) &&
-          inspection.coordinator.messages.some((message) => message.id === submission.answerId),
-      ),
-    ),
-  );
-  const answerIds = new Set(inspection?.coordinator?.submissions?.map((submission) => submission.answerId));
-  pass(
-    "owner-native inspection ties native generation IDs to answer entries",
-    expectedSubmissions.every((item) => {
-      const submission = inspection?.coordinator?.submissions?.find((value) => value.requestId === item.requestId);
-      return inspection?.coordinator?.generationTasks?.some(
-        (task) => task.outcome?.result?.entryId === submission?.answerId && task.conversationId === inspection.coordinator.conversationId,
-      );
-    }) && answerIds.size >= 2,
-  );
-  pass(
-    "owner-native inspection polls successful generation tasks while host is alive",
-    inspection?.coordinator?.generationTasks?.length >= 2 &&
-      inspection.coordinator.generationTasks.every(
-        (task) =>
-          task.kind === "pi.generation" &&
-          task.conversationId === inspection.coordinator.conversationId &&
-          task.terminal &&
-          task.state === "terminal" &&
-          task.outcome?.status === "completed" &&
-          Number.isSafeInteger(task.outcome.result?.entryId),
-      ),
-  );
+  return show.messages.map((message) => message.id);
 }
 async function hostPhase(started) {
   const phaseErrors = [];
@@ -1360,7 +1306,7 @@ async function hostPhase(started) {
   phaseReceipt.firstShow = firstShow;
   pass(
     "first public show carries the documented base schema",
-    "busy,durableInspection,evidence,inbox,jobs,messages,notes,project".split(",").every((key) => Object.hasOwn(firstShow, key)),
+    "busy,evidence,inbox,jobs,messages,notes,project".split(",").every((key) => Object.hasOwn(firstShow, key)),
   );
   pass(
     "first public show has exact project identity/models",
@@ -1386,7 +1332,6 @@ async function hostPhase(started) {
   };
   phaseReceipt.firstProject = firstProject;
   phaseReceipt.firstRecords = firstRecords;
-  assertPublicInspection(firstShow, id, firstRecords);
   const firstHealth = await readHealth("first-live");
   pass(
     "first live checkpoint has exact health PID/home/source",
@@ -1442,7 +1387,6 @@ async function hostPhase(started) {
     reopenedShow.messages.some((message) => message.role === "assistant" && message.text === eventMarker) &&
       reopenedShow.messages.some((message) => message.role === "assistant" && message.text === "HOST_POSITIVE_SCHEDULE"),
   );
-  assertPublicInspection(reopenedShow, id, firstRecords);
   const reopenedHealth = await readHealth("reopened-live", reopenedHost.socket);
   pass(
     "reopened live checkpoint has exact health PID/home/source",

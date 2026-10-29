@@ -62,7 +62,7 @@ const k = await kit("worker-artifacts-browser", {}, respond);
 // The worker view opens once the page has read the Jobs (they arrive by push after load).
 const openWorker = async (thread, page) => {
   await k.waitFor(
-    `import('/app/decisions.js').then((m) => !!m.plan?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
+    `import('/app/decisions.js').then((m) => !!m.jobsSnap?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
     page,
     "page knows the worker",
   );
@@ -158,7 +158,7 @@ try {
   await openWorker(threadA, s);
   await waitFor(`document.querySelectorAll('#artifact-tree .artifact-file').length >= 5`, s, "artifact tree");
   const layout = await evaluate(
-    `(() => { const view = document.querySelector('#inline-thread'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inView: !view.hidden && view.contains(document.querySelector('#artifact-pane')) && !document.querySelector('#workers-card').contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`,
+    `(() => { const view = document.querySelector('#inline-thread'), a = document.querySelector('#artifact-pane').getBoundingClientRect(), t = document.querySelector('#artifact-tree'); return { inView: !view.hidden && view.contains(document.querySelector('#artifact-pane')) && !document.querySelector('#job-tree').contains(document.querySelector('#artifact-pane')), width: a.width, vw: innerWidth, treeOverflow: getComputedStyle(t).overflowY, treeMax: t.getBoundingClientRect().height <= 201 }; })()`,
     s,
   );
   result.layout = layout;
