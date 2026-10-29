@@ -1075,12 +1075,7 @@ async function usageList(offset = 0) {
     page.totalWorkers < 0 ||
     !page.coordinator ||
     (page.nextOffset !== null && (!page.workers.length || page.nextOffset !== offset + page.workers.length)) ||
-    page.workers.some(
-      (worker) =>
-        !["thread", "legacy"].includes(worker.kind) ||
-        (worker.kind === "thread" && !uuid(worker.threadId)) ||
-        !Number.isSafeInteger(worker.conversationId),
-    )
+    page.workers.some((worker) => !uuid(worker.threadId) || !Number.isSafeInteger(worker.conversationId))
   )
     throw new Error("Usage projection differs from its owned conversation/page");
   const number = (value) => Number(value).toLocaleString(),
@@ -1097,7 +1092,7 @@ async function usageList(offset = 0) {
   };
   const detail = (value) => `${counters(value.total)}${rawDetails({ models: value.models, tools: value.tools }, "By model and tool")}`;
   setDialogBody(
-    `<h3>Coordinator</h3>${detail(page.coordinator)}<h3>Workers</h3><p class="note">${esc(page.totalThreads)} reusable threads and ${esc(page.legacyOnlyWorkers)} older workers. The totals below cover this page only, not the whole project.</p>${counters(page.workerPageTotal)}${page.workers.length ? `<div class="seg-row mt"><span class="note">Workers on this page</span>${pager({ offset, count: page.workers.length, total: page.totalWorkers, size: 100, data: { action: "usage-list" } })}</div>` : ""}${page.workers.map((worker) => `<div class="list-row"><div class="grow"><strong>${worker.kind === "thread" ? `Thread ${esc(worker.threadId.slice(0, 8))}` : `Earlier worker ${esc(worker.name)}`}</strong><span class="meta">${number(worker.total.totalTokens)} tokens · $${worker.total.cost.total.toFixed(2)} estimated${(worker.legacyNames ?? []).length ? ` · also known as ${esc(worker.legacyNames.join(", "))}` : ""}</span></div>${detail(worker)}</div>`).join("") || '<p class="empty-state">No workers have run yet.</p>'}<p class="note">Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(String(page.accounting).replace(/\.$/, ""))}. SDK estimates are not billing or verified spend.</p>${dlgActions(dlgBtn("Refresh", { action: "usage-list", offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
+    `<h3>Coordinator</h3>${detail(page.coordinator)}<h3>Workers</h3><p class="note">${esc(page.totalThreads)} reusable threads. The totals below cover this page only, not the whole project.</p>${counters(page.workerPageTotal)}${page.workers.length ? `<div class="seg-row mt"><span class="note">Workers on this page</span>${pager({ offset, count: page.workers.length, total: page.totalWorkers, size: 100, data: { action: "usage-list" } })}</div>` : ""}${page.workers.map((worker) => `<div class="list-row"><div class="grow"><strong>${worker.kind === "thread" ? `Thread ${esc(worker.threadId.slice(0, 8))}` : `Earlier worker ${esc(worker.name)}`}</strong><span class="meta">${number(worker.total.totalTokens)} tokens · $${worker.total.cost.total.toFixed(2)} estimated</span></div>${detail(worker)}</div>`).join("") || '<p class="empty-state">No workers have run yet.</p>'}<p class="note">Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(String(page.accounting).replace(/\.$/, ""))}. SDK estimates are not billing or verified spend.</p>${dlgActions(dlgBtn("Refresh", { action: "usage-list", offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
   );
 }
 async function ownerSetupDialog(result = null) {

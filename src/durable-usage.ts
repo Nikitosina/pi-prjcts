@@ -132,16 +132,11 @@ async function usageTimeline(conversation: Conversation, now: number) {
   };
 }
 
-type WorkerIdentity =
-  | { kind: "thread"; threadId: string; conversationId: ConversationId; legacyNames: string[] }
-  | { kind: "legacy"; name: string; conversationId: ConversationId; legacyNames: string[] };
-
 export async function durableUsageSnapshot(
   harness: Harness,
   root: Conversation,
   threads: readonly { threadId: string; conversationId: ConversationId }[],
   options: { offset?: number; limit?: number },
-  legacy: readonly { name: string; conversationId: ConversationId }[] = [],
   work: readonly { threadId: string; role: string; text: string }[] = [],
   chats: readonly { id: string; title: string; archived: boolean; conversationId: number }[] = [],
 ) {
@@ -149,26 +144,15 @@ export async function durableUsageSnapshot(
     limit = options.limit ?? 100;
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100)
     throw new Error("Invalid usage page");
-  const identities = new Map<ConversationId, WorkerIdentity>();
+  const identities = new Map<ConversationId, { threadId: string; conversationId: ConversationId }>();
   const threadIds = new Set<string>();
   for (const thread of threads) {
     if (thread.conversationId === root.id || identities.has(thread.conversationId) || threadIds.has(thread.threadId))
       throw new Error("Usage conversations must have unique owned identities");
     threadIds.add(thread.threadId);
-    identities.set(thread.conversationId, { kind: "thread", ...thread, legacyNames: [] });
+    identities.set(thread.conversationId, thread);
   }
-  for (const worker of [...legacy].sort((a, b) => a.name.localeCompare(b.name))) {
-    if (worker.conversationId === root.id) throw new Error("Legacy worker cannot identify the coordinator conversation");
-    const existing = identities.get(worker.conversationId);
-    if (existing) {
-      if (!existing.legacyNames.includes(worker.name)) existing.legacyNames.push(worker.name);
-    } else identities.set(worker.conversationId, { kind: "legacy", ...worker, legacyNames: [worker.name] });
-  }
-  const workersByIdentity = [...identities.values()].sort((a, b) => {
-    const left = a.kind === "thread" ? `thread:${a.threadId}` : `legacy:${a.name}`;
-    const right = b.kind === "thread" ? `thread:${b.threadId}` : `legacy:${b.name}`;
-    return left.localeCompare(right);
-  });
+  const workersByIdentity = [...identities.values()].sort((a, b) => a.threadId.localeCompare(b.threadId));
   const selected = workersByIdentity.slice(offset, offset + limit);
   const now = Date.now();
   const coordinator = {
@@ -199,10 +183,9 @@ export async function durableUsageSnapshot(
     selected.map(async (thread) => {
       const conversation = await harness.conversation(thread.conversationId, BACKGROUND_CONTEXT);
       if (!conversation) throw new Error("Owned usage conversation is missing");
-      const item = work.find((candidate) => thread.kind === "thread" && candidate.threadId === thread.threadId);
+      const item = work.find((candidate) => candidate.threadId === thread.threadId);
       return {
         ...thread,
-        legacyNames: [...thread.legacyNames],
         conversationId: Number(thread.conversationId),
         role: item?.role ?? null,
         title: item?.text ?? null,
@@ -221,11 +204,10 @@ export async function durableUsageSnapshot(
     workerPageTotal: copy(workerPageTotal),
     totalWorkers: workersByIdentity.length,
     totalThreads: threads.length,
-    legacyOnlyWorkers: workersByIdentity.filter((worker) => worker.kind === "legacy").length,
     offset,
     nextOffset: offset + workers.length < workersByIdentity.length ? offset + workers.length : null,
     observedAtMs: Date.now(),
     accounting:
-      "Each registered conversation is counted once: Main (coordinator), every other chat, and workers including retained legacy ones. Worker totals cover this page only. These are live reads, not an atomic accounting snapshot. Reasoning is included in output, and cacheWrite1h in cacheWrite. Costs are SDK estimates, not billing receipts.",
+      "Each registered conversation is counted once: Main (coordinator), every other chat, and every worker. Worker totals cover this page only. These are live reads, not an atomic accounting snapshot. Reasoning is included in output, and cacheWrite1h in cacheWrite. Costs are SDK estimates, not billing receipts.",
   };
 }

@@ -1829,7 +1829,6 @@ export async function openDurableProject(input: {
           root,
           [...(await threadIdentities()), ...subagents],
           options,
-          [],
           view.agents.map((agent) => ({ threadId: agent.id, role: agent.role, text: agent.title })),
           await chatList(),
         );
