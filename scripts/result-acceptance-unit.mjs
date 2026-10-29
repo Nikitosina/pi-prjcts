@@ -101,12 +101,11 @@ git(checkout, "checkout", "-q", "--", "a.txt");
 
 // Not mergeable yet: auto-merge armed, Approve answers pending at once, and the flow finishes in the background.
 save({ mergeStateStatus: "BLOCKED" });
-setTimeout(() => save({ state: "MERGED", mergeStateStatus: "BLOCKED" }), 100);
 const armed = job();
-const started = Date.now();
 assert.equal((await approver.approve(armed)).kind, "auto-merge-pending");
-assert.ok(Date.now() - started < 90, "Approve does not wait for the merge");
+assert.equal(finished.length, 0, "Approve answered before the merge finished");
 assert.ok(readFileSync(calls, "utf8").includes("--auto"));
+setTimeout(() => save({ state: "MERGED", mergeStateStatus: "BLOCKED" }), 50);
 assert.equal((await settled(armed.id)).kind, "accepted");
 
 // Auto-merge never completes within the wait: the background flow ends pending, resumable.

@@ -29,7 +29,7 @@ Jobs replace the plan/work model. One Job is one owner request with one worker; 
 | `thread-steer {id, threadId, requestId, text}` | Message a running agent. A finished Job runs again. |
 | `thread-send {id, threadId, requestId, text}` | Queue a message after the agent's current answer. |
 | `thread-stop {id, threadId}` | Stop an agent, its subagents and their background processes. Job becomes `stopped` with reason "Stopped by the owner". |
-| `job-approve {id, jobId}` | Merge a Ready Job's candidate through result acceptance (same path as Telegram Approve). Returns the `AcceptanceOutcome`. |
+| `job-approve {id, jobId}` | Merge a Ready Job's candidate through result acceptance (same path as Telegram Approve). Returns the `AcceptanceOutcome`. A draft PR is marked ready first. When auto-merge is armed it answers `auto-merge-pending` at once; the flow finishes in an owner-scoped background task (aborted when the project closes), marks the Job approved and posts the result to the Job's chat. |
 | `work-submit {id, requestId, workspaceScopeId, text, threadId}` | Spawn a worker Job from the host (`threadId` is ignored). |
 | `pause` / `resume` | Pause aborts every running agent (they continue on resume). |
 
