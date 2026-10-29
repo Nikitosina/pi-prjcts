@@ -551,7 +551,10 @@ await kit.run(async () => {
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() ? (entry.name === "vendor" ? [] : walk(join(dir, entry.name))) : [join(dir, entry.name)],
     );
+  // usage-limits.ts reads the owner's Eliza usage endpoint: a provider status item, not VCS code.
+  const exempt = new Set([join(kit.core, "src", "usage-limits.ts")]);
   const offenders = [...walk(join(kit.core, "src")), ...walk(join(kit.core, "web"))].filter((file) => {
+    if (exempt.has(file)) return false;
     const text = readFileSync(file, "utf8");
     return (
       forbidden.some((word) => text.toLowerCase().includes(word)) ||
