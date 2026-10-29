@@ -24,7 +24,7 @@ const PROJECT_NAME = "Verify seed";
 const RPC_ALLOWLIST = new Set([
   "list",
   "show",
-  "plan-snapshot",
+  "jobs-snapshot",
   "knowledge-list",
   "knowledge-read",
   "knowledge-history",
@@ -630,13 +630,93 @@ const journeys = {
     if (view.project.fallbackModels?.worker !== "fake/fallback-model" || view.project.models.worker !== "fake/fake-model")
       throw Error("host state differs from UI selection");
     writeFileSync(
-      join(dir, "host-plan-proof.json"),
-      JSON.stringify(await rpc(run, { action: "plan-snapshot", id: run.projectId }), null, 2),
+      join(dir, "host-jobs-proof.json"),
+      JSON.stringify(await rpc(run, { action: "jobs-snapshot", id: run.projectId }), null, 2),
     );
     record(
       "verified",
       "pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model",
     );
+  },
+  // Feature: features/jobs.md
+  async jobs(run, page, record, dir, sinks) {
+    const prompt = "VERIFY-JOB please greet the world",
+      composer = 'textarea[aria-label="Message coordinator"]',
+      origin = new URL(run.webUrl).origin;
+    await page.navigate(run.webUrl);
+    await page.waitFor(
+      `document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)}) && !!document.querySelector(${JSON.stringify(composer)}) && !document.querySelector('#sign-in')?.open`,
+      "seeded project and composer",
+    );
+    await page.waitFor(`!document.querySelector('#job-tree').innerText.includes('Reading Jobs')`, "Jobs tree loaded");
+    record("entry", `opened ${origin}; sidebar shows Chats then Jobs`);
+    await page.shot(dir, "00-before-send");
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: prompt });
+    await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ${JSON.stringify(prompt)}`, "typed text in composer");
+    await page.click("#compose button[type=submit]");
+    record("action", `pointer-clicked Send with ${JSON.stringify(prompt)}`);
+    await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
+    // The Job appears in the sidebar tree and its Ready report arrives as a regular chat message.
+    await page.waitFor(`document.querySelector('#job-tree .job')?.innerText.includes('VERIFY-JOB')`, "Job in the sidebar tree", 60000);
+    await page.shot(dir, "01-job-in-tree");
+    await page.waitFor(`!!document.querySelector('#messages .job-msg[data-status="ready"]')`, "Ready message", 90000);
+    await page.waitFor(`!!document.querySelector('#messages [data-action="job-approve"]')`, "Approve button on the Ready message");
+    const ready = await page.evaluate(
+      `({ card: !!document.querySelector('#messages details.report'), message: document.querySelector('#messages .job-msg[data-status="ready"]').innerText, tree: document.querySelector('#job-tree').innerText })`,
+    );
+    if (ready.card || !/2\/2/.test(ready.tree)) throw Error(`Ready message or tree wrong: ${JSON.stringify(ready)}`);
+    await page.evaluate(`document.querySelector('#messages [data-action="job-approve"]').scrollIntoView({ block: "end" })`);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await page.shot(dir, "02-ready-with-approve");
+    record("visible", "a regular Ready message with an Approve button; the Job row shows ready and plan progress 2/2");
+    const jobs = await rpc(run, { action: "jobs-snapshot", id: run.projectId });
+    writeFileSync(join(dir, "host-jobs-snapshot.json"), JSON.stringify(jobs, null, 2));
+    if (jobs.jobs.length !== 1 || jobs.jobs[0].status !== "ready" || jobs.jobs[0].pr !== "12")
+      throw Error(`host Job wrong: ${JSON.stringify(jobs.jobs.map((j) => [j.status, j.pr]))}`);
+    record("side-effect", `jobs-snapshot lists one ${jobs.jobs[0].status} Job with PR ${jobs.jobs[0].pr}`);
+    // Approve is a real host call; the private host has no GitHub, so the outcome line says why it did not merge.
+    const seen = { errors: sinks.errors.length, http: sinks.httpErrors.length };
+    await page.click('#messages [data-action="job-approve"]');
+    await page.waitFor(`!!document.querySelector('#messages .job-outcome, #error:not([hidden])')`, "Approve outcome", 60000);
+    const outcome = await page.evaluate(
+      `document.querySelector('#messages .job-outcome')?.innerText ?? document.querySelector('#error')?.innerText ?? ''`,
+    );
+    await page.shot(dir, "02b-approve-outcome");
+    // The host answers the failed gh call with a 400; that is the expected result here, not a browser problem.
+    sinks.errors.length = seen.errors;
+    sinks.httpErrors.length = seen.http;
+    writeFileSync(join(dir, "approve-outcome.txt"), outcome);
+    record("visible", `after clicking Approve: ${JSON.stringify(outcome.slice(0, 160))}`);
+    // Expand the Job: its worker node shows status, plan progress and ETA.
+    await page.click("#job-tree .job-toggle");
+    await page.waitFor(`!!document.querySelector('#job-tree .job-children [data-action="thread"]')`, "expanded Job");
+    await page.shot(dir, "03-job-tree-expanded");
+    record("visible", `expanded Job: ${JSON.stringify(await page.evaluate(`document.querySelector('#job-tree').innerText`))}`);
+    // Open the worker node: its transcript replaces the chat.
+    await page.click('#job-tree [data-action="thread"]');
+    await page.waitFor(
+      `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
+      "worker transcript",
+    );
+    await page.shot(dir, "04-worker-transcript");
+    record("visible", "opening the worker node shows its transcript");
+    await page.click('[data-action="thread-close"]');
+    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to the chat");
+    // Host settings: the Deploy section.
+    await page.click("button[data-tab=settings]");
+    await page.waitFor(`!!document.querySelector('#deploy [data-action="deploy-start"]')`, "Deploy section", 30000);
+    await page.evaluate(`document.querySelector('#set-deploy').scrollIntoView()`);
+    await page.shot(dir, "05-deploy-settings");
+    const deploy = await page.evaluate(`document.querySelector('#deploy').innerText`);
+    writeFileSync(join(dir, "deploy-section.txt"), deploy);
+    if (
+      !/02:00 07:00/.test(
+        await page.evaluate(`[...document.querySelectorAll('#deploy select')].map(n => n.selectedOptions[0]?.textContent).join(' ')`),
+      )
+    )
+      throw Error(`deploy window default missing: ${deploy}`);
+    record("visible", "Deploy section: Deploy button, deploy-when-idle switch and the 02:00-07:00 window");
   },
   // Feature: features/message-coordinator.md
   async "message-coordinator"(run, page, record, dir) {

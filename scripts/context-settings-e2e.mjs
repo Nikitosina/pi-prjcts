@@ -154,13 +154,16 @@ try {
     "X3 context settings save while the coordinator is busy (no reopen)",
     busyChange.values.context.keepRecentTokens === 3000 && (await show()).busy,
   );
+  const otherChange = await rpc({
+    action: "settings-update",
+    id,
+    confirm: id,
+    expectedRevision: await rev(),
+    changes: { knowledgeAccess: "maintain" },
+  });
   check(
-    "X3 other settings still require an idle project",
-    await fails(
-      async () =>
-        rpc({ action: "settings-update", id, confirm: id, expectedRevision: await rev(), changes: { knowledgeAccess: "maintain" } }),
-      /idle coordinator/,
-    ),
+    "X3 other settings save while busy too and apply before the next message",
+    otherChange.values.knowledgeAccess === "maintain" && (await show()).busy,
   );
   release();
   await eventually(async () => !(await show()).busy, "busy turn did not finish");

@@ -263,13 +263,6 @@ const settle = async (id, job) =>
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
-const workFor = async (id, task) =>
-  eventually(async () => (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task)), `work ${task} missing`);
-const terminal = async (id, task, status) =>
-  eventually(async () => {
-    const w = (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task));
-    return w?.status === status && w;
-  }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
   evaluate(
     `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
@@ -327,6 +320,7 @@ try {
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
   launch.searchParams.set("tab", "coordinator");
+  launch.searchParams.set("e2e", "1");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -340,11 +334,17 @@ try {
   );
   await delay(400);
 
-  // Long turn: the owner's message and every step stay in the transcript (failure 5).
-  const long = await evaluate(
-    `({ you: document.querySelector('#messages').innerText.includes('MARK-LONG run a long chain'), tools: document.querySelectorAll('#messages .tool-call').length })`,
-    s,
-  );
+  // Long turn: the owner's message and every step stay in the transcript (failure 5); older pages are one request away.
+  const long = { you: false, tools: 0 };
+  for (let before; ;) {
+    const page = await rpc({ action: "chat-history", id, ...(before ? { before } : {}) });
+    for (const item of page.items) {
+      if (item.kind === "message" && item.text?.includes("MARK-LONG run a long chain")) long.you = true;
+      if (item.kind === "tool-call") long.tools++;
+    }
+    if (long.you || page.before === null) break;
+    before = page.before;
+  }
   if (!long.you || long.tools < LONG) throw Error("Long turn truncated: " + JSON.stringify(long));
   result.checks.push(`LC5 a ${LONG}-tool turn keeps the owner's message and all ${LONG} steps`);
 
@@ -353,9 +353,8 @@ try {
     `[...document.querySelectorAll('.col .card')].filter(n => n.offsetParent).map(n => n.querySelector('b')?.innerText)`,
     s,
   );
-  if (order.indexOf("Knowledge") < 0 || order.indexOf("Recent results") < 0 || order.indexOf("Knowledge") > order.indexOf("Recent results"))
-    throw Error("Rail order wrong: " + JSON.stringify(order));
-  result.checks.push("O1 rail shows Knowledge before Recent results");
+  if (order.indexOf("Knowledge") < 0 || order.includes("Recent results")) throw Error("Rail wrong: " + JSON.stringify(order));
+  result.checks.push("O1 rail shows Knowledge; Job results arrive as chat messages, not a card");
   const rail = await evaluate(
     `(() => { const card = document.querySelector('#notes'); const r = card.closest('.card').getBoundingClientRect(); return { folders: [...card.querySelectorAll('.tree-folder > summary .tree-name')].map(n => n.innerText), files: [...card.querySelectorAll('.tree-file .tree-name')].map(n => n.innerText), overflow: [...card.querySelectorAll('.tree-file')].some(n => n.getBoundingClientRect().right > r.right + 1), scroll: card.scrollWidth > card.clientWidth + 1 }; })()`,
     s,

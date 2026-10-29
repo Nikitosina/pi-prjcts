@@ -441,6 +441,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     const url = new URL(web.url);
     url.searchParams.set("project", id);
     url.searchParams.set("tab", tab);
+    url.searchParams.set("e2e", "1");
     return url.toString();
   };
 

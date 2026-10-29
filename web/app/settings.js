@@ -33,18 +33,22 @@ import {
   tab,
   toast,
   uiAction,
+  probe,
 } from "./shell.js";
 import { esc } from "./format.js";
 import { chatId, renderProjects } from "./chat.js";
-import { plan } from "./decisions.js";
+import { jobsSnap } from "./decisions.js";
 import { editableKnowledge } from "./knowledge.js";
 import { loadAutomationStrip, loadEventsIn } from "./admin.js";
 import { renderModelCycle } from "./search.js";
 
 const settingsDrafts = new Map();
+if (probe) window.settingsDrafts = settingsDrafts;
 export const modelCache = new Map();
 let settingsCache = null;
 let settingsConfirmation = null;
+// E2E runs (?e2e=1) assert that closing a dialog drops its pending proposal.
+if (probe) Object.defineProperty(window, "settingsConfirmation", { get: () => settingsConfirmation });
 onProjectChange(() => {
   settingsCache = null;
   modelCache.clear();
@@ -60,7 +64,7 @@ onTab((next) => {
 
 function renderSettings() {
   const p = getView().project;
-  document.querySelector("#settings-button").hidden = !plan;
+  document.querySelector("#settings-button").hidden = !jobsSnap;
   renderModelCycle();
   setHtml(
     "#settings-summary",
@@ -74,7 +78,7 @@ function renderSettings() {
 onRender(renderSettings);
 
 function renderSettingsCards() {
-  if (tab === "settings" && plan) {
+  if (tab === "settings" && jobsSnap) {
     void loadAutomationStrip();
     void loadEventsIn();
     void loadSkillsPicker();
@@ -161,7 +165,7 @@ async function loadSkillsPicker(force = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#skills-picker");
-  if (!id || !plan) return;
+  if (!id || !jobsSnap) return;
   // Opening Settings rebuilds the list from disk. Unsaved choices are kept: only the catalog is refreshed, so a skill installed meanwhile still shows up.
   if (!force && skillsPicker?.projectId === id && JSON.stringify(skillsPicker.draft) !== skillsPicker.saved) {
     try {
@@ -331,7 +335,7 @@ async function loadMcpPicker(force = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#mcp-picker");
-  if (!id || !plan || (!force && mcpPicker?.projectId === id)) return;
+  if (!id || !jobsSnap || (!force && mcpPicker?.projectId === id)) return;
   try {
     const [settings, catalog] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "mcp-catalog", id })]);
     if (id !== getProjectId() || current !== getGeneration()) return;
@@ -496,7 +500,7 @@ async function loadPrompts(force = false, keepEdits = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#prompts");
-  if (!id || !plan || (!force && promptsState?.projectId === id)) return;
+  if (!id || !jobsSnap || (!force && promptsState?.projectId === id)) return;
   const seq = ++promptsSeq,
     fresh = () => id === getProjectId() && current === getGeneration() && seq === promptsSeq && !promptsSaving;
   try {
@@ -575,7 +579,7 @@ async function loadWorktrees(force = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#worktrees");
-  if (!id || !plan || (!force && worktrees?.projectId === id && worktrees.data)) return;
+  if (!id || !jobsSnap || (!force && worktrees?.projectId === id && worktrees.data)) return;
   worktrees = { projectId: id, data: null, setup: "", revision: "" };
   try {
     const [data, settings] = await Promise.all([api({ action: "worktrees-snapshot", id }), api({ action: "settings-snapshot", id })]);
@@ -633,7 +637,7 @@ async function loadContextSettings(force = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#context-settings");
-  if (!id || !plan || (!force && contextCard?.projectId === id)) return;
+  if (!id || !jobsSnap || (!force && contextCard?.projectId === id)) return;
   try {
     const settings = await api({ action: "settings-snapshot", id });
     if (id !== getProjectId() || current !== getGeneration()) return;
@@ -935,9 +939,7 @@ function validateSettings(value) {
     !["none", "coordinator"].includes(v.libraryAccess) ||
     !["none", "coordinator"].includes(v.decisionAccess) ||
     (v.verification !== null && (typeof v.verification?.enabled !== "boolean" || typeof v.verification.skill !== "string")) ||
-    !Number.isSafeInteger(v.workerCap) ||
-    v.workerCap < 1 ||
-    v.workerCap > 32 ||
+    !Number.isSafeInteger(v.stallMinutes) ||
     (value.verificationProblem !== null && typeof value.verificationProblem !== "string")
   )
     throw new Error("Invalid settings snapshot/receipt");
@@ -960,7 +962,8 @@ function captureSettingsDraft() {
   }
 }
 
-// Project settings: one form (name, objective, models, access, worker limit), then one confirmation that shows every before → after.
+const DEFAULT_VERIFY_ROUNDS = 3;
+// Project settings: one form (name, objective, models, stall time, verification, access), then one confirmation that shows every before → after.
 const settingsRoles = [
   ["coordinator", "Coordinator", "Plans the work and talks to you."],
   ["worker", "Worker", "Writes code in its own worktree."],
@@ -1026,13 +1029,15 @@ const flatSettings = (values) => ({
   libraryAccess: values.libraryAccess,
   decisionAccess: values.decisionAccess,
   githubCli: values.githubCli ?? "full",
-  workerCap: String(values.workerCap),
+  stallMinutes: String(values.stallMinutes),
+  verifyRounds: String(values.verification?.rounds ?? DEFAULT_VERIFY_ROUNDS),
 });
 function settingsFormValues(form) {
   const flat = {
     name: form.elements.name.value,
     objective: form.elements.objective.value,
-    workerCap: form.elements.workerCap.value,
+    stallMinutes: form.elements.stallMinutes.value,
+    verifyRounds: form.elements.verifyRounds.value,
     verifyEnabled: form.elements.verifyEnabled.checked ? "on" : "off",
     verifySkill: form.elements.verifySkill.value.trim(),
   };
@@ -1050,7 +1055,7 @@ function settingsChanges(flat, values) {
     changes = {};
   for (const field of ["name", "objective", "knowledgeAccess", "libraryAccess", "decisionAccess", "githubCli"])
     if (flat[field] !== was[field]) changes[field] = flat[field];
-  if (flat.workerCap !== was.workerCap) changes.workerCap = Number(flat.workerCap);
+  if (flat.stallMinutes !== was.stallMinutes) changes.stallMinutes = Number(flat.stallMinutes);
   if (flat.coordinator !== was.coordinator) changes.model = flat.coordinator;
   for (const role of ["worker", "scout", "reviewer"]) {
     if (flat[role] !== was[role]) (changes.models ??= {})[role] = flat[role] === "" ? null : flat[role];
@@ -1058,8 +1063,12 @@ function settingsChanges(flat, values) {
       (changes.fallbackModels ??= {})[role] = flat[`${role}Fallback`] === "" ? null : flat[`${role}Fallback`];
   }
   if (flat.verifier !== was.verifier) (changes.models ??= {}).verifier = flat.verifier === "" ? null : flat.verifier;
-  if (flat.verifyEnabled !== was.verifyEnabled || (flat.verifyEnabled === "on" && flat.verifySkill !== was.verifySkill))
-    changes.verification = flat.verifyEnabled === "on" ? { enabled: true, skill: flat.verifySkill } : null;
+  if (
+    flat.verifyEnabled !== was.verifyEnabled ||
+    (flat.verifyEnabled === "on" && (flat.verifySkill !== was.verifySkill || flat.verifyRounds !== was.verifyRounds))
+  )
+    changes.verification =
+      flat.verifyEnabled === "on" ? { enabled: true, skill: flat.verifySkill, rounds: Number(flat.verifyRounds) } : null;
   if (flat.scoped !== was.scoped) changes.scopedModels = flat.scoped === "" ? null : flat.scoped.split("\n");
   return changes;
 }
@@ -1071,8 +1080,13 @@ function validateSettingsChanges(changes) {
     throw new Error("The name cannot be empty, and name and objective cannot contain control characters. Your edits are kept.");
   if (changes.verification?.enabled && !changes.verification.skill)
     throw new Error("Name the verification skill to run, or turn verification off. Your edits are kept.");
-  if ("workerCap" in changes && (!Number.isSafeInteger(changes.workerCap) || changes.workerCap < 1 || changes.workerCap > 32))
-    throw new Error("Workers at once must be a whole number from 1 to 32.");
+  if ("stallMinutes" in changes && (!Number.isSafeInteger(changes.stallMinutes) || changes.stallMinutes < 1 || changes.stallMinutes > 240))
+    throw new Error("Minutes before a stall notice must be a whole number from 1 to 240. Your edits are kept.");
+  if (
+    changes.verification?.enabled &&
+    (!Number.isSafeInteger(changes.verification.rounds) || changes.verification.rounds < 1 || changes.verification.rounds > 10)
+  )
+    throw new Error("Verifier rounds must be a whole number from 1 to 10. Your edits are kept.");
 }
 // The request must use the revision each retained text edit started from, so a stale edit is rejected by the host instead of being rebased.
 function settingsRevisionFor(changes) {
@@ -1106,7 +1120,7 @@ function settingsSync() {
   hint.classList.toggle("dirty", count > 0);
 }
 export async function settingsList(keep = false) {
-  if (!plan) throw new Error("Settings require a loaded Durable project");
+  if (!jobsSnap) throw new Error("Settings require a loaded Durable project");
   const id = getProjectId(),
     current = getGeneration(),
     version = showDialog("Project settings", '<p class="note">Loading settings…</p>', "Name, objective, models and what workers may use.");
@@ -1152,12 +1166,12 @@ export async function settingsList(keep = false) {
     .filter(([role]) => role !== "coordinator" && role !== "verifier")
     .map(fallbackField)
     .join("")}</div>
-<h3>Workers</h3>
-<div class="field-grid"><div class="field" data-field="workerCap"><label><span class="flabel">Workers at once</span><input name="workerCap" type="number" min="1" max="32" step="1" value="${esc(shown.workerCap)}"></label><span class="fhelp">How many workers may run in parallel (1–32). New projects start with 5.</span></div></div>
+<h3>Stalls</h3>
+<div class="field-grid"><div class="field" data-field="stallMinutes"><label><span class="flabel">Minutes before a stall notice</span><input name="stallMinutes" type="number" min="1" max="240" step="1" value="${esc(shown.stallMinutes)}"></label><span class="fhelp">A running Job with no progress for this long raises one notice in its chat (1–240, default 20). Nothing is stopped or steered automatically.</span></div></div>
 <h3>Verification</h3>${value.verificationProblem ? `<p class="note-box warn" data-verify-problem>Verification is on, but no worker of this project can pass it. ${esc(value.verificationProblem)}. Turn it off, or every finished worker ends as not verified.</p>` : ""}
-<div class="field-grid"><div class="field" data-field="verifyEnabled"><label><span class="flabel">Verify finished workers</span><span class="fhelp">Off by default. When on, a fresh verifier (the Verifier model above, never a fallback) runs the skill against the worker's exact result, uncommitted files included. A failure goes back to the same worker, up to 3 verifier attempts; then it comes to you.</span><span class="fhelp" data-verify-trust><b>The verifier is trusted like the worker, not sandboxed.</b> It runs shell commands in the worker's worktree as you, with the worker's shell policy and the host's resource leases. It can do what a worker's shell can do. Checking the revision and the files it changed keeps the evidence honest; it is not a security boundary. Only workers in a git workspace scope are verified; any other worker ends as not verified.</span><input name="verifyEnabled" type="checkbox"${shown.verifyEnabled === "on" ? " checked" : ""}></label></div><div class="field" data-field="verifySkill"><label><span class="flabel">Verification skill</span><span class="fhelp">Name of an installed project skill, for example verify-pi-prjcts.</span><input name="verifySkill" maxlength="128" autocomplete="off" value="${esc(shown.verifySkill)}"></label></div></div>
+<div class="field-grid"><div class="field" data-field="verifyEnabled"><label><span class="flabel">Verify finished workers</span><span class="fhelp">Off by default. When on, a fresh verifier (the Verifier model above, never a fallback) runs the skill against the worker's exact result, uncommitted files included. A failure goes back to the worker, which repairs and asks again, up to the rounds below; then the Job is Ready with gaps.</span><span class="fhelp" data-verify-trust><b>The verifier is trusted like the worker, not sandboxed.</b> It runs shell commands in the worker's worktree as you, with the worker's shell policy and the host's resource leases. It can do what a worker's shell can do. Checking the revision and the files it changed keeps the evidence honest; it is not a security boundary. Only workers in a git workspace scope are verified; any other worker ends as not verified.</span><input name="verifyEnabled" type="checkbox"${shown.verifyEnabled === "on" ? " checked" : ""}></label></div><div class="field" data-field="verifySkill"><label><span class="flabel">Verification skill</span><span class="fhelp">Name of an installed project skill, for example verify-pi-prjcts.</span><input name="verifySkill" maxlength="128" autocomplete="off" value="${esc(shown.verifySkill)}"></label></div><div class="field" data-field="verifyRounds"><label><span class="flabel">Verifier rounds</span><span class="fhelp">How many times the worker may repair and re-verify (1–10, default 3).</span><input name="verifyRounds" type="number" min="1" max="10" step="1" value="${esc(shown.verifyRounds)}"></label></div></div>
 <details class="advanced"><summary>Access to project functions</summary><div class="field-grid">${Object.entries(settingsAccess).map(accessField).join("")}</div></details>
-<p class="note">Model changes apply to the next request without interrupting current work. New threads use the current role selections. The worker limit applies at once and never stops running work. Other changes need an idle project. You review every change before it is saved.</p>
+<p class="note">Model changes apply to the next request without interrupting current work. New threads use the current role selections. The stall time applies at once. Other changes need an idle project. You review every change before it is saved.</p>
 ${dlgActions('<span class="hint" role="status"></span>', dlgBtn("Cancel", { action: "close-dialog" }), '<button type="submit" class="primary" data-off disabled>Review changes</button>')}</form>`);
   settingsSync();
 }
@@ -1169,11 +1183,10 @@ const modelText = (ref, role = "") => {
   const model = modelCache.get(ref);
   return model ? `${esc(model.name)}<small class="mono">${esc(ref)}</small>` : esc(ref);
 };
-const verifyText = (value) => (value?.enabled ? `On: skill <b>${esc(value.skill)}</b>, verifier model above` : "Off");
-export const verificationNote = (cycle) =>
-  cycle
-    ? `<p class="note" data-verification>Verification ${cycle.open ? "running" : esc(cycle.outcome ?? "ended")} (skill ${esc(cycle.skill)}, model ${esc(cycle.model)}): ${cycle.attempts.map((item) => `attempt ${item.n} ${esc(item.state)}`).join(", ") || "no attempt yet"}${cycle.reason ? `. ${esc(cycle.reason)}` : ""}</p>`
-    : "";
+const verifyText = (value) =>
+  value?.enabled
+    ? `On: skill <b>${esc(value.skill)}</b>, up to ${value.rounds ?? DEFAULT_VERIFY_ROUNDS} rounds, verifier model above`
+    : "Off";
 const emptyText = (text) => (text ? esc(text) : "<small>empty</small>");
 function settingsDiffRows(changes, values) {
   const rows = [];
@@ -1191,7 +1204,7 @@ function settingsDiffRows(changes, values) {
     if (field in changes)
       rows.push([settingsAccess[field][0], esc(accessText(field, values[field])), esc(accessText(field, changes[field]))]);
   if ("verification" in changes) rows.push(["Verification", verifyText(values.verification), verifyText(changes.verification)]);
-  if ("workerCap" in changes) rows.push(["Workers at once", String(values.workerCap), String(changes.workerCap)]);
+  if ("stallMinutes" in changes) rows.push(["Minutes before a stall notice", String(values.stallMinutes), String(changes.stallMinutes)]);
   return rows;
 }
 export const diffItem = ([label, before, after]) =>

@@ -19,6 +19,7 @@ import {
   onRender,
   onTab,
   pager,
+  probe,
   projects,
   rawDetails,
   recordSummary,
@@ -35,7 +36,7 @@ import {
 } from "./shell.js";
 import { clip, esc, uuid } from "./format.js";
 import { admissionBlocked, renderProjects } from "./chat.js";
-import { plan } from "./decisions.js";
+import { jobsSnap } from "./decisions.js";
 import { diffItem } from "./settings.js";
 import { when } from "./observability.js";
 import { resumeDialog } from "./creation.js";
@@ -44,6 +45,11 @@ let routineCache = null,
   routineConfirmation = null;
 const providerCache = new Map();
 let providerInspection = null;
+if (probe) {
+  Object.defineProperty(window, "routineConfirmation", { get: () => routineConfirmation });
+  Object.defineProperty(window, "providerInspection", { get: () => providerInspection });
+  Object.assign(window, { providerCache, providerRecord, ownerFieldsValue });
+}
 onProjectChange(() => {
   providerCache.clear();
   routineCache = null;
@@ -53,18 +59,59 @@ onTab((next) => {
   if (next !== "settings") return;
   void loadAutomationStrip();
   void loadEventsIn();
+  void loadDeploy();
 });
+
+// Deploy (host-wide): the button spawns the deploy CLI detached; "deploy when idle" is an opt-in with a daily window.
+let deployView = null,
+  deployError = "",
+  deployTimer = null;
+async function loadDeploy() {
+  clearTimeout(deployTimer);
+  try {
+    deployView = await api({ action: "deploy-snapshot" });
+    deployError = "";
+  } catch (error) {
+    deployError = error.message;
+  }
+  renderDeploy();
+  if (tab === "settings") deployTimer = setTimeout(() => void loadDeploy(), deployView?.running ? 3000 : 15000);
+}
+const hourOptions = (selected) =>
+  Array.from(
+    { length: 24 },
+    (_, hour) => `<option value="${hour}"${hour === selected ? " selected" : ""}>${String(hour).padStart(2, "0")}:00</option>`,
+  ).join("");
+function renderDeploy() {
+  const node = document.querySelector("#deploy");
+  if (!deployView) {
+    node.innerHTML = `<p class="note">${deployError ? `Deploy unavailable: ${esc(deployError)}` : "Reading…"}</p>`;
+    return;
+  }
+  // Typing in the window controls must not be overwritten by the next poll.
+  if (node.contains(document.activeElement)) return;
+  const { settings, state, running } = deployView,
+    last = state.lastResult;
+  node.innerHTML = `<div class="kv deploy-state"><span>Now</span><b id="deploy-running">${running ? "A deploy is running" : "Idle"}</b><span>Last good version</span><b>${state.lastGood ? `<code>${esc(state.lastGood.slice(0, 8))}</code>` : "none yet"}</b><span>Last deploy</span><b id="deploy-last">${last ? `${last.ok ? "ok" : "failed"} · ${esc(when(last.at))} · <code>${esc(last.sha.slice(0, 8))}</code> · ${esc(clip(last.message, 160))}` : "never"}</b></div>
+    <div class="row"><button data-action="deploy-start" ${running ? "disabled" : ""}>Deploy now…</button></div>
+    <fieldset class="events-group"><legend>Deploy when idle</legend>
+      <label class="check"><input type="checkbox" id="deploy-idle" ${settings.idle ? "checked" : ""}> Deploy new code on its own when no Job is running in any project</label>
+      <div class="row"><label class="field">From <select id="deploy-from">${hourOptions(settings.startHour)}</select></label><label class="field">To <select id="deploy-to">${hourOptions(settings.endHour)}</select></label></div>
+      <p class="note">Checks every few minutes, at most one automatic attempt a day, only inside this window (local time, default 02:00–07:00) and only when the checkout has new code. Equal hours mean any time of day.</p>
+      <div class="row"><button class="primary" data-action="deploy-save">Save</button></div>
+    </fieldset>`;
+}
 
 function renderAdmin() {
   const p = getView().project;
   document.querySelector("#owner-setup-button").hidden = !getView();
-  document.querySelector("#usage-button").hidden = !plan;
-  document.querySelector("#provider-button").hidden = !plan;
-  document.querySelector("#routines-button").hidden = !plan;
+  document.querySelector("#usage-button").hidden = !jobsSnap;
+  document.querySelector("#provider-button").hidden = !jobsSnap;
+  document.querySelector("#routines-button").hidden = !jobsSnap;
   const historyButton = document.querySelector('[data-action="routine-history"]');
   if (historyButton) {
     historyButton.dataset.project = getProjectId() ?? "";
-    historyButton.hidden = !plan;
+    historyButton.hidden = !jobsSnap;
   }
   document.querySelector("#workspace").textContent = getView().project.cwd;
   document.querySelector("#workspace-policy").textContent =
@@ -120,7 +167,7 @@ export async function loadEventsIn(force = false) {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#events-in");
-  if (!id || !plan || (!force && eventsIn?.projectId === id)) return;
+  if (!id || !jobsSnap || (!force && eventsIn?.projectId === id)) return;
   if (eventsIn?.projectId !== id) eventsIn = { projectId: id, data: null, reveal: false, rotateArmed: false };
   try {
     const data = await api({ action: "automation-snapshot", id });
@@ -232,7 +279,7 @@ export async function loadAutomationStrip() {
   const id = getProjectId(),
     current = getGeneration(),
     node = document.querySelector("#automation-history");
-  if (!id || !plan || (node.dataset.project === id && node.dataset.loaded === "true")) return;
+  if (!id || !jobsSnap || (node.dataset.project === id && node.dataset.loaded === "true")) return;
   node.dataset.project = id;
   node.dataset.loaded = "loading";
   try {
@@ -268,7 +315,7 @@ onBusyChange(() => {
         ? "Archived"
         : getView().paused
           ? "Paused"
-          : getView().busy || plan?.work.some((work) => work.status === "running")
+          : getView().busy || jobsSnap?.jobs.some((job) => job.status === "running")
             ? "Working"
             : "Idle";
   document.querySelector("#lifecycle-state").dataset.state = document.querySelector("#lifecycle-state").textContent.toLowerCase();
@@ -376,6 +423,32 @@ registerActions({
   },
 });
 registerActions({
+  "deploy-start"() {
+    showDialog(
+      "Deploy now?",
+      `<p>The host restarts from its main checkout. Every project pauses briefly and this page reconnects. If the new host fails its smoke test, the last good version comes back.</p>${dlgActions(dlgBtn("Cancel", { action: "close-dialog" }), dlgBtn("Deploy", { action: "deploy-confirm" }, "danger"))}`,
+    );
+  },
+  async "deploy-confirm"() {
+    const version = dialogVersion;
+    deployView = await api({ action: "deploy-start" });
+    closeCurrentDialog(getProjectId(), version);
+    toast("Deploy started. The host restarts shortly.");
+    renderDeploy();
+  },
+  async "deploy-save"() {
+    const read = (selector) => document.querySelector(selector);
+    deployView = await api({
+      action: "deploy-settings",
+      settings: {
+        idle: read("#deploy-idle").checked,
+        startHour: Number(read("#deploy-from").value),
+        endHour: Number(read("#deploy-to").value),
+      },
+    });
+    toast("Deploy settings saved.");
+    renderDeploy();
+  },
   async "automation-refresh"() {
     await loadEventsIn(true);
   },
@@ -557,7 +630,7 @@ registerForms([
       const target = form.dataset.project;
       requireProject(target);
       const operation = form.dataset.operation;
-      if (!plan || !["archive", "delete", "restore"].includes(operation) || data.get("confirm") !== target)
+      if (!jobsSnap || !["archive", "delete", "restore"].includes(operation) || data.get("confirm") !== target)
         throw new Error("Confirm the exact Durable project/lifecycle action");
       await mutate(
         operation === "delete" ? { action: "delete", id: target, confirm: target } : { action: operation, id: target },
@@ -630,7 +703,7 @@ function providerBinding(scopeId, repositoryId) {
   return grant;
 }
 async function providerList(kind = "reads", offset = 0) {
-  if (!plan || !["reads", "writes"].includes(kind) || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
+  if (!jobsSnap || !["reads", "writes"].includes(kind) || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
     throw new Error("A loaded Durable project and valid receipt page are required");
   const id = getProjectId(),
     current = getGeneration(),
@@ -764,7 +837,12 @@ function providerInspect(key) {
   disableActions();
 }
 function providerKnown() {
-  if (!plan || getView().project.workspaceAuthorization?.provider !== "github" || getView().project.archived || getView().project.deleted)
+  if (
+    !jobsSnap ||
+    getView().project.workspaceAuthorization?.provider !== "github" ||
+    getView().project.archived ||
+    getView().project.deleted
+  )
     throw new Error("A current active GitHub scope is required. Other workspace providers remain deferred");
   const scopes = getView().project.workspaceAuthorization.scopes.filter((scope) =>
     getView().project.githubAuthorization?.some((grant) => grant.repositoryId === scope.repositoryId),
@@ -778,7 +856,7 @@ function providerKnown() {
   disableActions();
 }
 function lifecycleMore() {
-  if (!plan) throw new Error("Lifecycle controls require a loaded Durable project");
+  if (!jobsSnap) throw new Error("Lifecycle controls require a loaded Durable project");
   const p = getView().project,
     inactive = p.archived || p.deleted,
     state = p.deleted ? "removed from the list" : p.archived ? "archived" : getView().paused ? "paused" : "active";
@@ -800,7 +878,7 @@ function lifecycleMore() {
 }
 function lifecycleConfirm(id, operation) {
   requireProject(id);
-  if (!plan || !["archive", "delete", "restore"].includes(operation)) throw new Error("Unknown Durable lifecycle action");
+  if (!jobsSnap || !["archive", "delete", "restore"].includes(operation)) throw new Error("Unknown Durable lifecycle action");
   const inactive = getView().project.archived || getView().project.deleted;
   if (operation === "restore" ? !inactive : inactive) throw new Error("Project lifecycle state changed; reopen its controls");
   const copy = {
@@ -829,7 +907,7 @@ function lifecycleConfirm(id, operation) {
 }
 async function routineList(lens = "schedules", offset = 0) {
   if (lens === "history") return routineHistory("intents", 0, 0);
-  if (!plan || !["schedules", "monitors"].includes(lens) || !Number.isSafeInteger(offset) || offset < 0)
+  if (!jobsSnap || !["schedules", "monitors"].includes(lens) || !Number.isSafeInteger(offset) || offset < 0)
     throw new Error("Routine view requires a loaded Durable project and valid cached page");
   const id = getProjectId(),
     current = getGeneration(),
@@ -841,7 +919,7 @@ async function routineList(lens = "schedules", offset = 0) {
   const [schedules, monitors, policy] = await Promise.all([
     api({ action: "schedule-snapshot", id, includeHistory: false }),
     api({ action: "monitor-snapshot", id }),
-    api({ action: "plan-snapshot", id }),
+    api({ action: "jobs-snapshot", id }),
   ]);
   if (!dialog.open || version !== dialogVersion || id !== getProjectId() || current !== getGeneration()) return;
   if (
@@ -881,8 +959,7 @@ async function routineList(lens = "schedules", offset = 0) {
         record.pullRequest < 1,
     ) ||
     !policy ||
-    typeof policy.paused !== "boolean" ||
-    typeof policy.pausing !== "boolean"
+    typeof policy.paused !== "boolean"
   )
     throw new Error("Invalid owned routine projection");
   routineCache = { project: id, schedules, monitors, policy };
@@ -917,7 +994,7 @@ async function routineList(lens = "schedules", offset = 0) {
       .join("") ||
     `<p class="empty-state">No ${lens === "schedules" ? "schedules" : "monitors"} yet. They are created from the command line and start turned off.</p>`;
   setDialogBody(
-    `${policy.paused || policy.pausing || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused || policy.pausing ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
+    `${policy.paused || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
   );
 }
 function validateRoutineRange(text, range, requested) {
@@ -938,7 +1015,7 @@ function validateRoutineRange(text, range, requested) {
 }
 async function routineHistory(kind = "intents", offset = 0, textOffset = 0) {
   if (
-    !plan ||
+    !jobsSnap ||
     !["events", "intents"].includes(kind) ||
     ![offset, textOffset].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 1000000)
   )
@@ -1040,11 +1117,10 @@ function routineConfirm(kind, recordId, value) {
   routineConfirmation = { project: id, kind, recordId, enabled, binding, version };
 }
 async function usageList(offset = 0) {
-  if (!plan || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
+  if (!jobsSnap || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000000)
     throw new Error("Usage requires a loaded Durable project/valid page");
   const id = getProjectId(),
     current = getGeneration(),
-    coordinatorId = getView().durableInspection?.identity.coordinatorConversationId,
     version = showDialog("Usage", '<p class="note">Reading token counts…</p>', "Token counts recorded by the SDK. Estimates, not billing.");
   const page = await api({ action: "usage-snapshot", id, offset, limit: 100 });
   if (!dialog.open || version !== dialogVersion || id !== getProjectId() || current !== getGeneration()) return;
@@ -1056,7 +1132,6 @@ async function usageList(offset = 0) {
     !Number.isSafeInteger(page.totalWorkers) ||
     page.totalWorkers < 0 ||
     !page.coordinator ||
-    (coordinatorId !== undefined && page.coordinator.conversationId !== coordinatorId) ||
     (page.nextOffset !== null && (!page.workers.length || page.nextOffset !== offset + page.workers.length)) ||
     page.workers.some(
       (worker) =>

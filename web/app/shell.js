@@ -12,6 +12,12 @@ if (supplied) {
 }
 // End-to-end runs (?e2e=1) read how much work the live preview and the markdown renderer did; nothing else touches this.
 export const probe = initial.searchParams.get("e2e") === "1" ? (window.__projectsProbe = { live: [], markdown: [] }) : null;
+// E2E scripts read the open project view by name, as they did before the page was split into modules.
+if (probe) {
+  Object.defineProperty(window, "view", { get: () => getView() });
+  Object.defineProperty(window, "projectId", { get: () => getProjectId() });
+  window.render = render;
+}
 initial.hash = "";
 history.replaceState(null, "", initial);
 export const token = localStorage.getItem(key) || "";

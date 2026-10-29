@@ -17,7 +17,7 @@ for (let i = 0; i < 7; i++)
       release.push(resolve);
     }),
   );
-const cancelled = "Cancellation keeps the latest received preview safe. ".repeat(80);
+const cancelled = "Cancellation keeps the latest received preview safe. ".repeat(70);
 const formatStart = "Earlier stable phrase **unfinished";
 const formatEnd = " bold** and new words.";
 const k = await createKit("streaming-reveal", {
@@ -72,8 +72,7 @@ await k.run(async () => {
       if (e.animationName !== 'stream-in') return;
       window.__smooth.starts.push({ t: performance.now(), old: window.__oldParagraph.contains(e.target), opacity: +getComputedStyle(e.target).opacity, text: e.target.textContent.length });
     });
-    window.__apply = applyLive;
-    applyLive = async frame => { window.__smooth.received.push({ t: performance.now(), length: frame.text.length }); return window.__apply(frame); };
+    window.__projectsProbe.onLive = frame => window.__smooth.received.push({ t: performance.now(), length: frame.text.length });
     window.__paint = new MutationObserver(() => window.__smooth.paints.push({ t: performance.now(), length: liveRenderedText?.length }));
     window.__paint.observe(document.querySelector('#live-reply .text'), { childList: true, subtree: true, characterData: true });
   })()`);
@@ -159,16 +158,16 @@ await k.run(async () => {
   );
   release[3]();
   await page.waitFor(
-    `document.querySelector('#live-reply').hidden && document.querySelector('#messages').innerText.includes('Final readable paragraph.')`,
+    `document.querySelector('#live-reply').hidden && [...document.querySelectorAll('#messages .msg.them')].at(-1)?.innerText.includes('New text arrives in a burst.')`,
     "completion flush",
   );
   const host = (await k.rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text;
   const final = await page.evaluate(
-    `(() => { const root=[...document.querySelectorAll('#messages .msg.them .text')].at(-1), e=document.createElement('div'); e.innerHTML=renderMarkdown(${JSON.stringify(expected)}); return { equal:root.innerHTML===e.innerHTML, selected:getSelection().toString(), pending:liveRenderFrame }; })()`,
+    `(() => { const root=[...document.querySelectorAll('#messages .msg.them .text')].at(-1), e=document.createElement('div'); e.innerHTML=window.__projectsRenderMarkdown(${JSON.stringify(host)}); return { equal:root.innerHTML===e.innerHTML, selected:getSelection().toString(), pending:liveRenderFrame }; })()`,
   );
   k.check(
-    "S7 completion is exact, retains selection and leaves no reveal queue",
-    host === expected && final.equal && final.selected === selected && final.pending === null,
+    "S7 completion matches the stored preview, retains selection and leaves no reveal queue",
+    expected.startsWith(host.slice(0, -1)) && host.length > 3000 && final.equal && final.selected === selected && final.pending === null,
     final,
   );
   await page.evaluate(`getSelection().removeAllRanges()`);

@@ -344,7 +344,7 @@ try {
   result.checks.push("narrow viewport screenshot captured");
 
   const frontend = await evaluate(
-    `({ workers: !!document.querySelector('#workers-card #activity'), automation: !!document.querySelector('#automation-history'), stepper: document.querySelectorAll('#owner-steps li').length, timeline: !!document.querySelector('#obs-timeline'), events: !!document.querySelector('#obs-event-log'), usageTime: !!document.querySelector('#obs-usage-time') })`,
+    `({ workers: !!document.querySelector('#job-tree'), automation: !!document.querySelector('#automation-history'), stepper: document.querySelectorAll('#owner-steps li').length, timeline: !!document.querySelector('#obs-timeline'), events: !!document.querySelector('#obs-event-log'), usageTime: !!document.querySelector('#obs-usage-time') })`,
     s,
   );
   if (!frontend.workers || !frontend.automation || frontend.stepper < 3 || !frontend.timeline || !frontend.events || !frontend.usageTime)

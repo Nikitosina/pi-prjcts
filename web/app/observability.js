@@ -1,6 +1,6 @@
 import { api, getGeneration, getProjectId, getView, onProjectChange, onRender, onTab, registerActions, setHtml, tab } from "./shell.js";
 import { badge, duration, esc } from "./format.js";
-import { pendingCount, plan } from "./decisions.js";
+import { jobChatId, jobsSnap, pendingCount } from "./decisions.js";
 
 // Observability usage is pinned to the project/generation that requested it.
 let usageObs = null,
@@ -22,80 +22,76 @@ onTab((next) => {
   void loadObservability();
 });
 
+// Agent ids whose transcripts belong to a Job: its worker and the subagents the worker started.
+const jobThreads = (job) => [job.id, ...job.children.map((child) => child.id)];
 function renderObservability() {
   const p = getView().project,
-    work = plan?.work ?? [];
-  const count = (status) => work.filter((item) => item.status === status).length;
+    jobs = jobsSnap?.jobs ?? [];
+  const count = (...statuses) => jobs.filter((job) => statuses.includes(job.status)).length;
   const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
   setHtml(
     "#obs-kpis",
     [
       kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""),
       kpi("Running", count("running")),
-      kpi("Queued", count("queued")),
-      kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""),
-      kpi("Work items", work.length),
-      kpi("Worker cap", plan?.workerCap ?? "—"),
+      kpi("Ready", count("ready", "ready-with-gaps")),
+      kpi("Failed", count("failed"), count("failed") ? "err" : ""),
+      kpi("Jobs", jobs.length),
     ].join(""),
   );
   renderHealth(p);
-  if (tab === "observability" && plan && !observability && !observabilityLoading) void loadObservability();
-  const threads = new Map();
-  for (const item of work) threads.set(item.threadId, [...(threads.get(item.threadId) ?? []), item]);
-  // One node per chat; each worker thread sits under the chat that delegated its latest work (null means Main).
+  if (tab === "observability" && jobsSnap && !observability && !observabilityLoading) void loadObservability();
+  // One node per chat; each Job sits under the chat that spawned it, with its subagents below.
   const chats = getView().chats ?? [{ id: "main", title: "Coordinator", conversationId: null, busy: getView().busy, archived: false }];
-  const mainConversation = chats.find((chat) => chat.id === "main")?.conversationId ?? null;
-  const childThreads = (threadId) => [...threads].filter(([id, items]) => id !== threadId && items.at(-1).parentThreadId === threadId);
-  const owner = (items) => chats.find((chat) => chat.conversationId === (items.at(-1).chatConversationId ?? mainConversation)) ?? chats[0];
-  const threadHtml = ([threadId, items], nested = false) =>
-    `<li${nested ? ` class="trace-child" data-parent="${esc(items.at(-1).parentThreadId)}"` : ""} data-thread="${esc(threadId)}"><details ${items.some((item) => ["running", "queued", "blocked"].includes(item.status)) ? "open" : ""}><summary>${badge(items.at(-1).status)} <b>${nested ? "sub-agent · " : ""}${esc(items[0].role)} thread</b> <small class="inline mono">${esc(threadId.slice(0, 8))} · ${items.length} work item(s)</small> <button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(threadId)}">history ↗</button></summary><ul>${items.map((item) => `<li>${badge(item.status)} ${esc(item.text.slice(0, 160))} <small class="inline">${esc(item.attempt?.model ?? "")}</small></li>`).join("")}${(
-      observability?.tools ?? []
-    )
+  const toolsOf = (threadId) =>
+    (observability?.tools ?? [])
       .filter((call) => call.threadId === threadId)
       .map((call) => `<li>${toolCallHtml(call)}</li>`)
-      .join("")}${childThreads(threadId)
-      .map((entry) => threadHtml(entry, true))
+      .join("");
+  const jobHtml = (job) =>
+    `<li data-thread="${esc(job.id)}"><details ${job.status === "running" ? "open" : ""}><summary>${badge(job.status)} <b>${esc(job.title)}</b> <small class="inline mono">${esc(job.id.slice(0, 8))}</small> <button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(job.id)}">history ↗</button></summary><ul>${toolsOf(job.id)}${job.children
+      .map(
+        (child) =>
+          `<li class="trace-child" data-parent="${esc(job.id)}" data-thread="${esc(child.id)}">${badge(child.working ? "running" : "done")} ${esc(child.role)} · ${esc(child.title)} <button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(child.id)}">history ↗</button><ul>${toolsOf(child.id)}</ul></li>`,
+      )
       .join("")}</ul></details></li>`;
   setHtml(
     "#obs-trace",
     `<ul class="trace">${chats
       .map((chat) => {
-        const owned = [...threads].filter(
-          ([, items]) => owner(items) === chat && !(items.at(-1).parentThreadId && threads.has(items.at(-1).parentThreadId)),
-        );
-        return `<li class="trace-chat" data-chat="${esc(chat.id)}"><details ${chat.busy || owned.length || chat.id === "main" ? "open" : ""}><summary><b>${esc(chat.title)}</b> <small class="inline">chat · ${esc(p.model)} · ${chat.busy ? "busy" : "idle"}${chat.archived ? " · archived" : ""}${chat.attention ? " · needs attention" : ""}</small></summary><ul>${owned.map(threadHtml).join("") || '<li class="note">No threads from this chat.</li>'}</ul></details></li>`;
+        const owned = jobs.filter((job) => jobChatId(job) === chat.id);
+        return `<li class="trace-chat" data-chat="${esc(chat.id)}"><details ${chat.busy || owned.length || chat.id === "main" ? "open" : ""}><summary><b>${esc(chat.title)}</b> <small class="inline">chat · ${esc(p.model)} · ${chat.busy ? "busy" : "idle"}${chat.archived ? " · archived" : ""}${chat.attention ? " · needs attention" : ""}</small></summary><ul>${owned.map(jobHtml).join("") || '<li class="note">No Jobs from this chat.</li>'}</ul></details></li>`;
       })
       .join("")}</ul>`,
   );
   setHtml("#obs-usage", usageHtml());
   renderUsageBuckets();
   const now = Date.now(),
-    starts = work.map((item) => item.startedAt).filter(Number.isFinite),
-    ends = work.map((item) => item.endedAt).filter(Number.isFinite);
+    starts = jobs.map((job) => job.createdAt),
+    ends = jobs.map((job) => job.endedAt).filter(Number.isFinite);
   const rangeStart = Math.min(...starts, now),
     rangeEnd = Math.max(now, ...ends),
     span = Math.max(1, rangeEnd - rangeStart);
   setHtml(
     "#obs-timeline",
-    work.length
-      ? work
+    jobs.length
+      ? jobs
           .toReversed()
-          .map((item) => {
-            const start = Number.isFinite(item.startedAt) ? item.startedAt : null,
-              end = Number.isFinite(item.endedAt) ? item.endedAt : start !== null && item.status === "running" ? now : null;
-            const x = start === null ? 0 : Math.max(0, Math.min(100, ((start - rangeStart) / span) * 100)),
-              width = start === null ? 0 : Math.max(1, Math.min(100 - x, (((end ?? start + 1) - start) / span) * 100));
-            return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
+          .map((job) => {
+            const end = job.endedAt ?? (job.status === "running" ? now : job.createdAt + 1);
+            const x = Math.max(0, Math.min(100, ((job.createdAt - rangeStart) / span) * 100)),
+              width = Math.max(1, Math.min(100 - x, ((end - job.createdAt) / span) * 100));
+            return `<div class="timeline-row"><small>${esc(job.title.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(job.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${esc(new Date(job.createdAt).toLocaleTimeString())}${job.endedAt ? ` – ${esc(new Date(job.endedAt).toLocaleTimeString())}` : " · ongoing"}</small></div>`;
           })
           .join("")
-      : '<p class="note">No worker timestamps recorded.</p>',
+      : '<p class="note">No Jobs recorded.</p>',
   );
-  if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
+  if (tab === "observability" && jobsSnap && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
 onRender(renderObservability);
 
 async function loadUsage() {
-  if (!plan || usageLoading) return;
+  if (!jobsSnap || usageLoading) return;
   const id = getProjectId(),
     current = getGeneration();
   usageLoading = true;
@@ -117,7 +113,7 @@ async function loadUsage() {
   }
 }
 function usageHtml() {
-  if (!plan) return '<p class="note">Usage counters require a Durable project.</p>';
+  if (!jobsSnap) return '<p class="note">Usage counters require a Durable project.</p>';
   if (!usageObs) return '<p class="note">Reading SDK conversation counters…</p>';
   if (usageObs.error) return `<p class="note">Usage unavailable: ${esc(usageObs.error)}</p>`;
   const { page } = usageObs,
@@ -127,10 +123,9 @@ function usageHtml() {
     ...usageChatRows(page).map((row) => ({ label: row.label, total: row.value.total })),
     ...page.workers.map((worker) => {
       if (worker.kind !== "thread") return { label: `Legacy ${worker.name}`, total: worker.total };
-      const matching = plan?.work.filter((item) => item.threadId === worker.threadId) ?? [];
-      const latest = matching.at(-1);
+      const job = jobsSnap?.jobs.find((item) => jobThreads(item).includes(worker.threadId));
       return {
-        label: latest ? `${latest.role}: ${latest.text.slice(0, 72)}` : `Thread ${worker.threadId.slice(0, 8)}`,
+        label: job ? `${job.title.slice(0, 72)}` : `Thread ${worker.threadId.slice(0, 8)}`,
         total: worker.total,
       };
     }),
@@ -150,7 +145,7 @@ function usageChatRows(page) {
   ];
 }
 async function loadObservability() {
-  if (!plan || observabilityLoading) return;
+  if (!jobsSnap || observabilityLoading) return;
   const id = getProjectId(),
     current = getGeneration();
   observabilityLoading = true;
@@ -159,7 +154,7 @@ async function loadObservability() {
       api({ action: "event-log", id, offset: eventOffset, limit: 20 }),
       api({ action: "host-health", id }),
       Promise.all(
-        [...new Set(plan.work.map((item) => item.threadId))].map((threadId) => api({ action: "thread-history", id, threadId, limit: 100 })),
+        [...new Set(jobsSnap.jobs.flatMap(jobThreads))].map((threadId) => api({ action: "thread-history", id, threadId, limit: 100 })),
       ),
     ]);
     if (id !== getProjectId() || current !== getGeneration() || tab !== "observability") return;
@@ -202,13 +197,11 @@ function renderHealth(project) {
         ? "deleted"
         : project.archived
           ? "archived"
-          : plan?.pausing
-            ? "pausing"
-            : getView().paused
-              ? "paused"
-              : project.phase === "attention"
-                ? "needs attention"
-                : "ready",
+          : getView().paused
+            ? "paused"
+            : project.phase === "attention"
+              ? "needs attention"
+              : "ready",
     ],
     ["Uptime", h ? duration(h.uptimeMs) : "Reading…"],
     ["Queue depth", h ? (h.queue?.queued ?? 0) + (h.queue?.running ?? 0) : "Reading…"],
@@ -270,13 +263,16 @@ export function toolLabel(call) {
   const a = toolArgs(call),
     path = a.path ?? a.file ?? a.filePath ?? "";
   const labels = {
-    projects_delegate: () => `Delegated to ${a.role ?? "a worker"}${a.task ? `: ${a.task}` : ""}`,
-    projects_worker_archive: () => "Archived finished work",
-    projects_worker_control: () => `${a.operation ? a.operation[0].toUpperCase() + a.operation.slice(1) : "Controlled"} worker`,
-    projects_control: () => `${a.operation ? a.operation[0].toUpperCase() + a.operation.slice(1) : "Controlled"} worker`,
-    projects_workers: () => "Checked workers",
-    projects_worker_plan: () => "Checked the plan",
-    projects_worker_read: () => "Read a worker result",
+    agents: () =>
+      ({
+        spawn: `Started a ${a.role ?? "worker"}${a.title ? `: ${a.title}` : ""}`,
+        send: "Messaged an agent",
+        stop: `Stopped an agent${a.reason ? `: ${a.reason}` : ""}`,
+        status: "Checked agents",
+        wait: "Waited for agents",
+      })[a.action] ?? "Managed agents",
+    job: () => ({ plan: "Updated the plan", candidate: "Recorded the candidate", ready: "Reported Ready" })[a.action] ?? "Updated the Job",
+    subagent: () => `Asked a ${a.role ?? "subagent"}${a.task ? `: ${String(a.task).split("\n")[0]}` : ""}`,
     projects_question: () => `Asked you${a.question ? `: ${a.question.split("\n")[0]}` : ""}`,
     projects_knowledge_write: () => `Updated knowledge ${path}`,
     projects_knowledge_read: () => `Read knowledge ${path}`,

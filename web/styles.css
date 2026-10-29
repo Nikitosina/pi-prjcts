@@ -1077,11 +1077,6 @@ h3.section {
   overflow: hidden;
   clip: rect(0 0 0 0);
 }
-.work-children {
-  margin-left: 18px;
-  border-left: 2px solid var(--line);
-  padding-left: 6px;
-}
 .sub-label {
   font-size: 10.5px;
   text-transform: uppercase;
@@ -1097,10 +1092,6 @@ h3.section {
   border-left: 2px solid var(--line);
   padding-left: 8px;
   list-style: none;
-}
-.worker-item .archive {
-  margin: 0 0 6px 4px;
-  color: var(--muted);
 }
 .thread-title {
   gap: 8px;
@@ -1574,6 +1565,16 @@ details.advanced > summary {
   .side .side-foot {
     display: none;
   }
+  .side .side-work {
+    order: 4;
+    flex-basis: 100%;
+    max-height: 96px;
+    overflow-y: auto;
+  }
+  .side .side-work .chat-list {
+    flex-direction: row;
+    overflow-x: auto;
+  }
   .side #projects {
     display: block !important;
     flex: 1;
@@ -1628,44 +1629,6 @@ details.advanced > summary {
   button.small {
     min-height: 44px;
   }
-}
-.worker-line {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 1px 8px;
-  width: 100%;
-  text-align: left;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-  padding: 7px 0;
-  font-size: 12.5px;
-}
-.worker-line:last-of-type {
-  border-bottom: 0;
-}
-.worker-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.worker-line > .ctx-ring {
-  grid-column: 3;
-  grid-row: 1 / span 2;
-}
-.worker-meta {
-  grid-column: 2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.failed .worker-status,
-.blocked .worker-status,
-.interrupted .worker-status {
-  color: var(--k-a3301f);
 }
 .col .card .note {
   margin: 0;
@@ -1831,24 +1794,6 @@ details.advanced > summary {
   }
 }
 
-.archive-toggle {
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
-  margin: 0;
-}
-.worker-item.archived {
-  opacity: 0.6;
-}
-.all-work {
-  margin-top: 6px;
-  padding-left: 0;
-  color: var(--muted);
-}
-.all-work:hover {
-  color: var(--text);
-  background: transparent;
-}
 .table-wrap {
   overflow-x: auto;
   margin: 8px 0;
@@ -2198,32 +2143,35 @@ pre.diff .del {
   }
 }
 
-/* Chats: one coordinator conversation each, sharing workers and knowledge. */
-.chat-bar {
-  flex: none;
+/* Chats and Jobs live in the sidebar under the project list. */
+.side-work {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
-  flex-wrap: wrap;
+}
+.chat-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 .chat-list {
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 .chat {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  flex: none;
-  max-width: 220px;
-  border: 1px solid transparent;
+  gap: 8px;
+  max-width: 100%;
+  text-align: left;
+  border: 0;
   background: transparent;
-  padding: 5px 10px;
-  border-radius: 99px;
+  padding: 5px 8px;
+  border-radius: 8px;
   font-size: 12.5px;
   color: var(--muted);
 }
@@ -2232,7 +2180,6 @@ pre.diff .del {
 }
 .chat.on {
   background: var(--panel);
-  border-color: var(--line);
   color: var(--text);
   font-weight: 600;
   box-shadow: 0 1px 2px #0000000f;
@@ -2246,40 +2193,153 @@ pre.diff .del {
   font-style: italic;
 }
 .chat-tools {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  margin-left: auto;
   align-items: center;
 }
 .chat-archived {
   font-size: 12px;
   color: var(--muted);
+  flex-basis: 100%;
 }
 .chat-archived summary {
   cursor: pointer;
-}
-.chat-archived[open] {
-  position: relative;
-}
-.chat-archived .archived-list {
-  position: absolute;
-  right: 0;
-  z-index: 5;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px;
-  min-width: 220px;
-  box-shadow: 0 6px 20px #0002;
 }
 .chat-archived .archived-row {
   display: flex;
   align-items: center;
   gap: 8px;
   justify-content: space-between;
-  padding: 4px;
+  padding: 4px 0;
 }
-
+.chat-bar > .ghost.small[data-action="chat-new"] {
+  align-self: flex-start;
+}
+.job-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.job-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+.job-toggle {
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: 4px 4px;
+  color: var(--muted);
+  line-height: 1.2;
+}
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+.job-open {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1px 8px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+}
+.job-open:hover {
+  background: var(--hover-strong);
+}
+.job-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.job-meta {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job[data-status="failed"] .job-status {
+  color: var(--k-a3301f);
+}
+.job-children {
+  margin-left: 14px;
+  border-left: 2px solid var(--line);
+  padding-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.job-reason {
+  margin: 0 0 0 26px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.job-stop {
+  flex: none;
+}
+.all-jobs {
+  align-self: flex-start;
+  color: var(--muted);
+}
+.job-plan {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  display: grid;
+  gap: 2px;
+}
+.job-plan [data-status="done"] {
+  color: var(--muted);
+}
+.job-plan small {
+  color: var(--muted);
+}
+.job-summary-line {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+/* The Ready message: a regular coordinator-side message with Approve beneath it. */
+.job-msg .job-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.job-msg .job-outcome {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.job-msg .job-actions .job-outcome {
+  margin: 0;
+}
+.job-msg[data-status="failed"],
+.job-msg[data-status="stopped"] {
+  border-color: var(--k-efceca);
+}
+.deploy-state {
+  margin-bottom: 8px;
+}
+#deploy .row {
+  margin-bottom: 14px;
+}
 /* Uploads and attachments */
 .attach-chips,
 .attach-row {
@@ -4009,10 +4069,6 @@ button.primary.danger:hover {
 .field-grid {
   align-items: start;
 }
-.worker-holds {
-  color: var(--accent-ink);
-  font-weight: 600;
-}
 
 /* Worker detail inside the Workers card: brief, follow-up, conversation, artifacts. */
 .artifact-pane {
@@ -4219,6 +4275,9 @@ button.primary.danger:hover {
 .app.side-collapsed .side .side-label,
 .app.side-collapsed .side .quiet {
   visibility: hidden;
+}
+.app.side-collapsed .side-work {
+  display: none;
 }
 .app.side-collapsed .brand-row {
   justify-content: center;
@@ -5110,6 +5169,9 @@ details.advanced[open] > summary {
   .convo {
     min-height: 0;
   }
+  .side .side-work {
+    display: none;
+  }
   .body {
     padding-top: 8px;
     padding-bottom: 8px;
@@ -5217,17 +5279,71 @@ details.advanced[open] > summary {
 }
 
 /* Archive and paged transcripts */
-.archive-home { gap: 8px; align-items: end; }
-.archive-home label { flex: 1; }
-.archive-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.archive-row { display: flex; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; text-align: left; }
-.archive-list li { min-width: 0; }
-.archive-row { box-sizing: border-box; max-width: 100%; overflow: hidden; }
-.archive-row b { flex: none; white-space: nowrap; }
-.archive-row small { color: var(--muted, inherit); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.archive-transcript { max-height: 60vh; overflow: auto; }
-.msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
-.lazy-img { max-width: 100%; border-radius: 6px; background: rgba(127, 127, 127, 0.15); }
-.lazy-img.loaded { max-height: 420px; object-fit: contain; }
-.lazy-img.failed { opacity: 0.4; }
-.full-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.archive-home {
+  gap: 8px;
+  align-items: end;
+}
+.archive-home label {
+  flex: 1;
+}
+.archive-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+.archive-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+.archive-list li {
+  min-width: 0;
+}
+.archive-row {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: hidden;
+}
+.archive-row b {
+  flex: none;
+  white-space: nowrap;
+}
+.archive-row small {
+  color: var(--muted, inherit);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archive-transcript {
+  max-height: 60vh;
+  overflow: auto;
+}
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.lazy-img {
+  max-width: 100%;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.15);
+}
+.lazy-img.loaded {
+  max-height: 420px;
+  object-fit: contain;
+}
+.lazy-img.failed {
+  opacity: 0.4;
+}
+.full-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

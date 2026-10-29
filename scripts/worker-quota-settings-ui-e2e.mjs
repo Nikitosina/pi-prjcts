@@ -59,6 +59,4 @@ await kit.run(async () => {
     "saved fallback visible",
   );
   await page.shot("03-quota-settings-saved", { force: true });
-  const status = await kit.rpc({ action: "plan-snapshot", id });
-  writeFileSync(join(kit.artifacts, "host-plan-proof.json"), JSON.stringify(status, null, 2));
 });

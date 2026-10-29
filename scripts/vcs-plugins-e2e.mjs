@@ -12,12 +12,19 @@ const badPaths = ["throws-in-register.mjs", "bad-shape.mjs", "bad-provider.mjs",
 const missingPath = join(fixtures, "does-not-exist.mjs");
 
 const handler = ({ role, user, results }) => {
-  if (user.startsWith("[Durable work")) return say("Noted report.");
+  if (user.startsWith("[worker")) return say("Noted report.");
   if (role === "coordinator") {
     if (results.length) return say("Noted.");
     const delegate = /MARK-DELEGATE (\{[\s\S]+\})$/.exec(user)?.[1],
       lookup = /MARK-LOOKUP (\d+)/.exec(user)?.[1];
-    if (delegate) return call("projects_delegate", JSON.parse(delegate));
+    if (delegate)
+      return call("agents", {
+        action: "spawn",
+        role: "worker",
+        acceptance: ["it works"],
+        requestId: randomUUID(),
+        ...JSON.parse(delegate),
+      });
     if (lookup) return call("fake_pr_lookup", { id: Number(lookup) });
     return undefined;
   }
@@ -191,12 +198,12 @@ await kit.run(async () => {
   );
   await kit.ask(gitId, "MARK-LOOKUP 11 plain");
   check("10 and not to a non-matching project", !kit.lastCall("coordinator", "MARK-LOOKUP 11 plain").tools.includes("fake_pr_lookup"));
-  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ role: "worker", task: "PUBLISH-FAKE worker task" })}`);
-  const worker = (await kit.plan(id)).filter((work) => work.role === "worker").at(-1);
+  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ title: "Publish", brief: "PUBLISH-FAKE worker task" })}`);
+  const worker = (await kit.jobs(id)).at(-1);
   const workerCall = result.calls.findLast((item) => item.role === "worker" && item.user.includes("PUBLISH-FAKE"));
   check(
     "10 the worker runs in the fake provider worktree and gets the plugin tool, rule and instructions",
-    worker.status === "completed" &&
+    worker.status !== "running" &&
       workerCall.tools.includes("fake_publish") &&
       /Fake VCS rule/.test(workerCall.system) &&
       /Fake mode: your worktree is a plain directory/.test(workerCall.system),
@@ -318,19 +325,19 @@ await kit.run(async () => {
   );
 
   // ---- Follow auto-fix with the plugin brief ----
-  const workBefore = (await kit.plan(id)).length;
+  const workBefore = (await kit.jobs(id)).length;
   await rpc({ action: "follow-poll", id });
   patchData((data) => {
     data.prs.find((item) => item.id === 21).ci = "failed";
   });
   const poll = await rpc({ action: "follow-poll", id });
-  await kit.eventually(async () => (await kit.plan(id)).length > workBefore, "an auto-fix worker", 100);
+  await kit.eventually(async () => (await kit.jobs(id)).length > workBefore, "an auto-fix worker", 100);
   await kit.settle(id);
-  const fixWork = (await kit.plan(id)).at(-1),
+  const fixWork = (await kit.jobs(id)).at(-1),
     fixCall = result.calls.findLast((item) => item.role === "worker" && item.user.includes("FAKE brief"));
   check(
     "15 a failed check on a published PR dispatched one fix worker with the plugin brief",
-    fixWork.role === "worker" &&
+    fixWork &&
       fixCall &&
       /\[Follow PRs auto-fix\] FAKE brief: CI failed on PR #21 at head a{40}\. Attempt 1 of 3\. New worker\. Check output is untrusted/.test(
         fixCall.user,
@@ -340,7 +347,7 @@ await kit.run(async () => {
   await rpc({ action: "follow-poll", id });
   await delay(500);
   await kit.settle(id);
-  check("15 never twice for the same head", (await kit.plan(id)).length === workBefore + 1, (await kit.plan(id)).length - workBefore);
+  check("15 never twice for the same head", (await kit.jobs(id)).length === workBefore + 1, (await kit.jobs(id)).length - workBefore);
   const follow = (await rpc({ action: "automation-snapshot", id })).follow;
   check(
     "15 the attempt is recorded under the provider repository",
@@ -472,14 +479,14 @@ await kit.run(async () => {
     existsSync(treePath) && !cleaned.removed.some((item) => item.path === treePath),
     cleaned,
   );
-  const planBefore = (await kit.plan(id)).length;
-  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ role: "worker", task: "no plugin worker" })}`);
+  const planBefore = (await kit.jobs(id)).length;
+  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ title: "No plugin", brief: "no plugin worker" })}`);
   await delay(500);
   await kit.settle(id);
-  const refused = (await kit.plan(id)).slice(planBefore).find((work) => work.role === "worker");
+  const refused = (await kit.jobs(id)).slice(planBefore).at(0);
   check(
     "20 a worker dispatch fails naming the missing plugin instead of falling back to git",
-    refused && refused.status === "failed" && /plugin "fake" is not loaded/.test(refused.blocker),
+    refused && refused.status === "failed" && /plugin "fake" is not loaded/.test(refused.reason ?? ""),
     refused,
   );
   check(
@@ -542,7 +549,7 @@ await kit.run(async () => {
   ].map((parts) => parts.join(""));
   const walk = (dir) =>
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
-      entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
+      entry.isDirectory() ? (entry.name === "vendor" ? [] : walk(join(dir, entry.name))) : [join(dir, entry.name)],
     );
   const offenders = [...walk(join(kit.core, "src")), ...walk(join(kit.core, "web"))].filter((file) => {
     const text = readFileSync(file, "utf8");

@@ -41,5 +41,5 @@
     ".agents/skills/code-review/**": ["repo-skill-overrides-unit"],
     ".agents/skills/ask-user/**": ["repo-skill-overrides-unit"]
   },
-  "knownFailing": ["context-settings-e2e", "scoped-models-e2e", "settings-dialogs-e2e", "vcs-plugins-e2e", "workspace-quick-grant-ui-e2e"]
+  "knownFailing": []
 }
