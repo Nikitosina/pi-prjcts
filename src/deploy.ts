@@ -84,7 +84,8 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
   const run = deps.run ?? defaultRun,
     git = (...args: string[]) => run("git", args, deps.repo);
   return withLock(async () => {
-    if (await git("status", "--porcelain")) throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
+    if (await git("status", "--porcelain", "--untracked-files=no"))
+      throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
     const sha = await git("rev-parse", "HEAD"),
       previous = readDeployState().lastGood ?? sha;
     const lockfileChanged = async (from: string, to: string) =>
@@ -155,20 +156,31 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
   return {
     repo,
     async stopHost() {
-      const running = (await health().catch(() => null)) as { pid?: number } | null;
-      if (!running) return;
-      await request({ action: "shutdown" }, false);
-      const pid = running.pid;
-      const deadline = Date.now() + 120_000;
-      while (pid && Date.now() < deadline) {
+      // The host lock holds the pid; a failing health read alone does not prove the host is down.
+      const alive = (pid: number) => {
         try {
           process.kill(pid, 0);
+          return true;
         } catch {
-          return;
+          return false;
         }
+      };
+      let pid = 0;
+      try {
+        pid = Number(readFileSync(join(home(), "host.lock"), "utf8").trim());
+      } catch {}
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !alive(pid)) return;
+      const deadline = Date.now() + 120_000;
+      let asked = false;
+      while (alive(pid) && Date.now() < deadline) {
+        if (!asked)
+          asked = await request({ action: "shutdown" }, false).then(
+            () => true,
+            () => false,
+          );
         await sleep(100);
       }
-      throw new Error("The host did not stop within 120 s");
+      if (alive(pid)) throw new Error("The host did not stop within 120 s");
     },
     startHost: () => ensureHost({ repo, attempts: options.startAttempts }),
     async smoke() {
