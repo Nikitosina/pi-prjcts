@@ -7,12 +7,10 @@ import type { Context as ModelRequest, Message } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   AssistantEntry,
-  CompactionEntry,
   GenerationTask,
   Harness,
   ROOT_CONVERSATION_ID,
   ToolTask,
-  ResetEntry,
   configure,
   createRegistry,
   defineDoc,
@@ -22,7 +20,6 @@ import {
   section,
   type AgentChange,
   type Conversation,
-  type EntryRecord,
   type Extension,
   type Storage,
   type Submission,
@@ -264,21 +261,17 @@ export type DurableProjectRuntime = {
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
+  /** A page of an agent's transcript with its tool names and recent generation state; text beyond a preview is read with `transcriptText`. */
   workerRead(
     threadId: string,
-    options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number },
-  ): Promise<{
-    threadId: string;
-    items: Awaited<ReturnType<typeof threadHistory>>["items"];
-    offset: number;
-    limit: number;
-    textLimit: number;
-    total: number;
-    nextOffset: number | null;
-    observedAtMs: number;
-    toolNames: string[];
-    generations: Array<Pick<DurableInspection["coordinator"]["generationTasks"][number], "phase" | "state" | "terminal" | "outcome">>;
-  }>;
+    options?: HistoryOptions,
+  ): Promise<
+    TranscriptPage & {
+      threadId: string;
+      toolNames: string[];
+      generations: Array<Pick<DurableInspection["coordinator"]["generationTasks"][number], "phase" | "state" | "terminal" | "outcome">>;
+    }
+  >;
   /** Stop admitting work and pause every running agent; they continue after `resume`. */
   pause(): Promise<{ paused: boolean }>;
   resume(): Promise<{ paused: boolean }>;
@@ -1559,19 +1552,7 @@ export async function openDurableProject(input: {
       },
       searchSources: async () => {
         assertOpen();
-        const read = async (conversation: Conversation | null | undefined): Promise<SearchMessage[]> => {
-          if (!conversation) return [];
-          const view = await conversation.viewState(context);
-          try {
-            return (await chatTranscript(openedStorage, conversation, view.value.entries)).flatMap((message) =>
-              "kind" in message || !message.text.trim()
-                ? []
-                : [{ index: message.id, role: message.role, at: message.at, text: message.text }],
-            );
-          } finally {
-            view.dispose();
-          }
-        };
+        const read = (conversationId: Conversation["id"]) => searchMessages(storageSource(openedStorage, context), Number(conversationId));
         const agents = (await jobs.snapshot(openedHarness)).agents;
         return {
           chats: await Promise.all(
@@ -1580,7 +1561,7 @@ export async function openDurableProject(input: {
               title: chat.title,
               archived: chat.archived,
               conversationId: chat.conversationId,
-              messages: await read((await resolveChat(chat.id)).conversation),
+              messages: await read((await resolveChat(chat.id)).conversation.id),
             })),
           ),
           threads: await Promise.all(
@@ -1591,7 +1572,7 @@ export async function openDurableProject(input: {
                 task: thread.title,
                 parentThreadId: null,
                 conversationId: Number(thread.conversationId),
-                messages: await read(await openedHarness.conversation(thread.conversationId, context)),
+                messages: await read(thread.conversationId),
               };
             }),
           ),
@@ -1662,22 +1643,19 @@ export async function openDurableProject(input: {
         assertOpen();
         return workerChanges(await agentCwd(threadId), base, page);
       },
-      workerRead: async (threadId, options) => {
+      workerRead: async (threadId, options = {}) => {
         assertOpen();
         const conversationId = await agentConversation(threadId);
-        const page = await threadHistory(openedHarness, { kind: "thread", threadId, conversationId }, options ?? {});
+        const page = await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
+          ...options,
+          display: displayText,
+        });
         const child = await openedHarness.conversation(conversationId, context);
         if (!child) throw new Error("Owned durable worker conversation is missing");
         const generations = await coordinatorGenerationTasks(openedStorage, child, await openedHarness.inspect(context));
         return {
           threadId,
-          items: page.items,
-          offset: page.offset,
-          limit: page.limit,
-          textLimit: page.textLimit,
-          total: page.total,
-          nextOffset: page.nextOffset,
-          observedAtMs: page.observedAtMs,
+          ...page,
           toolNames: (await child.agent(context)).tools.map((tool) => tool.name),
           generations: generations.slice(-10).map(({ phase, state, terminal, outcome }) => ({ phase, state, terminal, outcome })),
         };
@@ -2369,64 +2347,30 @@ async function workerContext(
   };
 }
 
-type HistoryIdentity = { conversationId: Conversation["id"] } & ({ kind: "thread"; threadId: string } | { kind: "legacy"; name: string });
-/** `windowOf` (set only when the caller asked for `context`) maps the worker's own model to its catalog window; the project contextWindow override is coordinator-only and never applies here. */
-async function threadHistory(
-  harness: Harness,
-  thread: HistoryIdentity,
-  options: { offset?: number; limit?: number; textOffset?: number; textLimit?: number },
-  windowOf?: (model: { provider: string; modelId: string }) => number | null,
-) {
-  const offset = options.offset ?? 0,
-    requestedLimit = options.limit ?? 30;
-  const textOffset = options.textOffset ?? 0,
-    textLimit = options.textLimit ?? 4000;
-  if (
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    !Number.isSafeInteger(requestedLimit) ||
-    requestedLimit < 1 ||
-    requestedLimit > 100 ||
-    !Number.isSafeInteger(textOffset) ||
-    textOffset < 0 ||
-    !Number.isSafeInteger(textLimit) ||
-    textLimit < 1 ||
-    textLimit > 16000
-  )
-    throw new Error("Invalid thread history page");
-  const limit = Math.min(requestedLimit, Math.floor(262144 / textLimit));
-  const child = await harness.conversation(thread.conversationId, context);
-  if (!child) throw new Error("Owned durable worker conversation is missing");
-  const view = await child.viewState(context);
-  try {
-    const messages = coordinatorMessages(view.value.entries);
-    const items = messages.slice(offset, offset + limit).map((message) => {
-      if ("kind" in message) return message;
-      const range = textPage(message.text, textOffset, textLimit);
-      return {
-        ...message,
-        text: range.text,
-        textOffset: range.offset,
-        nextTextOffset: range.nextOffset,
-        totalTextCharacters: range.totalCharacters,
-      };
-    });
-    const context = windowOf ? await workerContext(child, view.value, windowOf) : undefined;
-    return {
-      ...thread,
-      conversationId: Number(child.id),
-      items,
-      offset,
-      limit,
-      textLimit,
-      total: messages.length,
-      nextOffset: offset + items.length < messages.length ? offset + items.length : null,
-      observedAtMs: Date.now(),
-      ...(context ? { context } : {}),
-    };
-  } finally {
-    view.dispose();
+/** Every text message of a conversation, full text, oldest first, for full-text search. Over-long messages are read by reference past their page preview. */
+async function searchMessages(source: TranscriptSource, conversationId: number): Promise<SearchMessage[]> {
+  const found: SearchMessage[] = [];
+  for (let before: number | null | undefined; before !== null;) {
+    const page = await readTranscriptPage(source, conversationId, { before, limit: 200 });
+    const batch: SearchMessage[] = [];
+    for (const item of page.items) {
+      if (item.kind !== "message") continue;
+      let text = item.text;
+      if (item.truncated) {
+        text = "";
+        for (let offset: number | null = 0; offset !== null;) {
+          const part = await readTranscriptText(source, conversationId, item.ref, { offset, limit: 20_000 });
+          text += part.text;
+          offset = part.nextOffset;
+        }
+        text = displayText(item.role, text);
+      }
+      if (text.trim()) batch.push({ index: item.entryId, role: item.role, at: item.at, text });
+    }
+    found.unshift(...batch);
+    before = page.before;
   }
+  return found;
 }
 
 async function coordinatorInputSubmissionIds(
@@ -2545,119 +2489,6 @@ function generationEntryId(value: unknown): number {
   )
     throw new Error("Durable generation outcome has an invalid entryId");
   return value.entryId;
-}
-
-/**
- * Every stored message of a chat since its last reset, oldest first, with a divider at each compaction. `active` (the Durable view) only starts at the
- * newest compaction's first kept entry; the entries before it stay in storage, so the whole range is read from there. Entries up to the view's newest
- * entry are immutable, so the result is reused until that entry changes.
- */
-const transcriptCache = new WeakMap<Storage, Map<number, { tail: number; messages: DurableCoordinatorMessage[] }>>();
-async function chatTranscript(storage: Storage, chat: Conversation, active: readonly EntryRecord[]): Promise<DurableCoordinatorMessage[]> {
-  const newest = active.reduce<EntryRecord | undefined>(
-    (best, entry) => (!best || Number(entry.id) > Number(best.id) ? entry : best),
-    undefined,
-  );
-  if (!newest) return [];
-  const cache = transcriptCache.get(storage) ?? new Map<number, { tail: number; messages: DurableCoordinatorMessage[] }>();
-  transcriptCache.set(storage, cache);
-  const cached = cache.get(Number(chat.id));
-  if (cached?.tail === Number(newest.id)) return cached.messages;
-  const range: EntryRecord[] = [];
-  let cursor: Awaited<ReturnType<Storage["scanEntries"]>>["next"] | undefined;
-  scan: do {
-    const page = await storage.scanEntries({ conversationId: chat.id, maxEntryId: newest.id }, 256, cursor, context);
-    for (const entry of page.items) {
-      range.push(entry);
-      if (ResetEntry.is(entry)) break scan;
-    }
-    cursor = page.next;
-  } while (cursor !== undefined);
-  const messages = coordinatorMessages(range.reverse(), true);
-  cache.set(Number(chat.id), { tail: Number(newest.id), messages });
-  return messages;
-}
-
-function coordinatorMessages(
-  entries: readonly {
-    id: number;
-    kind?: string;
-    model?: readonly { role: string; content: unknown; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean }[];
-  }[],
-  markCompactions = false,
-): DurableCoordinatorMessage[] {
-  const results = new Map<string, { isError: boolean; preview: string; at: number }>();
-  for (const entry of entries)
-    for (const message of entry.model ?? []) {
-      if (message.role === "toolResult" && message.toolCallId)
-        results.set(message.toolCallId, {
-          isError: message.isError === true,
-          preview: boundedPreview(message.content),
-          at: message.timestamp ?? 0,
-        });
-    }
-  return entries.flatMap((entry) =>
-    markCompactions && CompactionEntry.is(entry as never)
-      ? [{ id: Number(entry.id), kind: "compaction" as const, at: entry.model?.[0]?.timestamp ?? 0 }]
-      : (entry.model?.flatMap((message) => {
-          if (message.role === "user" || message.role === "assistant") {
-            const thinking = message.role === "assistant" ? thinkingText(message.content) : "";
-            const text: DurableCoordinatorMessage[] = [
-              {
-                id: Number(entry.id),
-                role: message.role,
-                at: message.timestamp ?? 0,
-                text: messageText(message.content),
-                ...(thinking
-                  ? { thinking: thinking.length > THINKING_LIMIT ? `${thinking.slice(0, THINKING_LIMIT - 1)}…` : thinking }
-                  : {}),
-              },
-            ];
-            if (message.role !== "assistant" || !Array.isArray(message.content)) return text;
-            for (const part of message.content) {
-              if (
-                typeof part !== "object" ||
-                part === null ||
-                !("type" in part) ||
-                part.type !== "toolCall" ||
-                !("id" in part) ||
-                typeof part.id !== "string" ||
-                !("name" in part) ||
-                typeof part.name !== "string"
-              )
-                continue;
-              const result = results.get(part.id);
-              text.push({
-                id: Number(entry.id),
-                kind: "tool",
-                name: part.name,
-                argsPreview: boundedPreview("arguments" in part ? part.arguments : ""),
-                status: result ? (result.isError ? "error" : "ok") : "pending",
-                resultPreview: result?.preview ?? "",
-                at: result?.at ?? message.timestamp ?? 0,
-              });
-            }
-            return text;
-          }
-          return [];
-        }) ?? []),
-  );
-}
-
-function textMessages(messages: DurableCoordinatorMessage[]): Extract<DurableCoordinatorMessage, { role: "user" | "assistant" }>[] {
-  return messages
-    .filter((message): message is Extract<DurableCoordinatorMessage, { role: "user" | "assistant" }> => !("kind" in message))
-    .map(({ thinking: _, ...message }) => message);
-}
-
-function boundedPreview(value: unknown): string {
-  let text: string;
-  try {
-    text = typeof value === "string" ? value : (JSON.stringify(value) ?? "");
-  } catch {
-    text = "[unavailable]";
-  }
-  return text.length > 500 ? `${text.slice(0, 497)}...` : text;
 }
 
 function messageText(content: unknown): string {
