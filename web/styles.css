@@ -2426,26 +2426,6 @@ button.attach-chip {
 .fix-attempt.failed {
   color: var(--bad, var(--k-b42318));
 }
-.merge-receipt {
-  display: inline-block;
-  margin: 2px 4px 2px 0;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--soft, var(--k-f2f2f2));
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-.merge-receipt.merged {
-  color: var(--good, var(--k-067647));
-}
-.merge-receipt.failed {
-  color: var(--bad, var(--k-b42318));
-}
-.merge-note {
-  display: inline-block;
-  font-size: 12px;
-  color: var(--muted, var(--k-667085));
-}
 .event-card > summary .event-mark {
   flex: none;
   font-size: 11px;

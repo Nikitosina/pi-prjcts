@@ -1237,15 +1237,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (!chat || chat.archived) throw new Error("Choose an existing, active chat for events");
       }
       const next = await withProjectLock(input.id, async () => updateAutomations(input.id, input.change));
-      if (
-        next.follow.enabled &&
-        (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs || next.autoMerge.enabled !== before.autoMerge.enabled)
-      )
-        owner.followKick();
-      recordHostEvent(
-        "automations",
-        `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}`,
-      );
+      if (next.follow.enabled && (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs)) owner.followKick();
+      recordHostEvent("automations", `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}`);
       return automationSnapshot(input.id);
     }
     case "webhook-rotate": {

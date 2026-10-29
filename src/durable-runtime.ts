@@ -94,7 +94,6 @@ import { catalog } from "./workspace-authorization.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
-import { reviewVerdictTools } from "./durable-review.ts";
 import { rolePrompt, SHARED_ROLE_RULES } from "./role-prompts.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
@@ -812,24 +811,9 @@ export async function openDurableProject(input: {
       const cwd = (await api.agent(context)).cwd;
       return cwd && existsSync(cwd) ? cwd : project.cwd;
     });
-    let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => {
       throw new Error("Project runtime is not open");
     };
-    const reviewerTools = reviewVerdictTools({
-      planRoot: () => rootReference?.id,
-      repositories: () => {
-        const current = loadProject(project.id);
-        return [
-          ...(current.githubAuthorization ?? []).map((item) => item.repositoryId),
-          ...plugins.followProviders().flatMap((provider) => {
-            const repo = provider.repository(current);
-            return repo ? [repo.repositoryId] : [];
-          }),
-        ];
-      },
-      onVerdict: () => kickFollow(),
-    });
     // Verifier tools: trusted runs on the candidate, tied to its commit. A verifier is trusted like its worker: it runs under the worker's shell policy.
     const proof = proofTools({
       projectId: project.id,
@@ -877,14 +861,13 @@ export async function openDurableProject(input: {
           tools: [...readOnlyCode.tools, ...proof.tools, skillFiles.tool],
           extensions: [policy, readOnlyCode.extension, proof.extension, skillFiles.extension],
         };
-      const review = spec.role === "reviewer" && spec.jobId === null ? reviewerTools : undefined;
       return {
         model,
         thinkingLevel: "medium",
         cwd: spec.cwd ?? project.cwd,
         instructions,
-        tools: [...workerKnowledge(), ...readOnlyCode.tools, ...(review?.tools ?? []), skillFiles.tool, ...mcp.tools],
-        extensions: [policy, readOnlyCode.extension, ...(review ? [review.extension] : []), skillFiles.extension, mcp.extension],
+        tools: [...workerKnowledge(), ...readOnlyCode.tools, skillFiles.tool, ...mcp.tools],
+        extensions: [policy, readOnlyCode.extension, skillFiles.extension, mcp.extension],
       };
     };
     /** Threads the host knows these conversations by (agent and Job ids): background commands and leases are keyed by them. */
@@ -1008,7 +991,6 @@ export async function openDurableProject(input: {
     registry.install(libraryPolicy);
     registry.install(decisions.extension);
     registry.install(readOnlyCode.extension);
-    registry.install(reviewerTools.extension);
     registry.install(proof.extension);
     jobs.install(registry);
     registry.install(workerManagement.extension);
@@ -1149,21 +1131,6 @@ export async function openDurableProject(input: {
       project.id,
       schedules,
       {
-        planReview: async (work, chat) => {
-          // The auto-merge reviewer reads the exact PR head it judges, not the owner's checkout.
-          const sha = /:([0-9a-f]{40})$/.exec(work.requestId)?.[1];
-          const spawned = await admitting(() =>
-            jobs.spawn(root, chat as Conversation["id"], {
-              role: "reviewer",
-              brief: work.text,
-              title: "Auto-merge review",
-              requestId: work.requestId,
-              ...(sha ? { readRef: sha } : {}),
-            }),
-          );
-          if (!spawned.id) throw new Error(spawned.text);
-          return spawned.id;
-        },
         planWork: async (work, chat) => {
           const spawned = await admitting(() =>
             jobs.spawn(root, chat as Conversation["id"], {
@@ -1212,9 +1179,6 @@ export async function openDurableProject(input: {
       Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000,
     );
     prMonitorWake.unref();
-    kickFollow = () => {
-      if (!closed && loadAutomations(project.id).autoMerge.enabled) follow.kick();
-    };
     const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
     followWake.unref();
     // Stall detector: one notice per stalled Job to its chat; it never steers or stops.

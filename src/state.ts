@@ -235,7 +235,6 @@ export const AutomationChange = Type.Object(
       ),
     ),
     webhook: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
-    autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
   },
   { additionalProperties: false },
 );
