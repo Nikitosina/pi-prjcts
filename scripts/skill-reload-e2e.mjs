@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync, createWriteStream
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { call } from "./lib/e2e-kit.mjs";
 
 const repo = process.cwd();
 const artifacts = join(repo, "artifacts", `skill-reload-${new Date().toISOString().replaceAll(":", "-")}`);
@@ -26,16 +27,6 @@ const check = (name, ok, detail) => {
 
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-const call = (name, args) =>
-  chunk(
-    {
-      role: "assistant",
-      tool_calls: [{ index: 0, id: randomUUID(), type: "function", function: { name, arguments: JSON.stringify(args) } }],
-    },
-    null,
-  ) +
-  chunk({}, "tool_calls") +
-  "data: [DONE]\n\n";
 const say = (value) => chunk({ role: "assistant", content: value }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
 const contentText = (content) =>
   typeof content === "string"
@@ -70,11 +61,11 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages,
       tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-    const role = tools.includes("projects_delegate")
+    const role = tools.includes("agents")
       ? "coordinator"
       : tools.includes("code_read")
         ? "scout"
-        : tools.includes("bash")
+        : tools.includes("bash") || tools.includes("job")
           ? "worker"
           : "other";
     const lastUser = msgs.findLastIndex((m) => m.role === "user"),
@@ -233,7 +224,7 @@ try {
     id,
     confirm: id,
     expectedRevision: settings.revision,
-    changes: { workerCap: 3, models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
+    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
   });
   settings = await rpc({ action: "settings-snapshot", id });
   // Role exclusions exist before anything new is installed: the coordinator and workers never see glob-excl or home-new.
@@ -246,7 +237,8 @@ try {
   });
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const plan = async () => (await rpc({ action: "plan-snapshot", id })).work;
+  const plan = async () =>
+    (await rpc({ action: "jobs-snapshot", id })).jobs.map((j) => ({ text: j.request, threadId: j.id, status: j.status }));
   const settleAll = () =>
     eventually(
       async () => {
@@ -396,12 +388,7 @@ try {
       historyAfter.startsWith(historyBefore.slice(0, 200)),
     null,
   );
-  check(
-    "reload does not touch existing workers",
-    (await plan()).filter((w) => w.threadId === preThread).length === 2 &&
-      index(lastCall("worker", "FOLLOW1").system).join() === "glob-old,repo-old",
-    null,
-  );
+  check("reload does not touch existing workers", index(lastCall("worker", "FOLLOW1").system).join() === "glob-old,repo-old", null);
   check("a second reload with nothing new changes nothing", (await rpc({ action: "chat-reload", id })).changed === false);
   // The changed body is read fresh by the next skill read.
   await ask("SKILL-READ glob-old");

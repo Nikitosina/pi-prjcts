@@ -194,6 +194,8 @@ export type JobsHost = {
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
   quotaRetryBaseMs?: number;
+  /** Why this agent cannot take a message (e.g. a worker that never got a workspace), or null. */
+  refuseSend?(agent: Agent): string | null;
   /** Workspace scope a worker runs in when its spawn names none. */
   defaultScope?(): string | undefined;
   now?: () => number;
@@ -715,6 +717,8 @@ export function createJobs(host: JobsHost) {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
       if (!agent) return `No agent ${id}.`;
+      const refusal = host.refuseSend?.(agent);
+      if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       if (job) {

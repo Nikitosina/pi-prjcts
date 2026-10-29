@@ -643,6 +643,8 @@ export async function openDurableProject(input: {
     // What each coordinator chat may read: the open-time set until that chat is reloaded, then its own reloaded set (a reload never widens another chat).
     const coordinatorSkills = new Map<number, ReadonlySet<string>>();
     const staleChats = new Set<number>();
+    // A thread reads the set that was current when it started; later installs reach only new threads.
+    const threadSkills = new Map<number, ReadonlySet<string>>();
     let knownLoader = input.configuredSkillLoader;
     const roleIndex = (role: SkillRole) =>
       skillIndex((role === "coordinator" ? roleSkills : delegatedSkills)[role]) + (role === "coordinator" ? MCP_NOTE : "");
@@ -701,7 +703,9 @@ export async function openDurableProject(input: {
                 ...(coordinatorSkills.get(Number(api.conversationId)) ?? roleSkills.coordinator.map((skill) => skill.name)),
                 ...invokedSkills(dir),
               ])
-            : new Set(caller.skills ?? roleSkills[caller.role].map((skill) => skill.name));
+            : new Set(
+                caller.skills ?? threadSkills.get(Number(api.conversationId)) ?? delegatedSkills[caller.role].map((skill) => skill.name),
+              );
       },
     });
     // Installed always so recorded calls resolve; the owner's per-profile selection is read fresh on every call.
@@ -888,14 +892,23 @@ export async function openDurableProject(input: {
       checkout: (job) => mergeTargets.get(job.id)!.checkout,
       log: fileAcceptanceLog(join(dir, "acceptance")),
     });
+    // A worker spawned without a workspace has no shell or file tools and cannot gain them: once a workspace exists, its work belongs to a new worker.
+    const unscopedRefusal = (agent: { role: string; scopeId: string | null }) =>
+      agent.role === "worker" && !agent.scopeId && catalog(loadProject(project.id)).length
+        ? "This worker was started without a workspace, so it has no shell or file tools and cannot get them. Start a new worker (new workers get the repository workspace by default) instead of following up or steering this one."
+        : null;
     const jobs = createJobs({
       agentChange: agentSetup,
       defaultScope: () => {
         const scopes = catalog(loadProject(project.id));
         return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
       },
+      refuseSend: (agent) => unscopedRefusal(agent),
       prepare: async ({ agent, job }) => {
         await refreshDelegatedSkills();
+        const conversation = Number(agent.conversationId);
+        if (!threadSkills.has(conversation))
+          threadSkills.set(conversation, new Set(delegatedSkills[agent.role].map((skill) => skill.name)));
         if (agent.role !== "worker") {
           // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
           if (!agent.readRef) return { instructions: instructionsFor(agent.role) };
@@ -1638,7 +1651,13 @@ export async function openDurableProject(input: {
         if (!closed) await cleanup().catch((error) => report(input.onReport, project.id, error));
         return text;
       },
-      steerJob: (id, text, options = {}) => admitting(() => jobs.steer(openedHarness, id, text, options.followUp)),
+      steerJob: (id, text, options = {}) =>
+        admitting(async () => {
+          const agent = (await openedHarness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[id];
+          const refusal = agent && unscopedRefusal(agent);
+          if (refusal) throw new Error(refusal);
+          return jobs.steer(openedHarness, id, text, options.followUp);
+        }),
       approveJob: async (id) => {
         assertOpen();
         return jobs.approve(openedHarness, id);

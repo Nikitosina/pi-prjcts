@@ -153,7 +153,7 @@ export async function refresh() {
     }
     if (current !== getGeneration()) return;
     const [nextPlan, nextApprovals, nextDocs] = await Promise.all([
-      api({ action: "plan-snapshot", id }),
+      api({ action: "jobs-snapshot", id }).then((j) => ({ ...j, work: [] })),
       api({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
       api({ action: "knowledge-list", id }),
     ]);

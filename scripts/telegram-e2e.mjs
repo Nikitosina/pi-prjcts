@@ -367,16 +367,41 @@ try {
     "T17/T18 a needs-you question arrives with answer buttons; a press records the answer once and wakes the asking chat; a stale button is refused",
   );
 
-  // T19: approval.
+  // T19: a Job's plan arrives as one progress message edited in place; its Ready message offers Approve, which reaches the host.
   mark = toOwner().length;
-  const record = await k.approval(a);
-  const approvalMsg = await lastTo(/approval/i, "approval notice", mark);
-  press(OWNER, approvalMsg, buttons(approvalMsg).find((btn) => /approve/i.test(btn.text)).callback_data);
-  await lastTo(/approved/i, "approved ack", mark);
-  const decided = (await rpc({ action: "operation-snapshot", id: a })).items.find((item) => item.id === record.id);
-  if (decided.status !== "approved" || decided.executionApproved || decided.fingerprint !== record.fingerprint)
-    throw Error("Approval wrong: " + JSON.stringify(decided));
-  result.checks.push("T19 an approval arrives with Approve/Reject; Approve records the exact pending record without execution consent");
+  k.hold("plan2");
+  k.hold("ready");
+  text(OWNER, "MARK-SHIP via telegram");
+  const progress = await lastTo(/Step 1/, "plan progress message", mark);
+  k.release("plan2");
+  await eventually(
+    async () => tg.edits.some((e) => e.message_id === progress.message_id && /Step 2/.test(e.text)),
+    "progress message was not edited on the plan change",
+  );
+  if (
+    toOwner()
+      .slice(mark)
+      .filter((m) => /Step 1/.test(m.text)).length !== 1
+  )
+    throw Error("Progress was sent more than once");
+  k.release("ready");
+  const readyMsg = await lastTo(/MARK-JOB shipped/, "Ready message", mark);
+  const approve = buttons(readyMsg).find((btn) => btn.text === "Approve");
+  if (!approve) throw Error("Ready message has no Approve button: " + JSON.stringify(readyMsg));
+  mark = toOwner().length;
+  press(OWNER, readyMsg, approve.callback_data);
+  await lastTo(/Approving/, "approve acknowledged", mark);
+  await eventually(
+    async () =>
+      toOwner()
+        .slice(mark)
+        .some((m) => !/^Approving/.test(m.text)),
+    "no approve outcome reached the owner",
+    300,
+  );
+  result.checks.push(
+    "T19 a Job's plan is one progress message edited on each plan change; its Ready message carries Approve and the press reaches the host's Approve",
+  );
 
   // Errors, long results, reply-to routing, paused project.
   mark = toOwner().length;

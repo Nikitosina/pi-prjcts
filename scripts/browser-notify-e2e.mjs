@@ -127,12 +127,10 @@ try {
     "no question notification",
     300,
   );
-  const record = await k.approval(a);
-  await eventually(
-    async () => (await notes(s)).some((n) => /approval/i.test(n.body) && n.body.includes("merge")),
-    "no approval notification",
-    300,
-  );
+  await k.ask(a, "main", "MARK-SHIP a job");
+  await eventually(async () => (await notes(s)).some((n) => n.body.includes("MARK-JOB shipped")), "no Ready notification", 300);
+  const ready = (await rpc({ action: "notify-feed", after: 0 })).items.find((n) => n.kind === "result" && n.jobId);
+  if (!ready || ready.mergeable !== true) throw Error("Ready notice lacks jobId or mergeable: " + JSON.stringify(ready));
   const failed = await k.ask(a, two.id, "MARK-FAIL break");
   if (failed.state !== "failed") throw Error("Fixture turn did not fail: " + failed.state);
   await eventually(
@@ -153,7 +151,6 @@ try {
     "N2/N3/N7 while hidden: results from another chat and another project, a question, an approval and a coordinator error each show once, titled project · chat, clipped",
   );
   result.notes = shown;
-  if (record.status !== "pending") throw Error("Approval fixture wrong");
 
   // N6: click focuses the right project/chat.
   await evaluate(`window.__notes.find(n => n.body.includes('Done MARK-BETA.')).onclick()`, s);
