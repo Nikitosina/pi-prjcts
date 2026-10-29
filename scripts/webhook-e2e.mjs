@@ -41,7 +41,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages,
       tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-    const coordinator = tools.includes("projects_delegate");
+    const coordinator = tools.includes("agents");
     const userText = contentText(msgs[msgs.findLastIndex((m) => m.role === "user")]?.content);
     const kind = userText.startsWith("[Owner-local event")
       ? "event"

@@ -42,7 +42,9 @@ const tgApi = createServer((req, res) => {
 await new Promise((ok) => tgApi.listen(0, "127.0.0.1", ok));
 tgApi.unref();
 
+const briefs = [];
 const handler = ({ role, user, results, tools }) => {
+  if (role === "worker" && user.startsWith("[Follow PRs auto-fix]") && !briefs.includes(user)) briefs.push(user);
   if (role === "coordinator" && /^MARK-PUBLISH/.test(user) && results.length === 0)
     return call("projects_delegate", { role: "worker", task: "MARK-PUBLISH-FIX make the change and open a draft PR" });
   if (role === "worker" && /MARK-PUBLISH-FIX/.test(user) && results.length === 0)
@@ -142,13 +144,15 @@ const feed = async () => (await rpc({ action: "notify-feed", after: 0 })).items.
 const texts = (list) => list.map((item) => item.text);
 const count = (list, pattern) => texts(list).filter((text) => pattern.test(text)).length;
 const fixWork = async (id) =>
-  (await rpc({ action: "plan-snapshot", id })).work.filter((work) => work.text?.includes("[Follow PRs auto-fix]"));
+  (await rpc({ action: "automation-snapshot", id })).follow.fixes
+    .flatMap((fix) => fix.attempts)
+    .map((attempt, index) => ({ ...attempt, text: briefs[index] ?? "" }));
 const settleAll = (id) =>
   kit.eventually(
     async () => {
       const view = await rpc({ action: "show", id });
-      const plan = await rpc({ action: "plan-snapshot", id });
-      return !view.chats.some((chat) => chat.busy) && !plan.work.some((work) => ["queued", "running"].includes(work.status));
+      const plan = await rpc({ action: "jobs-snapshot", id });
+      return !view.chats.some((chat) => chat.busy) && !plan.jobs.some((job) => job.status === "running");
     },
     "project did not settle",
     1200,
@@ -165,9 +169,7 @@ await kit.run(async () => {
   const plain = await kit.createProject("PlainGit", { cwd: plainDir, grant: false });
   await rpc({ action: "message", id, text: "MARK-PUBLISH open the login fix" });
   await kit.eventually(
-    async () =>
-      gh$().pulls.length === 2 &&
-      (await rpc({ action: "plan-snapshot", id })).work.every((work) => !["queued", "running"].includes(work.status)),
+    async () => gh$().pulls.length === 2 && (await rpc({ action: "jobs-snapshot", id })).jobs.every((job) => job.status !== "running"),
     "worker did not publish #2",
     1200,
   );
@@ -217,11 +219,12 @@ await kit.run(async () => {
   // A project whose workspace grant is limited to two files (no whole-repository scope): PRs touching them are relevant to it.
   const clone = join(root, "clone2");
   execFileSync("/usr/bin/git", ["clone", "-q", kit.workspace, clone]);
-  kit.git(clone, "remote", "set-url", "origin", "https://github.com/acme/mari.git");
-  kit.git(clone, "remote", "set-url", "--push", "origin", bare);
   const approved = join(root, "approved");
   execFileSync("/usr/bin/git", ["clone", "-q", kit.workspace, approved]);
+  // Created while origin is still a local path, so the default whole-repository scope is for another repository id.
   const sub = await kit.createProject("MariFiles", { cwd: clone, grant: false });
+  kit.git(clone, "remote", "set-url", "origin", "https://github.com/acme/mari.git");
+  kit.git(clone, "remote", "set-url", "--push", "origin", bare);
   await rpc({
     action: "workspace-grant",
     id: sub,
@@ -795,7 +798,7 @@ await kit.run(async () => {
   // Auto-fix brief (29, 30): #2 is the worker's PR.
   const fixes = await kit.eventually(async () => {
     const list = await fixWork(id);
-    return list.length === 1 && list;
+    return list.length === 1 && list[0].text && list;
   }, "auto-fix not dispatched");
   const brief = fixes[0].text;
   check(

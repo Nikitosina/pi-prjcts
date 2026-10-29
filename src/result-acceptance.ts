@@ -60,8 +60,6 @@ export function describeAcceptance(outcome: AcceptanceOutcome): string {
   }
 }
 
-export type Approver = ReturnType<typeof createApprover>;
-
 /** Approve: merge the approved head (now, or when it becomes mergeable), then pull the main checkout when that is safe. */
 export function createApprover(options: {
   provider: (job: AcceptJob) => MergeProvider;

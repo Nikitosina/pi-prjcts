@@ -20,6 +20,7 @@ for (const dir of [artifacts, root, home, workspace, agent]) mkdirSync(dir, { re
 const result = { root, checks: [], calls: [], tools: [], errors: [] };
 const save = () => writeFileSync(join(artifacts, "result.json"), JSON.stringify(result, null, 2) + "\n", { mode: 0o600 });
 const mutation = ["projects_knowledge_write", "projects_note"];
+let gate = Promise.resolve();
 let commands = [],
   host,
   hostExit;
@@ -31,7 +32,7 @@ const model = createServer((req, res) => {
   req.on("data", (part) => {
     body += part;
   });
-  req.on("end", () => {
+  req.on("end", async () => {
     const input = JSON.parse(body),
       msgs = input.messages;
     const system = msgs
@@ -49,6 +50,7 @@ const model = createServer((req, res) => {
         result.tools.push({ callId: reply.tool_call_id, content: reply.content });
     let tool;
     if (coordinator && String(text).startsWith("CONTROL ")) tool = commands[turnTools.length];
+    if (!coordinator && /(?:^|\n\n)HOLD/.test(String(text)) && turnTools.length === 0) await gate;
     const write = !coordinator && String(text).match(/(?:^|\n\n)WRITE (\S+)/);
     if (write && turnTools.length === 0)
       tool = { name: "projects_knowledge_write", arguments: { path: write[1], text: `worker ${write[1]}`, expectedRevision: null } };
@@ -289,6 +291,54 @@ try {
   );
   assert(!existsSync(knowledgeFile(maintain, "research/downgraded.md")));
   result.checks.push("K5 maintain → read-only keeps coordinator write, removes worker write for new threads");
+
+  // Settings reach the running owner: a change while a worker is mid-request neither waits for it nor interrupts it.
+  const live = await create("Settings applied live fixture");
+  let release;
+  gate = new Promise((ok) => (release = ok));
+  await command(live, "agents", {
+    action: "spawn",
+    role: "worker",
+    title: "hold",
+    brief: "HOLD",
+    acceptance: ["held"],
+    requestId: randomUUID(),
+  });
+  await eventually(() => result.calls.some((c) => !c.coordinator && c.text.includes("HOLD")), "Held worker did not reach the model");
+  const liveSettings = await rpc({ action: "settings-snapshot", id: live.id });
+  const saved = await rpc({
+    action: "settings-update",
+    id: live.id,
+    confirm: live.id,
+    expectedRevision: liveSettings.revision,
+    changes: {
+      objective: "LIVE_OBJECTIVE",
+      prompts: { coordinator: "LIVE_COORDINATOR_PROMPT, the single point of contact" },
+      knowledgeAccess: "maintain",
+    },
+  });
+  assert.equal(saved.pendingReopen, false);
+  const running = (await rpc({ action: "jobs-snapshot", id: live.id })).jobs.find((j) => j.title === "hold");
+  assert.equal(running?.status, "running", "the held worker was interrupted by the settings change");
+  release();
+  await eventually(async () => {
+    const job = (await rpc({ action: "jobs-snapshot", id: live.id })).jobs.find((j) => j.title === "hold");
+    return job && job.status !== "running";
+  }, "Held worker did not settle");
+  assert.equal(result.calls.filter((c) => !c.coordinator && c.text.includes("HOLD")).length, 1, "the held worker ran again");
+  await command(live, "projects_notes");
+  assert(
+    /LIVE_OBJECTIVE/.test(lastCoordinator().system) && /LIVE_COORDINATOR_PROMPT/.test(lastCoordinator().system),
+    "coordinator prompt is stale",
+  );
+  const next = await delegateWrite(live, "research/live.md");
+  assert(
+    mutation.every((name) => next.available.includes(name)),
+    `new worker tools: ${next.available}`,
+  );
+  result.checks.push(
+    "K6 prompt, objective and grant changes apply live: running worker untouched, next coordinator turn and worker see them",
+  );
 
   await rpc({ action: "shutdown" });
   await hostExit;

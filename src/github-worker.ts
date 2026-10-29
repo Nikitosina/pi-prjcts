@@ -292,29 +292,6 @@ export async function githubPublishedPullRequests(
   );
 }
 
-export async function githubPublishedHead(root: Conversation, input: { scopeId: string; numericId: number; pullRequest: number }) {
-  return root.commit(async (tx) => {
-    const rows = (await tx.doc(Writes, root.id)).items;
-    const pr = rows.find(
-      (row) =>
-        row.scopeId === input.scopeId &&
-        row.operation === "create-pr" &&
-        row.state === "done" &&
-        row.effect.kind === "pr" &&
-        row.effect.number === input.pullRequest &&
-        row.resource.startsWith(`${input.numericId}:pr:`),
-    );
-    if (!pr || !pr.target.startsWith("pr:")) throw new Error("Operation requires this scope's verified PR publication receipt");
-    const branch = pr.target.slice(3);
-    const published = rows
-      .filter((row) => row.scopeId === input.scopeId && row.resource === `${input.numericId}:branch:${branch}` && row.state === "done")
-      .at(-1);
-    if (!published || published.state !== "done" || published.effect.kind !== "sha")
-      throw new Error("Operation requires a verified published head");
-    return { branch, sha: published.effect.sha };
-  }, BACKGROUND_CONTEXT);
-}
-
 async function observeEffect(
   repositoryId: string,
   record: Record,

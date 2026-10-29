@@ -59,12 +59,12 @@ import {
   inspectGithubRepository,
   rebindOneClickGithub,
 } from "./github-authorization.ts";
-import { projectSettings, updateProjectSettings } from "./project-settings.ts";
+import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
-import { projectModelCatalog, projectModelPicker, validateProjectModelChanges } from "./project-models.ts";
-import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
+import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
+import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
 import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
@@ -104,18 +104,6 @@ const configuredSkills = (id: string) => loadProjectResourceLoader(loadProject(i
 const durableRuntimes = new Map<string, Promise<DurableProjectRuntime>>();
 const projectLocks = new Map<string, Promise<void>>();
 const settingsUpdating = new Set<string>();
-/** Settings read at use time, so a change needs no reopen. */
-/** Turning verification on needs an installed skill, whichever settings path carries the change. */
-async function validateVerificationChange(
-  id: string,
-  changes: { verification?: { enabled: boolean; skill: string } | null },
-): Promise<void> {
-  if (!changes.verification?.enabled) return;
-  const skill = changes.verification.skill.trim();
-  if (!(await configuredSkills(id)).getSkills().skills.some((item) => item.name === skill))
-    throw new Error(`Verification skill "${skill}" is not installed for this project`);
-}
-const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "verification", "stallMinutes"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -291,6 +279,44 @@ async function closeLifecycleOwner(id: string, owner: DurableProjectRuntime): Pr
   }
   durableRuntimes.delete(id);
 }
+
+/** Work is running or queued: closing the owner now would interrupt it. */
+async function ownerBusy(owner: DurableProjectRuntime): Promise<boolean> {
+  const current = await owner.snapshot(),
+    plan = await owner.jobs();
+  return (
+    current.coordinator.busy ||
+    current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
+    workBusy(plan)
+  );
+}
+
+const settings = settingsApplication({
+  load: loadProject,
+  save: saveProject,
+  lock: (id, operation) => withProjectLock(id, operation),
+  running: (id) => durableRuntimes.get(id),
+  skillInstalled: async (id, skill) => (await configuredSkills(id)).getSkills().skills.some((item) => item.name === skill),
+  closing: () => closing,
+  async reopenIfIdle(id) {
+    let existing: Promise<DurableProjectRuntime> | undefined;
+    await withProjectLock(id, async () => {
+      existing = durableRuntimes.get(id);
+      settingsUpdating.add(id);
+    });
+    try {
+      if (!existing) return true;
+      const owner = await existing;
+      if (await ownerBusy(owner)) return false;
+      await closeLifecycleOwner(id, owner);
+    } finally {
+      settingsUpdating.delete(id);
+    }
+    // Reopened at once so schedules and PR follow keep running.
+    void durable(id).catch(() => {});
+    return true;
+  },
+});
 
 function ownedProjectDir(id: string): string {
   const project = loadProject(id);
@@ -477,7 +503,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "library-read":
       return libraryRead(ownedProjectDir(input.id), input);
     case "settings-snapshot":
-      return projectSettings(loadProject(input.id));
+      return settings.snapshot(input.id);
     case "prompts-snapshot": {
       const project = loadProject(input.id),
         defaults = DEFAULT_ROLE_PROMPTS;
@@ -512,59 +538,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         return { ok: false, error: errorText(error) };
       }
     }
-    case "settings-update": {
-      updateProjectSettings(loadProject(input.id), input);
-      // Context/compaction, MCP and model settings apply live (read on every generation / tool call / worker admission): no idle queue, no reopen.
-      if (Object.keys(input.changes).every((key) => LIVE_SETTINGS.has(key))) {
-        await validateProjectModelChanges(input.changes);
-        await validateVerificationChange(input.id, input.changes);
-        return withProjectLock(input.id, async () => {
-          const project = updateProjectSettings(loadProject(input.id), input);
-          const running = durableRuntimes.get(input.id);
-          if (running) {
-            const owner = await running;
-            if (input.changes.model !== undefined || input.changes.models !== undefined || input.changes.fallbackModels !== undefined)
-              await owner.applyModels(project);
-            if (input.changes.context !== undefined) owner.applyContext(project.contextSettings);
-          }
-          saveProject(project);
-          return projectSettings(project);
-        });
-      }
-      await validateProjectModelChanges(input.changes);
-      await validateVerificationChange(input.id, input.changes);
-      let existing: Promise<DurableProjectRuntime> | undefined;
-      await withProjectLock(input.id, async () => {
-        updateProjectSettings(loadProject(input.id), input);
-        existing = durableRuntimes.get(input.id);
-        settingsUpdating.add(input.id);
-      });
-      try {
-        if (existing) {
-          const owner = await existing,
-            current = await owner.snapshot(),
-            plan = await owner.jobs();
-          if (
-            current.coordinator.busy ||
-            current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            workBusy(plan)
-          )
-            throw new Error("Settings changes require an idle coordinator and worker queue");
-          await closeLifecycleOwner(input.id, owner);
-        }
-        return await withProjectLock(
-          input.id,
-          async () => {
-            const project = updateProjectSettings(loadProject(input.id), input);
-            saveProject(project);
-            return projectSettings(project);
-          },
-          true,
-        );
-      } finally {
-        settingsUpdating.delete(input.id);
-      }
-    }
+    case "settings-update":
+      return settings.update(input);
     case "worker-skills-catalog": {
       const protectedFiles = await protectedSkillBackingFiles();
       const catalog = await captureOwnerWorkerSkillCatalog({
@@ -592,40 +567,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (!profile) throw new Error("Unknown command profile");
       return profile;
     }
-    case "command-profile-set": {
-      const profile = await prepareCommandProfile(loadProject(input.id), input);
-      let existing: Promise<DurableProjectRuntime> | undefined;
-      await withProjectLock(input.id, async () => {
-        applyCommandProfile(loadProject(input.id), input, profile);
-        settingsUpdating.add(input.id);
-        existing = durableRuntimes.get(input.id);
-      });
-      try {
-        if (existing) {
-          const owner = await existing;
-          const view = await owner.snapshot(),
-            plan = await owner.jobs();
-          if (
-            view.coordinator.busy ||
-            view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            workBusy(plan)
-          )
-            throw new Error("Command profile changes require no active project work");
-          await closeLifecycleOwner(input.id, owner);
-        }
-        return await withProjectLock(
-          input.id,
-          async () => {
-            const project = applyCommandProfile(loadProject(input.id), input, profile);
-            saveProject(project);
-            return commandProfilesSnapshot(project);
-          },
-          true,
-        );
-      } finally {
-        settingsUpdating.delete(input.id);
-      }
-    }
+    case "command-profile-set":
+      return settings.setCommandProfile(input);
     case "show":
       return durableHostSnapshot(await durable(input.id), input.chatId, input.focus, input.from);
     case "search":

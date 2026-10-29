@@ -57,7 +57,7 @@ try {
 
     // A worker thread that starts before the upgrade freezes the legacy text.
     await kit.ask(id, "MARK-WORKER frozen");
-    const frozen = (await kit.plan(id)).find((work) => work.text.includes("TASK-WORKER frozen"));
+    const frozen = (await kit.jobs(id)).find((job) => job.request.includes("TASK-WORKER frozen"));
     check(
       "S1 the pre-upgrade worker runs with the legacy default",
       kit.lastCall("worker", "TASK-WORKER frozen")?.system.includes("LEGACY-DEFAULT worker."),
@@ -262,7 +262,7 @@ try {
       kit.lastCall("reviewer", "TASK-REVIEWER fresh")?.system.includes(expected.reviewer),
     );
     check("S6 a new scout uses the genuine override", kit.lastCall("scout", "TASK-SCOUT fresh")?.system.includes(CUSTOM_SCOUT));
-    await rpc({ action: "thread-send", id, threadId: frozen.threadId, text: "FROZEN-FOLLOW-UP", requestId: randomUUID() });
+    await rpc({ action: "thread-send", id, threadId: frozen.id, text: "FROZEN-FOLLOW-UP", requestId: randomUUID() });
     await delay(300);
     await kit.settle(id);
     const followUp = kit.result.calls.findLast((c) => c.role === "worker" && c.user.includes("FROZEN-FOLLOW-UP"));

@@ -31,12 +31,8 @@ import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 // Offline: the coordinator and every role use the local fake model; the SDK home is private, so no owner credentials or real providers are reachable.
 const MODEL = FAKE_MODEL;
 const ROLE_MODELS = { worker: FAKE_MODEL, scout: FAKE_MODEL, reviewer: FAKE_MODEL };
-// Built-in role defaults that `create` stores (names only; the test replaces them before any request).
-const CREATE_ROLE_MODELS = {
-  worker: "openai-codex/gpt-5.6-terra",
-  scout: "openai-codex/gpt-5.6-luna",
-  reviewer: "openai-codex/gpt-5.6-sol",
-};
+// `create` stores no role models: roles follow the coordinator until the owner picks one (the test sets them before any request).
+const CREATE_ROLE_MODELS = {};
 const ROOT = resolve("artifacts", `durable-local-schedule-host-positive-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
 const HOME = join(ROOT, "state");
 const WORKSPACE = join(ROOT, "plaincwd");
@@ -582,10 +578,26 @@ function immutableProject(project, expectedId, models = ROLE_MODELS) {
   pass("new project defaults decisionAccess to coordinator", project.decisionAccess === "coordinator");
   pass(
     "project create has only documented mutable state differences",
-    Object.keys(project).sort().join(",") ===
-      ["createdAt", "cwd", "decisionAccess", "id", "model", "models", "name", "objective", "phase", "problem", "runtime", "version"].join(
-        ",",
-      ),
+    // fallbackModels is stored empty at create and dropped once a settings update leaves it empty.
+    Object.keys(project)
+      .filter((key) => key !== "fallbackModels")
+      .sort()
+      .join(",") ===
+      [
+        "createdAt",
+        "cwd",
+        "decisionAccess",
+        "id",
+        "libraryAccess",
+        "model",
+        "models",
+        "name",
+        "objective",
+        "phase",
+        "problem",
+        "runtime",
+        "version",
+      ].join(","),
   );
 }
 function exactIntent(view, requestId, stableId) {
@@ -1545,14 +1557,38 @@ async function hostPhase(started) {
     "second-closed",
   );
   phaseReceipt.secondClosed = secondClosed;
+  // A reopen may create the Follow PRs and PR watch documents on first use; everything else stays byte-equal.
+  const lazyIds = new Set(
+    secondClosed.records.documents
+      .filter((record) => !firstClosed.records.documents.some((first) => first.id === record.id))
+      .map((record) => {
+        pass(
+          "reopen adds only lazily created follow documents",
+          ["projects.pr-follow", "projects.github-pr-watch"].includes(record.record.kind),
+        );
+        return record.id;
+      }),
+  );
+  const strip = (rows) => rows.filter((row) => !lazyIds.has(row.id ?? row.documentId ?? row.document_id));
+  const settled = (closed) => ({
+    ...closed.records,
+    documents: strip(closed.records.documents),
+    revisions: strip(closed.records.revisions),
+    cursors: {
+      ...closed.records.cursors,
+      documents: strip(closed.records.cursors.documents),
+      revisions: strip(closed.records.cursors.revisions),
+    },
+  });
+  const [first, second] = [settled(firstClosed), settled(secondClosed)];
   for (const table of ["submissions", "entries", "tasks", "conversations", "documents", "revisions", "cursors"])
     pass(
       `first-closed and reopened-closed ${table} records are byte-equivalent`,
-      JSON.stringify(firstClosed.records[table]) === JSON.stringify(secondClosed.records[table]),
+      JSON.stringify(first[table]) === JSON.stringify(second[table]),
     );
   pass(
     "first-closed and reopened-closed docs preserve latest revisions",
-    JSON.stringify(firstClosed.documents) === JSON.stringify(secondClosed.documents),
+    JSON.stringify(strip(firstClosed.documents)) === JSON.stringify(strip(secondClosed.documents)),
   );
   return {
     id,

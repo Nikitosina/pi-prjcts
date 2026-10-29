@@ -56,7 +56,25 @@ export async function kit(name, extraEnv = {}, respond) {
       : Array.isArray(content)
         ? content.map((part) => part.text ?? "").join("")
         : JSON.stringify(content ?? "");
+  // MARK-SHIP: the coordinator spawns a worker briefed MARK-JOB that plans, updates the plan and reports Ready with a PR and candidate (mergeable). `hold(step)` pauses it before "plan2" or "ready".
+  const held = new Map();
+  const hold = (step) => held.set(step, Promise.withResolvers());
+  const release = (step) => held.get(step)?.resolve();
+  const JOB = {
+    pr: "https://github.com/acme/demo/pull/7",
+    candidate: "a".repeat(40),
+    plan: (statuses) => ({
+      action: "plan",
+      steps: statuses.map((status, i) => ({ title: `Step ${i + 1}`, status, estimateMin: 10 })),
+    }),
+  };
   const scripts = {
+    "MARK-SHIP": [
+      [
+        "agents",
+        { action: "spawn", role: "worker", title: "Ship MARK-JOB", brief: "MARK-JOB do it", acceptance: ["done"], requestId: randomUUID() },
+      ],
+    ],
     "MARK-ASK": [
       ["projects_question", { question: "MARK-Q Pick a colour\nWhich colour should the button use?", choices: ["red", "blue"] }],
     ],
@@ -92,6 +110,19 @@ export async function kit(name, extraEnv = {}, respond) {
         return;
       }
       if (typeof custom === "string") return reply(custom);
+      if (!coordinator && marker === "MARK-JOB") {
+        const stage = results.length;
+        if (stage === 0) return reply(call("job", JOB.plan(["doing", "todo"])));
+        if (stage === 1) {
+          await held.get("plan2")?.promise;
+          return reply(call("job", JOB.plan(["done", "doing"])));
+        }
+        if (stage === 2) {
+          await held.get("ready")?.promise;
+          return reply(call("job", { action: "ready", summary: "MARK-JOB shipped", pr: JOB.pr, candidate: JOB.candidate }));
+        }
+        return reply(say("Worker finished MARK-JOB"));
+      }
       if (!coordinator) return reply(say(`Worker ${marker}`));
       if (userText.startsWith("Owner answered your question")) return reply(say(`ANSWER-ACK ${/\n(.*)$/.exec(userText)?.[1] ?? ""}`));
       if (marker === "MARK-FAIL") {
@@ -351,24 +382,6 @@ export async function kit(name, extraEnv = {}, respond) {
     });
     return project.id;
   };
-  // A pending merge approval needs a granted workspace scope; the one-click grant on the git fixture gives one.
-  const approval = async (id) => {
-    const snap = await rpc({ action: "owner-setup-snapshot", id });
-    const scope = await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: snap.workspaceRevision });
-    return rpc({
-      action: "operation-request",
-      id,
-      requestId: randomUUID(),
-      operation: {
-        provider: "github",
-        kind: "merge",
-        repositoryId: "acme/demo",
-        scopeId: scope.id,
-        pullRequest: 7,
-        expectedHead: "a".repeat(40),
-      },
-    });
-  };
   const settle = async (id, chatId, job) =>
     eventually(async () => {
       const view = await rpc({ action: "show", id, ...(chatId && chatId !== "main" ? { chatId } : {}) });
@@ -416,7 +429,8 @@ export async function kit(name, extraEnv = {}, respond) {
     waitFor,
     openPage,
     setup,
-    approval,
+    hold,
+    release,
     settle,
     ask,
     finish,

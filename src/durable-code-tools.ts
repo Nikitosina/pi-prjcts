@@ -14,7 +14,7 @@ type Built = ReturnType<typeof createReadOnlyTools>;
 const CLIP_NOTES: Record<string, (args: { offset?: number }) => (shown: number, total: number) => string> = {
   read:
     ({ offset }) =>
-    (shown, total) =>
+    (shown) =>
       shown
         ? `[Clipped at 8 KiB after line ${(offset ?? 1) + shown - 1}. Continue with offset=${(offset ?? 1) + shown}, or pass limit for more lines per call.]`
         : `[Line ${offset ?? 1} is longer than 8 KiB and was cut. Continue with offset=${(offset ?? 1) + 1}; code_grep shows matching lines.]`,

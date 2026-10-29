@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -87,6 +88,8 @@ export type Agent = {
   readRef: string | null;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
+  /** Where its prepared workspace lives; a message to an agent whose workspace was cleaned up prepares it again. */
+  workspace?: string;
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: { at: number; from: string; to: string }[];
@@ -194,6 +197,8 @@ export type JobsHost = {
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
   quotaRetryBaseMs?: number;
+  /** Why this agent cannot take a message (e.g. a worker that never got a workspace), or null. */
+  refuseSend?(agent: Agent): string | null;
   /** Workspace scope a worker runs in when its spawn names none. */
   defaultScope?(): string | undefined;
   now?: () => number;
@@ -256,6 +261,7 @@ const reporterTask = (host: JobsHost) =>
           if (!failure) {
             if (change) await configure(tx, conversationId, change);
             agent.prepared = true;
+            if (change?.cwd) agent.workspace = change.cwd;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
           const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
@@ -715,6 +721,8 @@ export function createJobs(host: JobsHost) {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
       if (!agent) return `No agent ${id}.`;
+      const refusal = host.refuseSend?.(agent);
+      if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       if (job) {
@@ -728,7 +736,14 @@ export function createJobs(host: JobsHost) {
       const background = { ownership: { kind: "conversation" }, background: true, conversationId: agent.chat } as const;
       await tx.createTask(
         Reporter,
-        { agentId: id, conversationId: agent.conversationId, chat: agent.chat, message, followUp, prepare: !agent.prepared },
+        {
+          agentId: id,
+          conversationId: agent.conversationId,
+          chat: agent.chat,
+          message,
+          followUp,
+          prepare: !agent.prepared || (!!agent.workspace && !existsSync(agent.workspace)),
+        },
         background,
       );
       return `Sent to ${id}.`;

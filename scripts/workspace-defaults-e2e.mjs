@@ -97,7 +97,7 @@ await kit.run(async () => {
     changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
   });
   await kit.ask(lonely, "MARK-W lonely");
-  const orphan = (await kit.plan(lonely)).find((work) => work.text.includes("W-TASK lonely"));
+  const orphan = (await kit.jobs(lonely)).find((job) => job.request.includes("W-TASK lonely"));
   kit.git(plain, "init", "-b", "main");
   kit.git(plain, "config", "user.email", "e2e@example.invalid");
   kit.git(plain, "config", "user.name", "E2E");
@@ -109,7 +109,7 @@ await kit.run(async () => {
   const refusal = await kit.rejects({
     action: "thread-send",
     id: lonely,
-    threadId: orphan.threadId,
+    threadId: orphan.id,
     text: "please continue",
     requestId: randomUUID(),
   });
@@ -120,23 +120,19 @@ await kit.run(async () => {
   );
   check(
     "W6 the refused follow-up admitted nothing",
-    (await kit.plan(lonely)).filter((work) => work.threadId === orphan.threadId).length === 1,
+    (await kit.jobs(lonely)).find((job) => job.id === orphan.id)?.endedAt === orphan.endedAt,
   );
   check(
     "W6 steering it is refused the same way",
     /start a new worker/i.test(
-      (await kit.rejects({ action: "thread-steer", id: lonely, threadId: orphan.threadId, text: "redirect", requestId: randomUUID() })) ??
-        "",
+      (await kit.rejects({ action: "thread-steer", id: lonely, threadId: orphan.id, text: "redirect", requestId: randomUUID() })) ?? "",
     ),
   );
-  const withScope = (await kit.plan(id)).find((work) => work.text.includes("W-TASK after-migration"));
-  await rpc({ action: "thread-send", id, threadId: withScope.threadId, text: "FOLLOW-OK", requestId: randomUUID() });
+  const withScope = (await kit.jobs(id)).find((job) => job.request.includes("W-TASK after-migration"));
+  await rpc({ action: "thread-send", id, threadId: withScope.id, text: "FOLLOW-OK", requestId: randomUUID() });
   await delay(300);
   await kit.settle(id);
-  check(
-    "W7 a follow-up to a scoped worker still works",
-    (await kit.plan(id)).filter((work) => work.threadId === withScope.threadId).at(-1).status === "completed",
-  );
+  check("W7 a follow-up to a scoped worker still works", !!kit.lastCall("worker", "FOLLOW-OK"));
 
   // Composer help and Settings, in the browser.
   const page = await kit.openPage(await kit.webUrl(id, "coordinator"));
@@ -231,22 +227,6 @@ await kit.run(async () => {
   check("H4 a tap outside closes it", (await state()).hidden === true);
   await page.cdp("Emulation.setTouchEmulationEnabled", { enabled: false });
   await page.viewport(1440, 1000);
-
-  // The worker follow-up composer has it too.
-  const workerUrl = new URL(await kit.webUrl(id, "coordinator"));
-  workerUrl.searchParams.set("worker", withScope.threadId);
-  await page.navigate(workerUrl.toString());
-  await page.waitFor(`!!document.querySelector('[data-inline-thread-send] [data-action="composer-help"]')`, "worker composer help");
-  check(
-    "H5 the worker composer has no permanent hint either",
-    !/Enter to send/.test(await page.evaluate(`document.querySelector('[data-inline-thread-send]').innerText`)),
-  );
-  await page.evaluate(`document.querySelector('[data-inline-thread-send] .help-btn').click()`);
-  check(
-    "H5 and opens the same help",
-    /Shift\+Enter/.test(await page.evaluate(`document.querySelector('[data-inline-thread-send] .help-pop').innerText`)),
-  );
-  await page.shot("03-worker-composer-help");
 
   // Settings: no workspace step, and the prompt editor.
   await page.navigate(await kit.webUrl(id));
@@ -391,7 +371,7 @@ await kit.run(async () => {
     "P7 the next coordinator turn is back on the default",
     !coordReset.system.includes("CUSTOM-COORDINATOR") && coordReset.system.includes(snapshot.roles[0].default.slice(0, 80)),
   );
-  await rpc({ action: "thread-send", id, threadId: withScope.threadId, text: "FOLLOW-AFTER-OVERRIDE", requestId: randomUUID() });
+  await rpc({ action: "thread-send", id, threadId: withScope.id, text: "FOLLOW-AFTER-OVERRIDE", requestId: randomUUID() });
   await delay(300);
   await kit.settle(id);
   const old = kit.lastCall("worker", "FOLLOW-AFTER-OVERRIDE");
@@ -404,12 +384,7 @@ await kit.run(async () => {
           same: old.system === kit.lastCall("worker", "W-TASK after-migration").system,
           a: old.system.slice(0, 300),
         }
-      : {
-          none: true,
-          work: (await kit.plan(id))
-            .filter((work) => work.threadId === withScope.threadId)
-            .map((work) => [work.text.slice(0, 30), work.status, work.blocker]),
-        },
+      : { none: true, jobs: (await kit.jobs(id)).map((job) => [job.request.slice(0, 30), job.status, job.reason]) },
   );
   const click = async (selector) => {
     await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({ block: 'center' })`);

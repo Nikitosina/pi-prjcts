@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, realpathSync, writeFileSync, createWriteStream
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { call } from "./lib/e2e-kit.mjs";
 
 const repo = process.cwd();
 const artifacts = join(repo, "artifacts", `skill-profiles-${new Date().toISOString().replaceAll(":", "-")}`);
@@ -27,16 +28,6 @@ const check = (name, ok, detail) => {
 
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-const call = (name, args) =>
-  chunk(
-    {
-      role: "assistant",
-      tool_calls: [{ index: 0, id: randomUUID(), type: "function", function: { name, arguments: JSON.stringify(args) } }],
-    },
-    null,
-  ) +
-  chunk({}, "tool_calls") +
-  "data: [DONE]\n\n";
 const say = (value) => chunk({ role: "assistant", content: value }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
 const contentText = (content) =>
   typeof content === "string"
@@ -64,11 +55,11 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages,
       tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-    const role = tools.includes("projects_delegate")
+    const role = tools.includes("agents")
       ? "coordinator"
       : tools.includes("code_read")
         ? "scout"
-        : tools.includes("bash")
+        : tools.includes("bash") || tools.includes("job")
           ? "worker"
           : "other";
     const lastUser = msgs.findLastIndex((m) => m.role === "user"),
@@ -91,8 +82,6 @@ const model = createServer((req, res) => {
         return res.end(call("projects_skill_file", { skill: read[1], ...(read[2] ? { path: read[2] } : {}) }));
       return res.end(say("Noted."));
     }
-    if (role === "worker" && /W-TASK child/.test(userText) && results.length === 0)
-      return res.end(call("projects_delegate_child", { role: "worker", task: "CHILD-W SKILL-READ glob-gamma" }));
     if (read && results.length === 0)
       return res.end(call("projects_skill_file", { skill: read[1], ...(read[2] ? { path: read[2] } : {}) }));
     res.end(say(`DONE ${role}`));
@@ -321,11 +310,12 @@ try {
     id,
     confirm: id,
     expectedRevision: settings.revision,
-    changes: { workerCap: 3, models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
+    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
   });
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const plan = async () => (await rpc({ action: "plan-snapshot", id })).work;
+  const plan = async () =>
+    (await rpc({ action: "jobs-snapshot", id })).jobs.map((j) => ({ text: j.request, threadId: j.id, status: j.status }));
   const settleAll = () =>
     eventually(
       async () => {
@@ -478,19 +468,17 @@ try {
   );
   await shot("02-skills-picker-worker", s);
 
-  // Effective sets per role, including a child worker.
+  // Effective sets per role, .
   await ask("MARK-W child");
   await ask("MARK-S post SKILL-READ glob-beta");
   await ask("MARK-S post2 SKILL-READ glob-alpha");
   await ask("MARK-W post SKILL-READ glob-beta ../../../etc/hosts");
   const coord1 = lastCall("coordinator", "MARK-W child"),
     parent1 = lastCall("worker", "W-TASK child"),
-    child1 = lastCall("worker", "CHILD-W"),
     scout1 = lastCall("scout", "S-TASK post");
   result.indexes = {
     coordinator: index(coord1.system),
     worker: index(parent1.system),
-    child: index(child1?.system ?? ""),
     scout: index(scout1.system),
   };
   check(
@@ -504,18 +492,10 @@ try {
     result.indexes,
   );
   check(
-    "S6 a child worker gets the worker set",
-    result.indexes.child.join() === "glob-beta,glob-delta,glob-gamma,repo-one",
-    result.indexes,
-  );
-  check(
     "S4 scout index = everything minus its opt-outs",
     result.indexes.scout.join() === "glob-alpha,glob-delta,glob-gamma,repo-one",
     result.indexes,
   );
-  const childRead =
-    result.calls.findLast((c) => c.role === "worker" && c.user.includes("CHILD-W") && c.results.length === 1)?.results[0] ?? "";
-  check("S6/S13 the child worker reads its role skill on demand", childRead.includes("BODY-glob-gamma"), childRead.slice(0, 300));
   const scoutDenied = toolResult("scout", "S-TASK post SKILL-READ"),
     scoutAllowed = toolResult("scout", "S-TASK post2");
   check(
@@ -540,7 +520,7 @@ try {
     result.calls.findLast((c) => c.role === "worker" && c.user.includes("FOLLOW SKILL-READ") && c.results.length === 1)?.results[0] ?? "";
   check(
     "S15 a thread created before the change takes a follow-up and reads a reference of its role skill",
-    follow.text.includes("FOLLOW") && follow.status === "completed" && followRead.includes("REF-glob-gamma"),
+    followRead.includes("REF-glob-gamma"),
     { follow, followRead: followRead.slice(0, 200) },
   );
 

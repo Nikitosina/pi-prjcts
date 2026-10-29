@@ -281,6 +281,8 @@ export type DurableProjectRuntime = {
   applyContext(settings: ContextSettings | undefined): void;
   /** Coordinator, role-model and explicit quota-fallback selection, live. Existing threads change model only through audited quota recovery. */
   applyModels(project: Pick<Project, "model" | "models" | "fallbackModels">): Promise<void>;
+  /** Saved prompt, skill and grant changes for every chat: rebuilt now when idle, else before the chat's next message. `deferred` counts the busy chats. */
+  applySettings(): Promise<{ deferred: number }>;
   /** Manual compaction of one chat ("Compact now"); refuses while paused or already compacting. */
   compact(chatId?: string): Promise<{ started: true; chatId: string }>;
   /** Starts a fresh context in one idle chat ("/new"); earlier entries stay stored but leave the transcript and the model context. */
@@ -443,7 +445,8 @@ export async function openDurableProject(input: {
 }): Promise<DurableProjectRuntime> {
   const project = parse(ProjectSchema, input.project);
   const dir = resolve(input.dir);
-  const knowledgeAccess = input.knowledgeAccess ?? project.knowledgeAccess ?? "read-only";
+  // Read from the saved project each time, so a settings change reaches the next worker without reopening.
+  const knowledgeAccess = (): KnowledgeAccess => input.knowledgeAccess ?? loadProject(project.id).knowledgeAccess ?? "read-only";
   if (dir !== resolve(projectDir(project.id))) throw new Error("Durable directory must be this project's state directory");
   assertStoragePaths(dir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -629,7 +632,8 @@ export async function openDurableProject(input: {
     const pluginExtensions = pluginCoordinator.map((item) => item.extension);
     // Prompts carry only the index of each role's effective set; projects_skill_file reads a body on demand, restricted to the caller's set.
     // Two sets, both built from the owner's current profiles: the coordinator's follows /reload; the other roles follow the catalog at each delegation. A thread's own set is frozen in its instructions.
-    const rolesOf = (loader: Parameters<typeof effectiveSkills>[1], profiles: Project["skillProfiles"]) =>
+    type SkillLoader = Parameters<typeof effectiveSkills>[1];
+    const rolesOf = (loader: SkillLoader, profiles: Project["skillProfiles"]) =>
       Object.fromEntries(SKILL_ROLES.map((role) => [role, effectiveSkills(profiles, loader, role)])) as Record<
         SkillRole,
         ReturnType<typeof effectiveSkills>
@@ -638,6 +642,10 @@ export async function openDurableProject(input: {
     let delegatedSkills = roleSkills;
     // What each coordinator chat may read: the open-time set until that chat is reloaded, then its own reloaded set (a reload never widens another chat).
     const coordinatorSkills = new Map<number, ReadonlySet<string>>();
+    const staleChats = new Set<number>();
+    // A thread reads the set that was current when it started; later installs reach only new threads.
+    const threadSkills = new Map<number, ReadonlySet<string>>();
+    let knownLoader = input.configuredSkillLoader;
     const roleIndex = (role: SkillRole) =>
       skillIndex((role === "coordinator" ? roleSkills : delegatedSkills)[role]) + (role === "coordinator" ? MCP_NOTE : "");
     // Skills the runtime has seen (open, each reload, each delegation); a read resolves here. Only a skill the owner invoked by name and the runtime has not seen triggers one rebuild.
@@ -657,14 +665,13 @@ export async function openDurableProject(input: {
       return knownSkills.get(name);
     };
     const refreshDelegatedSkills = async () => {
-      if (input.discoverSkills)
-        try {
-          const loader = await input.discoverSkills();
-          remember(loader);
-          delegatedSkills = rolesOf(loader, loadProject(project.id).skillProfiles);
-        } catch (error) {
-          report(input.onReport, project.id, error);
-        }
+      try {
+        const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
+        remember(loader);
+        delegatedSkills = rolesOf(loader, loadProject(project.id).skillProfiles);
+      } catch (error) {
+        report(input.onReport, project.id, error);
+      }
     };
     // Who is calling and where: coordinators (Main and chats) work in the project checkout; every other agent in the cwd it was configured with.
     const callerOf = async (
@@ -696,7 +703,9 @@ export async function openDurableProject(input: {
                 ...(coordinatorSkills.get(Number(api.conversationId)) ?? roleSkills.coordinator.map((skill) => skill.name)),
                 ...invokedSkills(dir),
               ])
-            : new Set(caller.skills ?? roleSkills[caller.role].map((skill) => skill.name));
+            : new Set(
+                caller.skills ?? threadSkills.get(Number(api.conversationId)) ?? delegatedSkills[caller.role].map((skill) => skill.name),
+              );
       },
     });
     // Installed always so recorded calls resolve; the owner's per-profile selection is read fresh on every call.
@@ -711,7 +720,7 @@ export async function openDurableProject(input: {
     });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
     const tools = maintainedKnowledgeTools(dir);
-    const workerKnowledge = knowledgeAccess === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name));
+    const workerKnowledge = () => (knowledgeAccess() === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name)));
     // Library and decision tools authorize against the saved project on every call; the grant only decides whether a chat is offered them.
     const libraryTools = coordinatorLibraryTools({ projectId: project.id, dir, root: () => rootReference, isCoordinator });
     const libraryPolicy = defineExtension({ name: "projects.durable-library", tools: libraryTools });
@@ -739,16 +748,12 @@ export async function openDurableProject(input: {
         hook(GenerationTask, {
           beforeRequest: (request, api) => observeModelRequest(input, project.id, api.conversationId, request.messages),
         }),
-        ...(knowledgeAccess === "maintain"
-          ? []
-          : [
-              hook(ToolTask, {
-                beforeTool: (call, api) =>
-                  mutationTools.has(call.name) && !isCoordinator(api.conversationId)
-                    ? { block: "Worker knowledge maintenance requires an explicit maintain grant." }
-                    : undefined,
-              }),
-            ]),
+        hook(ToolTask, {
+          beforeTool: (call, api) =>
+            knowledgeAccess() !== "maintain" && mutationTools.has(call.name) && !isCoordinator(api.conversationId)
+              ? { block: "Worker knowledge maintenance requires an explicit maintain grant." }
+              : undefined,
+        }),
       ],
     });
     const registry = createRegistry();
@@ -830,9 +835,9 @@ export async function openDurableProject(input: {
     const instructionsFor = (role: DurableRole, repositoryStanding = standing.text): string => {
       if (role === "verifier") {
         const skill = loadProject(project.id).verification?.skill;
-        return `${verifierInstructions(project, repositoryStanding)}${skill ? `\nThe verify skill is "${skill}"; read it with projects_skill_file.` : ""}\n${READ_ONLY_CODE_NOTE}`;
+        return `${verifierInstructions(loadProject(project.id), repositoryStanding)}${skill ? `\nThe verify skill is "${skill}"; read it with projects_skill_file.` : ""}\n${READ_ONLY_CODE_NOTE}`;
       }
-      const base = workerInstructions(project, knowledgeAccess, repositoryStanding, role);
+      const base = workerInstructions(loadProject(project.id), knowledgeAccess(), repositoryStanding, role);
       return role === "worker"
         ? `${base}\nRole profile: worker.${roleIndex("worker")}${verifyLine()}`
         : `${base}\nRole profile: ${role}.\n${READ_ONLY_CODE_NOTE}${roleIndex(role)}`;
@@ -847,7 +852,7 @@ export async function openDurableProject(input: {
           thinkingLevel: "medium",
           cwd: project.cwd,
           instructions,
-          tools: [...workerKnowledge, skillFiles.tool, ...mcp.tools, ...jobs.tools.worker],
+          tools: [...workerKnowledge(), skillFiles.tool, ...mcp.tools, ...jobs.tools.worker],
           extensions: [policy, skillFiles.extension, mcp.extension, jobs.worker],
         };
       if (spec.role === "verifier")
@@ -865,7 +870,7 @@ export async function openDurableProject(input: {
         thinkingLevel: "medium",
         cwd: spec.cwd ?? project.cwd,
         instructions,
-        tools: [...workerKnowledge, ...readOnlyCode.tools, ...(review?.tools ?? []), skillFiles.tool, ...mcp.tools],
+        tools: [...workerKnowledge(), ...readOnlyCode.tools, ...(review?.tools ?? []), skillFiles.tool, ...mcp.tools],
         extensions: [policy, readOnlyCode.extension, ...(review ? [review.extension] : []), skillFiles.extension, mcp.extension],
       };
     };
@@ -887,14 +892,23 @@ export async function openDurableProject(input: {
       checkout: (job) => mergeTargets.get(job.id)!.checkout,
       log: fileAcceptanceLog(join(dir, "acceptance")),
     });
+    // A worker spawned without a workspace has no shell or file tools and cannot gain them: once a workspace exists, its work belongs to a new worker.
+    const unscopedRefusal = (agent: { role: string; scopeId: string | null }) =>
+      agent.role === "worker" && !agent.scopeId && catalog(loadProject(project.id)).length
+        ? "This worker was started without a workspace, so it has no shell or file tools and cannot get them. Start a new worker (new workers get the repository workspace by default) instead of following up or steering this one."
+        : null;
     const jobs = createJobs({
       agentChange: agentSetup,
       defaultScope: () => {
         const scopes = catalog(loadProject(project.id));
         return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
       },
+      refuseSend: (agent) => unscopedRefusal(agent),
       prepare: async ({ agent, job }) => {
         await refreshDelegatedSkills();
+        const conversation = Number(agent.conversationId);
+        if (!threadSkills.has(conversation))
+          threadSkills.set(conversation, new Set(delegatedSkills[agent.role].map((skill) => skill.name)));
         if (agent.role !== "worker") {
           // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
           if (!agent.readRef) return { instructions: instructionsFor(agent.role) };
@@ -1489,6 +1503,35 @@ export async function openDurableProject(input: {
       }, context);
     }
 
+    // Rebuilds a chat's prompt and tools from the saved project, the checkout's standing instructions and the skill catalog, and applies them in one commit: a failure leaves the chat as it was.
+    const rebuildCoordinator = async (conversation: Conversation, loader: SkillLoader) => {
+      const current = loadProject(project.id);
+      if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
+      const next = rolesOf(loader, current.skillProfiles);
+      const agent = await conversation.agent(context);
+      const instructions = coordinatorInstructions(current, loadDurableStanding(project.cwd).text, skillIndex(next.coordinator) + MCP_NOTE);
+      const tools = coordinatorToolsFor(agent, current),
+        extensions = coordinatorExtensionsFor(agent);
+      const names = (list: readonly { name: string }[]) => JSON.stringify(list.map((item) => item.name).sort());
+      const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
+      if (changed) await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context);
+      remember(loader);
+      coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map((skill) => skill.name)));
+      staleChats.delete(Number(conversation.id));
+      return { skills: next.coordinator.length, changed };
+    };
+    // A working or compacting chat keeps its prompt until it is idle: it is marked stale and rebuilt before the owner's next message.
+    const tryRebuildCoordinator = async (conversation: Conversation, loader: SkillLoader): Promise<boolean> => {
+      try {
+        await rebuildCoordinator(conversation, loader);
+        return true;
+      } catch (error) {
+        if (!(error instanceof Error && error.message.includes("wait for it to finish"))) throw error;
+        staleChats.add(Number(conversation.id));
+        return false;
+      }
+    };
+
     const runtime: DurableProjectRuntime = {
       get acceptsImages() {
         return models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.input.includes("image") ?? false;
@@ -1497,6 +1540,7 @@ export async function openDurableProject(input: {
         admitting(async () => {
           const { conversation, chat } = await resolveChat(options.chatId);
           if (chat.archived) throw new Error("Chat is archived; restore it before sending");
+          if (staleChats.has(Number(conversation.id))) await tryRebuildCoordinator(conversation, knownLoader);
           const admitted = await admit(conversation, content, options);
           if (options.title && chat.id !== MAIN_CHAT) await updateChat(chat.id, { title: chatTitle(options.title), untitledOnly: true });
           return admitted;
@@ -1607,7 +1651,13 @@ export async function openDurableProject(input: {
         if (!closed) await cleanup().catch((error) => report(input.onReport, project.id, error));
         return text;
       },
-      steerJob: (id, text, options = {}) => admitting(() => jobs.steer(openedHarness, id, text, options.followUp)),
+      steerJob: (id, text, options = {}) =>
+        admitting(async () => {
+          const agent = (await openedHarness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[id];
+          const refusal = agent && unscopedRefusal(agent);
+          if (refusal) throw new Error(refusal);
+          return jobs.steer(openedHarness, id, text, options.followUp);
+        }),
       approveJob: async (id) => {
         assertOpen();
         return jobs.approve(openedHarness, id);
@@ -1792,26 +1842,26 @@ export async function openDurableProject(input: {
           } finally {
             view.dispose();
           }
-          // Everything is rebuilt from the saved project, the checkout's standing instructions and the disk catalog before anything is applied, and applied in one commit: a failure leaves the chat as it was.
-          const current = loadProject(project.id);
-          if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
           const modelUpdate = await prepareModels();
           assertConfiguredModel(modelUpdate.candidate, coordinatorModel.provider, coordinatorModel.modelId, "Coordinator");
           for (const [role, ref] of Object.entries(roleModels))
             assertConfiguredModel(modelUpdate.candidate, ref.provider, ref.modelId, role);
-          const standingNow = loadDurableStanding(project.cwd);
-          const next = rolesOf(loader, current.skillProfiles);
-          const agent = await conversation.agent(context);
-          const instructions = coordinatorInstructions(current, standingNow.text, skillIndex(next.coordinator) + MCP_NOTE);
-          const tools = coordinatorToolsFor(agent, current),
-            extensions = coordinatorExtensionsFor(agent);
-          const names = (list: readonly { name: string }[]) => JSON.stringify(list.map((item) => item.name).sort());
-          const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
-          if (changed) await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context);
+          const result = await rebuildCoordinator(conversation, loader);
           modelUpdate.commit();
-          remember(loader);
-          coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map((skill) => skill.name)));
-          return { chatId: chat.id, skills: next.coordinator.length, changed };
+          return { chatId: chat.id, ...result };
+        });
+      },
+      applySettings: async () => {
+        const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
+        return schedules.mutex.run(async () => {
+          assertOpen();
+          let deferred = 0;
+          for (const chat of (await chatList()).filter((item) => !item.archived)) {
+            const { conversation } = await resolveChat(chat.id);
+            if (!(await tryRebuildCoordinator(conversation, loader))) deferred++;
+          }
+          knownLoader = loader;
+          return { deferred };
         });
       },
       operationRequest: approvals.request,
