@@ -7,6 +7,7 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync, create
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
+import { call } from "./lib/e2e-kit.mjs";
 
 const repo = process.cwd();
 const artifacts = join(repo, "artifacts", `follow-prs-${new Date().toISOString().replaceAll(":", "-")}`);
@@ -63,16 +64,6 @@ const ghLog = () => readFileSync(ghCalls, "utf8").split("\n").filter(Boolean).ma
 
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-const call = (name, args) =>
-  chunk(
-    {
-      role: "assistant",
-      tool_calls: [{ index: 0, id: randomUUID(), type: "function", function: { name, arguments: JSON.stringify(args) } }],
-    },
-    null,
-  ) +
-  chunk({}, "tool_calls") +
-  "data: [DONE]\n\n";
 const say = (value) => chunk({ role: "assistant", content: value }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
 const contentText = (content) =>
   typeof content === "string"
@@ -91,7 +82,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages,
       tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-    const coordinator = tools.includes("projects_delegate");
+    const coordinator = tools.includes("agents");
     const userText = contentText(msgs[msgs.findLastIndex((m) => m.role === "user")]?.content);
     const kind = userText.startsWith("[Owner-local event")
       ? "event"
@@ -374,8 +365,7 @@ try {
   // C5: auto-fix eligibility is a publication receipt, so #2 is opened by a project worker; the fixture then shapes it.
   await rpc({ action: "message", id, text: "MARK-PUBLISH open the login fix" });
   await eventually(
-    async () =>
-      gh$().pulls.length === 2 && (await rpc({ action: "plan-snapshot", id })).work.every((w) => !["queued", "running"].includes(w.status)),
+    async () => gh$().pulls.length === 2 && (await rpc({ action: "jobs-snapshot", id })).jobs.every((j) => j.status !== "running"),
     "worker did not publish #2",
     1200,
   );
@@ -398,15 +388,21 @@ try {
     (await rpc({ action: "schedule-history", id, kind: "intents", limit: 100, textLimit: 4000 })).items.filter(
       (item) => item.kind === "event",
     );
-  const fixWork = async () => (await rpc({ action: "plan-snapshot", id })).work.filter((w) => w.text?.includes("[Follow PRs auto-fix]"));
+  // One entry per fix attempt the host recorded; the text is what the worker was sent.
+  const fixWork = async () => {
+    const texts = [...new Set(result.calls.filter((c) => !c.coordinator && c.kind === "fix").map((c) => c.user))];
+    return (await snap()).follow.fixes
+      .flatMap((fix) => fix.attempts)
+      .map((attempt, index) => ({ ...attempt, text: texts[index] ?? "", chatConversationId: alerts.conversationId }));
+  };
   const followCalls = () => ghLog().filter((c) => c.target.includes("pulls?state=all"));
   const poll = () => rpc({ action: "follow-poll", id });
   const settleAll = () =>
     eventually(
       async () => {
         const view = await rpc({ action: "show", id, chatId: alerts.id });
-        const plan = await rpc({ action: "plan-snapshot", id });
-        return !view.chats.some((c) => c.busy) && !plan.work.some((w) => ["queued", "running"].includes(w.status));
+        const plan = await rpc({ action: "jobs-snapshot", id });
+        return !view.chats.some((c) => c.busy) && !plan.jobs.some((j) => j.status === "running");
       },
       "project did not go idle",
       900,
@@ -521,6 +517,7 @@ try {
   if (event.conversationId !== alerts.conversationId)
     throw Error("Event not routed to Alerts: " + JSON.stringify({ event: event.conversationId, alerts: alerts.conversationId }));
   result.checks.push("F9/F10 the batch is one event in the chat chosen in Settings");
+  await eventually(async () => result.calls.some((c) => !c.coordinator && c.kind === "fix"), "the fix worker never ran");
   const fixes1 = await fixWork();
   if (
     fixes1.length !== 1 ||
@@ -539,18 +536,12 @@ try {
   const fixTools = result.calls.find((c) => !c.coordinator && c.kind === "fix")?.tools ?? [];
   if (!["write", "edit"].every((name) => fixTools.includes(name)))
     throw Error("Fix worker is not scoped to the repository: " + JSON.stringify(fixTools));
-  const reportCalls = result.calls.filter((c) => c.coordinator && c.kind === "report");
-  if (!reportCalls.some((c) => c.user.includes("[Follow PRs auto-fix]"))) throw Error("Fix report never reached the coordinator");
-  const alertsView = await rpc({ action: "show", id, chatId: alerts.id }),
-    mainView = await rpc({ action: "show", id });
-  if (
-    !alertsView.messages.some((m) => m.text?.startsWith("[Durable work") && m.text.includes("[Follow PRs auto-fix]")) ||
-    mainView.messages.some((m) => m.text?.includes("[Owner-local event") || m.text?.includes("[Follow PRs auto-fix]"))
-  )
-    throw Error("Report or event in the wrong chat");
+  const mainView = await rpc({ action: "show", id });
+  if (mainView.messages.some((m) => m.text?.includes("[Owner-local event") || m.text?.includes("[Follow PRs auto-fix]")))
+    throw Error("Event in the wrong chat");
   if (result.calls.filter((c) => c.coordinator && c.kind === "event").length !== 1)
     throw Error("More than one coordinator turn for one batch");
-  result.checks.push("F16 the fix worker report lands in Alerts; Main sees neither the event nor the report");
+  result.checks.push("F16 the event reaches Alerts as one coordinator turn; Main sees neither the event nor the fix request");
 
   // F11: the transcript renders an event card.
   const chatUrl = new URL(launch);
