@@ -63,3 +63,10 @@ Work item lifecycle: Ask → Running → Ready (PR, proof, 3-line summary) or Re
 - Delete Follow PRs auto-merge and its reviewer. Approve is the only merge path. Follow PRs auto-fix stays.
 - Delete per-PR monitors. Follow PRs and PR watch cover CI and merge state.
 - Keep worker GitHub publication tools with receipts for the trial; revisit after it.
+
+## Trial (started 2026-10-29)
+
+- Host: launchd `dev.pi-projects.host.3c435db9`, checkout `~/Projects/pi-prjcts-next` (branch `lean-runtime`), home `~/.pi/agent/projects-next`, Arc plugin clone `~/Projects/projects-arc-plugin-next` (branch `lean-runtime`). It owns the Telegram bot and the relay identity.
+- Old host: launchd `dev.pi-projects.host.11a08742` booted out and disabled; `~/.pi/agent/projects-dev` untouched and readable in Archive.
+- Rollback: `launchctl bootout gui/$(id -u)/dev.pi-projects.host.3c435db9; launchctl enable gui/$(id -u)/dev.pi-projects.host.11a08742; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.pi-projects.host.11a08742.plist`.
+- After the trial: PR `lean-runtime` → main; merge the plugin clone's `lean-runtime` into the live plugin repo after the owner commits or stashes their uncommitted work there.
