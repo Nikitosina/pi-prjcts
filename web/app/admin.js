@@ -92,7 +92,7 @@ function renderDeploy() {
   if (node.contains(document.activeElement)) return;
   const { settings, state, running } = deployView,
     last = state.lastResult;
-  node.innerHTML = `<div class="kv deploy-state"><span>Now</span><b id="deploy-running">${running ? "A deploy is running" : "Idle"}</b><span>Last good version</span><b>${state.lastGood ? `<code>${esc(state.lastGood.slice(0, 8))}</code>` : "none yet"}</b><span>Last deploy</span><b id="deploy-last">${last ? `${last.ok ? "ok" : "failed"} · ${esc(when(last.at))} · <code>${esc(last.sha.slice(0, 8))}</code> · ${esc(clip(last.message, 160))}` : "never"}</b></div>
+  node.innerHTML = `<div class="kv deploy-state"><span>Now</span><b id="deploy-running">${running ? "A deploy is running" : state.queuedAt ? "Deploy queued until no work is running" : "Idle"}</b><span>Last good version</span><b>${state.lastGood ? `<code>${esc(state.lastGood.slice(0, 8))}</code>` : "none yet"}</b><span>Last deploy</span><b id="deploy-last">${last ? `${last.ok ? "ok" : "failed"} · ${esc(when(last.at))} · <code>${esc(last.sha.slice(0, 8))}</code> · ${esc(clip(last.message, 160))}` : "never"}</b></div>
     <div class="row"><button data-action="deploy-start" ${running ? "disabled" : ""}>Deploy now…</button></div>
     <fieldset class="events-group"><legend>Deploy when idle</legend>
       <label class="check"><input type="checkbox" id="deploy-idle" ${settings.idle ? "checked" : ""}> Deploy new code on its own when no Job is running in any project</label>
@@ -433,7 +433,7 @@ registerActions({
     const version = dialogVersion;
     deployView = await api({ action: "deploy-start" });
     closeCurrentDialog(getProjectId(), version);
-    toast("Deploy started. The host restarts shortly.");
+    toast(deployView.queued ? deployView.line : "Deploy started. The host restarts shortly.");
     renderDeploy();
   },
   async "deploy-save"() {

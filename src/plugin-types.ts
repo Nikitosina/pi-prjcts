@@ -407,6 +407,8 @@ export type MergeProvider = {
   /** Checkout kind this provider accepts results for; matches VcsProvider.kind. */
   kind: string;
   inspect(input: MergeTarget): Promise<MergeFacts>;
+  /** Marks a draft PR ready for review; without it a draft cannot be approved. */
+  markReady?(input: MergeTarget): Promise<MergeAnswer>;
   /** Merges exactly `head`; must refuse when the PR head differs. */
   merge(input: MergeTarget & { head: string }): Promise<MergeAnswer>;
   /** Merges as soon as the PR becomes mergeable, pinned to `head`. `waiting: false` when the PR is already mergeable and nothing was armed. */

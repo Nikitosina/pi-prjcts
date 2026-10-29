@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -20,7 +20,12 @@ export type AcceptanceOutcome =
 
 /** The intent is written before the merge call so a crash leaves a trace; `merging` means the call may or may not have landed. */
 export type AcceptanceIntent = { head: string; state: "merging" | "auto-merge" | "merged" };
-export type AcceptanceLog = { read(jobId: string): AcceptanceIntent | undefined; write(jobId: string, intent: AcceptanceIntent): void };
+export type AcceptanceLog = {
+  read(jobId: string): AcceptanceIntent | undefined;
+  write(jobId: string, intent: AcceptanceIntent): void;
+  /** Forget an attempt the provider refused: nothing landed, so it must not block a later Approve. */
+  clear(jobId: string): void;
+};
 
 const Intent = Type.Object({
   head: Type.String(),
@@ -43,6 +48,9 @@ export function fileAcceptanceLog(dir: string): AcceptanceLog {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       saveJson(file(jobId), intent);
     },
+    clear(jobId) {
+      rmSync(file(jobId), { force: true });
+    },
   };
 }
 
@@ -60,24 +68,33 @@ export function describeAcceptance(outcome: AcceptanceOutcome): string {
   }
 }
 
-/** Approve: merge the approved head (now, or when it becomes mergeable), then pull the main checkout when that is safe. */
+/**
+ * Approve: merge the approved head (now, or when it becomes mergeable), then pull the main checkout when that is safe.
+ * Once auto-merge is armed, `approve` answers `auto-merge-pending` at once and the flow finishes in the background, reporting through `finished`.
+ */
 export function createApprover(options: {
   provider: (job: AcceptJob) => MergeProvider;
   checkout: (job: AcceptJob) => string;
   log: AcceptanceLog;
   pollMs?: number;
   waitMs?: number;
+  finished?: (job: AcceptJob, result: AcceptanceOutcome | Error) => void;
 }) {
   const inflight = new Map<string, Promise<AcceptanceOutcome>>();
   const pollMs = options.pollMs ?? 30_000,
     waitMs = options.waitMs ?? 6 * 3_600_000;
 
-  async function run(job: AcceptJob, signal: AbortSignal): Promise<AcceptanceOutcome> {
+  async function run(job: AcceptJob, signal: AbortSignal, armed: () => void): Promise<AcceptanceOutcome> {
     const provider = options.provider(job),
       target: MergeTarget = { checkout: options.checkout(job), pr: job.pr, signal },
       head = job.candidateSha;
     const prior = options.log.read(job.id);
-    if (prior && prior.head !== head) throw new Error("This Job was already accepted at a different head");
+    if (prior?.state === "merged" && prior.head !== head) throw new Error("This Job was already merged at a different head");
+    // A refusal means nothing landed, so its record must not block a later attempt.
+    const refuse = (message: string): never => {
+      options.log.clear(job.id);
+      throw new Error(message);
+    };
     let facts = await provider.inspect(target);
     const exact = (current: MergeFacts) => {
       if (current.head !== head)
@@ -88,7 +105,11 @@ export function createApprover(options: {
     if (facts.state === "closed") throw new Error("The PR is closed without a merge");
 
     if (facts.state === "open") {
-      if (facts.draft) throw new Error("The PR is still a draft");
+      if (facts.draft) {
+        if (!provider.markReady) throw new Error("The PR is still a draft");
+        const ready = await provider.markReady(target);
+        if (!ready.ok) throw new Error(`Could not mark the draft PR ready: ${ready.refused}`);
+      }
       if (facts.mergeable === "no") throw new Error("The PR has conflicts and cannot merge");
       const direct = async (): Promise<AcceptanceOutcome | "merged"> => {
         options.log.write(job.id, { head, state: "merging" });
@@ -101,20 +122,21 @@ export function createApprover(options: {
           if (after?.state === "merged" && after.head === head) return "merged";
           return uncertain(`The merge call failed (${errorText(error)}) and the PR could not be confirmed ${after?.state ?? "unread"}`);
         }
-        if (!answer.ok) throw new Error(`Merge refused: ${answer.refused}`);
+        if (!answer.ok) return refuse(`Merge refused: ${answer.refused}`);
         return "merged";
       };
       if (facts.mergeable === "yes") {
         const done = await direct();
         if (done !== "merged") return done;
       } else {
-        const armed = await provider.enableAutoMerge({ ...target, head });
-        if (!armed.ok) throw new Error(`Auto-merge refused: ${armed.refused}`);
-        if (!armed.waiting) {
+        const arming = await provider.enableAutoMerge({ ...target, head });
+        if (!arming.ok) return refuse(`Auto-merge refused: ${arming.refused}`);
+        if (!arming.waiting) {
           const done = await direct();
           if (done !== "merged") return done;
         } else {
           options.log.write(job.id, { head, state: "auto-merge" });
+          armed();
           const deadline = Date.now() + waitMs;
           for (;;) {
             await sleep(pollMs, undefined, { signal });
@@ -140,9 +162,19 @@ export function createApprover(options: {
     approve(job: AcceptJob, signal: AbortSignal = new AbortController().signal): Promise<AcceptanceOutcome> {
       const running = inflight.get(job.id);
       if (running) return running;
-      const flow = run(job, signal).finally(() => inflight.delete(job.id));
-      inflight.set(job.id, flow);
-      return flow;
+      let early = false;
+      let settleFirst!: { resolve(value: AcceptanceOutcome): void; reject(error: unknown): void };
+      const first = new Promise<AcceptanceOutcome>((resolve, reject) => (settleFirst = { resolve, reject }));
+      const done = () => inflight.delete(job.id);
+      void run(job, signal, () => {
+        early = true;
+        settleFirst.resolve({ kind: "auto-merge-pending" });
+      }).then(
+        (outcome) => (done(), early ? options.finished?.(job, outcome) : settleFirst.resolve(outcome)),
+        (error) => (done(), early ? options.finished?.(job, error as Error) : settleFirst.reject(error)),
+      );
+      inflight.set(job.id, first);
+      return first;
     },
   };
 }
@@ -192,6 +224,7 @@ export function githubMergeProvider(): MergeProvider {
             : "later";
       return { state, draft: view.isDraft, head: view.headRefOid, base: view.baseRefName, mergeable };
     },
+    markReady: (target) => answer(gh(target, ["pr", "ready", target.pr])),
     merge: (input) => answer(gh(input, ["pr", "merge", input.pr, "--squash", "--match-head-commit", input.head])),
     async enableAutoMerge(input) {
       const result = await answer(gh(input, ["pr", "merge", input.pr, "--auto", "--squash", "--match-head-commit", input.head]));
