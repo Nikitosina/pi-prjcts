@@ -352,51 +352,8 @@ try {
   });
   const setup = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: setup.workspaceRevision });
-  const pages = [];
-  for (let offset = 0; offset !== null;) {
-    const page = await rpc({ action: "worker-skills-catalog", id, offset, limit: 16 });
-    pages.push(page);
-    offset = page.page.nextOffset;
-    if (pages.length > 10) throw Error("Paging never ends");
-  }
-  const all = pages.flatMap((page) => page.candidates),
-    configured = all.filter((c) => c.origin.kind === "configured");
-  if (
-    pages.length !== 6 ||
-    new Set(pages.map((p) => p.revision)).size !== 1 ||
-    pages.some((p) => p.page.total !== SKILLS) ||
-    new Set(all.map((c) => c.catalogId)).size !== SKILLS ||
-    configured.length !== SKILLS
-  )
-    throw Error("Catalog paging wrong: " + JSON.stringify(pages.map((p) => ({ rev: p.revision, page: p.page, n: p.candidates.length }))));
-  const big = await rpc({ action: "worker-skills-catalog", id, offset: 64, limit: 64 });
-  if (big.candidates.length !== SKILLS - 64 || big.page.nextOffset !== null || big.revision !== pages[0].revision)
-    throw Error("64-wide page wrong");
-  result.catalog = { total: SKILLS, pages: pages.length, revision: pages[0].revision };
-  // L2: the CLI prints every page, not the first 16.
-  const cliEnv = { ...env };
-  delete cliEnv.PI_PROJECTS_HOST;
-  const cli = JSON.parse(
-    execFileSync(process.execPath, [join(repo, "src/cli.ts"), "--no-start", "owner-skills-catalog", id], {
-      cwd: repo,
-      env: cliEnv,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    }),
-  );
-  if (
-    cli.candidates.length !== SKILLS ||
-    cli.page.nextOffset !== null ||
-    cli.revision !== pages[0].revision ||
-    new Set(cli.candidates.map((c) => c.catalogId)).size !== SKILLS
-  )
-    throw Error("CLI catalog incomplete: " + JSON.stringify({ n: cli.candidates.length, page: cli.page }));
-  result.checks.push(`L2 CLI owner-skills-catalog returns all ${SKILLS} candidates of one revision`);
-  result.checks.push(
-    "F1-F5 owner worker-skills catalog with 89 configured skills captures; 16-wide pages 0..88 are disjoint, stable revision, nextOffset ends null; offset 64 accepted",
-  );
-  // Skills reach workers through Settings profiles now (the grant model is retired): a skill from the last page is saved for workers.
-  const last = all.at(-1),
+  // Skills reach workers through Settings profiles now (the grant model is retired): the last of the configured skills is saved for workers.
+  const last = { name: `owner-skill-${String(SKILLS - 1).padStart(2, "0")}` },
     before = await rpc({ action: "settings-snapshot", id });
   await rpc({
     action: "settings-update",

@@ -81,8 +81,6 @@ import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord,
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
-import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
-import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
 import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
@@ -560,26 +558,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.id, { topic: "settings" });
       return result;
     }
-    case "worker-skills-catalog": {
-      const protectedFiles = await protectedSkillBackingFiles();
-      const catalog = await captureOwnerWorkerSkillCatalog({
-        project: () => loadProject(input.id),
-        configured: { kind: "loaded", loader: await configuredSkills(input.id) },
-        protectedFiles,
-      });
-      const offset = input.offset ?? 0,
-        limit = input.limit ?? 16;
-      return {
-        ...catalog,
-        candidates: catalog.candidates.slice(offset, offset + limit),
-        page: {
-          offset,
-          limit,
-          total: catalog.candidates.length,
-          nextOffset: offset + limit < catalog.candidates.length ? offset + limit : null,
-        },
-      };
-    }
     case "command-profiles-snapshot":
       return commandProfilesSnapshot(loadProject(input.id));
     case "command-profile-read": {
@@ -829,14 +807,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const githubRevision = createHash("sha256")
         .update(JSON.stringify([project.githubAuthorization ?? [], project.githubAuthorizationHistory ?? []]))
         .digest("hex");
-      const grants = project.workerSkillGrants ?? [];
-      const grantsRevision = createHash("sha256").update(JSON.stringify(grants)).digest("hex");
       const profileSnapshot = commandProfilesSnapshot(project);
       return {
         projectId: project.id,
         workspaceRevision,
         githubRevision,
-        grantsRevision,
         profilesRevision: profileSnapshot.revision,
         workspace: project.workspaceAuthorization
           ? {
@@ -898,13 +873,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           revision: profile.revision,
           executionAvailable: profile.executionAvailable,
           blocker: profile.blocker,
-        })),
-        grants: grants.map((grant) => ({
-          id: grant.id,
-          revision: grant.revision,
-          enabled: grant.enabled,
-          scopeIds: grant.scopeIds,
-          skills: grant.skills.map((skill) => ({ catalogId: skill.catalogId, name: skill.name })),
         })),
         configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." },
       };

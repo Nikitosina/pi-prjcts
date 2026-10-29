@@ -15,7 +15,6 @@ type Changes = Update["changes"];
  * - prompts: coordinator chats are rebuilt from the saved project (busy chats before their next message); workers read it at delegation.
  */
 type Effect = "saved" | "models" | "context" | "prompts";
-/** `workerCap` is still accepted from old project files but does nothing, so it has no effect here. */
 const EFFECTS: Partial<Record<keyof Changes, Effect>> = {
   name: "prompts",
   objective: "prompts",

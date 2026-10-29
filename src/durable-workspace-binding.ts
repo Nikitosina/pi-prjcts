@@ -427,7 +427,6 @@ export function durableWorkspaceBinding(input: {
         JSON.stringify({
           receipt: receipt.providerFacts,
           scope,
-          workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []),
           names: tools.map((tool) => tool.name),
           commands: (input.project.commandProfiles ?? [])
             .filter((profile) => profile.enabled && profile.scopeIds.includes(scope.id))

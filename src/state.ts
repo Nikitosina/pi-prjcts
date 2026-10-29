@@ -5,7 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
-import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
 export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
@@ -148,13 +147,9 @@ export const Project = Type.Object(
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
     githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
     githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
-    /** Retired worker limit; kept so old project files load. */
-    workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** Minutes without progress before a stall notice; absent = DEFAULT_STALL_MINUTES. */
     stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
     commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
-    /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
-    workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })),
     /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
     skillProfiles: Type.Optional(SkillProfiles),
     /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
@@ -179,9 +174,6 @@ export const Project = Type.Object(
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
     /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
     scopedModels: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true })),
-    /** Retired legacy-runtime fields (always null / empty); accepted so existing project files load. */
-    sessionFile: Type.Optional(Type.Null()),
-    runs: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 0 })),
     phase: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("attention")]),
     problem: Type.Union([Type.String(), Type.Null()]),
     // Top-level records owned by provider plugins (e.g. a publication authorization) are kept verbatim, also while no plugin understands them.
@@ -497,15 +489,6 @@ export const Request = Type.Union([
     { action: Type.Literal("mcp-probe"), id: Id, server: Type.String({ minLength: 1, maxLength: 128 }) },
     { additionalProperties: false },
   ),
-  Type.Object(
-    {
-      action: Type.Literal("worker-skills-catalog"),
-      id: Id,
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })),
-    },
-    { additionalProperties: false },
-  ),
   Type.Object({ action: Type.Literal("command-profiles-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profile-read"), id: Id, profileId: Id }, { additionalProperties: false }),
   Type.Object(
@@ -640,8 +623,6 @@ export const Request = Type.Union([
           decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
           githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
           stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
-          /** Retired worker limit: accepted and ignored so older clients keep saving settings. */
-          workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
           /** null restores the default (repository skills for every profile). */
           skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
           /** null removes every MCP server. */

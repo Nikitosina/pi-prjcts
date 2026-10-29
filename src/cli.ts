@@ -241,19 +241,16 @@ switch (command) {
     break;
   }
   case "owner-workspaces":
-  case "owner-skills-catalog":
   case "owner-command-profiles":
   case "owner-setup": {
     if (!first || second !== undefined || rest.length) throw new Error(`Usage: ${command} <project-id>`);
     const action =
       command === "owner-workspaces"
         ? "workspace-catalog"
-        : command === "owner-skills-catalog"
-          ? "worker-skills-catalog"
-          : command === "owner-command-profiles"
-            ? "command-profiles-snapshot"
-            : "owner-setup-snapshot";
-    input = parse(Request, { action, id: first, ...(action === "worker-skills-catalog" ? { limit: 64 } : {}) });
+        : command === "owner-command-profiles"
+          ? "command-profiles-snapshot"
+          : "owner-setup-snapshot";
+    input = parse(Request, { action, id: first });
     break;
   }
   case "owner-workspace-revoke": {
@@ -338,29 +335,12 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }
 try {
-  let data = await request(input, startHost && command !== "host-stop");
-  // The owner catalog is paged; print every page of one revision.
-  if (input.action === "worker-skills-catalog") {
-    const catalog = data as {
-      revision: string;
-      candidates: unknown[];
-      page: { offset: number; limit: number; total: number; nextOffset: number | null };
-    };
-    for (let page = catalog.page; page.nextOffset !== null;) {
-      const next = (await request({ ...input, offset: page.nextOffset, limit: 64 }, false)) as typeof catalog;
-      if (next.revision !== catalog.revision || next.page.offset !== page.nextOffset)
-        throw new Error("Skill catalog changed while paging; run the command again");
-      catalog.candidates.push(...next.candidates);
-      page = next.page;
-    }
-    catalog.page = { offset: 0, limit: catalog.candidates.length, total: catalog.candidates.length, nextOffset: null };
-    data = catalog;
-  }
+  const data = await request(input, startHost && command !== "host-stop");
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 } catch (error) {
   process.stderr.write(errorText(error) + "\n");
