@@ -24,12 +24,15 @@ const modern = (name, args) =>
           ...(args.role && args.role !== "worker" ? {} : { acceptance: args.acceptance ?? ["done"] }),
           requestId: args.requestId ?? randomUUID(),
           ...(args.branch ? { branch: args.branch } : {}),
+          ...(args.ref ? { readRef: args.ref } : {}),
           ...(args.workspaceScopeId ? { scopeId: args.workspaceScopeId } : {}),
         },
       ]
-    : name === "projects_delegate_child"
-      ? ["subagent", { role: args.role === "worker" ? "verifier" : args.role, task: args.task }]
-      : [name, args];
+    : name === "projects_worker_control"
+      ? ["agents", { action: "send", id: args.threadId, message: args.text, followUp: true }]
+      : name === "projects_delegate_child"
+        ? ["subagent", { role: args.role === "worker" ? "verifier" : args.role, task: args.task }]
+        : [name, args];
 export const call = (name, args) =>
   ([name, args] = modern(name, args)) &&
   chunk(

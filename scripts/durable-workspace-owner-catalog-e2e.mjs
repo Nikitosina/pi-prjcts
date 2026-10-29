@@ -251,7 +251,7 @@ try {
   const unknown = await api({
     action: "message",
     id: project.id,
-    text: `Call projects_delegate with JSON arguments {"role":"worker","workspaceScopeId":"${unknownScope}","task":"Use the assigned workspace capability write tool to write exactly BAD to owned/assigned.txt."}. Do not substitute another scope ID. FAKE-CALL projects_delegate ${JSON.stringify({ role: "worker", workspaceScopeId: unknownScope, task: "Use the assigned workspace capability write tool to write exactly BAD to owned/assigned.txt." })} FAKE-SAY done`,
+    text: `Call agents with JSON arguments {"role":"worker","workspaceScopeId":"${unknownScope}","task":"Use the assigned workspace capability write tool to write exactly BAD to owned/assigned.txt."}. Do not substitute another scope ID. FAKE-CALL agents ${JSON.stringify({ action: "spawn", role: "worker", scopeId: unknownScope, brief: "Use the assigned workspace capability write tool to write exactly BAD to owned/assigned.txt.", title: "BAD write", acceptance: ["done"], requestId: randomUUID() })} FAKE-SAY done`,
   });
   const unknownView = await until((view) => view.jobs.some((j) => j.id === unknown.id && ["done", "failed"].includes(j.state)));
   const unknownJob = unknownView.jobs.find((j) => j.id === unknown.id);
@@ -301,7 +301,7 @@ try {
   const delegateJob = await api({
     action: "message",
     id: project.id,
-    text: `Call projects_workspace_catalog first, then projects_delegate. FAKE-CALL projects_workspace_catalog {} FAKE-CALL projects_delegate ${JSON.stringify({ role: "worker", workspaceScopeId: scope.id, task: workerTask }).replaceAll("FAKE-", "FAKE\\u002D")} FAKE-SAY delegated`,
+    text: `Call projects_workspace_catalog first, then agents spawn. FAKE-CALL projects_workspace_catalog {} FAKE-CALL agents ${JSON.stringify({ action: "spawn", role: "worker", scopeId: scope.id, brief: workerTask, title: "Assigned write", acceptance: ["done"], requestId: randomUUID() }).replaceAll("FAKE-", "FAKE\\u002D")} FAKE-SAY delegated`,
   });
   const workerDone = await until((view) => view.jobs.some((j) => j.id === delegateJob.id && j.state === "done"));
   const deadline = Date.now() + 180000;
