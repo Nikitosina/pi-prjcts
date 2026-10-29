@@ -1,5 +1,6 @@
 // Fake OpenAI-completions provider for verification runs. Usage: node fake-provider.mjs <port-file> <request-log>
 // Answers every model call with `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
+// A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -27,9 +28,57 @@ const server = createServer((req, res) => {
       JSON.stringify({ at: new Date().toISOString(), model: input.model, tools: (input.tools ?? []).map((t) => t.function?.name), user }) +
         "\n",
     );
+    const names = (input.tools ?? []).map((t) => t.function?.name);
+    const stage = messages.slice(messages.findLastIndex((m) => m.role === "user") + 1).filter((m) => m.role === "tool").length;
+    const call = (name, args) =>
+      chunk(
+        {
+          role: "assistant",
+          tool_calls: [{ index: 0, id: `call-${stage}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+        },
+        null,
+      ) +
+      chunk({}, "tool_calls") +
+      "data: [DONE]\n\n";
+    const say = (content) => chunk({ role: "assistant", content }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+    const title = "VERIFY-JOB greet the world";
+    let reply;
+    if (user.includes("VERIFY-JOB") && names.includes("agents") && !user.startsWith("[worker")) {
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "worker",
+              title,
+              brief: `${title}: add a greeting.`,
+              acceptance: ["It greets."],
+              requestId: "verify-job",
+            })
+          : say("Started the Job.");
+    } else if (user.includes("VERIFY-JOB") && names.includes("job")) {
+      const steps = (done) => [
+        { title: "Write the greeting", status: done ? "done" : "doing", estimateMin: 5 },
+        { title: "Check it", status: done ? "done" : "todo", estimateMin: 3 },
+      ];
+      reply =
+        stage === 0
+          ? call("job", { action: "plan", steps: steps(false) })
+          : stage === 1
+            ? call("job", { action: "plan", steps: steps(true) })
+            : stage === 2
+              ? call("job", {
+                  action: "ready",
+                  summary: "Added the greeting.",
+                  pr: "12",
+                  candidate: "a".repeat(40),
+                  proof: ["greeting printed"],
+                })
+              : say("Done.");
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end(
-      chunk({ role: "assistant", content: `VERIFY-FAKE-REPLY: ${user.slice(0, 200)}` }, null) + chunk({}, "stop") + "data: [DONE]\n\n",
+      reply ??
+        chunk({ role: "assistant", content: `VERIFY-FAKE-REPLY: ${user.slice(0, 200)}` }, null) + chunk({}, "stop") + "data: [DONE]\n\n",
     );
   });
 });

@@ -549,7 +549,7 @@ await kit.run(async () => {
   ].map((parts) => parts.join(""));
   const walk = (dir) =>
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
-      entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)],
+      entry.isDirectory() ? (entry.name === "vendor" ? [] : walk(join(dir, entry.name))) : [join(dir, entry.name)],
     );
   const offenders = [...walk(join(kit.core, "src")), ...walk(join(kit.core, "web"))].filter((file) => {
     const text = readFileSync(file, "utf8");

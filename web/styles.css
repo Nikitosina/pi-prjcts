@@ -2337,6 +2337,9 @@ pre.diff .del {
 .deploy-state {
   margin-bottom: 8px;
 }
+#deploy .row {
+  margin-bottom: 14px;
+}
 /* Uploads and attachments */
 .attach-chips,
 .attach-row {

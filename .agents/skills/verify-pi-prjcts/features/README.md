@@ -13,8 +13,8 @@ Maintained source for verifying what a user does in the Pi Projects browser inbo
 
 - Browser entry is the launch link in `run.json` (`webUrl`, token in the `#fragment`), opened in headless Chrome over CDP.
 - Prefer ARIA labels and ids: `textarea[aria-label="Message coordinator"]`, `#compose button[type=submit]`, `#messages`, `#title`, `#search-button`, `#create`.
-- Type with `Input.insertText` and click real buttons. Never use host writes for the journey itself. Read-only second views: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> show` (allowlisted: list, show, plan-snapshot, knowledge-list, knowledge-read, knowledge-history, search) and `model-requests.jsonl`.
-- The fake provider answers `VERIFY-FAKE-REPLY: <your last message>` and never calls tools. A journey that needs a model-chosen tool call reports failure with that reason.
+- Type with `Input.insertText` and click real buttons. Never use host writes for the journey itself. Read-only second views: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> show` (allowlisted: list, show, jobs-snapshot, knowledge-list, knowledge-read, knowledge-history, search) and `model-requests.jsonl`.
+- The fake provider answers `VERIFY-FAKE-REPLY: <your last message>` and calls tools only for a message containing `VERIFY-JOB` (see the Jobs feature). Any other journey that needs a model-chosen tool call reports failure with that reason.
 
 ## Proof and skip reporting
 
@@ -33,4 +33,5 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Search a project](./search.md) — search dialog over chats. Recipe only.
 - [Knowledge topics](./knowledge.md) — create and read a knowledge document. Recipe only.
 - [Verification settings](./verification-settings.md) — opt in to the automatic verifier loop in Project settings. Scripted.
+- [Jobs, Approve and Deploy](./jobs.md) — Job tree, Ready message with Approve, Deploy settings. Scripted.
 - [Quota fallback settings](./quota-settings.md) — worker fallback selection, review, save and reload. Scripted.

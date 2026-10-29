@@ -118,14 +118,20 @@ function textDialog(mode, id) {
 const approveOutcomes = new Map();
 export const approveLine = (jobId) => approveOutcomes.get(jobId) ?? null;
 const openJobs = new Map();
+// The tree is not redrawn under a focused control, so a click that changes it lets go of focus first and takes it back after.
+function redrawTree(focusSelector) {
+  document.activeElement?.blur();
+  renderJobTree();
+  document.querySelector(`#job-tree ${focusSelector}`)?.focus();
+}
 registerActions({
   "job-toggle"(node) {
     openJobs.set(node.dataset.job, node.getAttribute("aria-expanded") !== "true");
-    renderJobTree();
+    redrawTree(`.job-toggle[data-job="${node.dataset.job}"]`);
   },
   "all-jobs"() {
     allJobs = !allJobs;
-    renderJobTree();
+    redrawTree(".all-jobs");
   },
   "thread-close"() {
     if (history.state?.worker) history.back();
