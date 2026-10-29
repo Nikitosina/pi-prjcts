@@ -278,7 +278,7 @@ export function prMonitorRuntime(
       }
       if (watch && doc.hidden?.includes(id)) doc.hidden = doc.hidden.filter((item) => item !== id); // watching a hidden PR unhides it
       if (!watch && has) doc.watched = watched.filter((item) => item !== id);
-      return doc.watched;
+      return [...doc.watched];
     }, BACKGROUND_CONTEXT);
   }
   /** Hide drops the PR from watched and from the seen baseline, so unhiding starts fresh instead of replaying what changed meanwhile. */
@@ -296,7 +296,7 @@ export function prMonitorRuntime(
         delete doc.prs[id];
       }
       if (!hide && has) doc.hidden = list.filter((item) => item !== id);
-      return doc.hidden ?? [];
+      return [...(doc.hidden ?? [])];
     }, BACKGROUND_CONTEXT);
   }
   async function snapshot() {

@@ -117,17 +117,20 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       const input = JSON.parse(body),
         msgs = input.messages,
         tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
+      const systemText = contentText(msgs.find((m) => m.role === "system" || m.role === "developer")?.content);
       const role = tools.includes("agents")
         ? "coordinator"
-        : tools.includes("projects_verify_run")
-          ? "verifier"
-          : tools.includes("job")
-            ? "worker"
-            : tools.includes("code_read")
-              ? "scout"
-              : tools.includes("bash")
-                ? "worker"
-                : "other";
+        : systemText.includes("Review the pinned candidate")
+          ? "reviewer"
+          : tools.includes("projects_verify_run")
+            ? "verifier"
+            : tools.includes("job")
+              ? "worker"
+              : tools.includes("code_read")
+                ? "scout"
+                : tools.includes("bash")
+                  ? "worker"
+                  : "other";
       const lastUser = msgs.findLastIndex((m) => m.role === "user"),
         user = contentText(msgs[lastUser]?.content);
       const results = msgs
