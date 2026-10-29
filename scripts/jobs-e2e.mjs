@@ -48,6 +48,7 @@ function route(request) {
     return result ? say("OK.") : say("Noted.");
   }
   if (role === "worker") {
+    if (user.startsWith("Just a question")) return say("Answer.");
     if (user.startsWith("Add a test"))
       return call("job", {
         action: "ready",
@@ -87,6 +88,9 @@ function route(request) {
 
 // ── Host tools standing in for the project's: a gate, a silent blocking "process", and a chatty step.
 const processes = new Set();
+// Titles whose prepare step is held open, and the ones that have entered it.
+const prepareHeld = new Set(),
+  prepareEntered = new Set();
 let gateOpen = false,
   gateEntered = false;
 const TestTools = defineExtension({
@@ -143,6 +147,11 @@ async function open() {
       killed.push(...ids);
       for (const id of ids) processes.delete(id);
     },
+    prepare: async ({ agent }) => {
+      prepareEntered.add(agent.title);
+      while (prepareHeld.has(agent.title)) await delay(20);
+    },
+    approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
     backgroundSilence: () => null,
     stallMinutes: () => 20,
   });
@@ -203,6 +212,7 @@ for (const part of [
   "Not fixed: none",
   "Gaps: none",
   "Done.",
+  "Cost: ",
 ])
   assert.ok(report[0].includes(part), `report carries ${part}`);
 const snapshot = await jobs.snapshot(harness);
@@ -271,14 +281,63 @@ assert.ok(
 );
 assert.match(await jobs.stop(harness, silent.id, "again"), /already stopped/);
 
-// 6. Steer revives a finished Job; the new answer reports again.
-await jobs.steer(harness, job.id, "Add a test too");
+// 6. A question to a finished Job is answered without failing it; a steer that does work reports again, and a retried steer id sends once.
+await jobs.steer(harness, job.id, "Just a question");
+await quiet(harness);
+assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "ready", "an answer-only follow-up keeps the Job Ready");
+assert.equal((await chatText(root)).filter((line) => line.startsWith(`[worker ${job.id} answered`)).length, 1);
+await jobs.steer(harness, job.id, "Add a test too", false, "steer-1");
+assert.match(await jobs.steer(harness, job.id, "Add a test too", false, "steer-1"), /Already sent/);
 await quiet(harness);
 assert.equal(
-  (await chatText(root)).filter((line) => line.startsWith(`[worker ${job.id}`)).length,
+  (await chatText(root)).filter((line) => line.startsWith(`[worker ${job.id} ready`)).length,
   2,
-  "the follow-up answer reports once more",
+  "the follow-up answer reports once more, and the retried steer did not run twice",
 );
+
+// 7. Stop or pause while the agent is still preparing never submits its brief; resume sends it once.
+const holdPrepare = async (title, name) => {
+  prepareHeld.add(title);
+  await say_(root, `Start ${name}`);
+  await until(() => prepareEntered.has(title), `${title} preparing`);
+  return (await jobsOf(harness)).find((item) => item.title === title);
+};
+const prep = await holdPrepare("Job PREP", "PREP");
+await jobs.stop(harness, prep.id, "changed my mind");
+prepareHeld.delete("Job PREP");
+await quiet(harness);
+assert.ok(!requests.some((item) => item.tag === "BRIEF-PREP"), "a Job stopped during prepare never reaches the model");
+assert.equal((await jobsOf(harness)).find((item) => item.id === prep.id).status, "stopped");
+const paused = await holdPrepare("Job PAUSEPREP", "PAUSEPREP");
+await jobs.pause(harness);
+prepareHeld.delete("Job PAUSEPREP");
+await quiet(harness);
+assert.ok(!requests.some((item) => item.tag === "BRIEF-PAUSEPREP"), "a paused project does not start the agent");
+await jobs.resume(harness);
+await quiet(harness);
+assert.equal((await jobsOf(harness)).find((item) => item.id === paused.id).status, "ready");
+assert.equal(
+  requests.filter((item) => item.role === "worker" && item.user.includes("BRIEF-PAUSEPREP")).length,
+  1,
+  "resume sends the brief once",
+);
+
+// 8. Approve: an armed auto-merge answers at once; the background finish marks the Job approved and tells the chat.
+const outcome = await jobs.approve(harness, job.id);
+assert.deepEqual(outcome, { outcome: { kind: "auto-merge-pending" } });
+assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "ready");
+await jobs.finishApproval(harness, job.id, { kind: "accepted", head: sha }, "Merged aaaaaaaa.");
+assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "approved");
+await until(async () => (await chatText(root)).some((line) => line.startsWith(`[worker ${job.id} approve`)), "approve notice in chat");
+
+// 9. A running Job whose idle worker never reported is flagged once it has been quiet past the limit.
+const rootId = (await harness.root(context)).id;
+await harness.commit(async (tx) => {
+  const record = (await tx.doc(Jobs, rootId)).jobs[gate.id];
+  Object.assign(record, { status: "running", ready: null, endedAt: null });
+}, context);
+assert.deepEqual(await jobs.stallTick(harness, T), []);
+assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an idle running Job is stalled");
 
 await harness.close(context);
 rmSync(dir, { recursive: true, force: true });

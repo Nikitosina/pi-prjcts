@@ -38,7 +38,7 @@ import type { Context } from "@earendil-works/chord";
 import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
 import { Jobs, createJobs, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
-import { createApprover, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
+import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
@@ -265,7 +265,7 @@ export type DurableProjectRuntime = {
   /** Stop an agent and everything it owns; `reason` is required and recorded on the Job. */
   stopJob(id: string, reason: string): Promise<string>;
   /** Message an agent; a finished Job runs again. `followUp` queues it after the agent's current answer. */
-  steerJob(id: string, text: string, options?: { followUp?: boolean }): Promise<string>;
+  steerJob(id: string, text: string, options?: { followUp?: boolean; requestId?: string }): Promise<string>;
   /** Approve a Ready Job: merge its candidate through result acceptance. */
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
@@ -913,10 +913,19 @@ export async function openDurableProject(input: {
       return found;
     };
     const mergeTargets = new Map<string, { provider: ReturnType<typeof githubMergeProvider>; checkout: string }>();
+    // An armed auto-merge finishes in the background; closing the owner aborts it (Approve again resumes).
+    const mergeFlows = new AbortController();
     const approver = createApprover({
       provider: (job) => mergeTargets.get(job.id)!.provider,
       checkout: (job) => mergeTargets.get(job.id)!.checkout,
       log: fileAcceptanceLog(join(dir, "acceptance")),
+      finished: (job, result) => {
+        if (closed) return;
+        const line = result instanceof Error ? `Approve failed: ${result.message}` : describeAcceptance(result);
+        void jobs
+          .finishApproval(openedHarness, job.id, result instanceof Error ? null : result, line)
+          .catch((error) => report(input.onReport, project.id, error));
+      },
     });
     // A worker spawned without a workspace has no shell or file tools and cannot gain them: once a workspace exists, its work belongs to a new worker.
     const unscopedRefusal = (agent: { role: string; scopeId: string | null }) =>
@@ -1004,7 +1013,7 @@ export async function openDurableProject(input: {
           if (!provider)
             throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
           mergeTargets.set(job.id, { provider, checkout: repository.ownerCheckout });
-          return approver.approve(job);
+          return approver.approve(job, mergeFlows.signal);
         },
       },
     });
@@ -1714,7 +1723,7 @@ export async function openDurableProject(input: {
           const agent = (await openedHarness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[id];
           const refusal = agent && unscopedRefusal(agent);
           if (refusal) throw new Error(refusal);
-          return jobs.steer(openedHarness, id, text, options.followUp);
+          return jobs.steer(openedHarness, id, text, options.followUp, options.requestId);
         }),
       approveJob: async (id) => {
         assertOpen();
@@ -2062,6 +2071,7 @@ export async function openDurableProject(input: {
       close: () => {
         if (closeOperation) return closeOperation;
         closed = true;
+        mergeFlows.abort();
         stopFeed();
         for (const stop of [...liveWatchers]) stop();
         dispatchReady = false;

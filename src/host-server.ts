@@ -1,6 +1,6 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
@@ -42,7 +42,7 @@ import { feed } from "./change-feed.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
-import { deployPending, idleDeployTick, readDeployState } from "./deploy.ts";
+import { clearQueuedDeploy, deployPending, idleDeployTick, queueDeploy, readDeployState, recordHostSha, forgetHostSha } from "./deploy.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
 import { startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
@@ -316,15 +316,16 @@ const settings = settingsApplication({
   closing: () => closing,
   async reopenIfIdle(id) {
     let existing: Promise<DurableProjectRuntime> | undefined;
-    await withProjectLock(id, async () => {
+    // The block only goes up once the owner is idle, so a busy project keeps serving requests.
+    const idle = await withProjectLock(id, async () => {
       existing = durableRuntimes.get(id);
+      if (existing && (await ownerBusy(await existing))) return false;
       settingsUpdating.add(id);
+      return true;
     });
+    if (!idle) return false;
     try {
-      if (!existing) return true;
-      const owner = await existing;
-      if (await ownerBusy(owner)) return false;
-      await closeLifecycleOwner(id, owner);
+      if (existing) await closeLifecycleOwner(id, await existing);
     } finally {
       settingsUpdating.delete(id);
     }
@@ -1304,7 +1305,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "thread-steer": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
-      return { result: await (await durable(input.id)).steerJob(input.threadId, input.text) };
+      return { result: await (await durable(input.id)).steerJob(input.threadId, input.text, { requestId: input.requestId }) };
     }
     case "thread-stop": {
       const project = loadProject(input.id);
@@ -1362,7 +1363,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         operation: async (owner) => {
           const plan = await owner.jobs();
           if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          return { result: await owner.steerJob(input.threadId, input.text, { followUp: true }) };
+          return { result: await owner.steerJob(input.threadId, input.text, { followUp: true, requestId: input.requestId }) };
         },
       });
     case "message": {
@@ -1489,9 +1490,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
     case "deploy-start":
       if (deployRunning()) throw new Error("A deploy is already running");
+      if (!(await noOwnerBusy())) {
+        queueDeploy();
+        recordHostEvent("deploy", "deploy queued: work is running");
+        return {
+          settings: loadDeploySettings(),
+          state: readDeployState(),
+          running: false,
+          queued: true,
+          line: "Work is running, so the deploy is queued. It runs at the next moment no project has work running, whatever the deploy window.",
+        };
+      }
       startDeploy();
       recordHostEvent("deploy", "deploy started by the owner");
-      return { settings: loadDeploySettings(), state: readDeployState(), running: true };
+      return { settings: loadDeploySettings(), state: readDeployState(), running: true, queued: false };
     case "shutdown":
       closing = true;
       setTimeout(() => {
@@ -1596,6 +1608,12 @@ async function automationSnapshot(id: string) {
   };
 }
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+try {
+  recordHostSha(execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
+} catch (error) {
+  forgetHostSha();
+  recordHostEvent("deploy", `could not record the sha this host started from; deploy will refuse: ${errorText(error)}`);
+}
 function deployRunning(): boolean {
   try {
     const pid = Number(readFileSync(join(home(), "deploy.lock"), "utf8"));
@@ -1618,22 +1636,31 @@ function startDeploy(): void {
   child.unref();
   closeSync(log);
 }
-/** Idle means no running Job in any project; a project whose runtime is not open has nothing running. */
-async function noRunningJobs(): Promise<boolean> {
-  for (const opening of durableRuntimes.values()) {
-    const snapshot = await (await opening).jobs();
-    if (snapshot.jobs.some((job) => job.status === "running")) return false;
-  }
+/** Idle means no open project owner is busy; a project whose runtime is not open has nothing running. */
+async function noOwnerBusy(): Promise<boolean> {
+  for (const opening of durableRuntimes.values()) if (await ownerBusy(await opening)) return false;
   return true;
 }
 const idleDeployTimer = setInterval(
   () => {
     const settings = loadDeploySettings();
-    if (closing || !settings.idle) return;
+    if (closing) return;
+    if (readDeployState().queuedAt !== undefined && !deployRunning()) {
+      void noOwnerBusy()
+        .then((idle) => {
+          if (!idle || closing) return;
+          clearQueuedDeploy();
+          startDeploy();
+          recordHostEvent("deploy", "queued deploy started: the host is idle");
+        })
+        .catch((error) => recordHostEvent("deploy", `queued deploy check failed: ${errorText(error)}`));
+      return;
+    }
+    if (!settings.idle) return;
     idleDeployTick({
       now: new Date(),
       window: settings,
-      idle: noRunningJobs,
+      idle: noOwnerBusy,
       pending: () => deployPending(repoRoot),
       start() {
         startDeploy();

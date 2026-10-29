@@ -19,6 +19,7 @@ import {
   type Extension,
   type Harness,
   type Session,
+  UsageDoc,
 } from "@earendil-works/pi-durable";
 import { providerFailure, QUOTA_RETRY_BASE_MS, QUOTA_RETRY_LIMIT, quotaRetryDelay, unansweredReason } from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
@@ -70,6 +71,8 @@ export type Job = {
   /** Stall notices sent so far, and when the current one was raised (null: not stalled). */
   stalls: number;
   stalledAt: number | null;
+  /** The finished state a follow-up interrupted; restored when the worker answers without a new Ready report. */
+  resume: { status: "ready" | "ready-with-gaps"; ready: ReadyReport; endedAt: number | null } | null;
 };
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
@@ -81,6 +84,9 @@ export type Agent = {
   title: string;
   createdAt: number;
   endedAt: number | null;
+  /** The first message the agent gets, and whether it reached the conversation; a pause before that resends it on resume. */
+  brief: string;
+  briefed: boolean;
   /** Answers already reported, so steers answered together report once. */
   reported: EntryId[];
   /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
@@ -149,7 +155,7 @@ export function planEta(plan: readonly PlanStep[]): { done: number; total: numbe
 }
 
 /** The Ready report the coordinator receives in full, followed by the worker's own closing message. */
-export function readyText(job: Job, answer: string): string {
+export function readyText(job: Job, answer: string, cost?: number | null): string {
   const ready = job.ready!;
   const list = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
   return [
@@ -162,6 +168,7 @@ export function readyText(job: Job, answer: string): string {
     `Not fixed:${ready.notFixed.length ? ready.notFixed.map((item) => `\n- ${item.text} (${item.reason})`).join("") : " none"}`,
     `Gaps:${list(ready.gaps)}`,
     `Time: ${minutes((job.endedAt ?? ready.at) - job.createdAt)}`,
+    `Cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
     ...(answer.trim() ? ["", `Worker's closing message:`, answer.trim()] : []),
   ].join("\n");
 }
@@ -211,8 +218,11 @@ type Delivery = {
   message: string;
   followUp: boolean;
   prepare: boolean;
+  /** The caller's id for this message; a retried send with the same id is delivered once. */
+  requestId?: string;
 };
-type DeliveryState = { phase: "prepare" } | { phase: "deliver"; attempt: number } | { phase: "report"; report?: string };
+type DeliveryState =
+  { phase: "prepare" } | { phase: "deliver"; attempt: number; checked?: boolean } | { phase: "report"; report?: string; waits?: number };
 
 const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string => {
   const message = entry?.model?.[0] as { content?: { type: string; text?: string }[] } | undefined;
@@ -230,6 +240,21 @@ const Anchor = defineTask<null, { phase: "done" }, null>({
   },
   abort: (_anchor, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
 });
+
+/** Total spend of these conversations, or null when none has usage yet. */
+async function treeCost(
+  reader: Pick<Session, "snapshot">,
+  ids: readonly ConversationId[],
+  taskContext: typeof context,
+): Promise<number | null> {
+  let total: number | null = null;
+  for (const id of ids) {
+    const usage = await reader.snapshot(UsageDoc, id, taskContext);
+    for (const entry of [...Object.values(usage?.models ?? {}), ...Object.values(usage?.tools ?? {})])
+      total = (total ?? 0) + entry.cost.total;
+  }
+  return total;
+}
 
 /** Prepares an agent, delivers one message to it and reports its answer to the chat in full, once. */
 const reporterTask = (host: JobsHost) =>
@@ -275,14 +300,32 @@ const reporterTask = (host: JobsHost) =>
         }, taskContext);
       },
       deliver: async (reporter, runtime, taskContext) => {
-        const { agentId, conversationId, message, followUp } = reporter.input;
-        const attempt = reporter.state.checkpoint.attempt;
+        const { agentId, conversationId, message, followUp, requestId } = reporter.input;
+        const { attempt, checked } = reporter.state.checkpoint;
         // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
         const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
         if (waiting && waiting.retryAt > runtime.now()) await runtime.sleep(waiting.retryAt, taskContext);
+        // A stop or pause during prepare or a quota sleep must not start the agent: decide inside a commit, right before submitting.
+        if (!checked) {
+          await runtime.commit(async (tx) => {
+            const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+            const record = state.agents[agentId];
+            const job = record?.jobId ? state.jobs[record.jobId] : undefined;
+            if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
+              return { status: "running", checkpoint: { phase: "report" } } as const;
+            if (message === record.brief) record.briefed = true;
+            return { status: "running", checkpoint: { phase: "deliver", attempt, checked: true } } as const;
+          }, taskContext);
+          return;
+        }
         const agent = (await runtime.conversation(conversationId, taskContext))!;
         const submission = await agent.submit(
-          { type: "input", content: message, whenBusy: followUp ? "followUp" : "steer", requestId: `agent:${reporter.id}:${attempt}` },
+          {
+            type: "input",
+            content: message,
+            whenBusy: followUp ? "followUp" : "steer",
+            requestId: requestId ? `send:${requestId}:${attempt}` : `agent:${reporter.id}:${attempt}`,
+          },
           taskContext,
         );
         const settled = await submission.wait(taskContext);
@@ -315,6 +358,10 @@ const reporterTask = (host: JobsHost) =>
             return;
           }
         }
+        // What the Job's whole tree spent so far: the worker and its subagents.
+        const tree = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.jobs[agentId]?.children ?? [];
+        const cost =
+          settled.status === "unanswered" ? null : await treeCost(runtime, [conversationId, ...tree.map((child) => child.id)], taskContext);
         await runtime.commit(async (tx) => {
           const next = (report?: string) => ({ status: "running", checkpoint: { phase: "report", report } }) as const;
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
@@ -336,16 +383,30 @@ const reporterTask = (host: JobsHost) =>
           record.reported.push(settled.answer);
           record.endedAt = Date.now();
           if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);
+          if (isLive(job.status) && job.resume) {
+            // A follow-up on a finished Job that only needed an answer: the earlier Ready report stands.
+            Object.assign(job, { status: job.resume.status, ready: job.resume.ready, endedAt: job.resume.endedAt, resume: null });
+            return next(`[worker ${job.id} answered: ${job.title}]\n${answer.trim()}`);
+          }
           if (isLive(job.status)) {
             Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });
             return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
           }
           if (job.status === "failed") return next();
-          return next(readyText(job, answer));
+          return next(readyText(job, answer, cost));
         }, taskContext);
       },
       report: async (reporter, runtime, taskContext) => {
-        const report = reporter.state.checkpoint.report;
+        const { report, waits = 0 } = reporter.state.checkpoint;
+        // A paused project runs no coordinator turns; the report waits for the resume.
+        if (report !== undefined && (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.paused) {
+          await runtime.sleep(runtime.now() + 2000, taskContext);
+          await runtime.commit(
+            () => ({ status: "running", checkpoint: { phase: "report", report, waits: waits + 1 } }) as const,
+            taskContext,
+          );
+          return;
+        }
         if (report !== undefined) {
           const chat = await runtime.conversation(reporter.input.chat, taskContext);
           await chat?.submit({ type: "input", content: report, whenBusy: "followUp", requestId: `report:${reporter.id}` }, taskContext);
@@ -470,6 +531,8 @@ export function createJobs(host: JobsHost) {
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
         readRef: args.readRef?.trim() || null,
         prepared: false,
+        brief: "",
+        briefed: false,
         quota: null,
         modelMoves: [],
       };
@@ -494,12 +557,14 @@ export function createJobs(host: JobsHost) {
           endedAt: null,
           stalls: 0,
           stalledAt: null,
+          resume: null,
         };
       if (requestId) doc.requests[requestId] = agentId;
       const message =
         role === "worker"
           ? `Job ${agentId}: ${title}\n\n${args.brief}${acceptanceText(args.acceptance!)}${args.branch ? `\n\nContinue branch ${args.branch}.` : ""}`
           : args.brief;
+      doc.agents[agentId]!.brief = message;
       await tx.createTask(Reporter, { agentId, conversationId: child.id, chat: chat, message, followUp: false, prepare: true }, background);
       return { text: `Started ${role} ${agentId}.`, id: agentId, conversationId: child.id };
     }, spawnContext);
@@ -666,6 +731,7 @@ export function createJobs(host: JobsHost) {
           job.branch = args.branch ?? job.branch;
           job.candidate = args.candidate ?? job.candidate;
           job.status = gaps.length ? "ready-with-gaps" : "ready";
+          job.resume = null;
           job.endedAt = now;
           job.stalledAt = null;
           return `Ready recorded (${job.status}). End your turn; the report goes to the coordinator.`;
@@ -716,16 +782,21 @@ export function createJobs(host: JobsHost) {
 
   // ── Operations ─────────────────────────────────────────────────────────────
   /** Send a message to an agent (steer, or queue after its answer); a finished Job runs again. */
-  async function sendTo(api: Pick<Session, "commit">, id: string, message: string, followUp: boolean): Promise<string> {
+  async function sendTo(api: Pick<Session, "commit">, id: string, message: string, followUp: boolean, requestId?: string): Promise<string> {
     return api.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
       if (!agent) return `No agent ${id}.`;
+      const key = requestId ? `send:${requestId}` : undefined;
+      if (key && doc.requests[key]) return `Already sent to ${id}.`;
       const refusal = host.refuseSend?.(agent);
       if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
+      if (key) doc.requests[key] = id;
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       if (job) {
+        if (job.status === "ready" || job.status === "ready-with-gaps")
+          job.resume = { status: job.status, ready: job.ready!, endedAt: job.endedAt };
         job.status = "running";
         job.ready = null;
         job.endedAt = null;
@@ -742,6 +813,7 @@ export function createJobs(host: JobsHost) {
           chat: agent.chat,
           message,
           followUp,
+          requestId,
           prepare: !agent.prepared || (!!agent.workspace && !existsSync(agent.workspace)),
         },
         background,
@@ -760,7 +832,7 @@ export function createJobs(host: JobsHost) {
       if (job && !isLive(job.status)) return { text: `The Job is already ${job.status}.` };
       if (!job && agent.endedAt) return { text: `${id} already ended.` };
       const now = clock();
-      if (job) Object.assign(job, { status: "stopped", reason, endedAt: now, stalledAt: null });
+      if (job) Object.assign(job, { status: "stopped", reason, endedAt: now, stalledAt: null, resume: null });
       agent.endedAt = now;
       return { conversationId: agent.conversationId };
     }, context);
@@ -798,9 +870,10 @@ export function createJobs(host: JobsHost) {
     const live = await harness.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       doc.paused = false;
-      return liveAgents(doc).map((agent) => agent.id);
+      return liveAgents(doc).map((agent) => ({ id: agent.id, brief: agent.briefed ? null : agent.brief }));
     }, context);
-    for (const id of live) await sendTo(root, id, "The project was paused and has resumed. Continue where you left off.", true);
+    for (const { id, brief } of live)
+      await sendTo(root, id, brief || "The project was paused and has resumed. Continue where you left off.", true);
   }
 
   /** After a reopen, before the scheduler runs: let the host rebuild what live agents need (workspace tools). */
@@ -848,12 +921,32 @@ export function createJobs(host: JobsHost) {
     if (job.status !== "ready" && job.status !== "ready-with-gaps") return { refused: `The Job is ${job.status}, not ready.` };
     if (!job.pr || !job.candidate) return { refused: "The Job has no PR and candidate to merge." };
     const outcome = await host.approver.approve({ id: job.id, pr: job.pr, candidateSha: job.candidate });
-    if (outcome.kind === "accepted" || outcome.kind === "merged-pull-skipped")
-      await harness.commit(async (tx) => {
-        const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
-        if (current && (current.status === "ready" || current.status === "ready-with-gaps")) current.status = "approved";
-      }, context);
+    await markApproved(harness, jobId, outcome);
     return { outcome };
+  }
+
+  async function markApproved(harness: Harness, jobId: string, outcome: AcceptanceOutcome | null): Promise<void> {
+    if (outcome?.kind !== "accepted" && outcome?.kind !== "merged-pull-skipped") return;
+    await harness.commit(async (tx) => {
+      const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
+      if (current && (current.status === "ready" || current.status === "ready-with-gaps")) current.status = "approved";
+    }, context);
+  }
+
+  /** An Approve that answered `auto-merge-pending` ended later: record the merge and tell the Job's chat. */
+  async function finishApproval(harness: Harness, jobId: string, outcome: AcceptanceOutcome | null, line: string): Promise<void> {
+    await markApproved(harness, jobId, outcome);
+    const job = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.jobs[jobId];
+    const chat = job && (await harness.conversation(job.chat, context));
+    await chat?.submit(
+      {
+        type: "input",
+        content: `[worker ${jobId} approve: ${job!.title}] ${line}`,
+        whenBusy: "followUp",
+        requestId: `approve:${jobId}:${clock()}`,
+      },
+      context,
+    );
   }
 
   // ── Stall detector ─────────────────────────────────────────────────────────
@@ -907,7 +1000,10 @@ export function createJobs(host: JobsHost) {
       const owned = [worker, ...(await descendants(harness, worker))];
       const background = (await host.backgroundSilence?.(owned)) ?? null;
       const running = await working(harness, worker);
-      if (!running && background === null) {
+      const agent = doc.agents[job.id];
+      // Idle with no process: only a worker that is prepared and not waiting out a quota can be stalled.
+      const idle = !running && background === null;
+      if (idle && (!agent?.prepared || (agent.quota && agent.quota.retryAt > now))) {
         seen.delete(worker);
         continue;
       }
@@ -921,8 +1017,9 @@ export function createJobs(host: JobsHost) {
       const calls = await recentCalls(harness, leaf);
       const tail = calls.slice(-REPEATS);
       let problem: string | null = null;
-      if (running && silent >= limit) problem = `no progress for ${minutes(silent)}`;
-      else if (tail.length === REPEATS && tail.every((call) => call.key === tail[0]!.key))
+      if (idle && silent >= limit) problem = `the worker is idle and has not reported for ${minutes(silent)}`;
+      else if (running && silent >= limit) problem = `no progress for ${minutes(silent)}`;
+      else if (running && tail.length === REPEATS && tail.every((call) => call.key === tail[0]!.key))
         problem = `the same tool call returned the same result ${REPEATS} times`;
       else if (background !== null && background >= limit) problem = `a background process printed nothing for ${minutes(background)}`;
       if (!problem) {
@@ -940,7 +1037,7 @@ export function createJobs(host: JobsHost) {
       await chat?.submit(
         {
           type: "input",
-          content: `[worker ${job.id} stalled: ${job.title}] ${problem}${leaf !== worker ? ` (in its ${leaf === worker ? "worker" : "subagent"} conversation ${leaf})` : ""}.${steps ? `\nLast steps:\n${steps}` : ""}\nSteer or stop it if needed.`,
+          content: `[worker ${job.id} stalled: ${job.title}] ${problem}${leaf !== worker ? ` (in its ${job.children.find((child) => child.id === leaf)?.role ?? "subagent"} conversation ${leaf})` : ""}.${steps ? `\nLast steps:\n${steps}` : ""}\nSteer or stop it if needed.`,
           whenBusy: "followUp",
           requestId: `stall:${job.id}:${episode}`,
         },
@@ -976,11 +1073,12 @@ export function createJobs(host: JobsHost) {
       if (!reason.trim()) throw new Error("Stopping needs a reason");
       return stopAgent(harness, id, reason.trim());
     },
-    steer: async (harness: Harness, id: string, message: string, followUp = false) => {
+    steer: async (harness: Harness, id: string, message: string, followUp = false, requestId?: string) => {
       const root = await harness.root(context);
-      return sendTo(root, id, message, followUp);
+      return sendTo(root, id, message, followUp, requestId);
     },
     approve,
+    finishApproval,
     stallTick,
     pause,
     resume,

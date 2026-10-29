@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -23,6 +23,8 @@ export function inDeployWindow(now: Date, window: DeployWindow = DEFAULT_DEPLOY_
 
 type DeployState = {
   lastGood?: string;
+  /** When the owner asked to deploy while work was running; the deploy starts at the next idle moment, window or not. */
+  queuedAt?: number;
   lastIdleAttemptDay?: string;
   lastResult?: { at: number; ok: boolean; sha: string; message: string };
 };
@@ -36,6 +38,22 @@ export function readDeployState(): DeployState {
   }
 }
 const writeDeployState = (patch: Partial<DeployState>) => saveJson(statePath(), { ...readDeployState(), ...patch });
+
+export const queueDeploy = () => writeDeployState({ queuedAt: Date.now() });
+export const clearQueuedDeploy = () => writeDeployState({ queuedAt: undefined });
+
+const hostShaPath = () => join(home(), "host-sha");
+/** The host records the sha it started from; that is the only trustworthy rollback target. */
+export const recordHostSha = (sha: string): void => writeFileSync(hostShaPath(), `${sha}\n`, { mode: 0o600 });
+export const forgetHostSha = (): void => rmSync(hostShaPath(), { force: true });
+export function readHostSha(): string | undefined {
+  try {
+    const sha = readFileSync(hostShaPath(), "utf8").trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export type RunCommand = (command: string, args: string[], cwd: string) => Promise<string>;
 const defaultRun: RunCommand = async (command, args, cwd) =>
@@ -77,17 +95,18 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Restart the host from its main checkout: record the running sha, npm ci when the lockfile changed, npm run check, stop, start, smoke.
- * A failure after the stop checks out the recorded sha, restarts and tells the owner; the checkout stays detached there until the owner switches back.
+ * Restart the host from its main checkout: install and check the new sha in a separate worktree, then stop, npm ci when the lockfile changed, start, smoke.
+ * A failure after the stop checks out the sha the host started from, restarts and tells the owner; the checkout stays detached there until the owner switches back.
  */
 export async function deploy(deps: DeployDeps): Promise<DeployResult> {
   const run = deps.run ?? defaultRun,
     git = (...args: string[]) => run("git", args, deps.repo);
   return withLock(async () => {
+    const previous = readHostSha();
+    if (!previous) throw new Error("The sha the running host started from is unknown; deploy refused (restart the host once to record it)");
     if (await git("status", "--porcelain", "--untracked-files=no"))
       throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
-    const sha = await git("rev-parse", "HEAD"),
-      previous = readDeployState().lastGood ?? sha;
+    const sha = await git("rev-parse", "HEAD");
     const lockfileChanged = async (from: string, to: string) =>
       Boolean(await git("diff", "--name-only", from, to, "--", "package-lock.json")) || !existsSync(join(deps.repo, "node_modules"));
     const fail = async (result: DeployResult & { ok: false }) => {
@@ -95,16 +114,26 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
       await deps.tell(`Deploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
       return result;
     };
+    const changed = await lockfileChanged(previous, sha);
+    const checkDir = join(home(), "deploy-check");
     try {
-      if (await lockfileChanged(previous, sha)) await run("npm", ["ci"], deps.repo);
-      await run("npm", ["run", "check"], deps.repo);
+      // The running host keeps its node_modules and files until the check has passed.
+      rmSync(checkDir, { recursive: true, force: true });
+      await git("worktree", "prune");
+      await git("worktree", "add", "--detach", checkDir, sha);
+      if (changed) await run("npm", ["ci"], checkDir);
+      else symlinkSync(join(deps.repo, "node_modules"), join(checkDir, "node_modules"));
+      await run("npm", ["run", "check"], checkDir);
     } catch (error) {
       // Nothing was stopped, so the running host is untouched.
       return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
+    } finally {
+      await git("worktree", "remove", "--force", checkDir).catch(() => rmSync(checkDir, { recursive: true, force: true }));
     }
     let reason: string | undefined;
     try {
       await deps.stopHost();
+      if (changed) await run("npm", ["ci"], deps.repo);
       await deps.startHost();
       reason = await deps.smoke();
     } catch (error) {
@@ -231,8 +260,8 @@ export async function idleDeployTick(options: {
   return "started";
 }
 
-/** True when the checkout HEAD differs from the sha of the last good deploy. */
+/** True when the checkout HEAD differs from the sha the host started from. */
 export async function deployPending(repo: string, run: RunCommand = defaultRun): Promise<boolean> {
-  const good = readDeployState().lastGood;
-  return !good || good !== (await run("git", ["rev-parse", "HEAD"], repo));
+  const running = readHostSha();
+  return !running || running !== (await run("git", ["rev-parse", "HEAD"], repo));
 }
