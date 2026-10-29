@@ -40,6 +40,7 @@ try {
   checked = ["coordinator transcript item compatibility", "no tool items without model execution"];
   await request({ action: "shutdown" }, false);
 } catch (error) {
+  await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running
   primaryError = error instanceof Error ? error.message : String(error);
 } finally {
   const log = join(process.env.PI_PROJECTS_HOME, "host.log");
