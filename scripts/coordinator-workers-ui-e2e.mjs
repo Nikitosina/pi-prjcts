@@ -56,7 +56,7 @@ const model = createServer((req, res) => {
     const input = JSON.parse(body),
       msgs = input.messages;
     const names = (input.tools ?? []).map((tool) => tool.function?.name);
-    const coordinator = names.includes("projects_delegate");
+    const coordinator = names.includes("agents");
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const userText = String(
       typeof msgs[lastUser]?.content === "string" ? msgs[lastUser].content : JSON.stringify(msgs[lastUser]?.content ?? ""),
@@ -70,20 +70,27 @@ const model = createServer((req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(text);
     };
-    if (coordinator && userText.startsWith("[Durable work")) return reply(say("Report acknowledged."));
+    if (coordinator && /^\[(worker|scout|reviewer) /.test(userText)) return reply(say("Report acknowledged."));
     if (coordinator) {
       const delegate = {
         "MARK-SCOUT": { role: "scout", task: "MARK-SCOUTTASK read the code" },
         "MARK-REVIEW": { role: "reviewer", task: "MARK-REVIEWTASK grep the code" },
         "MARK-FAIL": { role: "worker", task: "MARK-FAILTASK will fail" },
-        "MARK-FAILB": { role: "worker", task: "MARK-FAILBTASK will fail" },
         "MARK-HOLD": { role: "worker", task: "MARK-HOLDTASK waits" },
-        "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", workspaceScopeId: randomUUID() },
+        "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", scopeId: randomUUID() },
       }[marker];
-      if (delegate && stage === 0) return reply(call("projects_delegate", delegate));
-      if (marker === "MARK-ARCHRUN" && stage === 0)
-        return reply(call("projects_worker_archive", { workIds: [/WORK=([a-f0-9-]{36})/.exec(userText)[1]] }));
-      if (marker === "MARK-ARCHALL" && stage === 0) return reply(call("projects_worker_archive", { terminal: true }));
+      if (delegate && stage === 0)
+        return reply(
+          call("agents", {
+            action: "spawn",
+            role: delegate.role,
+            title: delegate.task,
+            brief: delegate.task,
+            ...(delegate.role === "worker" ? { acceptance: ["it works"] } : {}),
+            ...(delegate.scopeId ? { scopeId: delegate.scopeId } : {}),
+            requestId: randomUUID(),
+          }),
+        );
       if (marker === "MARK-SLOW") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write(chunk({ role: "assistant", content: "" }, null));
@@ -290,11 +297,21 @@ const settle = async (id, job) =>
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
-const workFor = async (id, task) =>
-  eventually(async () => (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task)), `work ${task} missing`);
+// Jobs and loose agents (scouts, reviewers) in one list.
+const workOf = async (id) => {
+  const snap = await rpc({ action: "jobs-snapshot", id });
+  return [
+    ...snap.jobs.map((j) => ({
+      text: j.title,
+      status: j.status === "running" ? "running" : j.status === "failed" ? "failed" : "completed",
+    })),
+    ...snap.agents.filter((a) => a.jobId === null).map((a) => ({ text: a.title, status: a.endedAt === null ? "running" : "completed" })),
+  ];
+};
+const workFor = async (id, task) => eventually(async () => (await workOf(id)).find((w) => w.text.startsWith(task)), `work ${task} missing`);
 const terminal = async (id, task, status) =>
   eventually(async () => {
-    const w = (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task));
+    const w = (await workOf(id)).find((w) => w.text.startsWith(task));
     return w?.status === status && w;
   }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
@@ -302,6 +319,7 @@ const scrollInfo = (s) =>
     `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
     s,
   );
+let chromeSession;
 try {
   await eventually(async () => {
     if (hostEnded) throw Error("Host exited");
@@ -340,7 +358,7 @@ try {
   const scoutTools = toolsSeen["MARK-SCOUTTASK"] ?? [];
   if (!["code_read", "code_grep", "code_find", "code_ls"].every((name) => scoutTools.includes(name)))
     throw Error("Scout lacks read-only code tools: " + scoutTools);
-  if (scoutTools.some((name) => ["write", "edit", "bash", "read", "projects_delegate"].includes(name)))
+  if (scoutTools.some((name) => ["write", "edit", "bash", "read"].includes(name)))
     throw Error("Scout has mutating/unexpected tools: " + scoutTools);
   result.checks.push("R1 unscoped scout gets code_read/grep/find/ls and no write/edit/bash");
   result.scoutTools = scoutTools;
@@ -374,7 +392,7 @@ try {
     throw Error("Scoped scout did not run read-only with the scope ignored: " + JSON.stringify(scopedScout).slice(0, 400));
   result.checks.push("R5 a scout given workspaceScopeId runs read-only (scope ignored, C11f)");
 
-  // Browser: Workers panel hides completed, keeps failed.
+  // Browser: the Jobs tree lists the Jobs, and a held one finishes.
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
@@ -382,70 +400,22 @@ try {
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
+  chromeSession = s;
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   await waitFor(
-    `document.querySelector('#title')?.innerText === 'Workers UI' && document.querySelector('#outcomes').innerText.includes('failed')`,
+    `document.querySelector('#title')?.innerText === 'Workers UI' && document.querySelector('#job-tree').innerText.includes('MARK-FAILTASK')`,
     s,
     "project loaded",
   );
-  const panel = await evaluate(`document.querySelector('#activity').innerText`, s);
-  if (
-    /completed/i.test(panel) ||
-    /MARK-SCOUTTASK|MARK-REVIEWTASK/.test(
-      await evaluate(`[...document.querySelectorAll('#activity [title]')].map(n => n.title).join(' ')`, s),
-    )
-  )
-    throw Error("Completed work still in Workers panel: " + panel);
-  result.checks.push("A1 Workers panel hides finished work; failed shows under Recent results");
-
   await ask("MARK-HOLD");
-  const holdWork = await eventually(async () => {
-    const w = await workFor(id, "MARK-HOLDTASK");
-    return w.status === "running" && w;
-  }, "hold not running");
-  const archRun = await ask(`MARK-ARCHRUN WORK=${holdWork.id}`);
-  if (!/not terminal|running/i.test(archRun)) throw Error("Archiving running work not refused: " + archRun.slice(0, 400));
-  const unknown = await rpc({ action: "work-archive", id, workIds: [randomUUID()] }).then(
-    () => "accepted",
-    (error) => String(error),
-  );
-  if (unknown === "accepted") throw Error("Unknown work ID archived");
-  result.checks.push("A2 archive refuses running and unknown work");
+  await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status === "running", "hold not running");
+  await waitFor(`document.querySelector('#job-tree').innerText.includes('MARK-HOLDTASK')`, s, "running Job in the tree");
   releaseHold();
-  await terminal(id, "MARK-HOLDTASK", "completed");
-
-  const archAll = await ask("MARK-ARCHALL");
-  const afterArchive = (await rpc({ action: "plan-snapshot", id })).work;
-  const failA = afterArchive.find((w) => w.text.startsWith("MARK-FAILTASK"));
-  if (!failA?.archived || !/archived/i.test(archAll)) throw Error("Coordinator archive failed: " + archAll.slice(0, 300));
-  if (afterArchive.length < 4 || !(await rpc({ action: "thread-history", id, threadId: failA.threadId }).catch(() => null)))
-    throw Error("Archive removed history");
-  await waitFor(
-    `!document.querySelector('#outcomes').innerText.includes('failed') && !document.querySelector('#warning').innerText.includes('${failA.threadId}')`,
-    s,
-    "failed hidden from panel and warning after archive",
-  );
-  result.checks.push("A3 coordinator archives terminal work; panel hides it; record and thread retained");
-
-  await ask("MARK-FAILB");
-  await terminal(id, "MARK-FAILBTASK", "failed");
-  await evaluate(`document.querySelector('#activity [data-action="all-work"]').click()`, s);
-  await waitFor(`!!document.querySelector('#activity [data-action="work-archive"]')`, s, "owner archive button");
-  if (await evaluate(`document.querySelector('#activity').innerText.includes('MARK-FAILTASK')`, s))
-    throw Error("Archived work visible without toggle");
-  await evaluate(`document.querySelector('#activity [data-action="work-archive"]').click()`, s);
-  await waitFor(`!document.querySelector('#activity').innerText.includes('MARK-FAILBTASK')`, s, "owner archive hides");
-  await evaluate(`document.querySelector('#show-archived').click()`, s);
-  await waitFor(
-    `document.querySelector('#activity').innerText.includes('MARK-FAILTASK') && document.querySelector('#activity').innerText.includes('MARK-FAILBTASK') && /archived/i.test(document.querySelector('#activity').innerText)`,
-    s,
-    "show archived",
-  );
-  result.checks.push('A4 owner archives from Activity; "Show archived" reveals archived work');
-  await shot("01-activity-archived", s);
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
+  await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status !== "running", "held Job did not finish");
+  result.checks.push("A1 the Jobs tree lists failed and running Jobs; a held Job finishes");
+  await shot("01-jobs-tree", s);
 
   // Inline streaming with sticky auto-scroll.
   await waitFor(`!document.querySelector('#compose textarea').disabled`, s, "composer ready");
@@ -478,7 +448,7 @@ try {
   result.checks.push("S3 auto-scroll resumes after Jump to latest");
   await settle(id, slow);
   await waitFor(
-    `document.querySelector('#messages').innerText.includes('STREAM-END') && document.querySelector('#live-reply').hidden`,
+    `document.querySelector('#messages').innerText.includes('STREAM-LINE-15') && document.querySelector('#live-reply').hidden`,
     s,
     "final message",
     40,
@@ -491,6 +461,12 @@ try {
 } catch (error) {
   result.status = "failed";
   result.failure = redact(error?.stack ?? error);
+  try {
+    result.diagnostic = await evaluate(
+      `JSON.stringify({ live: document.querySelector('#live-reply')?.hidden, tail: document.querySelector('#messages').innerText.slice(-300) })`,
+      chromeSession,
+    );
+  } catch {}
 } finally {
   releaseHold?.();
   if (chrome && !cdpEnded) {

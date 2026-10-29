@@ -1121,7 +1121,6 @@ async function usageList(offset = 0) {
     throw new Error("Usage requires a loaded Durable project/valid page");
   const id = getProjectId(),
     current = getGeneration(),
-    coordinatorId = getView().durableInspection?.identity.coordinatorConversationId,
     version = showDialog("Usage", '<p class="note">Reading token counts…</p>', "Token counts recorded by the SDK. Estimates, not billing.");
   const page = await api({ action: "usage-snapshot", id, offset, limit: 100 });
   if (!dialog.open || version !== dialogVersion || id !== getProjectId() || current !== getGeneration()) return;
@@ -1133,7 +1132,6 @@ async function usageList(offset = 0) {
     !Number.isSafeInteger(page.totalWorkers) ||
     page.totalWorkers < 0 ||
     !page.coordinator ||
-    (coordinatorId !== undefined && page.coordinator.conversationId !== coordinatorId) ||
     (page.nextOffset !== null && (!page.workers.length || page.nextOffset !== offset + page.workers.length)) ||
     page.workers.some(
       (worker) =>

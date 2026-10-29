@@ -229,7 +229,9 @@ try {
     "oversized Unicode MEMORY.md records memory guard failure before unsafe reply",
     invalid.status === "unanswered" &&
       /3000|MEMORY\.md/i.test(guardEvidence) &&
-      !invalidView.coordinator.history.items.some((message) => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN")),
+      !invalidView.coordinator.history.items.some(
+        (message) => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN"),
+      ),
   );
   const damaged = await readKnowledge(primary.dir, "MEMORY.md");
   memory = await writeKnowledge({
@@ -262,7 +264,8 @@ try {
   );
   pass(
     "preferences are absent until demanded",
-    !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes(preference)),
+    !has(firstMaster, preference) &&
+      (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes(preference)),
   );
   const workerRequestAt = requests.length;
   const spawned = await runtime.spawn(undefined, {
