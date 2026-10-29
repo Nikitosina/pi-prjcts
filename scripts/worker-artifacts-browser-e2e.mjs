@@ -297,7 +297,12 @@ try {
   await select("my notes/résumé 日本.txt", s);
   await waitFor(`document.querySelector('#artifact-body pre')?.innerText === 'unicode ok'`, s, "unicode preview");
   await click('#artifact-preview [data-action="artifact-download"]', s);
-  await eventually(() => readdirSync(dl).some((f) => !f.endsWith(".crdownload")), "download did not finish", 100);
+  // The blob fetch and Chrome's download both slow down under parallel load; wait for the file, and say what the page showed if it never lands.
+  await eventually(() => readdirSync(dl).some((f) => !f.endsWith(".crdownload")), "download did not finish", 600).catch(async (error) => {
+    throw Error(
+      `${error.message}: files ${JSON.stringify(readdirSync(dl))}, page says ${await evaluate(`document.querySelector('#error')?.innerText ?? ''`, s)}`,
+    );
+  });
   const downloaded = readdirSync(dl);
   result.downloads = downloaded;
   check(

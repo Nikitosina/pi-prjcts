@@ -360,14 +360,13 @@ try {
   };
   writeFileSync(join(base, "report.json"), JSON.stringify(report, null, 2) + "\n");
   fake.close();
-  if (pid) {
+  // pid is cleared while the host restarts, so a failure there must still stop the new host.
+  try {
+    await api({ action: "shutdown" }, false);
+  } catch {
     try {
-      await api({ action: "shutdown" }, false);
-    } catch {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {}
-    }
+      if (pid) process.kill(pid, "SIGTERM");
+    } catch {}
   }
   process.stderr.write(`${join(base, "report.json")}\n`);
 }

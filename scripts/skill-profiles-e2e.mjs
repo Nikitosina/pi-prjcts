@@ -421,7 +421,19 @@ try {
     await waitFor(`document.querySelector('[data-action="skills-tab"][data-role="${role}"]').classList.contains('on')`, s, `${role} tab`);
     await evaluate(`document.querySelector('[data-skill-pick="${name}"]').click()`, s);
   };
+  // A Settings read still in flight when the owner starts picking must not overwrite the picks when it lands.
+  await evaluate(
+    `(() => { const f = window.fetch; window.fetch = async (u, o) => { const r = await f(u, o); if (String(o?.body).includes('settings-snapshot')) await new Promise((x) => { window.__release = x; }); return r; }; window.__realFetch = f; })()`,
+    s,
+  );
+  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
+  await delay(300);
+  await evaluate(`document.querySelector('[data-tab="settings"]').click()`, s);
+  await delay(300);
   await pick("all", "repo-two"); // switch repo-two off for every profile
+  await waitFor(`typeof window.__release === 'function'`, s, "settings read held in flight");
+  await evaluate(`window.__release(); window.fetch = window.__realFetch`, s);
+  await delay(300);
   await pick("worker", "glob-alpha");
   await pick("scout", "glob-beta");
   await pick("coordinator", "glob-gamma");

@@ -49,7 +49,8 @@ const call = (tool, args, conversationId) =>
   tool.execute(args, { conversationId, taskId: 1, callId: randomUUID() }, { abortSignal: undefined });
 const payload = (out) => JSON.parse(out.content[0].text);
 
-let errorText = null,
+let hostStopped = false,
+  errorText = null,
   harness;
 try {
   const repo = join(root, "Demo");
@@ -161,6 +162,7 @@ try {
   assert.equal(advanced.wholeRepository, undefined);
   pass("F14/F15 project view has wholeRepository; advanced grant API still works", { advancedScope: advanced.id });
   await request({ action: "shutdown" }, false);
+  hostStopped = true;
 
   // ---- Worker binding, in process (no host, no model) ----
   const [
@@ -284,6 +286,7 @@ try {
   );
   pass("F13 advanced scope: dirty owner blocked, exact files enforced, no list tool");
 } catch (error) {
+  if (!hostStopped) await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running
   errorText = error instanceof Error ? error.stack : String(error);
 } finally {
   try {

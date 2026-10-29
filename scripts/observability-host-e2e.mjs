@@ -38,6 +38,7 @@ try {
   actions.push("event-log lifecycle");
   await request({ action: "shutdown" }, false);
 } catch (error) {
+  await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running
   errorText = error instanceof Error ? error.message : String(error);
 } finally {
   const log = join(process.env.PI_PROJECTS_HOME, "host.log");

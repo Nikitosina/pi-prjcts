@@ -34,6 +34,7 @@ try {
   if (!Array.isArray(history.routines) || history.routines.length !== 0) throw new Error("Empty project should have no routine outcomes");
   await request({ action: "shutdown" }, false);
 } catch (error) {
+  await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running
   errorText = error instanceof Error ? error.message : String(error);
 } finally {
   const log = join(process.env.PI_PROJECTS_HOME, "host.log");

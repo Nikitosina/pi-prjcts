@@ -26,6 +26,7 @@ try {
   results.push("jobs-snapshot", "usage-snapshot", "owner-setup-snapshot");
   await request({ action: "shutdown" }, false);
 } catch (error) {
+  await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running
   primaryError = error instanceof Error ? error.message : String(error);
 } finally {
   const log = join(process.env.PI_PROJECTS_HOME, "host.log");

@@ -177,9 +177,16 @@ async function loadSkillsPicker(force = false) {
     } catch {}
     return;
   }
+  const draftAtStart = skillsPicker?.projectId === id ? JSON.stringify(skillsPicker.draft) : null;
   try {
     const [settings, { skills }] = await Promise.all([api({ action: "settings-snapshot", id }), api({ action: "coordinator-skills", id })]);
     if (id !== getProjectId() || current !== getGeneration()) return;
+    // The owner edited while this read was in flight: the answer is stale for the draft, so only the catalog is taken from it.
+    if (!force && skillsPicker?.projectId === id && JSON.stringify(skillsPicker.draft) !== draftAtStart) {
+      skillsPicker.skills = skills;
+      renderSkillsPicker();
+      return;
+    }
     const saved = settings.values.skills;
     const profiles = { ...{ all: [], coordinator: [], worker: [], scout: [], reviewer: [] }, ...(saved?.off ?? {}) };
     skillsPicker = {
