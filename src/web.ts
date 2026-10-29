@@ -84,7 +84,11 @@ export async function startWeb(
   const COALESCE_MS = 250;
   /** Pushes the topics a project's commits touch, batched; the browser refetches only those. No polling: nothing runs while nothing changes. */
   const watchChanges = async (id: string, frame: (frame: unknown) => void, end: () => void) => {
-    if (closing) throw new Error("Browser listener is stopping");
+    // A tab reconnecting while the host stops gets an empty stream, not an error; it retries against the next host.
+    if (closing) {
+      end();
+      return () => {};
+    }
     await openProject(id);
     const pending = new Map<string, FeedEvent>();
     let timer: NodeJS.Timeout | undefined;
