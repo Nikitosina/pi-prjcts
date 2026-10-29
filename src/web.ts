@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
@@ -175,6 +175,9 @@ export async function startWeb(
     ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
     ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
   ]);
+  // The feature modules under web/app/ are imported by app.js; only files that exist at start are served, never a path from the request.
+  for (const file of readdirSync(fileURLToPath(new URL("../web/app/", import.meta.url))))
+    if (/^[a-z]+\.js$/.test(file)) assets.set(`/app/${file}`, { path: `app/${file}`, mime: "text/javascript; charset=utf-8" });
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store",
