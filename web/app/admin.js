@@ -480,12 +480,9 @@ registerForms([
       const input =
         proposal.kind === "events"
           ? { action: "event-opt-in", id: target, enabled: proposal.enabled }
-          : proposal.kind === "schedule"
-            ? { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled }
-            : { action: "monitor-enable", id: target, monitorId: proposal.recordId, enabled: proposal.enabled };
+          : { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled };
       await mutate(input, "Confirmed routine setting recorded. Pause, grants and retained receipts are unchanged.");
-      if (dialog.open && getProjectId() === target && dialogVersion === version)
-        await routineList(proposal.kind === "monitor" ? "monitors" : "schedules", 0);
+      if (dialog.open && getProjectId() === target && dialogVersion === version) await routineList("schedules", 0);
     },
   ],
   [
@@ -877,18 +874,17 @@ function lifecycleConfirm(id, operation) {
 }
 async function routineList(lens = "schedules", offset = 0) {
   if (lens === "history") return routineHistory("intents", 0, 0);
-  if (!jobsSnap || !["schedules", "monitors"].includes(lens) || !Number.isSafeInteger(offset) || offset < 0)
+  if (!jobsSnap || lens !== "schedules" || !Number.isSafeInteger(offset) || offset < 0)
     throw new Error("Routine view requires a loaded Durable project and valid cached page");
   const id = getProjectId(),
     current = getGeneration(),
     version = showDialog(
-      "Schedules and monitors",
+      "Schedules",
       '<p class="note">Reading your automations…</p>',
       "Turn automations on or off. Every change asks you to confirm first.",
     );
-  const [schedules, monitors, policy] = await Promise.all([
+  const [schedules, policy] = await Promise.all([
     api({ action: "schedule-snapshot", id, includeHistory: false }),
-    api({ action: "monitor-snapshot", id }),
     api({ action: "jobs-snapshot", id }),
   ]);
   if (!dialog.open || version !== dialogVersion || id !== getProjectId() || current !== getGeneration()) return;
@@ -915,37 +911,19 @@ async function routineList(lens = "schedules", offset = 0) {
         !["once", "interval", "calendar"].includes(record.kind) ||
         typeof record.text !== "string",
     ) ||
-    !monitors ||
-    !Array.isArray(monitors.items) ||
-    monitors.items.some(
-      (record) =>
-        !uuid(record.id) ||
-        typeof record.enabled !== "boolean" ||
-        !["pr", "ci", "review"].includes(record.kind) ||
-        typeof record.repositoryId !== "string" ||
-        !Number.isSafeInteger(record.expectedRepositoryId) ||
-        record.expectedRepositoryId < 1 ||
-        !Number.isSafeInteger(record.pullRequest) ||
-        record.pullRequest < 1,
-    ) ||
     !policy ||
     typeof policy.paused !== "boolean"
   )
     throw new Error("Invalid owned routine projection");
-  routineCache = { project: id, schedules, monitors, policy };
-  const records = lens === "schedules" ? schedules.schedules : monitors.items,
+  routineCache = { project: id, schedules, policy };
+  const records = schedules.schedules,
     page = records.slice(offset, offset + 100),
-    kind = lens === "schedules" ? "schedule" : "monitor";
+    kind = "schedule";
   const tabs = segTabs([
     [
       `Schedules (${schedules.schedules.length})`,
       { action: "routine-list", project: id, lens: "schedules", offset: 0 },
       lens === "schedules",
-    ],
-    [
-      `GitHub monitors (${monitors.items.length})`,
-      { action: "routine-list", project: id, lens: "monitors", offset: 0 },
-      lens === "monitors",
     ],
     [
       `History (${schedules.historyCounts.events + schedules.historyCounts.intents})`,
@@ -959,10 +937,9 @@ async function routineList(lens = "schedules", offset = 0) {
     page
       .map(
         (record) =>
-          `<div class="list-row"><div class="grow"><strong>${lens === "schedules" ? esc(clip(record.text, 140)) : `${esc(record.repositoryId)} · PR #${record.pullRequest}`}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))}${lens === "monitors" ? " monitor" : " schedule"}</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`,
+          `<div class="list-row"><div class="grow"><strong>${esc(clip(record.text, 140))}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))} schedule</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`,
       )
-      .join("") ||
-    `<p class="empty-state">No ${lens === "schedules" ? "schedules" : "monitors"} yet. They are created from the command line and start turned off.</p>`;
+      .join("") || `<p class="empty-state">No schedules yet. They are created from the command line and start turned off.</p>`;
   setDialogBody(
     `${policy.paused || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
   );
@@ -1059,12 +1036,10 @@ async function routineHistory(kind = "intents", offset = 0, textOffset = 0) {
   );
 }
 function routineRecord(kind, recordId) {
-  if (!routineCache || routineCache.project !== getProjectId() || !["schedule", "monitor", "events"].includes(kind))
+  if (!routineCache || routineCache.project !== getProjectId() || !["schedule", "events"].includes(kind))
     throw new Error("Owned routine snapshot unavailable; reread");
   if (kind === "events") return { eventOptIn: routineCache.schedules.eventOptIn };
-  const record = (kind === "schedule" ? routineCache.schedules.schedules : routineCache.monitors.items).find(
-    (record) => record.id === recordId,
-  );
+  const record = routineCache.schedules.schedules.find((record) => record.id === recordId);
   if (!record) throw new Error("Routine not present in the displayed owned snapshot");
   return record;
 }
@@ -1077,11 +1052,11 @@ function routineConfirm(kind, recordId, value) {
   if ((kind === "events" ? record.eventOptIn : record.enabled) === enabled)
     throw new Error("Displayed routine setting changed; reread before confirming");
   const binding = JSON.stringify(record),
-    noun = kind === "events" ? "outside events" : `this ${kind}`,
+    noun = kind === "events" ? "outside events" : "this schedule",
     state = (on) => (on ? "On" : "Off");
   const version = showDialog(
     `Turn ${enabled ? "on" : "off"} ${noun}?`,
-    `<div class="diff-list">${diffItem(["Status", state(!enabled), state(enabled)])}</div>${kind === "events" ? "" : recordSummary(record)}<p class="note">${enabled ? "Turning on lets it run while your Mac is awake. It does not resume the project, grant tools or publishing, clear an uncertain outcome or replay anything. Monitors also need outside events on and current repository access." : "Turning off keeps its schedule, history and cursors. It just stops running."}</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "routine-list", project: id, lens: kind === "monitor" ? "monitors" : "schedules" }), `<button type="submit" class="primary">Turn ${enabled ? "on" : "off"}</button>`)}</form>`,
+    `<div class="diff-list">${diffItem(["Status", state(!enabled), state(enabled)])}</div>${kind === "events" ? "" : recordSummary(record)}<p class="note">${enabled ? "Turning on lets it run while your Mac is awake. It does not resume the project, grant tools or publishing, clear an uncertain outcome or replay anything." : "Turning off keeps its schedule, history and cursors. It just stops running."}</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "routine-list", project: id, lens: "schedules" }), `<button type="submit" class="primary">Turn ${enabled ? "on" : "off"}</button>`)}</form>`,
     getView().project.name,
   );
   routineConfirmation = { project: id, kind, recordId, enabled, binding, version };

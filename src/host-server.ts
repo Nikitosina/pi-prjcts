@@ -1203,26 +1203,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         textOffset: input.textOffset,
         textLimit: input.textLimit,
       });
-    case "monitor-create":
-      return withDurableOwner({
-        id: input.id,
-        validate: (project) => {
-          if (project.deleted || project.archived) throw new Error("Inactive project cannot monitor providers");
-        },
-        operation: (owner) =>
-          owner.monitorCreate({
-            id: input.monitorId,
-            repositoryId: input.repositoryId,
-            expectedRepositoryId: input.expectedRepositoryId,
-            pullRequest: input.pullRequest,
-            kind: input.kind,
-            everyMs: input.everyMs,
-          }),
-      });
-    case "monitor-enable":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.monitorSetEnabled(input.monitorId, input.enabled) });
-    case "monitor-snapshot":
-      return (await durable(input.id)).monitorSnapshot();
     case "event-opt-in":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleSetEventOptIn(input.enabled) });
     case "automation-snapshot":

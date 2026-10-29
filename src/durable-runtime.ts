@@ -89,7 +89,6 @@ import {
 } from "./state.ts";
 import { catalog } from "./workspace-authorization.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
-import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { rolePrompt, SHARED_ROLE_RULES } from "./role-prompts.ts";
 import { loadAutomations } from "./project-automations.ts";
@@ -314,9 +313,6 @@ export type DurableProjectRuntime = {
   ingestLocalEvent(input: { eventId: string; kind: string; payload: string }): Promise<unknown>;
   scheduleSnapshot(options?: { includeHistory?: boolean }): Promise<DurableScheduleSnapshot>;
   scheduleHistory: ReturnType<typeof scheduleRuntime>["history"];
-  monitorCreate(input: MonitorInput): ReturnType<ReturnType<typeof monitorRuntime>["create"]>;
-  monitorSetEnabled(id: string, enabled: boolean): ReturnType<ReturnType<typeof monitorRuntime>["setEnabled"]>;
-  monitorSnapshot(): ReturnType<ReturnType<typeof monitorRuntime>["snapshot"]>;
   /** Follow PRs: poll now (joins a running poll), status, and restart the schedule after an opt-in change. */
   followPoll(): Promise<unknown>;
   followSnapshot(): ReturnType<ReturnType<typeof followRuntime>["snapshot"]>;
@@ -1101,15 +1097,6 @@ export async function openDurableProject(input: {
       beforeScheduleReceiptCommit: input.beforeScheduleReceiptCommit,
     });
     const worktreeMutex = new AdmissionMutex();
-    const monitors = monitorRuntime(root, project.id, schedules, () => closed);
-    const monitorOperations = new Set<Promise<void>>();
-    const monitorWake = setInterval(() => {
-      if (closed) return;
-      const operation = monitors.poll().catch((error) => report(input.onReport, project.id, error));
-      monitorOperations.add(operation);
-      void operation.finally(() => monitorOperations.delete(operation));
-    }, 60000);
-    monitorWake.unref();
     // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
     const eventTarget = async (): Promise<Conversation> => {
       try {
@@ -1256,9 +1243,6 @@ export async function openDurableProject(input: {
       follow.abort();
       clearInterval(prMonitorWake);
       clearInterval(stallWake);
-      clearInterval(monitorWake);
-      await monitors.close();
-      await Promise.allSettled([...monitorOperations]);
     };
     const armWake = async (): Promise<void> => {
       if (closed) return;
@@ -1661,7 +1645,6 @@ export async function openDurableProject(input: {
         };
       },
       pause: async () => {
-        monitors.abort();
         follow.abort();
         commands.abort();
         await schedules.mutex.run(async () => {
@@ -1697,9 +1680,6 @@ export async function openDurableProject(input: {
         await schedules.reconcile();
         return schedules.history(kind, options);
       },
-      monitorCreate: (value) => monitors.create(value),
-      monitorSetEnabled: (id, enabled) => monitors.setEnabled(id, enabled),
-      monitorSnapshot: () => monitors.snapshot(),
       followPoll: () => {
         assertOpen();
         return follow.poll(true);

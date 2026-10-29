@@ -1053,21 +1053,6 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object(
-    {
-      action: Type.Literal("monitor-create"),
-      id: Id,
-      monitorId: Type.Optional(Id),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-      pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-      kind: Type.Union([Type.Literal("pr"), Type.Literal("ci"), Type.Literal("review")]),
-      everyMs: Type.Integer({ minimum: 60000, maximum: 86400000 }),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object({ action: Type.Literal("monitor-enable"), id: Id, monitorId: Id, enabled: Type.Boolean() }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("monitor-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("event-opt-in"), id: Id, enabled: Type.Boolean() }, { additionalProperties: false }),
   Type.Object(
     {

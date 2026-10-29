@@ -418,7 +418,7 @@ await kit.run(async () => {
   check(
     "routines: plain title, tabs with counts, rows with On/Off chips, JSON only in Details",
     await dlg(
-      `d.querySelector('h2').textContent === 'Schedules and monitors' && d.querySelectorAll('.skill-tabs button').length === 3 && d.querySelectorAll('.list-row').length >= 3 && d.querySelector('.state-chip') && ![...d.querySelectorAll('pre')].some(p => !p.closest('details')) && !${jargon}.test(d.innerText)`,
+      `d.querySelector('h2').textContent === 'Schedules' && d.querySelectorAll('.skill-tabs button').length === 2 && d.querySelectorAll('.list-row').length >= 3 && d.querySelector('.state-chip') && ![...d.querySelectorAll('pre')].some(p => !p.closest('details')) && !${jargon}.test(d.innerText)`,
     ),
   );
   await capture("routines");
@@ -433,7 +433,7 @@ await kit.run(async () => {
   await capture("routine-confirm");
   await ev(`document.querySelector('#dialog form[data-routine-change] [type=submit]').click()`);
   await page.waitFor(
-    `document.querySelector('#dialog h2')?.textContent === 'Schedules and monitors' || !document.querySelector('#dialog').open`,
+    `document.querySelector('#dialog h2')?.textContent === 'Schedules' || !document.querySelector('#dialog').open`,
     "after toggle",
   );
   const enabledCount = (await rpc({ action: "schedule-snapshot", id })).schedules.filter(

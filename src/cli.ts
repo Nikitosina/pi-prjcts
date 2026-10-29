@@ -160,10 +160,6 @@ switch (command) {
       throw new Error("Usage: schedules <project-id> [--without-history]");
     input = parse(Request, { action: "schedule-snapshot", id: first, ...(second ? { includeHistory: false } : {}) });
     break;
-  case "monitors":
-    if (!first || second || rest.length) throw new Error("Usage: monitors <project-id>");
-    input = parse(Request, { action: "monitor-snapshot", id: first });
-    break;
   case "schedule-history": {
     const [offset = "0", textOffset = "0"] = rest;
     if (!first || (second !== "events" && second !== "intents") || rest.length > 2)
@@ -226,15 +222,14 @@ switch (command) {
     }
     break;
   }
-  case "schedule-enable":
-  case "monitor-enable": {
-    if (!first || !second) throw new Error(`Usage: ${command} <project-id> <routine-id> <true|false> --confirm <same-project-id>`);
+  case "schedule-enable": {
+    if (!first || !second) throw new Error("Usage: schedule-enable <project-id> <schedule-id> <true|false> --confirm <same-project-id>");
     const values = confirmedArguments(rest, first);
     if (values.length !== 1 || (values[0] !== "true" && values[0] !== "false")) throw new Error("Enabled must be exactly true or false");
     input = parse(Request, {
-      action: command,
+      action: "schedule-enable",
       id: first,
-      ...(command === "schedule-enable" ? { scheduleId: second } : { monitorId: second }),
+      scheduleId: second,
       enabled: values[0] === "true",
     });
     break;
@@ -243,26 +238,6 @@ switch (command) {
     if (!first || (second !== "true" && second !== "false") || confirmedArguments(rest, first).length)
       throw new Error("Usage: event-opt-in <project-id> <true|false> --confirm <same-project-id>");
     input = parse(Request, { action: "event-opt-in", id: first, enabled: second === "true" });
-    break;
-  }
-  case "monitor-create": {
-    if (!first || !second)
-      throw new Error(
-        "Usage: monitor-create <project-id> <stable-monitor-uuid> <repository-id> <numeric-repository-id> <pr-number> <pr|ci|review> <interval-ms> --confirm <same-project-id>",
-      );
-    const values = confirmedArguments(rest, first);
-    if (values.length !== 5) throw new Error("Monitor requires repository identity, PR number, kind and interval");
-    const [repositoryId, expectedRepositoryId, pullRequest, kind, everyMs] = values;
-    input = parse(Request, {
-      action: "monitor-create",
-      id: first,
-      monitorId: second,
-      repositoryId,
-      expectedRepositoryId: integerArgument(expectedRepositoryId, "Repository numeric ID"),
-      pullRequest: integerArgument(pullRequest, "PR number"),
-      kind,
-      everyMs: integerArgument(everyMs, "Monitor interval milliseconds"),
-    });
     break;
   }
   case "owner-workspaces":
@@ -363,7 +338,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }
@@ -400,10 +375,6 @@ try {
   if (input.action === "schedule-create")
     process.stderr.write(
       `Schedule ${input.scheduleId}: response is unconfirmed. Inspect its retained definition/ticks before any exact-ID retry; do not invent a replacement ID or start time.\n`,
-    );
-  if (input.action === "monitor-create")
-    process.stderr.write(
-      `Monitor ${input.monitorId}: response is unconfirmed. Inspect its retained binding/cursor before any exact-ID retry; do not invent a replacement UUID.\n`,
     );
   process.exitCode = 1;
 }
