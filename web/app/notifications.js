@@ -28,7 +28,6 @@ export let notifyCursor,
 const notifyAwayNow = () => document.visibilityState === "hidden" || !document.hasFocus();
 const noticeLabels = {
   question: "Question",
-  approval: "Approval",
   review: "Review",
   result: "Finished",
   error: "Error",
@@ -117,7 +116,7 @@ function testNotice() {
   };
 }
 function showNotice(item) {
-  const body = `${noticeLabels[item.kind] ?? item.kind}: ${item.kind === "approval" ? item.title : item.text}`;
+  const body = `${noticeLabels[item.kind] ?? item.kind}: ${item.text}`;
   const notice = new Notification(`${item.project} · ${item.chat}`, {
     body: body.length > 300 ? `${body.slice(0, 299)}…` : body,
     tag: `pi-projects-${item.seq}`,

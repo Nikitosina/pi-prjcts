@@ -21,7 +21,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - vcs        a checkout kind besides git: root detection, status, diffs, PR-head snapshots, branch continuation.
  *  - workspace  a workspace-grant provider for that kind: one-click grant, worktree backend, worker binding, cleanup facts, setup cards.
  *  - prs        a pull-request provider: card data, detail, `#` refs, watch/hide, transitions for the monitor, notices.
- *  - follow     publication-receipt based Follow PRs for the provider: observe, auto-fix brief, auto-merge.
+ *  - follow     publication-receipt based Follow PRs for the provider: observe, auto-fix brief.
  *  - merge      result acceptance for the checkout kind: inspect a PR, merge at the approved head, auto-merge, pull the main checkout.
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.
@@ -343,34 +343,6 @@ export type FollowFailure = {
   provider?: string;
 };
 export type FollowRepoState = { baselined: boolean; prs: Record<string, FollowPrState> };
-export type MergeReceipt = {
-  sha: string;
-  state: "uncertain" | "merged" | "failed";
-  at: number;
-  marker: string;
-  reviewerThreadId: string;
-  mergeCommit: string | null;
-  error: string | null;
-  retryable?: boolean;
-};
-/** Helpers the host gives a provider's auto-merge (same receipts, review requests and gates as GitHub's). */
-export type AutoMergeKit = {
-  repositoryId: string;
-  note(id: string, line: string): FollowItem | null;
-  receipts(): MergeReceipt[];
-  save(receipt: MergeReceipt, change: Partial<MergeReceipt>): Promise<void>;
-  /** Records an `uncertain` receipt before the merge call (refuses when paused, switched off or already recorded). */
-  begin(receipt: MergeReceipt): Promise<void>;
-  /** The reviewer's verdict for exactly this head, if any. */
-  verdict(head: string): Promise<{ verdict: string; threadId: string; summary: string } | null>;
-  requestReview(pr: FollowPrState, diff: () => Promise<string>): Promise<FollowItem | null>;
-  /** Pull requests this project opened (verified receipts). */
-  published(): Promise<Array<{ number: number }>>;
-  project(): Project;
-  trustedOwner(): string;
-  signal: AbortSignal;
-  state: { mergeNotes?: Record<string, string> };
-};
 export type FollowProvider = {
   id: string;
   /** Event kind for deliveries, e.g. "<id>.follow". */
@@ -386,7 +358,6 @@ export type FollowProvider = {
     signal: AbortSignal;
   }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
   published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>>;
-  autoMerge(kit: AutoMergeKit, number: number, pr: FollowPrState): Promise<FollowItem | null>;
 };
 
 // ---- merge (result acceptance) ----

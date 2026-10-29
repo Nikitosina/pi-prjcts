@@ -57,11 +57,10 @@ await kit.run(async () => {
   // Q1/Q2/Q3/Q11/Q12: location, order, other-chat banner, sidebar link, badge, composer hint.
   const state =
     await ev(`(() => { const t = document.querySelector('#transcript'), q = document.querySelector('#questions'), m = document.querySelector('#messages');
-    return { letter: document.querySelector('#letter').innerText.trim(), after: !!(m.compareDocumentPosition(q) & Node.DOCUMENT_POSITION_FOLLOWING), inTranscript: t.contains(q),
+    return { after: !!(m.compareDocumentPosition(q) & Node.DOCUMENT_POSITION_FOLLOWING), inTranscript: t.contains(q),
       titles: [...q.querySelectorAll('.question-card .q-title')].map(n => n.innerText), banner: q.querySelector('.question-away')?.innerText ?? '', badge: document.querySelector('#needs-count').innerText,
       side: document.querySelector('#needs-questions').innerText, cardShown: !!document.querySelector('#needs-card').offsetParent, hint: !!document.querySelector('#question-hint').offsetParent,
       choices: [...q.querySelectorAll('.question-card:first-of-type .choices button')].map(b => b.innerText.replace(/\\s+/g, ' ')), textareas: q.querySelectorAll('.question-card textarea').length, xss: window.__xss, imgs: q.querySelectorAll('img').length, md: !!q.querySelector('.q-body strong') && !!q.querySelector('.q-body code') } })()`);
-  check("Q1 sidebar letter has no question", state.letter === "", state);
   check("Q2 cards sit in the transcript after the messages", state.after && state.inTranscript, state);
   check("Q13 questions stack in asked order", state.titles[0].includes("MARK-RICH") && state.titles[1].includes("MARK-FREE"), state.titles);
   check(

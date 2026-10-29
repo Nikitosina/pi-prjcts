@@ -102,13 +102,8 @@ switch (command) {
     input = parse(Request, { action: command, id: first });
     break;
   case "resume":
-    if (!first) throw new Error("Usage: resume <project-id> [--leave-interrupted --confirm <same-project-id>]");
-    if (second === undefined) input = { action: "resume", id: first };
-    else {
-      if (second !== "--leave-interrupted" || rest.length !== 2 || rest[0] !== "--confirm" || rest[1] !== first)
-        throw new Error("Usage: resume <project-id> --leave-interrupted --confirm <same-project-id>");
-      input = { action: "resume", id: first, recovery: "leave-interrupted", confirm: rest[1] };
-    }
+    if (!first || second !== undefined) throw new Error("Usage: resume <project-id>");
+    input = { action: "resume", id: first };
     break;
   case "jobs":
     if (!first || second) throw new Error("Usage: jobs <project-id>");
@@ -159,10 +154,6 @@ switch (command) {
     if (!first || rest.length || (second !== undefined && second !== "--without-history"))
       throw new Error("Usage: schedules <project-id> [--without-history]");
     input = parse(Request, { action: "schedule-snapshot", id: first, ...(second ? { includeHistory: false } : {}) });
-    break;
-  case "monitors":
-    if (!first || second || rest.length) throw new Error("Usage: monitors <project-id>");
-    input = parse(Request, { action: "monitor-snapshot", id: first });
     break;
   case "schedule-history": {
     const [offset = "0", textOffset = "0"] = rest;
@@ -226,15 +217,14 @@ switch (command) {
     }
     break;
   }
-  case "schedule-enable":
-  case "monitor-enable": {
-    if (!first || !second) throw new Error(`Usage: ${command} <project-id> <routine-id> <true|false> --confirm <same-project-id>`);
+  case "schedule-enable": {
+    if (!first || !second) throw new Error("Usage: schedule-enable <project-id> <schedule-id> <true|false> --confirm <same-project-id>");
     const values = confirmedArguments(rest, first);
     if (values.length !== 1 || (values[0] !== "true" && values[0] !== "false")) throw new Error("Enabled must be exactly true or false");
     input = parse(Request, {
-      action: command,
+      action: "schedule-enable",
       id: first,
-      ...(command === "schedule-enable" ? { scheduleId: second } : { monitorId: second }),
+      scheduleId: second,
       enabled: values[0] === "true",
     });
     break;
@@ -245,40 +235,17 @@ switch (command) {
     input = parse(Request, { action: "event-opt-in", id: first, enabled: second === "true" });
     break;
   }
-  case "monitor-create": {
-    if (!first || !second)
-      throw new Error(
-        "Usage: monitor-create <project-id> <stable-monitor-uuid> <repository-id> <numeric-repository-id> <pr-number> <pr|ci|review> <interval-ms> --confirm <same-project-id>",
-      );
-    const values = confirmedArguments(rest, first);
-    if (values.length !== 5) throw new Error("Monitor requires repository identity, PR number, kind and interval");
-    const [repositoryId, expectedRepositoryId, pullRequest, kind, everyMs] = values;
-    input = parse(Request, {
-      action: "monitor-create",
-      id: first,
-      monitorId: second,
-      repositoryId,
-      expectedRepositoryId: integerArgument(expectedRepositoryId, "Repository numeric ID"),
-      pullRequest: integerArgument(pullRequest, "PR number"),
-      kind,
-      everyMs: integerArgument(everyMs, "Monitor interval milliseconds"),
-    });
-    break;
-  }
   case "owner-workspaces":
-  case "owner-skills-catalog":
   case "owner-command-profiles":
   case "owner-setup": {
     if (!first || second !== undefined || rest.length) throw new Error(`Usage: ${command} <project-id>`);
     const action =
       command === "owner-workspaces"
         ? "workspace-catalog"
-        : command === "owner-skills-catalog"
-          ? "worker-skills-catalog"
-          : command === "owner-command-profiles"
-            ? "command-profiles-snapshot"
-            : "owner-setup-snapshot";
-    input = parse(Request, { action, id: first, ...(action === "worker-skills-catalog" ? { limit: 64 } : {}) });
+        : command === "owner-command-profiles"
+          ? "command-profiles-snapshot"
+          : "owner-setup-snapshot";
+    input = parse(Request, { action, id: first });
     break;
   }
   case "owner-workspace-revoke": {
@@ -363,29 +330,12 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }
 try {
-  let data = await request(input, startHost && command !== "host-stop");
-  // The owner catalog is paged; print every page of one revision.
-  if (input.action === "worker-skills-catalog") {
-    const catalog = data as {
-      revision: string;
-      candidates: unknown[];
-      page: { offset: number; limit: number; total: number; nextOffset: number | null };
-    };
-    for (let page = catalog.page; page.nextOffset !== null;) {
-      const next = (await request({ ...input, offset: page.nextOffset, limit: 64 }, false)) as typeof catalog;
-      if (next.revision !== catalog.revision || next.page.offset !== page.nextOffset)
-        throw new Error("Skill catalog changed while paging; run the command again");
-      catalog.candidates.push(...next.candidates);
-      page = next.page;
-    }
-    catalog.page = { offset: 0, limit: catalog.candidates.length, total: catalog.candidates.length, nextOffset: null };
-    data = catalog;
-  }
+  const data = await request(input, startHost && command !== "host-stop");
   process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 } catch (error) {
   process.stderr.write(errorText(error) + "\n");
@@ -400,10 +350,6 @@ try {
   if (input.action === "schedule-create")
     process.stderr.write(
       `Schedule ${input.scheduleId}: response is unconfirmed. Inspect its retained definition/ticks before any exact-ID retry; do not invent a replacement ID or start time.\n`,
-    );
-  if (input.action === "monitor-create")
-    process.stderr.write(
-      `Monitor ${input.monitorId}: response is unconfirmed. Inspect its retained binding/cursor before any exact-ID retry; do not invent a replacement UUID.\n`,
     );
   process.exitCode = 1;
 }

@@ -122,7 +122,6 @@ function usageHtml() {
   const rows = [
     ...usageChatRows(page).map((row) => ({ label: row.label, total: row.value.total })),
     ...page.workers.map((worker) => {
-      if (worker.kind !== "thread") return { label: `Legacy ${worker.name}`, total: worker.total };
       const job = jobsSnap?.jobs.find((item) => jobThreads(item).includes(worker.threadId));
       return {
         label: job ? `${job.title.slice(0, 72)}` : `Thread ${worker.threadId.slice(0, 8)}`,

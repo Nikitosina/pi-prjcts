@@ -20,19 +20,10 @@ export const AutomationConfig = Type.Object(
       { additionalProperties: false },
     ),
     webhook: Type.Object({ enabled: Type.Boolean(), secret: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
-    /** Merge project-published PRs once CI (all required checks) is green and a reviewer approved the exact head. Absent (pre-feature files) means off. */
-    autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
-    /** Retired worker watchdog (replaced by the stall detector); accepted so old files load. */
-    watchdog: Type.Optional(
-      Type.Object(
-        { enabled: Type.Boolean(), everyMs: Type.Integer({ minimum: 60_000, maximum: 86_400_000 }) },
-        { additionalProperties: false },
-      ),
-    ),
   },
   { additionalProperties: false },
 );
-export type AutomationConfig = Omit<Static<typeof AutomationConfig>, "watchdog"> & { autoMerge: { enabled: boolean } };
+export type AutomationConfig = Static<typeof AutomationConfig>;
 
 const file = (id: string) => join(projectDir(id), "automations.json");
 const secret = () => randomBytes(32).toString("hex");
@@ -45,13 +36,13 @@ export function loadAutomations(id: string): AutomationConfig {
       eventChat: "main",
       follow: { enabled: false, everyMs: 300_000, autoFix: true, fixCap: 3 },
       webhook: { enabled: false, secret: secret() },
-      autoMerge: { enabled: false },
     };
     saveJson(path, initial);
     return initial;
   }
-  const { watchdog: _retired, ...config } = parse(AutomationConfig, JSON.parse(readFileSync(path, "utf8")));
-  return { ...config, autoMerge: config.autoMerge ?? { enabled: false } };
+  // Fields of retired features (the worker watchdog, Follow PRs auto-merge) are dropped so old files load.
+  const { watchdog: _watchdog, autoMerge: _autoMerge, ...stored } = JSON.parse(readFileSync(path, "utf8"));
+  return parse(AutomationConfig, stored);
 }
 export function updateAutomations(id: string, change: Static<typeof AutomationChange>): AutomationConfig {
   const current = loadAutomations(id);
@@ -60,7 +51,6 @@ export function updateAutomations(id: string, change: Static<typeof AutomationCh
     eventChat: change.eventChat ?? current.eventChat,
     follow: { ...current.follow, ...change.follow },
     webhook: { ...current.webhook, ...change.webhook },
-    autoMerge: { ...current.autoMerge, ...change.autoMerge },
   }) as AutomationConfig;
   saveJson(file(id), next);
   return next;

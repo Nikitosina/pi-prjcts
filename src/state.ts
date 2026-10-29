@@ -5,7 +5,6 @@ import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
-import { WorkerSkillGrant } from "./worker-skill-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
 export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
@@ -104,40 +103,6 @@ export const WorkspaceAuthorizationHistory = Type.Array(
   ),
   { maxItems: 2048 },
 );
-export const OperationSpec = Type.Union([
-  Type.Object(
-    {
-      provider: Provider,
-      kind: Type.Literal("command"),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      scopeId: Id,
-      threadId: Id,
-      profileId: Id,
-      profileRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      effect: Type.Union([Type.Literal("destructive"), Type.Literal("deployment")]),
-      receiptId: Id,
-      allocationAttemptId: Id,
-      requestId: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      provider: Provider,
-      kind: Type.Literal("vcs"),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      scopeId: Id,
-      action: Type.Union([Type.Literal("worktree-remove"), Type.Literal("worktree-remount"), Type.Literal("branch-delete")]),
-      checkout: Type.String({ minLength: 1, maxLength: 4096 }),
-      target: Type.String({ minLength: 1, maxLength: 4096 }),
-      expectedState: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      state: Type.String({ minLength: 1, maxLength: 16000 }),
-      risks: Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { minItems: 1, maxItems: 8 }),
-    },
-    { additionalProperties: false },
-  ),
-]);
-export type OperationSpec = Static<typeof OperationSpec>;
 export const GithubAuthorization = Type.Object(
   {
     repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
@@ -182,13 +147,9 @@ export const Project = Type.Object(
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
     githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
     githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
-    /** Retired worker limit; kept so old project files load. */
-    workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
     /** Minutes without progress before a stall notice; absent = DEFAULT_STALL_MINUTES. */
     stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
     commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
-    /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
-    workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })),
     /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
     skillProfiles: Type.Optional(SkillProfiles),
     /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
@@ -213,9 +174,6 @@ export const Project = Type.Object(
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
     /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
     scopedModels: Type.Optional(Type.Array(text, { minItems: 1, maxItems: 64, uniqueItems: true })),
-    /** Retired legacy-runtime fields (always null / empty); accepted so existing project files load. */
-    sessionFile: Type.Optional(Type.Null()),
-    runs: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 0 })),
     phase: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("attention")]),
     problem: Type.Union([Type.String(), Type.Null()]),
     // Top-level records owned by provider plugins (e.g. a publication authorization) are kept verbatim, also while no plugin understands them.
@@ -269,7 +227,6 @@ export const AutomationChange = Type.Object(
       ),
     ),
     webhook: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
-    autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
   },
   { additionalProperties: false },
 );
@@ -532,15 +489,6 @@ export const Request = Type.Union([
     { action: Type.Literal("mcp-probe"), id: Id, server: Type.String({ minLength: 1, maxLength: 128 }) },
     { additionalProperties: false },
   ),
-  Type.Object(
-    {
-      action: Type.Literal("worker-skills-catalog"),
-      id: Id,
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 512 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64 })),
-    },
-    { additionalProperties: false },
-  ),
   Type.Object({ action: Type.Literal("command-profiles-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("command-profile-read"), id: Id, profileId: Id }, { additionalProperties: false }),
   Type.Object(
@@ -675,8 +623,6 @@ export const Request = Type.Union([
           decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
           githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
           stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
-          /** Retired worker limit: accepted and ignored so older clients keep saving settings. */
-          workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
           /** null restores the default (repository skills for every profile). */
           skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
           /** null removes every MCP server. */
@@ -744,11 +690,7 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("pause"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("jobs-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("job-approve"), id: Id, jobId: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("resume"), id: Id }, { additionalProperties: false }),
-  Type.Object(
-    { action: Type.Literal("resume"), id: Id, recovery: Type.Literal("leave-interrupted"), confirm: Type.Optional(Id) },
-    { additionalProperties: false },
-  ),
+  Type.Object({ action: Type.Literal("resume"), id: Id, confirm: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("archive"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("restore"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("delete"), id: Id, confirm: Type.Optional(Id) }, { additionalProperties: false }),
@@ -861,10 +803,6 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
-    { action: Type.Literal("operation-request"), id: Id, requestId: Id, operation: OperationSpec },
-    { additionalProperties: false },
-  ),
-  Type.Object(
     {
       action: Type.Literal("github-read-snapshot"),
       id: Id,
@@ -890,58 +828,6 @@ export const Request = Type.Union([
       id: Id,
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-execute"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      confirm: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-inspect"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      confirm: Id,
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-snapshot"),
-      id: Id,
-      status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("approved"), Type.Literal("rejected")])),
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-decide"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      decision: Type.Literal("approve"),
-      confirm: Id,
-      execution: Type.Optional(Type.Literal(true)),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("operation-decide"),
-      id: Id,
-      operationId: Id,
-      fingerprint: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-      decision: Type.Literal("reject"),
     },
     { additionalProperties: false },
   ),
@@ -1144,21 +1030,6 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object(
-    {
-      action: Type.Literal("monitor-create"),
-      id: Id,
-      monitorId: Type.Optional(Id),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      expectedRepositoryId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-      pullRequest: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-      kind: Type.Union([Type.Literal("pr"), Type.Literal("ci"), Type.Literal("review")]),
-      everyMs: Type.Integer({ minimum: 60000, maximum: 86400000 }),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object({ action: Type.Literal("monitor-enable"), id: Id, monitorId: Id, enabled: Type.Boolean() }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("monitor-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("event-opt-in"), id: Id, enabled: Type.Boolean() }, { additionalProperties: false }),
   Type.Object(
     {

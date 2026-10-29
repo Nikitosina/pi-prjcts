@@ -10,7 +10,7 @@ export const CommandProfileInput = Type.Object(
     scopeIds: Type.Array(Id, { minItems: 1, maxItems: 64, uniqueItems: true }),
     executable: Type.String({ minLength: 1, maxLength: 4096 }),
     arguments: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 64 }),
-    effect: Type.Union([Type.Literal("workspace"), Type.Literal("destructive"), Type.Literal("deployment")]),
+    effect: Type.Literal("workspace"),
     timeoutMs: Type.Integer({ minimum: 1000, maximum: 300000 }),
     maxOutputBytes: Type.Integer({ minimum: 1024, maximum: 65536 }),
     enabled: Type.Boolean(),

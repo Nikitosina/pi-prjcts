@@ -4,7 +4,6 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Jobs } from "./jobs.ts";
 import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
-import { hasUncertainVcsOperations } from "./vcs-operation-state.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
 type Schedule = {
@@ -144,9 +143,7 @@ export function scheduleRuntime(
 ) {
   const mutex = new AdmissionMutex();
   const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> =>
-    (await hasUncertainGithubWrites(tx, root.id)) ||
-    (await plugins.anyUncertainWrites(tx, root.id)) ||
-    (await hasUncertainVcsOperations(tx, root.id))
+    (await hasUncertainGithubWrites(tx, root.id)) || (await plugins.anyUncertainWrites(tx, root.id))
       ? "uncertain-provider-write"
       : (await hasUncertainCommands(tx, root.id))
         ? "uncertain-command"
@@ -282,21 +279,19 @@ export function scheduleRuntime(
         return state.eventOptIn;
       }, BACKGROUND_CONTEXT),
     );
-  /** `options.target` routes the event to a chat; `automation` events (Follow PRs, webhook) carry their own owner opt-in instead of `eventOptIn`.
-   * `effectFree` events (the worker watchdog) only ask for steering, never a write, so an uncertain effect does not block them; pause still does. */
+  /** `options.target` routes the event to a chat; `automation` events (Follow PRs, webhook) carry their own owner opt-in instead of `eventOptIn`. */
   const ingest = (
     input: { eventId: string; kind: string; payload: string },
     guard?: (tx: Tx) => Promise<boolean>,
     onRecord?: (tx: Tx) => Promise<void>,
-    options: { target?: Conversation; automation?: boolean; effectFree?: boolean } = {},
+    options: { target?: Conversation; automation?: boolean } = {},
   ) =>
     mutex.run(async () => {
       if (!input.eventId || input.eventId.length > 256 || !input.kind || input.kind.length > 128 || input.payload.length > 32000)
         throw new Error("Invalid owner-local event");
       if (isClosed()) throw new Error("Project is closed");
       const result = await root.commit(async (tx) => {
-        if (!options.effectFree && (await uncertainEffects(tx)))
-          throw new Error("Automatic event admission is blocked by an uncertain effect");
+        if (await uncertainEffects(tx)) throw new Error("Automatic event admission is blocked by an uncertain effect");
         if (guard && !(await guard(tx))) throw new Error("Event admission is no longer authorized");
         const state = await tx.doc(DurableSchedule, root.id);
         if (!state.eventOptIn && !options.automation) throw new Error("Owner-local event ingress is disabled");
@@ -332,11 +327,11 @@ export function scheduleRuntime(
           kind: result.intent.kind,
           submissionId: null,
         });
-      const submitted: ScheduleIntent & { duplicate?: true } = await submitIntent(result.intent, options.target, options.effectFree);
+      const submitted: ScheduleIntent & { duplicate?: true } = await submitIntent(result.intent, options.target);
       if (!result.newlyRecorded) submitted.duplicate = true;
       return submitted;
     });
-  async function submitIntent(intent: ScheduleIntent, target: Conversation = root, effectFree = false): Promise<ScheduleIntent> {
+  async function submitIntent(intent: ScheduleIntent, target: Conversation = root): Promise<ScheduleIntent> {
     if (intent.status !== "recorded") return intent;
     if (isClosed()) return mark(intent.requestId, "interrupted", "Project closed");
     const allowed = await root.commit(async (tx) => {
@@ -344,7 +339,7 @@ export function scheduleRuntime(
       const state = await tx.doc(DurableSchedule, root.id);
       const current = own(state.intents, intent.requestId);
       if (!current || current.status !== "recorded" || planning.paused) return "paused";
-      return !effectFree && (await uncertainEffects(tx)) ? "uncertain" : "allowed";
+      return (await uncertainEffects(tx)) ? "uncertain" : "allowed";
     }, BACKGROUND_CONTEXT);
     if (allowed !== "allowed")
       return mark(

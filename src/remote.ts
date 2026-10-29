@@ -770,7 +770,7 @@ export function createRemote(options: Options) {
               deviceId: device.id,
               endpoint: device.push.endpoint,
               body: body.toString("base64url"),
-              urgency: notice.kind === "question" || notice.kind === "approval" ? "high" : "normal",
+              urgency: notice.kind === "question" ? "high" : "normal",
               retried: false,
               readyAt: 0,
             });

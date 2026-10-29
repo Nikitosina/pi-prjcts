@@ -22,7 +22,7 @@ try {
   const owner = await request({ action: "owner-setup-snapshot", id: project.id });
   if (!Array.isArray(plan.jobs)) throw new Error("jobs-snapshot did not return jobs");
   if (!Array.isArray(usage.workers)) throw new Error("usage-snapshot did not return workers");
-  if (!Array.isArray(owner.profiles) || !Array.isArray(owner.grants)) throw new Error("owner setup profile/grant status missing");
+  if (!Array.isArray(owner.profiles)) throw new Error("owner setup profile status missing");
   results.push("jobs-snapshot", "usage-snapshot", "owner-setup-snapshot");
   await request({ action: "shutdown" }, false);
 } catch (error) {

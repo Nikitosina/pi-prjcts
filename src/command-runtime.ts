@@ -6,8 +6,7 @@ import { Type } from "typebox";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineDoc, defineTool, type Conversation, type Tx, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
-import { loadProject, type Project, type OperationSpec } from "./state.ts";
-import type { OperationApprovals } from "./operation-approvals.ts";
+import { loadProject, type Project } from "./state.ts";
 import { captureEvidenceBytes, readEvidence } from "./evidence.ts";
 import type { CommandProfile } from "./command-profile-types.ts";
 import { commandProgram, validateCommandRisk } from "./command-profiles.ts";
@@ -29,8 +28,6 @@ type Result = {
 type Identity = {
   evidenceId?: string;
   evidenceSha256?: string;
-  approvalId?: string;
-  approvalFingerprint?: string;
   key: string;
   resource: string;
   requestId: string;
@@ -69,7 +66,6 @@ function copyIdentity(row: Identity): Identity {
     taskId: row.taskId,
     callId: row.callId,
     startedAt: row.startedAt,
-    ...(row.approvalId ? { approvalId: row.approvalId, approvalFingerprint: row.approvalFingerprint } : {}),
     ...(row.evidenceId ? { evidenceId: row.evidenceId } : {}),
     ...(row.evidenceSha256 ? { evidenceSha256: row.evidenceSha256 } : {}),
   };
@@ -362,7 +358,6 @@ export function commandExecution() {
 
 export async function commandWorkerTools(input: {
   executor: ReturnType<typeof commandExecution>;
-  approvals?: () => OperationApprovals;
   project: Project;
   root: Conversation;
   authority: WorkspaceAuthority;
@@ -449,61 +444,6 @@ export async function commandWorkerTools(input: {
       execute(args, api, context) {
         return input.executor.track(async () => {
           await active(profile, api, context);
-          let approvalIdentity: { approvalId: string; approvalFingerprint: string } | undefined;
-          async function approvalRequired() {
-            if (profile.effect === "workspace") return null;
-            if (!input.approvals) throw new Error("Separate command approval binding is unavailable");
-            const threadId = await api.commit(async (tx) => {
-              await assertWork(tx);
-              return (await tx.doc(Jobs, input.root.id)).jobs[input.workId]?.id;
-            }, context);
-            if (!threadId) throw new Error("Command approval requires its owned thread identity");
-            const operation: OperationSpec = {
-              provider: profile.provider,
-              kind: "command",
-              repositoryId: profile.repositoryId,
-              scopeId: input.scopeId,
-              threadId,
-              profileId: profile.id,
-              profileRevision: profile.revision,
-              effect: profile.effect,
-              receiptId: input.authority.receiptId,
-              allocationAttemptId: input.authority.attemptId,
-              requestId: args.requestId,
-            };
-            const digest = hash(JSON.stringify(operation));
-            const operationId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
-            const approvals = input.approvals();
-            const record = await approvals.request({
-              action: "operation-request",
-              id: input.project.id,
-              requestId: operationId,
-              operation,
-            });
-            if (record.status !== "approved" || record.executionApproved !== true)
-              return {
-                needsApproval: true,
-                operationId: record.id,
-                fingerprint: record.fingerprint,
-                status: record.status,
-                executionRequired: true,
-                commandProfileId: profile.id,
-                requestId: args.requestId,
-                permissionChanged: false,
-              };
-            const approved = await approvals.approved({
-              id: input.project.id,
-              operationId: record.id,
-              fingerprint: record.fingerprint,
-              confirm: input.project.id,
-            });
-            if (JSON.stringify(approved.operation) !== JSON.stringify(operation))
-              throw new Error("Command approval target does not match this launch");
-            approvalIdentity = { approvalId: approved.id, approvalFingerprint: approved.fingerprint };
-            return null;
-          }
-          const pending = await approvalRequired();
-          if (pending) return { content: [{ type: "text" as const, text: JSON.stringify(pending) }], isError: true };
           environment();
           return withWorkspaceMutationLock({ ...input.lock, waitMs: 0 }, async () => {
             await active(profile, api, context);
@@ -511,8 +451,6 @@ export async function commandWorkerTools(input: {
             if (JSON.stringify(program) !== JSON.stringify(profile.program))
               throw new Error("Command executable changed; obtain a new owner grant");
             await active(profile, api, context);
-            const pending = await approvalRequired();
-            if (pending) return { content: [{ type: "text" as const, text: JSON.stringify(pending) }], isError: true };
             const key = hash(JSON.stringify({ profile: profile.revision, resource, requestId: args.requestId }));
             const previous = await api.commit(async (tx) => {
               await assertWork(tx);
@@ -530,7 +468,6 @@ export async function commandWorkerTools(input: {
                 throw new Error("Workspace has an unresolved command; execution is blocked");
               if (rows.length >= 4096) throw new Error("Command intent limit reached");
               rows.push({
-                ...approvalIdentity,
                 evidenceId: randomUUID(),
                 key,
                 resource,

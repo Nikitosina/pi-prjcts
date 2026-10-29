@@ -15,7 +15,6 @@ import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { githubWorkerTools } from "./github-worker.ts";
 import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
-import type { OperationApprovals } from "./operation-approvals.ts";
 import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
 import { worktreeSetup } from "./worktree-maintenance.ts";
 import { verificationProviderProblem } from "./project-settings.ts";
@@ -46,7 +45,6 @@ export function durableWorkspaceBinding(input: {
   controlRoot: string;
   projectStanding?: DurableStanding;
   commands?: ReturnType<typeof commandExecution>;
-  commandApprovals?: () => OperationApprovals;
   isClosed?: () => boolean;
   /** Whole-repository workers get lease and background-command tools when present. */ environment?: {
     leases: ResourceLeases;
@@ -299,7 +297,6 @@ export function durableWorkspaceBinding(input: {
       tools.push(
         ...(await commandWorkerTools({
           executor: input.commands,
-          approvals: input.commandApprovals,
           project: input.project,
           root: input.conversation(),
           authority,
@@ -430,7 +427,6 @@ export function durableWorkspaceBinding(input: {
         JSON.stringify({
           receipt: receipt.providerFacts,
           scope,
-          workerSkillGrants: JSON.stringify(input.project.workerSkillGrants ?? []),
           names: tools.map((tool) => tool.name),
           commands: (input.project.commandProfiles ?? [])
             .filter((profile) => profile.enabled && profile.scopeIds.includes(scope.id))

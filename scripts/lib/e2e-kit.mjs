@@ -117,9 +117,10 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       const input = JSON.parse(body),
         msgs = input.messages,
         tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
+      const systemText = contentText(msgs.find((m) => m.role === "system" || m.role === "developer")?.content);
       const role = tools.includes("agents")
         ? "coordinator"
-        : tools.includes("projects_review_verdict")
+        : systemText.includes("Review the pinned candidate")
           ? "reviewer"
           : tools.includes("projects_verify_run")
             ? "verifier"

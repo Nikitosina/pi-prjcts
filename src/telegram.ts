@@ -115,7 +115,6 @@ const PAIR_MS = 10 * 60_000,
   LIMIT = 4000;
 const LABEL: Record<Notice["kind"], string> = {
   question: "Question",
-  approval: "Approval",
   result: "Finished",
   error: "Error",
   pr: "Pull request",
@@ -518,7 +517,6 @@ export function startTelegram(options: {
           },
         ]),
       };
-    if (notice.kind === "approval") return { text: head + "\n\n<i>Decide it in the browser approval inbox.</i>", buttons: [] };
     return {
       text: head + "\n\n<i>Reply to this message to write to this chat.</i>",
       buttons: notice.jobId && notice.mergeable ? approveButton(notice.projectId, notice.jobId) : [],
@@ -540,7 +538,7 @@ export function startTelegram(options: {
     const formatted = format({ ...notice, text: extracted.markdown });
     const buttons = formatted.buttons;
     let text = formatted.text.replace(/\uE000(\d+)\uE001/g, (_, index: string) => escapeHtml(extracted.media[Number(index)].caption));
-    if (extracted.media.length && Array.from(htmlToPlain(text)).length > 1024 && notice.kind !== "approval") {
+    if (extracted.media.length && Array.from(htmlToPlain(text)).length > 1024) {
       text = text.replace(/<i>[^<]*<\/i>$/, notice.kind === "question" ? "<i>Reply or choose an answer.</i>" : "<i>Reply to chat.</i>");
     }
     const plan: TelegramPart[] = [];

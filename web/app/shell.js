@@ -361,11 +361,7 @@ export async function mutate(input, success) {
     const result = await api(input);
     toast(typeof success === "function" ? success(result) : success);
     if (input.id === projectId) {
-      if (
-        document.querySelector("#letter").contains(document.activeElement) ||
-        document.querySelector("#questions").contains(document.activeElement)
-      )
-        document.activeElement.blur();
+      if (document.querySelector("#questions").contains(document.activeElement)) document.activeElement.blur();
       await refreshOpenProject();
     }
     return result;

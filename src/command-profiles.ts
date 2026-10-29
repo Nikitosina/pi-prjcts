@@ -70,7 +70,7 @@ export async function commandProgram(executable: string): Promise<CommandProgram
   return outcome.program;
 }
 
-export function validateCommandRisk(profile: Pick<CommandProfile, "program" | "arguments" | "effect">) {
+export function validateCommandRisk(profile: Pick<CommandProfile, "program" | "arguments">) {
   const name = basename(profile.program.path),
     args = profile.arguments;
   if (name === "gh" && args.includes("pr") && args.includes("merge"))
@@ -106,8 +106,7 @@ export function validateCommandRisk(profile: Pick<CommandProfile, "program" | "a
     (name === "gh" &&
       (args.includes("delete") ||
         (args.includes("api") && args.some((value) => value === "DELETE" || value === "-XDELETE" || value === "--method=DELETE"))));
-  if (destructive && profile.effect === "workspace")
-    throw new Error("Recognized destructive command requires a separately approved non-workspace profile");
+  if (destructive) throw new Error("Recognized destructive commands cannot be registered as command profiles");
 }
 
 function riskBlocker(profile: CommandProfile) {
@@ -149,13 +148,11 @@ export function commandProfilesSnapshot(project: Project) {
         riskBlocker(profile) ??
         (profile.provider !== "github"
           ? "Command execution is not available for this workspace provider; profiles cannot run"
-          : profile.effect !== "workspace"
-            ? "Separate exact owner approval with execution enabled is required"
-            : !profile.enabled
-              ? "Command profile is disabled"
-              : profile.workspaceRevision !== authorizationFingerprint(project)
-                ? "Command scope authorization changed; obtain a new grant"
-                : null),
+          : !profile.enabled
+            ? "Command profile is disabled"
+            : profile.workspaceRevision !== authorizationFingerprint(project)
+              ? "Command scope authorization changed; obtain a new grant"
+              : null),
     })),
   };
 }
@@ -180,7 +177,7 @@ export async function prepareCommandProfile(project: Project, input: Update): Pr
   if (grant.provider !== "github" && definition.enabled)
     throw new Error("Command execution is not available for this workspace provider; profiles cannot be enabled");
   const program = await commandProgram(definition.executable);
-  validateCommandRisk({ program, arguments: definition.arguments, effect: definition.effect });
+  validateCommandRisk({ program, arguments: definition.arguments });
   const executableName = basename(program.path);
   if (
     (grant.provider !== "github" && ["git", "gh"].includes(executableName)) ||

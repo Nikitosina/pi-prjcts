@@ -199,12 +199,6 @@ function renderEventsIn() {
         `<li><b>${esc(fix.pr)}</b> ${fix.attempts.map((item, index) => `<span class="fix-attempt ${esc(item.status ?? (item.error ? "failed" : "none"))}" title="${esc(item.error ?? item.mode)}">${index + 1}: ${esc(item.sha.slice(0, 7))} · ${esc(item.mode === "none" ? "no scope" : (item.status ?? (item.error ? "dispatch failed" : "pending")))}</span>`).join(" ")}</li>`,
     )
     .join("");
-  const merges = (f?.merges ?? [])
-    .map(
-      (item) =>
-        `<li class="merge-row"><b>${esc(item.pr)}</b> ${item.receipts.map((r) => `<span class="merge-receipt ${esc(r.state)}" title="${esc(r.error ?? r.marker)}">${esc(r.sha.slice(0, 7))} · ${esc(r.state)}${r.mergeCommit ? ` → ${esc(r.mergeCommit.slice(0, 7))}` : ""}</span>`).join(" ")}${item.note ? `<span class="merge-note">${esc(mergeNoteText(item.note))}</span>` : ""}</li>`,
-    )
-    .join("");
   node.innerHTML = `<div class="events-in">
     <label class="field">Send events to <select id="event-chat">${chats.map((chat) => `<option value="${esc(chat.id)}" ${chat.id === data.eventChat ? "selected" : ""}>${esc(chat.title)}${chat.archived ? " (archived, using Main)" : ""}</option>`).join("")}</select></label>
     <fieldset class="events-group"><legend>Follow PRs</legend>
@@ -217,11 +211,6 @@ function renderEventsIn() {
       ${fixes ? `<ul id="follow-fixes" class="fix-list">${fixes}</ul>` : ""}
       <div class="row"><button data-action="follow-poll" ${f?.enabled ? "" : "disabled"}>Check now</button></div>
     </fieldset>
-    <fieldset class="events-group" id="auto-merge"><legend>Auto-merge</legend>
-      <label class="check"><input type="checkbox" id="merge-enabled" ${f?.autoMerge ? "checked" : ""}> Merge PRs this project opened once CI and every required check pass and a reviewer worker approved that exact head</label>
-      <p class="note">${f?.autoMerge && !f?.enabled ? "Turn on Follow PRs: auto-merge runs on its checks." : "Off by default. A reviewer is sent when CI turns green; a new push needs a new review. The merge pins the reviewed head (squash). Otherwise merges wait for your approval."}</p>
-      ${merges ? `<ul id="merge-receipts" class="fix-list">${merges}</ul>` : ""}
-    </fieldset>
     <fieldset class="events-group"><legend>Webhook</legend>
       <label class="check"><input type="checkbox" id="webhook-enabled" ${data.webhook.enabled ? "checked" : ""}> Accept webhook deliveries</label>
       <div class="kv"><span>URL</span><code id="webhook-url" class="mono">${esc(data.webhook.url)}</code><span>Secret</span><code id="webhook-secret" class="mono">${eventsIn.reveal ? esc(data.webhook.secret) : "•".repeat(16)}</code></div>
@@ -230,24 +219,6 @@ function renderEventsIn() {
     </fieldset>
     <div class="row"><button class="primary" data-action="automation-save">Save</button></div>
   </div>`;
-}
-function mergeNoteText(note) {
-  const [kind, , ...rest] = note.split(":");
-  return (
-    {
-      merged: "merged",
-      review: "waiting for review",
-      changes: "reviewer requested changes",
-      required: `required check missing: ${rest.join(":")}`,
-      ci: "CI not green",
-      refused: "refused by GitHub",
-      uncertain: "outcome unknown, checking",
-      grant: "authorization changed",
-      target: "outside authorized base",
-      ready: "draft could not be marked ready",
-      "review-none": "reviewer gave no verdict",
-    }[kind] ?? kind.replace(/^review-/, "reviewer ")
-  );
 }
 async function saveEventsIn() {
   const value = (selector) => document.querySelector(selector);
@@ -266,7 +237,6 @@ async function saveEventsIn() {
           fixCap: cap,
         },
         webhook: { enabled: value("#webhook-enabled").checked },
-        autoMerge: { enabled: value("#merge-enabled").checked },
       },
     },
     "Events settings saved.",
@@ -510,12 +480,9 @@ registerForms([
       const input =
         proposal.kind === "events"
           ? { action: "event-opt-in", id: target, enabled: proposal.enabled }
-          : proposal.kind === "schedule"
-            ? { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled }
-            : { action: "monitor-enable", id: target, monitorId: proposal.recordId, enabled: proposal.enabled };
+          : { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled };
       await mutate(input, "Confirmed routine setting recorded. Pause, grants and retained receipts are unchanged.");
-      if (dialog.open && getProjectId() === target && dialogVersion === version)
-        await routineList(proposal.kind === "monitor" ? "monitors" : "schedules", 0);
+      if (dialog.open && getProjectId() === target && dialogVersion === version) await routineList("schedules", 0);
     },
   ],
   [
@@ -527,10 +494,7 @@ registerForms([
       if (target !== getProjectId()) throw new Error("The selected project changed. Reopen the resume dialog.");
       const confirm = data.get("confirm").trim();
       if (confirm !== target) throw new Error("Confirmation must match the project ID.");
-      await mutate(
-        { action: "resume", id: target, recovery: "leave-interrupted", confirm },
-        "Project resumed. Interrupted work continues.",
-      );
+      await mutate({ action: "resume", id: target, confirm }, "Project resumed. Interrupted work continues.");
       closeCurrentDialog(target, version);
     },
   ],
@@ -907,18 +871,17 @@ function lifecycleConfirm(id, operation) {
 }
 async function routineList(lens = "schedules", offset = 0) {
   if (lens === "history") return routineHistory("intents", 0, 0);
-  if (!jobsSnap || !["schedules", "monitors"].includes(lens) || !Number.isSafeInteger(offset) || offset < 0)
+  if (!jobsSnap || lens !== "schedules" || !Number.isSafeInteger(offset) || offset < 0)
     throw new Error("Routine view requires a loaded Durable project and valid cached page");
   const id = getProjectId(),
     current = getGeneration(),
     version = showDialog(
-      "Schedules and monitors",
+      "Schedules",
       '<p class="note">Reading your automations…</p>',
       "Turn automations on or off. Every change asks you to confirm first.",
     );
-  const [schedules, monitors, policy] = await Promise.all([
+  const [schedules, policy] = await Promise.all([
     api({ action: "schedule-snapshot", id, includeHistory: false }),
-    api({ action: "monitor-snapshot", id }),
     api({ action: "jobs-snapshot", id }),
   ]);
   if (!dialog.open || version !== dialogVersion || id !== getProjectId() || current !== getGeneration()) return;
@@ -945,37 +908,19 @@ async function routineList(lens = "schedules", offset = 0) {
         !["once", "interval", "calendar"].includes(record.kind) ||
         typeof record.text !== "string",
     ) ||
-    !monitors ||
-    !Array.isArray(monitors.items) ||
-    monitors.items.some(
-      (record) =>
-        !uuid(record.id) ||
-        typeof record.enabled !== "boolean" ||
-        !["pr", "ci", "review"].includes(record.kind) ||
-        typeof record.repositoryId !== "string" ||
-        !Number.isSafeInteger(record.expectedRepositoryId) ||
-        record.expectedRepositoryId < 1 ||
-        !Number.isSafeInteger(record.pullRequest) ||
-        record.pullRequest < 1,
-    ) ||
     !policy ||
     typeof policy.paused !== "boolean"
   )
     throw new Error("Invalid owned routine projection");
-  routineCache = { project: id, schedules, monitors, policy };
-  const records = lens === "schedules" ? schedules.schedules : monitors.items,
+  routineCache = { project: id, schedules, policy };
+  const records = schedules.schedules,
     page = records.slice(offset, offset + 100),
-    kind = lens === "schedules" ? "schedule" : "monitor";
+    kind = "schedule";
   const tabs = segTabs([
     [
       `Schedules (${schedules.schedules.length})`,
       { action: "routine-list", project: id, lens: "schedules", offset: 0 },
       lens === "schedules",
-    ],
-    [
-      `GitHub monitors (${monitors.items.length})`,
-      { action: "routine-list", project: id, lens: "monitors", offset: 0 },
-      lens === "monitors",
     ],
     [
       `History (${schedules.historyCounts.events + schedules.historyCounts.intents})`,
@@ -989,10 +934,9 @@ async function routineList(lens = "schedules", offset = 0) {
     page
       .map(
         (record) =>
-          `<div class="list-row"><div class="grow"><strong>${lens === "schedules" ? esc(clip(record.text, 140)) : `${esc(record.repositoryId)} · PR #${record.pullRequest}`}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))}${lens === "monitors" ? " monitor" : " schedule"}</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`,
+          `<div class="list-row"><div class="grow"><strong>${esc(clip(record.text, 140))}</strong><span class="meta">${stateChip(record.enabled ? "On" : "Off", record.enabled ? "on" : "")}${esc(humanKey(record.kind))} schedule</span></div><div class="row-actions">${toggle(record.enabled ? "Turn off…" : "Turn on…", record.enabled, record.id)}</div>${rawDetails(record)}</div>`,
       )
-      .join("") ||
-    `<p class="empty-state">No ${lens === "schedules" ? "schedules" : "monitors"} yet. They are created from the command line and start turned off.</p>`;
+      .join("") || `<p class="empty-state">No schedules yet. They are created from the command line and start turned off.</p>`;
   setDialogBody(
     `${policy.paused || schedules.automaticAdmissionBlocker ? `<p class="note-box warn">${policy.paused ? "The project is paused, so nothing starts automatically. " : ""}${schedules.automaticAdmissionBlocker ? `Automatic runs are blocked until you check an earlier uncertain ${schedules.automaticAdmissionBlocker === "uncertain-command" ? "command" : "GitHub change"}.` : ""}</p>` : ""}<div class="choice-card"><div><b>Outside events ${stateChip(schedules.eventOptIn ? "On" : "Off", schedules.eventOptIn ? "on" : "")}</b><p>Lets events from GitHub or webhooks start work in this project.</p></div>${toggle(schedules.eventOptIn ? "Turn off…" : "Turn on…", schedules.eventOptIn, "", "events")}</div><div class="seg-row mt">${tabs}${pager({ offset, count: page.length, total: records.length, size: 100, data: { action: "routine-list", project: id, lens } })}</div>${rows}<p class="note">Routines run only while your Mac is awake, and only if they are on. This list is a sample read, not an atomic snapshot.</p>${dlgActions(dlgBtn("Refresh", { action: "routine-list", project: id, lens, offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
   );
@@ -1089,12 +1033,10 @@ async function routineHistory(kind = "intents", offset = 0, textOffset = 0) {
   );
 }
 function routineRecord(kind, recordId) {
-  if (!routineCache || routineCache.project !== getProjectId() || !["schedule", "monitor", "events"].includes(kind))
+  if (!routineCache || routineCache.project !== getProjectId() || !["schedule", "events"].includes(kind))
     throw new Error("Owned routine snapshot unavailable; reread");
   if (kind === "events") return { eventOptIn: routineCache.schedules.eventOptIn };
-  const record = (kind === "schedule" ? routineCache.schedules.schedules : routineCache.monitors.items).find(
-    (record) => record.id === recordId,
-  );
+  const record = routineCache.schedules.schedules.find((record) => record.id === recordId);
   if (!record) throw new Error("Routine not present in the displayed owned snapshot");
   return record;
 }
@@ -1107,11 +1049,11 @@ function routineConfirm(kind, recordId, value) {
   if ((kind === "events" ? record.eventOptIn : record.enabled) === enabled)
     throw new Error("Displayed routine setting changed; reread before confirming");
   const binding = JSON.stringify(record),
-    noun = kind === "events" ? "outside events" : `this ${kind}`,
+    noun = kind === "events" ? "outside events" : "this schedule",
     state = (on) => (on ? "On" : "Off");
   const version = showDialog(
     `Turn ${enabled ? "on" : "off"} ${noun}?`,
-    `<div class="diff-list">${diffItem(["Status", state(!enabled), state(enabled)])}</div>${kind === "events" ? "" : recordSummary(record)}<p class="note">${enabled ? "Turning on lets it run while your Mac is awake. It does not resume the project, grant tools or publishing, clear an uncertain outcome or replay anything. Monitors also need outside events on and current repository access." : "Turning off keeps its schedule, history and cursors. It just stops running."}</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "routine-list", project: id, lens: kind === "monitor" ? "monitors" : "schedules" }), `<button type="submit" class="primary">Turn ${enabled ? "on" : "off"}</button>`)}</form>`,
+    `<div class="diff-list">${diffItem(["Status", state(!enabled), state(enabled)])}</div>${kind === "events" ? "" : recordSummary(record)}<p class="note">${enabled ? "Turning on lets it run while your Mac is awake. It does not resume the project, grant tools or publishing, clear an uncertain outcome or replay anything." : "Turning off keeps its schedule, history and cursors. It just stops running."}</p><form data-routine-change data-project="${esc(id)}"><input type="hidden" name="confirm" value="${esc(id)}">${dlgActions(dlgBtn("Back", { action: "routine-list", project: id, lens: "schedules" }), `<button type="submit" class="primary">Turn ${enabled ? "on" : "off"}</button>`)}</form>`,
     getView().project.name,
   );
   routineConfirmation = { project: id, kind, recordId, enabled, binding, version };
@@ -1133,12 +1075,7 @@ async function usageList(offset = 0) {
     page.totalWorkers < 0 ||
     !page.coordinator ||
     (page.nextOffset !== null && (!page.workers.length || page.nextOffset !== offset + page.workers.length)) ||
-    page.workers.some(
-      (worker) =>
-        !["thread", "legacy"].includes(worker.kind) ||
-        (worker.kind === "thread" && !uuid(worker.threadId)) ||
-        !Number.isSafeInteger(worker.conversationId),
-    )
+    page.workers.some((worker) => !uuid(worker.threadId) || !Number.isSafeInteger(worker.conversationId))
   )
     throw new Error("Usage projection differs from its owned conversation/page");
   const number = (value) => Number(value).toLocaleString(),
@@ -1155,7 +1092,7 @@ async function usageList(offset = 0) {
   };
   const detail = (value) => `${counters(value.total)}${rawDetails({ models: value.models, tools: value.tools }, "By model and tool")}`;
   setDialogBody(
-    `<h3>Coordinator</h3>${detail(page.coordinator)}<h3>Workers</h3><p class="note">${esc(page.totalThreads)} reusable threads and ${esc(page.legacyOnlyWorkers)} older workers. The totals below cover this page only, not the whole project.</p>${counters(page.workerPageTotal)}${page.workers.length ? `<div class="seg-row mt"><span class="note">Workers on this page</span>${pager({ offset, count: page.workers.length, total: page.totalWorkers, size: 100, data: { action: "usage-list" } })}</div>` : ""}${page.workers.map((worker) => `<div class="list-row"><div class="grow"><strong>${worker.kind === "thread" ? `Thread ${esc(worker.threadId.slice(0, 8))}` : `Earlier worker ${esc(worker.name)}`}</strong><span class="meta">${number(worker.total.totalTokens)} tokens · $${worker.total.cost.total.toFixed(2)} estimated${(worker.legacyNames ?? []).length ? ` · also known as ${esc(worker.legacyNames.join(", "))}` : ""}</span></div>${detail(worker)}</div>`).join("") || '<p class="empty-state">No workers have run yet.</p>'}<p class="note">Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(String(page.accounting).replace(/\.$/, ""))}. SDK estimates are not billing or verified spend.</p>${dlgActions(dlgBtn("Refresh", { action: "usage-list", offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
+    `<h3>Coordinator</h3>${detail(page.coordinator)}<h3>Workers</h3><p class="note">${esc(page.totalThreads)} reusable threads. The totals below cover this page only, not the whole project.</p>${counters(page.workerPageTotal)}${page.workers.length ? `<div class="seg-row mt"><span class="note">Workers on this page</span>${pager({ offset, count: page.workers.length, total: page.totalWorkers, size: 100, data: { action: "usage-list" } })}</div>` : ""}${page.workers.map((worker) => `<div class="list-row"><div class="grow"><strong>${worker.kind === "thread" ? `Thread ${esc(worker.threadId.slice(0, 8))}` : `Earlier worker ${esc(worker.name)}`}</strong><span class="meta">${number(worker.total.totalTokens)} tokens · $${worker.total.cost.total.toFixed(2)} estimated</span></div>${detail(worker)}</div>`).join("") || '<p class="empty-state">No workers have run yet.</p>'}<p class="note">Observed ${esc(new Date(page.observedAtMs).toLocaleString())}. ${esc(String(page.accounting).replace(/\.$/, ""))}. SDK estimates are not billing or verified spend.</p>${dlgActions(dlgBtn("Refresh", { action: "usage-list", offset }), dlgBtn("Close", { action: "close-dialog" }, "primary"))}`,
   );
 }
 async function ownerSetupDialog(result = null) {

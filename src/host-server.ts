@@ -81,8 +81,6 @@ import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord,
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
-import { captureOwnerWorkerSkillCatalog } from "./worker-skill-owner-catalog.ts";
-import { protectedSkillBackingFiles } from "./worker-skill-backing.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
 import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
@@ -560,26 +558,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.id, { topic: "settings" });
       return result;
     }
-    case "worker-skills-catalog": {
-      const protectedFiles = await protectedSkillBackingFiles();
-      const catalog = await captureOwnerWorkerSkillCatalog({
-        project: () => loadProject(input.id),
-        configured: { kind: "loaded", loader: await configuredSkills(input.id) },
-        protectedFiles,
-      });
-      const offset = input.offset ?? 0,
-        limit = input.limit ?? 16;
-      return {
-        ...catalog,
-        candidates: catalog.candidates.slice(offset, offset + limit),
-        page: {
-          offset,
-          limit,
-          total: catalog.candidates.length,
-          nextOffset: offset + limit < catalog.candidates.length ? offset + limit : null,
-        },
-      };
-    }
     case "command-profiles-snapshot":
       return commandProfilesSnapshot(loadProject(input.id));
     case "command-profile-read": {
@@ -807,20 +785,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return lifecycle(
         input.id,
         (project) => {
-          if ("recovery" in input && input.confirm !== input.id) throw new Error("Recovery requires confirmation matching project id");
+          if (input.confirm !== undefined && input.confirm !== input.id) throw new Error("Resume confirmation must match the project id");
           if (project.deleted) throw new Error("Deleted project must be restored before resume");
           if (project.archived) throw new Error("Archived project must be restored before resume");
         },
         async (owner) => {
-          if ("recovery" in input) await owner.pause();
-          else {
-            const plan = await owner.jobs();
-            if (plan.jobs.length !== 0 || (await owner.snapshot()).coordinator.submissions.length !== 0)
-              throw new Error("Project resume with prior work requires an explicit recovery decision");
-          }
           const paused = (await owner.resume()).paused;
           recordHostEvent("lifecycle", `resumed:${input.id}`);
-          return "recovery" in input ? { paused, recovery: input.recovery } : { paused };
+          return { paused };
         },
       );
     case "owner-setup-snapshot": {
@@ -829,14 +801,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const githubRevision = createHash("sha256")
         .update(JSON.stringify([project.githubAuthorization ?? [], project.githubAuthorizationHistory ?? []]))
         .digest("hex");
-      const grants = project.workerSkillGrants ?? [];
-      const grantsRevision = createHash("sha256").update(JSON.stringify(grants)).digest("hex");
       const profileSnapshot = commandProfilesSnapshot(project);
       return {
         projectId: project.id,
         workspaceRevision,
         githubRevision,
-        grantsRevision,
         profilesRevision: profileSnapshot.revision,
         workspace: project.workspaceAuthorization
           ? {
@@ -898,13 +867,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           revision: profile.revision,
           executionAvailable: profile.executionAvailable,
           blocker: profile.blocker,
-        })),
-        grants: grants.map((grant) => ({
-          id: grant.id,
-          revision: grant.revision,
-          enabled: grant.enabled,
-          scopeIds: grant.scopeIds,
-          skills: grant.skills.map((skill) => ({ catalogId: skill.catalogId, name: skill.name })),
         })),
         configuredCatalog: { available: true, reason: "Configured Pi skills load automatically for whole-repository workers." },
       };
@@ -1032,24 +994,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return (await durable(input.id)).githubWriteInspect(input);
     case "github-write-snapshot":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.githubWriteSnapshot(input) });
-    case "operation-execute":
-      return (await durable(input.id)).operationExecute(input);
-    case "operation-inspect":
-      return (await durable(input.id)).operationInspect(input);
-    case "operation-snapshot":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.operationSnapshot(input) });
-    case "operation-request":
-    case "operation-decide":
-      return withDurableOwner({
-        id: input.id,
-        validate: (project) => {
-          if (project.deleted || project.archived)
-            throw new Error("Retained project must be restored before recording operation decisions");
-          if (input.action === "operation-decide" && input.decision === "approve" && input.confirm !== input.id)
-            throw new Error("Operation approval requires confirmation matching project id");
-        },
-        operation: (owner) => (input.action === "operation-request" ? owner.operationRequest(input) : owner.operationDecide(input)),
-      });
     case "github-revoke": {
       if (input.confirm !== input.id) throw new Error("GitHub authorization revocation requires confirmation matching project id");
       return lifecycle(
@@ -1221,26 +1165,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         textOffset: input.textOffset,
         textLimit: input.textLimit,
       });
-    case "monitor-create":
-      return withDurableOwner({
-        id: input.id,
-        validate: (project) => {
-          if (project.deleted || project.archived) throw new Error("Inactive project cannot monitor providers");
-        },
-        operation: (owner) =>
-          owner.monitorCreate({
-            id: input.monitorId,
-            repositoryId: input.repositoryId,
-            expectedRepositoryId: input.expectedRepositoryId,
-            pullRequest: input.pullRequest,
-            kind: input.kind,
-            everyMs: input.everyMs,
-          }),
-      });
-    case "monitor-enable":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.monitorSetEnabled(input.monitorId, input.enabled) });
-    case "monitor-snapshot":
-      return (await durable(input.id)).monitorSnapshot();
     case "event-opt-in":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleSetEventOptIn(input.enabled) });
     case "automation-snapshot":
@@ -1255,15 +1179,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (!chat || chat.archived) throw new Error("Choose an existing, active chat for events");
       }
       const next = await withProjectLock(input.id, async () => updateAutomations(input.id, input.change));
-      if (
-        next.follow.enabled &&
-        (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs || next.autoMerge.enabled !== before.autoMerge.enabled)
-      )
-        owner.followKick();
-      recordHostEvent(
-        "automations",
-        `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}`,
-      );
+      if (next.follow.enabled && (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs)) owner.followKick();
+      recordHostEvent("automations", `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}`);
       return automationSnapshot(input.id);
     }
     case "webhook-rotate": {
@@ -1546,15 +1463,8 @@ remote = createRemote({
   report: (detail) => recordHostEvent("remote", detail),
   summary: async () => {
     let needs = 0;
-    for (const project of listProjects().filter((project) => !project.deleted && !project.archived)) {
+    for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
       needs += inbox(projectDir(project.id)).filter((item) => !item.result).length;
-      const opening = durableRuntimes.get(project.id);
-      if (opening && !lifecycleChanging.has(project.id) && !settingsUpdating.has(project.id) && !ownerCloseFailed.has(project.id)) {
-        needs += (
-          await (await opening).operationSnapshot({ action: "operation-snapshot", id: project.id, status: "pending", offset: 0, limit: 1 })
-        ).total;
-      }
-    }
     return { needs };
   },
 });

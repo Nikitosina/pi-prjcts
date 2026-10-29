@@ -332,66 +332,6 @@ hr {
   color: var(--muted);
   margin-bottom: 10px;
 }
-#queue {
-  border-top: 1px solid var(--line);
-}
-.inbox-item {
-  display: flex;
-  gap: 17px;
-  width: 100%;
-  align-items: center;
-  text-align: left;
-  padding: 21px 12px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: transparent;
-}
-.inbox-item.active {
-  background: var(--panel);
-  box-shadow: inset 3px 0 var(--accent);
-}
-.inbox-item .index {
-  font:
-    23px Georgia,
-    serif;
-  color: var(--muted);
-  min-width: 28px;
-}
-.inbox-item strong {
-  display: block;
-  font-weight: 500;
-  font-size: 14px;
-  line-height: 1.5;
-  margin-bottom: 5px;
-}
-.inbox-item .item-body {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.inbox-item .arrow {
-  color: var(--muted);
-}
-.letter {
-  padding: 30px;
-  margin-top: 22px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--panel);
-  box-shadow: 0 4px 12px #28282004;
-}
-.letter h2 {
-  font:
-    26px/1.35 Georgia,
-    serif;
-  margin: 20px 0 17px;
-  overflow-wrap: anywhere;
-}
-.letter .description {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 .choices {
   display: grid;
   gap: 10px;
@@ -974,36 +914,6 @@ h3.section {
   background: transparent;
 }
 
-#queue .inbox-item {
-  padding: 10px 6px;
-  gap: 10px;
-}
-#queue .inbox-item .index {
-  font-size: 15px;
-  min-width: 20px;
-}
-#queue .inbox-item strong {
-  font-size: 13px;
-  margin-bottom: 2px;
-}
-#queue:empty {
-  display: none;
-}
-.col .letter {
-  padding: 0;
-  margin-top: 4px;
-  border: 0;
-  box-shadow: none;
-  background: transparent;
-}
-.col .letter h2 {
-  font-size: 17px;
-  margin: 4px 0 8px;
-}
-.col .letter .description {
-  font-size: 13px;
-  margin-bottom: 4px;
-}
 #needs-card {
   border-color: var(--k-e2b49c);
   box-shadow: 0 0 0 3px var(--k-c2653a14);
@@ -2515,26 +2425,6 @@ button.attach-chip {
 }
 .fix-attempt.failed {
   color: var(--bad, var(--k-b42318));
-}
-.merge-receipt {
-  display: inline-block;
-  margin: 2px 4px 2px 0;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--soft, var(--k-f2f2f2));
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-.merge-receipt.merged {
-  color: var(--good, var(--k-067647));
-}
-.merge-receipt.failed {
-  color: var(--bad, var(--k-b42318));
-}
-.merge-note {
-  display: inline-block;
-  font-size: 12px;
-  color: var(--muted, var(--k-667085));
 }
 .event-card > summary .event-mark {
   flex: none;

@@ -26,7 +26,6 @@
     "src/provider-extensions.ts": ["provider-extensions-e2e", "scoped-model-environment-e2e"],
     "src/project-models.ts": ["model-refresh-e2e", "scoped-models-e2e", "scoped-model-environment-e2e"],
     "src/skill-profiles.ts": ["skill-profiles-e2e", "coordinator-github-skills-e2e"],
-    "src/worker-skill-*.ts": ["skill-profiles-e2e", "coordinator-github-skills-e2e"],
     "src/durable-*.ts": ["durable-runtime-e2e", "jobs-e2e"],
     "src/github-*.ts": ["github-*", "follow-prs-e2e"],
     "src/pr-*.ts": ["github-pr-watch-e2e", "follow-prs-e2e"],

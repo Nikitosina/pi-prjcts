@@ -182,6 +182,13 @@ const requireStrings = (what: string, value: object, names: string[]) => {
     if (typeof (value as Record<string, unknown>)[name] !== "string" || !(value as Record<string, string>)[name])
       throw new Error(`${what}.${name} must be a non-empty string`);
 };
+/** Fields that older plugins still provide: the host ignores them with one log line instead of refusing the plugin. */
+function dropRetired(name: string, caps: PluginCapabilities): void {
+  const follow = caps.follow as (typeof caps.follow & { autoMerge?: unknown }) | undefined;
+  if (follow?.autoMerge === undefined) return;
+  delete follow.autoMerge;
+  process.stderr.write(`plugin ${name}: follow.autoMerge is retired and ignored; approve a PR to merge it\n`);
+}
 function validate(caps: PluginCapabilities): void {
   if (caps.vcs) {
     requireStrings("vcs", caps.vcs, ["kind", "readHeadMarker"]);
@@ -201,7 +208,7 @@ function validate(caps: PluginCapabilities): void {
   }
   if (caps.follow) {
     requireStrings("follow", caps.follow, ["id", "eventKind", "label"]);
-    requireFunctions("follow", caps.follow, ["repository", "observe", "published", "autoMerge"]);
+    requireFunctions("follow", caps.follow, ["repository", "observe", "published"]);
   }
   if (caps.merge) {
     requireStrings("merge", caps.merge, ["kind"]);
@@ -331,6 +338,7 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
       hostApi(module.name, stage).then((api) => module.register!(api)),
       "register",
     );
+    dropRetired(module.name, stage);
     validate(stage);
     const clash = conflict(module.name, stage);
     if (clash) throw new Error(clash);

@@ -188,8 +188,6 @@
             <aside class="col">
               <div id="needs-card" class="card">
                 <b>Needs you</b><span id="needs-badge" hidden></span>
-                <nav id="queue" aria-label="Pending decisions"></nav>
-                <div id="letter"></div>
                 <div id="needs-questions" class="needs-questions"></div>
               </div>
               <div class="card" id="prs-card" hidden>
@@ -288,7 +286,7 @@
               ><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a
               ><a href="#set-advanced">Advanced</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a
               ><a href="#set-remote">Remote access</a><a href="#set-deploy">Deploy</a><a href="#set-appearance">Appearance</a
-              ><a href="#set-approvals">Approvals</a><a href="#set-danger" class="danger">Danger zone</a>
+              ><a href="#set-providers">Providers</a><a href="#set-danger" class="danger">Danger zone</a>
             </nav>
             <div class="set-main">
               <section class="set-section" id="set-setup">
@@ -403,7 +401,7 @@
                 <header class="set-head">
                   <div>
                     <h2>Automations</h2>
-                    <p class="note">Schedules, monitors and events. Toggling always asks for confirmation.</p>
+                    <p class="note">Schedules and events. Toggling always asks for confirmation.</p>
                   </div>
                   <button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button>
                 </header>
@@ -488,14 +486,12 @@
                   </div>
                 </div>
               </section>
-              <section class="set-section" id="set-approvals">
+              <section class="set-section" id="set-providers">
                 <header class="set-head">
                   <div>
-                    <h2>Approvals and providers</h2>
-                    <p id="approval-page-note" class="note"></p>
+                    <h2>Providers</h2>
                   </div>
                   <span class="row"
-                    ><button id="approvals-button" data-action="operation-list" hidden>All retained approvals ↗</button
                     ><button id="provider-button" data-action="provider-list" hidden>GitHub PR/CI/review receipts ↗</button></span
                   >
                 </header>

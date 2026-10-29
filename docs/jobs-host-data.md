@@ -41,4 +41,4 @@ A running Job with no progress for `stallMinutes`, the same tool call five times
 
 ## Telegram
 
-One progress message per running Job (plan steps and ETA), edited in place; a Ready notice with `mergeable` offers Approve. Operation-approval notices no longer have buttons: decide them in the browser approval inbox.
+One progress message per running Job (plan steps and ETA), edited in place; a Ready notice with `mergeable` offers Approve.
