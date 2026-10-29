@@ -24,7 +24,7 @@ const PROJECT_NAME = "Verify seed";
 const RPC_ALLOWLIST = new Set([
   "list",
   "show",
-  "plan-snapshot",
+  "jobs-snapshot",
   "knowledge-list",
   "knowledge-read",
   "knowledge-history",
@@ -630,8 +630,8 @@ const journeys = {
     if (view.project.fallbackModels?.worker !== "fake/fallback-model" || view.project.models.worker !== "fake/fake-model")
       throw Error("host state differs from UI selection");
     writeFileSync(
-      join(dir, "host-plan-proof.json"),
-      JSON.stringify(await rpc(run, { action: "plan-snapshot", id: run.projectId }), null, 2),
+      join(dir, "host-jobs-proof.json"),
+      JSON.stringify(await rpc(run, { action: "jobs-snapshot", id: run.projectId }), null, 2),
     );
     record(
       "verified",

@@ -53,14 +53,14 @@ try {
   let plan, view;
   while (Date.now() < deadline) {
     await delay(5000);
-    plan = await request({ action: "plan-snapshot", id });
+    plan = await request({ action: "jobs-snapshot", id });
     view = await request({ action: "show", id });
     const errors = JSON.stringify(view).match(/prompt-capture[^"]{0,200}/g);
     if (errors) {
       result.events.push(...errors);
       break;
     }
-    const done = plan.work.length && plan.work.every((w) => !["queued", "running", "pending"].includes(w.status));
+    const done = plan.jobs.length && plan.jobs.every((w) => w.status !== "running");
     if (view.failedJobs) {
       result.events.push(view.jobs.at(-1)?.error);
       break;
@@ -71,10 +71,10 @@ try {
   writeFileSync(join(artifacts, "show.json"), JSON.stringify(view, null, 2));
   const text = JSON.stringify(view) + JSON.stringify(plan);
   check("F1/F2 no prompt-capture error", !/prompt-capture/.test(text));
-  check("F3 worker delegated", plan?.work?.length >= 1, plan?.work?.map((w) => `${w.role}:${w.status}`).join(","));
+  check("F3 worker delegated", plan?.jobs?.length >= 1, plan?.jobs?.map((w) => `worker:${w.status}`).join(","));
   check(
     "F3 worker completed",
-    plan?.work?.some((w) => w.status === "completed"),
+    plan?.jobs?.some((w) => ["ready", "ready-with-gaps", "approved"].includes(w.status)),
   );
   const worktrees = await request({ action: "worktrees-snapshot", id }).catch((e) => ({ error: e.message }));
   const paths =

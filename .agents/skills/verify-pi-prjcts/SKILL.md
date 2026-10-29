@@ -23,7 +23,7 @@ All commands below are `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs 
 
 ## Evidence
 
-Read-only second view of host state: `V rpc --run <scratch> <action> ['{"field":"value"}']` with `id` defaulting to the seeded project. Allowed actions: `list`, `show`, `plan-snapshot`, `knowledge-list`, `knowledge-read`, `knowledge-history`, `search`; everything else is refused.
+Read-only second view of host state: `V rpc --run <scratch> <action> ['{"field":"value"}']` with `id` defaulting to the seeded project. Allowed actions: `list`, `show`, `jobs-snapshot`, `knowledge-list`, `knowledge-read`, `knowledge-history`, `search`; everything else is refused.
 
 Each drive folder holds: `01-before-send.png`, `02-typed.png`, `03-reply.png`, `04-after-reload.png`, `messages-dom.txt`, `host-show-messages.json` (host's stored transcript), `model-requests.jsonl` (what the provider received), `report.json` (steps, console errors, HTTP errors, problems). A failure adds `99-failure.png`. `<evidence>/diagnostics/` always gets redacted copies of `host.log`, `fake-provider.log`, `model-requests.jsonl` and `run.json`, written before scratch is removed (also when launch or drive fails). Proof standards: use the real user path (typing, clicking), capture action and result, confirm a side effect through a read-only second view, and report anything unscripted or blocked as such. A precondition the seed lacks is a failure reported with its reason, never a weaker journey.
 

@@ -263,13 +263,6 @@ const settle = async (id, job) =>
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
-const workFor = async (id, task) =>
-  eventually(async () => (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task)), `work ${task} missing`);
-const terminal = async (id, task, status) =>
-  eventually(async () => {
-    const w = (await rpc({ action: "plan-snapshot", id })).work.find((w) => w.text.startsWith(task));
-    return w?.status === status && w;
-  }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
   evaluate(
     `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
