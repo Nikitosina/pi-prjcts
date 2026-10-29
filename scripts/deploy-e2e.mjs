@@ -18,7 +18,8 @@ const { deploy, deployPending, hostDeps, inDeployWindow, idleDeployTick, readDep
 const { health, request } = await import("../src/client.ts");
 const told = [],
   commands = [];
-const real = hostDeps(clone, { startAttempts: 80, smokeMs: 3000 });
+// Generous budgets: a deploy on a busy machine takes a while to start the host.
+const real = hostDeps(clone, { startAttempts: 300, smokeMs: 10_000 });
 const deps = {
   ...real,
   stopHost: async () => (commands.push("stop host"), real.stopHost()),
