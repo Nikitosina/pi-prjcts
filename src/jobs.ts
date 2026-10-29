@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -94,8 +93,6 @@ export type Agent = {
   readRef: string | null;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
-  /** Where its prepared workspace lives; a message to an agent whose workspace was cleaned up prepares it again. */
-  workspace?: string;
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: { at: number; from: string; to: string }[];
@@ -284,9 +281,9 @@ const reporterTask = (host: JobsHost) =>
           const agent = state.agents[agentId];
           if (!agent) return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
-            if (change) await configure(tx, conversationId, change);
+            // A prepared agent keeps its frozen prompt; preparing again only restores its workspace, tools and extensions.
+            if (change) await configure(tx, conversationId, agent.prepared ? { ...change, instructions: undefined } : change);
             agent.prepared = true;
-            if (change?.cwd) agent.workspace = change.cwd;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
           const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
@@ -814,7 +811,7 @@ export function createJobs(host: JobsHost) {
           message,
           followUp,
           requestId,
-          prepare: !agent.prepared || (!!agent.workspace && !existsSync(agent.workspace)),
+          prepare: true, // every message re-binds the workspace and tools, re-acquires the lease and revives a cleaned-up worktree
         },
         background,
       );
