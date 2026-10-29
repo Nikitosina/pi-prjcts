@@ -116,7 +116,6 @@ let settingsCache = null;
 let settingsConfirmation = null;
 const providerCache = new Map();
 let providerInspection = null;
-let lastDraftError = null;
 let projects = [];
 let projectId = initial.searchParams.get("project");
 // Selected coordinator chat; "main" is the project's original coordinator. Drafts are kept per chat.
@@ -219,6 +218,48 @@ let observability = null,
   observabilityLoading = false,
   eventOffset = 0;
 
+//@m dispatch
+// data-action and form-submit routing: features register their handlers; plugins claim their own "<name>-" actions through a router.
+const actionTable = new Map(),
+  actionRouters = [],
+  formHandlers = [];
+function registerActions(handlers) {
+  for (const [name, run] of Object.entries(handlers)) {
+    if (actionTable.has(name)) throw new Error(`Duplicate action ${name}`);
+    actionTable.set(name, run);
+  }
+}
+function registerForms(entries) {
+  formHandlers.push(...entries);
+}
+function routeActions(router) {
+  actionRouters.push(router);
+}
+// Enter in a form's textarea submits it (Shift+Enter and IME composition do not); true when the key was an unmodified Enter in a matching textarea.
+function submitOnEnter(event, textareaSelector) {
+  const textarea = event.target.closest(textareaSelector);
+  if (!textarea || event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return false;
+  const form = textarea.form;
+  const submitButton = form?.querySelector('button[type="submit"]');
+  if (form && !submitButton?.disabled && !busy) {
+    event.preventDefault();
+    form.requestSubmit();
+  }
+  return true;
+}
+async function action(node) {
+  for (const router of actionRouters) {
+    const run = router(node);
+    if (run) {
+      await run();
+      return;
+    }
+  }
+  await actionTable.get(node.dataset.action)?.(node);
+}
+async function submit(form) {
+  for (const [selector, run] of formHandlers) if (form.matches(selector)) return run(form);
+}
 // Browser plugins: /plugins/<name>/ui.js calls piProjects.register({ name, mount(slot), projectChanged, render, tick, hide, action(name, node) }).
 // Their data-action names start with "<name>-". A failing plugin is logged and skipped; the app keeps working.
 const uiPlugins = [],
@@ -244,6 +285,11 @@ function loadUiPlugins(list) {
     }
   }
 }
+//@m plugins
+routeActions((node) => {
+  const owner = uiPlugins.find((plugin) => node.dataset.action?.startsWith(`${plugin.name}-`));
+  return owner && (() => owner.action(node.dataset.action, node));
+});
 window.piProjects = Object.freeze({
   register(plugin) {
     if (
@@ -690,6 +736,13 @@ streamMotion.addEventListener("change", () => {
   renderLive(true);
 });
 
+// Explicit chat or project switches clear the frame (reconnects keep the last received preview readable).
+function resetLive() {
+  liveStream?.controller.abort();
+  liveStream = null;
+  liveFrame = null;
+  renderLive();
+}
 function renderLive(immediate = false) {
   if (liveRenderFrame !== null) {
     cancelAnimationFrame(liveRenderFrame);
@@ -830,103 +883,130 @@ function clearTranscriptSelection() {
     selection.removeAllRanges();
 }
 
+//@m shell
+// Opening a project invalidates everything in flight (generation) and resets each feature through its registered hook.
+// Hook order is the import order in app.js: chat sets the chat and clears the view first, artifacts redraw from the cleared state last.
+const projectChangeHooks = [];
+function onProjectChange(reset) {
+  projectChangeHooks.push(reset);
+}
 function changeProject(id, chat = "main") {
-  clearTranscriptSelection();
+  captureDrafts();
   generation++;
-  workerChat = null;
-  searchFocus = null;
-  workerFocus = null;
   projectId = id;
-  chatId = chat;
-  linksReady = false;
   uiPluginCall("projectChanged");
-  captureDialogDraft();
-  liveStream?.controller.abort();
-  liveStream = null;
-  liveFrame = null;
-  renderLive();
-  knowledgeDocs = [];
-  stickToBottom = true;
-  view = null;
-  plan = null;
-  observability = null;
-  observabilityLoading = false;
-  eventOffset = 0;
-  approvalPage = null;
-  operationCache.clear();
-  knowledgeCache.clear();
-  libraryCache.clear();
-  libraryPayload = null;
-  settingsCache = null;
-  modelCache.clear();
-  providerCache.clear();
-  routineCache = null;
-  selected = null;
+  for (const reset of projectChangeHooks) reset(id, chat);
   closeDialog();
   const url = new URL(location.href);
   if (id) url.searchParams.set("project", id);
   else url.searchParams.delete("project");
-  if (chat === "main") url.searchParams.delete("chat");
-  else url.searchParams.set("chat", chat);
   history.replaceState(null, "", url);
   document.querySelector("#projects").value = id ?? "";
-  document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? "";
-  autosize(document.querySelector("#compose textarea"));
-  renderAttachments();
-  document.querySelector("#compose button").disabled = !id || busy;
   html.clear();
-  usageObs = null;
-  closeWorkerDetail();
-  renderArtifactBrowser();
   const p = projects.find((p) => p.id === id);
   document.querySelector("#title").textContent = id ? (p?.name ?? "Opening project…") : "Create your first project.";
   document.querySelector("#avatar").textContent = initials(p?.name);
-  for (const selector of [
-    "#chat-bar",
-    "#queue",
-    "#letter",
-    "#needs-questions",
-    "#questions",
-    "#activity",
-    "#outcomes",
-    "#notes",
-    "#messages",
-    "#reply-summary",
-    "#workspace",
-    "#evidence-inline",
-    "#obs-kpis",
-    "#obs-usage",
-    "#obs-health",
-    "#obs-trace",
-    "#obs-timeline",
-    "#obs-event-log",
-    "#obs-usage-time",
-    "#owner-steps",
-    "#settings-summary",
-  ])
-    document.querySelector(selector).replaceChildren();
-  document.querySelector("#chat-bar").dataset.html = "";
   renderProjects();
-  document.querySelector("#warning").hidden = true;
   disableActions();
   void refresh();
 }
 
+//@m chat
+onProjectChange((id, chat) => {
+  clearTranscriptSelection();
+  chatId = chat;
+  view = null;
+  setChatUrl(chat);
+  for (const selector of ["#chat-bar", "#messages", "#reply-summary"]) document.querySelector(selector).replaceChildren();
+  document.querySelector("#chat-bar").dataset.html = "";
+  document.querySelector("#warning").hidden = true;
+});
+//@m live
+onProjectChange(resetLive);
+//@m reading
+onProjectChange(() => {
+  stickToBottom = true;
+});
+//@m composer
+onProjectChange((id) => {
+  document.querySelector("#compose textarea").value = drafts.get(draftKey()) ?? "";
+  autosize(document.querySelector("#compose textarea"));
+  document.querySelector("#compose button").disabled = !id || busy;
+});
+//@m workers
+onProjectChange(() => {
+  workerChat = null;
+  plan = null;
+  closeWorkerDetail();
+  for (const selector of ["#activity", "#outcomes"]) document.querySelector(selector).replaceChildren();
+});
+//@m search
+onProjectChange(() => {
+  searchFocus = null;
+  workerFocus = null;
+});
+//@m prs
+onProjectChange(() => {
+  linksReady = false;
+});
+//@m knowledge
+onProjectChange(() => {
+  knowledgeDocs = [];
+  knowledgeCache.clear();
+  libraryCache.clear();
+  libraryPayload = null;
+  renderAttachments();
+  document.querySelector("#notes").replaceChildren();
+});
+//@m observability
+onProjectChange(() => {
+  observability = null;
+  observabilityLoading = false;
+  eventOffset = 0;
+  usageObs = null;
+  for (const selector of ["#obs-kpis", "#obs-usage", "#obs-health", "#obs-trace", "#obs-timeline", "#obs-event-log", "#obs-usage-time"])
+    document.querySelector(selector).replaceChildren();
+});
+//@m decisions
+onProjectChange(() => {
+  approvalPage = null;
+  operationCache.clear();
+  selected = null;
+  for (const selector of ["#queue", "#letter", "#needs-questions", "#questions"]) document.querySelector(selector).replaceChildren();
+});
+//@m settings
+onProjectChange(() => {
+  settingsCache = null;
+  modelCache.clear();
+  document.querySelector("#settings-summary").replaceChildren();
+});
+//@m admin
+onProjectChange(() => {
+  providerCache.clear();
+  routineCache = null;
+  for (const selector of ["#workspace", "#owner-steps"]) document.querySelector(selector).replaceChildren();
+});
+//@m artifacts
+onProjectChange(() => {
+  renderArtifactBrowser();
+  document.querySelector("#evidence-inline").replaceChildren();
+});
+
 // Switching chats keeps the project, plan and rail; only the transcript, live stream and draft change.
+function setChatUrl(chat) {
+  const url = new URL(location.href);
+  if (chat === "main") url.searchParams.delete("chat");
+  else url.searchParams.set("chat", chat);
+  history.replaceState(null, "", url);
+}
 function changeChat(chat) {
   if (chat === chatId && view?.chatId === chat) return;
   clearTranscriptSelection();
   generation++;
   chatId = chat;
   if (searchFocus?.chat !== chat) searchFocus = null;
-  const url = new URL(location.href);
-  if (chat === "main") url.searchParams.delete("chat");
-  else url.searchParams.set("chat", chat);
-  history.replaceState(null, "", url);
-  liveStream?.controller.abort();
-  liveStream = null;
-  liveFrame = null;
-  renderLive();
+  setChatUrl(chat);
+  resetLive();
   stickToBottom = true;
   closeSkillMenu();
   const textarea = document.querySelector("#compose textarea");
@@ -1147,94 +1227,37 @@ function setTab(next) {
   }
 }
 
+//@m shell
+// Features draw their own part of the page; render() runs them in registration order (the import order in app.js), then locks controls.
+const renderers = [];
+function onRender(draw) {
+  renderers.push(draw);
+}
 function render() {
   if (!view) return;
-  const pending = [
-    ...view.inbox.filter((item) => !item.result),
-    ...(approvalPage?.items ?? [])
-      .filter((record) => record.status === "pending")
-      .map((record) => ({
-        kind: "approval",
-        id: `operation:${record.id}`,
-        title: `${record.operation.provider} ${record.operation.kind} · ${record.operation.repositoryId}`,
-        record,
-      })),
-  ].sort((a, b) => (a.kind === "question" ? 0 : 1) - (b.kind === "question" ? 0 : 1));
-  const pendingTotal = view.inbox.filter((item) => !item.result).length + (approvalPage?.total ?? 0);
-  // Questions live in the chat transcript; the sidebar card keeps operation approvals only.
-  const approvals = pending.filter((item) => item.kind === "approval");
-  const entry = approvals.find((item) => item.id === selected) ?? approvals[0];
-  selected = entry?.id ?? null;
+  for (const draw of renderers) draw();
+  disableActions();
+}
+function renderHeader() {
   document.title = `${view.project.name} · Pi Projects`;
   document.querySelector("#title").textContent = view.project.name;
   document.querySelector("#avatar").textContent = initials(view.project.name);
-  for (const selector of ["#needs-count"]) {
-    const node = document.querySelector(selector);
-    node.textContent = String(pendingTotal);
-    node.hidden = !pendingTotal;
-  }
-  syncSeen();
   renderProjects();
-  renderChats();
   uiPluginCall("render");
-  setHtml(
-    "#queue",
-    approvals.length < 2
-      ? ""
-      : approvals
-          .map(
-            (item, i) =>
-              `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`,
-          )
-          .join(""),
-  );
-  setHtml("#letter", entry ? letter(entry) : "");
-  const waiting = questionPlacement();
-  setHtml(
-    "#needs-questions",
-    waiting.here.length || waiting.elsewhere.length
-      ? `${waiting.here.length ? `<button type="button" class="ghost small" data-action="questions-jump">${waiting.here.length} ${waiting.here.length === 1 ? "question" : "questions"} in chat ↓</button>` : ""}${waiting.elsewhere.length ? `<button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(waiting.elsewhere[0].chat.id)}">${waiting.elsewhere.length} ${waiting.elsewhere.length === 1 ? "question" : "questions"} in other chats →</button>` : ""}`
-      : "",
-  );
-  document.querySelector("#needs-card").hidden = !entry && !waiting.here.length && !waiting.elsewhere.length;
-  document.querySelector("#question-hint").hidden = !waiting.here.length;
-  renderWorkers();
-  setHtml("#outcomes", plan ? durableResults() : "");
-  renderPrs();
-  void loadPrs();
-  // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
-  const topics = knowledgeDocs.filter(
-    (doc) => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"),
-  );
-  setHtml(
-    "#notes",
-    topics.length
-      ? knowledgeTree(topics, true)
-      : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`,
-  );
-  setHtml(
-    "#knowledge-inline",
-    knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>',
-  );
-  setHtml("#uploads-inline", uploadsHtml());
-  renderAttachments();
+}
+onRender(renderHeader);
+
+//@m chat
+function renderChat() {
+  syncSeen();
+  renderChats();
   const readingAnchor = stickToBottom ? null : captureTranscriptAnchor();
   setHtml(
     "#messages",
-    transcriptHtml(waiting.answered) ||
+    transcriptHtml(questionPlacement().answered) ||
       `<div class="empty-chat"><h2>How can the coordinator help with ${esc(view.project.name)}?</h2><p>Describe an outcome. The coordinator plans the work, spawns workers and brings decisions back here.</p></div>`,
   );
   if (!stickToBottom) restoreTranscriptAnchor(readingAnchor);
-  setHtml(
-    "#questions",
-    waiting.here.map(questionCard).join("") +
-      waiting.elsewhere
-        .map(
-          ({ item, chat }) =>
-            `<p class="question-away"><span>Question waiting in chat <b>${esc(chat.title)}</b>: ${esc(clip(item.title, 90))}</span><button type="button" class="small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button></p>`,
-        )
-        .join(""),
-  );
   const reply = view.messages.findLast((message) => message.role === "assistant" && message.text.trim());
   setHtml(
     "#reply-summary",
@@ -1242,25 +1265,6 @@ function render() {
       ? `<div class="reply-text">${renderMarkdown(reply.text.slice(0, 500))}</div><button type="button" class="ghost small" data-action="conversation">Read conversation ↗</button>`
       : "",
   );
-  document.querySelector("#approvals-button").hidden = !plan;
-  document.querySelector("#settings-button").hidden = !plan;
-  document.querySelector("#owner-setup-button").hidden = !view;
-  document.querySelector("#usage-button").hidden = !plan;
-  document.querySelector("#provider-button").hidden = !plan;
-  document.querySelector("#routines-button").hidden = !plan;
-  const historyButton = document.querySelector('[data-action="routine-history"]');
-  if (historyButton) {
-    historyButton.dataset.project = projectId ?? "";
-    historyButton.hidden = !plan;
-  }
-  document.querySelector("#approval-page-note").textContent = approvalPage
-    ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.`
-    : "";
-  renderModelCycle();
-  renderPanels();
-  document.querySelector("#workspace").textContent = view.project.cwd;
-  document.querySelector("#workspace-policy").textContent =
-    "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
   // Failures older than the newest settled turn are history, not current problems.
   const lastDone = view.jobs.findLastIndex((job) => job.state === "done");
   const failures = view.jobs
@@ -1283,6 +1287,7 @@ function render() {
         .slice(-3)
         .map((work) => row(work.id, `${work.role} ${work.threadId}: ${work.blocker}`)),
     );
+  const pending = pendingItems();
   const shownProblem = failures.some((job) => job.error === view.project.problem);
   // The problem may come from another chat; offer to open it.
   const problemChat = (view.chats ?? []).find(
@@ -1300,10 +1305,292 @@ function render() {
     warning = document.querySelector("#warning");
   setHtml("#warning", shown.map(([key, body]) => `<div class="notice-row">${body}${closeButton(key)}</div>`).join(""));
   warning.hidden = !shown.length;
-  renderContextMeter(view.context);
-  disableActions();
-  applySearchFocus();
+  document.querySelector("#transcript").dataset.count = String(view.messages.length);
+  followTranscript();
 }
+onRender(renderChat);
+
+//@m decisions
+// Unanswered questions plus pending approvals, questions first.
+function pendingItems() {
+  return [
+    ...view.inbox.filter((item) => !item.result),
+    ...(approvalPage?.items ?? [])
+      .filter((record) => record.status === "pending")
+      .map((record) => ({
+        kind: "approval",
+        id: `operation:${record.id}`,
+        title: `${record.operation.provider} ${record.operation.kind} · ${record.operation.repositoryId}`,
+        record,
+      })),
+  ].sort((a, b) => (a.kind === "question" ? 0 : 1) - (b.kind === "question" ? 0 : 1));
+}
+function renderInbox() {
+  const pending = pendingItems();
+  const pendingTotal = view.inbox.filter((item) => !item.result).length + (approvalPage?.total ?? 0);
+  // Questions live in the chat transcript; the sidebar card keeps operation approvals only.
+  const approvals = pending.filter((item) => item.kind === "approval");
+  const entry = approvals.find((item) => item.id === selected) ?? approvals[0];
+  selected = entry?.id ?? null;
+  for (const selector of ["#needs-count"]) {
+    const node = document.querySelector(selector);
+    node.textContent = String(pendingTotal);
+    node.hidden = !pendingTotal;
+  }
+  setHtml(
+    "#queue",
+    approvals.length < 2
+      ? ""
+      : approvals
+          .map(
+            (item, i) =>
+              `<button class="inbox-item ${entry.id === item.id ? "active" : ""}" data-action="select" data-entry="${item.id}"><span class="index">${String(i + 1).padStart(2, "0")}</span><span class="item-body"><strong>${esc(item.title)}</strong><small>${item.kind === "question" ? "A decision for the coordinator" : "Exact bound operation, not an execution"}</small></span><span class="arrow">↗</span></button>`,
+          )
+          .join(""),
+  );
+  setHtml("#letter", entry ? letter(entry) : "");
+  const waiting = questionPlacement();
+  setHtml(
+    "#needs-questions",
+    waiting.here.length || waiting.elsewhere.length
+      ? `${waiting.here.length ? `<button type="button" class="ghost small" data-action="questions-jump">${waiting.here.length} ${waiting.here.length === 1 ? "question" : "questions"} in chat ↓</button>` : ""}${waiting.elsewhere.length ? `<button type="button" class="ghost small" data-action="chat-select" data-chat="${esc(waiting.elsewhere[0].chat.id)}">${waiting.elsewhere.length} ${waiting.elsewhere.length === 1 ? "question" : "questions"} in other chats →</button>` : ""}`
+      : "",
+  );
+  document.querySelector("#needs-card").hidden = !entry && !waiting.here.length && !waiting.elsewhere.length;
+  document.querySelector("#question-hint").hidden = !waiting.here.length;
+  setHtml(
+    "#questions",
+    waiting.here.map(questionCard).join("") +
+      waiting.elsewhere
+        .map(
+          ({ item, chat }) =>
+            `<p class="question-away"><span>Question waiting in chat <b>${esc(chat.title)}</b>: ${esc(clip(item.title, 90))}</span><button type="button" class="small" data-action="chat-select" data-chat="${esc(chat.id)}">Open</button></p>`,
+        )
+        .join(""),
+  );
+  document.querySelector("#approvals-button").hidden = !plan;
+  document.querySelector("#approval-page-note").textContent = approvalPage
+    ? `Inbox includes pending approvals ${approvalPage.items.length ? 1 : 0}-${approvalPage.items.length}/${approvalPage.total}. Completed history is excluded; open all approvals for later pending/history records.`
+    : "";
+}
+onRender(renderInbox);
+
+//@m workers
+function renderWork() {
+  renderWorkers();
+  setHtml("#outcomes", plan ? durableResults() : "");
+}
+onRender(renderWork);
+
+//@m prs
+function renderPrCard() {
+  renderPrs();
+  void loadPrs();
+}
+onRender(renderPrCard);
+
+//@m knowledge
+function renderKnowledge() {
+  // The rail shows topic documents; the starter files and raw legacy answers live in the Knowledge tab.
+  const topics = knowledgeDocs.filter(
+    (doc) => doc.path !== "MEMORY.md" && doc.path !== "preferences.md" && !doc.path.startsWith("research/legacy/"),
+  );
+  setHtml(
+    "#notes",
+    topics.length
+      ? knowledgeTree(topics, true)
+      : `<p class="note">${knowledgeDocs.length ? "Only the starter MEMORY.md and preferences.md so far." : "No knowledge documents yet."}</p>`,
+  );
+  setHtml(
+    "#knowledge-inline",
+    knowledgeDocs.length ? knowledgeTree(knowledgeDocs, false) : '<p class="note">No knowledge documents yet.</p>',
+  );
+  setHtml("#uploads-inline", uploadsHtml());
+  renderAttachments();
+}
+onRender(renderKnowledge);
+
+//@m artifacts
+function renderEvidence() {
+  setHtml(
+    "#evidence-inline",
+    view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>',
+  );
+}
+onRender(renderEvidence);
+
+//@m admin
+function renderAdmin() {
+  const p = view.project;
+  document.querySelector("#owner-setup-button").hidden = !view;
+  document.querySelector("#usage-button").hidden = !plan;
+  document.querySelector("#provider-button").hidden = !plan;
+  document.querySelector("#routines-button").hidden = !plan;
+  const historyButton = document.querySelector('[data-action="routine-history"]');
+  if (historyButton) {
+    historyButton.dataset.project = projectId ?? "";
+    historyButton.hidden = !plan;
+  }
+  document.querySelector("#workspace").textContent = view.project.cwd;
+  document.querySelector("#workspace-policy").textContent =
+    "Workers run on this Mac and edit only folders you allow in Settings. Keep the Mac awake while work runs.";
+  const scopes = p.workspaceAuthorization?.scopes?.length ?? 0,
+    grants = p.githubAuthorization?.length ?? 0,
+    pluginProvider = p.workspaceAuthorization && p.workspaceAuthorization.provider !== "github" ? p.workspaceAuthorization.provider : null,
+    providerCard = (view.providerCards ?? [])[0];
+  const step = (done, title, detail) =>
+    `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
+  const wholeRepository = p.workspaceAuthorization?.scopes?.some((scope) => scope.wholeRepository);
+  setHtml(
+    "#owner-steps",
+    [
+      ...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]),
+      pluginProvider
+        ? providerCard
+          ? step(
+              providerCard.state === "connected",
+              `1. ${providerCard.title}`,
+              providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.",
+            ) +
+            (wholeRepository && providerCard.state === "available" && providerCard.connect
+              ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>`
+              : "")
+          : step(
+              false,
+              `1. ${pluginProvider}`,
+              view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.",
+            )
+        : step(
+            grants > 0,
+            "1. GitHub",
+            grants
+              ? `Draft PRs on ${p.githubAuthorization.map((grant) => grant.repositoryId).join(", ")}`
+              : wholeRepository
+                ? "Workers cannot open draft PRs yet."
+                : "Not connected.",
+          ) +
+          (wholeRepository && !grants
+            ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>'
+            : ""),
+      ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]),
+      step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default."),
+    ].join(""),
+  );
+}
+onRender(renderAdmin);
+
+//@m settings
+function renderSettings() {
+  const p = view.project;
+  document.querySelector("#settings-button").hidden = !plan;
+  renderModelCycle();
+  setHtml(
+    "#settings-summary",
+    `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {})
+      .map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`)
+      .join("")}${Object.entries(p.fallbackModels ?? {})
+      .map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} quota fallback</span><b>${esc(model)}</b>`)
+      .join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`,
+  );
+}
+onRender(renderSettings);
+
+//@m observability
+function renderObservability() {
+  const p = view.project,
+    work = plan?.work ?? [];
+  const count = (status) => work.filter((item) => item.status === status).length;
+  const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
+  setHtml(
+    "#obs-kpis",
+    [
+      kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""),
+      kpi("Running", count("running")),
+      kpi("Queued", count("queued")),
+      kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""),
+      kpi("Work items", work.length),
+      kpi("Worker cap", plan?.workerCap ?? "—"),
+    ].join(""),
+  );
+  renderHealth(p);
+  if (tab === "observability" && plan && !observability && !observabilityLoading) void loadObservability();
+  const threads = new Map();
+  for (const item of work) threads.set(item.threadId, [...(threads.get(item.threadId) ?? []), item]);
+  // One node per chat; each worker thread sits under the chat that delegated its latest work (null means Main).
+  const chats = view.chats ?? [{ id: "main", title: "Coordinator", conversationId: null, busy: view.busy, archived: false }];
+  const mainConversation = chats.find((chat) => chat.id === "main")?.conversationId ?? null;
+  const childThreads = (threadId) => [...threads].filter(([id, items]) => id !== threadId && items.at(-1).parentThreadId === threadId);
+  const owner = (items) => chats.find((chat) => chat.conversationId === (items.at(-1).chatConversationId ?? mainConversation)) ?? chats[0];
+  const threadHtml = ([threadId, items], nested = false) =>
+    `<li${nested ? ` class="trace-child" data-parent="${esc(items.at(-1).parentThreadId)}"` : ""} data-thread="${esc(threadId)}"><details ${items.some((item) => ["running", "queued", "blocked"].includes(item.status)) ? "open" : ""}><summary>${badge(items.at(-1).status)} <b>${nested ? "sub-agent · " : ""}${esc(items[0].role)} thread</b> <small class="inline mono">${esc(threadId.slice(0, 8))} · ${items.length} work item(s)</small> <button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">history ↗</button></summary><ul>${items.map((item) => `<li>${badge(item.status)} ${esc(item.text.slice(0, 160))} <small class="inline">${esc(item.attempt?.model ?? "")}</small></li>`).join("")}${(
+      observability?.tools ?? []
+    )
+      .filter((call) => call.threadId === threadId)
+      .map((call) => `<li>${toolCallHtml(call)}</li>`)
+      .join("")}${childThreads(threadId)
+      .map((entry) => threadHtml(entry, true))
+      .join("")}</ul></details></li>`;
+  setHtml(
+    "#obs-trace",
+    `<ul class="trace">${chats
+      .map((chat) => {
+        const owned = [...threads].filter(
+          ([, items]) => owner(items) === chat && !(items.at(-1).parentThreadId && threads.has(items.at(-1).parentThreadId)),
+        );
+        return `<li class="trace-chat" data-chat="${esc(chat.id)}"><details ${chat.busy || owned.length || chat.id === "main" ? "open" : ""}><summary><b>${esc(chat.title)}</b> <small class="inline">chat · ${esc(p.model)} · ${chat.busy ? "busy" : "idle"}${chat.archived ? " · archived" : ""}${chat.attention ? " · needs attention" : ""}</small></summary><ul>${owned.map(threadHtml).join("") || '<li class="note">No threads from this chat.</li>'}</ul></details></li>`;
+      })
+      .join("")}</ul>`,
+  );
+  setHtml("#obs-usage", usageHtml());
+  renderUsageBuckets();
+  const now = Date.now(),
+    starts = work.map((item) => item.startedAt).filter(Number.isFinite),
+    ends = work.map((item) => item.endedAt).filter(Number.isFinite);
+  const rangeStart = Math.min(...starts, now),
+    rangeEnd = Math.max(now, ...ends),
+    span = Math.max(1, rangeEnd - rangeStart);
+  setHtml(
+    "#obs-timeline",
+    work.length
+      ? work
+          .toReversed()
+          .map((item) => {
+            const start = Number.isFinite(item.startedAt) ? item.startedAt : null,
+              end = Number.isFinite(item.endedAt) ? item.endedAt : start !== null && item.status === "running" ? now : null;
+            const x = start === null ? 0 : Math.max(0, Math.min(100, ((start - rangeStart) / span) * 100)),
+              width = start === null ? 0 : Math.max(1, Math.min(100 - x, (((end ?? start + 1) - start) / span) * 100));
+            return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
+          })
+          .join("")
+      : '<p class="note">No worker timestamps recorded.</p>',
+  );
+  if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
+}
+onRender(renderObservability);
+
+//@m settingsCards
+function renderSettingsCards() {
+  if (tab === "settings" && plan) {
+    void loadAutomationStrip();
+    void loadEventsIn();
+    void loadSkillsPicker();
+    void loadMcpPicker();
+    void loadPrompts();
+    void loadWorktrees();
+    void loadContextSettings();
+  }
+  renderContextMeter(view.context);
+}
+onRender(renderSettingsCards);
+
+//@m notifications
+function renderTelegramCard() {
+  if (tab === "settings" && !telegramView) void loadTelegram();
+}
+onRender(renderTelegramCard);
+
+//@m search
+onRender(applySearchFocus);
 
 function renderModelCycle() {
   const button = document.querySelector("#model-cycle"),
@@ -1374,144 +1661,6 @@ function renderContextMeter(context) {
     popup.dataset.html = popupHtml;
   }
   meter.querySelector(".context-pct").textContent = known ? `${percent}%` : "";
-}
-
-function renderPanels() {
-  const p = view.project,
-    work = plan?.work ?? [];
-  const count = (status) => work.filter((item) => item.status === status).length;
-  const transcript = document.querySelector("#transcript");
-  transcript.dataset.count = String(view.messages.length);
-  followTranscript();
-  setHtml(
-    "#evidence-inline",
-    view.evidence.slice(-6).reverse().map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>',
-  );
-  const kpi = (label, value, tone = "") => `<div class="card kpi ${tone}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
-  setHtml(
-    "#obs-kpis",
-    [
-      kpi("Needs you", pendingCount(), pendingCount() ? "warn" : ""),
-      kpi("Running", count("running")),
-      kpi("Queued", count("queued")),
-      kpi("Blocked", count("blocked"), count("blocked") ? "err" : ""),
-      kpi("Work items", work.length),
-      kpi("Worker cap", plan?.workerCap ?? "—"),
-    ].join(""),
-  );
-  renderHealth(p);
-  if (tab === "observability" && plan && !observability && !observabilityLoading) void loadObservability();
-  const threads = new Map();
-  for (const item of work) threads.set(item.threadId, [...(threads.get(item.threadId) ?? []), item]);
-  // One node per chat; each worker thread sits under the chat that delegated its latest work (null means Main).
-  const chats = view.chats ?? [{ id: "main", title: "Coordinator", conversationId: null, busy: view.busy, archived: false }];
-  const mainConversation = chats.find((chat) => chat.id === "main")?.conversationId ?? null;
-  const childThreads = (threadId) => [...threads].filter(([id, items]) => id !== threadId && items.at(-1).parentThreadId === threadId);
-  const owner = (items) => chats.find((chat) => chat.conversationId === (items.at(-1).chatConversationId ?? mainConversation)) ?? chats[0];
-  const threadHtml = ([threadId, items], nested = false) =>
-    `<li${nested ? ` class="trace-child" data-parent="${esc(items.at(-1).parentThreadId)}"` : ""} data-thread="${esc(threadId)}"><details ${items.some((item) => ["running", "queued", "blocked"].includes(item.status)) ? "open" : ""}><summary>${badge(items.at(-1).status)} <b>${nested ? "sub-agent · " : ""}${esc(items[0].role)} thread</b> <small class="inline mono">${esc(threadId.slice(0, 8))} · ${items.length} work item(s)</small> <button class="ghost small" data-action="thread" data-project="${esc(projectId)}" data-thread="${esc(threadId)}">history ↗</button></summary><ul>${items.map((item) => `<li>${badge(item.status)} ${esc(item.text.slice(0, 160))} <small class="inline">${esc(item.attempt?.model ?? "")}</small></li>`).join("")}${(
-      observability?.tools ?? []
-    )
-      .filter((call) => call.threadId === threadId)
-      .map((call) => `<li>${toolCallHtml(call)}</li>`)
-      .join("")}${childThreads(threadId)
-      .map((entry) => threadHtml(entry, true))
-      .join("")}</ul></details></li>`;
-  setHtml(
-    "#obs-trace",
-    `<ul class="trace">${chats
-      .map((chat) => {
-        const owned = [...threads].filter(
-          ([, items]) => owner(items) === chat && !(items.at(-1).parentThreadId && threads.has(items.at(-1).parentThreadId)),
-        );
-        return `<li class="trace-chat" data-chat="${esc(chat.id)}"><details ${chat.busy || owned.length || chat.id === "main" ? "open" : ""}><summary><b>${esc(chat.title)}</b> <small class="inline">chat · ${esc(p.model)} · ${chat.busy ? "busy" : "idle"}${chat.archived ? " · archived" : ""}${chat.attention ? " · needs attention" : ""}</small></summary><ul>${owned.map(threadHtml).join("") || '<li class="note">No threads from this chat.</li>'}</ul></details></li>`;
-      })
-      .join("")}</ul>`,
-  );
-  setHtml("#obs-usage", usageHtml());
-  renderUsageBuckets();
-  const now = Date.now(),
-    starts = work.map((item) => item.startedAt).filter(Number.isFinite),
-    ends = work.map((item) => item.endedAt).filter(Number.isFinite);
-  const rangeStart = Math.min(...starts, now),
-    rangeEnd = Math.max(now, ...ends),
-    span = Math.max(1, rangeEnd - rangeStart);
-  setHtml(
-    "#obs-timeline",
-    work.length
-      ? work
-          .toReversed()
-          .map((item) => {
-            const start = Number.isFinite(item.startedAt) ? item.startedAt : null,
-              end = Number.isFinite(item.endedAt) ? item.endedAt : start !== null && item.status === "running" ? now : null;
-            const x = start === null ? 0 : Math.max(0, Math.min(100, ((start - rangeStart) / span) * 100)),
-              width = start === null ? 0 : Math.max(1, Math.min(100 - x, (((end ?? start + 1) - start) / span) * 100));
-            return `<div class="timeline-row"><small>${esc(item.role)} · ${esc(item.text.slice(0, 90))}</small><svg viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label="${esc(item.status)}"><rect x="${x}" y="1" width="${width}" height="6" rx="3" class="timeline-bar"></rect></svg><small>${start === null ? "Not started" : `${esc(new Date(start).toLocaleTimeString())}${end === null ? " · ongoing" : ` – ${esc(new Date(end).toLocaleTimeString())}`}`}</small></div>`;
-          })
-          .join("")
-      : '<p class="note">No worker timestamps recorded.</p>',
-  );
-  const scopes = p.workspaceAuthorization?.scopes?.length ?? 0,
-    grants = p.githubAuthorization?.length ?? 0,
-    pluginProvider = p.workspaceAuthorization && p.workspaceAuthorization.provider !== "github" ? p.workspaceAuthorization.provider : null,
-    providerCard = (view.providerCards ?? [])[0];
-  const step = (done, title, detail) =>
-    `<li class="${done ? "done" : ""}"><span class="n">${done ? "✓" : "•"}</span><div><b>${esc(title)}</b><small>${esc(detail)}</small></div></li>`;
-  const wholeRepository = p.workspaceAuthorization?.scopes?.some((scope) => scope.wholeRepository);
-  setHtml(
-    "#owner-steps",
-    [
-      ...(scopes ? [] : [step(false, "Repository", "No Git repository found in the project folder, so workers cannot edit code.")]),
-      pluginProvider
-        ? providerCard
-          ? step(
-              providerCard.state === "connected",
-              `1. ${providerCard.title}`,
-              providerCard.state === "connected" || wholeRepository ? providerCard.body : "Not connected.",
-            ) +
-            (wholeRepository && providerCard.state === "available" && providerCard.connect
-              ? `<li class="step-action"><button class="primary" data-action="provider-connect" data-card="${esc(providerCard.id)}">${esc(providerCard.connect.label)}</button></li>`
-              : "")
-          : step(
-              false,
-              `1. ${pluginProvider}`,
-              view.unloadedProvider ? "The provider plugin is not loaded; its records are kept." : "Not connected.",
-            )
-        : step(
-            grants > 0,
-            "1. GitHub",
-            grants
-              ? `Draft PRs on ${p.githubAuthorization.map((grant) => grant.repositoryId).join(", ")}`
-              : wholeRepository
-                ? "Workers cannot open draft PRs yet."
-                : "Not connected.",
-          ) +
-          (wholeRepository && !grants
-            ? '<li class="step-action"><button class="primary" data-action="github-quick">Connect GitHub</button></li>'
-            : ""),
-      ...(wholeRepository ? [] : [step(false, "2. Fixed command profile", "Optional, owner-defined executable and arguments.")]),
-      step(true, wholeRepository ? "2. Skills" : "3. Skills", "Chosen per role in Skills below; repository skills by default."),
-    ].join(""),
-  );
-  if (tab === "settings" && plan) {
-    void loadAutomationStrip();
-    void loadEventsIn();
-    void loadSkillsPicker();
-    void loadMcpPicker();
-    void loadPrompts();
-    void loadWorktrees();
-    void loadContextSettings();
-  }
-  if (tab === "settings" && !telegramView) void loadTelegram();
-  setHtml(
-    "#settings-summary",
-    `<div class="kv"><span>Coordinator model</span><b>${esc(p.model)}</b>${Object.entries(p.models ?? {})
-      .map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} model</span><b>${esc(model)}</b>`)
-      .join("")}${Object.entries(p.fallbackModels ?? {})
-      .map(([role, model]) => `<span>${esc(role[0].toUpperCase() + role.slice(1))} quota fallback</span><b>${esc(model)}</b>`)
-      .join("")}<span>Workspace</span><b class="mono">${esc(p.cwd)}</b></div>`,
-  );
-  if (tab === "observability" && plan && (!usageObs || Date.now() - usageObs.at > 15000)) void loadUsage();
 }
 
 // Skills (Settings): "All profiles" plus per-role additions. Prompts carry only names and descriptions; bodies are read on demand.
@@ -2610,7 +2759,7 @@ async function loadObservability() {
     renderHealth(view.project);
     renderEventLog();
     renderUsageBuckets();
-    renderPanels();
+    renderObservability();
   } catch (error) {
     if (id === projectId && current === generation) {
       setHtml("#obs-event-log", `<p class="note">Event log unavailable: ${esc(error.message)}</p>`);
@@ -4098,27 +4247,47 @@ function setHtml(selector, text) {
 function admissionBlocked() {
   return !view || view.paused || view.project.archived || view.project.deleted || Boolean(currentChat()?.archived);
 }
+//@m api
+// Features own the controls they lock while a request is in flight or the project cannot admit work; each registers its rules here.
+const busyHooks = [];
+function onBusyChange(apply) {
+  busyHooks.push(apply);
+}
 function disableActions() {
-  document.querySelectorAll("#letter button, #letter textarea, #questions textarea, .panel button").forEach((node) => {
+  // data-off: a picker button that is idle-disabled (nothing to save), not just busy
+  document.querySelectorAll('#dialog button[type="submit"]').forEach((node) => {
+    node.disabled = busy || node.hasAttribute("data-off");
+  });
+  for (const apply of busyHooks) apply();
+}
+//@m chat
+onBusyChange(() => {
+  document.querySelectorAll(".panel button").forEach((node) => {
     node.disabled = busy || !view || node.hasAttribute("data-off");
-  }); // data-off: a picker button that is idle-disabled (nothing to save), not just busy
+  });
   document.querySelectorAll("#compose button, #compose textarea").forEach((node) => {
     node.disabled = busy || admissionBlocked();
   });
-  document
-    .querySelectorAll(
-      '#dialog button[type="submit"], #dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"], #create',
-    )
-    .forEach((node) => {
-      node.disabled = busy || node.hasAttribute("data-off");
-    });
+});
+//@m decisions
+onBusyChange(() => {
+  document.querySelectorAll("#letter button, #letter textarea, #questions textarea").forEach((node) => {
+    node.disabled = busy || !view || node.hasAttribute("data-off");
+  });
   document
     .querySelectorAll('[data-action="operation-decision"], [data-action="operation-execute"], [data-action="operation-inspect"]')
     .forEach((node) => {
       const record = operationCache.get(node.dataset.operation);
       node.disabled = busy || !view || view.project.archived || view.project.deleted || !record?.scopeCurrent;
     });
-  // Stop stays available while paused (the host allows it); steer/send need an admitting project.
+});
+//@m creation
+onBusyChange(() => {
+  document.querySelector("#create").disabled = busy;
+});
+//@m workers
+// Stop stays available while paused (the host allows it); steer/send need an admitting project.
+onBusyChange(() => {
   document
     .querySelectorAll(
       "#dialog [data-thread-mutation], #inline-thread [data-thread-mutation], [data-inline-thread-send] button, [data-inline-thread-send] textarea",
@@ -4127,6 +4296,12 @@ function disableActions() {
       node.disabled =
         busy || (node.dataset.action === "thread-stop" ? !view || view.project.archived || view.project.deleted : admissionBlocked());
     });
+});
+//@m admin
+onBusyChange(() => {
+  document.querySelectorAll('#dialog [data-action="confirm-pause"], #dialog [data-action="confirm-resume"]').forEach((node) => {
+    node.disabled = busy || node.hasAttribute("data-off");
+  });
   document.querySelector("#lifecycle").hidden = !view;
   document.querySelector("#lifecycle-state").textContent = !view
     ? ""
@@ -4147,7 +4322,7 @@ function disableActions() {
   resume.hidden = !view?.paused || view.project.archived || view.project.deleted;
   resume.disabled = busy;
   document.querySelector("#paused-hint").hidden = !view?.paused || view.project.archived || view.project.deleted;
-}
+});
 
 function uiFrame() {
   return { projectId, generation, dialogVersion };
@@ -4892,17 +5067,19 @@ function inlineRefsMarkdown(value, refs) {
   text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>");
   return text.replace(/\u0000(\d+)\u0000/g, (_, index) => code[Number(index)]);
 }
-function closeDialog() {
-  captureDialogDraft();
-  answerAdoption = null;
-  routineConfirmation = null;
-  uploadConfirmations.clear();
-  settingsConfirmation = null;
-  providerInspection = null;
+// Features that keep per-dialog state (pending confirmations, object URLs) register a cleanup that runs whenever the dialog closes or is replaced.
+const dialogClosers = [];
+function onDialogClose(cleanup) {
+  dialogClosers.push(cleanup);
+}
+function resetDialogState() {
+  captureDrafts();
+  for (const cleanup of dialogClosers) cleanup();
   dialogVersion++;
+}
+function closeDialog() {
+  resetDialogState();
   if (dialog.open) dialog.close();
-  if (blobUrl) URL.revokeObjectURL(blobUrl);
-  blobUrl = null;
 }
 function showDialog(title, content, subtitle = "") {
   closeDialog();
@@ -4982,7 +5159,7 @@ function createDialog() {
   );
 }
 function newCreationDraft() {
-  captureDialogDraft();
+  captureDrafts();
   const id = crypto.randomUUID();
   creationDrafts.set(id, { name: "", cwd: "", objective: "", outcome: "draft", createdId: null, requestBound: true });
   persistBrowserDrafts();
@@ -5022,7 +5199,7 @@ async function resumeDialog() {
 }
 
 function textDialog(mode, id) {
-  captureDialogDraft();
+  captureDrafts();
   const project = projectId,
     draftKey = `${project}:${mode}:${id}`;
   const draft = formDrafts.get(draftKey) ?? { text: "", requestId: crypto.randomUUID(), submittedText: null };
@@ -5034,1282 +5211,1465 @@ function textDialog(mode, id) {
   );
   dialog.querySelector("textarea").focus();
 }
-
-async function action(node) {
-  if (["answer", "answer-adopt"].includes(node.dataset.action)) requireProject(node.dataset.project);
-  const entry = view?.inbox.find((item) => item.id === node.dataset.entry);
-  const owner = uiPlugins.find((plugin) => node.dataset.action?.startsWith(`${plugin.name}-`));
-  if (owner) {
-    await owner.action(node.dataset.action, node);
-    return;
-  }
-  switch (node.dataset.action) {
-    case "select":
-      selected = node.dataset.entry;
-      document.activeElement.blur();
-      render();
-      break;
-    case "event-page": {
-      const delta = Number(node.dataset.offset),
-        id = projectId,
-        current = generation;
-      eventOffset = node.dataset.offset === "0" ? 0 : Math.max(0, eventOffset + delta);
-      observability = null;
-      await loadObservability();
-      if (id !== projectId || current !== generation) return;
-      break;
-    }
-    case "creation-list":
-      createDialog();
-      break;
-    case "creation-new":
-      newCreationDraft();
-      break;
-    case "creation-edit":
-      creationEdit(node.dataset.draft);
-      break;
-    case "creation-dismiss": {
-      const draft = creationDrafts.get(node.dataset.draft);
-      if (!draft || draft.outcome !== "created" || !uuid(draft.createdId))
-        throw new Error("Only known-success creation entries may be dismissed");
-      creationDrafts.delete(node.dataset.draft);
-      persistBrowserDrafts();
-      createDialog();
-      break;
-    }
-    case "answer-adopt": {
-      if (entry?.kind !== "question" || entry.result || !answers.has(entry.id))
-        throw new Error("No retained unbound draft for this pending question");
-      const key = answerKey(projectId, entry.id),
-        text = answers.get(entry.id);
-      if (answers.has(key)) throw new Error("A project-bound draft already exists; it will not be overwritten");
-      const version = showDialog(
-        "Adopt this old answer draft?",
-        `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Copy draft only, do not send</button></form>`,
-      );
-      answerAdoption = { projectId, entryId: entry.id, text, version };
-      break;
-    }
-    case "questions-jump":
-      document.querySelector("#questions").scrollIntoView({ block: "center", behavior: scrollBehavior() });
-      document.querySelector("#questions .question-card textarea")?.focus({ preventScroll: true });
-      break;
-    case "answer": {
-      const index = Number(node.dataset.choice);
-      if (
-        entry?.kind !== "question" ||
-        entry.result ||
-        !Number.isSafeInteger(index) ||
-        index < 0 ||
-        index >= entry.choices.length ||
-        entry.choices[index] !== node.dataset.choiceText
-      )
-        throw new Error("Displayed choice changed or question is resolved; refresh and choose again");
-      await mutate(
-        { action: "answer", id: node.dataset.project, entry: entry.id, text: node.dataset.choiceText },
-        "Answer sent to the coordinator.",
-      );
-      break;
-    }
-    case "work-archive": {
-      const work = plan?.work.find((item) => item.id === node.dataset.work);
-      if (node.dataset.project !== projectId || !work || work.archived) throw new Error("Displayed work changed; refresh before archiving");
-      await mutate({ action: "work-archive", id: projectId, workIds: [work.id] }, "Work archived. Record and thread kept.");
-      break;
-    }
-    case "retry-message": {
-      const job = view.jobs.find((item) => item.id === node.dataset.job);
-      if (node.dataset.project !== projectId || !job || !["failed", "interrupted"].includes(job.state))
-        throw new Error("Displayed failed message changed; refresh before retrying");
-      node.disabled = true; // a second click must not resend
-      await mutate(
-        { action: "message", id: projectId, text: job.text, ...(chatId === "main" ? {} : { chatId }) },
-        "Message resent to the coordinator.",
-      );
-      break;
-    }
-    case "chat-select":
-      if (dialog.contains(node)) closeDialog();
-      changeChat(node.dataset.chat);
-      break;
-    case "chat-new": {
-      const id = projectId,
-        created = await mutate({ action: "chat-create", id }, "New chat opened. It shares this project's workers and knowledge.");
-      if (id === projectId) changeChat(created.id);
-      break;
-    }
-    case "chat-rename": {
-      const chat = currentChat();
-      if (!chat) throw new Error("Chat list is still loading");
-      showDialog(
-        "Rename chat",
-        `<form data-chat-rename data-project="${esc(projectId)}" data-chat="${esc(chat.id)}"><label>Title<input name="title" maxlength="120" required value="${esc(chat.title)}"></label><div class="row"><button type="submit" class="primary">Rename</button></div></form>`,
-      );
-      document.querySelector("#dialog form[data-chat-rename] input").select();
-      break;
-    }
-    case "chat-archive": {
-      const chat = currentChat();
-      if (!chat || chat.id === "main") throw new Error("Main cannot be archived");
-      await mutate({ action: "chat-update", id: projectId, chatId: chat.id, archived: true }, "Chat archived. Its history is kept.");
-      changeChat("main");
-      break;
-    }
-    case "chat-restore": {
-      const target = node.dataset.chat;
-      await mutate({ action: "chat-update", id: projectId, chatId: target, archived: false }, "Chat restored.");
-      changeChat(target);
-      break;
-    }
-    case "thread-list":
-      threadList();
-      break;
-    case "all-work":
-      allWork = !allWork;
-      render();
-      break;
-    case "history-earlier":
-      node.blur();
-      await showEarlier();
-      break;
-    case "jump-latest":
-      searchFocus = null;
-      stickToBottom = true;
-      followTranscript();
-      renderWorkingPill();
-      break;
-    case "skill-pick":
-      pickMenuItem(
-        skillMenu?.items.find((item) => item.name === node.dataset.name && item.source === node.dataset.source) ?? {
-          name: node.dataset.name,
-        },
-      );
-      break;
-    case "ref-pick": {
-      const item = refMenu?.items[Number(node.dataset.index)];
-      if (item) pickRef(item);
-      break;
-    }
-    case "ref-open":
-      await refOpen(node.dataset.kind, node.dataset.value);
-      break;
-    case "pr-pick":
-      pickPr(
-        prMenu.items.find((item) => item.provider === node.dataset.provider && String(item.id) === node.dataset.pr)?.ref ??
-          `#${node.dataset.pr}`,
-      );
-      break;
-    case "prs-refresh":
-      await loadPrs(true);
-      break;
-    case "pr-hide": {
-      await api({
-        action: "pr-hide",
-        id: projectId,
-        provider: node.dataset.provider,
-        pr: node.dataset.pr,
-        hide: node.dataset.hide === "true",
-      });
-      prsState.at = 0;
-      await loadPrs();
-      break;
-    }
-    case "pr-watch": {
-      const on = node.getAttribute("aria-pressed") !== "true";
-      await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on });
-      prsState.at = 0;
-      await loadPrs();
-      break;
-    }
-    case "artifact-dir":
-    case "artifact-select":
-    case "artifact-deselect":
-    case "artifacts-sort":
-    case "artifact-download":
-    case "artifact-open":
-      artifactAction(node.dataset.action, node);
-      break;
-    case "limits-refresh": {
-      if (limitsRefreshing) break;
-      limitsRefreshing = true;
-      renderLimits();
-      try {
-        const loaded = await api({ action: "limits-refresh" });
-        if (loaded?.providers) limits = loaded;
-      } catch (error) {
-        report(error);
-      } finally {
-        limitsRefreshing = false;
-        renderLimits();
-      }
-      break;
-    }
-    case "cursor-connect": {
-      const started = await api({ action: "cursor-connect" });
-      const cursor = limits?.providers.find((item) => item.provider === "cursor");
-      if (cursor) {
-        cursor.connect = started;
-        renderLimits();
-      }
-      if (started.loginUrl) window.open(started.loginUrl, "_blank", "noopener,noreferrer");
-      scheduleLimitsWatch();
-      break;
-    }
-    case "thread-close":
-      if (history.state?.worker) history.back();
-      else {
-        closeWorkerDetail();
-        ensureChanges();
-        dialogVersion++;
-        renderArtifactBrowser();
-        render();
-      }
-      break;
-    case "toggle-clamp":
-      node.classList.toggle("clamp");
-      break;
-    case "provider-list":
-      await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0));
-      break;
-    case "provider-record":
-      requireProject(node.dataset.project);
-      providerRecord(node.dataset.record);
-      break;
-    case "provider-fresh":
-      requireProject(node.dataset.project);
-      await providerFresh(node.dataset.record);
-      break;
-    case "provider-inspect":
-      requireProject(node.dataset.project);
-      providerInspect(node.dataset.record);
-      break;
-    case "provider-known":
-      providerKnown();
-      break;
-    case "routine-list":
-      if (node.dataset.project) requireProject(node.dataset.project);
-      await routineList(node.dataset.lens ?? "schedules", Number(node.dataset.offset ?? 0));
-      break;
-    case "routine-history":
-      requireProject(node.dataset.project);
-      await routineHistory(node.dataset.kind, Number(node.dataset.offset ?? 0), Number(node.dataset.textOffset ?? 0));
-      break;
-    case "routine-confirm":
-      requireProject(node.dataset.project);
-      routineConfirm(node.dataset.kind, node.dataset.record, node.dataset.enabled);
-      break;
-    case "usage-list":
-      await usageList(Number(node.dataset.offset ?? 0));
-      break;
-    case "lifecycle-more":
-      lifecycleMore();
-      break;
-    case "lifecycle-confirm":
-      lifecycleConfirm(node.dataset.project, node.dataset.operation);
-      break;
-    case "open-retained":
-      showDialog(
-        "Open known retained project",
-        '<p>Enter an owned project UUID to inspect retained state, including projects removed from the ordinary list. This does not restore/resume it.</p><form data-open-retained><label>Known project UUID<input name="id" required maxlength="36" autocomplete="off"></label><button type="submit">Open retained metadata</button></form>',
-      );
-      break;
-    case "settings-list":
-      await settingsList();
-      break;
-    case "automation-refresh":
-      await loadEventsIn(true);
-      break;
-    case "telegram-save": {
-      const input = document.querySelector("#telegram-token"),
-        token = input.value.trim();
-      input.value = "";
-      if (!token) throw new Error("Paste the bot token first");
-      await telegramAction({ action: "telegram-token", token }, "Telegram bot saved.");
-      break;
-    }
-    case "telegram-pair":
-      await telegramAction({ action: "telegram-pair" });
-      break;
-    case "telegram-unpair":
-      await telegramAction({ action: "telegram-unpair" }, "Telegram chat unpaired.");
-      break;
-    case "telegram-remove": {
-      if (!telegramRemoveArmed) {
-        telegramRemoveArmed = true;
-        renderTelegram();
-        setTimeout(() => {
-          if (telegramRemoveArmed) {
-            telegramRemoveArmed = false;
-            renderTelegram();
-          }
-        }, 6000);
-        break;
-      }
-      telegramRemoveArmed = false;
-      await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed.");
-      break;
-    }
-    case "remote-pair": {
-      const pairing = await remoteAction({ action: "remote-pair-start" });
-      if (pairing) remotePairing = pairing;
-      await loadRemote();
-      break;
-    }
-    case "remote-pair-cancel":
-      await remoteAction({ action: "remote-pair-cancel" });
-      remotePairing = null;
-      await loadRemote();
-      break;
-    case "remote-copy-link":
-      if (remotePairing) {
-        await navigator.clipboard.writeText(remotePairing.link);
-        toast("Pairing link copied. It works once.");
-      }
-      break;
-    case "remote-rename":
-      remoteRenaming = node.dataset.device;
-      renderRemote();
-      break;
-    case "remote-rename-cancel":
-      remoteRenaming = null;
-      renderRemote();
-      break;
-    case "remote-rename-save": {
-      const name = document.querySelector("#remote-rename").value.trim();
-      if (!name) throw new Error("Name the device first");
-      remoteRenaming = null;
-      await remoteAction({ action: "remote-rename", deviceId: node.dataset.device, name });
-      await loadRemote();
-      break;
-    }
-    case "remote-revoke": {
-      const id = node.dataset.device;
-      if (remoteRevokeArmed !== id) {
-        remoteRevokeArmed = id;
-        renderRemote();
-        setTimeout(() => {
-          if (remoteRevokeArmed === id) {
-            remoteRevokeArmed = null;
-            renderRemote();
-          }
-        }, 6000);
-        break;
-      }
-      remoteRevokeArmed = null;
-      await remoteAction({ action: "remote-revoke", deviceId: id, confirm: id }, "Device revoked.");
-      await loadRemote();
-      break;
-    }
-    case "automation-save":
-      await saveEventsIn();
-      break;
-    case "worktree-setup-save":
-      await saveWorktreeSetup();
-      break;
-    case "worktrees-cleanup":
-      await cleanupWorktreesNow();
-      break;
-    case "worktrees-refresh":
-      await loadWorktrees(true);
-      break;
-    case "context-save":
-      await saveContextSettings(false);
-      break;
-    case "context-reset":
-      await saveContextSettings(true);
-      break;
-    case "compact-now":
-      await compactNow();
-      break;
-    case "prompt-save":
-      await savePrompt(node.dataset.role, false);
-      break;
-    case "prompt-reset":
-      await savePrompt(node.dataset.role, true);
-      break;
-    case "composer-help":
-      toggleComposerHelp(node);
-      break;
-    case "skills-tab":
-      skillsPicker.tab = node.dataset.role;
-      renderSkillsPicker();
-      break;
-    case "skills-select":
-      bulkSkills(node.dataset.source, node.dataset.mode);
-      break;
-    case "mcp-select":
-      bulkMcp(node.dataset.mode);
-      break;
-    case "skills-save":
-      await saveSkillsPicker(false);
-      break;
-    case "skills-reset":
-      await saveSkillsPicker(true);
-      break;
-    case "mcp-tab":
-      mcpPicker.tab = node.dataset.role;
-      renderMcpPicker();
-      break;
-    case "mcp-save":
-      await saveMcpPicker(false);
-      break;
-    case "mcp-reset":
-      await saveMcpPicker(true);
-      break;
-    case "mcp-test":
-      await testMcpServer(node.dataset.server);
-      break;
-    case "follow-poll": {
-      const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub.");
-      eventsIn.data = data;
-      renderEventsIn();
-      break;
-    }
-    case "webhook-reveal":
-      eventsIn.reveal = !eventsIn.reveal;
-      renderEventsIn();
-      break;
-    case "webhook-copy":
-      await navigator.clipboard.writeText(node.dataset.what === "url" ? eventsIn.data.webhook.url : eventsIn.data.webhook.secret);
-      toast(node.dataset.what === "url" ? "Webhook URL copied." : "Webhook secret copied.");
-      break;
-    case "webhook-rotate": {
-      if (!eventsIn.rotateArmed) {
-        eventsIn.rotateArmed = true;
-        renderEventsIn();
-        setTimeout(() => {
-          if (eventsIn?.rotateArmed) {
-            eventsIn.rotateArmed = false;
-            renderEventsIn();
-          }
-        }, 6000);
-        break;
-      }
-      eventsIn.rotateArmed = false;
-      const data = await mutate(
-        { action: "webhook-rotate", id: projectId, confirm: projectId },
-        "Webhook secret rotated. The old secret no longer works.",
-      );
-      eventsIn.data = data;
-      eventsIn.reveal = true;
-      renderEventsIn();
-      break;
-    }
-    case "owner-setup":
-      await ownerSetupDialog();
-      break;
-    case "workspace-quick":
-      await workspaceQuickDialog();
-      break;
-    case "workspace-quick-confirm":
-      await workspaceQuickConfirm(node.dataset.project, node.dataset.revision);
-      break;
-    case "provider-connect":
-      await providerConnectDialog(node.dataset.card);
-      break;
-    case "provider-connect-confirm":
-      await providerConnectConfirm(node.dataset.project, node.dataset.card, node.dataset.revision);
-      break;
-    case "github-quick":
-      await githubQuickDialog();
-      break;
-    case "github-quick-confirm":
-      await githubQuickConfirm(node.dataset.project, node.dataset.revision);
-      break;
-    case "owner-setup-edit":
-      await ownerSetupEdit(node.dataset.kind, node.dataset.payload || "{}");
-      break;
-    case "owner-profile-read":
-      await ownerProfileRead(node.dataset.project, node.dataset.profile);
-      break;
-    case "settings-back":
-      await settingsList(true);
-      break;
-    case "mp-toggle": {
-      const mp = node.closest(".mp");
-      if (mp.classList.contains("open")) mpClose(mp, true);
-      else mpOpen(mp);
-      break;
-    }
-    case "mp-pick":
-      mpPick(node.closest(".mp"), node.dataset.ref);
-      break;
-    case "model-cycle":
-      await cycleModel(1);
-      break;
-    case "scope-clear":
-      for (const box of dialog.querySelectorAll("[data-scope-ref]")) box.checked = false;
-      settingsSync();
-      break;
-    case "profile-roles": {
-      const skills = node.dataset.picker === "skills";
-      (skills ? skillsPicker : mcpPicker).roles = true;
-      (skills ? renderSkillsPicker : renderMcpPicker)();
-      break;
-    }
-    case "settings-discard":
-      settingsDiscard(node.dataset.project, node.dataset.field);
-      break;
-    case "settings-confirm-discard": {
-      requireProject(node.dataset.project);
-      if (!["name", "objective"].includes(node.dataset.field)) throw new Error("Unknown settings draft field");
-      settingsDrafts.delete(`${projectId}:${node.dataset.field}`);
-      if (settingsPending?.projectId === projectId) delete settingsPending.flat[node.dataset.field];
-      persistBrowserDrafts();
-      await settingsList(true);
-      break;
-    }
-    case "upload-list":
-      uploadList();
-      break;
-    case "upload-pick":
-      document.querySelector("#upload-input").click();
-      break;
-    case "attach-pick":
-      document.querySelector("#attach-input").click();
-      break;
-    case "attach-remove": {
-      const list = attachmentDrafts.get(draftKey()) ?? [];
-      list.splice(Number(node.dataset.index), 1);
-      renderAttachments();
-      break;
-    }
-    case "upload-open":
-      await uploadOpen(node.dataset.upload);
-      break;
-    case "upload-delete":
-      requireProject(node.dataset.project);
-      await mutate({ action: "upload-delete", id: node.dataset.project, uploadId: node.dataset.upload }, "Upload deleted.");
-      closeDialog();
-      break;
-    case "upload-new": {
-      if (!view) throw new Error("Select a loaded project first");
-      const draft = {
-        projectId,
-        importId: crypto.randomUUID(),
-        filename: "reference.md",
-        title: "Project reference",
-        encoding: "utf8",
-        text: "",
-        submittedFingerprint: null,
-      };
-      uploadDrafts.set(draft.importId, draft);
-      persistBrowserDrafts();
-      uploadEdit(draft.importId);
-      break;
-    }
-    case "upload-edit":
-      requireProject(node.dataset.project);
-      uploadEdit(node.dataset.import);
-      break;
-    case "library-list":
-      await libraryList(Number(node.dataset.offset ?? 0));
-      break;
-    case "library-open":
-      requireProject(node.dataset.project);
-      await libraryOpen(node.dataset.file, node.dataset.sha);
-      break;
-    case "library-bytes":
-      requireProject(node.dataset.project);
-      libraryBytes(node.dataset.file, node.dataset.sha, Number(node.dataset.offset));
-      break;
-    case "knowledge-list":
-      await knowledgeList();
-      break;
-    case "knowledge-read":
-      requireProject(node.dataset.project);
-      await knowledgeRead(node.dataset.path);
-      break;
-    case "knowledge-edit":
-      knowledgeEdit(node.dataset.project, node.dataset.path);
-      break;
-    case "knowledge-new":
-      knowledgeNew();
-      break;
-    case "knowledge-history":
-      requireProject(node.dataset.project);
-      await knowledgeHistory(node.dataset.path, Number(node.dataset.offset ?? 0));
-      break;
-    case "knowledge-discard":
-      knowledgeDiscard(node.dataset.project, node.dataset.path);
-      break;
-    case "knowledge-confirm-discard": {
-      requireProject(node.dataset.project);
-      const key = `${projectId}:${node.dataset.path}`;
-      if (!knowledgeCache.has(key)) throw new Error("Reread the current document before discarding its draft");
-      knowledgeDrafts.delete(key);
-      persistBrowserDrafts();
-      knowledgeEdit(projectId, node.dataset.path);
-      break;
-    }
-    case "operation-list":
-      await operationsDialog(Number(node.dataset.offset ?? 0));
-      break;
-    case "operation-view":
-      operationView(node.dataset.operation, node.dataset.fingerprint);
-      break;
-    case "operation-decision":
-      operationDecision(node.dataset.operation, node.dataset.fingerprint, node.dataset.decision);
-      break;
-    case "operation-execute":
-      operationExecution(node.dataset.operation, node.dataset.fingerprint);
-      break;
-    case "operation-inspect":
-      operationExecution(node.dataset.operation, node.dataset.fingerprint, true);
-      break;
-    case "thread":
-      requireProject(node.dataset.project);
-      if (dialog.contains(node)) closeDialog();
-      await inspectThread(node.dataset.thread);
-      break;
-    case "thread-history-page":
-      requireProject(node.dataset.project);
-      await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset));
-      break;
-    case "thread-send":
-      requireProject(node.dataset.project);
-      requireThread(node.dataset.thread);
-      textDialog("thread-send", node.dataset.thread);
-      break;
-    case "thread-steer":
-      requireProject(node.dataset.project);
-      requireThread(node.dataset.thread);
-      showDialog(
-        "Steer this reusable thread?",
-        `<p>Project ${esc(projectId)}. Thread ${esc(node.dataset.thread)}. The replacement is recorded before interruption; scope/model/tools stay frozen.</p><button data-action="confirm-thread-steer" data-project="${esc(projectId)}" data-thread="${esc(node.dataset.thread)}">Compose replacement</button>`,
-      );
-      break;
-    case "confirm-thread-steer":
-      requireProject(node.dataset.project);
-      textDialog("thread-steer", node.dataset.thread);
-      break;
-    case "thread-stop":
-      requireProject(node.dataset.project);
-      requireThread(node.dataset.thread);
-      showDialog(
-        "Stop this reusable thread?",
-        `<p>Conversation, receipts and partial files remain.</p><button class="danger" data-action="confirm-thread-stop" data-project="${esc(projectId)}" data-thread="${esc(node.dataset.thread)}">Stop thread ${esc(node.dataset.thread)}</button>`,
-      );
-      break;
-    case "confirm-thread-stop": {
-      const id = node.dataset.project,
-        version = dialogVersion;
-      requireProject(id);
-      await mutate({ action: "thread-stop", id, threadId: node.dataset.thread }, "Thread stop recorded. History and work retained.");
-      closeCurrentDialog(id, version);
-      break;
-    }
-    case "resume-project":
-      await resumeDialog();
-      break;
-    case "confirm-resume": {
-      const version = dialogVersion;
-      if (node.dataset.project !== projectId) throw new Error("The selected project changed. Reopen the resume dialog.");
-      await mutate({ action: "resume", id: node.dataset.project }, "Idle project resumed.");
-      closeCurrentDialog(node.dataset.project, version);
-      break;
-    }
-    case "pause-project":
-      showDialog(
-        "Pause this project?",
-        `<p>This interrupts the coordinator and workers, and blocks scheduled work. State and partial workspace changes stay intact.</p><p>Resume is a separate action.</p><button class="danger" data-action="confirm-pause" data-project="${esc(projectId)}">Pause project</button>`,
-      );
-      break;
-    case "confirm-pause": {
-      const version = dialogVersion;
-      if (node.dataset.project !== projectId) throw new Error("The selected project changed. Reopen the pause confirmation.");
-      await mutate({ action: "pause", id: node.dataset.project }, "Project paused. State retained.");
-      closeCurrentDialog(node.dataset.project, version);
-      break;
-    }
-    case "artifact":
-      await inspectArtifact(node.dataset.file);
-      break;
-    case "notes":
-      showDialog(
-        "Shared project notes",
-        view.notes
-          .map(
-            (note) =>
-              `<article class="message"><div class="eyebrow">${esc(note.author)} · ${esc(new Date(note.at).toLocaleString())}</div><p>${esc(note.text)}</p></article>`,
-          )
-          .join("") || '<p class="note">No notes yet.</p>',
-      );
-      break;
-    case "evidence-list":
-      showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
-      break;
-    case "conversation":
-      document.querySelector(".conversation").open = true;
-      document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: scrollBehavior() });
-      document.querySelector(".conversation summary").focus();
-      break;
-    case "close-dialog":
-      closeDialog();
-      break;
-    case "search":
-      openSearch();
-      break;
-    case "search-open":
-      await openSearchHit(Number(node.dataset.i));
-      break;
-  }
-}
-
-async function submit(form) {
-  const slash = form.id === "compose" ? slashCommand(new FormData(form).get("message").trim()) : null;
-  if (slash) {
-    closeSkillMenu();
-    const textarea = form.querySelector("textarea"),
-      key = draftKey(projectId, chatId),
-      typed = textarea.value;
-    await slash.command.run(slash.argument);
-    if (textarea.value === typed) {
-      drafts.delete(key);
-      persistBrowserDrafts();
-      form.reset();
-      autosize(textarea);
-    }
-    return;
-  }
-  if (form.id === "compose" && (busy || admissionBlocked()))
-    throw new Error("This project cannot accept a request now. Your draft was kept.");
-  const data = new FormData(form);
-  const id = projectId,
-    version = dialogVersion;
-  if (form.matches("[data-pr-add]")) {
-    const input = form.querySelector("input");
-    await api({ action: "pr-watch", id, provider: form.dataset.provider, pr: String(data.get("pr") ?? "").trim(), watch: true });
-    input.value = "";
-    input.blur();
-    prsState.at = 0;
-    await loadPrs();
-    return;
-  }
-  if (form.matches("[data-inline-thread-send]")) {
-    if (busy || admissionBlocked()) throw new Error("This project cannot accept a request now. Your draft was kept.");
-    const target = form.dataset.project,
-      threadId = form.dataset.thread;
-    requireProject(target);
-    requireThread(threadId);
-    const text = data.get("message");
-    if (!text.trim()) return;
-    const draftKey = `${target}:thread-send:${threadId}`;
-    const draft = formDrafts.get(draftKey) ?? { text: "", requestId: crypto.randomUUID(), submittedText: null };
-    if (draft.submittedText !== null && draft.submittedText !== text)
-      throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
-    draft.text = text;
-    draft.submittedText = text;
-    formDrafts.set(draftKey, draft);
-    persistBrowserDrafts();
-    await mutate(
-      { action: "thread-send", id: target, threadId, requestId: draft.requestId, text },
-      "Instruction recorded on the existing thread.",
+//@m decisions
+registerActions({
+  select(node) {
+    selected = node.dataset.entry;
+    document.activeElement.blur();
+    render();
+  },
+  "answer-adopt"(node) {
+    requireProject(node.dataset.project);
+    const entry = view?.inbox.find((item) => item.id === node.dataset.entry);
+    if (entry?.kind !== "question" || entry.result || !answers.has(entry.id))
+      throw new Error("No retained unbound draft for this pending question");
+    const key = answerKey(projectId, entry.id),
+      text = answers.get(entry.id);
+    if (answers.has(key)) throw new Error("A project-bound draft already exists; it will not be overwritten");
+    const version = showDialog(
+      "Adopt this old answer draft?",
+      `<p>Target project ${esc(projectId)}, question ${esc(entry.id)}: ${esc(entry.title)}.</p><pre>${esc(text)}</pre><form data-answer-adopt data-project="${esc(projectId)}" data-entry="${esc(entry.id)}"><input type="hidden" name="confirm" value="${esc(projectId)}"><button type="submit">Copy draft only, do not send</button></form>`,
     );
-    if (formDrafts.get(draftKey) === draft) {
-      formDrafts.delete(draftKey);
-      persistBrowserDrafts();
-      if (projectId === target && workerChat?.threadId === threadId) await inspectThread(threadId);
+    answerAdoption = { projectId, entryId: entry.id, text, version };
+  },
+  "questions-jump"() {
+    document.querySelector("#questions").scrollIntoView({ block: "center", behavior: scrollBehavior() });
+    document.querySelector("#questions .question-card textarea")?.focus({ preventScroll: true });
+  },
+  async answer(node) {
+    requireProject(node.dataset.project);
+    const entry = view?.inbox.find((item) => item.id === node.dataset.entry);
+    const index = Number(node.dataset.choice);
+    if (
+      entry?.kind !== "question" ||
+      entry.result ||
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= entry.choices.length ||
+      entry.choices[index] !== node.dataset.choiceText
+    )
+      throw new Error("Displayed choice changed or question is resolved; refresh and choose again");
+    await mutate(
+      { action: "answer", id: node.dataset.project, entry: entry.id, text: node.dataset.choiceText },
+      "Answer sent to the coordinator.",
+    );
+  },
+  async "operation-list"(node) {
+    await operationsDialog(Number(node.dataset.offset ?? 0));
+  },
+  "operation-view"(node) {
+    operationView(node.dataset.operation, node.dataset.fingerprint);
+  },
+  "operation-decision"(node) {
+    operationDecision(node.dataset.operation, node.dataset.fingerprint, node.dataset.decision);
+  },
+  "operation-execute"(node) {
+    operationExecution(node.dataset.operation, node.dataset.fingerprint);
+  },
+  "operation-inspect"(node) {
+    operationExecution(node.dataset.operation, node.dataset.fingerprint, true);
+  },
+});
+//@m observability
+registerActions({
+  async "event-page"(node) {
+    const delta = Number(node.dataset.offset),
+      id = projectId,
+      current = generation;
+    eventOffset = node.dataset.offset === "0" ? 0 : Math.max(0, eventOffset + delta);
+    observability = null;
+    await loadObservability();
+    if (id !== projectId || current !== generation) return;
+  },
+});
+//@m creation
+registerActions({
+  "creation-list"() {
+    createDialog();
+  },
+  "creation-new"() {
+    newCreationDraft();
+  },
+  "creation-edit"(node) {
+    creationEdit(node.dataset.draft);
+  },
+  "creation-dismiss"(node) {
+    const draft = creationDrafts.get(node.dataset.draft);
+    if (!draft || draft.outcome !== "created" || !uuid(draft.createdId))
+      throw new Error("Only known-success creation entries may be dismissed");
+    creationDrafts.delete(node.dataset.draft);
+    persistBrowserDrafts();
+    createDialog();
+  },
+});
+//@m workers
+registerActions({
+  async "work-archive"(node) {
+    const work = plan?.work.find((item) => item.id === node.dataset.work);
+    if (node.dataset.project !== projectId || !work || work.archived) throw new Error("Displayed work changed; refresh before archiving");
+    await mutate({ action: "work-archive", id: projectId, workIds: [work.id] }, "Work archived. Record and thread kept.");
+  },
+  "thread-list"() {
+    threadList();
+  },
+  "all-work"() {
+    allWork = !allWork;
+    render();
+  },
+  "thread-close"() {
+    if (history.state?.worker) history.back();
+    else {
+      closeWorkerDetail();
+      ensureChanges();
+      dialogVersion++;
+      renderArtifactBrowser();
+      render();
     }
-  } else if (form.matches("[data-chat-rename]")) {
-    requireProject(form.dataset.project);
-    const title = data.get("title").trim();
-    if (!title) return;
-    await mutate({ action: "chat-update", id: form.dataset.project, chatId: form.dataset.chat, title }, "Chat renamed.");
+  },
+  async thread(node) {
+    requireProject(node.dataset.project);
+    if (dialog.contains(node)) closeDialog();
+    await inspectThread(node.dataset.thread);
+  },
+  async "thread-history-page"(node) {
+    requireProject(node.dataset.project);
+    await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset));
+  },
+  "thread-send"(node) {
+    requireProject(node.dataset.project);
+    requireThread(node.dataset.thread);
+    textDialog("thread-send", node.dataset.thread);
+  },
+  "thread-steer"(node) {
+    requireProject(node.dataset.project);
+    requireThread(node.dataset.thread);
+    showDialog(
+      "Steer this reusable thread?",
+      `<p>Project ${esc(projectId)}. Thread ${esc(node.dataset.thread)}. The replacement is recorded before interruption; scope/model/tools stay frozen.</p><button data-action="confirm-thread-steer" data-project="${esc(projectId)}" data-thread="${esc(node.dataset.thread)}">Compose replacement</button>`,
+    );
+  },
+  "confirm-thread-steer"(node) {
+    requireProject(node.dataset.project);
+    textDialog("thread-steer", node.dataset.thread);
+  },
+  "thread-stop"(node) {
+    requireProject(node.dataset.project);
+    requireThread(node.dataset.thread);
+    showDialog(
+      "Stop this reusable thread?",
+      `<p>Conversation, receipts and partial files remain.</p><button class="danger" data-action="confirm-thread-stop" data-project="${esc(projectId)}" data-thread="${esc(node.dataset.thread)}">Stop thread ${esc(node.dataset.thread)}</button>`,
+    );
+  },
+  async "confirm-thread-stop"(node) {
+    const id = node.dataset.project,
+      version = dialogVersion;
+    requireProject(id);
+    await mutate({ action: "thread-stop", id, threadId: node.dataset.thread }, "Thread stop recorded. History and work retained.");
     closeCurrentDialog(id, version);
-  } else if (form.id === "compose") {
-    closeSkillMenu();
+  },
+});
+//@m chat
+registerActions({
+  async "retry-message"(node) {
+    const job = view.jobs.find((item) => item.id === node.dataset.job);
+    if (node.dataset.project !== projectId || !job || !["failed", "interrupted"].includes(job.state))
+      throw new Error("Displayed failed message changed; refresh before retrying");
+    node.disabled = true; // a second click must not resend
+    await mutate(
+      { action: "message", id: projectId, text: job.text, ...(chatId === "main" ? {} : { chatId }) },
+      "Message resent to the coordinator.",
+    );
+  },
+  "chat-select"(node) {
+    if (dialog.contains(node)) closeDialog();
+    changeChat(node.dataset.chat);
+  },
+  async "chat-new"() {
+    const id = projectId,
+      created = await mutate({ action: "chat-create", id }, "New chat opened. It shares this project's workers and knowledge.");
+    if (id === projectId) changeChat(created.id);
+  },
+  "chat-rename"() {
+    const chat = currentChat();
+    if (!chat) throw new Error("Chat list is still loading");
+    showDialog(
+      "Rename chat",
+      `<form data-chat-rename data-project="${esc(projectId)}" data-chat="${esc(chat.id)}"><label>Title<input name="title" maxlength="120" required value="${esc(chat.title)}"></label><div class="row"><button type="submit" class="primary">Rename</button></div></form>`,
+    );
+    document.querySelector("#dialog form[data-chat-rename] input").select();
+  },
+  async "chat-archive"() {
+    const chat = currentChat();
+    if (!chat || chat.id === "main") throw new Error("Main cannot be archived");
+    await mutate({ action: "chat-update", id: projectId, chatId: chat.id, archived: true }, "Chat archived. Its history is kept.");
+    changeChat("main");
+  },
+  async "chat-restore"(node) {
+    const target = node.dataset.chat;
+    await mutate({ action: "chat-update", id: projectId, chatId: target, archived: false }, "Chat restored.");
+    changeChat(target);
+  },
+  async "history-earlier"(node) {
+    node.blur();
+    await showEarlier();
+  },
+  conversation() {
+    document.querySelector(".conversation").open = true;
+    document.querySelector(".conversation").scrollIntoView({ block: "start", behavior: scrollBehavior() });
+    document.querySelector(".conversation summary").focus();
+  },
+});
+//@m reading
+registerActions({
+  "jump-latest"() {
     searchFocus = null;
-    // Only an explicit send (or Jump to latest) may take a reader back to the bottom. A trailing user message during polling is not a new send.
     stickToBottom = true;
     followTranscript();
-    const submitted = data.get("message"),
-      chat = chatId,
-      key = draftKey(id, chat);
-    const text = submitted.trim();
-    if (!text) return;
-    const list = attachmentDrafts.get(key) ?? [];
-    if (list.some((item) => item.pending)) throw new Error("Attachments are still uploading. Your draft was kept.");
-    persistBrowserDrafts();
-    await mutate(
-      {
-        action: "message",
-        id,
-        text,
-        ...(chat === "main" ? {} : { chatId: chat }),
-        ...(list.length ? { attachments: list.map((item) => item.id) } : {}),
+    renderWorkingPill();
+  },
+});
+//@m composer
+registerActions({
+  "skill-pick"(node) {
+    pickMenuItem(
+      skillMenu?.items.find((item) => item.name === node.dataset.name && item.source === node.dataset.source) ?? {
+        name: node.dataset.name,
       },
-      "Request sent to the coordinator.",
     );
-    if (drafts.get(key) === submitted) drafts.delete(key);
-    if (attachmentDrafts.get(key) === list) {
-      attachmentDrafts.delete(key);
-      renderAttachments();
-    }
-    if (projectId === id && chatId === chat && form.querySelector("textarea").value === submitted) {
-      form.reset();
-      autosize(form.querySelector("textarea"));
-    }
-  } else if (form.matches("[data-answer-adopt]")) {
-    const proposal = answerAdoption;
-    requireProject(form.dataset.project);
-    if (
-      !proposal ||
-      proposal.projectId !== projectId ||
-      proposal.entryId !== form.dataset.entry ||
-      proposal.version !== version ||
-      data.get("confirm") !== projectId ||
-      answers.get(proposal.entryId) !== proposal.text
-    )
-      throw new Error("Draft adoption binding changed; inspect and confirm it again");
-    const entry = view?.inbox.find((entry) => entry.id === proposal.entryId && entry.kind === "question" && !entry.result);
-    const key = answerKey(projectId, proposal.entryId);
-    if (!entry || answers.has(key)) throw new Error("Target is resolved or has a newer draft; nothing overwritten");
-    answers.set(key, proposal.text);
-    persistBrowserDrafts();
-    closeCurrentDialog(projectId, version);
-    render();
-    toast("Old draft copied. No answer sent; original unbound draft retained.");
-  } else if (form.matches("[data-answer]")) {
-    requireProject(form.dataset.project);
-    const text = data.get("answer").trim();
-    if (!text) return;
-    const entry = view?.inbox.find((entry) => entry.id === form.dataset.entry && !entry.result);
-    if (!entry) throw new Error("Answer target is no longer pending in this project");
-    await mutate({ action: "answer", id, entry: form.dataset.entry, text }, "Answer sent to the coordinator.");
-  } else if (form.matches("[data-task-message]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const text = data.get("message");
-    if (!text.trim()) return;
-    const draft = formDrafts.get(form.dataset.draftKey);
-    if (!draft) throw new Error("Form draft is missing; reopen the intended target");
-    draft.text = data.get("message");
-    if (form.dataset.mode !== "thread-send" && form.dataset.mode !== "thread-steer") throw new Error("Unknown message form");
-    if (draft.submittedText !== null && draft.submittedText !== text)
-      throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
-    draft.submittedText = text;
-    persistBrowserDrafts();
-    await mutate(
-      { action: form.dataset.mode, id: target, threadId: form.dataset.id, requestId: draft.requestId, text },
-      "Instruction recorded on the existing thread.",
+  },
+  "ref-pick"(node) {
+    const item = refMenu?.items[Number(node.dataset.index)];
+    if (item) pickRef(item);
+  },
+  async "ref-open"(node) {
+    await refOpen(node.dataset.kind, node.dataset.value);
+  },
+  "pr-pick"(node) {
+    pickPr(
+      prMenu.items.find((item) => item.provider === node.dataset.provider && String(item.id) === node.dataset.pr)?.ref ??
+        `#${node.dataset.pr}`,
     );
-    if (formDrafts.get(form.dataset.draftKey) === draft) {
-      if (draft.text === data.get("message")) {
-        formDrafts.delete(form.dataset.draftKey);
-        closeCurrentDialog(target, version);
-      } else {
-        formDrafts.set(form.dataset.draftKey, { text: draft.text, requestId: crypto.randomUUID(), submittedText: null });
-        if (projectId === target && dialogVersion === version) textDialog(form.dataset.mode, form.dataset.id);
-      }
+  },
+  "composer-help"(node) {
+    toggleComposerHelp(node);
+  },
+});
+//@m prs
+registerActions({
+  async "prs-refresh"() {
+    await loadPrs(true);
+  },
+  async "pr-hide"(node) {
+    await api({
+      action: "pr-hide",
+      id: projectId,
+      provider: node.dataset.provider,
+      pr: node.dataset.pr,
+      hide: node.dataset.hide === "true",
+    });
+    prsState.at = 0;
+    await loadPrs();
+  },
+  async "pr-watch"(node) {
+    const on = node.getAttribute("aria-pressed") !== "true";
+    await api({ action: "pr-watch", id: projectId, provider: node.dataset.provider, pr: node.dataset.pr, watch: on });
+    prsState.at = 0;
+    await loadPrs();
+  },
+});
+//@m artifacts
+function runArtifactDir(node) {
+  artifactAction(node.dataset.action, node);
+}
+registerActions({
+  "artifact-dir": runArtifactDir,
+  "artifact-select": runArtifactDir,
+  "artifact-deselect": runArtifactDir,
+  "artifacts-sort": runArtifactDir,
+  "artifact-download": runArtifactDir,
+  "artifact-open": runArtifactDir,
+  async artifact(node) {
+    await inspectArtifact(node.dataset.file);
+  },
+  "evidence-list"() {
+    showDialog("Project evidence", view.evidence.map(artifactButton).join("") || '<p class="note">No evidence captured yet.</p>');
+  },
+});
+//@m limits
+registerActions({
+  async "limits-refresh"() {
+    if (limitsRefreshing) return;
+    limitsRefreshing = true;
+    renderLimits();
+    try {
+      const loaded = await api({ action: "limits-refresh" });
+      if (loaded?.providers) limits = loaded;
+    } catch (error) {
+      report(error);
+    } finally {
+      limitsRefreshing = false;
+      renderLimits();
     }
+  },
+  async "cursor-connect"() {
+    const started = await api({ action: "cursor-connect" });
+    const cursor = limits?.providers.find((item) => item.provider === "cursor");
+    if (cursor) {
+      cursor.connect = started;
+      renderLimits();
+    }
+    if (started.loginUrl) window.open(started.loginUrl, "_blank", "noopener,noreferrer");
+    scheduleLimitsWatch();
+  },
+});
+//@m dom
+registerActions({
+  "toggle-clamp"(node) {
+    node.classList.toggle("clamp");
+  },
+  "close-dialog"() {
+    closeDialog();
+  },
+});
+//@m admin
+registerActions({
+  async "provider-list"(node) {
+    await providerList(node.dataset.kind ?? "reads", Number(node.dataset.offset ?? 0));
+  },
+  "provider-record"(node) {
+    requireProject(node.dataset.project);
+    providerRecord(node.dataset.record);
+  },
+  async "provider-fresh"(node) {
+    requireProject(node.dataset.project);
+    await providerFresh(node.dataset.record);
+  },
+  "provider-inspect"(node) {
+    requireProject(node.dataset.project);
+    providerInspect(node.dataset.record);
+  },
+  "provider-known"() {
+    providerKnown();
+  },
+  async "routine-list"(node) {
+    if (node.dataset.project) requireProject(node.dataset.project);
+    await routineList(node.dataset.lens ?? "schedules", Number(node.dataset.offset ?? 0));
+  },
+  async "routine-history"(node) {
+    requireProject(node.dataset.project);
+    await routineHistory(node.dataset.kind, Number(node.dataset.offset ?? 0), Number(node.dataset.textOffset ?? 0));
+  },
+  "routine-confirm"(node) {
+    requireProject(node.dataset.project);
+    routineConfirm(node.dataset.kind, node.dataset.record, node.dataset.enabled);
+  },
+  async "usage-list"(node) {
+    await usageList(Number(node.dataset.offset ?? 0));
+  },
+  "lifecycle-more"() {
+    lifecycleMore();
+  },
+  "lifecycle-confirm"(node) {
+    lifecycleConfirm(node.dataset.project, node.dataset.operation);
+  },
+  "open-retained"() {
+    showDialog(
+      "Open known retained project",
+      '<p>Enter an owned project UUID to inspect retained state, including projects removed from the ordinary list. This does not restore/resume it.</p><form data-open-retained><label>Known project UUID<input name="id" required maxlength="36" autocomplete="off"></label><button type="submit">Open retained metadata</button></form>',
+    );
+  },
+  async "owner-setup"() {
+    await ownerSetupDialog();
+  },
+  async "workspace-quick"() {
+    await workspaceQuickDialog();
+  },
+  async "workspace-quick-confirm"(node) {
+    await workspaceQuickConfirm(node.dataset.project, node.dataset.revision);
+  },
+  async "provider-connect"(node) {
+    await providerConnectDialog(node.dataset.card);
+  },
+  async "provider-connect-confirm"(node) {
+    await providerConnectConfirm(node.dataset.project, node.dataset.card, node.dataset.revision);
+  },
+  async "github-quick"() {
+    await githubQuickDialog();
+  },
+  async "github-quick-confirm"(node) {
+    await githubQuickConfirm(node.dataset.project, node.dataset.revision);
+  },
+  async "owner-setup-edit"(node) {
+    await ownerSetupEdit(node.dataset.kind, node.dataset.payload || "{}");
+  },
+  async "owner-profile-read"(node) {
+    await ownerProfileRead(node.dataset.project, node.dataset.profile);
+  },
+  async "resume-project"() {
+    await resumeDialog();
+  },
+  async "confirm-resume"(node) {
+    const version = dialogVersion;
+    if (node.dataset.project !== projectId) throw new Error("The selected project changed. Reopen the resume dialog.");
+    await mutate({ action: "resume", id: node.dataset.project }, "Idle project resumed.");
+    closeCurrentDialog(node.dataset.project, version);
+  },
+  "pause-project"() {
+    showDialog(
+      "Pause this project?",
+      `<p>This interrupts the coordinator and workers, and blocks scheduled work. State and partial workspace changes stay intact.</p><p>Resume is a separate action.</p><button class="danger" data-action="confirm-pause" data-project="${esc(projectId)}">Pause project</button>`,
+    );
+  },
+  async "confirm-pause"(node) {
+    const version = dialogVersion;
+    if (node.dataset.project !== projectId) throw new Error("The selected project changed. Reopen the pause confirmation.");
+    await mutate({ action: "pause", id: node.dataset.project }, "Project paused. State retained.");
+    closeCurrentDialog(node.dataset.project, version);
+  },
+});
+//@m settings
+registerActions({
+  async "settings-list"() {
+    await settingsList();
+  },
+  async "settings-back"() {
+    await settingsList(true);
+  },
+  "mp-toggle"(node) {
+    const mp = node.closest(".mp");
+    if (mp.classList.contains("open")) mpClose(mp, true);
+    else mpOpen(mp);
+  },
+  "mp-pick"(node) {
+    mpPick(node.closest(".mp"), node.dataset.ref);
+  },
+  async "model-cycle"() {
+    await cycleModel(1);
+  },
+  "scope-clear"() {
+    for (const box of dialog.querySelectorAll("[data-scope-ref]")) box.checked = false;
+    settingsSync();
+  },
+  "settings-discard"(node) {
+    settingsDiscard(node.dataset.project, node.dataset.field);
+  },
+  async "settings-confirm-discard"(node) {
+    requireProject(node.dataset.project);
+    if (!["name", "objective"].includes(node.dataset.field)) throw new Error("Unknown settings draft field");
+    settingsDrafts.delete(`${projectId}:${node.dataset.field}`);
+    if (settingsPending?.projectId === projectId) delete settingsPending.flat[node.dataset.field];
     persistBrowserDrafts();
-  } else if (form.matches("[data-routine-change]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const proposal = routineConfirmation;
-    if (
-      !proposal ||
-      proposal.project !== target ||
-      proposal.version !== version ||
-      data.get("confirm") !== target ||
-      JSON.stringify(routineRecord(proposal.kind, proposal.recordId)) !== proposal.binding
-    )
-      throw new Error("Routine confirmation changed; inspect it again");
-    const input =
-      proposal.kind === "events"
-        ? { action: "event-opt-in", id: target, enabled: proposal.enabled }
-        : proposal.kind === "schedule"
-          ? { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled }
-          : { action: "monitor-enable", id: target, monitorId: proposal.recordId, enabled: proposal.enabled };
-    await mutate(input, "Confirmed routine setting recorded. Pause, grants and retained receipts are unchanged.");
-    if (dialog.open && projectId === target && dialogVersion === version)
-      await routineList(proposal.kind === "monitor" ? "monitors" : "schedules", 0);
-  } else if (form.matches("[data-resume-project]")) {
-    const target = form.dataset.project;
-    if (target !== projectId) throw new Error("The selected project changed. Reopen the resume dialog.");
-    const confirm = data.get("confirm").trim();
-    if (confirm !== target) throw new Error("Confirmation must match the project ID.");
-    await mutate({ action: "resume", id: target, recovery: "leave-interrupted", confirm }, "Project resumed. Interrupted work continues.");
-    closeCurrentDialog(target, version);
-  } else if (form.matches("[data-provider-known]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const grant = providerBinding(data.get("scope")),
-      pullRequest = Number(data.get("pr")),
-      expectedHead = data.get("head"),
-      page = Number(data.get("page")),
-      kind = data.get("kind");
-    if (
-      !Number.isSafeInteger(pullRequest) ||
-      pullRequest < 1 ||
-      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedHead) ||
-      !Number.isSafeInteger(page) ||
-      page < 1 ||
-      page > 1000000 ||
-      !["pr", "ci", "review"].includes(kind)
-    )
-      throw new Error("A known PR, exact head and valid inspection page are required");
-    const identity = {
-      id: target,
-      provider: "github",
-      repositoryId: grant.repositoryId,
-      expectedRepositoryId: grant.numericId,
-      pullRequest,
-      expectedHead,
+    await settingsList(true);
+  },
+});
+//@m automation
+registerActions({
+  async "automation-refresh"() {
+    await loadEventsIn(true);
+  },
+  async "automation-save"() {
+    await saveEventsIn();
+  },
+  async "follow-poll"() {
+    const data = await mutate({ action: "follow-poll", id: projectId }, "Checked GitHub.");
+    eventsIn.data = data;
+    renderEventsIn();
+  },
+  "webhook-reveal"() {
+    eventsIn.reveal = !eventsIn.reveal;
+    renderEventsIn();
+  },
+  async "webhook-copy"(node) {
+    await navigator.clipboard.writeText(node.dataset.what === "url" ? eventsIn.data.webhook.url : eventsIn.data.webhook.secret);
+    toast(node.dataset.what === "url" ? "Webhook URL copied." : "Webhook secret copied.");
+  },
+  async "webhook-rotate"() {
+    if (!eventsIn.rotateArmed) {
+      eventsIn.rotateArmed = true;
+      renderEventsIn();
+      setTimeout(() => {
+        if (eventsIn?.rotateArmed) {
+          eventsIn.rotateArmed = false;
+          renderEventsIn();
+        }
+      }, 6000);
+      return;
+    }
+    eventsIn.rotateArmed = false;
+    const data = await mutate(
+      { action: "webhook-rotate", id: projectId, confirm: projectId },
+      "Webhook secret rotated. The old secret no longer works.",
+    );
+    eventsIn.data = data;
+    eventsIn.reveal = true;
+    renderEventsIn();
+  },
+});
+//@m notifications
+registerActions({
+  async "telegram-save"() {
+    const input = document.querySelector("#telegram-token"),
+      token = input.value.trim();
+    input.value = "";
+    if (!token) throw new Error("Paste the bot token first");
+    await telegramAction({ action: "telegram-token", token }, "Telegram bot saved.");
+  },
+  async "telegram-pair"() {
+    await telegramAction({ action: "telegram-pair" });
+  },
+  async "telegram-unpair"() {
+    await telegramAction({ action: "telegram-unpair" }, "Telegram chat unpaired.");
+  },
+  async "telegram-remove"() {
+    if (!telegramRemoveArmed) {
+      telegramRemoveArmed = true;
+      renderTelegram();
+      setTimeout(() => {
+        if (telegramRemoveArmed) {
+          telegramRemoveArmed = false;
+          renderTelegram();
+        }
+      }, 6000);
+      return;
+    }
+    telegramRemoveArmed = false;
+    await telegramAction({ action: "telegram-remove", confirm: "remove" }, "Telegram bot removed.");
+  },
+});
+//@m remote
+registerActions({
+  async "remote-pair"() {
+    const pairing = await remoteAction({ action: "remote-pair-start" });
+    if (pairing) remotePairing = pairing;
+    await loadRemote();
+  },
+  async "remote-pair-cancel"() {
+    await remoteAction({ action: "remote-pair-cancel" });
+    remotePairing = null;
+    await loadRemote();
+  },
+  async "remote-copy-link"() {
+    if (remotePairing) {
+      await navigator.clipboard.writeText(remotePairing.link);
+      toast("Pairing link copied. It works once.");
+    }
+  },
+  "remote-rename"(node) {
+    remoteRenaming = node.dataset.device;
+    renderRemote();
+  },
+  "remote-rename-cancel"() {
+    remoteRenaming = null;
+    renderRemote();
+  },
+  async "remote-rename-save"(node) {
+    const name = document.querySelector("#remote-rename").value.trim();
+    if (!name) throw new Error("Name the device first");
+    remoteRenaming = null;
+    await remoteAction({ action: "remote-rename", deviceId: node.dataset.device, name });
+    await loadRemote();
+  },
+  async "remote-revoke"(node) {
+    const id = node.dataset.device;
+    if (remoteRevokeArmed !== id) {
+      remoteRevokeArmed = id;
+      renderRemote();
+      setTimeout(() => {
+        if (remoteRevokeArmed === id) {
+          remoteRevokeArmed = null;
+          renderRemote();
+        }
+      }, 6000);
+      return;
+    }
+    remoteRevokeArmed = null;
+    await remoteAction({ action: "remote-revoke", deviceId: id, confirm: id }, "Device revoked.");
+    await loadRemote();
+  },
+});
+//@m settingsCards
+registerActions({
+  async "worktree-setup-save"() {
+    await saveWorktreeSetup();
+  },
+  async "worktrees-cleanup"() {
+    await cleanupWorktreesNow();
+  },
+  async "worktrees-refresh"() {
+    await loadWorktrees(true);
+  },
+  async "context-save"() {
+    await saveContextSettings(false);
+  },
+  async "context-reset"() {
+    await saveContextSettings(true);
+  },
+  async "compact-now"() {
+    await compactNow();
+  },
+  async "prompt-save"(node) {
+    await savePrompt(node.dataset.role, false);
+  },
+  async "prompt-reset"(node) {
+    await savePrompt(node.dataset.role, true);
+  },
+  "skills-tab"(node) {
+    skillsPicker.tab = node.dataset.role;
+    renderSkillsPicker();
+  },
+  "skills-select"(node) {
+    bulkSkills(node.dataset.source, node.dataset.mode);
+  },
+  "mcp-select"(node) {
+    bulkMcp(node.dataset.mode);
+  },
+  async "skills-save"() {
+    await saveSkillsPicker(false);
+  },
+  async "skills-reset"() {
+    await saveSkillsPicker(true);
+  },
+  "mcp-tab"(node) {
+    mcpPicker.tab = node.dataset.role;
+    renderMcpPicker();
+  },
+  async "mcp-save"() {
+    await saveMcpPicker(false);
+  },
+  async "mcp-reset"() {
+    await saveMcpPicker(true);
+  },
+  async "mcp-test"(node) {
+    await testMcpServer(node.dataset.server);
+  },
+  "profile-roles"(node) {
+    const skills = node.dataset.picker === "skills";
+    (skills ? skillsPicker : mcpPicker).roles = true;
+    (skills ? renderSkillsPicker : renderMcpPicker)();
+  },
+});
+//@m knowledge
+registerActions({
+  "upload-list"() {
+    uploadList();
+  },
+  "upload-pick"() {
+    document.querySelector("#upload-input").click();
+  },
+  "attach-pick"() {
+    document.querySelector("#attach-input").click();
+  },
+  "attach-remove"(node) {
+    const list = attachmentDrafts.get(draftKey()) ?? [];
+    list.splice(Number(node.dataset.index), 1);
+    renderAttachments();
+  },
+  async "upload-open"(node) {
+    await uploadOpen(node.dataset.upload);
+  },
+  async "upload-delete"(node) {
+    requireProject(node.dataset.project);
+    await mutate({ action: "upload-delete", id: node.dataset.project, uploadId: node.dataset.upload }, "Upload deleted.");
+    closeDialog();
+  },
+  "upload-new"() {
+    if (!view) throw new Error("Select a loaded project first");
+    const draft = {
+      projectId,
+      importId: crypto.randomUUID(),
+      filename: "reference.md",
+      title: "Project reference",
+      encoding: "utf8",
+      text: "",
+      submittedFingerprint: null,
     };
-    const result = await mutate(
-      kind === "pr"
-        ? { action: "provider-pr-inspect", ...identity }
-        : { action: kind === "ci" ? "provider-ci-inspect" : "provider-review-inspect", ...identity, page },
-      "Owner pinned inspection responded. No native worker receipt or execution grant invented.",
+    uploadDrafts.set(draft.importId, draft);
+    persistBrowserDrafts();
+    uploadEdit(draft.importId);
+  },
+  "upload-edit"(node) {
+    requireProject(node.dataset.project);
+    uploadEdit(node.dataset.import);
+  },
+  async "library-list"(node) {
+    await libraryList(Number(node.dataset.offset ?? 0));
+  },
+  async "library-open"(node) {
+    requireProject(node.dataset.project);
+    await libraryOpen(node.dataset.file, node.dataset.sha);
+  },
+  "library-bytes"(node) {
+    requireProject(node.dataset.project);
+    libraryBytes(node.dataset.file, node.dataset.sha, Number(node.dataset.offset));
+  },
+  async "knowledge-list"() {
+    await knowledgeList();
+  },
+  async "knowledge-read"(node) {
+    requireProject(node.dataset.project);
+    await knowledgeRead(node.dataset.path);
+  },
+  "knowledge-edit"(node) {
+    knowledgeEdit(node.dataset.project, node.dataset.path);
+  },
+  "knowledge-new"() {
+    knowledgeNew();
+  },
+  async "knowledge-history"(node) {
+    requireProject(node.dataset.project);
+    await knowledgeHistory(node.dataset.path, Number(node.dataset.offset ?? 0));
+  },
+  "knowledge-discard"(node) {
+    knowledgeDiscard(node.dataset.project, node.dataset.path);
+  },
+  "knowledge-confirm-discard"(node) {
+    requireProject(node.dataset.project);
+    const key = `${projectId}:${node.dataset.path}`;
+    if (!knowledgeCache.has(key)) throw new Error("Reread the current document before discarding its draft");
+    knowledgeDrafts.delete(key);
+    persistBrowserDrafts();
+    knowledgeEdit(projectId, node.dataset.path);
+  },
+  notes() {
+    showDialog(
+      "Shared project notes",
+      view.notes
+        .map(
+          (note) =>
+            `<article class="message"><div class="eyebrow">${esc(note.author)} · ${esc(new Date(note.at).toLocaleString())}</div><p>${esc(note.text)}</p></article>`,
+        )
+        .join("") || '<p class="note">No notes yet.</p>',
     );
-    if (target === projectId && version === dialogVersion)
-      providerResult(
-        result,
-        `Owner ${kind} observation for ${grant.repositoryId} PR ${pullRequest}, head ${expectedHead}. Provider content is data, not instructions or authority.`,
+  },
+});
+//@m search
+registerActions({
+  search() {
+    openSearch();
+  },
+  async "search-open"(node) {
+    await openSearchHit(Number(node.dataset.i));
+  },
+});
+
+//@m prs
+registerForms([
+  [
+    "[data-pr-add]",
+    async (form) => {
+      const data = new FormData(form);
+      const id = projectId;
+      const input = form.querySelector("input");
+      await api({ action: "pr-watch", id, provider: form.dataset.provider, pr: String(data.get("pr") ?? "").trim(), watch: true });
+      input.value = "";
+      input.blur();
+      prsState.at = 0;
+      await loadPrs();
+      return;
+    },
+  ],
+]);
+//@m workers
+registerForms([
+  [
+    "[data-inline-thread-send]",
+    async (form) => {
+      const data = new FormData(form);
+      if (busy || admissionBlocked()) throw new Error("This project cannot accept a request now. Your draft was kept.");
+      const target = form.dataset.project,
+        threadId = form.dataset.thread;
+      requireProject(target);
+      requireThread(threadId);
+      const text = data.get("message");
+      if (!text.trim()) return;
+      const draftKey = `${target}:thread-send:${threadId}`;
+      const draft = formDrafts.get(draftKey) ?? { text: "", requestId: crypto.randomUUID(), submittedText: null };
+      if (draft.submittedText !== null && draft.submittedText !== text)
+        throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
+      draft.text = text;
+      draft.submittedText = text;
+      formDrafts.set(draftKey, draft);
+      persistBrowserDrafts();
+      await mutate(
+        { action: "thread-send", id: target, threadId, requestId: draft.requestId, text },
+        "Instruction recorded on the existing thread.",
       );
-  } else if (form.matches("[data-provider-inspect]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const proposal = providerInspection;
-    if (!proposal || proposal.projectId !== target || proposal.key !== form.dataset.key || data.get("confirm") !== target)
-      throw new Error("Reopen the exact retained effect and confirm its project");
-    const grant = providerBinding(proposal.record.scopeId, proposal.repositoryId);
-    if (grant.numericId !== proposal.numericId) throw new Error("Provider repository binding changed");
-    const result = await mutate(
-      {
-        action: "github-write-inspect",
+      if (formDrafts.get(draftKey) === draft) {
+        formDrafts.delete(draftKey);
+        persistBrowserDrafts();
+        if (projectId === target && workerChat?.threadId === threadId) await inspectThread(threadId);
+      }
+    },
+  ],
+  [
+    "[data-task-message]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const text = data.get("message");
+      if (!text.trim()) return;
+      const draft = formDrafts.get(form.dataset.draftKey);
+      if (!draft) throw new Error("Form draft is missing; reopen the intended target");
+      draft.text = data.get("message");
+      if (form.dataset.mode !== "thread-send" && form.dataset.mode !== "thread-steer") throw new Error("Unknown message form");
+      if (draft.submittedText !== null && draft.submittedText !== text)
+        throw new Error("Prior thread submission is unresolved. Resend its exact text or inspect history before a different request");
+      draft.submittedText = text;
+      persistBrowserDrafts();
+      await mutate(
+        { action: form.dataset.mode, id: target, threadId: form.dataset.id, requestId: draft.requestId, text },
+        "Instruction recorded on the existing thread.",
+      );
+      if (formDrafts.get(form.dataset.draftKey) === draft) {
+        if (draft.text === data.get("message")) {
+          formDrafts.delete(form.dataset.draftKey);
+          closeCurrentDialog(target, version);
+        } else {
+          formDrafts.set(form.dataset.draftKey, { text: draft.text, requestId: crypto.randomUUID(), submittedText: null });
+          if (projectId === target && dialogVersion === version) textDialog(form.dataset.mode, form.dataset.id);
+        }
+      }
+      persistBrowserDrafts();
+    },
+  ],
+]);
+//@m chat
+registerForms([
+  [
+    "[data-chat-rename]",
+    async (form) => {
+      const data = new FormData(form);
+      const id = projectId,
+        version = dialogVersion;
+      requireProject(form.dataset.project);
+      const title = data.get("title").trim();
+      if (!title) return;
+      await mutate({ action: "chat-update", id: form.dataset.project, chatId: form.dataset.chat, title }, "Chat renamed.");
+      closeCurrentDialog(id, version);
+    },
+  ],
+]);
+//@m composer
+registerForms([
+  [
+    "#compose",
+    async (form) => {
+      const slash = form.id === "compose" ? slashCommand(new FormData(form).get("message").trim()) : null;
+      if (slash) {
+        closeSkillMenu();
+        const textarea = form.querySelector("textarea"),
+          key = draftKey(projectId, chatId),
+          typed = textarea.value;
+        await slash.command.run(slash.argument);
+        if (textarea.value === typed) {
+          drafts.delete(key);
+          persistBrowserDrafts();
+          form.reset();
+          autosize(textarea);
+        }
+        return;
+      }
+      if (form.id === "compose" && (busy || admissionBlocked()))
+        throw new Error("This project cannot accept a request now. Your draft was kept.");
+      const data = new FormData(form);
+      const id = projectId;
+      closeSkillMenu();
+      searchFocus = null;
+      // Only an explicit send (or Jump to latest) may take a reader back to the bottom. A trailing user message during polling is not a new send.
+      stickToBottom = true;
+      followTranscript();
+      const submitted = data.get("message"),
+        chat = chatId,
+        key = draftKey(id, chat);
+      const text = submitted.trim();
+      if (!text) return;
+      const list = attachmentDrafts.get(key) ?? [];
+      if (list.some((item) => item.pending)) throw new Error("Attachments are still uploading. Your draft was kept.");
+      persistBrowserDrafts();
+      await mutate(
+        {
+          action: "message",
+          id,
+          text,
+          ...(chat === "main" ? {} : { chatId: chat }),
+          ...(list.length ? { attachments: list.map((item) => item.id) } : {}),
+        },
+        "Request sent to the coordinator.",
+      );
+      if (drafts.get(key) === submitted) drafts.delete(key);
+      if (attachmentDrafts.get(key) === list) {
+        attachmentDrafts.delete(key);
+        renderAttachments();
+      }
+      if (projectId === id && chatId === chat && form.querySelector("textarea").value === submitted) {
+        form.reset();
+        autosize(form.querySelector("textarea"));
+      }
+    },
+  ],
+]);
+//@m decisions
+registerForms([
+  [
+    "[data-answer-adopt]",
+    (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const proposal = answerAdoption;
+      requireProject(form.dataset.project);
+      if (
+        !proposal ||
+        proposal.projectId !== projectId ||
+        proposal.entryId !== form.dataset.entry ||
+        proposal.version !== version ||
+        data.get("confirm") !== projectId ||
+        answers.get(proposal.entryId) !== proposal.text
+      )
+        throw new Error("Draft adoption binding changed; inspect and confirm it again");
+      const entry = view?.inbox.find((entry) => entry.id === proposal.entryId && entry.kind === "question" && !entry.result);
+      const key = answerKey(projectId, proposal.entryId);
+      if (!entry || answers.has(key)) throw new Error("Target is resolved or has a newer draft; nothing overwritten");
+      answers.set(key, proposal.text);
+      persistBrowserDrafts();
+      closeCurrentDialog(projectId, version);
+      render();
+      toast("Old draft copied. No answer sent; original unbound draft retained.");
+    },
+  ],
+  [
+    "[data-answer]",
+    async (form) => {
+      const data = new FormData(form);
+      const id = projectId;
+      requireProject(form.dataset.project);
+      const text = data.get("answer").trim();
+      if (!text) return;
+      const entry = view?.inbox.find((entry) => entry.id === form.dataset.entry && !entry.result);
+      if (!entry) throw new Error("Answer target is no longer pending in this project");
+      await mutate({ action: "answer", id, entry: form.dataset.entry, text }, "Answer sent to the coordinator.");
+    },
+  ],
+  [
+    "[data-operation-decision]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const record = ownedOperation(form.dataset.operation, form.dataset.fingerprint);
+      if (record.status !== "pending") throw new Error("Operation decision is immutable");
+      const mode = form.dataset.decision;
+      if (!["plain", "execution", "reject"].includes(mode)) throw new Error("Unknown operation decision");
+      if (mode !== "reject" && data.get("confirm") !== target) throw new Error("Confirmation must match the project ID");
+      if (mode === "execution" && !executionConsentAvailable(record))
+        throw new Error("Executable consent is unavailable for this operation");
+      await mutate(
+        mode === "reject"
+          ? { action: "operation-decide", id: target, operationId: record.id, fingerprint: record.fingerprint, decision: "reject" }
+          : {
+              action: "operation-decide",
+              id: target,
+              operationId: record.id,
+              fingerprint: record.fingerprint,
+              decision: "approve",
+              confirm: target,
+              ...(mode === "execution" ? { execution: true } : {}),
+            },
+        "Operation decision recorded. No operation was executed.",
+      );
+      closeCurrentDialog(target, version);
+    },
+  ],
+  [
+    "[data-operation-execute]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const record = ownedOperation(form.dataset.operation, form.dataset.fingerprint);
+      if (!operationExecutionAvailable(record) || data.get("confirm") !== target)
+        throw new Error("Exact executable approval and project confirmation are required");
+      if (!["execute", "inspect"].includes(form.dataset.mode)) throw new Error("Unknown bound operation control");
+      const result = await mutate(
+        {
+          action: form.dataset.mode === "inspect" ? "operation-inspect" : "operation-execute",
+          id: target,
+          operationId: record.id,
+          fingerprint: record.fingerprint,
+          confirm: target,
+        },
+        form.dataset.mode === "inspect"
+          ? "Bound outcome inspected. No replay/retry permission inferred."
+          : "Executor responded. Inspect its receipt; no new retry permission inferred.",
+      );
+      if (target === projectId && dialogVersion === version)
+        showDialog(
+          "Bound executor response",
+          `<p>Approval is not effect verification. Uncertain effects must be inspected, never replayed automatically.</p><pre>${esc(JSON.stringify(result, null, 2) ?? "No readable receipt returned; outcome remains unproven.")}</pre>`,
+        );
+    },
+  ],
+]);
+//@m admin
+registerForms([
+  [
+    "[data-routine-change]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const proposal = routineConfirmation;
+      if (
+        !proposal ||
+        proposal.project !== target ||
+        proposal.version !== version ||
+        data.get("confirm") !== target ||
+        JSON.stringify(routineRecord(proposal.kind, proposal.recordId)) !== proposal.binding
+      )
+        throw new Error("Routine confirmation changed; inspect it again");
+      const input =
+        proposal.kind === "events"
+          ? { action: "event-opt-in", id: target, enabled: proposal.enabled }
+          : proposal.kind === "schedule"
+            ? { action: "schedule-enable", id: target, scheduleId: proposal.recordId, enabled: proposal.enabled }
+            : { action: "monitor-enable", id: target, monitorId: proposal.recordId, enabled: proposal.enabled };
+      await mutate(input, "Confirmed routine setting recorded. Pause, grants and retained receipts are unchanged.");
+      if (dialog.open && projectId === target && dialogVersion === version)
+        await routineList(proposal.kind === "monitor" ? "monitors" : "schedules", 0);
+    },
+  ],
+  [
+    "[data-resume-project]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      if (target !== projectId) throw new Error("The selected project changed. Reopen the resume dialog.");
+      const confirm = data.get("confirm").trim();
+      if (confirm !== target) throw new Error("Confirmation must match the project ID.");
+      await mutate(
+        { action: "resume", id: target, recovery: "leave-interrupted", confirm },
+        "Project resumed. Interrupted work continues.",
+      );
+      closeCurrentDialog(target, version);
+    },
+  ],
+  [
+    "[data-provider-known]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const grant = providerBinding(data.get("scope")),
+        pullRequest = Number(data.get("pr")),
+        expectedHead = data.get("head"),
+        page = Number(data.get("page")),
+        kind = data.get("kind");
+      if (
+        !Number.isSafeInteger(pullRequest) ||
+        pullRequest < 1 ||
+        !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(expectedHead) ||
+        !Number.isSafeInteger(page) ||
+        page < 1 ||
+        page > 1000000 ||
+        !["pr", "ci", "review"].includes(kind)
+      )
+        throw new Error("A known PR, exact head and valid inspection page are required");
+      const identity = {
         id: target,
-        key: proposal.key,
+        provider: "github",
         repositoryId: grant.repositoryId,
         expectedRepositoryId: grant.numericId,
-      },
-      "Retained effect inspected. No replay or retry permission granted.",
-    );
-    if (target === projectId && version === dialogVersion)
-      providerResult(
-        result,
-        "A matching positive native observation may settle the original journal. Missing markers stay uncertain. This does not publish, roll back or authorize another attempt.",
-      );
-  } else if (form.matches("[data-open-retained]")) {
-    const target = data.get("id").trim(),
-      current = generation;
-    if (!uuid(target)) throw new Error("A known owned project UUID is required");
-    const retained = await api({ action: "show", id: target });
-    if (current !== generation || version !== dialogVersion || !dialog.open) return;
-    if (retained?.project?.id !== target) throw new Error("Retained project response does not match its UUID");
-    if (!projects.some((project) => project.id === target)) projects.push(retained.project);
-    renderProjects();
-    changeProject(target);
-  } else if (form.matches("[data-lifecycle-change]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const operation = form.dataset.operation;
-    if (!plan || !["archive", "delete", "restore"].includes(operation) || data.get("confirm") !== target)
-      throw new Error("Confirm the exact Durable project/lifecycle action");
-    await mutate(
-      operation === "delete" ? { action: "delete", id: target, confirm: target } : { action: operation, id: target },
-      operation === "restore"
-        ? "Retained project restored, still paused. Nothing was resumed/replayed."
-        : "Project retained. Repository work, receipts and remote PRs are not deleted.",
-    );
-    closeCurrentDialog(target, version);
-  } else if (form.matches("[data-owner-github-inspect]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const repositoryId = data.get("repositoryId").trim();
-    if (!repositoryId) throw new Error("Enter the exact owner/repository from the selected checkout origin");
-    const result = await api({ action: "github-repository-inspect", id: target, repositoryId });
-    if (target === projectId && version === dialogVersion && dialog.open)
-      setDialogBody(
-        `<p class="note">Read-only lookup. Use the numeric ID and default branch below when you authorize this repository.</p>${recordSummary(result)}${dlgActions(dlgBtn("Back to owner setup", { action: "owner-setup" }, "primary"))}`,
-      );
-  } else if (form.matches("[data-owner-write]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    if (form.dataset.kind.endsWith("-revoke") && data.get("confirm") !== target)
-      throw new Error("Type the exact project ID for fresh owner consent");
-    const fields = ownerFieldsValue(form);
-    const kind = form.dataset.kind,
-      actionByKind = {
-        "workspace-grant": "workspace-grant",
-        "workspace-revoke": "workspace-revoke",
-        "github-authorize": "github-authorize",
-        "github-revoke": "github-revoke",
-        "command-profile-set": "command-profile-set",
+        pullRequest,
+        expectedHead,
       };
-    if (!Object.hasOwn(actionByKind, kind)) throw new Error("Unknown owner setup action");
-    const result = await mutate(
-      { ...fields, action: actionByKind[kind], id: target, confirm: target },
-      "Owner API recorded this explicit revision-checked change. No command was executed.",
-    );
-    if (projectId === target && version === dialogVersion && dialog.open) await ownerSetupDialog(result);
-  } else if (form.matches("[data-settings-form]")) {
-    requireProject(form.dataset.project);
-    captureSettingsDraft();
-    persistBrowserDrafts();
-    if (!settingsCache || settingsCache.projectId !== projectId) throw new Error("Reopen the project settings first");
-    const changes = settingsChanges(settingsFormValues(form), settingsCache.values);
-    if (!Object.keys(changes).length) throw new Error("There are no changes to review yet.");
-    validateSettingsChanges(changes);
-    settingsReview(settingsRevisionFor(changes), changes);
-  } else if (form.matches("[data-settings-confirm]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const proposal = settingsConfirmation;
-    if (!proposal || proposal.projectId !== target || proposal.revision !== form.dataset.revision || data.get("confirm") !== target)
-      throw new Error("Reopen the exact settings proposal and confirm its project ID");
-    persistBrowserDrafts();
-    const result = await mutate(
-      { action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes },
-      "Settings saved. New threads use them; running threads keep what they started with.",
-    );
-    validateSettings(result);
-    for (const [field, changed] of Object.entries(proposal.changes)) {
-      if (
-        field === "verification"
-          ? JSON.stringify(result.values.verification) !== JSON.stringify(changed)
-          : field === "models" || field === "fallbackModels"
-            ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference)
-            : field === "scopedModels"
-              ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed)
-              : result.values[field] !== changed
-      )
-        throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
-    }
-    for (const key of proposal.draftKeys) {
-      const draft = settingsDrafts.get(key),
-        field = key.slice(key.indexOf(":") + 1);
-      if (draft?.expectedRevision === proposal.revision && draft.text === proposal.changes[field]) settingsDrafts.delete(key);
-    }
-    persistBrowserDrafts();
-    settingsPending = null;
-    if (target === projectId) {
-      settingsCache = { ...result, projectId: target };
-      projects = projects.map((project) => (project.id === target ? { ...project, name: result.values.name } : project));
-      renderProjects();
-      closeCurrentDialog(target, version);
-    }
-  } else if (form.matches("[data-upload-edit]")) {
-    requireProject(form.dataset.project);
-    captureUploadDraft();
-    persistBrowserDrafts();
-    await uploadReview(form.dataset.import);
-  } else if (form.matches("[data-upload-confirm]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const draft = uploadDrafts.get(form.dataset.import),
-      payload = uploadConfirmations.get(form.dataset.import);
-    if (
-      !draft ||
-      !payload ||
-      payload.projectId !== target ||
-      form.dataset.fingerprint !== payload.fingerprint ||
-      data.get("confirm") !== target
-    )
-      throw new Error("Reopen the exact upload review and confirm its project ID");
-    const current = await prepareUpload(draft);
-    if (target !== projectId || version !== dialogVersion || !dialog.open) return;
-    if (
-      draft.filename !== current.filename ||
-      draft.title !== current.title ||
-      draft.encoding !== current.encoding ||
-      draft.text !== current.text
-    )
-      throw new Error("Upload draft changed during preparation; review it again");
-    if (
-      current.fingerprint !== payload.fingerprint ||
-      (draft.submittedFingerprint !== null && draft.submittedFingerprint !== payload.fingerprint)
-    )
-      throw new Error("Upload bytes/binding changed. Unresolved UUID cannot be reused for a changed payload");
-    draft.submittedFingerprint = payload.fingerprint;
-    persistBrowserDrafts();
-    const record = await mutate(
-      {
-        action: "library-import",
-        id: target,
-        confirm: target,
-        importId: payload.importId,
-        filename: payload.filename,
-        title: payload.title,
-        encoding: "base64",
-        data: payload.data,
-        expectedSha256: payload.sha256,
-      },
-      "Owner reference import acknowledged. No agent grant or native worker evidence inferred.",
-    );
-    validateLibraryRecord(record, target);
-    if (
-      record.id !== payload.importId ||
-      record.filename !== payload.filename ||
-      record.title !== payload.title ||
-      record.sha256 !== payload.sha256 ||
-      record.size !== payload.size ||
-      record.native !== undefined ||
-      record.sessionFile !== null
-    )
-      throw new Error("Upload receipt differs from the confirmed owner reference. UUID/fingerprint retained");
-    if (
-      uploadDrafts.get(draft.importId) === draft &&
-      draft.filename === payload.filename &&
-      draft.title === payload.title &&
-      draft.encoding === payload.encoding &&
-      draft.text === payload.text
-    )
-      uploadDrafts.delete(draft.importId);
-    persistBrowserDrafts();
-    if (target === projectId && version === dialogVersion)
-      showDialog(
-        "Owner reference receipt",
-        `<p>Stored immutable owner reference, not worker-generated evidence. Import does not grant agent access or execution authority.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><button data-action="library-list">Open project library</button>`,
+      const result = await mutate(
+        kind === "pr"
+          ? { action: "provider-pr-inspect", ...identity }
+          : { action: kind === "ci" ? "provider-ci-inspect" : "provider-review-inspect", ...identity, page },
+        "Owner pinned inspection responded. No native worker receipt or execution grant invented.",
       );
-  } else if (form.matches("[data-knowledge-path]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const path = data.get("path").trim();
-    if (!knowledgePath(path) || !path.includes("/")) throw new Error("Choose a managed topic path, such as research/topic.md");
-    knowledgePaths.set(target, data.get("path"));
-    const key = `${target}:${path}`;
-    if (!knowledgeDrafts.has(key)) knowledgeDrafts.set(key, { text: "", expectedRevision: null });
-    persistBrowserDrafts();
-    knowledgeEdit(target, path, true);
-  } else if (form.matches("[data-knowledge-write]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const path = form.dataset.path,
-      key = `${target}:${path}`,
-      draft = knowledgeDrafts.get(key);
-    if (!knowledgePath(path) || !draft) throw new Error("Knowledge draft is missing; reopen the document");
-    const text = data.get("text");
-    draft.text = text;
-    if (!editableKnowledge(text)) throw new Error("Unsafe control text cannot be edited; the draft was retained");
-    if (path === "MEMORY.md" && [...text].length > 3000)
-      throw new Error("MEMORY.md exceeds 3,000 Unicode code points; the draft was retained");
-    if (data.get("confirm") !== target) throw new Error("Confirmation must match the project ID");
-    const expectedRevision = draft.expectedRevision;
-    persistBrowserDrafts();
-    const result = await mutate(
-      { action: "knowledge-write", id: target, path, text, expectedRevision },
-      "Knowledge write acknowledged. Index and execution authority were not changed automatically.",
-    );
-    validateKnowledgeDocument(result, path);
-    if (result.text !== text) throw new Error("Knowledge write receipt differs from the submitted text; retain the draft and inspect");
-    if (knowledgeDrafts.get(key) === draft && draft.text === text && draft.expectedRevision === expectedRevision)
-      knowledgeDrafts.delete(key);
-    persistBrowserDrafts();
-    if (target === projectId && dialogVersion === version) await knowledgeRead(path);
-  } else if (form.matches("[data-operation-decision]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const record = ownedOperation(form.dataset.operation, form.dataset.fingerprint);
-    if (record.status !== "pending") throw new Error("Operation decision is immutable");
-    const mode = form.dataset.decision;
-    if (!["plain", "execution", "reject"].includes(mode)) throw new Error("Unknown operation decision");
-    if (mode !== "reject" && data.get("confirm") !== target) throw new Error("Confirmation must match the project ID");
-    if (mode === "execution" && !executionConsentAvailable(record)) throw new Error("Executable consent is unavailable for this operation");
-    await mutate(
-      mode === "reject"
-        ? { action: "operation-decide", id: target, operationId: record.id, fingerprint: record.fingerprint, decision: "reject" }
-        : {
-            action: "operation-decide",
-            id: target,
-            operationId: record.id,
-            fingerprint: record.fingerprint,
-            decision: "approve",
-            confirm: target,
-            ...(mode === "execution" ? { execution: true } : {}),
-          },
-      "Operation decision recorded. No operation was executed.",
-    );
-    closeCurrentDialog(target, version);
-  } else if (form.matches("[data-operation-execute]")) {
-    const target = form.dataset.project;
-    requireProject(target);
-    const record = ownedOperation(form.dataset.operation, form.dataset.fingerprint);
-    if (!operationExecutionAvailable(record) || data.get("confirm") !== target)
-      throw new Error("Exact executable approval and project confirmation are required");
-    if (!["execute", "inspect"].includes(form.dataset.mode)) throw new Error("Unknown bound operation control");
-    const result = await mutate(
-      {
-        action: form.dataset.mode === "inspect" ? "operation-inspect" : "operation-execute",
-        id: target,
-        operationId: record.id,
-        fingerprint: record.fingerprint,
-        confirm: target,
-      },
-      form.dataset.mode === "inspect"
-        ? "Bound outcome inspected. No replay/retry permission inferred."
-        : "Executor responded. Inspect its receipt; no new retry permission inferred.",
-    );
-    if (target === projectId && dialogVersion === version)
-      showDialog(
-        "Bound executor response",
-        `<p>Approval is not effect verification. Uncertain effects must be inspected, never replayed automatically.</p><pre>${esc(JSON.stringify(result, null, 2) ?? "No readable receipt returned; outcome remains unproven.")}</pre>`,
-      );
-  } else if (form.matches("[data-create]")) {
-    if (busy) return;
-    if (!data.has("trusted")) throw new Error("Approve the trusted workspace before creating it");
-    captureCreationDraft();
-    const creation = creationDrafts.get(form.dataset.draft);
-    const retry = form.dataset.retry === "true";
-    if (!creation || (retry ? creation.outcome !== "unknown" || creation.requestBound !== true : creation.outcome !== "draft"))
-      throw new Error("Only a fresh draft or explicitly confirmed exact bound retry may be submitted");
-    const payload = {
-      action: "create",
-      requestId: form.dataset.draft,
-      name: creation.name.trim(),
-      cwd: creation.cwd.trim(),
-      objective: creation.objective.trim(),
-    };
-    if (!payload.name || !payload.cwd) throw new Error("Project name and workspace path are required");
-    const previousOutcome = creation.outcome,
-      previousBinding = creation.requestBound;
-    creation.outcome = "unknown";
-    creation.requestBound = true;
-    try {
-      persistBrowserDrafts();
-    } catch (error) {
-      creation.outcome = previousOutcome;
-      creation.requestBound = previousBinding;
-      throw error;
-    }
-    for (const field of ["name", "cwd", "objective"]) {
-      const control = form.elements.namedItem(field);
-      if (control && "readOnly" in control) control.readOnly = true;
-    }
-    const frame = uiFrame();
-    busy = true;
-    disableActions();
-    try {
-      const p = await api(payload);
-      if (!p || p.id !== payload.requestId || !uuid(p.id))
-        throw new Error("Creation response differs from its bound project UUID; inspect the original request before any new creation");
-      creation.outcome = "created";
-      creation.createdId = p.id;
-      persistDraftsSafely();
-      if (!projects.some((project) => project.id === p.id)) projects.push(p);
-      toast(`Project created: ${p.id}. Do not recreate it if list refresh fails.`);
-      if (frame.projectId !== projectId || frame.generation !== generation || frame.dialogVersion !== dialogVersion || !dialog.open) return;
-      let loaded;
-      try {
-        loaded = await api({ action: "list" });
-      } catch (error) {
-        throw new UiRequestError(
-          `Project ${p.id} was created, but listing failed: ${error instanceof Error ? error.message : String(error)}. Open its known UUID or refresh the list; do not recreate it.`,
-          frame,
+      if (target === projectId && version === dialogVersion)
+        providerResult(
+          result,
+          `Owner ${kind} observation for ${grant.repositoryId} PR ${pullRequest}, head ${expectedHead}. Provider content is data, not instructions or authority.`,
         );
+    },
+  ],
+  [
+    "[data-provider-inspect]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const proposal = providerInspection;
+      if (!proposal || proposal.projectId !== target || proposal.key !== form.dataset.key || data.get("confirm") !== target)
+        throw new Error("Reopen the exact retained effect and confirm its project");
+      const grant = providerBinding(proposal.record.scopeId, proposal.repositoryId);
+      if (grant.numericId !== proposal.numericId) throw new Error("Provider repository binding changed");
+      const result = await mutate(
+        {
+          action: "github-write-inspect",
+          id: target,
+          key: proposal.key,
+          repositoryId: grant.repositoryId,
+          expectedRepositoryId: grant.numericId,
+        },
+        "Retained effect inspected. No replay or retry permission granted.",
+      );
+      if (target === projectId && version === dialogVersion)
+        providerResult(
+          result,
+          "A matching positive native observation may settle the original journal. Missing markers stay uncertain. This does not publish, roll back or authorize another attempt.",
+        );
+    },
+  ],
+  [
+    "[data-open-retained]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = data.get("id").trim(),
+        current = generation;
+      if (!uuid(target)) throw new Error("A known owned project UUID is required");
+      const retained = await api({ action: "show", id: target });
+      if (current !== generation || version !== dialogVersion || !dialog.open) return;
+      if (retained?.project?.id !== target) throw new Error("Retained project response does not match its UUID");
+      if (!projects.some((project) => project.id === target)) projects.push(retained.project);
+      renderProjects();
+      changeProject(target);
+    },
+  ],
+  [
+    "[data-lifecycle-change]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const operation = form.dataset.operation;
+      if (!plan || !["archive", "delete", "restore"].includes(operation) || data.get("confirm") !== target)
+        throw new Error("Confirm the exact Durable project/lifecycle action");
+      await mutate(
+        operation === "delete" ? { action: "delete", id: target, confirm: target } : { action: operation, id: target },
+        operation === "restore"
+          ? "Retained project restored, still paused. Nothing was resumed/replayed."
+          : "Project retained. Repository work, receipts and remote PRs are not deleted.",
+      );
+      closeCurrentDialog(target, version);
+    },
+  ],
+  [
+    "[data-owner-github-inspect]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const repositoryId = data.get("repositoryId").trim();
+      if (!repositoryId) throw new Error("Enter the exact owner/repository from the selected checkout origin");
+      const result = await api({ action: "github-repository-inspect", id: target, repositoryId });
+      if (target === projectId && version === dialogVersion && dialog.open)
+        setDialogBody(
+          `<p class="note">Read-only lookup. Use the numeric ID and default branch below when you authorize this repository.</p>${recordSummary(result)}${dlgActions(dlgBtn("Back to owner setup", { action: "owner-setup" }, "primary"))}`,
+        );
+    },
+  ],
+  [
+    "[data-owner-write]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      if (form.dataset.kind.endsWith("-revoke") && data.get("confirm") !== target)
+        throw new Error("Type the exact project ID for fresh owner consent");
+      const fields = ownerFieldsValue(form);
+      const kind = form.dataset.kind,
+        actionByKind = {
+          "workspace-grant": "workspace-grant",
+          "workspace-revoke": "workspace-revoke",
+          "github-authorize": "github-authorize",
+          "github-revoke": "github-revoke",
+          "command-profile-set": "command-profile-set",
+        };
+      if (!Object.hasOwn(actionByKind, kind)) throw new Error("Unknown owner setup action");
+      const result = await mutate(
+        { ...fields, action: actionByKind[kind], id: target, confirm: target },
+        "Owner API recorded this explicit revision-checked change. No command was executed.",
+      );
+      if (projectId === target && version === dialogVersion && dialog.open) await ownerSetupDialog(result);
+    },
+  ],
+]);
+//@m settings
+registerForms([
+  [
+    "[data-settings-form]",
+    (form) => {
+      requireProject(form.dataset.project);
+      captureSettingsDraft();
+      persistBrowserDrafts();
+      if (!settingsCache || settingsCache.projectId !== projectId) throw new Error("Reopen the project settings first");
+      const changes = settingsChanges(settingsFormValues(form), settingsCache.values);
+      if (!Object.keys(changes).length) throw new Error("There are no changes to review yet.");
+      validateSettingsChanges(changes);
+      settingsReview(settingsRevisionFor(changes), changes);
+    },
+  ],
+  [
+    "[data-settings-confirm]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const proposal = settingsConfirmation;
+      if (!proposal || proposal.projectId !== target || proposal.revision !== form.dataset.revision || data.get("confirm") !== target)
+        throw new Error("Reopen the exact settings proposal and confirm its project ID");
+      persistBrowserDrafts();
+      const result = await mutate(
+        { action: "settings-update", id: target, confirm: target, expectedRevision: proposal.revision, changes: proposal.changes },
+        "Settings saved. New threads use them; running threads keep what they started with.",
+      );
+      validateSettings(result);
+      for (const [field, changed] of Object.entries(proposal.changes)) {
+        if (
+          field === "verification"
+            ? JSON.stringify(result.values.verification) !== JSON.stringify(changed)
+            : field === "models" || field === "fallbackModels"
+              ? Object.entries(changed).some(([role, reference]) => (result.values[field][role] ?? null) !== reference)
+              : field === "scopedModels"
+                ? JSON.stringify(result.values.scopedModels) !== JSON.stringify(changed)
+                : result.values[field] !== changed
+        )
+          throw new Error("Settings receipt differs from the proposed change; retain drafts and inspect");
       }
-      if (frame.projectId !== projectId || frame.generation !== generation || frame.dialogVersion !== dialogVersion || !dialog.open) return;
-      if (!loaded.some((project) => project.id === p.id)) loaded.push(p);
-      projects = loaded;
-      changeProject(p.id);
-    } finally {
-      busy = false;
+      for (const key of proposal.draftKeys) {
+        const draft = settingsDrafts.get(key),
+          field = key.slice(key.indexOf(":") + 1);
+        if (draft?.expectedRevision === proposal.revision && draft.text === proposal.changes[field]) settingsDrafts.delete(key);
+      }
+      persistBrowserDrafts();
+      settingsPending = null;
+      if (target === projectId) {
+        settingsCache = { ...result, projectId: target };
+        projects = projects.map((project) => (project.id === target ? { ...project, name: result.values.name } : project));
+        renderProjects();
+        closeCurrentDialog(target, version);
+      }
+    },
+  ],
+]);
+//@m knowledge
+registerForms([
+  [
+    "[data-upload-edit]",
+    async (form) => {
+      requireProject(form.dataset.project);
+      captureUploadDraft();
+      persistBrowserDrafts();
+      await uploadReview(form.dataset.import);
+    },
+  ],
+  [
+    "[data-upload-confirm]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const draft = uploadDrafts.get(form.dataset.import),
+        payload = uploadConfirmations.get(form.dataset.import);
+      if (
+        !draft ||
+        !payload ||
+        payload.projectId !== target ||
+        form.dataset.fingerprint !== payload.fingerprint ||
+        data.get("confirm") !== target
+      )
+        throw new Error("Reopen the exact upload review and confirm its project ID");
+      const current = await prepareUpload(draft);
+      if (target !== projectId || version !== dialogVersion || !dialog.open) return;
+      if (
+        draft.filename !== current.filename ||
+        draft.title !== current.title ||
+        draft.encoding !== current.encoding ||
+        draft.text !== current.text
+      )
+        throw new Error("Upload draft changed during preparation; review it again");
+      if (
+        current.fingerprint !== payload.fingerprint ||
+        (draft.submittedFingerprint !== null && draft.submittedFingerprint !== payload.fingerprint)
+      )
+        throw new Error("Upload bytes/binding changed. Unresolved UUID cannot be reused for a changed payload");
+      draft.submittedFingerprint = payload.fingerprint;
+      persistBrowserDrafts();
+      const record = await mutate(
+        {
+          action: "library-import",
+          id: target,
+          confirm: target,
+          importId: payload.importId,
+          filename: payload.filename,
+          title: payload.title,
+          encoding: "base64",
+          data: payload.data,
+          expectedSha256: payload.sha256,
+        },
+        "Owner reference import acknowledged. No agent grant or native worker evidence inferred.",
+      );
+      validateLibraryRecord(record, target);
+      if (
+        record.id !== payload.importId ||
+        record.filename !== payload.filename ||
+        record.title !== payload.title ||
+        record.sha256 !== payload.sha256 ||
+        record.size !== payload.size ||
+        record.native !== undefined ||
+        record.sessionFile !== null
+      )
+        throw new Error("Upload receipt differs from the confirmed owner reference. UUID/fingerprint retained");
+      if (
+        uploadDrafts.get(draft.importId) === draft &&
+        draft.filename === payload.filename &&
+        draft.title === payload.title &&
+        draft.encoding === payload.encoding &&
+        draft.text === payload.text
+      )
+        uploadDrafts.delete(draft.importId);
+      persistBrowserDrafts();
+      if (target === projectId && version === dialogVersion)
+        showDialog(
+          "Owner reference receipt",
+          `<p>Stored immutable owner reference, not worker-generated evidence. Import does not grant agent access or execution authority.</p><pre>${esc(JSON.stringify(record, null, 2))}</pre><button data-action="library-list">Open project library</button>`,
+        );
+    },
+  ],
+  [
+    "[data-knowledge-path]",
+    (form) => {
+      const data = new FormData(form);
+      const target = form.dataset.project;
+      requireProject(target);
+      const path = data.get("path").trim();
+      if (!knowledgePath(path) || !path.includes("/")) throw new Error("Choose a managed topic path, such as research/topic.md");
+      knowledgePaths.set(target, data.get("path"));
+      const key = `${target}:${path}`;
+      if (!knowledgeDrafts.has(key)) knowledgeDrafts.set(key, { text: "", expectedRevision: null });
+      persistBrowserDrafts();
+      knowledgeEdit(target, path, true);
+    },
+  ],
+  [
+    "[data-knowledge-write]",
+    async (form) => {
+      const data = new FormData(form);
+      const version = dialogVersion;
+      const target = form.dataset.project;
+      requireProject(target);
+      const path = form.dataset.path,
+        key = `${target}:${path}`,
+        draft = knowledgeDrafts.get(key);
+      if (!knowledgePath(path) || !draft) throw new Error("Knowledge draft is missing; reopen the document");
+      const text = data.get("text");
+      draft.text = text;
+      if (!editableKnowledge(text)) throw new Error("Unsafe control text cannot be edited; the draft was retained");
+      if (path === "MEMORY.md" && [...text].length > 3000)
+        throw new Error("MEMORY.md exceeds 3,000 Unicode code points; the draft was retained");
+      if (data.get("confirm") !== target) throw new Error("Confirmation must match the project ID");
+      const expectedRevision = draft.expectedRevision;
+      persistBrowserDrafts();
+      const result = await mutate(
+        { action: "knowledge-write", id: target, path, text, expectedRevision },
+        "Knowledge write acknowledged. Index and execution authority were not changed automatically.",
+      );
+      validateKnowledgeDocument(result, path);
+      if (result.text !== text) throw new Error("Knowledge write receipt differs from the submitted text; retain the draft and inspect");
+      if (knowledgeDrafts.get(key) === draft && draft.text === text && draft.expectedRevision === expectedRevision)
+        knowledgeDrafts.delete(key);
+      persistBrowserDrafts();
+      if (target === projectId && dialogVersion === version) await knowledgeRead(path);
+    },
+  ],
+]);
+//@m creation
+registerForms([
+  [
+    "[data-create]",
+    async (form) => {
+      const data = new FormData(form);
+      if (busy) return;
+      if (!data.has("trusted")) throw new Error("Approve the trusted workspace before creating it");
+      captureCreationDraft();
+      const creation = creationDrafts.get(form.dataset.draft);
+      const retry = form.dataset.retry === "true";
+      if (!creation || (retry ? creation.outcome !== "unknown" || creation.requestBound !== true : creation.outcome !== "draft"))
+        throw new Error("Only a fresh draft or explicitly confirmed exact bound retry may be submitted");
+      const payload = {
+        action: "create",
+        requestId: form.dataset.draft,
+        name: creation.name.trim(),
+        cwd: creation.cwd.trim(),
+        objective: creation.objective.trim(),
+      };
+      if (!payload.name || !payload.cwd) throw new Error("Project name and workspace path are required");
+      const previousOutcome = creation.outcome,
+        previousBinding = creation.requestBound;
+      creation.outcome = "unknown";
+      creation.requestBound = true;
+      try {
+        persistBrowserDrafts();
+      } catch (error) {
+        creation.outcome = previousOutcome;
+        creation.requestBound = previousBinding;
+        throw error;
+      }
+      for (const field of ["name", "cwd", "objective"]) {
+        const control = form.elements.namedItem(field);
+        if (control && "readOnly" in control) control.readOnly = true;
+      }
+      const frame = uiFrame();
+      busy = true;
       disableActions();
-    }
-  }
-}
+      try {
+        const p = await api(payload);
+        if (!p || p.id !== payload.requestId || !uuid(p.id))
+          throw new Error("Creation response differs from its bound project UUID; inspect the original request before any new creation");
+        creation.outcome = "created";
+        creation.createdId = p.id;
+        persistDraftsSafely();
+        if (!projects.some((project) => project.id === p.id)) projects.push(p);
+        toast(`Project created: ${p.id}. Do not recreate it if list refresh fails.`);
+        if (frame.projectId !== projectId || frame.generation !== generation || frame.dialogVersion !== dialogVersion || !dialog.open)
+          return;
+        let loaded;
+        try {
+          loaded = await api({ action: "list" });
+        } catch (error) {
+          throw new UiRequestError(
+            `Project ${p.id} was created, but listing failed: ${error instanceof Error ? error.message : String(error)}. Open its known UUID or refresh the list; do not recreate it.`,
+            frame,
+          );
+        }
+        if (frame.projectId !== projectId || frame.generation !== generation || frame.dialogVersion !== dialogVersion || !dialog.open)
+          return;
+        if (!loaded.some((project) => project.id === p.id)) loaded.push(p);
+        projects = loaded;
+        changeProject(p.id);
+      } finally {
+        busy = false;
+        disableActions();
+      }
+    },
+  ],
+]);
 
 function report(error, frame = error instanceof UiRequestError ? error.frame : uiFrame()) {
   if (frame.projectId !== projectId || frame.generation !== generation) return;
@@ -6329,12 +6689,7 @@ document.addEventListener("click", (event) => {
   if (node && !node.disabled) void uiAction(() => action(node));
 });
 document.addEventListener("submit", (event) => {
-  if (
-    !event.target.matches(
-      "#compose, [data-chat-rename], [data-answer], [data-answer-adopt], [data-task-message], [data-resume-project], [data-operation-decision], [data-operation-execute], [data-inline-thread-send], [data-knowledge-path], [data-knowledge-write], [data-upload-edit], [data-upload-confirm], [data-settings-form], [data-settings-confirm], [data-routine-change], [data-lifecycle-change], [data-open-retained], [data-provider-known], [data-provider-inspect], [data-create], [data-pr-add]",
-    )
-  )
-    return;
+  if (!event.target.matches(formHandlers.map(([selector]) => selector).join(", "))) return;
   event.preventDefault();
   void uiAction(() => submit(event.target));
 });
@@ -6353,42 +6708,66 @@ document.addEventListener("input", (event) => {
   for (const row of filter.closest(".scope-editor").querySelectorAll(".scope-row"))
     row.hidden = !terms.every((term) => modelNorm(row.textContent).includes(term));
 });
+//@m settings
 document.addEventListener("input", (event) => {
   if (event.target.matches(".mp-search")) {
     renderModelList(event.target.closest(".mp"));
     return;
   }
-  if (event.target.id === "search-input") {
-    scheduleSearch();
-    return;
-  }
-  if (event.target.closest("#compose")) {
-    drafts.set(draftKey(), event.target.value);
-    autosize(event.target);
-    void updateSkillMenu(event.target).catch((error) => {
-      closeSkillMenu();
-      report(error);
-    });
-  }
+  if (!event.target.closest("[data-settings-form]")) return;
+  captureSettingsDraft();
+  persistDraftsSafely();
+  settingsSync();
+});
+//@m search
+document.addEventListener("input", (event) => {
+  if (event.target.id === "search-input") scheduleSearch();
+});
+//@m composer
+document.addEventListener("input", (event) => {
+  if (!event.target.closest("#compose")) return;
+  drafts.set(draftKey(), event.target.value);
+  autosize(event.target);
+  void updateSkillMenu(event.target).catch((error) => {
+    closeSkillMenu();
+    report(error);
+  });
+  persistDraftsSafely();
+});
+//@m decisions
+document.addEventListener("input", (event) => {
   const answerForm = event.target.closest("[data-answer]");
-  if (answerForm?.dataset.project === projectId)
-    answers.set(answerKey(projectId, answerForm.dataset.entry), answerForm.querySelector("textarea").value);
+  if (answerForm?.dataset.project !== projectId) return;
+  answers.set(answerKey(projectId, answerForm.dataset.entry), answerForm.querySelector("textarea").value);
+  persistDraftsSafely();
+});
+//@m workers
+document.addEventListener("input", (event) => {
   const form = event.target.closest("[data-task-message], [data-inline-thread-send]");
-  if (form?.matches("[data-inline-thread-send]")) {
+  if (!form) return;
+  if (form.matches("[data-inline-thread-send]")) {
     const key = `${form.dataset.project}:thread-send:${form.dataset.thread}`;
     const draft = formDrafts.get(key) ?? { text: "", requestId: crypto.randomUUID(), submittedText: null };
     draft.text = form.querySelector("textarea").value;
     formDrafts.set(key, draft);
   } else {
-    const draft = form && formDrafts.get(form.dataset.draftKey);
+    const draft = formDrafts.get(form.dataset.draftKey);
     if (draft) draft.text = form.querySelector("textarea").value;
   }
+  persistDraftsSafely();
+});
+//@m knowledge
+document.addEventListener("input", (event) => {
+  if (!event.target.closest("[data-knowledge-write], [data-knowledge-path], [data-upload-edit]")) return;
   captureKnowledgeDraft();
   captureUploadDraft();
-  captureSettingsDraft();
+  persistDraftsSafely();
+});
+//@m creation
+document.addEventListener("input", (event) => {
+  if (!event.target.closest("[data-create]")) return;
   captureCreationDraft();
   persistDraftsSafely();
-  if (event.target.closest("[data-settings-form]")) settingsSync();
 });
 // Clicking elsewhere closes the skill picker; moving the caret re-evaluates it.
 document.addEventListener("mousedown", (event) => {
@@ -6561,15 +6940,7 @@ document.querySelector("#refresh").addEventListener("click", () => {
 dialog.addEventListener("close", () => {
   // A delayed close event must not cancel a dialog that has since reopened.
   if (dialog.open) return;
-  captureDialogDraft();
-  answerAdoption = null;
-  routineConfirmation = null;
-  uploadConfirmations.clear();
-  settingsConfirmation = null;
-  providerInspection = null;
-  dialogVersion++;
-  if (blobUrl) URL.revokeObjectURL(blobUrl);
-  blobUrl = null;
+  resetDialogState();
 });
 // Esc inside an open model list closes only the list.
 dialog.addEventListener("cancel", (event) => {
@@ -6585,14 +6956,12 @@ dialog.addEventListener("mousedown", (event) => {
 document.addEventListener("click", (event) => {
   for (const mp of dialog.querySelectorAll(".mp.open")) if (!mp.contains(event.target)) mpClose(mp);
 });
+// Key handling is split by feature; the first handler to act calls preventDefault and later ones stand down. Registration order matters:
+// the model picker and search come first, then the worker view's Escape, then the composer's menus.
+//@m settings
 document.addEventListener("keydown", (event) => {
   const picker = event.target.closest?.(".mp");
   if (picker && !event.isComposing && mpKey(event, picker)) return;
-  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) {
-    event.preventDefault();
-    openSearch();
-    return;
-  }
   if (
     event.ctrlKey &&
     !event.metaKey &&
@@ -6605,6 +6974,13 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     if (!busy) void uiAction(() => cycleModel(event.shiftKey ? -1 : 1));
+  }
+});
+//@m search
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === "k" && !event.isComposing) {
+    event.preventDefault();
+    openSearch();
     return;
   }
   if (event.target.id === "search-input" && !event.isComposing) {
@@ -6619,8 +6995,10 @@ document.addEventListener("keydown", (event) => {
       if (searchState.query === event.target.value.trim() && count) void uiAction(() => openSearchHit(searchState.active));
       else void runSearch();
     }
-    return;
   }
+});
+//@m shell
+document.addEventListener("keydown", (event) => {
   if (
     (event.metaKey || event.ctrlKey) &&
     !event.altKey &&
@@ -6631,8 +7009,10 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     setSidebar(!document.querySelector(".app").classList.contains("side-collapsed"));
-    return;
   }
+});
+//@m workers
+document.addEventListener("keydown", (event) => {
   if (
     event.key === "Escape" &&
     workerChat &&
@@ -6644,8 +7024,11 @@ document.addEventListener("keydown", (event) => {
   ) {
     event.preventDefault();
     document.querySelector('#inline-thread [data-action="thread-close"]')?.click();
-    return;
   }
+});
+//@m composer
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
   if (refMenu && event.target.closest("#compose textarea") && !event.isComposing) {
     const count = refMenu.items.length;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -6721,18 +7104,24 @@ document.addEventListener("keydown", (event) => {
       return;
     }
   }
-  const textarea = event.target.closest(
-    "#compose textarea, [data-answer] textarea, [data-task-message] textarea, [data-inline-thread-send] textarea",
-  );
-  if (textarea && event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
-    const form = textarea.form;
-    const submit = form?.querySelector('button[type="submit"]');
-    if (form && !submit?.disabled && !busy) {
-      event.preventDefault();
-      form.requestSubmit();
-    }
+  if (submitOnEnter(event, "#compose textarea")) return;
+  if (
+    event.key !== "/" ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    dialog.open ||
+    event.target.closest("input, textarea, select, [contenteditable]")
+  )
     return;
-  }
+  event.preventDefault();
+  setTab("coordinator");
+  document.querySelector("#compose textarea").focus();
+});
+//@m decisions
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+  if (submitOnEnter(event, "[data-answer] textarea")) return;
   const card =
     /^[1-9]$/.test(event.key) &&
     !event.ctrlKey &&
@@ -6748,20 +7137,12 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       choice.click();
     }
-    return;
   }
-  if (
-    event.key !== "/" ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.altKey ||
-    dialog.open ||
-    event.target.closest("input, textarea, select, [contenteditable]")
-  )
-    return;
-  event.preventDefault();
-  setTab("coordinator");
-  document.querySelector("#compose textarea").focus();
+});
+//@m workers
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+  submitOnEnter(event, "[data-task-message] textarea, [data-inline-thread-send] textarea");
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refresh();
@@ -8831,30 +9212,29 @@ function workerChanges(threadId, items) {
   });
   return `<section class="changes-evidence"><h4>Evidence</h4>${linked.map(artifactButton).join("") || '<p class="note">No evidence linked to this thread.</p>'}${legacy ? '<p class="note">Legacy evidence without native provenance stays unlinked.</p>' : ""}<h4>Files touched (from tool calls)</h4>${paths.length ? `<ul>${paths.map((path) => `<li>${path}</li>`).join("")}</ul>` : '<p class="note">No write/edit tool calls in this page.</p>'}</section>`;
 }
-function captureDialogDraft() {
-  const form = dialog.querySelector("[data-task-message]");
-  const draft = form && formDrafts.get(form.dataset.draftKey);
-  if (draft) draft.text = form.querySelector("textarea").value;
-  captureKnowledgeDraft();
-  captureUploadDraft();
-  captureSettingsDraft();
-  captureCreationDraft();
+//@m drafts
+// Browser-kept drafts survive a reload (sessionStorage, one JSON snapshot). Features register the maps they own: entries() serializes,
+// validate(pairs) throws on malformed data, restore(pairs) rebuilds, capture() copies open dialog fields into them.
+const draftStorageKey = "pi-projects-ui-drafts:v1";
+const draftParts = [];
+let lastDraftSnapshot = "";
+let lastDraftError = null;
+function registerDrafts(part) {
+  draftParts.push(part);
+}
+const draftPairs = (value) =>
+  Array.isArray(value) &&
+  value.length <= 256 &&
+  value.every((pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") &&
+  new Set(value.map((pair) => pair[0])).size === value.length;
+const draftText = (value) => typeof value === "string" && value.length <= 32000;
+const draftSnapshot = () => ({ version: 1, ...Object.fromEntries(draftParts.map((part) => [part.key, part.entries()])) });
+function captureDrafts() {
+  for (const part of draftParts) part.capture?.();
   persistDraftsSafely();
 }
-const draftStorageKey = "pi-projects-ui-drafts:v1";
-let lastDraftSnapshot = "";
 function persistBrowserDrafts() {
-  const state = {
-    version: 1,
-    coordinator: [...drafts],
-    answers: [...answers],
-    forms: [...formDrafts],
-    knowledge: [...knowledgeDrafts],
-    knowledgePaths: [...knowledgePaths],
-    uploads: [...uploadDrafts],
-    settings: [...settingsDrafts],
-    creations: [...creationDrafts],
-  };
+  const state = draftSnapshot();
   const serialized = JSON.stringify(state);
   validateBrowserDraftState(state);
   if (new TextEncoder().encode(serialized).length > 1048576)
@@ -8876,44 +9256,145 @@ function persistDraftsSafely() {
   }
 }
 function validateBrowserDraftState(state) {
-  const pairs = (value) =>
-    Array.isArray(value) &&
-    value.length <= 256 &&
-    value.every((pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") &&
-    new Set(value.map((pair) => pair[0])).size === value.length;
-  const text = (value) => typeof value === "string" && value.length <= 32000;
-  if (
-    state?.creations !== undefined &&
-    (!pairs(state.creations) ||
-      state.creations.some(
-        ([id, value]) =>
-          !uuid(id) ||
-          !value ||
-          typeof value.name !== "string" ||
-          value.name.length > 120 ||
-          !text(value.cwd) ||
-          !text(value.objective) ||
-          !["draft", "unknown", "created"].includes(value.outcome) ||
-          (value.requestBound !== undefined && typeof value.requestBound !== "boolean") ||
-          (value.outcome === "created"
-            ? !uuid(value.createdId) || (value.requestBound === true && value.createdId !== id)
-            : value.createdId !== null),
-      ))
-  )
-    throw new Error("Malformed creation drafts; nothing restored or truncated");
-  if (
-    state?.settings !== undefined &&
-    (!pairs(state.settings) ||
-      state.settings.some(
+  if (!state || state.version !== 1)
+    throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
+  for (const part of draftParts) {
+    if (state[part.key] === undefined && !part.required) continue;
+    part.validate(state[part.key]);
+  }
+}
+function restoreBrowserDrafts() {
+  try {
+    const serialized = sessionStorage.getItem(draftStorageKey);
+    if (!serialized) return;
+    if (new TextEncoder().encode(serialized).length > 1048576) throw new Error("Browser draft snapshot exceeds 1 MiB");
+    const state = JSON.parse(serialized);
+    validateBrowserDraftState(state);
+    for (const part of draftParts) part.restore(state[part.key] ?? []);
+    lastDraftSnapshot = JSON.stringify(draftSnapshot());
+  } catch (error) {
+    report(error);
+  }
+}
+window.addEventListener("pagehide", captureDrafts);
+//@m decisions
+onDialogClose(() => {
+  answerAdoption = null;
+});
+//@m admin
+onDialogClose(() => {
+  routineConfirmation = null;
+  providerInspection = null;
+});
+//@m knowledge
+onDialogClose(() => {
+  uploadConfirmations.clear();
+  if (blobUrl) URL.revokeObjectURL(blobUrl);
+  blobUrl = null;
+});
+//@m settings
+onDialogClose(() => {
+  settingsConfirmation = null;
+});
+//@m composer
+registerDrafts({
+  key: "coordinator",
+  required: true,
+  entries: () => [...drafts],
+  validate(pairs) {
+    if (!draftPairs(pairs) || pairs.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !draftText(value)))
+      throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) drafts.set(id, value);
+  },
+});
+//@m decisions
+registerDrafts({
+  key: "answers",
+  required: true,
+  entries: () => [...answers],
+  validate(pairs) {
+    if (!draftPairs(pairs) || pairs.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !draftText(value)))
+      throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) answers.set(id, value);
+  },
+});
+//@m workers
+registerDrafts({
+  key: "forms",
+  required: true,
+  entries: () => [...formDrafts],
+  validate(pairs) {
+    if (
+      !draftPairs(pairs) ||
+      pairs.some(
         ([key, value]) =>
-          !/^[a-f0-9-]{36}:(?:name|objective)$/.test(key) || !value || !text(value.text) || !/^[a-f0-9]{64}$/.test(value.expectedRevision),
-      ))
-  )
-    throw new Error("Malformed settings drafts; nothing restored or truncated");
-  if (
-    state?.uploads !== undefined &&
-    (!pairs(state.uploads) ||
-      state.uploads.some(
+          !/^[a-f0-9-]{36}:(?:steer|revise|thread-send|thread-steer):[a-f0-9-]{36}$/.test(key) ||
+          !value ||
+          !draftText(value.text) ||
+          !uuid(value.requestId) ||
+          (value.submittedText !== null && !draftText(value.submittedText)),
+      )
+    )
+      throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) formDrafts.set(id, { ...value });
+  },
+  capture() {
+    const form = dialog.querySelector("[data-task-message]");
+    const draft = form && formDrafts.get(form.dataset.draftKey);
+    if (draft) draft.text = form.querySelector("textarea").value;
+  },
+});
+//@m knowledge
+registerDrafts({
+  key: "knowledge",
+  entries: () => [...knowledgeDrafts],
+  validate(pairs) {
+    if (
+      !draftPairs(pairs) ||
+      pairs.some(
+        ([key, value]) =>
+          !uuid(key.slice(0, 36)) ||
+          key[36] !== ":" ||
+          !knowledgePath(key.slice(37)) ||
+          !value ||
+          !draftText(value.text) ||
+          (value.expectedRevision !== null && !/^[a-f0-9]{64}$/.test(value.expectedRevision)),
+      )
+    )
+      throw new Error("Malformed browser knowledge drafts; nothing restored or truncated");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) knowledgeDrafts.set(id, { ...value });
+  },
+  capture() {
+    captureKnowledgeDraft();
+    captureUploadDraft();
+  },
+});
+registerDrafts({
+  key: "knowledgePaths",
+  entries: () => [...knowledgePaths],
+  validate(pairs) {
+    if (!draftPairs(pairs) || pairs.some(([id, value]) => !uuid(id) || typeof value !== "string" || value.length > 240))
+      throw new Error("Malformed browser knowledge drafts; nothing restored or truncated");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) knowledgePaths.set(id, value);
+  },
+});
+registerDrafts({
+  key: "uploads",
+  entries: () => [...uploadDrafts],
+  validate(pairs) {
+    if (
+      !draftPairs(pairs) ||
+      pairs.some(
         ([id, value]) =>
           !uuid(id) ||
           !value ||
@@ -8927,60 +9408,62 @@ function validateBrowserDraftState(state) {
           typeof value.text !== "string" ||
           value.text.length > 43692 ||
           (value.submittedFingerprint !== null && !/^[a-f0-9]{64}$/.test(value.submittedFingerprint)),
-      ))
-  )
-    throw new Error("Malformed upload drafts; nothing restored or truncated");
-  if (
-    (state?.knowledge !== undefined &&
-      (!pairs(state.knowledge) ||
-        state.knowledge.some(
-          ([key, value]) =>
-            !uuid(key.slice(0, 36)) ||
-            key[36] !== ":" ||
-            !knowledgePath(key.slice(37)) ||
-            !value ||
-            !text(value.text) ||
-            (value.expectedRevision !== null && !/^[a-f0-9]{64}$/.test(value.expectedRevision)),
-        ))) ||
-    (state?.knowledgePaths !== undefined &&
-      (!pairs(state.knowledgePaths) ||
-        state.knowledgePaths.some(([id, value]) => !uuid(id) || typeof value !== "string" || value.length > 240)))
-  )
-    throw new Error("Malformed browser knowledge drafts; nothing restored or truncated");
-  if (
-    !state ||
-    state.version !== 1 ||
-    !pairs(state.coordinator) ||
-    !pairs(state.answers) ||
-    !pairs(state.forms) ||
-    state.coordinator.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !text(value)) ||
-    state.answers.some(([id, value]) => !(uuid(id) || /^[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(id)) || !text(value)) ||
-    state.forms.some(
-      ([key, value]) =>
-        !/^[a-f0-9-]{36}:(?:steer|revise|thread-send|thread-steer):[a-f0-9-]{36}$/.test(key) ||
-        !value ||
-        !text(value.text) ||
-        !uuid(value.requestId) ||
-        (value.submittedText !== null && !text(value.submittedText)),
+      )
     )
-  )
-    throw new Error("Malformed/oversized browser draft state. In-memory drafts retained without truncation");
-}
-function restoreBrowserDrafts() {
-  try {
-    const serialized = sessionStorage.getItem(draftStorageKey);
-    if (!serialized) return;
-    if (new TextEncoder().encode(serialized).length > 1048576) throw new Error("Browser draft snapshot exceeds 1 MiB");
-    const state = JSON.parse(serialized);
-    validateBrowserDraftState(state);
-    for (const [id, value] of state.coordinator) drafts.set(id, value);
-    for (const [id, value] of state.answers) answers.set(id, value);
-    for (const [id, value] of state.forms) formDrafts.set(id, { ...value });
-    for (const [id, value] of state.knowledge ?? []) knowledgeDrafts.set(id, { ...value });
-    for (const [id, value] of state.knowledgePaths ?? []) knowledgePaths.set(id, value);
-    for (const [id, value] of state.uploads ?? []) uploadDrafts.set(id, { ...value });
-    for (const [id, value] of state.settings ?? []) settingsDrafts.set(id, { ...value });
-    for (const [id, value] of state.creations ?? [])
+      throw new Error("Malformed upload drafts; nothing restored or truncated");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) uploadDrafts.set(id, { ...value });
+  },
+});
+//@m settings
+registerDrafts({
+  key: "settings",
+  entries: () => [...settingsDrafts],
+  validate(pairs) {
+    if (
+      !draftPairs(pairs) ||
+      pairs.some(
+        ([key, value]) =>
+          !/^[a-f0-9-]{36}:(?:name|objective)$/.test(key) ||
+          !value ||
+          !draftText(value.text) ||
+          !/^[a-f0-9]{64}$/.test(value.expectedRevision),
+      )
+    )
+      throw new Error("Malformed settings drafts; nothing restored or truncated");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs) settingsDrafts.set(id, { ...value });
+  },
+  capture: captureSettingsDraft,
+});
+//@m creation
+registerDrafts({
+  key: "creations",
+  entries: () => [...creationDrafts],
+  validate(pairs) {
+    if (
+      !draftPairs(pairs) ||
+      pairs.some(
+        ([id, value]) =>
+          !uuid(id) ||
+          !value ||
+          typeof value.name !== "string" ||
+          value.name.length > 120 ||
+          !draftText(value.cwd) ||
+          !draftText(value.objective) ||
+          !["draft", "unknown", "created"].includes(value.outcome) ||
+          (value.requestBound !== undefined && typeof value.requestBound !== "boolean") ||
+          (value.outcome === "created"
+            ? !uuid(value.createdId) || (value.requestBound === true && value.createdId !== id)
+            : value.createdId !== null),
+      )
+    )
+      throw new Error("Malformed creation drafts; nothing restored or truncated");
+  },
+  restore(pairs) {
+    for (const [id, value] of pairs)
       creationDrafts.set(id, {
         name: value.name,
         cwd: value.cwd,
@@ -8989,26 +9472,11 @@ function restoreBrowserDrafts() {
         createdId: value.createdId,
         ...(value.requestBound === undefined ? {} : { requestBound: value.requestBound }),
       });
-    lastDraftSnapshot = JSON.stringify({
-      version: 1,
-      coordinator: [...drafts],
-      answers: [...answers],
-      forms: [...formDrafts],
-      knowledge: [...knowledgeDrafts],
-      knowledgePaths: [...knowledgePaths],
-      uploads: [...uploadDrafts],
-      settings: [...settingsDrafts],
-      creations: [...creationDrafts],
-    });
-  } catch (error) {
-    report(error);
-  }
-}
-restoreBrowserDrafts();
-window.addEventListener("pagehide", () => {
-  captureDialogDraft();
-  persistDraftsSafely();
+  },
+  capture: captureCreationDraft,
 });
+//@m app
+restoreBrowserDrafts();
 // Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once every 5 minutes (the refresh button polls now, with a short per-provider cooldown on the host); the bar re-renders every 30 s so countdowns stay current.
 let limits = null,
   limitsRefreshing = false;
