@@ -162,47 +162,6 @@ export function readArtifactBytes(
     closeSync(opened.fd);
   }
 }
-const size = (bytes: number) =>
-  bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
-const SUMMARY_ROWS = 6,
-  SUMMARY_BUNDLES = 2;
-/** Directory bundles (Xcode results, archives) hold hundreds of diagnostics; a report names the bundle, not its contents. */
-const BUNDLE = /^(.*?\.(?:xcresult|xcarchive|dSYM))\//;
-/** Short list appended to a settled-work report, so the coordinator sees (and can cite) the evidence. Files inside bundles collapse into one line per bundle; `projects_artifacts_list` still lists every file. */
-export function artifactSummary(controlRoot: string, threadId: string): string {
-  let listing: ArtifactListing;
-  try {
-    listing = listArtifacts(controlRoot, threadId);
-  } catch {
-    return "";
-  }
-  if (!listing.files.length) return "";
-  const bundles = new Map<string, { files: number; bytes: number }>(),
-    loose: ArtifactFile[] = [];
-  for (const file of listing.files) {
-    const bundle = BUNDLE.exec(file.path)?.[1];
-    if (!bundle) {
-      loose.push(file);
-      continue;
-    }
-    const entry = bundles.get(bundle) ?? { files: 0, bytes: 0 };
-    entry.files++;
-    entry.bytes += file.size;
-    bundles.set(bundle, entry);
-  }
-  const topBundles = [...bundles].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, SUMMARY_BUNDLES),
-    shown = loose.toSorted((a, b) => b.mtimeMs - a.mtimeMs).slice(0, SUMMARY_ROWS - topBundles.length);
-  const omittedFiles = loose.length - shown.length,
-    omittedBundles = bundles.size - topBundles.length;
-  const lines = [
-    ...shown.map((file) => `- ${file.kind === "image" || file.kind === "video" ? "!" : ""}[${file.path}](${file.ref}) ${size(file.size)}`),
-    ...topBundles.map(([path, entry]) => `- bundle ${path}: ${entry.files} files, ${size(entry.bytes)}`),
-    ...(omittedFiles || omittedBundles
-      ? [`- … ${omittedFiles} more files and ${omittedBundles} more bundles (projects_artifacts_list lists every file)`]
-      : []),
-  ];
-  return `\nArtifacts (${listing.files.length} file(s), ${size(listing.totalBytes)}${listing.overCap ? `, OVER the ${size(listing.capBytes)} cap: ask the worker to delete what is not needed` : ""}); cite as Markdown, images and videos render inline:\n${lines.join("\n")}`;
-}
 export function artifactInstructions(dir: string, threadId: string): string {
   return `\nArtifacts folder: ${dir} ($PI_ARTIFACTS_DIR), outside the worktree and visible to the owner. Save evidence (screenshots, videos, logs) there and list each file in your answer as a ref [name](artifact:${threadId}/<path>), with a leading ! for images and videos.\n`;
 }

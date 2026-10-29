@@ -1,4 +1,4 @@
-import { cli, findVcsRoot, runCli } from "./vcs.ts";
+import { cli, runCli } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
 import type { ContinuationBranch } from "./plugin-types.ts";
 import type { Project } from "./state.ts";
