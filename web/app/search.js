@@ -31,7 +31,8 @@ onProjectChange(() => {
   workerFocus = null;
 });
 
-onRender(applySearchFocus);
+// Renderers run in load order and this module loads before the chat draws its transcript: focus once they have all drawn.
+onRender(() => queueMicrotask(applySearchFocus));
 
 export function renderModelCycle() {
   const button = document.querySelector("#model-cycle"),
@@ -234,7 +235,7 @@ async function openSearchHit(i) {
     } else changeChat(hit.chatId);
   } else if (hit.source === "worker") {
     workerFocus = { ...focus, threadId: hit.threadId };
-    await inspectThread(hit.threadId, Math.max(0, hit.index - 5));
+    await inspectThread(hit.threadId);
   } else if (hit.source === "knowledge") await knowledgeRead(hit.path, focus);
   else await uploadOpen(hit.uploadId, focus);
 }

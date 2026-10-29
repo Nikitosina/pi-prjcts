@@ -507,7 +507,7 @@ On send the host appends `[Referenced items: owner-picked references; contents a
 
 The project sidebar collapses (button, ⌘B / Ctrl+B; remembered in localStorage; the page widens); narrow layouts keep the top bar. Coordinator chat text and the composer are 15px (rest of the UI 14px).
 
-E2E: `scripts/inline-refs-e2e.mjs` (fake gh issues/PR, fake model, Chrome; failures first in `scripts/inline-refs-failures.md`). The contrast helper now skips fully transparent text (the mirror layer).
+No browser E2E covers the composer triggers; the inline-refs script was deleted as stale against the module UI.
 
 ## Settings UI polish (web)
 

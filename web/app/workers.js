@@ -39,6 +39,7 @@ import { artifactButton, lightbox, loadWorkerArtifacts, renderArtifactBrowser } 
 import { refMenu } from "./composer.js";
 import { verificationNote } from "./settings.js";
 import { focusNode, setWorkerFocus, workerFocus } from "./search.js";
+import { bindTranscript, displayMessages, hydrate, loadOlder, mergeNewest, reach } from "./transcript.js";
 
 const formDrafts = new Map();
 export let workerChat = null;
@@ -149,9 +150,14 @@ registerActions({
     if (dialog.contains(node)) closeDialog();
     await inspectThread(node.dataset.thread);
   },
-  async "thread-history-page"(node) {
+  async "thread-older"(node) {
     requireProject(node.dataset.project);
-    await inspectThread(node.dataset.thread, Number(node.dataset.offset), Number(node.dataset.textOffset));
+    const chat = workerChat;
+    if (!chat || chat.threadId !== node.dataset.thread) return;
+    await loadOlder(workerKey(chat), (before) =>
+      api({ action: "thread-history", id: chat.id, threadId: chat.threadId, before, limit: 30 }),
+    );
+    await refreshWorkerChat(chat);
   },
   "thread-send"(node) {
     requireProject(node.dataset.project);
@@ -288,7 +294,7 @@ document.querySelector("#show-archived").addEventListener("change", (event) => {
   if (getView()) render();
 });
 function requireThread(id) {
-  if (!uuid(id) || !plan?.work.some((work) => work.threadId === id)) throw new Error("Unknown owned reusable thread in the current plan");
+  if (!uuid(id) || !plan?.agents?.some((agent) => agent.id === id)) throw new Error("Unknown owned reusable thread in the current plan");
 }
 function workLine(work, detail) {
   return `<button class="worker-line ${esc(work.status)}" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(work.threadId)}" title="${esc(work.text)}"><span class="dot"></span><span class="worker-title">${work.parentThreadId ? '<span class="sub-label">sub-agent</span> ' : ""}${esc(clip(work.text.replace(/\s+/g, " ").trim(), 60))}</span><small class="worker-meta"><span class="worker-role">${esc(work.role)}</span> · <span class="worker-status">${esc(work.status)}</span>${detail ? ` · <span class="worker-detail">${esc(detail)}</span>` : ""}${holdsBadge(work.holds)}</small>${contextRing(workerContexts.get(work.threadId))}</button>`;
@@ -424,12 +430,10 @@ function workerDetailHtml(chat, page, work) {
   const data = `data-project="${esc(chat.id)}" data-thread="${esc(threadId)}"`;
   return `<div class="worker-head"><button type="button" class="ghost small" data-action="thread-close" aria-label="Back to the coordinator chat">← Back</button><div class="row thread-title">${badge(work?.status ?? "unknown")}<b>${esc(role[0].toUpperCase() + role.slice(1))}</b><small>${esc(work?.attempt?.model ?? "")}</small></div><span id="worker-context" class="worker-context"></span><span class="row worker-actions"><button data-thread-mutation data-action="thread-steer" ${data}>Steer…</button><button data-thread-mutation class="danger" data-action="thread-stop" ${data}>Stop…</button></span></div><p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(work?.text ?? "")}</p><p class="worker-latest" id="worker-latest"></p><details class="worker-convo" open><summary>Conversation</summary><div id="worker-messages" class="transcript" aria-live="polite"></div><div id="worker-history-pages" class="row"></div></details><form class="composer" data-inline-thread-send ${data}><textarea name="message" aria-label="Message worker" required maxlength="32000" rows="2" placeholder="Follow up with this ${esc(role)}…">${esc(draft?.text ?? "")}</textarea><div class="row between"><span class="row help-line"><small>Reuses this ${esc(role)}'s conversation</small><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><button class="primary" type="submit">Send</button></div></form><section class="artifact-pane" id="artifact-pane" aria-label="Worker artifacts"><div class="row between"><b>Artifacts <span id="artifact-count"></span></b><button class="ghost small" data-action="artifacts-sort" id="artifact-sort" title="Sort files">Newest</button></div><small id="artifact-summary" class="note"></small><input id="artifact-filter" type="search" placeholder="Filter by name…" aria-label="Filter artifacts" autocomplete="off"><div id="artifact-tree" class="artifact-tree"></div><div id="artifact-preview" class="artifact-preview" hidden></div></section><details class="worker-controls"><summary>Evidence and changes</summary><div id="worker-evidence"></div><p class="note">Thread ${esc(threadId)} · Conversation ${esc(page.conversationId)}. Scope, model and tools stay frozen; history, partial files and receipts are kept.</p></details>`;
 }
-export async function inspectThread(threadId, offset = null, textOffset = 0) {
+export async function inspectThread(threadId) {
   requireThread(threadId);
   if (workerFocus?.threadId !== threadId) setWorkerFocus(null);
-  if (![offset ?? 0, textOffset].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 1000000))
-    throw new Error("Invalid thread history page");
-  const chat = { id: getProjectId(), generation: getGeneration(), threadId, offset, textOffset };
+  const chat = { id: getProjectId(), generation: getGeneration(), threadId };
   workerChat = chat;
   const target = threadPane;
   target.hidden = false;
@@ -446,23 +450,17 @@ export async function inspectThread(threadId, offset = null, textOffset = 0) {
   renderWorkerChat(chat, page, true);
   render();
 }
+// The newest page of the worker's conversation plus any older pages already loaded (see transcript.js).
+const workerKey = (chat) => `${chat.id}/${chat.threadId}`;
 async function workerChatPage(chat) {
-  const read = (offset) =>
-    api({
-      action: "thread-history",
-      id: chat.id,
-      threadId: chat.threadId,
-      offset,
-      limit: 30,
-      textOffset: chat.textOffset,
-      textLimit: 4000,
-      context: true,
-    });
-  let page = await read(chat.offset ?? 0);
-  if (chat.offset === null && page.total > 30) page = await read(Math.max(0, page.total - 30));
-  if (page.threadId !== chat.threadId || !Array.isArray(page.items) || (chat.offset !== null && page.offset !== chat.offset))
-    throw new Error("History does not match its owned thread/page");
-  return page;
+  const page = await api({ action: "thread-history", id: chat.id, threadId: chat.threadId, limit: 30, context: true });
+  if (!Array.isArray(page.items)) throw new Error("History does not match its owned thread/page");
+  const held = mergeNewest(workerKey(chat), page);
+  if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id)
+    await reach(workerKey(chat), workerFocus.index, (before) =>
+      api({ action: "thread-history", id: chat.id, threadId: chat.threadId, before, limit: 30 }),
+    );
+  return { ...page, items: displayMessages(held.items), older: held.cursor !== null };
 }
 function contextLine({ tokens, window }) {
   const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n));
@@ -480,9 +478,7 @@ export async function refreshWorkerChat(chat) {
 function renderWorkerChat(chat, page, opening = false) {
   const transcript = document.querySelector("#worker-messages");
   const atEnd = opening || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 40;
-  const messages =
-    page.items.map((message, i) => chatMessageHtml({ ...message, index: page.offset + i }, "Worker")).join("") ||
-    '<p class="note">No messages yet.</p>';
+  const messages = page.items.map((message) => chatMessageHtml(message, "Worker")).join("") || '<p class="note">No messages yet.</p>';
   if (transcript.dataset.content !== messages) {
     transcript.innerHTML = messages;
     transcript.dataset.content = messages;
@@ -495,10 +491,14 @@ function renderWorkerChat(chat, page, opening = false) {
   document.querySelector("#worker-context").innerHTML = contextRing(page.context);
   if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id)
     focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
-  const pageButton = (label, offset, slice = 0) =>
-    `<button data-action="thread-history-page" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}" data-offset="${offset}" data-text-offset="${slice}">${label}</button>`;
-  document.querySelector("#worker-history-pages").innerHTML =
-    `${page.offset ? pageButton("Older messages", Math.max(0, page.offset - 30)) : ""}${page.nextOffset !== null ? pageButton("Newer messages", page.nextOffset) : ""}${chat.textOffset ? pageButton("Previous text slice", page.offset, Math.max(0, chat.textOffset - 4000)) : ""}${page.items.some((message) => message.nextTextOffset != null) ? pageButton("Next text slice", page.offset, chat.textOffset + 4000) : ""}${page.total > page.items.length ? `<small>Messages ${page.offset + (page.items.length ? 1 : 0)}-${page.offset + page.items.length} of ${page.total}</small>` : ""}`;
+  document.querySelector("#worker-history-pages").innerHTML = page.older
+    ? `<button data-action="thread-older" data-project="${esc(chat.id)}" data-thread="${esc(chat.threadId)}">Older messages</button>`
+    : "";
+  bindTranscript(transcript, {
+    text: (ref, offset) => api({ action: "transcript-text", id: chat.id, threadId: chat.threadId, ref, offset, limit: 20000 }),
+    image: (ref) => api({ action: "transcript-image", id: chat.id, threadId: chat.threadId, ref }),
+  });
+  hydrate(transcript);
   document.querySelector("#worker-evidence").innerHTML = workerChanges(chat.threadId, page.items);
   void loadWorkerArtifacts(chat);
 }

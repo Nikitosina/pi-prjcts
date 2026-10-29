@@ -1,4 +1,4 @@
-// Browser E2E: the chat keeps every stored message across compactions (durable-runtime chatTranscript, durable-host transcriptWindow, web transcript).
+// Browser E2E: the chat keeps every stored message across compactions (newest-first transcript pages, web transcript).
 // Isolated host, local fake model, headless Chrome; no provider calls. Failure cases: scripts/transcript-compaction-failures.md.
 import { kit, delay } from "./notify-kit.mjs";
 
@@ -81,9 +81,9 @@ try {
     brain.summaries.map((text) => text.slice(0, 120)),
   );
   check(
-    "T5 indexes are unique and ascending",
-    view.messages.every((m, i) => i === 0 || m.index > view.messages[i - 1].index),
-    view.messages.map((m) => m.index),
+    "T5 entry ids ascend",
+    view.messages.every((m, i) => i === 0 || m.entryId >= view.messages[i - 1].entryId),
+    view.messages.map((m) => m.entryId),
   );
 
   // Browser: reload and chat switch show the same history with dividers; the divider is understated.
@@ -127,7 +127,7 @@ try {
 
   // A new message after a reload streams in below the dividers without duplicating anything.
   await k.ask(id, "main", fill(9));
-  await waitFor(`/FILL-9/.test(document.querySelector('#messages').innerText)`, s, "new message shown");
+  await waitFor(`(${dom}).includes('aFILL-9')`, s, "new message and its answer shown");
   const live = await evaluate(dom, s);
   check(
     "T8 a newer message appears once, after the dividers",
@@ -140,8 +140,8 @@ try {
   view = await show();
   check(
     "T9 the window leaves the oldest messages out and counts them",
-    view.earlier > 0 && !sequence(view.messages).includes("uFILL-1") && view.messages.some((m) => m.kind === "compaction"),
-    { earlier: view.earlier },
+    view.before !== null && !sequence(view.messages).includes("uFILL-1") && view.messages.some((m) => m.kind === "compaction"),
+    { before: view.before },
   );
   await send("Page.reload", {}, s);
   await waitFor(`!!document.querySelector('#messages .earlier-messages')`, s, "show earlier button");
@@ -149,7 +149,7 @@ try {
     `(() => { const t = document.querySelector('#transcript'); t.scrollTop = 0; const first = document.querySelector('#messages .msg'); return { y: first.getBoundingClientRect().top, id: first.innerText.slice(0, 60) }; })()`,
     s,
   );
-  await evaluate(`document.querySelector('#messages .earlier-messages').click()`, s);
+  // Scrolling to the top loads the older page by itself (the button is the fallback).
   await waitFor(`!document.querySelector('#messages .earlier-messages')`, s, "earlier messages shown");
   const all = await evaluate(dom, s),
     shown = all.filter((x) => x !== "C");
@@ -175,13 +175,16 @@ try {
   // A restart keeps the stored history.
   await k.stopHost();
   await k.startHost();
-  view = await rpc({ action: "show", id, from: 0 });
+  const items = [];
+  for (let page = await show(), before; ; page = await rpc({ action: "chat-history", id, before })) {
+    items.unshift(...(page.items ?? page.messages));
+    before = page.before;
+    if (before === null) break;
+  }
   check(
-    "T11 after a host restart the whole history and both dividers are still there",
-    view.earlier === 0 &&
-      view.messages.filter((m) => m.kind === "compaction").length === 2 &&
-      sequence(view.messages).filter((x) => x !== "C").length === 40,
-    sequence(view.messages),
+    "T11 after a host restart paging back reaches the whole history and both dividers",
+    items.filter((m) => m.kind === "compaction").length === 2 && sequence(items).filter((x) => x !== "C").length === 40,
+    sequence(items),
   );
   result.status = "passed";
 } catch (error) {
