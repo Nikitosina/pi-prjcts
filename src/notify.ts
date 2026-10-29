@@ -24,6 +24,9 @@ export type Notice = {
   fingerprint?: string;
   workId?: string;
   threadId?: string;
+  /** A Ready report for this Job; with `mergeable`, Telegram offers Approve. */
+  jobId?: string;
+  mergeable?: boolean;
 };
 /** `workBaselined`: failed work existing before worker-failure notices (or before the project was first scanned) was marked seen silently. */
 type ProjectState = { seen: string[]; chats: Record<string, number>; workBaselined?: boolean };
