@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
-const timeoutMs = 10_000,
+// A loaded machine can take tens of seconds to run interactive zsh startup; a host that never starts is worse than a slow start.
+const timeoutMs = 90_000,
   maxBytes = 2 * 1024 * 1024;
 const exportHeader = "pi-projects-env-v1\0";
 
