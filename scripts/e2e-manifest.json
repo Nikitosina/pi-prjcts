@@ -27,6 +27,7 @@
     "coordinator-efficiency",
     "quota-status",
     "coordinator-gh",
+    "jobs",
     "machine-status-unit",
     "usage-limits-recovery-unit",
     "worker-quota-recovery",
