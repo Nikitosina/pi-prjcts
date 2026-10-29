@@ -90,7 +90,8 @@ function route(request) {
 const processes = new Set();
 // Titles whose prepare step is held open, and the ones that have entered it.
 const prepareHeld = new Set(),
-  prepareEntered = new Set();
+  prepareEntered = new Set(),
+  prepareRuns = [];
 let gateOpen = false,
   gateEntered = false;
 const TestTools = defineExtension({
@@ -149,6 +150,7 @@ async function open() {
     },
     prepare: async ({ agent }) => {
       prepareEntered.add(agent.title);
+      prepareRuns.push(agent.id);
       while (prepareHeld.has(agent.title)) await delay(20);
     },
     approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
@@ -282,8 +284,14 @@ assert.ok(
 assert.match(await jobs.stop(harness, silent.id, "again"), /already stopped/);
 
 // 6. A question to a finished Job is answered without failing it; a steer that does work reports again, and a retried steer id sends once.
+const preparesBefore = prepareRuns.filter((id) => id === job.id).length;
 await jobs.steer(harness, job.id, "Just a question");
 await quiet(harness);
+assert.equal(
+  prepareRuns.filter((id) => id === job.id).length,
+  preparesBefore + 1,
+  "a follow-up to a finished Job after a restart prepares its workspace and tools again",
+);
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "ready", "an answer-only follow-up keeps the Job Ready");
 assert.equal((await chatText(root)).filter((line) => line.startsWith(`[worker ${job.id} answered`)).length, 1);
 await jobs.steer(harness, job.id, "Add a test too", false, "steer-1");

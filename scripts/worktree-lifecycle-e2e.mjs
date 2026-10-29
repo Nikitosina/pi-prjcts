@@ -141,6 +141,15 @@ const model = createServer((req, res) => {
             requestId: randomUUID(),
           }),
         );
+      if (/MARK-FOLLOW2 (\S+)/.test(userText) && n === 0)
+        return res.end(
+          call("projects_worker_control", {
+            action: "follow_up",
+            threadId: /MARK-FOLLOW2 (\S+)/.exec(userText)[1],
+            text: "W2-AGAIN keep going",
+            requestId: randomUUID(),
+          }),
+        );
       if (/MARK-FOLLOW (\S+)/.test(userText) && n === 0)
         return res.end(
           call("projects_worker_control", {
@@ -172,6 +181,10 @@ const model = createServer((req, res) => {
           );
         }
         return res.end(say(`W1-DONE branch ${brain.b1}`));
+      }
+      if (/W2-TASK/.test(firstUser) && /W2-AGAIN/.test(userText)) {
+        if (n === 0) return res.end(call("bash", { command: "pwd && git branch --show-current && ls wip-note.txt" }));
+        return res.end(say("W2-AGAIN-DONE"));
       }
       if (/W2-TASK/.test(firstUser)) {
         if (userText.startsWith("[Child work")) return res.end(say("W2-DONE after child review"));
@@ -734,6 +747,21 @@ try {
   check(
     "K8 automatic cleanup removed the now-pushed W3 and kept dirty W2",
     !existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
+  );
+
+  // K12: after the restart, a follow-up to the finished W2 keeps its worktree, branch and tools (bash is how the fake model sees a worker).
+  await ask(`MARK-FOLLOW2 ${w2.threadId}`);
+  const w2Again = await eventually(
+    async () => result.calls.findLast((c) => c.role === "worker" && c.user.includes("W2-AGAIN") && c.results.length),
+    "W2 follow-up after the restart never ran as a worker with tools",
+    300,
+  );
+  check(
+    "K12 a follow-up after a host restart runs in the same worktree and branch with the worker tools",
+    w2Again.results[0].includes(w2Path) &&
+      w2Again.results[0].includes("wip-note.txt") &&
+      w2Again.tools.some((name) => name.endsWith("_open_draft_pr")),
+    w2Again,
   );
 
   // K11: a cleaned thread whose kept branch is gone cannot be revived: a typed blocker says so and names the way forward, and nothing is created.
