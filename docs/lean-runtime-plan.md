@@ -56,3 +56,10 @@ Run this branch as a separate host with `PI_PROJECTS_HOME=~/.pi/agent/projects-n
 ## Near-loop shape (target)
 
 Work item lifecycle: Ask → Running → Ready (PR, proof, 3-line summary) or Ready with gaps → owner Approve (merge + pull) or Reject with comment. The coordinator contacts the owner only for consequential architecture or product decisions. Triggers (PR follow, webhook, schedule, Telegram) create work items.
+
+## Decisions 2026-10-29 (final review)
+
+- Delete operation approvals (exact VCS operation inbox). Worktree cleanup stays as the Settings button; branch deletion is the owner's shell action.
+- Delete Follow PRs auto-merge and its reviewer. Approve is the only merge path. Follow PRs auto-fix stays.
+- Delete per-PR monitors. Follow PRs and PR watch cover CI and merge state.
+- Keep worker GitHub publication tools with receipts for the trial; revisit after it.
