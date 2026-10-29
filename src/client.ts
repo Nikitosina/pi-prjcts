@@ -31,7 +31,9 @@ export async function openInbox(id?: string): Promise<string> {
   return url;
 }
 
-export async function ensureHost(): Promise<void> {
+/** `repo` starts the host from another checkout (deploy); `attempts` bounds the 100 ms health polls. */
+export async function ensureHost(options: { repo?: string; attempts?: number } = {}): Promise<void> {
+  const attempts = options.attempts ?? hostStartAttempts;
   try {
     await health();
     return;
@@ -41,7 +43,7 @@ export async function ensureHost(): Promise<void> {
   mkdirSync(home(), { recursive: true, mode: 0o700 });
   if (remoteConfig()?.enabled) {
     kickstartRemoteHost();
-    for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       await sleep(100);
       try {
         await health();
@@ -56,16 +58,17 @@ export async function ensureHost(): Promise<void> {
     // Kept after the legacy runtime removal: the host loads global extensions, and pi-subagent-manager reads PI_SUBAGENT_*.
     if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE" || key === "PI_PROJECTS_LAUNCHD") delete env[key];
   }
-  const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], {
+  const repo = options.repo ?? fileURLToPath(new URL("..", import.meta.url));
+  const child = spawn(process.execPath, [join(repo, "src", "host.ts")], {
     detached: true,
     stdio: ["ignore", log, log],
     env,
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd: repo,
   });
   child.on("error", () => {});
   child.unref();
   closeSync(log);
-  for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     await sleep(100);
     try {
       await health();

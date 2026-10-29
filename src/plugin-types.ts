@@ -22,6 +22,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - workspace  a workspace-grant provider for that kind: one-click grant, worktree backend, worker binding, cleanup facts, setup cards.
  *  - prs        a pull-request provider: card data, detail, `#` refs, watch/hide, transitions for the monitor, notices.
  *  - follow     publication-receipt based Follow PRs for the provider: observe, auto-fix brief, auto-merge.
+ *  - merge      result acceptance for the checkout kind: inspect a PR, merge at the approved head, auto-merge, pull the main checkout.
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.
  *  - uncertainWrites  durable "an outcome is unknown" check that blocks automatic admission.
@@ -388,6 +389,32 @@ export type FollowProvider = {
   autoMerge(kit: AutoMergeKit, number: number, pr: FollowPrState): Promise<FollowItem | null>;
 };
 
+// ---- merge (result acceptance) ----
+export type MergeFacts = {
+  state: "open" | "merged" | "closed";
+  draft: boolean;
+  /** Head revision of the PR right now. */
+  head: string;
+  /** Branch the PR merges into. */
+  base: string;
+  /** yes: merge now; later: blocked on checks or review, auto-merge can wait; no: conflicts. */
+  mergeable: "yes" | "later" | "no";
+};
+export type MergeTarget = { checkout: string; pr: string; signal: AbortSignal };
+/** `refused` means the provider answered and nothing was merged; a throw means the outcome of the call is unknown. */
+export type MergeAnswer = { ok: true } | { ok: false; refused: string };
+export type MergeProvider = {
+  /** Checkout kind this provider accepts results for; matches VcsProvider.kind. */
+  kind: string;
+  inspect(input: MergeTarget): Promise<MergeFacts>;
+  /** Merges exactly `head`; must refuse when the PR head differs. */
+  merge(input: MergeTarget & { head: string }): Promise<MergeAnswer>;
+  /** Merges as soon as the PR becomes mergeable, pinned to `head`. `waiting: false` when the PR is already mergeable and nothing was armed. */
+  enableAutoMerge(input: MergeTarget & { head: string }): Promise<{ ok: true; waiting: boolean } | { ok: false; refused: string }>;
+  /** Fast-forwards the main checkout of `base` when it is clean and on that branch; never throws for an expected skip. */
+  pullMain(input: { checkout: string; base: string; signal: AbortSignal }): Promise<{ pulled: true } | { pulled: false; reason: string }>;
+};
+
 // ---- coordinator tools / rpc / writes ----
 export type CoordinatorToolsProvider = {
   /** Installed always (recorded calls resolve), offered only where `applies`. */
@@ -439,6 +466,7 @@ export type PluginCapabilities = {
   workspace?: WorkspaceProvider;
   prs?: PrProvider;
   follow?: FollowProvider;
+  merge?: MergeProvider;
   coordinatorTools?: CoordinatorToolsProvider;
   rpc?: Record<string, PluginRpcHandler>;
   uncertainWrites?: (tx: Tx, root: Conversation["id"]) => Promise<boolean>;

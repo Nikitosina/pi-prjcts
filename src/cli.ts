@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { request, inboxUrl, openInbox, ensureRemoteHost } from "./client.ts";
 import { parse, errorText, Request } from "./state.ts";
 import { enableRemote, disableRemote, remoteServiceStatus } from "./remote.ts";
@@ -46,6 +47,20 @@ if (command === "remote") {
       } catch {}
       process.stdout.write(JSON.stringify({ ...service, host, devices }, null, 2) + "\n");
     } else throw new Error("Usage: remote <enable|disable|status>");
+  } catch (error) {
+    process.stderr.write(errorText(error) + "\n");
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode ?? 0);
+}
+if (command === "deploy") {
+  try {
+    if (!startHost) throw new Error("--no-start is not supported for deploy");
+    if (second) throw new Error("Usage: deploy [checkout]");
+    const { deploy, hostDeps } = await import("./deploy.ts");
+    const result = await deploy(hostDeps(first ?? fileURLToPath(new URL("..", import.meta.url))));
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    if (!result.ok) process.exitCode = 1;
   } catch (error) {
     process.stderr.write(errorText(error) + "\n");
     process.exitCode = 1;

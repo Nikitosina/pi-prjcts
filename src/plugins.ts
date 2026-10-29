@@ -12,6 +12,7 @@ import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
 import type {
   CoordinatorToolsProvider,
   FollowProvider,
+  MergeProvider,
   HostPluginApi,
   PluginCapabilities,
   PluginModule,
@@ -62,6 +63,7 @@ export const plugins = {
   prProviders: (): PrProvider[] => each((caps) => caps.prs),
   prProvider: (id: string): PrProvider | undefined => each((caps) => caps.prs).find((item) => item.id === id),
   followProviders: (): FollowProvider[] => each((caps) => caps.follow),
+  mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
   coordinatorTools: (): CoordinatorToolsProvider[] => each((caps) => caps.coordinatorTools),
   workerTools: (): WorkerToolsProvider[] => each((caps) => caps.workerTools),
   /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
@@ -200,6 +202,10 @@ function validate(caps: PluginCapabilities): void {
   if (caps.follow) {
     requireStrings("follow", caps.follow, ["id", "eventKind", "label"]);
     requireFunctions("follow", caps.follow, ["repository", "observe", "published", "autoMerge"]);
+  }
+  if (caps.merge) {
+    requireStrings("merge", caps.merge, ["kind"]);
+    requireFunctions("merge", caps.merge, ["inspect", "merge", "enableAutoMerge", "pullMain"]);
   }
   if (caps.coordinatorTools) requireFunctions("coordinatorTools", caps.coordinatorTools, ["create", "applies"]);
   if (caps.uncertainWrites !== undefined && typeof caps.uncertainWrites !== "function")

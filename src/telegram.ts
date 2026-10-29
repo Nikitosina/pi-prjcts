@@ -852,3 +852,18 @@ export function startTelegram(options: {
   };
 }
 export type Telegram = ReturnType<typeof startTelegram>;
+
+/** One plain message to the paired owner from outside the host (deploy runs while the host is down). Never throws. */
+export async function sendOwnerMessage(text: string): Promise<void> {
+  try {
+    const state = JSON.parse(readFileSync(join(home(), "telegram.json"), "utf8")) as State;
+    if (!state.token || !state.owner) return;
+    const base = (process.env.PI_PROJECTS_TELEGRAM_API ?? "https://api.telegram.org").replace(/\/+$/, "");
+    await fetch(`${base}/bot${state.token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: state.owner.chatId, text: clip(text) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {}
+}
