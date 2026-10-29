@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { Type, type Static } from "typebox";
+import { modelCopy, sniffImageMime, type ResultBlock } from "./binary-results.ts";
 import { Id, parse, readJson, saveJson } from "./state.ts";
 
 /** Owner uploads: project knowledge that coordinator and workers can search and read. Worker evidence stays in the library. */
 export const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
-/** Images up to this size go to image-capable models inline; larger ones are stored references only. */
+/** Kept for callers that still size-gate images; models now get a bounded copy made at upload time (`uploadModelCopy`). */
 export const UPLOAD_IMAGE_INLINE_BYTES = 5 * 1024 * 1024;
 const TEXT_MAX_CHARS = 2_000_000;
 export const UploadRecord = Type.Object(
@@ -116,6 +117,9 @@ export async function saveUpload(dir: string, input: { filename: string; bytes: 
     id = randomUUID();
   await writeExclusive(join(path, `${id}.data`), bytes);
   await writeExclusive(join(path, `${id}.txt`), text);
+  // The model sees this bounded copy, so a transcript never holds the full image.
+  const copy = kind === "image" ? await modelCopy(bytes, mime) : null;
+  if (copy) await writeExclusive(join(path, `${id}.model`), Buffer.from(copy.data, "base64"));
   const record = parse(UploadRecord, {
     id,
     at: new Date().toISOString(),
@@ -167,11 +171,30 @@ export function deleteUpload(dir: string, id: string): { deleted: string } {
   const record = uploadRecord(dir, id),
     path = folder(dir)!;
   rmSync(join(path, `${record.id}.json`));
-  for (const suffix of ["txt", "data"]) rmSync(join(path, `${record.id}.${suffix}`), { force: true });
+  for (const suffix of ["txt", "data", "model"]) rmSync(join(path, `${record.id}.${suffix}`), { force: true });
   return { deleted: record.id };
 }
 
 type ImagePart = { type: "image"; data: string; mimeType: string };
+/** The bounded image the model sees for an upload; null for non-images and for uploads stored before copies existed. */
+export function uploadModelCopy(dir: string, id: string): ImagePart | null {
+  const record = uploadRecord(dir, id),
+    path = join(folder(dir)!, `${record.id}.model`);
+  if (record.kind !== "image" || !existsSync(path)) return null;
+  const bytes = readFileSync(path),
+    mimeType = sniffImageMime(bytes);
+  return mimeType ? { type: "image", data: bytes.toString("base64"), mimeType } : null;
+}
+
+/** Result of reading an image upload: its record and reference as text, plus the bounded copy when one exists. */
+export function uploadImageResult(dir: string, id: string): ResultBlock[] {
+  const record = uploadRecord(dir, id),
+    copy = uploadModelCopy(dir, id);
+  const note = copy
+    ? "Reduced copy attached; the full image is the owner's upload."
+    : "No reduced copy; the owner can view the image in the Knowledge tab.";
+  return [{ type: "text", text: JSON.stringify({ record, ref: `upload:${record.id}`, note }) }, ...(copy ? [copy] : [])];
+}
 /** Coordinator input for an owner message: the text plus an attachment block naming each upload; images inline when the model accepts them. */
 export function attachmentContent(
   dir: string,
@@ -186,9 +209,10 @@ export function attachmentContent(
   const lines = ids.map((id) => {
     const record = known.get(id);
     if (!record) return `- deleted upload ${id}`;
-    const inline = acceptsImages && record.kind === "image" && record.size <= UPLOAD_IMAGE_INLINE_BYTES;
-    if (inline) images.push({ type: "image", data: uploadBytes(dir, record.id).bytes.toString("base64"), mimeType: record.mime });
-    return `- ${record.filename} · ${record.kind} · ${record.size} bytes · upload ${record.id}${inline ? " · image attached" : ""}`;
+    const copy = acceptsImages && record.kind === "image" ? uploadModelCopy(dir, record.id) : null,
+      inline = copy !== null;
+    if (copy) images.push(copy);
+    return `- ${record.filename} · ${record.kind} · ${record.size} bytes · upload ${record.id}${inline ? " · image attached (reduced copy)" : ""}`;
   });
   const block = `${text}\n\n${ATTACHMENT_HEADER}\n${lines.join("\n")}`;
   return images.length ? [{ type: "text", text: block }, ...images] : block;
