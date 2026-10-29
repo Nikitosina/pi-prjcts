@@ -93,6 +93,8 @@ export type Agent = {
   readRef: string | null;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
+  /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
+  sends?: number;
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: { at: number; from: string; to: string }[];
@@ -217,6 +219,8 @@ type Delivery = {
   prepare: boolean;
   /** The caller's id for this message; a retried send with the same id is delivered once. */
   requestId?: string;
+  /** The agent's `sends` count when this message was queued. */
+  seq?: number;
 };
 type DeliveryState =
   { phase: "prepare" } | { phase: "deliver"; attempt: number; checked?: boolean } | { phase: "report"; report?: string; waits?: number };
@@ -378,6 +382,9 @@ const reporterTask = (host: JobsHost) =>
           if (job && job.status === "stopped") return next();
           const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
           record.reported.push(settled.answer);
+          // A newer message is already queued for this agent: it keeps the Job running and decides how it ends.
+          if (reporter.input.seq !== undefined && (record.sends ?? 0) > reporter.input.seq)
+            return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer.trim()}`);
           record.endedAt = Date.now();
           if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);
           if (isLive(job.status) && job.resume) {
@@ -801,6 +808,7 @@ export function createJobs(host: JobsHost) {
         job.stalledAt = null;
       }
       agent.endedAt = null;
+      agent.sends = (agent.sends ?? 0) + 1;
       const background = { ownership: { kind: "conversation" }, background: true, conversationId: agent.chat } as const;
       await tx.createTask(
         Reporter,
@@ -811,6 +819,7 @@ export function createJobs(host: JobsHost) {
           message,
           followUp,
           requestId,
+          seq: agent.sends,
           prepare: true, // every message re-binds the workspace and tools, re-acquires the lease and revives a cleaned-up worktree
         },
         background,
