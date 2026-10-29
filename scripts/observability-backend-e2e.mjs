@@ -17,13 +17,13 @@ let primaryError;
 try {
   const { request } = await import("../src/client.ts");
   const project = await request({ action: "create", name: "Observability E2E", cwd: workspace });
-  const plan = await request({ action: "plan-snapshot", id: project.id });
+  const plan = await request({ action: "jobs-snapshot", id: project.id });
   const usage = await request({ action: "usage-snapshot", id: project.id });
   const owner = await request({ action: "owner-setup-snapshot", id: project.id });
-  if (!Array.isArray(plan.work)) throw new Error("plan-snapshot did not return work");
+  if (!Array.isArray(plan.jobs)) throw new Error("jobs-snapshot did not return jobs");
   if (!Array.isArray(usage.workers)) throw new Error("usage-snapshot did not return workers");
   if (!Array.isArray(owner.profiles) || !Array.isArray(owner.grants)) throw new Error("owner setup profile/grant status missing");
-  results.push("plan-snapshot", "usage-snapshot", "owner-setup-snapshot");
+  results.push("jobs-snapshot", "usage-snapshot", "owner-setup-snapshot");
   await request({ action: "shutdown" }, false);
 } catch (error) {
   primaryError = error instanceof Error ? error.message : String(error);
