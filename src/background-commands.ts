@@ -235,6 +235,17 @@ export function createBackgroundCommands(options: { controlRoot: string; maxPerT
   }
   const list = (threadId: string): BackgroundInfo[] =>
     [...live.values()].filter((item) => item.threadId === threadId).map((item) => ({ ...item.info }));
+  /** Longest time in ms a running command of this thread has gone without writing output, or null when none runs. */
+  function silence(threadId: string, now = Date.now()): number | null {
+    const quiet = running(threadId).map((item) => {
+      try {
+        return now - statSync(join(bgDir(options.controlRoot, threadId), `${item.info.id}.log`)).mtimeMs;
+      } catch {
+        return now - item.info.startedAt;
+      }
+    });
+    return quiet.length ? Math.max(...quiet) : null;
+  }
   async function killThread(threadId: string) {
     await Promise.all(running(threadId).map((item) => item.stop("thread-ended")));
   }
@@ -270,6 +281,6 @@ export function createBackgroundCommands(options: { controlRoot: string; maxPerT
     }
     return reaped;
   }
-  return { start, status, wait, stop, list, killThread, killAll, reap };
+  return { start, status, wait, stop, list, silence, killThread, killAll, reap };
 }
 export type BackgroundCommands = ReturnType<typeof createBackgroundCommands>;

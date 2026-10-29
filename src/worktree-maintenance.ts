@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFi
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation } from "@earendil-works/pi-durable";
-import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
+import { Jobs, liveAgentIds } from "./jobs.ts";
 import { githubRead } from "./github-authorization.ts";
 import { retireWorkspaceReceipt, workspaceReceipts } from "./workspace-isolation.ts";
 import type { Project } from "./state.ts";
@@ -215,18 +215,11 @@ export async function worktreeInventory(input: {
     threadId: string,
   ) => Promise<boolean>;
 }): Promise<WorktreeInventory> {
-  const plan = await input.root.commit(
-    async (tx) => JSON.parse(JSON.stringify(await tx.doc(DurablePlanning, input.root.id))) as PlanningState,
-    BACKGROUND_CONTEXT,
-  );
-  const live = Object.values(plan.work).filter(
-    (work) => work.status === "queued" || work.status === "running" || work.status === "interrupted",
-  );
-  const busyThread = (threadId: string) =>
-    live.some((work) => work.threadId === threadId || work.parentThreadId === threadId) || plan.threads[threadId]?.activeWorkId != null;
-  // A worktree allocated by one thread may now belong to threads that took it over: they keep it busy too.
-  const busy = (threadId: string) =>
-    busyThread(threadId) || Object.entries(plan.threads).some(([id, thread]) => thread.workspaceFrom === threadId && busyThread(id));
+  const { live, readers } = await input.root.commit(async (tx) => {
+    const doc = await tx.doc(Jobs, input.root.id);
+    return { live: new Set(liveAgentIds(doc)), readers: liveAgentIds(doc, true).length };
+  }, BACKGROUND_CONTEXT);
+  const busy = (threadId: string) => live.has(threadId);
   const items: WorktreeItem[] = [];
   for (const receipt of await workspaceReceipts(input.root)) {
     if (receipt.state !== "allocated" || !receipt.workspacePath || !existsSync(receipt.workspacePath)) continue;
@@ -318,10 +311,8 @@ export async function worktreeInventory(input: {
   const heads = join(input.controlRoot, "read-heads");
   for (const name of existsSync(heads) ? readdirSync(heads) : []) {
     const path = join(realpathSync(heads), name);
-    const users = Object.entries(plan.threads)
-      .filter(([, thread]) => thread.readRoot === path)
-      .map(([id]) => id);
-    const reasons = users.some(busy) ? ["a scout or reviewer reading it has queued or running work"] : [];
+    // Read-only agents are not tied to a path in the Jobs record: any live scout or reviewer keeps every read-head.
+    const reasons = readers ? ["a scout or reviewer reading it has queued or running work"] : [];
     const pluginHead = plugins.vcsProviders().find((vcs) => existsSync(join(path, vcs.readHeadMarker))),
       workspace = pluginHead && plugins.workspaceProvider(pluginHead.kind);
     if (!workspace && !existsSync(join(path, ".git"))) continue; // a snapshot of a provider that is not loaded: kept, never measured or removed
@@ -329,7 +320,7 @@ export async function worktreeInventory(input: {
     items.push({
       kind: "read-head",
       path,
-      threadId: users[0] ?? null,
+      threadId: null,
       branch: null,
       sizeKb: await sizeKb(path, Boolean(workspace?.virtualMount)),
       removable: reasons.length === 0,

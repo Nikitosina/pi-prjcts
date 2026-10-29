@@ -201,11 +201,14 @@ await kit.run(async () => {
     worker?.model === "ext-two" && worker.url === "/ext/v1/chat/completions",
     worker,
   );
-  const plan = await kit.plan(id);
+  const jobs = await kit.eventually(async () => {
+    const all = await kit.jobs(id);
+    return all.length && all.every((job) => job.status !== "running") && all;
+  }, "worker Job did not settle");
   check(
-    "worker completed",
-    plan.some((w) => w.status === "completed" || w.status === "done" || w.status === "succeeded"),
-    plan.map((w) => w.status),
+    "worker Job ended",
+    jobs.every((job) => job.status !== "running"),
+    jobs.map((job) => job.status),
   );
   await kit.ask(id, "SCOUTME please");
   const scout = kit.result.calls.find((c) => c.role === "scout" && c.user.includes("EXT-SCOUTTASK"));

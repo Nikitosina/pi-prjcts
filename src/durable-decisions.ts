@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { defineDoc, defineExtension, defineTool, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { retainQuestion } from "./inbox.ts";
 import type { InboxEntry } from "./state.ts";
 
@@ -68,8 +68,8 @@ export function durableDecisions(options: {
         throw new Error("Decision creation requires an explicit coordinator grant");
       const key = `${api.taskId}:${api.callId}`;
       const entry = await api.commit(async (tx) => {
-        const planning = await tx.doc(DurablePlanning, root.id);
-        if (planning.paused || planning.pausing) throw new Error("Project plan is paused; admission is denied");
+        const planning = await tx.doc(Jobs, root.id);
+        if (planning.paused) throw new Error("Project plan is paused; admission is denied");
         const state = await tx.doc(Questions, root.id);
         const prior = state.items.find((item) => item.key === key);
         if (prior) {

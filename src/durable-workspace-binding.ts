@@ -5,10 +5,10 @@ import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createCodingTools, type ResourceLoader } from "@earendil-works/pi-coding-agent";
-import type { DurablePrepareWorkerEnvironment } from "./durable-plan-types.ts";
+import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-types.ts";
 import { loadProject, type Project } from "./state.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
 import { workspaceCapabilities, workspacePhysicalLockPath, type WorkspaceAuthority } from "./workspace-capabilities.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
@@ -26,6 +26,19 @@ import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
 
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
+export type DurablePrepareWorkerEnvironment = (
+  input: Readonly<{
+    conversationId: number;
+    workId: string;
+    threadId: string;
+    role: DurableRole;
+    workspaceScopeId: string;
+    taskText: string;
+    /** The worker's thread already has its workspace tools bound (a restart re-prepares). */ configured: boolean;
+    continueBranch?: { name: string; sha: string };
+  }>,
+) => Promise<DurablePreparedWorkerEnvironment>;
+
 export function durableWorkspaceBinding(input: {
   project: Project;
   configuredSkillLoader?: Pick<ResourceLoader, "getSkills">;
@@ -55,7 +68,6 @@ export function durableWorkspaceBinding(input: {
     if (!repository || repository.provider !== authorization.provider)
       throw new Error("Workspace scope repository/provider is not host-authorized");
     const selectedRepository = repository;
-    const selectedScope = scope;
     if (
       scope.files.some(
         (file) =>
@@ -84,24 +96,12 @@ export function durableWorkspaceBinding(input: {
     assertStanding();
     const provider = isolationProvider(authorization.provider);
     // A thread that took over another's worktree uses that allocation's identity (same receipt, path and branch); the previous thread may not run again.
-    const thread = await input.conversation().commit(async (tx) => {
-      const state = await tx.doc(DurablePlanning, input.conversation().id),
-        item = state.threads[request.threadId];
-      const bound = Object.values(state.work).findLast((work) => work.threadId === request.threadId && work.attempt?.boundTools)?.attempt
-        ?.boundTools;
-      return {
-        workspaceFrom: item?.workspaceFrom,
-        transferredTo: item?.transferredTo,
-        continueBranch: item?.continueBranch ? { ...item.continueBranch } : undefined,
-        bound: bound ? [...bound] : undefined,
-        workspaceConfigured: Boolean(item?.workspaceConfigured),
-      };
-    }, BACKGROUND_CONTEXT);
-    if (thread.transferredTo)
-      throw new Error(
-        `This thread's worktree was handed to thread ${thread.transferredTo}; it can no longer run work. Send follow-ups to that thread.`,
-      );
-    const allocationThread = thread.workspaceFrom ?? request.threadId;
+    const thread = {
+      continueBranch: request.continueBranch,
+      bound: undefined as string[] | undefined,
+      workspaceConfigured: request.configured,
+    };
+    const allocationThread = request.threadId;
     const intentId = stableUuid(`${input.project.id}:${allocationThread}:${scope.id}`),
       attemptId = stableUuid(`${intentId}:allocation`);
     const whole = scope.wholeRepository === true;
@@ -123,10 +123,6 @@ export function durableWorkspaceBinding(input: {
         },
       ],
     });
-    const taskText = (workId: string) =>
-      input
-        .conversation()
-        .commit(async (tx) => (await tx.doc(DurablePlanning, input.conversation().id)).work[workId]?.text ?? "", BACKGROUND_CONTEXT);
     // A whole-repository thread starts from owner HEAD at its first allocation and keeps that base and branch on later dispatches.
     const receipts = whole ? (await isolation.snapshot()).receipts : [],
       allocated = receipts.find((item) => item.intentId === intentId)?.scope;
@@ -146,7 +142,7 @@ export function durableWorkspaceBinding(input: {
       root: input.conversation(),
       controlRoot: input.controlRoot,
       isClosed: () => input.isClosed?.() ?? false,
-      taskText: () => taskText(request.workId),
+      taskText: () => Promise.resolve(request.taskText),
     };
     // A provider plugin names the worktree and branch (frozen with the receipt); git derives them here.
     const plan = plug ? await plug.plan(bindContext) : undefined;
@@ -270,17 +266,9 @@ export function durableWorkspaceBinding(input: {
               )
                 throw new Error("Evidence capture authority changed");
               await root.commit(async (tx) => {
-                const state = await tx.doc(DurablePlanning, root.id),
-                  work = state.work[request.workId];
-                if (
-                  state.paused ||
-                  state.pausing ||
-                  !work ||
-                  work.status !== "running" ||
-                  work.workspaceScopeId !== selectedScope.id ||
-                  Number(work.conversationId) !== request.conversationId ||
-                  state.threads[work.threadId]?.activeWorkId !== work.id
-                )
+                const state = await tx.doc(Jobs, root.id),
+                  job = state.jobs[request.workId];
+                if (state.paused || !job || job.status !== "running" || Number(job.workerConversation) !== request.conversationId)
                   throw new Error("Evidence capture requires the active scoped worker");
               }, context);
             }
@@ -431,7 +419,7 @@ export function durableWorkspaceBinding(input: {
       ],
     });
     // Skills now come from the role profile (instructions + projects_skill_file). The retired grant fingerprint stays in the hash so existing threads keep their binding revision.
-    const handover = `${thread.workspaceFrom ? "\nThis worktree was taken over from an earlier worker thread; its branch, commits and uncommitted changes are here. Check the status first; the earlier thread can no longer work." : ""}${thread.continueBranch ? `\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)}) of an existing PR. Commit on top and push to it; never open a second PR.` : ""}`;
+    const handover = `${thread.continueBranch ? `\nThis worktree continues the existing branch ${branch} (tip ${thread.continueBranch.sha.slice(0, 12)}) of an existing PR. Commit on top and push to it; never open a second PR.` : ""}`;
     return {
       cwd: workDir,
       tools,

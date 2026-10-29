@@ -10,6 +10,7 @@ import {
   CompactionEntry,
   GenerationTask,
   Harness,
+  ROOT_CONVERSATION_ID,
   ToolTask,
   ResetEntry,
   configure,
@@ -19,8 +20,10 @@ import {
   defineTool,
   hook,
   section,
+  type AgentChange,
   type Conversation,
   type EntryRecord,
+  type Extension,
   type Storage,
   type Submission,
   type ToolExecutionApi,
@@ -32,15 +35,16 @@ import { liveModelRuntime } from "./live-models.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
-import { Workers, backgroundWorkers } from "./durable-workers.ts";
-import { DurablePlanning, planningRuntime } from "./durable-planning.ts";
+import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
+import { Jobs, createJobs, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import { checkProofRefs, proofTools } from "./proof.ts";
+import { createApprover, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
-import { artifactSummary, coordinatorArtifactTools, listArtifacts } from "./artifacts.ts";
+import { coordinatorArtifactTools } from "./artifacts.ts";
 import { createBackgroundCommands } from "./background-commands.ts";
-import { workspaceReceipts } from "./workspace-isolation.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
 import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
@@ -50,7 +54,7 @@ import { hasUncertainVcsOperations, type VcsExecution } from "./vcs-operation-st
 
 const READ_ONLY_CODE_NOTE =
   "Read code with code_read, code_grep, code_find, code_ls and code_diff: read-only, limited to your code root (a PR head, a worker's worktree or the project checkout), at most 8 KiB per call; continue with offset, limit or path.";
-import { coordinatorWorkerTools } from "./durable-worker-tools.ts";
+import { coordinatorJobReadTools } from "./job-read-tools.ts";
 import { resolveContinuationBranch } from "./branch-continuation.ts";
 import { workerChanges } from "./code-diff.ts";
 import { COORDINATOR_GITHUB_TOOLS, coordinatorGithubTools } from "./coordinator-github-tools.ts";
@@ -63,14 +67,8 @@ import { coordinatorSkillTool } from "./coordinator-skills.ts";
 import { mcpGatewayTools } from "./mcp-tools.ts";
 import { mcpPool } from "./mcp-servers.ts";
 import { MCP_NOTE } from "./mcp-profiles.ts";
-import type {
-  DurableRole,
-  DurableGenerationLifecycleObserver,
-  DurablePlan,
-  DurablePlanSnapshot,
-  DurableWorkerToolBindings,
-} from "./durable-plan-types.ts";
-export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-plan-types.ts";
+import type { DurableRole, DurableGenerationLifecycleObserver } from "./durable-types.ts";
+export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-types.ts";
 import { loadDurableStanding } from "./durable-standing.ts";
 import { durableWorkspaceBinding, verifierShell } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
@@ -84,7 +82,6 @@ import {
   writeKnowledge,
 } from "./knowledge.ts";
 import {
-  DEFAULT_WORKER_CAP,
   Project as ProjectSchema,
   addNote,
   loadProject,
@@ -99,15 +96,11 @@ import { catalog } from "./workspace-authorization.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { monitorRuntime, type MonitorInput } from "./durable-monitor.ts";
 import { followRuntime } from "./durable-follow.ts";
-import { omitIdleWatchdogTurns, watchdogRuntime } from "./durable-watchdog.ts";
 import { reviewVerdictTools } from "./durable-review.ts";
-import { captureAttemptTarget, verificationTools as buildVerificationTools } from "./durable-verification.ts";
 import { rolePrompt, SHARED_ROLE_RULES } from "./role-prompts.ts";
-import { VERIFIER_RULES } from "./verification-model.ts";
-import { captureTarget } from "./verification-target.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
-import { githubOperations, type ExecutionInput } from "./github-operations.ts";
+import { type ExecutionInput } from "./vcs-operations.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
 import { coordinatorLibraryTools } from "./durable-library.ts";
 import { searchKnowledge } from "./knowledge-search.ts";
@@ -253,27 +246,18 @@ export type DurableProjectRuntime = {
   result(submissionId: number): Promise<DurableSubmissionState>;
   wait(submissionId: number): Promise<DurableSubmissionState>;
   say(text: string, options?: { requestId?: string; steer?: boolean }): Promise<DurableSubmissionState>;
-  /** Compatibility continuation entrypoint; the identifier is a public durable thread UUID. */
-  send(threadId: string, text: string, options?: { requestId?: string; steer?: boolean }): Promise<{ attemptId: string }>;
-  /** `chat` is the admitting coordinator conversation that receives reports; absent means Main or the thread's chat. */
-  plan(plan: DurablePlan, chat?: number): Promise<DurablePlanSnapshot>;
-  followUp(threadId: string, text: string, options: { requestId: string; steer?: boolean; chat?: number }): Promise<{ attemptId: string }>;
-  steerThread(threadId: string, text: string, options: { requestId: string; chat?: number }): Promise<{ attemptId: string }>;
-  stop(threadId: string): Promise<void>;
-  pauseWorker(threadId: string): Promise<{ threadId: string; paused: true }>;
-  resumeWorker(threadId: string): Promise<{ threadId: string; paused: false }>;
-  retryWorker(workId: string, requestId: string, chat?: number): ReturnType<ReturnType<typeof planningRuntime>["retryWorker"]>;
-  archiveWork(selection: { workIds?: readonly string[]; terminal?: boolean }): Promise<{ archived: string[] }>;
-  prioritizeWorker(workId: string, priority: number): Promise<{ workId: string; priority: number }>;
-  workerSnapshot(options?: {
-    offset?: number;
-    limit?: number;
-    all?: boolean;
-  }): ReturnType<ReturnType<typeof planningRuntime>["workerSnapshot"]>;
+  /** Jobs and their agents with live status: what the UI and Telegram render. */
+  jobs(): Promise<JobsSnapshot>;
+  /** Start a worker, scout or reviewer for a chat (Main when omitted). The same `requestId` returns the same agent. */
+  spawn(chat: number | undefined, args: SpawnArgs & { requestId: string }): Promise<{ text: string; id?: string }>;
+  /** Stop an agent and everything it owns; `reason` is required and recorded on the Job. */
+  stopJob(id: string, reason: string): Promise<string>;
+  /** Message an agent; a finished Job runs again. `followUp` queues it after the agent's current answer. */
+  steerJob(id: string, text: string, options?: { followUp?: boolean }): Promise<string>;
+  /** Approve a Ready Job: merge its candidate through result acceptance. */
+  approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
-  /** One page (JSON) of a work item's complete result; chat reports are capped. */
-  workResult(args: { workId: string; offset?: number; limit?: number }): Promise<string>;
   workerRead(
     threadId: string,
     options?: Parameters<DurableProjectRuntime["threadHistory"]>[1],
@@ -289,16 +273,14 @@ export type DurableProjectRuntime = {
     toolNames: string[];
     generations: Array<Pick<DurableInspection["coordinator"]["generationTasks"][number], "phase" | "state" | "terminal" | "outcome">>;
   }>;
-  pausePlan(): Promise<DurablePlanSnapshot>;
-  resumePlan(): Promise<DurablePlanSnapshot>;
-  planSnapshot(): Promise<DurablePlanSnapshot>;
+  /** Stop admitting work and pause every running agent; they continue after `resume`. */
+  pause(): Promise<{ paused: boolean }>;
+  resume(): Promise<{ paused: boolean }>;
   worktrees(): Promise<WorktreeInventory>;
   /** Live context/compaction settings (read on every generation; no reopen). */
   applyContext(settings: ContextSettings | undefined): void;
   /** Coordinator, role-model and explicit quota-fallback selection, live. Existing threads change model only through audited quota recovery. */
   applyModels(project: Pick<Project, "model" | "models" | "fallbackModels">): Promise<void>;
-  /** The owner's worker limit, live; running work is never aborted. */
-  applyWorkerCap(cap: number): Promise<void>;
   /** Manual compaction of one chat ("Compact now"); refuses while paused or already compacting. */
   compact(chatId?: string): Promise<{ started: true; chatId: string }>;
   /** Starts a fresh context in one idle chat ("/new"); earlier entries stay stored but leave the transcript and the model context. */
@@ -315,10 +297,6 @@ export type DurableProjectRuntime = {
   threadHistory(
     threadId: string,
     options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number; context?: boolean },
-  ): ReturnType<typeof threadHistory>;
-  legacyThreadHistory(
-    name: string,
-    options?: { offset?: number; limit?: number; textOffset?: number; textLimit?: number },
   ): ReturnType<typeof threadHistory>;
   scheduleCreate(input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule }): Promise<unknown>;
   scheduleSetEnabled(id: string, enabled: boolean): Promise<unknown>;
@@ -359,8 +337,6 @@ export type DurableProjectRuntime = {
   prHide(provider: string, id: string, hide: boolean): Promise<string[]>;
   /** Runs `fn` with the Durable root conversation (plugin RPCs). */
   withRoot<T>(fn: (root: Conversation) => Promise<T>): Promise<T>;
-  watchdogSnapshot(): ReturnType<ReturnType<typeof watchdogRuntime>["snapshot"]>;
-  watchdogKick(): void;
   /** Automation event (webhook) into the chat chosen in Settings; a repeated event ID returns the first intent with `duplicate`. */
   ingestAutomationEvent(input: {
     eventId: string;
@@ -371,8 +347,8 @@ export type DurableProjectRuntime = {
   operationDecide: OperationApprovals["decide"];
   operationSnapshot: OperationApprovals["snapshot"];
   usageSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof durableUsageSnapshot>;
-  operationExecute(input: ExecutionInput): Promise<Awaited<ReturnType<ReturnType<typeof githubOperations>["execute"]>> | VcsExecution>;
-  operationInspect(input: ExecutionInput): Promise<Awaited<ReturnType<ReturnType<typeof githubOperations>["inspect"]>> | VcsExecution>;
+  operationExecute(input: ExecutionInput): Promise<VcsExecution>;
+  operationInspect(input: ExecutionInput): Promise<VcsExecution>;
   commandIntentInspect(key: string, confirm: string): ReturnType<typeof commandIntentInspect>;
   commandIntentsSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof commandIntentsSnapshot>;
   githubReadSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof githubReadSnapshot>;
@@ -457,27 +433,13 @@ export async function openDurableProject(input: {
     import("@earendil-works/pi-coding-agent").DefaultResourceLoader
   >;
   knowledgeAccess?: KnowledgeAccess;
-  /** Explicit bindings; registry presence never grants worker access. */ workerTools?: DurableWorkerToolBindings;
-  workerCap?: number;
   onReport?: (report: DurableRuntimeReport) => void;
   onModelRequest?: (request: DurableModelRequest) => void;
   /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver;
-  /** Test-only observer after genuine scoped preparation and before it returns to planning; detached metadata only. */ testAfterWorkerPreparation?: (
-    prepared: Readonly<{ conversationId: number; workId: string; threadId: string; cwd: string; bindingRevision: string }>,
-  ) => Promise<void>;
-  /** Test-only scoped-worker rendezvous; never persisted or model-visible. */ beforeScopedSubmit?: () => Promise<void>;
-  /** Direct-runtime test rendezvous; never host/model exposed or persisted. */ testBeforeWorkSettlement?: (
-    workId: string,
-  ) => Promise<void>;
-  /** Direct-runtime stop-abort rendezvous; never persisted or model/host exposed. */ testBeforeWorkerAbort?: () => Promise<void>;
-  /** Direct-runtime final-verifier-revision rendezvous; never persisted or model-visible. */ testBeforeVerifierRevision?: (
-    sourcePath: string,
-  ) => Promise<void>;
   /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (
     value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>,
   ) => Promise<void>;
   beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>;
-  afterPausePersisted?: (value: Readonly<{ paused: boolean; pausing: boolean; rootConversationId: number }>) => Promise<void>;
 }): Promise<DurableProjectRuntime> {
   const project = parse(ProjectSchema, input.project);
   const dir = resolve(input.dir);
@@ -647,7 +609,12 @@ export async function openDurableProject(input: {
     // Main (root) and every chat conversation; worker threads are never coordinators.
     const coordinatorIds = new Set<number>();
     const isCoordinator = (id: Conversation["id"]) => coordinatorIds.has(Number(id));
-    const workerManagement = coordinatorWorkerTools({ root: () => rootReference, runtime: () => runtimeReference, isCoordinator });
+    const workerManagement = coordinatorJobReadTools({
+      root: () => rootReference,
+      runtime: () => runtimeReference,
+      isCoordinator,
+      catalog: () => catalog(loadProject(project.id)),
+    });
     // Installed always so recorded calls still resolve; offered only while the project has a GitHub authorization.
     const github = coordinatorGithubTools({ projectId: project.id, root: () => rootReference, isCoordinator });
     const shell = coordinatorShellTools({ cwd: project.cwd, isCoordinator });
@@ -699,27 +666,23 @@ export async function openDurableProject(input: {
           report(input.onReport, project.id, error);
         }
     };
-    // Who is calling and where: coordinators (Main and chats) work in the project checkout, a worker in its frozen worktree, scouts and reviewers in their read root.
+    // Who is calling and where: coordinators (Main and chats) work in the project checkout; every other agent in the cwd it was configured with.
     const callerOf = async (
       api: ToolExecutionApi,
       context: Context,
     ): Promise<{ role: SkillRole; cwd: string; skills?: readonly string[] } | null> => {
       if (isCoordinator(api.conversationId)) return { role: "coordinator", cwd: project.cwd };
-      const planRoot = rootReference;
-      if (!planRoot) return null;
-      return api.commit(async (tx) => {
-        const state = await tx.doc(DurablePlanning, planRoot.id),
-          entry = Object.entries(state.threads).find(([, thread]) => Number(thread.conversationId) === Number(api.conversationId));
-        const work = entry && Object.values(state.work).findLast((item) => item.threadId === entry[0]);
-        // A verifier reads exactly its frozen skill list; it has no MCP tools bound, so its stand-in role only keys the (empty) default.
-        return entry && work
-          ? {
-              role: work.role === "verifier" ? "reviewer" : work.role,
-              skills: work.attempt?.skills ? [...work.attempt.skills] : work.role === "verifier" ? [] : undefined,
-              cwd: work.role === "worker" ? (work.attempt?.cwd ?? project.cwd) : (entry[1].readRoot ?? project.cwd),
-            }
-          : null;
-      }, context);
+      const state = await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+      const agent = Object.values(state?.agents ?? {}).find((item) => Number(item.conversationId) === Number(api.conversationId));
+      const jobId = state?.subagents[String(api.conversationId)];
+      const child = jobId ? state?.jobs[jobId]?.children.find((item) => Number(item.id) === Number(api.conversationId)) : undefined;
+      const role = agent?.role ?? child?.role;
+      if (!role) return null;
+      const cwd = (await api.agent(context)).cwd ?? project.cwd;
+      // A verifier reads exactly the verification skill; it has no MCP tools bound, so its stand-in role only keys the (empty) default.
+      return role === "verifier"
+        ? { role: "reviewer", cwd, skills: [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) }
+        : { role, cwd };
     };
     const skillFiles = coordinatorSkillTool({
       skill: lookupSkill,
@@ -742,13 +705,8 @@ export async function openDurableProject(input: {
       controlRoot: dir,
       isCoordinator: (id) => coordinatorIds.has(id),
       threads: async () => {
-        const planRoot = rootReference;
-        if (!planRoot) return [];
-        const work = (await planning.snapshot(planRoot)).work;
-        return (await planning.threadIdentities(planRoot)).map((thread) => {
-          const first = work.find((item) => item.threadId === thread.threadId);
-          return { threadId: thread.threadId, role: first?.role ?? "worker", task: first?.text ?? "" };
-        });
+        if (!harness) return [];
+        return (await jobs.snapshot(harness)).agents.map((agent) => ({ threadId: agent.id, role: agent.role, task: agent.title }));
       },
     });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
@@ -773,8 +731,6 @@ export async function openDurableProject(input: {
       ...pluginCoordinator.filter((item) => item.provider.applies(current)).flatMap((item) => item.tools),
     ];
     const standing = loadDurableStanding(project.cwd);
-    const workerStanding = workerInstructions(project, knowledgeAccess, standing.text),
-      roleStanding = (role: DurableRole) => workerInstructions(project, knowledgeAccess, standing.text, role);
     const policy = defineExtension({
       name: "projects.durable-policy",
       tools,
@@ -832,27 +788,11 @@ export async function openDurableProject(input: {
       },
       controlRoot: dir,
     });
-    const prepareWorkerEnvironment =
-      binder === undefined
-        ? undefined
-        : async (
-            request: Readonly<{ conversationId: number; workId: string; threadId: string; role: DurableRole; workspaceScopeId: string }>,
-          ) => {
-            const environment = await binder(request);
-            await input.testAfterWorkerPreparation?.({
-              conversationId: request.conversationId,
-              workId: request.workId,
-              threadId: request.threadId,
-              cwd: environment.cwd,
-              bindingRevision: environment.bindingRevision,
-            });
-            return environment;
-          };
     const heads = readHeads(project.cwd, dir, { projectId: project.id, project: () => loadProject(project.id) });
+    // Scouts, reviewers and verifiers read the cwd they were configured with: a PR head snapshot, a worker's worktree or the checkout.
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
-      const target = await planning.readTarget(api, context);
-      if (!target) return undefined;
-      return existsSync(target.root) ? target.root : target.sha ? heads.restore(target.sha) : project.cwd;
+      const cwd = (await api.agent(context)).cwd;
+      return cwd && existsSync(cwd) ? cwd : project.cwd;
     });
     let kickFollow = () => {};
     let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => {
@@ -872,145 +812,160 @@ export async function openDurableProject(input: {
       },
       onVerdict: () => kickFollow(),
     });
-    // Opt-in verification loop: tools only verifier threads are bound to, plus the host hooks planning calls at the end of a worker turn.
-    // A verifier is trusted like its worker: its commands use the worker's shell policy, the host's lease table and the background-command runner.
-    // A paused verifier can resume while its earlier settlement still checks the target.
-    const settlingVerifiers = new Map<string, number>();
-    const verification = {
-      tools: buildVerificationTools({
-        projectId: project.id,
-        planRoot: () => rootReference?.id,
-        controlRoot: dir,
-        background,
-        leases: hostLeases,
-        shell: (scopeId, cwd, branch) => verifierShell(loadProject(project.id), scopeId, cwd, branch),
-        isClosed: () => closed,
-      }),
-      hooks: {
-        config: () => {
-          const current = loadProject(project.id).verification;
-          return { enabled: Boolean(current?.enabled), skill: current?.skill ?? "" };
-        },
-        scopeCheck: (scopeId: string) => {
-          const shell = verifierShell(loadProject(project.id), scopeId, "/", null);
-          return "refusal" in shell ? shell.refusal : null;
-        },
-        check: async () => {
-          const skill = loadProject(project.id).verification?.skill ?? "";
-          // Judged on a fresh discovery: knownSkills only grows, so a skill deleted since open would still be "known".
-          let present = false;
-          try {
-            present =
-              Boolean(skill) &&
-              (input.discoverSkills
-                ? (await input.discoverSkills()).getSkills().skills.some((item) => item.name === skill)
-                : knownSkills.has(skill));
-          } catch {
-            present = false;
-          }
-          if (present) await refreshDelegatedSkills();
-          if (!present) return `The verification skill "${skill}" is not installed or not discoverable`;
-          const ref = roleModels.verifier;
-          if (!ref) return "No verifier model is configured in Settings";
-          try {
-            assertConfiguredModel(models, ref.provider, ref.modelId, "Verifier");
-          } catch (error) {
-            return error instanceof Error ? error.message : String(error);
-          }
-          return null;
-        },
-        capture: async (key: string, source: string) => {
-          const receipt = (await workspaceReceipts(root)).find(
-            (item) => item.state === "allocated" && item.scope.provider === "git" && item.workspacePath === source,
-          );
-          if (!receipt) throw new Error("The frozen workspace allocation base is unavailable; proof changes cannot be established");
-          return captureAttemptTarget(dir, key, source, receipt.scope.baseRevision);
-        },
-        revision: async (path: string) => {
-          await input.testBeforeVerifierRevision?.(path);
-          return (await captureTarget(path)).revision;
-        },
-        drain: async (verifierThreadId: string) => {
-          settlingVerifiers.set(verifierThreadId, (settlingVerifiers.get(verifierThreadId) ?? 0) + 1);
-          await background.killThread(verifierThreadId);
-        },
-        release: async (verifierThreadId: string) => {
-          const remaining = (settlingVerifiers.get(verifierThreadId) ?? 1) - 1;
-          if (remaining > 0) settlingVerifiers.set(verifierThreadId, remaining);
-          else {
-            settlingVerifiers.delete(verifierThreadId);
-            await releaseIdleLeases(new Set([verifierThreadId]));
-          }
-        },
-      },
-    };
-    const planning = planningRuntime({
+    // Verifier tools: trusted runs on the candidate, tied to its commit. A verifier is trusted like its worker: it runs under the worker's shell policy.
+    const proof = proofTools({
       projectId: project.id,
-      models: roleModelNow,
-      fallbackModels: {
-        verifier: null,
-        get worker() {
-          return fallbackModels.worker ?? null;
-        },
-        get scout() {
-          return fallbackModels.scout ?? null;
-        },
-        get reviewer() {
-          return fallbackModels.reviewer ?? null;
-        },
+      controlRoot: dir,
+      background,
+      leases: hostLeases,
+      shell: (job, cwd) => verifierShell(loadProject(project.id), job.scopeId ?? "", cwd, job.branch),
+      isClosed: () => closed,
+    });
+    const verifyLine = () => {
+      const checks = loadProject(project.id).verification;
+      return checks?.enabled
+        ? `\nVerification: the project's verify skill is "${checks.skill}"; run up to ${checks.rounds ?? DEFAULT_VERIFY_ROUNDS} verifier rounds, then report Ready with the unproven criteria as gaps.`
+        : "\nVerification is not configured for this project: list every criterion you could not prove as a gap.";
+    };
+    const instructionsFor = (role: DurableRole, repositoryStanding = standing.text): string => {
+      if (role === "verifier") {
+        const skill = loadProject(project.id).verification?.skill;
+        return `${verifierInstructions(project, repositoryStanding)}${skill ? `\nThe verify skill is "${skill}"; read it with projects_skill_file.` : ""}\n${READ_ONLY_CODE_NOTE}`;
+      }
+      const base = workerInstructions(project, knowledgeAccess, repositoryStanding, role);
+      return role === "worker"
+        ? `${base}\nRole profile: worker.${roleIndex("worker")}${verifyLine()}`
+        : `${base}\nRole profile: ${role}.\n${READ_ONLY_CODE_NOTE}${roleIndex(role)}`;
+    };
+    /** Model, tools and prompt of one agent role. A subagent (`jobId` set) works in its worker's cwd and has no verdict or spawn tools. */
+    const agentSetup = (spec: { role: DurableRole; jobId: string | null; cwd?: string }): AgentChange => {
+      const model = roleModelNow[spec.role];
+      const instructions = instructionsFor(spec.role);
+      if (spec.role === "worker")
+        return {
+          model,
+          thinkingLevel: "medium",
+          cwd: project.cwd,
+          instructions,
+          tools: [...workerKnowledge, skillFiles.tool, ...mcp.tools, ...jobs.tools.worker],
+          extensions: [policy, skillFiles.extension, mcp.extension, jobs.worker],
+        };
+      if (spec.role === "verifier")
+        return {
+          model,
+          thinkingLevel: "medium",
+          cwd: spec.cwd ?? project.cwd,
+          instructions,
+          tools: [...readOnlyCode.tools, ...proof.tools, skillFiles.tool],
+          extensions: [policy, readOnlyCode.extension, proof.extension, skillFiles.extension],
+        };
+      const review = spec.role === "reviewer" && spec.jobId === null ? reviewerTools : undefined;
+      return {
+        model,
+        thinkingLevel: "medium",
+        cwd: spec.cwd ?? project.cwd,
+        instructions,
+        tools: [...workerKnowledge, ...readOnlyCode.tools, ...(review?.tools ?? []), skillFiles.tool, ...mcp.tools],
+        extensions: [policy, readOnlyCode.extension, ...(review ? [review.extension] : []), skillFiles.extension, mcp.extension],
+      };
+    };
+    /** Threads the host knows these conversations by (agent and Job ids): background commands and leases are keyed by them. */
+    const threadsOf = async (ids: readonly unknown[]): Promise<Set<string>> => {
+      const doc = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
+      const found = new Set<string>();
+      for (const id of ids.map(Number)) {
+        const agent = Object.values(doc?.agents ?? {}).find((item) => Number(item.conversationId) === id);
+        const job = doc?.subagents[String(id)];
+        if (agent) found.add(agent.id);
+        if (job) found.add(job);
+      }
+      return found;
+    };
+    const mergeTargets = new Map<string, { provider: ReturnType<typeof githubMergeProvider>; checkout: string }>();
+    const approver = createApprover({
+      provider: (job) => mergeTargets.get(job.id)!.provider,
+      checkout: (job) => mergeTargets.get(job.id)!.checkout,
+      log: fileAcceptanceLog(join(dir, "acceptance")),
+    });
+    const jobs = createJobs({
+      agentChange: agentSetup,
+      defaultScope: () => {
+        const scopes = catalog(loadProject(project.id));
+        return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
       },
-      quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined,
+      prepare: async ({ agent, job }) => {
+        await refreshDelegatedSkills();
+        if (agent.role !== "worker") {
+          // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
+          if (!agent.readRef) return { instructions: instructionsFor(agent.role) };
+          const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
+          const target = state?.agents[agent.readRef];
+          if (target) {
+            const cwd = (await (await harness!.conversation(target.conversationId, context))?.agent(context))?.cwd;
+            if (!cwd || !existsSync(cwd))
+              throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
+            return { cwd, instructions: instructionsFor(agent.role) };
+          }
+          return { cwd: (await heads.ensure(agent.readRef)).root, instructions: instructionsFor(agent.role) };
+        }
+        // A worker without a scope reads and writes knowledge only; a scoped one gets its own worktree and publication tools.
+        if (!job?.scopeId) return { instructions: instructionsFor("worker") };
+        if (!binder) throw new Error("Workspace preparation is unavailable");
+        const continued =
+          job.branch && !agent.prepared ? await resolveContinuationBranch(loadProject(project.id), job.branch, job.scopeId) : undefined;
+        const environment = await binder({
+          conversationId: Number(agent.conversationId),
+          workId: job.id,
+          threadId: agent.id,
+          role: "worker",
+          workspaceScopeId: job.scopeId,
+          taskText: job.request,
+          configured: agent.prepared,
+          ...(continued ? { continueBranch: continued } : {}),
+        });
+        registry.install(environment.extension);
+        const base = agentSetup({ role: "worker", jobId: job.id });
+        const text = `${instructionsFor("worker", environment.repositoryStanding?.text ?? standing.text)}${environment.workerInstructions ?? ""}`;
+        return {
+          cwd: environment.cwd,
+          instructions: text,
+          tools: [...(base.tools as ToolRegistration[]), ...environment.tools],
+          extensions: [...(base.extensions as Extension[]), environment.extension],
+        };
+      },
+      killProcesses: async (ids) => {
+        const threads = await threadsOf(ids);
+        await Promise.all([...threads].map((id) => background.killThread(id)));
+        hostLeases.releaseWhere((holder) => ownLease()(holder) && threads.has(holder.threadId));
+      },
+      backgroundSilence: async (ids) => {
+        const quiet = [...(await threadsOf(ids))].map((id) => background.silence(id)).filter((value): value is number => value !== null);
+        return quiet.length ? Math.max(...quiet) : null;
+      },
+      fallbackModel: (role) => {
+        const reference = role === "verifier" ? undefined : fallbackModels[role];
+        if (!reference) return null;
+        const selected = modelRef(reference);
+        return { label: `${selected.provider}/${selected.modelId}`, change: { model: selected } };
+      },
       quotaResetAt,
-      testBeforeWorkSettlement: input.testBeforeWorkSettlement,
-      resolveModel: (value, role) => {
-        const selected = modelRef(value);
-        assertConfiguredModel(models, selected.provider, selected.modelId, `Frozen ${role}`);
-        return selected;
-      },
-      cwd: project.cwd,
-      refreshSkills: refreshDelegatedSkills,
-      skillNames: (role) =>
-        role === "verifier"
-          ? [loadProject(project.id).verification?.skill ?? ""].filter(Boolean)
-          : delegatedSkills[role].map((skill) => skill.name),
-      instructions: {
-        get worker() {
-          return `${workerStanding}\nRole profile: worker.${roleIndex("worker")}`;
+      quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined,
+      checkProof: (job, refs) => checkProofRefs(dir, job, refs),
+      stallMinutes: () => loadProject(project.id).stallMinutes ?? DEFAULT_STALL_MINUTES,
+      approver: {
+        approve: async (job) => {
+          const current = loadProject(project.id),
+            authorization = current.workspaceAuthorization,
+            record = harness ? (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.jobs[job.id] : undefined;
+          const scope = authorization?.scopes.find((item) => item.id === record?.scopeId),
+            repository = authorization?.repositories.find((item) => item.repositoryId === scope?.repositoryId);
+          if (!authorization || !repository) throw new Error("The Job's workspace scope is no longer authorized");
+          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          if (!provider)
+            throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
+          mergeTargets.set(job.id, { provider, checkout: repository.ownerCheckout });
+          return approver.approve(job);
         },
-        get scout() {
-          return `${roleStanding("scout")}\nRole profile: scout.\n${READ_ONLY_CODE_NOTE}${roleIndex("scout")}`;
-        },
-        get reviewer() {
-          return `${roleStanding("reviewer")}\nRole profile: reviewer.\n${READ_ONLY_CODE_NOTE}${roleIndex("reviewer")}`;
-        },
-        get verifier() {
-          return verifierInstructions(project, standing.text);
-        },
-      },
-      standingRevision: standing.revision,
-      workspaceInstructions: (role, selectedStanding) =>
-        `${workerInstructions(project, knowledgeAccess, selectedStanding.text, role)}\nRole profile: ${role}.${roleIndex(role === "verifier" ? "reviewer" : role)}`,
-      knowledgeTools: workerKnowledge,
-      skillFiles: { tool: skillFiles.tool, extension: skillFiles.extension },
-      mcp,
-      readOnlyCode,
-      reviewerTools,
-      verifierTools: verification.tools,
-      verification: verification.hooks,
-      workerPolicy: policy,
-      workerTools: input.workerTools,
-      workerCap: project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP,
-      workspaceCatalog: () => catalog(project),
-      prepareWorkerEnvironment,
-      publishWorkerEnvironment: (extension) => registry.install(extension),
-      beforeScopedSubmit: input.beforeScopedSubmit,
-      planRoot: () => rootReference?.id,
-      readHead: (ref) => heads.ensure(ref),
-      resolveBranch: (ref, scopeId) => resolveContinuationBranch(loadProject(project.id), ref, scopeId),
-      artifactSummary: (thread) => artifactSummary(dir, thread),
-      workerArtifacts: (thread) => {
-        const listing = listArtifacts(dir, thread);
-        return { dir: listing.dir, files: listing.files.map((file) => file.path) };
       },
     });
     registry.install(policy);
@@ -1018,10 +973,8 @@ export async function openDurableProject(input: {
     registry.install(decisions.extension);
     registry.install(readOnlyCode.extension);
     registry.install(reviewerTools.extension);
-    registry.install(verification.tools.extension);
-    registry.install(planning.extension);
-    registry.install(planning.capabilities);
-    registry.install(planning.delegation);
+    registry.install(proof.extension);
+    jobs.install(registry);
     registry.install(workerManagement.extension);
     registry.install(github.extension);
     registry.install(shell.extension);
@@ -1031,8 +984,6 @@ export async function openDurableProject(input: {
     registry.install(skillFiles.extension);
     registry.install(mcp.extension);
     registry.install(artifacts.extension);
-    const legacyWorkers = backgroundWorkers({ model: roleModel("worker"), tools: workerKnowledge, instructions: workerStanding });
-    registry.install(defineExtension({ name: "projects.legacy-worker-recovery", tasks: legacyWorkers.extension.tasks }));
     storage = await openNodeSqliteStorage(databasePath);
     harness = await Harness.open(
       storage,
@@ -1060,7 +1011,7 @@ export async function openDurableProject(input: {
         thinkingLevel: "medium",
         extensions: [
           policy,
-          planning.extension,
+          jobs.coordinator,
           libraryPolicy,
           decisions.extension,
           workerManagement.extension,
@@ -1082,8 +1033,7 @@ export async function openDurableProject(input: {
           skillFiles.tool,
           ...mcp.tools,
           ...artifacts.tools,
-          planning.delegate,
-          ...(planning.workspaceCatalog ? [planning.workspaceCatalog] : []),
+          ...jobs.tools.coordinator,
         ],
         cwd: project.cwd,
         instructions: coordinatorInstructions(project, standing.text, roleIndex("coordinator")),
@@ -1091,11 +1041,7 @@ export async function openDurableProject(input: {
     });
     rootReference = root;
     coordinatorIds.add(Number(root.id));
-    const existingAgent = await root.agent(context);
-    const catalogTool = planning.workspaceCatalog;
-    if (catalogTool && !existingAgent.tools.some((tool) => tool.name === catalogTool.name)) {
-      await root.configure({ tools: [...existingAgent.tools, catalogTool] }, context);
-    }
+    jobs.attach(harness);
     await root.commit(async (tx) => {
       const identity = await tx.doc(DurableProjectIdentity, root.id);
       if (identity.projectId !== null && identity.projectId !== project.id)
@@ -1151,56 +1097,47 @@ export async function openDurableProject(input: {
       {
         planReview: async (work, chat) => {
           // The auto-merge reviewer reads the exact PR head it judges, not the owner's checkout.
-          const sha = /:([0-9a-f]{40})$/.exec(work.requestId)?.[1],
-            head = sha ? await heads.ensure(sha).catch(() => undefined) : undefined;
-          await admitting(() =>
-            planning.plan(
-              root,
-              {
-                work: [
-                  {
-                    id: work.workId,
-                    threadId: work.threadId,
-                    role: "reviewer",
-                    text: work.text,
-                    requestId: work.requestId,
-                    ...(head ? { readRoot: head.root, readSha: head.sha } : {}),
-                  },
-                ],
-              },
-              chat as Conversation["id"],
-            ),
+          const sha = /:([0-9a-f]{40})$/.exec(work.requestId)?.[1];
+          const spawned = await admitting(() =>
+            jobs.spawn(root, chat as Conversation["id"], {
+              role: "reviewer",
+              brief: work.text,
+              title: "Auto-merge review",
+              requestId: work.requestId,
+              ...(sha ? { readRef: sha } : {}),
+            }),
           );
+          if (!spawned.id) throw new Error(spawned.text);
+          return spawned.id;
         },
         planWork: async (work, chat) => {
-          await admitting(() =>
-            planning.plan(
-              root,
-              {
-                work: [
-                  {
-                    id: work.workId,
-                    threadId: work.threadId,
-                    role: "worker",
-                    text: work.text,
-                    requestId: work.requestId,
-                    workspaceScopeId: work.workspaceScopeId,
-                  },
-                ],
-              },
-              chat as Conversation["id"],
-            ),
+          const spawned = await admitting(() =>
+            jobs.spawn(root, chat as Conversation["id"], {
+              role: "worker",
+              brief: work.text,
+              title: work.text.slice(0, 80),
+              acceptance: ["The failing check passes on the PR and the PR is updated"],
+              scopeId: work.workspaceScopeId,
+              requestId: work.requestId,
+            }),
           );
+          if (!spawned.id) throw new Error(spawned.text);
+          return spawned.id;
         },
-        followUp: (id, text, requestId, chat) => admitting(() => planning.followUp(root, id, text, requestId, chat as Conversation["id"])),
+        followUp: async (id, text, _requestId, _chat) => {
+          await admitting(() => jobs.steer(openedHarness, id, text, true));
+          return id;
+        },
         threads: async () =>
-          (await planning.threadIdentities(root)).map((thread) => ({
-            threadId: thread.threadId,
-            conversationId: Number(thread.conversationId),
-            stopping: thread.stopping,
-            ...(thread.transferredTo ? { transferredTo: thread.transferredTo } : {}),
-          })),
-        workStatus: async (id) => (await planning.snapshot(root)).work.find((work) => work.id === id)?.status ?? null,
+          (await jobs.snapshot(openedHarness)).jobs.map((job) => ({ threadId: job.id, conversationId: Number(job.workerConversation) })),
+        workStatus: async (id) => {
+          const view = await jobs.snapshot(openedHarness);
+          const job = view.jobs.find((item) => item.id === id);
+          if (job)
+            return job.status === "running" ? "running" : job.status === "failed" || job.status === "stopped" ? job.status : "completed";
+          const agent = view.agents.find((item) => item.id === id);
+          return agent ? (agent.working ? "running" : agent.endedAt === null ? "running" : "completed") : null;
+        },
         target: eventTarget,
       },
       () => closed,
@@ -1226,39 +1163,19 @@ export async function openDurableProject(input: {
     };
     const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
     followWake.unref();
-    // Worker watchdog: every N minutes while workers run, each chat gets a check for only the workers it admitted.
-    const watchdog = watchdogRuntime(
-      root,
-      project.id,
-      schedules,
-      {
-        plan: () => planning.snapshot(root),
-        entries: async (threadId) => {
-          const owned = (await planning.threadIdentities(root)).find((thread) => thread.threadId === threadId);
-          const child = owned ? await openedHarness.conversation(owned.conversationId, context) : undefined;
-          if (!child) return null;
-          const view = await child.viewState(context);
-          try {
-            return view.value.entries.map((entry) => ({ id: Number(entry.id), model: entry.model as never }));
-          } finally {
-            view.dispose();
-          }
-        },
-        chat: async (chatConversationId) => {
-          if (chatConversationId === null || chatConversationId === Number(root.id)) return root;
-          return (await openedHarness.conversation(chatConversationId as Conversation["id"], context)) ?? null;
-        },
+    // Stall detector: one notice per stalled Job to its chat; it never steers or stops.
+    const stallWake = setInterval(
+      () => {
+        if (!closed && dispatchReady) void jobs.stallTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
       },
-      () => closed,
-      (error) => report(input.onReport, project.id, error),
+      Number(process.env.PI_PROJECTS_STALL_TICK_MS) || 30_000,
     );
-    const watchdogWake = setInterval(watchdog.tick, Number(process.env.PI_PROJECTS_WATCHDOG_TICK_MS) || 15_000);
-    watchdogWake.unref();
+    stallWake.unref();
     // Settled worktrees are removed automatically (same safe rule as the Settings action); paused or closing projects are left alone.
     let cleaning: Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> | undefined;
     const untouchedThread = async (threadId: string) => {
-      const owned = (await planning.threadIdentities(root)).find((thread) => thread.threadId === threadId);
-      const child = owned ? await openedHarness.conversation(owned.conversationId, context) : undefined;
+      const owned = (await jobs.snapshot(openedHarness)).jobs.find((job) => job.id === threadId);
+      const child = owned ? await openedHarness.conversation(owned.workerConversation, context) : undefined;
       if (!child) return false;
       const view = await child.viewState(context);
       try {
@@ -1294,28 +1211,20 @@ export async function openDurableProject(input: {
     const cleanupWake = setInterval(
       () => {
         void (async () => {
-          if (closed || (await planning.snapshot(root)).paused) return;
+          if (closed || (await jobs.snapshot(openedHarness)).paused) return;
           await cleanup();
         })().catch((error) => report(input.onReport, project.id, error));
       },
       Number(process.env.PI_PROJECTS_WORKTREE_CLEANUP_MS) || 1_800_000,
     );
     cleanupWake.unref();
+    /** Threads whose leases stay: running Jobs and open scouts or reviewers. */
     async function retainedLeaseThreads(): Promise<Set<string>> {
-      return root.commit(async (tx) => {
-        const state = await tx.doc(DurablePlanning, root.id);
-        const held = new Set(
-          Object.values(state.work)
-            .filter((work) => work.status === "running")
-            .map((work) => work.threadId),
-        );
-        for (const thread of Object.values(state.threads))
-          if (thread.verification?.open)
-            for (const attempt of thread.verification.attempts) if (attempt.endedAt === undefined) held.add(attempt.verifierThreadId);
-        for (const [threadId, thread] of Object.entries(state.threads)) if (thread.stopping) held.add(threadId);
-        for (const threadId of settlingVerifiers.keys()) held.add(threadId);
-        return held;
-      }, context);
+      const view = await jobs.snapshot(openedHarness);
+      return new Set([
+        ...view.jobs.filter((job) => job.status === "running").map((job) => job.id),
+        ...view.agents.filter((agent) => agent.endedAt === null).map((agent) => agent.id),
+      ]);
     }
     async function releaseIdleLeases(targets?: ReadonlySet<string>): Promise<void> {
       await schedules.mutex.run(async () => {
@@ -1336,25 +1245,14 @@ export async function openDurableProject(input: {
       Number(process.env.PI_PROJECTS_LEASE_SWEEP_MS) || 1000,
     );
     leaseWake.unref();
-    // Persisted deadlines make quota recovery survive restarts; paused/stopped work stays untouched.
-    const quotaWake = setInterval(
-      () => {
-        if (!closed && dispatchReady)
-          void schedules.mutex.run(() => planning.recoverQuota(root)).catch((error) => report(input.onReport, project.id, error));
-      },
-      Number(process.env.PI_PROJECTS_QUOTA_SWEEP_MS) || 30_000,
-    );
-    quotaWake.unref();
     stopMonitors = async () => {
-      clearInterval(quotaWake);
       clearInterval(leaseWake);
       clearInterval(cleanupWake);
       await cleaning?.catch(() => {});
       clearInterval(followWake);
       follow.abort();
       clearInterval(prMonitorWake);
-      clearInterval(watchdogWake);
-      await watchdog.idle();
+      clearInterval(stallWake);
       clearInterval(monitorWake);
       await monitors.close();
       await Promise.allSettled([...monitorOperations]);
@@ -1381,42 +1279,7 @@ export async function openDurableProject(input: {
       }, delay);
     };
     await schedules.reconcile();
-    let initialPlan = await planning.snapshot(root);
-    const threads = await planning.threadIdentities(root);
-    const legacy = await legacyRecoveryState(openedHarness, openedStorage, root);
-    if (
-      !initialPlan.paused &&
-      (legacy.reporterTaskIds.length !== 0 ||
-        threads.some((thread) => thread.stopping) ||
-        initialPlan.work.some((work) => work.status === "queued" || work.status === "running") ||
-        (await hasPendingInputs(openedStorage, [
-          ...new Set([
-            root.id,
-            ...(await chatConversationIds()),
-            ...threads.map((thread) => thread.conversationId),
-            ...legacy.conversationIds,
-          ]),
-        ])))
-    ) {
-      await planning.pause(root);
-      initialPlan = await planning.snapshot(root);
-    }
-    if (initialPlan.pausing || threads.some((thread) => thread.stopping)) {
-      const recovered = await planning.recoverPause(root);
-      await Promise.all(recovered.taskIds.map((id) => openedHarness.abortTask(id, context)));
-      await Promise.all(
-        recovered.conversationIds.map(async (id) => (await openedHarness.conversation(id, context))?.abort(context, { background: true })),
-      );
-      await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true });
-      await abortChats(openedHarness);
-      await background.killAll();
-      // Only the new exclusive runtime can adopt stop owners left by the previous process.
-      for (const stop of recovered.stops) await planning.completeStop(root, stop.threadId, stop.stopId);
-      await planning.completePause(root);
-      await schedules.reconcile();
-      initialPlan = await planning.snapshot(root);
-    }
-    if (initialPlan.paused) await cancelLegacyWorkers(openedHarness, openedStorage, root);
+    await jobs.recover(openedHarness);
     const recoveredAgent = await root.agent(context);
     const knowledgeNames = new Set([
       "projects_knowledge_list",
@@ -1432,7 +1295,7 @@ export async function openDurableProject(input: {
       "projects_library_read",
       "projects_question",
     ]);
-    const workerManagementNames = new Set(workerManagement.tools.map((tool) => tool.name));
+    const workerManagementNames = new Set([...workerManagement.tools, ...jobs.tools.coordinator].map((tool) => tool.name));
     const ownedNames = new Set<string>([
       ...COORDINATOR_GITHUB_TOOLS,
       ...shell.tools.map((tool) => tool.name),
@@ -1450,6 +1313,7 @@ export async function openDurableProject(input: {
       ),
       ...tools,
       ...workerManagement.tools,
+      ...jobs.tools.coordinator,
       ...shell.tools,
       ...vcs.tools,
       ...offeredTools(current),
@@ -1460,6 +1324,7 @@ export async function openDurableProject(input: {
     const coordinatorTools = coordinatorToolsFor(recoveredAgent, project);
     const ownedExtensions = new Set([
       workerManagement.extension.name,
+      jobs.coordinator.name,
       github.extension.name,
       shell.extension.name,
       gh.extension.name,
@@ -1472,6 +1337,7 @@ export async function openDurableProject(input: {
     const coordinatorExtensionsFor = (agent: AgentNow) => [
       ...agent.extensions.filter((extension) => !ownedExtensions.has(extension.name)),
       workerManagement.extension,
+      jobs.coordinator,
       github.extension,
       shell.extension,
       gh.extension,
@@ -1526,16 +1392,17 @@ export async function openDurableProject(input: {
       if (!chat) throw new Error("Durable chat conversation is missing");
       if (agentKey(await chat.agent(context)) !== rootKey) await chat.configure(await chatAgent(), context);
     }
-    await planning.setWorkerCap(root, project.workerCap ?? input.workerCap ?? DEFAULT_WORKER_CAP);
     await decisions.recover();
-    dispatchReady = !initialPlan.paused && !initialPlan.pausing;
+    dispatchReady = !(await jobs.snapshot(openedHarness)).paused;
     const approvals = operationApprovals({ root, harness: openedHarness, project });
-    const operations = githubOperations(root, project.id, approvals, schedules, () => closed);
     const vcsRuntime = vcsOperations({ root, project, approvals, mutex: worktreeMutex, isClosed: () => closed });
     vcsReference = vcsRuntime;
+    const approvedVcs = async (value: ExecutionInput) => {
+      if ((await approvals.approved(value)).operation.kind !== "vcs") throw new Error("Only VCS operations are executed by the host");
+    };
     const writeInspector = githubWriteInspector(root, project.id);
     stopOperations = async () => {
-      const results = await Promise.allSettled([operations.close(), vcsRuntime.close(), writeInspector.close()]);
+      const results = await Promise.allSettled([vcsRuntime.close(), writeInspector.close()]);
       const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
       if (errors.length) throw new AggregateError(errors, "Provider operation shutdown failed");
     };
@@ -1546,66 +1413,30 @@ export async function openDurableProject(input: {
     function admitting<T>(operation: () => Promise<T>): Promise<T> {
       return schedules.mutex.run(async () => {
         assertOpen();
-        await planning.assertAdmitting(root);
+        if ((await jobs.snapshot(openedHarness)).paused) throw new Error("Project is paused; new work is denied");
         assertOpen();
         return operation();
       });
     }
 
-    /** Joins terminally stopped verifier settlements, including obsolete attempts on a resumed thread. Pauses stay resumable. */
-    async function joinStoppedVerifierSettlements(targets: ReadonlySet<string>): Promise<void> {
-      const workIds = await root.commit(
-        async (tx) =>
-          new Set(
-            Object.values((await tx.doc(DurablePlanning, root.id)).work)
-              .filter((work) => targets.has(work.threadId) && work.role === "verifier" && work.status === "stopped")
-              .map((work) => work.id),
-          ),
-        context,
-      );
-      if (!workIds.size) return;
-      let cursor: Awaited<ReturnType<Storage["scanTasks"]>>["next"];
-      do {
-        const page = await openedStorage.scanTasks({ conversationId: root.id, kind: "projects.plan-settlement" }, 100, cursor, context);
-        const settlements = page.items.filter((task) => {
-          const input = task.input;
-          return (
-            input !== null &&
-            typeof input === "object" &&
-            "workId" in input &&
-            typeof input.workId === "string" &&
-            workIds.has(input.workId)
-          );
-        });
-        await Promise.all(settlements.map((task) => openedHarness.waitForTask(task.id, context)));
-        cursor = page.next;
-      } while (cursor);
+    const threadIdentities = async () =>
+      (await jobs.snapshot(openedHarness)).agents.map((agent) => ({
+        threadId: agent.id,
+        conversationId: agent.conversationId,
+        reported: agent.reported,
+      }));
+    /** The conversation an agent id (Job id or scout/reviewer id) names. */
+    async function agentConversation(id: string): Promise<Conversation["id"]> {
+      const view = await jobs.snapshot(openedHarness);
+      const found = view.agents.find((agent) => agent.id === id);
+      if (!found) throw new Error("Unknown agent id");
+      return found.conversationId;
     }
-
-    async function drainWorker(threadId: string, stopped: Awaited<ReturnType<typeof planning.stop>>): Promise<void> {
-      const targets = new Set(
-        (await planning.threadIdentities(root))
-          .filter((thread) => stopped.conversationIds.includes(thread.conversationId))
-          .map((thread) => thread.threadId),
-      );
-      try {
-        await input.testBeforeWorkerAbort?.();
-        await Promise.all(stopped.taskIds.map((id) => openedHarness.abortTask(id, context)));
-      } finally {
-        try {
-          await Promise.all(
-            stopped.conversationIds.map(async (id) =>
-              (await openedHarness.conversation(id, context))?.abort(context, { background: true }),
-            ),
-          );
-        } finally {
-          await Promise.all([...targets].map((id) => background.killThread(id)));
-          await joinStoppedVerifierSettlements(targets);
-          if (!closed) await schedules.mutex.run(() => planning.completeStop(root, threadId, stopped.stopId));
-          await releaseIdleLeases(targets);
-          if (!closed) await cleanup().catch((error) => report(input.onReport, project.id, error));
-        }
-      }
+    async function agentCwd(id: string): Promise<string> {
+      const conversation = await openedHarness.conversation(await agentConversation(id), context);
+      const cwd = (await conversation?.agent(context))?.cwd;
+      if (!cwd || !existsSync(cwd)) throw new Error("The agent has no worktree");
+      return cwd;
     }
 
     async function chatList(): Promise<DurableChat[]> {
@@ -1694,16 +1525,14 @@ export async function openDurableProject(input: {
           if (!conversation) return [];
           const view = await conversation.viewState(context);
           try {
-            return omitIdleWatchdogTurns<DurableCoordinatorMessage>(
-              await chatTranscript(openedStorage, conversation, view.value.entries),
-            ).flatMap((message, index) =>
+            return (await chatTranscript(openedStorage, conversation, view.value.entries)).flatMap((message, index) =>
               "kind" in message || !message.text.trim() ? [] : [{ index, role: message.role, at: message.at, text: message.text }],
             );
           } finally {
             view.dispose();
           }
         };
-        const work = (await planning.snapshot(root)).work;
+        const agents = (await jobs.snapshot(openedHarness)).agents;
         return {
           chats: await Promise.all(
             (await chatList()).map(async (chat) => ({
@@ -1715,13 +1544,12 @@ export async function openDurableProject(input: {
             })),
           ),
           threads: await Promise.all(
-            (await planning.threadIdentities(root)).map(async (thread) => {
-              const latest = work.findLast((item) => item.threadId === thread.threadId);
+            agents.map(async (thread) => {
               return {
-                threadId: thread.threadId,
-                role: latest?.role ?? "worker",
-                task: latest?.text ?? "",
-                parentThreadId: latest?.parentThreadId ?? null,
+                threadId: thread.id,
+                role: thread.role,
+                task: thread.title,
+                parentThreadId: null,
                 conversationId: Number(thread.conversationId),
                 messages: await read(await openedHarness.conversation(thread.conversationId, context)),
               };
@@ -1766,82 +1594,33 @@ export async function openDurableProject(input: {
         );
         return wait(openedHarness, root, admitted.submissionId);
       },
-      send: async (id, text, options = {}) => ({
-        attemptId: await admitting(() =>
-          planning.followUp(root, parse(threadId, id), text, options.requestId ?? `worker-send:${id}:${crypto.randomUUID()}`),
-        ),
-      }),
-      plan: async (planValue, chat) => {
-        await refreshDelegatedSkills();
-        return schedules.mutex.run(async () => {
-          assertOpen();
-          return planning.plan(root, planValue, chat as Conversation["id"] | undefined);
-        });
-      },
-      followUp: async (threadId, text, options) => ({
-        attemptId: await admitting(() =>
-          planning.followUp(root, threadId, text, options.requestId, options.chat as Conversation["id"] | undefined),
-        ),
-      }),
-      steerThread: async (threadId, text, options) => {
-        const staged = await admitting(() =>
-          planning.steer(root, threadId, text, options.requestId, options.chat as Conversation["id"] | undefined),
-        );
-        if (staged.stop) {
-          await drainWorker(threadId, staged.stop);
-        }
-        return { attemptId: staged.attemptId };
-      },
-      stop: async (threadId) => {
-        const stopped = await schedules.mutex.run(() => {
-          assertOpen();
-          return planning.stop(root, threadId);
-        });
-        await drainWorker(threadId, stopped);
-      },
-      pauseWorker: async (threadId) => {
-        const stopped = await admitting(() => planning.pauseWorker(root, threadId));
-        if (stopped) await drainWorker(threadId, stopped);
-        return { threadId, paused: true };
-      },
-      resumeWorker: async (threadId) => {
-        await admitting(() => planning.resumeWorker(root, threadId));
-        return { threadId, paused: false };
-      },
-      retryWorker: (workId, requestId, chat) =>
-        admitting(() => planning.retryWorker(root, workId, requestId, chat as Conversation["id"] | undefined)),
-      archiveWork: async (selection) => {
+      jobs: async () => {
         assertOpen();
-        const archived = await planning.archiveWork(root, selection),
-          plan = await planning.snapshot(root);
-        // Background commands outlive turns but not the archive of their thread's work.
-        for (const id of new Set(plan.work.filter((work) => archived.archived.includes(work.id)).map((work) => work.threadId)))
-          if (!plan.work.some((work) => work.threadId === id && !work.archived)) await background.killThread(id);
-        return archived;
+        const view = await jobs.snapshot(openedHarness);
+        return { ...view, jobs: view.jobs.map((job) => (job.status === "running" ? { ...job, ...holdsOf(job.id) } : job)) };
       },
-      prioritizeWorker: async (workId, priority) => {
-        await admitting(() => planning.prioritizeWorker(root, workId, priority));
-        return { workId, priority };
-      },
-      workerSnapshot: async (options) => {
+      spawn: (chat, args) => admitting(() => jobs.spawn(root, (chat ?? root.id) as Conversation["id"], args)),
+      stopJob: async (id, reason) => {
         assertOpen();
-        const snapshot = await planning.workerSnapshot(root, options);
-        return { ...snapshot, threads: snapshot.threads.map((thread) => ({ ...thread, ...holdsOf(thread.threadId) })) };
+        const text = await jobs.stop(openedHarness, id, reason);
+        await releaseIdleLeases(new Set([id]));
+        if (!closed) await cleanup().catch((error) => report(input.onReport, project.id, error));
+        return text;
       },
-      workResult: (args) => {
+      steerJob: (id, text, options = {}) => admitting(() => jobs.steer(openedHarness, id, text, options.followUp)),
+      approveJob: async (id) => {
         assertOpen();
-        return planning.workResult(root, args);
+        return jobs.approve(openedHarness, id);
       },
       workerDiff: async (threadId, base, page) => {
         assertOpen();
-        return workerChanges(await planning.workerRoot(root, threadId), base, page);
+        return workerChanges(await agentCwd(threadId), base, page);
       },
       workerRead: async (threadId, options) => {
         assertOpen();
-        const owned = (await planning.threadIdentities(root)).find((thread) => thread.threadId === threadId);
-        if (!owned) throw new Error("Unknown durable thread UUID");
-        const page = await threadHistory(openedHarness, { kind: "thread", threadId, conversationId: owned.conversationId }, options ?? {});
-        const child = await openedHarness.conversation(owned.conversationId, context);
+        const conversationId = await agentConversation(threadId);
+        const page = await threadHistory(openedHarness, { kind: "thread", threadId, conversationId }, options ?? {});
+        const child = await openedHarness.conversation(conversationId, context);
         if (!child) throw new Error("Owned durable worker conversation is missing");
         const generations = await coordinatorGenerationTasks(openedStorage, child, await openedHarness.inspect(context));
         return {
@@ -1857,32 +1636,27 @@ export async function openDurableProject(input: {
           generations: generations.slice(-10).map(({ phase, state, terminal, outcome }) => ({ phase, state, terminal, outcome })),
         };
       },
-      pausePlan: async () => {
+      pause: async () => {
         monitors.abort();
         follow.abort();
-        operations.abort();
         commands.abort();
-        const paused = await schedules.mutex.run(async () => {
+        await schedules.mutex.run(async () => {
           dispatchReady = false;
-          const value = await planning.pause(root);
-          await input.afterPausePersisted?.({
-            paused: value.snapshot.paused,
-            pausing: value.snapshot.pausing,
-            rootConversationId: Number(root.id),
-          });
-          return value;
+          await jobs.pause(openedHarness);
         });
-        await Promise.all(paused.taskIds.map((id) => openedHarness.abortTask(id, context)));
-        await Promise.all(
-          paused.conversationIds.map(async (id) => (await openedHarness.conversation(id, context))?.abort(context, { background: true })),
-        );
         await (await openedHarness.conversation(root.id, context))?.abort(context, { background: true });
         await abortChats(openedHarness);
-        await cancelLegacyWorkers(openedHarness, openedStorage, root);
-        await planning.completePause(root);
         await schedules.reconcile();
-        return planning.snapshot(root);
+        return { paused: true };
       },
+      resume: async () =>
+        schedules.mutex.run(async () => {
+          await jobs.resume(openedHarness);
+          dispatchReady = true;
+          await armWake();
+          await follow.resumed();
+          return { paused: false };
+        }),
       scheduleCreate: (input) => schedules.create(input),
       scheduleSetEnabled: async (id, enabled) => {
         const value = await schedules.setEnabled(id, enabled);
@@ -1948,42 +1722,15 @@ export async function openDurableProject(input: {
         assertOpen();
         return fn(root);
       },
-      watchdogSnapshot: () => {
-        assertOpen();
-        return watchdog.snapshot();
-      },
-      watchdogKick: () => watchdog.tick(),
       ingestAutomationEvent: async (value) => {
         assertOpen();
         return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true });
-      },
-      resumePlan: async () =>
-        schedules.mutex.run(async () => {
-          try {
-            const value = await planning.resume(root);
-            dispatchReady = true;
-            await armWake();
-            await follow.resumed();
-            return value;
-          } catch (error) {
-            dispatchReady = false;
-            throw error;
-          }
-        }),
-      planSnapshot: async () => {
-        const plan = await planning.snapshot(root);
-        return { ...plan, work: plan.work.map((work) => (work.status === "running" ? { ...work, ...holdsOf(work.threadId) } : work)) };
       },
       worktrees: () => worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir }),
       cleanupWorktrees: () => cleanup(),
       applyContext: (value) => {
         contextSettings = value;
       },
-      applyWorkerCap: (cap) =>
-        schedules.mutex.run(async () => {
-          assertOpen();
-          await planning.setWorkerCap(root, cap);
-        }),
       applyModels: async (selection) =>
         schedules.mutex.run(async () => {
           assertOpen();
@@ -2071,23 +1818,29 @@ export async function openDurableProject(input: {
       operationDecide: approvals.decide,
       operationSnapshot: approvals.snapshot,
       usageSnapshot: async (options = {}) => {
-        const legacy = await openedHarness.snapshot(Workers, root.id, context);
-        const aliases = Object.entries(legacy?.agents ?? {}).map(([name, worker]) => ({ name, conversationId: worker.conversationId }));
-        const plan = await planning.snapshot(root);
+        const view = await jobs.snapshot(openedHarness);
+        // A subagent's conversation costs tokens too: counted as its own thread.
+        const subagents = view.jobs.flatMap((job) =>
+          job.children.map((child) => ({ threadId: `${job.id}/${child.id}`, conversationId: child.id })),
+        );
         return durableUsageSnapshot(
           openedHarness,
           root,
-          await planning.threadIdentities(root),
+          [...(await threadIdentities()), ...subagents],
           options,
-          aliases,
-          plan.work,
+          [],
+          view.agents.map((agent) => ({ threadId: agent.id, role: agent.role, text: agent.title })),
           await chatList(),
         );
       },
-      operationExecute: async (value) =>
-        (await approvals.approved(value)).operation.kind === "vcs" ? vcsRuntime.execute(value) : operations.execute(value),
-      operationInspect: async (value) =>
-        (await approvals.approved(value)).operation.kind === "vcs" ? vcsRuntime.inspect(value) : operations.inspect(value),
+      operationExecute: async (value) => {
+        await approvedVcs(value);
+        return vcsRuntime.execute(value);
+      },
+      operationInspect: async (value) => {
+        await approvedVcs(value);
+        return vcsRuntime.inspect(value);
+      },
       commandIntentsSnapshot: (options) => commandIntentsSnapshot(root, options),
       commandIntentInspect: (key, confirm) => {
         if (closed) throw new Error("Project runtime is closing");
@@ -2109,7 +1862,7 @@ export async function openDurableProject(input: {
           selected.chat.id,
           await chatList(),
           project,
-          await planning.threadIdentities(root),
+          await threadIdentities(),
           {
             window: models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null,
             catalogWindow: catalogWindow(),
@@ -2118,7 +1871,7 @@ export async function openDurableProject(input: {
       },
       workerContexts: async (threadIds) => {
         assertOpen();
-        const owned = await planning.threadIdentities(root);
+        const owned = await threadIdentities();
         return Object.fromEntries(
           await Promise.all(
             threadIds.map(async (id) => {
@@ -2139,7 +1892,7 @@ export async function openDurableProject(input: {
       },
       threadHistory: async (id, options = {}) => {
         assertOpen();
-        const owned = (await planning.threadIdentities(root)).find((thread) => thread.threadId === id);
+        const owned = (await threadIdentities()).find((thread) => thread.threadId === id);
         if (!owned) throw new Error("Unknown durable thread UUID");
         return threadHistory(
           openedHarness,
@@ -2147,13 +1900,6 @@ export async function openDurableProject(input: {
           options,
           options.context ? (model) => catalogModel(model.provider, model.modelId)?.contextWindow ?? null : undefined,
         );
-      },
-      legacyThreadHistory: async (name, options = {}) => {
-        assertOpen();
-        const retained = await openedHarness.snapshot(Workers, root.id, context);
-        const owned = retained?.agents && Object.hasOwn(retained.agents, name) ? retained.agents[name] : undefined;
-        if (!owned || owned.conversationId === root.id) throw new Error("Unknown retained legacy worker name");
-        return threadHistory(openedHarness, { kind: "legacy", name, conversationId: owned.conversationId }, options);
       },
       watchLive: async (onFrame, onEnd, id) => {
         assertOpen();
@@ -2501,19 +2247,18 @@ async function snapshot(
   chatIdValue: string,
   chats: DurableChat[],
   project: Project,
-  threads: readonly { threadId: string; conversationId: Conversation["id"] }[],
+  threads: readonly { threadId: string; conversationId: Conversation["id"]; reported: readonly unknown[] }[],
   windows: { window: number | null; catalogWindow: number | null },
 ): Promise<DurableProjectSnapshot> {
   const identity = await harness.snapshot(DurableProjectIdentity, root.id, context);
   if (!identity?.projectId || identity.coordinatorConversationId === null) throw new Error("Durable project identity is missing");
-  const workerState = await harness.snapshot(Workers, root.id, context);
   const view = await chat.viewState(context);
   try {
     const inspection = await harness.inspect(context);
     const admitted = await harness.snapshot(AdmittedInputs, chat.id, context);
     const ids = await coordinatorInputSubmissionIds(storage, chat, inspection, admitted?.ids ?? []);
     const submissions = await Promise.all(ids.map((id) => projectSubmission(harness, chat, id)));
-    const messages = omitIdleWatchdogTurns<DurableCoordinatorMessage>(await chatTranscript(storage, chat, view.value.entries));
+    const messages = await chatTranscript(storage, chat, view.value.entries);
     const generationTasks = await coordinatorGenerationTasks(storage, chat, inspection);
     const workers = await Promise.all(
       threads.map(async (thread) => {
@@ -2546,9 +2291,7 @@ async function snapshot(
       identities: {
         projectId: identity.projectId,
         coordinatorConversationId: identity.coordinatorConversationId,
-        workers: Object.fromEntries(
-          Object.entries(workerState?.agents ?? {}).map(([name, worker]) => [name, Number(worker.conversationId)]),
-        ),
+        workers: Object.fromEntries(threads.map((thread) => [thread.threadId, Number(thread.conversationId)])),
       },
       chatId: chatIdValue,
       chats,
@@ -2563,9 +2306,9 @@ async function snapshot(
         },
       },
       workers: Object.fromEntries(
-        Object.entries(workerState?.agents ?? {}).map(([name, worker]) => [
-          name,
-          { conversationId: Number(worker.conversationId), reportedAnswerIds: worker.reported.map(Number) },
+        threads.map((thread) => [
+          thread.threadId,
+          { conversationId: Number(thread.conversationId), reportedAnswerIds: thread.reported.map(Number) },
         ]),
       ),
     };
@@ -2670,51 +2413,6 @@ async function threadHistory(
   } finally {
     view.dispose();
   }
-}
-
-async function legacyRecoveryState(harness: Harness, storage: Storage, root: Conversation) {
-  const state = await harness.snapshot(Workers, root.id, context);
-  const conversationIds = [...new Set(Object.values(state?.agents ?? {}).map((worker) => worker.conversationId))];
-  if (conversationIds.includes(root.id)) throw new Error("Legacy worker registry identifies the coordinator as a worker");
-  const registered = new Set(Object.values(state?.reporters ?? {}));
-  const reporterTaskIds: Array<Awaited<ReturnType<Storage["scanTasks"]>>["items"][number]["id"]> = [];
-  let cursor: Awaited<ReturnType<Storage["scanTasks"]>>["next"] | undefined;
-  do {
-    context.abortSignal?.throwIfAborted();
-    const page = await storage.scanTasks({ conversationId: root.id, kind: "projects.worker-reporter" }, 100, cursor, context);
-    for (const task of page.items) {
-      if (task.state.status === "terminal") continue;
-      if (!registered.has(task.id)) throw new Error("Legacy worker reporter is missing its retained registry entry");
-      reporterTaskIds.push(task.id);
-    }
-    cursor = page.next;
-  } while (cursor !== undefined);
-  return { conversationIds, reporterTaskIds };
-}
-
-async function cancelLegacyWorkers(harness: Harness, storage: Storage, root: Conversation): Promise<void> {
-  const legacy = await legacyRecoveryState(harness, storage, root);
-  await Promise.all(legacy.reporterTaskIds.map((id) => harness.abortTask(id, context)));
-  await Promise.all(
-    legacy.conversationIds.map(async (id) => {
-      const child = await harness.conversation(id, context);
-      if (!child) throw new Error("Retained legacy worker conversation is missing");
-      await child.abort(context, { background: true });
-    }),
-  );
-}
-
-async function hasPendingInputs(storage: Storage, conversationIds: readonly Conversation["id"][]): Promise<boolean> {
-  for (const conversationId of conversationIds) {
-    let cursor: Awaited<ReturnType<Storage["scanSubmissions"]>>["next"] | undefined;
-    do {
-      if (context.abortSignal?.aborted) throw new Error("Durable recovery inspection cancelled");
-      const page = await storage.scanSubmissions({ conversationId }, 100, cursor, context);
-      if (page.items.some((record) => record.type === "input" && (record.status === "queued" || record.status === "placed"))) return true;
-      cursor = page.next;
-    } while (cursor !== undefined);
-  }
-  return false;
 }
 
 async function coordinatorInputSubmissionIds(
@@ -3096,8 +2794,7 @@ ${repositoryStanding}
 `
     : ""
 }${rolePrompt(project, "verifier")}
-${SHARED_ROLE_RULES}
-${VERIFIER_RULES}`;
+${SHARED_ROLE_RULES}`;
 }
 const workRules = () =>
   `${plugins

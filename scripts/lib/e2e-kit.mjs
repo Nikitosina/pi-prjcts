@@ -11,7 +11,27 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+// Old scripts delegate with `projects_delegate {role, task}`; the coordinator now has the `agents` tool.
+const modern = (name, args) =>
+  name === "projects_delegate"
+    ? [
+        "agents",
+        {
+          action: "spawn",
+          role: args.role ?? "worker",
+          brief: args.task,
+          title: args.title ?? String(args.task).slice(0, 40),
+          ...(args.role && args.role !== "worker" ? {} : { acceptance: args.acceptance ?? ["done"] }),
+          requestId: args.requestId ?? randomUUID(),
+          ...(args.branch ? { branch: args.branch } : {}),
+          ...(args.workspaceScopeId ? { scopeId: args.workspaceScopeId } : {}),
+        },
+      ]
+    : name === "projects_delegate_child"
+      ? ["subagent", { role: args.role === "worker" ? "verifier" : args.role, task: args.task }]
+      : [name, args];
 export const call = (name, args) =>
+  ([name, args] = modern(name, args)) &&
   chunk(
     {
       role: "assistant",
@@ -19,8 +39,8 @@ export const call = (name, args) =>
     },
     null,
   ) +
-  chunk({}, "tool_calls") +
-  "data: [DONE]\n\n";
+    chunk({}, "tool_calls") +
+    "data: [DONE]\n\n";
 export const say = (value) => chunk({ role: "assistant", content: value }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
 const contentText = (content) =>
   typeof content === "string"
@@ -94,15 +114,19 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       const input = JSON.parse(body),
         msgs = input.messages,
         tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-      const role = tools.includes("projects_delegate")
+      const role = tools.includes("agents")
         ? "coordinator"
         : tools.includes("projects_review_verdict")
           ? "reviewer"
-          : tools.includes("code_read")
-            ? "scout"
-            : tools.includes("bash")
+          : tools.includes("projects_verify_run")
+            ? "verifier"
+            : tools.includes("job")
               ? "worker"
-              : "other";
+              : tools.includes("code_read")
+                ? "scout"
+                : tools.includes("bash")
+                  ? "worker"
+                  : "other";
       const lastUser = msgs.findLastIndex((m) => m.role === "user"),
         user = contentText(msgs[lastUser]?.content);
       const results = msgs
@@ -251,7 +275,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
   };
 
   // Project helpers.
-  kit.createProject = async (title, { workerCap = 3, grant = true, cwd = dirs.workspace } = {}) => {
+  kit.createProject = async (title, { grant = true, cwd = dirs.workspace } = {}) => {
     const project = await kit.rpc({
       action: "create",
       requestId: randomUUID(),
@@ -267,7 +291,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       id,
       confirm: id,
       expectedRevision: settings.revision,
-      changes: { workerCap, models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
+      changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
     });
     if (grant) {
       const first = await kit.rpc({ action: "owner-setup-snapshot", id });
@@ -275,12 +299,12 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     }
     return id;
   };
-  kit.plan = async (id) => (await kit.rpc({ action: "plan-snapshot", id })).work;
+  kit.jobs = async (id) => (await kit.rpc({ action: "jobs-snapshot", id })).jobs;
   kit.settle = (id) =>
     kit.eventually(
       async () => {
         const view = await kit.rpc({ action: "show", id });
-        return !view.chats.some((c) => c.busy) && !(await kit.plan(id)).some((w) => ["queued", "running"].includes(w.status));
+        return !view.chats.some((c) => c.busy) && !(await kit.jobs(id)).some((job) => job.status === "running");
       },
       "project did not go idle",
       1200,

@@ -18,7 +18,7 @@ import { Type } from "typebox";
 import { parse, loadProject, type Project, type GithubAuthorization } from "./state.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
 import { checkoutRepository, githubCli, githubRead, safeGithubError } from "./github-authorization.ts";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { createGithubInspection } from "./github-inspection.ts";
 import { readGithubBaseFile } from "./github-base-file.ts";
 import { localPublicationSnapshot, wholeRepositorySnapshot } from "./github-local-publication.ts";
@@ -441,18 +441,13 @@ export async function githubWorkerTools(input: {
     if ((await checkoutRepository(input.authority.workspaceRoot, context.abortSignal)) !== publication.repositoryId)
       throw new Error("Allocated checkout does not match GitHub publication target");
     await api.commit(async (tx) => {
-      const plan = await tx.doc(DurablePlanning, root.id);
+      const state = await tx.doc(Jobs, root.id),
+        job = state.jobs[input.workId];
       if (
-        plan.paused ||
-        plan.pausing ||
-        !Object.values(plan.work).some(
-          (item) =>
-            item.status === "running" &&
-            item.id === input.workId &&
-            item.workspaceScopeId === input.scopeId &&
-            plan.threads[item.threadId]?.activeWorkId === item.id &&
-            Number(item.conversationId) === Number(api.conversationId),
-        )
+        state.paused ||
+        job?.status !== "running" ||
+        job.scopeId !== input.scopeId ||
+        Number(job.workerConversation) !== Number(api.conversationId)
       )
         throw new Error("GitHub publication requires active unpaused worker work");
     }, context);
@@ -559,8 +554,8 @@ export async function githubWorkerTools(input: {
       }),
     );
     return api.commit(async (tx) => {
-      const plan = await tx.doc(DurablePlanning, root.id),
-        work = plan.work[input.workId];
+      const plan = await tx.doc(Jobs, root.id),
+        work = plan.jobs[input.workId];
       const current = loadProject(input.project.id);
       if (
         input.isClosed?.() ||
@@ -570,13 +565,10 @@ export async function githubWorkerTools(input: {
           JSON.stringify(publication) ||
         publication.workspaceRevision !== authorizationFingerprint(current) ||
         plan.paused ||
-        plan.pausing ||
         !work ||
         work.status !== "running" ||
-        work.role !== "worker" ||
-        work.workspaceScopeId !== input.scopeId ||
-        Number(work.conversationId) !== input.conversationId ||
-        plan.threads[work.threadId]?.activeWorkId !== work.id
+        work.scopeId !== input.scopeId ||
+        Number(work.workerConversation) !== input.conversationId
       )
         throw new Error("Local publication authority changed before receipt admission");
       if (await hasUncertainCommands(tx, root.id, commandResource(input.authority)))

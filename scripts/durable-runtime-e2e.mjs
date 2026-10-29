@@ -63,15 +63,21 @@ async function until(predicate, timeout = 180000) {
   }
   throw new Error("Timed out waiting for runtime state");
 }
-async function untilPlan(predicate, timeout = 180000) {
+async function spawnWorker(text, requestId) {
+  const spawned = await runtime.spawn(undefined, { role: "worker", title: "Probe", acceptance: ["Done"], brief: text, requestId });
+  assert.ok(spawned.id, spawned.text);
+  return spawned.id;
+}
+async function untilSettled(jobId, timeout = 180000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const view = await runtime.planSnapshot();
-    writeFileSync(join(base, "latest-plan.json"), JSON.stringify(view, null, 2));
-    if (predicate(view)) return view;
+    const view = await runtime.jobs();
+    writeFileSync(join(base, "latest-jobs.json"), JSON.stringify(view, null, 2));
+    const job = view.jobs.find((item) => item.id === jobId);
+    if (job && job.status !== "running") return job;
     await sleep(500);
   }
-  throw new Error("Timed out waiting for durable plan state");
+  throw new Error("Timed out waiting for the Job to settle");
 }
 let secretForWorkerContext;
 try {
@@ -101,37 +107,22 @@ try {
   const secret = `TOPIC_${randomUUID()}`;
   secretForWorkerContext = secret;
   await writeKnowledge({ dir, path: "research/proof.md", text: secret, expectedRevision: null, author: "owner" });
-  const workerId = randomUUID(),
-    workerThreadId = randomUUID();
-  await runtime.plan({
-    work: [
-      {
-        id: workerId,
-        threadId: workerThreadId,
-        role: "worker",
-        text: 'Read research/proof.md using projects_knowledge_read and report its exact text. Do not mutate anything. FAKE-CALL projects_knowledge_read {"path":"research/proof.md"}',
-      },
-    ],
-  });
-  const done = await untilPlan((view) => view.work.some((work) => work.id === workerId && work.status === "completed"));
-  assert.equal(done.work.find((work) => work.id === workerId)?.threadId, workerThreadId);
+  const workerId = await spawnWorker(
+    'Read research/proof.md using projects_knowledge_read and report its exact text. Do not mutate anything. FAKE-CALL projects_knowledge_read {"path":"research/proof.md"}',
+    "knowledge-worker",
+  );
+  await untilSettled(workerId);
   assert.ok(workerContextSawSecret, "worker tool result was not present in a subsequent actual model request");
-  pass("UUID worker reads topic on demand and receives its tool result in context");
+  pass("Worker reads topic on demand and receives its tool result in context");
   await runtime.say('Record a note. FAKE-CALL projects_note {"text":"COORDINATOR_NOTE"} FAKE-SAY noted', { requestId: "coordinator-note" });
   assert.ok(notes(dir).some((note) => note.text === "COORDINATOR_NOTE"));
   pass("Coordinator may record notes");
-  const deniedId = randomUUID();
-  await runtime.plan({
-    work: [
-      {
-        id: deniedId,
-        threadId: randomUUID(),
-        role: "worker",
-        text: 'Attempt projects_note once, observe the denial, do not retry. FAKE-CALL projects_note {"text":"FORBIDDEN_NOTE"} FAKE-SAY denied',
-      },
-    ],
-  });
-  await untilPlan((view) => view.work.some((work) => work.id === deniedId && ["completed", "failed"].includes(work.status)));
+  await untilSettled(
+    await spawnWorker(
+      'Attempt projects_note once, observe the denial, do not retry. FAKE-CALL projects_note {"text":"FORBIDDEN_NOTE"} FAKE-SAY denied',
+      "denied-worker",
+    ),
+  );
   assert.ok(!notes(dir).some((note) => note.text === "FORBIDDEN_NOTE"));
   pass("Read-only worker note mutation denied");
   const memory = await readKnowledge(dir, "MEMORY.md");

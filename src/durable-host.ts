@@ -18,7 +18,7 @@ export async function openDurableHost(
 ): Promise<DurableProjectRuntime> {
   const owner = await openDurableProject({ project, dir: projectDir(project.id), configuredSkillLoader, discoverSkills });
   try {
-    if ((await owner.planSnapshot()).paused) return owner;
+    if ((await owner.jobs()).paused) return owner;
     for (const job of jobs(project.id).filter((job) => job.state === "queued" || job.state === "running")) {
       await owner.admit(attachmentContent(projectDir(project.id), job.text, job.attachments, owner.acceptsImages), {
         requestId: job.id,
@@ -84,18 +84,18 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
     if (ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed") needs = true;
     for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
   }
-  const work = (await owner.planSnapshot()).work.filter((item) => !item.archived);
-  for (const item of work) if (item.status === "completed") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
+  const work = (await owner.jobs()).jobs;
+  for (const item of work) if (item.status !== "running") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
   return {
-    working: chats.some((chat) => chat.busy) || work.some((item) => item.status === "running" || item.status === "queued"),
-    needs: needs || work.some((item) => item.status === "blocked"),
+    working: chats.some((chat) => chat.busy) || work.some((item) => item.status === "running"),
+    needs: needs || work.some((item) => item.status === "ready" || item.status === "ready-with-gaps"),
     finishedAt,
   };
 }
 
 export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string, focus?: number, from?: number): Promise<Snapshot> {
   const view = await owner.snapshot(chatId);
-  const paused = (await owner.planSnapshot()).paused;
+  const paused = (await owner.jobs()).paused;
   const project = loadProject(view.project.id);
   // Each chat has its own ledger; jobs without a chat belong to Main. Unsettled jobs of other chats are settled too, so attention covers every chat.
   const all = jobs(project.id),

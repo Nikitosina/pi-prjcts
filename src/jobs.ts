@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import {
+  AgentDoc,
   AssistantEntry,
   configure,
   defineDoc,
@@ -119,6 +120,11 @@ const uuidOf = (seed: string): string => {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 };
 const minutes = (ms: number) => (ms < 90_000 ? `${Math.max(0, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`);
+/** Ids of agents still working or waiting on an answer; their worktrees, leases and processes are in use. */
+export const liveAgentIds = (doc: Readonly<JobsState>, readOnly?: boolean): string[] =>
+  Object.values(doc.agents)
+    .filter((agent) => agent.endedAt === null && (readOnly === undefined || (agent.role !== "worker") === readOnly))
+    .map((agent) => agent.id);
 const isLive = (status: JobStatus) => status === "running";
 
 /** Remaining estimated minutes, scaled by how accurate this plan's finished estimates were. */
@@ -160,7 +166,14 @@ export function readyText(job: Job, answer: string): string {
 /** What the host supplies; everything project-specific (models, tools, prompts, workspaces, processes) lives behind it. */
 export type JobsHost = {
   /** Agent setup of a new conversation: model, instructions, tools. Applied before the Jobs tools are added. */
-  agentChange(spec: { role: AgentRole; id: string; title: string; jobId: string | null; parent: ConversationId }): AgentChange;
+  agentChange(spec: {
+    role: AgentRole;
+    id: string;
+    title: string;
+    jobId: string | null;
+    parent: ConversationId;
+    cwd?: string;
+  }): AgentChange;
   /**
    * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
    * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
@@ -169,11 +182,9 @@ export type JobsHost = {
   /** Stops the background processes and releases the leases of these conversations. */
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
-  backgroundSilence?(conversationIds: readonly ConversationId[]): number | null;
+  backgroundSilence?(conversationIds: readonly ConversationId[]): Promise<number | null> | number | null;
   /** The owner-configured quota fallback model for a role, if any. */
   fallbackModel?(role: AgentRole): { label: string; change: AgentChange } | null;
-  /** The label of the model an agent runs on now. */
-  modelLabel?(change: AgentChange | undefined): string;
   /** Cached provider reset time for a model label, if known. */
   quotaResetAt?(model: string, now: number): number | undefined;
   /** Why these proof references cannot back a Ready report, or null. */
@@ -183,6 +194,8 @@ export type JobsHost = {
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
   quotaRetryBaseMs?: number;
+  /** Workspace scope a worker runs in when its spawn names none. */
+  defaultScope?(): string | undefined;
   now?: () => number;
 };
 
@@ -258,6 +271,9 @@ const reporterTask = (host: JobsHost) =>
       deliver: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId, message, followUp } = reporter.input;
         const attempt = reporter.state.checkpoint.attempt;
+        // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
+        const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
+        if (waiting && waiting.retryAt > runtime.now()) await runtime.sleep(waiting.retryAt, taskContext);
         const agent = (await runtime.conversation(conversationId, taskContext))!;
         const submission = await agent.submit(
           { type: "input", content: message, whenBusy: followUp ? "followUp" : "steer", requestId: `agent:${reporter.id}:${attempt}` },
@@ -272,13 +288,14 @@ const reporterTask = (host: JobsHost) =>
           const previous = record?.quota?.attempts ?? 0;
           if (record && (switched || previous < QUOTA_RETRY_LIMIT)) {
             const now = runtime.now();
+            const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
+            const from = current ? `${current.provider}/${current.modelId}` : "";
             const stored = record.quota && record.quota.attempts === previous ? record.quota : null;
             const retryAt = switched
               ? now
               : (stored?.retryAt ??
-                host.quotaResetAt?.(record.modelMoves.at(-1)?.to ?? "", now) ??
+                host.quotaResetAt?.(from, now) ??
                 now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
-            const from = host.modelLabel?.(undefined) ?? "";
             await runtime.commit(async (tx) => {
               const doc = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
               if (!doc) return undefined;
@@ -289,7 +306,6 @@ const reporterTask = (host: JobsHost) =>
               }
               return { status: "running", checkpoint: { phase: "deliver", attempt: attempt + 1 } } as const;
             }, taskContext);
-            if (!switched && retryAt > now) await runtime.sleep(retryAt, taskContext);
             return;
           }
         }
@@ -357,6 +373,17 @@ export type JobsSnapshot = {
   agents: (Agent & { working: boolean })[];
 };
 
+export type SpawnArgs = {
+  role: Exclude<AgentRole, "verifier">;
+  brief: string;
+  title?: string;
+  acceptance?: string[];
+  branch?: string;
+  scopeId?: string;
+  readRef?: string;
+  requestId?: string;
+};
+
 export function createJobs(host: JobsHost) {
   const Reporter = reporterTask(host);
   const clock = () => host.now?.() ?? Date.now();
@@ -393,6 +420,84 @@ export function createJobs(host: JobsHost) {
 
   // ── Tools ──────────────────────────────────────────────────────────────────
   let Worker: Extension;
+
+  /** Start a worker, scout or reviewer for `chat`. The agent's id comes from `seed`, so a repeated spawn with the same seed starts one agent. */
+  async function spawn(
+    session: Pick<Session, "commit">,
+    chat: ConversationId,
+    args: SpawnArgs,
+    seed: string,
+    spawnContext: typeof context,
+  ): Promise<{ text: string; id?: string; conversationId?: ConversationId }> {
+    const { role } = args;
+    if (!args.brief.trim()) return { text: "spawn needs a role and a brief." };
+    if (role === "worker" && (!args.title?.trim() || !args.acceptance?.length))
+      return { text: "A worker needs a title and acceptance criteria." };
+    const requestId = args.requestId?.trim();
+    return session.commit(async (tx) => {
+      const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      if (requestId && doc.requests[requestId])
+        return { text: `Already started as ${doc.requests[requestId]}.`, id: doc.requests[requestId] };
+      if (doc.paused) return { text: "The project is paused; spawn again after it resumes." };
+      const agentId = uuidOf(seed);
+      const title = args.title?.trim() || clip(args.brief, 80);
+      const background = { ownership: { kind: "conversation" }, background: true } as const;
+      const anchor = await tx.createTask(Anchor, null, background);
+      const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
+      await configure(
+        tx,
+        child.id,
+        host.agentChange({ role, id: agentId, title, jobId: role === "worker" ? agentId : null, parent: chat }),
+      );
+      await configure(tx, child.id, { extensions: { remove: [Coordinator], add: role === "worker" ? [Worker] : [] } });
+      const now = clock();
+      doc.agents[agentId] = {
+        id: agentId,
+        role,
+        conversationId: child.id,
+        chat: chat,
+        jobId: role === "worker" ? agentId : null,
+        title,
+        createdAt: now,
+        endedAt: null,
+        reported: [],
+        scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
+        readRef: args.readRef?.trim() || null,
+        prepared: false,
+        quota: null,
+        modelMoves: [],
+      };
+      if (role === "worker")
+        doc.jobs[agentId] = {
+          id: agentId,
+          chat: chat,
+          title,
+          request: args.brief,
+          acceptance: args.acceptance!,
+          status: "running",
+          workerConversation: child.id,
+          scopeId: doc.agents[agentId]!.scopeId,
+          children: [],
+          branch: args.branch?.trim() || null,
+          pr: null,
+          candidate: null,
+          plan: [],
+          ready: null,
+          reason: null,
+          createdAt: now,
+          endedAt: null,
+          stalls: 0,
+          stalledAt: null,
+        };
+      if (requestId) doc.requests[requestId] = agentId;
+      const message =
+        role === "worker"
+          ? `Job ${agentId}: ${title}\n\n${args.brief}${acceptanceText(args.acceptance!)}${args.branch ? `\n\nContinue branch ${args.branch}.` : ""}`
+          : args.brief;
+      await tx.createTask(Reporter, { agentId, conversationId: child.id, chat: chat, message, followUp: false, prepare: true }, background);
+      return { text: `Started ${role} ${agentId}.`, id: agentId, conversationId: child.id };
+    }, spawnContext);
+  }
 
   const agentsTool = defineTool({
     name: "agents",
@@ -459,78 +564,14 @@ export function createJobs(host: JobsHost) {
         return reply(await sendTo(api, agent!.id, args.message, args.followUp === true));
       }
       // spawn
-      const role = args.role;
-      if (!role || !args.brief?.trim()) return reply("spawn needs a role and a brief.");
-      if (role === "worker" && (!args.title?.trim() || !args.acceptance?.length))
-        return reply("A worker needs a title and acceptance criteria.");
-      const requestId = args.requestId?.trim();
-      const result = await api.commit(async (tx) => {
-        const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
-        if (requestId && doc.requests[requestId])
-          return { text: `Already started as ${doc.requests[requestId]}.`, id: doc.requests[requestId] };
-        if (doc.paused) return { text: "The project is paused; spawn again after it resumes." };
-        const agentId = uuidOf(`${api.taskId}:spawn`);
-        const title = args.title?.trim() || clip(args.brief!, 80);
-        const background = { ownership: { kind: "conversation" }, background: true } as const;
-        const anchor = await tx.createTask(Anchor, null, background);
-        const child = await tx.createConversation({ ownership: { kind: "task", taskId: anchor } });
-        await configure(
-          tx,
-          child.id,
-          host.agentChange({ role, id: agentId, title, jobId: role === "worker" ? agentId : null, parent: api.conversationId }),
-        );
-        await configure(tx, child.id, { extensions: { remove: [Coordinator], add: role === "worker" ? [Worker] : [] } });
-        const now = clock();
-        doc.agents[agentId] = {
-          id: agentId,
-          role,
-          conversationId: child.id,
-          chat: api.conversationId,
-          jobId: role === "worker" ? agentId : null,
-          title,
-          createdAt: now,
-          endedAt: null,
-          reported: [],
-          scopeId: args.scopeId?.trim() || null,
-          readRef: args.readRef?.trim() || null,
-          prepared: false,
-          quota: null,
-          modelMoves: [],
-        };
-        if (role === "worker")
-          doc.jobs[agentId] = {
-            id: agentId,
-            chat: api.conversationId,
-            title,
-            request: args.brief!,
-            acceptance: args.acceptance!,
-            status: "running",
-            workerConversation: child.id,
-            scopeId: args.scopeId?.trim() || null,
-            children: [],
-            branch: args.branch?.trim() || null,
-            pr: null,
-            candidate: null,
-            plan: [],
-            ready: null,
-            reason: null,
-            createdAt: now,
-            endedAt: null,
-            stalls: 0,
-            stalledAt: null,
-          };
-        if (requestId) doc.requests[requestId] = agentId;
-        const message =
-          role === "worker"
-            ? `Job ${agentId}: ${title}\n\n${args.brief}${acceptanceText(args.acceptance!)}${args.branch ? `\n\nContinue branch ${args.branch}.` : ""}`
-            : args.brief!;
-        await tx.createTask(
-          Reporter,
-          { agentId, conversationId: child.id, chat: api.conversationId, message, followUp: false, prepare: true },
-          background,
-        );
-        return { text: `Started ${role} ${agentId}.`, id: agentId, conversationId: child.id };
-      }, callContext);
+      if (!args.role) return reply("spawn needs a role and a brief.");
+      const result = await spawn(
+        api,
+        api.conversationId,
+        { ...args, role: args.role, brief: args.brief ?? "" },
+        `${api.taskId}:spawn`,
+        callContext,
+      );
       return reply(result.text, result.id && result.conversationId ? { id: result.id, conversationId: result.conversationId } : undefined);
     },
   });
@@ -636,6 +677,7 @@ export function createJobs(host: JobsHost) {
     }),
     replay: "safe",
     execute: async (args, api, callContext) => {
+      const cwd = (await api.agent(callContext)).cwd;
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
         if (existing) return existing.id;
@@ -648,7 +690,7 @@ export function createJobs(host: JobsHost) {
         await configure(
           tx,
           created.id,
-          host.agentChange({ role: args.role, id: String(created.id), title: args.role, jobId: job.id, parent: api.conversationId }),
+          host.agentChange({ role: args.role, id: String(created.id), title: args.role, jobId: job.id, parent: api.conversationId, cwd }),
         );
         await configure(tx, created.id, { extensions: { remove: [Worker, Coordinator] } });
         return created.id;
@@ -779,9 +821,7 @@ export function createJobs(host: JobsHost) {
       }),
     );
     const agents = await Promise.all(
-      Object.values(doc.agents)
-        .filter((agent) => !agent.jobId)
-        .map(async (agent) => ({ ...agent, working: await working(harness, agent.conversationId) })),
+      Object.values(doc.agents).map(async (agent) => ({ ...agent, working: await working(harness, agent.conversationId) })),
     );
     return { paused: doc.paused, jobs, agents };
   }
@@ -850,7 +890,7 @@ export function createJobs(host: JobsHost) {
       if (!isLive(job.status)) continue;
       const worker = job.workerConversation;
       const owned = [worker, ...(await descendants(harness, worker))];
-      const background = host.backgroundSilence?.(owned) ?? null;
+      const background = (await host.backgroundSilence?.(owned)) ?? null;
       const running = await working(harness, worker);
       if (!running && background === null) {
         seen.delete(worker);
@@ -905,6 +945,8 @@ export function createJobs(host: JobsHost) {
     doc: Jobs,
     coordinator: Coordinator,
     worker: Worker,
+    /** The tools each extension offers, for hosts that list an agent's tools explicitly. */
+    tools: { coordinator: [agentsTool], worker: [jobTool, subagentTool] },
     /** Install the extensions on a registry; reporters and anchors resume after a reopen once installed. */
     install(registry: { install(extension: Extension): void }) {
       registry.install(Coordinator);
@@ -928,6 +970,9 @@ export function createJobs(host: JobsHost) {
     pause,
     resume,
     recover,
+    /** Start an agent from the host (Follow PRs, schedules): same dedupe as the coordinator tool, keyed by `requestId`. */
+    spawn: (root: Pick<Session, "commit">, chat: ConversationId, args: SpawnArgs & { requestId: string }) =>
+      spawn(root, chat, args, `host:${args.requestId}`, context),
   };
 }
 export type JobsRuntime = ReturnType<typeof createJobs>;

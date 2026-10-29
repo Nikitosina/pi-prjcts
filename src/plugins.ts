@@ -258,13 +258,13 @@ const provides = (caps: PluginCapabilities) =>
   (Object.keys(caps) as Array<keyof PluginCapabilities>).filter((key) => caps[key] !== undefined);
 
 async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPluginApi> {
-  const { DurablePlanning } = await import("./durable-planning.ts");
+  const { Jobs } = await import("./jobs.ts");
   const stateDir = join(home(), "plugins", name);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   return {
     name,
     stateDir,
-    lib: { durable, typebox, value, chord, docs: { planning: DurablePlanning } },
+    lib: { durable, typebox, value, chord, docs: { jobs: Jobs } },
     provide(capabilities) {
       for (const key of Object.keys(capabilities) as Array<keyof PluginCapabilities>) {
         if (stage[key] !== undefined) throw new Error(`capability "${key}" was provided twice`);

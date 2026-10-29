@@ -1,3 +1,4 @@
+import type { JobProgress } from "./telegram.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
@@ -46,6 +47,8 @@ export function startNotifier(options: {
   owner: (project: Project) => Promise<DurableProjectRuntime> | null;
   tickMs: number;
   onNotice: () => void;
+  /** Each running Job's plan as it changes, for the per-Job progress message. */
+  progress?: (view: JobProgress) => void;
   report: (detail: string) => void;
 }) {
   const path = join(home(), "notifications.json");
@@ -53,6 +56,7 @@ export function startNotifier(options: {
     ? JSON.parse(readFileSync(path, "utf8"))
     : { version: 1, startedAt: Date.now(), seq: 0, feed: [], projects: {} };
   if (!existsSync(path)) saveJson(path, state);
+  const progressSeen = new Map<string, string>();
   let scanning: Promise<void> | null = null,
     closed = false;
   const push = (notice: Omit<Notice, "seq" | "at">) => {
@@ -94,12 +98,7 @@ export function startNotifier(options: {
       seen.add(key);
       if (silent) continue;
       const op = record.operation,
-        what =
-          op.kind === "vcs"
-            ? `${op.action} ${op.target}`
-            : op.kind === "command"
-              ? `command ${op.effect} in ${op.repositoryId}`
-              : `${op.kind} ${op.repositoryId} PR #${op.pullRequest} at ${op.expectedHead.slice(0, 7)}`;
+        what = op.kind === "vcs" ? `${op.action} ${op.target}` : `command ${op.effect} in ${op.repositoryId}`;
       const detail =
         op.kind === "vcs"
           ? `\nCheckout: ${op.checkout}\n${op.risks.join("\n")}\nReview the exact state and permit execution in the browser approval inbox.`
@@ -110,7 +109,7 @@ export function startNotifier(options: {
         chat: chats[0].title,
         kind: "approval",
         title: clip(`${op.provider} ${what}`, 300),
-        text: clip(`Approval needed: ${op.provider} ${what}. Approving records consent only; it does not execute.${detail}`),
+        text: clip(`Approval needed: ${op.provider} ${what}. Decide it in the browser approval inbox.${detail}`),
         operationId: record.id,
         fingerprint: record.fingerprint,
       });
@@ -134,34 +133,48 @@ export function startNotifier(options: {
     }
     // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
     const quietWork = silent || !entry.workBaselined;
-    const planWork = (await owner.planSnapshot()).work;
-    for (const work of planWork) {
-      if (work.status !== "failed") continue;
-      const key = `work:${work.id}`;
+    const jobs = (await owner.jobs()).jobs;
+    for (const job of jobs) {
+      if (job.status !== "running" || !job.plan.length) continue;
+      const view: JobProgress = {
+        projectId: project.id,
+        chatId: chatOf(Number(job.chat)).id,
+        jobId: job.id,
+        title: job.title,
+        steps: job.plan.map((step) => ({ title: step.title, status: step.status, estimateMin: step.estimateMin ?? 0 })),
+        etaMin: job.eta.etaMin,
+      };
+      const fingerprint = JSON.stringify(view);
+      if (progressSeen.get(job.id) === fingerprint) continue;
+      progressSeen.set(job.id, fingerprint);
+      options.progress?.(view);
+    }
+    for (const job of jobs) {
+      const failed = job.status === "failed";
+      const ready = job.status === "ready" || job.status === "ready-with-gaps";
+      if (!failed && !ready) continue;
+      const key = `${failed ? "work" : "ready"}:${job.id}:${job.endedAt ?? 0}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (quietWork) continue;
-      const chat = work.chatConversationId === null ? chats[0] : chatOf(work.chatConversationId);
-      const task = work.text.replace(/\s+/g, " ").trim();
+      const chat = chatOf(Number(job.chat));
+      const task = job.title.replace(/\s+/g, " ").trim();
       push({
         ...base,
         chatId: chat.id,
         chat: chat.title,
-        kind: "error",
-        title: `${work.parentThreadId ? "Sub-agent" : work.role[0].toUpperCase() + work.role.slice(1)} failed`,
-        text: clip(`${work.role} failed: ${task.length > 200 ? `${task.slice(0, 199)}…` : task}${work.blocker ? `\n${work.blocker}` : ""}`),
-        workId: work.id,
-        threadId: work.threadId,
+        kind: failed ? "error" : "result",
+        title: failed ? "Worker failed" : job.status === "ready" ? "Ready" : "Ready with gaps",
+        text: clip(failed ? `worker failed: ${task}${job.reason ? `\n${job.reason}` : ""}` : `${task}\n${job.ready?.summary ?? ""}`),
+        workId: job.id,
+        threadId: job.id,
+        ...(ready ? { jobId: job.id, mergeable: Boolean(job.pr && job.candidate) } : {}),
       });
     }
     entry.workBaselined = true;
     // A coordinator turn is a result only when nothing is still running in its chat and no work report follows it (a later report turn means
     // work was still running when it was written); batched submissions share one answer and notify once. Intermediate status lines stay quiet.
-    const working = new Set(
-      planWork
-        .filter((work) => work.status === "queued" || work.status === "running")
-        .map((work) => (work.chatConversationId === null ? chats[0].id : chatOf(work.chatConversationId).id)),
-    );
+    const working = new Set(jobs.filter((job) => job.status === "running").map((job) => chatOf(Number(job.chat)).id));
     for (const chat of chats) {
       const after = entry.chats[chat.id];
       // Archived chats are skipped, but baselined once so a restored chat does not replay its history.
@@ -173,8 +186,6 @@ export function startNotifier(options: {
         if (submission.status === "queued" || submission.status === "placed") break;
         last = submission.id;
         if (quiet) continue;
-        // Watchdog checks are internal coordinator turns, never an owner-facing "Finished".
-        if (submission.requestId?.startsWith("event:watchdog:")) continue;
         if (
           submission.status === "done" &&
           submission.text?.trim() &&

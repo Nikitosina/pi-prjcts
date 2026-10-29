@@ -110,9 +110,9 @@ switch (command) {
       input = { action: "resume", id: first, recovery: "leave-interrupted", confirm: rest[1] };
     }
     break;
-  case "plan":
-    if (!first || second) throw new Error("Usage: plan <project-id>");
-    input = { action: "plan-snapshot", id: first };
+  case "jobs":
+    if (!first || second) throw new Error("Usage: jobs <project-id>");
+    input = { action: "jobs-snapshot", id: first };
     break;
   case "delete":
     if (!first || second !== "--confirm" || rest.length !== 1 || rest[0] !== first)
@@ -142,17 +142,14 @@ switch (command) {
       throw new Error("Usage: thread-stop <project-id> <thread-id> --confirm <same-thread-id>");
     input = parse(Request, { action: "thread-stop", id: first, threadId: second });
     break;
-  case "thread-history":
-  case "legacy-thread-history": {
+  case "thread-history": {
     const [offset = "0", textOffset = "0"] = rest;
     if (!first || !second || rest.length > 2 || !/^\d+$/.test(offset) || !/^\d+$/.test(textOffset))
-      throw new Error(
-        `Usage: ${command} <project-id> <${command === "thread-history" ? "thread-id" : "retained-name"}> [message-offset] [Unicode-text-offset]`,
-      );
+      throw new Error("Usage: thread-history <project-id> <thread-id> [message-offset] [Unicode-text-offset]");
     input = parse(Request, {
-      action: command,
+      action: "thread-history",
       id: first,
-      ...(command === "thread-history" ? { threadId: second } : { name: second }),
+      threadId: second,
       offset: Number(offset),
       textOffset: Number(textOffset),
       limit: 30,
@@ -368,7 +365,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|legacy-thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|plan|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|monitors|monitor-create|monitor-enable|owner-setup|owner-workspaces|owner-skills-catalog|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }

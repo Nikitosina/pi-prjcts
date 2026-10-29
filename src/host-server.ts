@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   PROMPT_ROLES,
   home,
@@ -38,6 +38,7 @@ import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
 import { startTelegram } from "./telegram.ts";
+import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
 import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
@@ -114,7 +115,7 @@ async function validateVerificationChange(
   if (!(await configuredSkills(id)).getSkills().skills.some((item) => item.name === skill))
     throw new Error(`Verification skill "${skill}" is not installed for this project`);
 }
-const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "verification", "workerCap"]);
+const LIVE_SETTINGS = new Set(["context", "mcp", "model", "models", "fallbackModels", "scopedModels", "verification", "stallMinutes"]);
 const lifecycleChanging = new Set<string>();
 const ownerCloseFailed = new Set<string>();
 const githubInspection = createGithubInspection();
@@ -265,12 +266,11 @@ async function persistWorkspaceGrant<T>(
     },
     async (owner) => {
       const current = await owner.snapshot(),
-        plan = await owner.planSnapshot();
+        plan = await owner.jobs();
       if (
         current.coordinator.busy ||
         current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-        plan.pausing ||
-        plan.work.some((work) => work.status === "queued" || work.status === "running")
+        workBusy(plan)
       )
         throw new Error("Workspace grants require an idle Durable project");
       await closeLifecycleOwner(before.id, owner);
@@ -278,6 +278,9 @@ async function persistWorkspaceGrant<T>(
     },
   );
 }
+
+/** Work is in flight: a worker, scout or reviewer has not finished. */
+const workBusy = (view: JobsSnapshot) => view.agents.some((agent) => agent.endedAt === null);
 
 async function closeLifecycleOwner(id: string, owner: DurableProjectRuntime): Promise<void> {
   try {
@@ -523,7 +526,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             if (input.changes.model !== undefined || input.changes.models !== undefined || input.changes.fallbackModels !== undefined)
               await owner.applyModels(project);
             if (input.changes.context !== undefined) owner.applyContext(project.contextSettings);
-            if (input.changes.workerCap !== undefined) await owner.applyWorkerCap(input.changes.workerCap);
           }
           saveProject(project);
           return projectSettings(project);
@@ -541,12 +543,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (existing) {
           const owner = await existing,
             current = await owner.snapshot(),
-            plan = await owner.planSnapshot();
+            plan = await owner.jobs();
           if (
             current.coordinator.busy ||
             current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            plan.pausing ||
-            plan.work.some((item) => item.status === "queued" || item.status === "running")
+            workBusy(plan)
           )
             throw new Error("Settings changes require an idle coordinator and worker queue");
           await closeLifecycleOwner(input.id, owner);
@@ -565,7 +566,6 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       }
     }
     case "worker-skills-catalog": {
-      const project = loadProject(input.id);
       const protectedFiles = await protectedSkillBackingFiles();
       const catalog = await captureOwnerWorkerSkillCatalog({
         project: () => loadProject(input.id),
@@ -604,12 +604,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         if (existing) {
           const owner = await existing;
           const view = await owner.snapshot(),
-            plan = await owner.planSnapshot();
+            plan = await owner.jobs();
           if (
             view.coordinator.busy ||
             view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            plan.pausing ||
-            plan.work.some((item) => item.status === "queued" || item.status === "running")
+            workBusy(plan)
           )
             throw new Error("Command profile changes require no active project work");
           await closeLifecycleOwner(input.id, owner);
@@ -654,7 +653,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (input.confirm !== input.id) throw new Error("Deletion requires confirmation matching project id");
         },
         async (owner) => {
-          await owner.pausePlan();
+          await owner.pause();
           await closeLifecycleOwner(input.id, owner);
           return withProjectLock(
             input.id,
@@ -674,7 +673,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         input.id,
         () => {},
         async (owner) => {
-          await owner.pausePlan();
+          await owner.pause();
           await closeLifecycleOwner(input.id, owner);
           return withProjectLock(
             input.id,
@@ -693,7 +692,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         input.id,
         () => {},
         async (owner) => {
-          if (!(await owner.planSnapshot()).paused) throw new Error("Project must be paused before restore");
+          if (!(await owner.jobs()).paused) throw new Error("Project must be paused before restore");
           await closeLifecycleOwner(input.id, owner);
           return withProjectLock(
             input.id,
@@ -708,12 +707,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           );
         },
       );
-    case "plan-snapshot":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.planSnapshot() });
+    case "jobs-snapshot":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.jobs() });
+    case "job-approve": {
+      const result = await (await durable(input.id)).approveJob(input.jobId);
+      if ("refused" in result) throw new Error(result.refused);
+      return result.outcome;
+    }
     case "artifacts-list": {
       // Owner browsing: one thread's files, or every thread that has some (known threads of this project only).
       const dir = ownedProjectDir(input.id),
-        threads = (await (await durable(input.id)).planSnapshot()).work.map((work) => work.threadId);
+        threads = (await (await durable(input.id)).jobs()).agents.map((agent) => agent.id);
       if (input.threadId) {
         if (!threads.includes(input.threadId)) throw new Error("Unknown thread for this project");
         const { dir: _, ...listing } = listArtifacts(dir, input.threadId);
@@ -737,39 +741,33 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "worktrees-cleanup":
       if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id");
       return withDurableOwner({ id: input.id, operation: (owner) => owner.cleanupWorktrees() });
-    case "work-archive":
-      return withDurableOwner({
-        id: input.id,
-        operation: (owner) => owner.archiveWork({ workIds: input.workIds, terminal: input.terminal }),
-      });
     case "event-log":
       return withDurableOwner({
         id: input.id,
         operation: async (owner) => {
           const [plan, scheduled, view] = await Promise.all([
-            owner.planSnapshot(),
+            owner.jobs(),
             owner.scheduleSnapshot({ includeHistory: true }),
             owner.snapshot(),
           ]);
           const events: Array<{ at: number; kind: string; source: string; id: string | null; detail: string }> = [];
-          for (const work of plan.work) {
-            if (work.startedAt !== null)
+          for (const job of plan.jobs) {
+            events.push({
+              at: job.createdAt,
+              kind: "work-dispatched",
+              source: "plan",
+              id: job.id,
+              detail: `worker: ${job.title.slice(0, 240)}`,
+            });
+            if (job.endedAt !== null)
+              events.push({ at: job.endedAt, kind: "work-settled", source: "plan", id: job.id, detail: job.status });
+            if (job.status === "failed")
               events.push({
-                at: work.startedAt,
-                kind: "work-dispatched",
-                source: "plan",
-                id: work.id,
-                detail: `${work.role}: ${work.text.slice(0, 240)}`,
-              });
-            if (work.endedAt !== null)
-              events.push({ at: work.endedAt, kind: "work-settled", source: "plan", id: work.id, detail: work.status });
-            if (work.status === "failed")
-              events.push({
-                at: work.endedAt ?? work.startedAt ?? Date.now(),
+                at: job.endedAt ?? job.createdAt,
                 kind: "error",
                 source: "plan",
-                id: work.id,
-                detail: work.blocker ?? "Work failed",
+                id: job.id,
+                detail: job.reason ?? "Job failed",
               });
           }
           for (const event of scheduled.events)
@@ -805,7 +803,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         operation: async (owner) => {
-          const [plan, view] = await Promise.all([owner.planSnapshot(), owner.snapshot()]);
+          const [plan, view] = await Promise.all([owner.jobs(), owner.snapshot()]);
           const projectJobs = jobs(input.id);
           let leases = 0;
           try {
@@ -821,8 +819,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             activeLeases: leases,
             activeLocks: projectLocks.size,
             queue: {
-              queued: plan.work.filter((work) => work.status === "queued").length,
-              running: plan.work.filter((work) => work.status === "running").length,
+              queued: 0,
+              running: plan.jobs.filter((job) => job.status === "running").length,
             },
             busy: view.coordinator.busy,
             paused: plan.paused,
@@ -837,7 +835,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         input.id,
         () => {},
         async (owner) => {
-          const result = await owner.pausePlan();
+          const result = await owner.pause();
           recordHostEvent("lifecycle", `paused:${input.id}`);
           return { paused: result.paused };
         },
@@ -851,13 +849,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (project.archived) throw new Error("Archived project must be restored before resume");
         },
         async (owner) => {
-          if ("recovery" in input) await owner.pausePlan();
+          if ("recovery" in input) await owner.pause();
           else {
-            const plan = await owner.planSnapshot();
-            if (plan.work.length !== 0 || (await owner.snapshot()).coordinator.submissions.length !== 0)
+            const plan = await owner.jobs();
+            if (plan.jobs.length !== 0 || (await owner.snapshot()).coordinator.submissions.length !== 0)
               throw new Error("Project resume with prior work requires an explicit recovery decision");
           }
-          const paused = (await owner.resumePlan()).paused;
+          const paused = (await owner.resume()).paused;
           recordHostEvent("lifecycle", `resumed:${input.id}`);
           return "recovery" in input ? { paused, recovery: input.recovery } : { paused };
         },
@@ -991,12 +989,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       };
       return lifecycle(input.id, validate, async (owner) => {
         const view = await owner.snapshot(),
-          plan = await owner.planSnapshot();
+          plan = await owner.jobs();
         if (
           view.coordinator.busy ||
           view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-          plan.pausing ||
-          plan.work.some((item) => item.status === "queued" || item.status === "running")
+          workBusy(plan)
         )
           throw new Error("GitHub authorization requires no active project work");
         await closeLifecycleOwner(input.id, owner);
@@ -1029,12 +1026,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         mutateIdle: (id, change) =>
           lifecycle(id, change.validate, async (owner) => {
             const view = await owner.snapshot(),
-              plan = await owner.planSnapshot();
+              plan = await owner.jobs();
             if (
               view.coordinator.busy ||
               view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-              plan.pausing ||
-              plan.work.some((item) => item.status === "queued" || item.status === "running")
+              workBusy(plan)
             )
               throw new Error("This change requires no active project work");
             await closeLifecycleOwner(id, owner);
@@ -1109,12 +1105,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         },
         async (owner) => {
           const view = await owner.snapshot(),
-            plan = await owner.planSnapshot();
+            plan = await owner.jobs();
           if (
             view.coordinator.busy ||
             view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            plan.pausing ||
-            plan.work.some((item) => item.status === "queued" || item.status === "running")
+            workBusy(plan)
           )
             throw new Error("GitHub authorization changes require an idle project");
           await closeLifecycleOwner(input.id, owner);
@@ -1228,12 +1223,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         },
         async (owner) => {
           const current = await owner.snapshot(),
-            plan = await owner.planSnapshot();
+            plan = await owner.jobs();
           if (
             current.coordinator.busy ||
             current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-            plan.pausing ||
-            plan.work.some((work) => work.status === "queued" || work.status === "running")
+            workBusy(plan)
           )
             throw new Error("Workspace changes require an idle project");
           await closeLifecycleOwner(input.id, owner);
@@ -1303,10 +1297,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         (!before.follow.enabled || next.follow.everyMs !== before.follow.everyMs || next.autoMerge.enabled !== before.autoMerge.enabled)
       )
         owner.followKick();
-      if (input.change.watchdog) owner.watchdogKick();
       recordHostEvent(
         "automations",
-        `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}:watchdog=${next.watchdog.enabled}/${next.watchdog.everyMs}`,
+        `${input.id}:follow=${next.follow.enabled}:webhook=${next.webhook.enabled}:autoMerge=${next.autoMerge.enabled}`,
       );
       return automationSnapshot(input.id);
     }
@@ -1349,16 +1342,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "thread-steer": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
-      return (await durable(input.id)).steerThread(input.threadId, input.text, { requestId: input.requestId });
+      return { result: await (await durable(input.id)).steerJob(input.threadId, input.text) };
     }
     case "thread-stop": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
-      await (await durable(input.id)).stop(input.threadId);
+      await (await durable(input.id)).stopJob(input.threadId, "Stopped by the owner");
       return { stopped: true, threadId: input.threadId };
     }
-    case "legacy-thread-history":
-      return (await durable(input.id)).legacyThreadHistory(input.name, input);
     case "worker-contexts":
       return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot":
@@ -1379,9 +1370,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (project.archived) throw new Error("Project is archived; admission is denied");
         },
         operation: async (owner) => {
-          const plan = await owner.planSnapshot();
-          if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
-          return owner.followUp(input.threadId, input.text, { requestId: input.requestId });
+          const plan = await owner.jobs();
+          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
+          return { result: await owner.steerJob(input.threadId, input.text, { followUp: true }) };
         },
       });
     case "message": {
@@ -1420,8 +1411,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           if (text.length > 120_000)
             throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
           for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          const plan = await owner.planSnapshot();
-          if (plan.paused || plan.pausing) throw new Error("Project plan is paused; admission is denied");
+          const plan = await owner.jobs();
+          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
           // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
           const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
           if (!chat) throw new Error("Unknown chat for this project");
@@ -1449,17 +1440,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         id: input.id,
         validate,
         operation: (owner) =>
-          owner.plan({
-            work: [
-              {
-                id: input.requestId,
-                requestId: input.requestId,
-                threadId: input.threadId,
-                role: "worker",
-                text: input.text,
-                workspaceScopeId: input.workspaceScopeId,
-              },
-            ],
+          owner.spawn(undefined, {
+            role: "worker",
+            brief: input.text,
+            title: input.text.slice(0, 80),
+            acceptance: ["The request is done as described"],
+            scopeId: input.workspaceScopeId,
+            requestId: input.requestId,
           }),
       });
     }
@@ -1568,6 +1555,7 @@ const notifier = startNotifier({
       ? null
       : (durableRuntimes.get(project.id) ?? null),
   tickMs: Number(process.env.PI_PROJECTS_NOTIFY_TICK_MS ?? 3000),
+  progress: (view) => void telegram.progress(view),
   onNotice: () => {
     web.noticesChanged(notifier.seq());
     remote?.notices(notifier.feed(pushCursor).items);
@@ -1579,6 +1567,11 @@ const notifier = startNotifier({
 let pushCursor = notifier.seq();
 const telegram = startTelegram({
   dispatch: (input) => dispatch(parse(Request, input)),
+  approve: async (projectId, jobId) => {
+    const result = await (await durable(projectId)).approveJob(jobId);
+    if ("refused" in result) throw new Error(result.refused);
+    return result.outcome;
+  },
   chats: async (id) => (await durable(id)).chats(),
   notifier,
   report: (detail) => recordHostEvent("telegram", detail),
@@ -1591,7 +1584,6 @@ async function automationSnapshot(id: string) {
     eventChat: config.eventChat,
     webhook: { enabled: config.webhook.enabled, url: webhooks.url(project.id), secret: config.webhook.secret },
     follow: !project.deleted && !project.archived ? await (await durable(id)).followSnapshot() : null,
-    watchdog: !project.deleted && !project.archived ? await (await durable(id)).watchdogSnapshot() : { ...config.watchdog },
     githubRepositories: (project.githubAuthorization ?? []).map((item) => item.repositoryId),
   };
 }

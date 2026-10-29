@@ -4,14 +4,14 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
-import { DurablePlanning, type PlanningState } from "./durable-planning.ts";
+import { Jobs, liveAgentIds, type JobsState } from "./jobs.ts";
 import { loadProject, parse, type OperationSpec, type Project } from "./state.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
 import { active, retireWorkspaceReceipt, workspaceReceipts } from "./workspace-isolation.ts";
 import { isolationProvider, type WorkspaceReceipt } from "./workspace-types.ts";
 import { plugins } from "./plugins.ts";
 import { cli, runCli } from "./vcs.ts";
-import type { ExecutionInput } from "./github-operations.ts";
+export type ExecutionInput = { id: string; operationId: string; fingerprint: string; confirm: string };
 import type { OperationApprovals } from "./operation-approvals.ts";
 import { VcsExecutions, hasUncertainVcsOperations, type VcsExecution } from "./vcs-operation-state.ts";
 
@@ -47,9 +47,9 @@ export function vcsOperations(input: {
       throw new Error("VCS operations require an owned whole-repository workspace scope");
     const checkout = directory(repository.ownerCheckout).path;
     const plan = await root.commit(async (tx) => {
-      const state = await tx.doc(DurablePlanning, root.id);
+      const state = await tx.doc(Jobs, root.id);
       assertIdle(state);
-      return { paused: state.paused, pausing: state.pausing };
+      return { paused: state.paused };
     }, context);
     let target = spec.target,
       facts: object,
@@ -169,7 +169,7 @@ export function vcsOperations(input: {
       if (!sameOperation(now, operation)) throw new Error("VCS target state changed; request a fresh operation approval");
       const binding = authorizationFingerprint(current());
       await root.commit(async (tx) => {
-        assertIdle(await tx.doc(DurablePlanning, root.id));
+        assertIdle(await tx.doc(Jobs, root.id));
         if (await hasUncertainVcsOperations(tx, root.id)) throw new Error("Another VCS operation has an uncertain outcome");
         const rows = (await tx.doc(VcsExecutions, root.id)).items;
         if (rows.some((item) => item.operationId === identity.operationId)) throw new Error("VCS execution was already recorded");
@@ -285,13 +285,8 @@ export function vcsOperations(input: {
   };
 }
 
-function assertIdle(plan: PlanningState) {
-  if (
-    plan.pausing ||
-    Object.values(plan.work).some((work) => work.status === "queued" || work.status === "running" || work.status === "interrupted") ||
-    Object.values(plan.threads).some((thread) => thread.activeWorkId !== null || thread.stopping)
-  )
-    throw new Error("VCS operations require all project workers to be settled, including children and transferred threads");
+function assertIdle(state: JobsState) {
+  if (liveAgentIds(state).length) throw new Error("VCS operations require all project workers to be settled");
 }
 function directory(path: string) {
   if (!isAbsolute(path)) throw new Error("VCS paths must be absolute");

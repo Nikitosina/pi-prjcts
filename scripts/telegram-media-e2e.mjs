@@ -90,12 +90,12 @@ const k = await createKit("telegram-media", {
       if (user.includes("MARK-MEDIAVIDEO")) return say(`COORDINATOR-VIDEO before ![Video](artifact:${fixtureThread}/video.mp4) after.`);
       if (user.includes("MARK-MEDIALONG"))
         return say(`COORDINATOR-LONG ${"long text ".repeat(650)} ![Image](artifact:${fixtureThread}/image.png) TAIL-PRESERVED`);
-      if (/MARK-MEDIA\b/.test(user) && !user.startsWith("[Durable work"))
+      if (/MARK-MEDIA\b/.test(user) && !user.startsWith("[worker "))
         return results.length
           ? say("Waiting for fixture work.")
           : call("projects_delegate", { role: "worker", task: "MEDIA-FIXTURE save generated attachments" });
-      if (user.startsWith("[Durable work") && user.includes("MEDIA-FIXTURE")) {
-        const thread = (fixtureThread = /; thread ([a-f0-9-]{36})\]/.exec(user)?.[1]);
+      if (user.startsWith("[worker ") && user.includes("MEDIA-FIXTURE")) {
+        const thread = (fixtureThread = /^\[worker ([a-f0-9-]{36})/.exec(user)?.[1]);
         output = `COORDINATOR-MEDIA before.\n\n![Generated image](artifact:${thread}/image.png)\n\nCOORDINATOR-MEDIA between.\n\n![Generated video](artifact:${thread}/video.mp4)\n\nCOORDINATOR-MEDIA after.`;
         return say(output);
       }
@@ -106,6 +106,7 @@ const k = await createKit("telegram-media", {
         return call("bash", {
           command: `node -e 'const fs=require("node:fs"), p=process.env.PI_ARTIFACTS_DIR; fs.writeFileSync(p+"/image.png",Buffer.from("${image.toString("base64")}","base64"));fs.writeFileSync(p+"/video.mp4",Buffer.from("${video.toString("base64")}","base64")); console.log("Saved generated fixtures");'`,
         });
+      if (results.length === 1) return call("job", { action: "ready", summary: "MEDIA-FIXTURE-DONE saved image.png and video.mp4" });
       return say("MEDIA-FIXTURE-DONE saved image.png and video.mp4");
     }
     return undefined;

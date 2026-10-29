@@ -71,7 +71,7 @@ export async function kit(name, extraEnv = {}, respond) {
       const input = JSON.parse(body),
         msgs = input.messages,
         tools = (input.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-      const coordinator = tools.includes("projects_delegate"),
+      const coordinator = tools.includes("agents"),
         lastUser = msgs.findLastIndex((m) => m.role === "user");
       const userText = contentText(msgs[lastUser]?.content),
         marker = /MARK-[A-Z0-9]+/.exec(userText)?.[0] ?? "none";

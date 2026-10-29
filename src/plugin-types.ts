@@ -5,7 +5,7 @@ import type * as Durable from "@earendil-works/pi-durable";
 import type * as Typebox from "typebox";
 import type * as TypeboxValue from "typebox/value";
 import type * as ChordContext from "@earendil-works/chord/context";
-import type { DurablePlanning } from "./durable-planning.ts";
+import type { Jobs } from "./jobs.ts";
 import type { Project, WorkspaceAuthorization } from "./state.ts";
 import type { PrNotice } from "./pr-notices.ts";
 import type { CliResult } from "./vcs.ts";
@@ -38,7 +38,7 @@ export type PluginLib = {
   typebox: typeof Typebox;
   value: typeof TypeboxValue;
   chord: typeof ChordContext;
-  docs: { planning: typeof DurablePlanning };
+  docs: { jobs: typeof Jobs };
 };
 export type Extension = ReturnType<typeof defineExtension>;
 export type PrId = string;

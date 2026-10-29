@@ -95,7 +95,7 @@ export async function startWeb(
         try {
           const values = await Promise.allSettled([
             dispatch({ action: "show", id, ...(chat === "main" ? {} : { chatId: chat }) }),
-            dispatch({ action: "plan-snapshot", id }),
+            dispatch({ action: "jobs-snapshot", id }),
             dispatch({ action: "operation-snapshot", id, status: "pending", offset: 0, limit: 100 }),
             dispatch({ action: "knowledge-list", id }),
             ...(thread

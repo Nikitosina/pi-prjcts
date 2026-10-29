@@ -38,7 +38,7 @@ const model = createServer((req, res) => {
       .filter((m) => m.role === "system" || m.role === "developer")
       .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
       .join("\n");
-    const coordinator = /persistent coordinator/.test(system) || msgs.some((m) => /persistent coordinator/.test(m.content ?? ""));
+    const coordinator = /single point of contact/.test(system) || msgs.some((m) => /single point of contact/.test(m.content ?? ""));
     const lastUser = msgs.findLastIndex((m) => m.role === "user");
     const text = msgs[lastUser]?.content ?? "";
     const turnTools = msgs.slice(lastUser + 1).filter((m) => m.role === "tool");
@@ -49,7 +49,7 @@ const model = createServer((req, res) => {
         result.tools.push({ callId: reply.tool_call_id, content: reply.content });
     let tool;
     if (coordinator && String(text).startsWith("CONTROL ")) tool = commands[turnTools.length];
-    const write = !coordinator && String(text).match(/^WRITE (\S+)/);
+    const write = !coordinator && String(text).match(/(?:^|\n\n)WRITE (\S+)/);
     if (write && turnTools.length === 0)
       tool = { name: "projects_knowledge_write", arguments: { path: write[1], text: `worker ${write[1]}`, expectedRevision: null } };
     if (tool && !available.includes(tool.name)) {
@@ -173,7 +173,7 @@ async function command(project, name, args = {}, expectError = false) {
   try {
     output = JSON.parse(found.content);
   } catch {
-    output = { error: found.content };
+    output = name === "agents" ? {} : { error: found.content };
   }
   if (!expectError)
     assert(
@@ -205,15 +205,21 @@ async function create(name, knowledgeAccess) {
 const knowledgeFile = (project, path) => join(home, project.id, "knowledge", path);
 const lastCoordinator = () => result.calls.findLast((c) => c.coordinator);
 async function delegateWrite(project, path) {
-  const work = await command(project, "projects_delegate", { task: `WRITE ${path}` });
-  await eventually(
-    async () =>
-      ["completed", "failed"].includes(
-        (await rpc({ action: "plan-snapshot", id: project.id })).work.find((w) => w.id === work.workId)?.status,
-      ),
-    "Worker did not settle",
-  );
-  return result.calls.findLast((c) => !c.coordinator && c.text.startsWith(`WRITE ${path}`));
+  const spawned = await command(project, "agents", {
+    action: "spawn",
+    role: "worker",
+    title: "write",
+    brief: `WRITE ${path}`,
+    acceptance: ["file written"],
+    requestId: randomUUID(),
+  });
+  await eventually(async () => {
+    const job = (await rpc({ action: "jobs-snapshot", id: project.id })).jobs.find(
+      (j) => j.title === "write" && j.request === `WRITE ${path}`,
+    );
+    return job && job.status !== "running";
+  }, "Worker did not settle");
+  return result.calls.findLast((c) => !c.coordinator && c.text.includes(`WRITE ${path}`));
 }
 try {
   await start();

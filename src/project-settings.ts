@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { DEFAULT_WORKER_CAP, type Project, type Request } from "./state.ts";
+import { DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
 
 type Update = Extract<Request, { action: "settings-update" }>;
 export function projectSettings(project: Project) {
@@ -13,7 +13,7 @@ export function projectSettings(project: Project) {
     libraryAccess: project.libraryAccess ?? "none",
     decisionAccess: project.decisionAccess ?? "none",
     githubCli: project.githubCli ?? "full",
-    workerCap: project.workerCap ?? DEFAULT_WORKER_CAP,
+    stallMinutes: project.stallMinutes ?? DEFAULT_STALL_MINUTES,
     scopedModels: project.scopedModels ?? null,
     skills: project.skillProfiles ?? null,
     mcp: project.mcp ?? null,
@@ -87,6 +87,6 @@ export function updateProjectSettings(project: Project, input: Update): Project 
     libraryAccess: patch.libraryAccess ?? project.libraryAccess,
     decisionAccess: patch.decisionAccess ?? project.decisionAccess,
     githubCli: patch.githubCli ?? project.githubCli,
-    workerCap: patch.workerCap ?? project.workerCap,
+    stallMinutes: patch.stallMinutes ?? project.stallMinutes,
   };
 }

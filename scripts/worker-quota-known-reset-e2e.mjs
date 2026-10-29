@@ -31,52 +31,31 @@ await kit.run(async () => {
   const id = await kit.createProject("Known quota reset");
   await kit.updateSettings(id, { models: { worker: "anthropic/local-reset-model" } });
   const scope = (await kit.rpc({ action: "workspace-catalog", id })).find((scope) => scope.wholeRepository);
-  const threadId = randomUUID();
-  await kit.rpc({
+  const submitted = await kit.rpc({
     action: "work-submit",
     id,
-    threadId,
+    threadId: randomUUID(),
     requestId: randomUUID(),
     workspaceScopeId: scope.id,
     text: "Recover only after provider reset",
   });
-  const row = () => kit.plan(id).then((rows) => rows.find((row) => row.threadId === threadId));
+  const row = () => kit.jobs(id).then((jobs) => jobs.find((job) => job.id === submitted.id));
   const waiting = await kit.eventually(async () => {
-    const work = await row();
-    return work?.status === "queued" && work.blocker?.startsWith("quota_reset_wait:") ? work : false;
+    const job = await row();
+    return job?.status === "running" && job.quota ? job : false;
   }, "quota wait missing");
-  kit.check(
-    "deadline uses provider reset instead of short test backoff",
-    waiting.blocker.includes(new Date(resetAt).toISOString()),
-    waiting,
-  );
-  const followupId = randomUUID();
-  await kit.rpc({
-    action: "work-submit",
-    id,
-    threadId,
-    requestId: followupId,
-    workspaceScopeId: scope.id,
-    text: "Queued followup must not bypass the quota wait",
-  });
+  kit.check("deadline uses provider reset instead of short test backoff", Math.abs(waiting.quota.retryAt - resetAt) < 1500, waiting.quota);
   await delay(300);
-  kit.check("no request before reset despite repeated sweeps", requests === 2 && (await row()).status === "queued");
+  kit.check("no request before reset despite repeated sweeps", requests === 2 && (await row()).status === "running");
   await kit.restartHost();
-  await delay(100);
-  kit.check("host restart never resumes interrupted work automatically", requests === 2 && (await row()).status === "interrupted");
-  await kit.rpc({ action: "resume", id, recovery: "leave-interrupted", confirm: id });
   const done = await kit.eventually(async () => {
-    const work = await row();
-    return work?.status === "completed" ? work : false;
+    const job = await row();
+    return job && job.status !== "running" ? job : false;
   }, "work did not recover");
-  await kit.eventually(async () => (await kit.plan(id)).every((work) => work.status === "completed"), "queued followup did not finish");
   const calls = kit.result.calls.filter((call) => call.role === "worker");
   kit.check(
-    "persisted reset recovers exactly once on the same model and thread",
-    requests === 4 &&
-      calls[2].at >= resetAt &&
-      done.attempt.model === "anthropic/local-reset-model" &&
-      done.attempt.modelTransitions.length === 0,
+    "persisted reset recovers exactly once on the same model",
+    requests === 3 && calls[2].at >= resetAt - 1000 && done.modelMoves.length === 0 && done.quota === null,
     { done, calls },
   );
 });

@@ -264,24 +264,19 @@ try {
     "preferences are absent until demanded",
     !has(firstMaster, preference) && (await runtime.snapshot()).coordinator.messages.some((message) => message.text?.includes(preference)),
   );
-  const workerId = randomUUID(),
-    workerThreadId = randomUUID(),
-    workerRequestAt = requests.length;
-  await runtime.plan({
-    work: [
-      {
-        id: workerId,
-        threadId: workerThreadId,
-        role: "worker",
-        text: 'Read research/topic.md with projects_knowledge_read and report its exact text. Do not mutate anything. FAKE-CALL projects_knowledge_read {"path":"research/topic.md"}',
-      },
-    ],
+  const workerRequestAt = requests.length;
+  const spawned = await runtime.spawn(undefined, {
+    role: "worker",
+    title: "Topic",
+    acceptance: ["The topic text is reported"],
+    brief:
+      'Read research/topic.md with projects_knowledge_read and report its exact text. Do not mutate anything. FAKE-CALL projects_knowledge_read {"path":"research/topic.md"}',
+    requestId: "topic-worker",
   });
-  const workerPlan = await waitFor(async () => {
-    const view = await runtime.planSnapshot();
-    return view.work.some((work) => work.id === workerId && work.status === "completed") ? view : null;
-  }, "UUID worker topic retrieval");
-  assert.equal(workerPlan.work.find((work) => work.id === workerId)?.threadId, workerThreadId);
+  await waitFor(async () => {
+    const job = (await runtime.jobs()).jobs.find((item) => item.id === spawned.id);
+    return job && job.status !== "running" ? job : null;
+  }, "worker topic retrieval");
   const workerRequests = requests.slice(workerRequestAt).filter((request) => request.conversationId !== masterId),
     firstWorker = workerRequests[0]?.messages ?? [];
   pass(

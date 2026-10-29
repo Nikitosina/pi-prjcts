@@ -11,7 +11,7 @@ import type { OperationApprovals } from "./operation-approvals.ts";
 import { captureEvidenceBytes, readEvidence } from "./evidence.ts";
 import type { CommandProfile } from "./command-profile-types.ts";
 import { commandProgram, validateCommandRisk } from "./command-profiles.ts";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
 import { plugins } from "./plugins.ts";
 import { isolationProvider } from "./workspace-types.ts";
@@ -425,17 +425,14 @@ export async function commandWorkerTools(input: {
     }, context);
   }
   async function assertWork(tx: Tx) {
-    const state = await tx.doc(DurablePlanning, input.root.id),
-      work = state.work[input.workId];
+    const state = await tx.doc(Jobs, input.root.id),
+      job = state.jobs[input.workId];
     if (
       state.paused ||
-      state.pausing ||
-      !work ||
-      work.role !== "worker" ||
-      work.status !== "running" ||
-      work.workspaceScopeId !== input.scopeId ||
-      Number(work.conversationId) !== input.conversationId ||
-      state.threads[work.threadId]?.activeWorkId !== work.id
+      !job ||
+      job.status !== "running" ||
+      job.scopeId !== input.scopeId ||
+      Number(job.workerConversation) !== input.conversationId
     )
       throw new Error("Command requires the active scoped worker");
   }
@@ -458,7 +455,7 @@ export async function commandWorkerTools(input: {
             if (!input.approvals) throw new Error("Separate command approval binding is unavailable");
             const threadId = await api.commit(async (tx) => {
               await assertWork(tx);
-              return (await tx.doc(DurablePlanning, input.root.id)).work[input.workId]?.threadId;
+              return (await tx.doc(Jobs, input.root.id)).jobs[input.workId]?.id;
             }, context);
             if (!threadId) throw new Error("Command approval requires its owned thread identity");
             const operation: OperationSpec = {
