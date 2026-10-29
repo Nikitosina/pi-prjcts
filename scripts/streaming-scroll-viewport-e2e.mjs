@@ -251,10 +251,15 @@ await k.run(async () => {
 
   // Read an early code block while a >4,000-character reply grows past the bounded preview.
   await page.evaluate(`(() => {
-    window.__liveBudget = { frames: 0, maxText: 0, maxBytes: 0, parses: 0, maxParseMs: 0 };
-    window.__originalApplyLive = applyLive; window.__originalMarkdown = renderMarkdown;
-    applyLive = async frame => { const b = window.__liveBudget; b.frames++; b.maxText = Math.max(b.maxText, frame.text.length); b.maxBytes = Math.max(b.maxBytes, new TextEncoder().encode(JSON.stringify(frame)).length); return window.__originalApplyLive(frame); };
-    renderMarkdown = (...args) => { const start = performance.now(), result = window.__originalMarkdown(...args), b = window.__liveBudget; if (String(args[0]).startsWith('## Stable section 0')) { b.parses++; b.maxParseMs = Math.max(b.maxParseMs, performance.now() - start); } return result; };
+    const probe = window.__projectsProbe;
+    probe.live.length = 0; probe.markdown.length = 0;
+    Object.defineProperty(window, '__liveBudget', { configurable: true, get: () => ({
+      frames: probe.live.length,
+      maxText: Math.max(0, ...probe.live.map(frame => frame.text.length)),
+      maxBytes: Math.max(0, ...probe.live.map(frame => new TextEncoder().encode(JSON.stringify(frame)).length)),
+      parses: probe.markdown.filter(call => call.text.startsWith('## Stable section 0')).length,
+      maxParseMs: Math.max(0, ...probe.markdown.filter(call => call.text.startsWith('## Stable section 0')).map(call => call.ms)),
+    }) });
     document.querySelector('#compose textarea').focus();
   })()`);
   await page.cdp("Input.insertText", { text: "MARK-LONG" });
@@ -334,7 +339,7 @@ await k.run(async () => {
   await page.evaluate(`getSelection().removeAllRanges()`);
   const longHost = (await k.rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text;
   const finalLong = await page.evaluate(
-    `(() => { const last = [...document.querySelectorAll('#messages .msg.them .text')].at(-1), expected = document.createElement('div'); expected.innerHTML = window.__originalMarkdown(${JSON.stringify(longText)}); return { html: last.innerHTML, expected: expected.innerHTML, text: last.textContent }; })()`,
+    `(() => { const last = [...document.querySelectorAll('#messages .msg.them .text')].at(-1), expected = document.createElement('div'); expected.innerHTML = window.__projectsRenderMarkdown(${JSON.stringify(longText)}); return { html: last.innerHTML, expected: expected.innerHTML, text: last.textContent }; })()`,
   );
   k.check(
     "L4 full long reply is stored exactly and browser matches complete rendered host markdown",
@@ -345,7 +350,6 @@ await k.run(async () => {
     { hostLength: longHost?.length, expectedLength: longText.length, browserLength: finalLong.text.length },
   );
   result.measurements.longStream = { beforeLong, duringLong, capped, hostLength: longHost.length };
-  await page.evaluate(`applyLive = window.__originalApplyLive; renderMarkdown = window.__originalMarkdown`);
 
   // Explicit chat switches intentionally open at newest and must replace selected old-chat content.
   await page.evaluate(

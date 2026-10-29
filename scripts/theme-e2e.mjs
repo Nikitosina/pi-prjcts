@@ -161,7 +161,10 @@ try {
   );
   must(dialogBg.scheme === "dark", "dialog color-scheme not dark");
   await evaluate(`document.querySelector('#dialog').close()`, s);
-  await evaluate(`toast('Saved something'); document.querySelector('#toast').classList.add('visible')`, s);
+  await evaluate(
+    `(async () => { (await import('/app/shell.js')).toast('Saved something'); document.querySelector('#toast').classList.add('visible'); })()`,
+    s,
+  );
   await delay(300);
   const toastScan = await evaluate(`window.__scan(false, document.querySelector('#toast').parentElement)`, s);
   must(!toastScan.low.length, "Toast contrast: " + toastScan.low.join("; "));

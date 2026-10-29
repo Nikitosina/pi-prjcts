@@ -130,7 +130,7 @@ await k.run(async () => {
     const host = (await k.rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text;
     const expected = prefix + suffix;
     const browserMatches = await page.evaluate(
-      `(() => { const expected = document.createElement('div'); expected.innerHTML = renderMarkdown(${JSON.stringify(expected)}); return [...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerHTML === expected.innerHTML; })()`,
+      `(() => { const expected = document.createElement('div'); expected.innerHTML = window.__projectsRenderMarkdown(${JSON.stringify(expected)}); return [...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerHTML === expected.innerHTML; })()`,
     );
     const fixture =
       scenario === "pinned"
