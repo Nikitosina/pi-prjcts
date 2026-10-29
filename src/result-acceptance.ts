@@ -46,6 +46,20 @@ export function fileAcceptanceLog(dir: string): AcceptanceLog {
   };
 }
 
+/** The owner-facing line for an outcome (web and Telegram). */
+export function describeAcceptance(outcome: AcceptanceOutcome): string {
+  switch (outcome.kind) {
+    case "accepted":
+      return `Merged ${outcome.head.slice(0, 8)} and updated the main checkout.`;
+    case "merged-pull-skipped":
+      return `Merged ${outcome.head.slice(0, 8)}. The main checkout was not updated: ${outcome.reason}.`;
+    case "merge-uncertain":
+      return `The merge outcome is unknown: ${outcome.detail}. Check the PR before approving again.`;
+    case "auto-merge-pending":
+      return "Auto-merge is armed and waiting for the PR to become mergeable; approve again later to finish.";
+  }
+}
+
 export type Approver = ReturnType<typeof createApprover>;
 
 /** Approve: merge the approved head (now, or when it becomes mergeable), then pull the main checkout when that is safe. */

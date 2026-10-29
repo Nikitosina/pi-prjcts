@@ -16,13 +16,15 @@ import {
   TELEGRAM_FILE_LIMIT,
   type TelegramPart,
 } from "./telegram-media.ts";
+import { describeAcceptance, type AcceptanceOutcome } from "./result-acceptance.ts";
 import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml, splitTelegramCaption } from "./telegram-html.ts";
 
 type Action =
   | { t: "project"; projectId: string }
   | { t: "chat"; projectId: string; chatId: string }
   | { t: "answer"; projectId: string; entryId: string; text: string }
-  | { t: "approve" | "reject"; projectId: string; operationId: string; fingerprint: string };
+  | { t: "approve" | "reject"; projectId: string; operationId: string; fingerprint: string }
+  | { t: "approve-job"; projectId: string; jobId: string };
 type Target = { projectId: string; chatId: string; entryId?: string };
 type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
@@ -44,6 +46,17 @@ type State = {
   lastError: string | null;
   lastPollAt: number | null;
   deliveryErrors?: DeliveryError[];
+  /** One progress message per Job, edited in place; `text` is what it shows now. */
+  progress?: Record<string, { messageId: number; text: string }>;
+};
+/** A Job's plan as the progress message shows it. `etaMin` is the caller's estimate; without it the remaining estimates are summed. */
+export type JobProgress = {
+  projectId: string;
+  chatId: string;
+  jobId: string;
+  title: string;
+  steps: { title: string; status: "todo" | "doing" | "done"; estimateMin: number }[];
+  etaMin?: number | null;
 };
 type Update = {
   update_id: number;
@@ -129,6 +142,8 @@ export function startTelegram(options: {
   chats: (projectId: string) => Promise<DurableChat[]>;
   notifier: Notifier;
   receiveUpdates?: boolean;
+  /** Approve a mergeable Job (result acceptance). Absent: the Approve button answers that it is unavailable. */
+  approve?: (projectId: string, jobId: string) => Promise<AcceptanceOutcome>;
   report: (detail: string) => void;
 }) {
   const base = (process.env.PI_PROJECTS_TELEGRAM_API ?? "https://api.telegram.org").replace(/\/+$/, "");
@@ -154,6 +169,7 @@ export function startTelegram(options: {
   const persist = () => {
     bounded(state.keys);
     bounded(state.messages);
+    if (state.progress) bounded(state.progress);
     saveJson(path, state);
   };
   const redact = (text: string, token = state.token, chatId?: unknown) =>
@@ -352,6 +368,20 @@ export function startTelegram(options: {
     if (!state.route) return say("Pick a project first: /projects");
     return deliver(state.route, text, updateId);
   }
+  const approveButton = (projectId: string, jobId: string): Button[][] => [
+    [{ text: "Approve", callback_data: key({ t: "approve-job", projectId, jobId }) }],
+  ];
+  /** Acknowledges at once and reports the outcome later: auto-merge can take hours and must not hold the poll loop. */
+  async function approveJob(projectId: string, jobId: string, clear: () => Promise<unknown> | undefined) {
+    if (!options.approve) return say("Approve is not available on this host.");
+    await clear();
+    await say("Approving…");
+    void options
+      .approve(projectId, jobId)
+      .then((outcome) => say(describeAcceptance(outcome)))
+      .catch((error) => say(`Approve failed: ${errorText(error)}`, approveButton(projectId, jobId)))
+      .catch(() => {});
+  }
   async function onCallback(callback: NonNullable<Update["callback_query"]>) {
     await call("answerCallbackQuery", { callback_query_id: callback.id }).catch(() => {});
     const action = /^k:([a-f0-9]{12})$/.test(callback.data ?? "") ? state.keys[callback.data!.slice(2)] : undefined;
@@ -372,6 +402,7 @@ export function startTelegram(options: {
         await clear();
         return await say(reply);
       }
+      if (action.t === "approve-job") return await approveJob(action.projectId, action.jobId, clear);
       const pending = (
         (await options.dispatch({ action: "operation-snapshot", id: action.projectId, status: "pending", offset: 0, limit: 100 })) as {
           items: { id: string; fingerprint: string }[];
@@ -544,7 +575,10 @@ export function startTelegram(options: {
           ],
         ],
       };
-    return { text: head + "\n\n<i>Reply to this message to write to this chat.</i>", buttons: [] };
+    return {
+      text: head + "\n\n<i>Reply to this message to write to this chat.</i>",
+      buttons: notice.jobId && notice.mergeable ? approveButton(notice.projectId, notice.jobId) : [],
+    };
   }
   async function authorizeArtifact(projectId: string, ref: string) {
     const match = /^artifact:([a-f0-9-]{36})\/(.+)$/.exec(ref);
@@ -769,6 +803,56 @@ export function startTelegram(options: {
     return flushing;
   }
 
+  const progressLocks = new Map<string, Promise<unknown>>();
+  const mark = { done: "✅", doing: "▶️", todo: "⬜" } as const;
+  function renderProgress(view: JobProgress): string {
+    const left = view.steps.filter((step) => step.status !== "done");
+    const eta = view.etaMin ?? left.reduce((sum, step) => sum + step.estimateMin, 0);
+    const done = view.steps.length - left.length;
+    return [
+      `<b>${escapeHtml(view.title.replace(/[\uE000\uE001]/g, ""))}</b>`,
+      ...view.steps.map(
+        (step) => `${mark[step.status]} ${escapeHtml(step.title)}${step.status === "done" ? "" : ` · ~${step.estimateMin} min`}`,
+      ),
+      left.length
+        ? `${done}/${view.steps.length} done · about ${Math.max(1, Math.round(eta))} min left`
+        : `${done}/${view.steps.length} done`,
+    ].join("\n");
+  }
+  /** Sends the Job's progress message once, then edits it in place; a deleted message is replaced. Updates for one Job run in order. */
+  function progress(view: JobProgress): Promise<void> {
+    const run = async () => {
+      if (!state.owner || !view.steps.length) return;
+      const text = renderProgress(view),
+        chat_id = state.owner.chatId,
+        prior = (state.progress ??= {})[view.jobId];
+      if (prior?.text === text) return;
+      if (prior) {
+        try {
+          await call("editMessageText", { chat_id, message_id: prior.messageId, text, parse_mode: "HTML" });
+          prior.text = text;
+          return persist();
+        } catch (error) {
+          if (!(error instanceof TelegramError) || error.code !== 400) throw error;
+          if (/not modified/i.test(error.message)) {
+            prior.text = text;
+            return persist();
+          }
+          // Any other 400 means the message is gone: fall through and send a new one.
+        }
+      }
+      const sent = await call<{ message_id: number }>("sendMessage", { chat_id, text, parse_mode: "HTML" });
+      state.progress![view.jobId] = { messageId: sent.message_id, text };
+      state.messages[String(sent.message_id)] = { projectId: view.projectId, chatId: view.chatId };
+      persist();
+    };
+    const next = (progressLocks.get(view.jobId) ?? Promise.resolve()).then(run, run);
+    progressLocks.set(view.jobId, next);
+    return next.finally(() => {
+      if (progressLocks.get(view.jobId) === next) progressLocks.delete(view.jobId);
+    });
+  }
+
   async function snapshot() {
     const route = state.route ? { ...state.route, name: await routeName() } : null;
     return {
@@ -792,6 +876,7 @@ export function startTelegram(options: {
   return {
     snapshot,
     flush,
+    progress,
     async setToken(token: string) {
       let bot: { id: number; username: string };
       try {
