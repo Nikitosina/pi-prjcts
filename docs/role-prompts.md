@@ -10,6 +10,6 @@ Each prompt states the outcome the role owns, not a procedure:
 - Reviewer: reads pinned code and reports findings with evidence; never edits.
 - Verifier: runs the project's verify skill against the candidate with `projects_verify_run` and reports per criterion what is proven, with run ids.
 
-Verification and review are worker-owned (see `docs/lean-runtime-design.md`); the host only checks that a Ready report's proof ids are passing runs on the candidate commit.
+Verification and review are worker-owned (see "Verification and review" in `ARCHITECTURE.md`); the host only checks that a Ready report's proof ids are passing runs on the candidate commit.
 
 Coverage: `role-prompts-e2e` (actual model-request text and tool sets per role), `jobs-e2e` (engine), `repo-skill-overrides-unit` (skill discovery).
