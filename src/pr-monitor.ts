@@ -16,24 +16,21 @@ type Seen = {
   failed: boolean;
   conflicts: boolean;
   mergeFailed: boolean;
-  /** Review facts, for providers that report them; absent in older docs. */ review?: PrCardData["review"];
+  /** Review facts, for providers that report them. */ review?: PrCardData["review"];
   unresolved?: number;
 };
 const DEFAULT_TRANSITIONS: readonly PrTransition[] = ["ci-failed", "conflicts", "merge-failed", "merged", "closed"],
   DEFAULT_NOTICES: readonly PrTransition[] = ["ci-failed", "merged"];
-/** Event ids keep their original spelling for transitions that existed before the generic list. */
-const EVENT_KEY: Partial<Record<PrTransition, string>> = { "ci-failed": "check-failed" };
-/** Ids are strings; documents written before ids were generic hold numbers and are read as strings. */
 type WatchState = {
-  watched: Array<string | number>;
+  watched: string[];
   prs: Record<string, Seen>;
   sent: string[];
   lastPollAtMs: number | null;
   lastError: string | null;
   polls: number;
   events: number;
-  /** PRs the owner hid: off the card and never monitored; absent in older docs. */ hidden?: Array<string | number>;
-  /** Host notices (CI failed, merged) for the notifier; absent in older docs. */ notices?: PrNotice[];
+  /** PRs the owner hid: off the card and never monitored. */ hidden?: string[];
+  /** Host notices (CI failed, merged) for the notifier. */ notices?: PrNotice[];
 };
 const docs = new Map<string, ReturnType<typeof watchDoc>>();
 function watchDoc(kind: string) {
@@ -50,7 +47,6 @@ const WATCH_CAP = 50,
   HIDDEN_CAP = 200,
   SENT_CAP = 500,
   LINE_CAP = 60;
-const strings = (list: Array<string | number> | undefined) => (list ?? []).map(String);
 
 /**
  * Transition monitor for one PR provider: watched ids + PRs touching the project folder + PRs the project's workers opened, minus PRs the owner hid.
@@ -71,9 +67,7 @@ export function prMonitorRuntime(
   const read = () =>
     root.commit(async (tx) => {
       const doc = JSON.parse(JSON.stringify(await tx.doc(Watch, root.id))) as WatchState;
-      doc.watched = strings(doc.watched);
-      if (doc.hidden) doc.hidden = strings(doc.hidden);
-      return doc as WatchState & { watched: string[]; hidden?: string[] };
+      return doc;
     }, BACKGROUND_CONTEXT);
   const paused = () =>
     root.commit(async (tx) => {
@@ -106,7 +100,7 @@ export function prMonitorRuntime(
       noticing = new Set<PrTransition>(provider.noticeFor ?? DEFAULT_NOTICES);
     const emit = (id: string, diff: Seen["diff"], kind: PrTransition, line: string, token = "") => {
       if (!watching.has(kind) || provider.followCovers?.events.includes(kind)) return;
-      const key = `${id}:${diff ?? "-"}:${EVENT_KEY[kind] ?? kind}${token}`;
+      const key = `${id}:${diff ?? "-"}:${kind}${token}`;
       if (sent.has(key)) return;
       sent.add(key);
       fresh.push(key);
@@ -207,10 +201,8 @@ export function prMonitorRuntime(
     const open = new Set(mine.prs.map((pr) => pr.id));
     const apply = (doc: WatchState, delivered: number) => {
       doc.prs = seen;
-      doc.watched = strings(doc.watched);
-      if (doc.hidden) doc.hidden = strings(doc.hidden);
-      if (!mine.error && doc.hidden?.length) doc.hidden = (doc.hidden as string[]).filter((id) => open.has(id));
-      doc.watched = (doc.watched as string[]).filter((id) => !finished.has(id));
+      if (!mine.error && doc.hidden?.length) doc.hidden = doc.hidden.filter((id) => open.has(id));
+      doc.watched = doc.watched.filter((id) => !finished.has(id));
       doc.sent = [...doc.sent, ...fresh].slice(-SENT_CAP);
       pushNotices(doc, notices);
       doc.lastPollAtMs = Date.now();
@@ -277,16 +269,16 @@ export function prMonitorRuntime(
     validId(id);
     return root.commit(async (tx) => {
       const doc = await tx.doc(Watch, root.id),
-        watched = strings(doc.watched),
+        watched = doc.watched,
         has = watched.includes(id);
       doc.watched = watched;
       if (watch && !has) {
         if (watched.length >= WATCH_CAP) throw new Error(`At most ${WATCH_CAP} PRs can be watched`);
         doc.watched = [...watched, id];
       }
-      if (watch && doc.hidden && strings(doc.hidden).includes(id)) doc.hidden = strings(doc.hidden).filter((item) => item !== id); // watching a hidden PR unhides it
+      if (watch && doc.hidden?.includes(id)) doc.hidden = doc.hidden.filter((item) => item !== id); // watching a hidden PR unhides it
       if (!watch && has) doc.watched = watched.filter((item) => item !== id);
-      return strings(doc.watched);
+      return doc.watched;
     }, BACKGROUND_CONTEXT);
   }
   /** Hide drops the PR from watched and from the seen baseline, so unhiding starts fresh instead of replaying what changed meanwhile. */
@@ -294,17 +286,17 @@ export function prMonitorRuntime(
     validId(id);
     return root.commit(async (tx) => {
       const doc = await tx.doc(Watch, root.id),
-        list = strings(doc.hidden),
+        list = doc.hidden ?? [],
         has = list.includes(id);
       doc.hidden = list;
       if (hide && !has) {
         if (list.length >= HIDDEN_CAP) throw new Error(`At most ${HIDDEN_CAP} PRs can be hidden`);
         doc.hidden = [...list, id];
-        doc.watched = strings(doc.watched).filter((item) => item !== id);
+        doc.watched = doc.watched.filter((item) => item !== id);
         delete doc.prs[id];
       }
       if (!hide && has) doc.hidden = list.filter((item) => item !== id);
-      return strings(doc.hidden);
+      return doc.hidden ?? [];
     }, BACKGROUND_CONTEXT);
   }
   async function snapshot() {
