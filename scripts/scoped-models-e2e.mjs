@@ -217,12 +217,18 @@ try {
       `document.querySelector('#error').hidden = true; document.querySelector('#error').innerHTML = ''; document.querySelector('#model-cycle').click()`,
       page,
     );
-    await delay(1500);
-    return {
+    const read = async () => ({
       before,
       after: (await settings()).values.model,
       error: await evaluate(`document.querySelector('#error').hidden ? '' : document.querySelector('#error').innerText`, page),
-    };
+    });
+    // The cycle is a host round trip; poll for its visible effect (a new model or the blocking message) instead of a fixed pause.
+    for (let tries = 0; tries < 40; tries += 1) {
+      await delay(250);
+      const outcome = await read();
+      if (outcome.after !== before || outcome.error) return outcome;
+    }
+    return read();
   };
   await update({ scopedModels: [dead] });
   let outcome = await cycleOutcome();

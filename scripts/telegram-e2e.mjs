@@ -238,7 +238,11 @@ try {
   web.searchParams.set("project", a);
   web.searchParams.set("tab", "settings");
   const s = await k.openPage(web.toString());
-  await waitFor(`!!document.querySelector('#telegram-token')`, s, "telegram card");
+  await waitFor(
+    `!!document.querySelector('#telegram-token') && !document.querySelector('[data-action="telegram-save"]').disabled`,
+    s,
+    "telegram card",
+  );
   await evaluate(
     `(() => { document.querySelector('#telegram-token').value = '999:WrongTokenWrongTokenWrongToken123'; document.querySelector('[data-action="telegram-save"]').click(); })()`,
     s,

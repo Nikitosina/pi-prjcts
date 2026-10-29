@@ -270,7 +270,19 @@ await k.run(async () => {
     `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(), code = document.querySelector('#live-reply pre'); window.__readingCode = code; return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: code.getBoundingClientRect().top - r.top - 35 }; })()`,
   );
   await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...longWheel, deltaX: 0 });
-  await delay(150);
+  // Under load the wheel can land late or overshoot: wait for the scroll to settle, then aim the code 35px under the viewport top.
+  const codeTop = () =>
+    page.evaluate(`window.__readingCode.getBoundingClientRect().top - document.querySelector('#transcript').getBoundingClientRect().top`);
+  for (let settled = 0, last = null; settled < 3; await delay(100)) {
+    const top = await codeTop();
+    settled = top === last ? settled + 1 : 0;
+    last = top;
+  }
+  const missed = (await codeTop()) - 35;
+  if (Math.abs(missed) > 1) {
+    await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...longWheel, deltaY: missed, deltaX: 0 });
+    await delay(300);
+  }
   const beforeLong = await page.evaluate(
     `(() => { const t = document.querySelector('#transcript'), code = window.__readingCode; return { text: code.textContent, top: code.getBoundingClientRect().top, gap: t.scrollHeight - t.scrollTop - t.clientHeight }; })()`,
   );
