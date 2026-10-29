@@ -32,7 +32,13 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  */
 
 /** Libraries the plugin must use instead of importing its own copies (Durable docs and tools only work with the host's instances). */
-export type PluginLib = { durable: typeof Durable; typebox: typeof Typebox; value: typeof TypeboxValue; chord: typeof ChordContext; docs: { planning: typeof DurablePlanning } };
+export type PluginLib = {
+  durable: typeof Durable;
+  typebox: typeof Typebox;
+  value: typeof TypeboxValue;
+  chord: typeof ChordContext;
+  docs: { planning: typeof DurablePlanning };
+};
 export type Extension = ReturnType<typeof defineExtension>;
 export type PrId = string;
 
@@ -50,7 +56,11 @@ export type VcsProvider = {
   /** Uncommitted paths (status lines) of a checkout; null when unreadable. */
   changedFiles(cwd: string): Promise<string[] | null>;
   /** Diff of HEAD plus uncommitted work against the merge-base with `base` (default: provider default). */
-  codeDiff(root: string, base: string | undefined, helpers: { text(result: Promise<CliResult>, what: string, tolerate?: boolean): Promise<string>; cap: number }): Promise<CodeDiffParts>;
+  codeDiff(
+    root: string,
+    base: string | undefined,
+    helpers: { text(result: Promise<CliResult>, what: string, tolerate?: boolean): Promise<string>; cap: number },
+  ): Promise<CodeDiffParts>;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
   /** Read-only snapshots of PR heads for scouts and reviewers. */
@@ -69,24 +79,54 @@ export type VcsProvider = {
 
 // ---- workspace ----
 export type QuickWorkspacePreview =
-  | { available: true; provider: string; repositoryId: string; ownerCheckout: string; approvedRoot: string; head: string; dirty: boolean; subpath?: string; sharedObjectStore?: string; login?: string; /** Rows and bullets for the confirm dialog (provider texts). */ dialog?: { checkoutLabel: string; rows?: Array<[string, string]>; bullets: string[] } }
+  | {
+      available: true;
+      provider: string;
+      repositoryId: string;
+      ownerCheckout: string;
+      approvedRoot: string;
+      head: string;
+      dirty: boolean;
+      subpath?: string;
+      sharedObjectStore?: string;
+      login?: string;
+      /** Rows and bullets for the confirm dialog (provider texts). */ dialog?: {
+        checkoutLabel: string;
+        rows?: Array<[string, string]>;
+        bullets: string[];
+      };
+    }
   | { available: false; blocker: string };
 
 export type IsolationFacts = Record<string, string>;
 export type IsolationBackend = {
   /** Provider-specific checks before an allocation or reconcile (after the host's own path checks). */
   preflight(scope: WorkspaceScope, input: { owner: string; target: string }): Promise<{ facts: IsolationFacts; reason: string | null }>;
-  add(intent: WorkspaceIntent, facts: IsolationFacts): Promise<{ state: "blocked" | "allocated" | "uncertain"; facts: IsolationFacts; lease: WorkspaceLease | null; reason: string | null }>;
+  add(
+    intent: WorkspaceIntent,
+    facts: IsolationFacts,
+  ): Promise<{ state: "blocked" | "allocated" | "uncertain"; facts: IsolationFacts; lease: WorkspaceLease | null; reason: string | null }>;
   /** What the provider currently reports for the scope's worktree; null when absent. */
   entry(scope: WorkspaceScope): Promise<{ facts: IsolationFacts; lease: WorkspaceLease | null } | null>;
   exact(scope: WorkspaceScope, actual: { facts: IsolationFacts; lease: WorkspaceLease | null }): boolean;
   /** Status command whose output must be empty before a release. */
   statusCommand(): { file: string; args: string[] };
   /** Fenced, unforced removal after the host's activity and status checks. */
-  release(intent: WorkspaceIntent, current: WorkspaceReceipt): Promise<{ ok: true; facts: IsolationFacts } | { ok: false; reason: string; facts?: IsolationFacts; lease?: WorkspaceLease | null }>;
+  release(
+    intent: WorkspaceIntent,
+    current: WorkspaceReceipt,
+  ): Promise<{ ok: true; facts: IsolationFacts } | { ok: false; reason: string; facts?: IsolationFacts; lease?: WorkspaceLease | null }>;
 };
 
-export type AllocationPlan = { name: string; branch: string; baseRevision: string; headRevision: string; leaseReason: string; sharedObjectStore: string | null; continueBranch?: true };
+export type AllocationPlan = {
+  name: string;
+  branch: string;
+  baseRevision: string;
+  headRevision: string;
+  leaseReason: string;
+  sharedObjectStore: string | null;
+  continueBranch?: true;
+};
 export type BindContext = {
   project: Project;
   repository: WorkspaceAuthorization["repositories"][number];
@@ -128,9 +168,21 @@ export type SetupCard = {
   body: string;
   /** Opaque revision the connect call must echo. */
   revision: string;
-  connect?: { label: string; dialog: { title: string; subtitle?: string; intro?: string; bullets: string[]; confirmLabel: string }; rpc: { plugin: string; method: string }; success: string };
+  connect?: {
+    label: string;
+    dialog: { title: string; subtitle?: string; intro?: string; bullets: string[]; confirmLabel: string };
+    rpc: { plugin: string; method: string };
+    success: string;
+  };
 };
-export type WorkerFacts = { threadId: string | null; branch: string | null; removable: boolean; reasons: string[]; pullRequests: Array<{ number: number; state: string }>; /** Clean checkout still at the commit it was created from. */ atBase?: boolean };
+export type WorkerFacts = {
+  threadId: string | null;
+  branch: string | null;
+  removable: boolean;
+  reasons: string[];
+  pullRequests: Array<{ number: number; state: string }>;
+  /** Clean checkout still at the commit it was created from. */ atBase?: boolean;
+};
 export type WorkspaceProvider = {
   /** workspaceAuthorization.provider value and checkout kind (matches a VcsProvider.kind). */
   id: string;
@@ -147,15 +199,30 @@ export type WorkspaceProvider = {
   plan(context: BindContext): Promise<AllocationPlan>;
   attach(context: AttachContext): Promise<WorkerAttachment>;
   /** Cleanup inventory: facts of one allocated worker worktree and the removal. */
-  workerFacts(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; busy(threadId: string): boolean }): Promise<WorkerFacts>;
+  workerFacts(input: {
+    project: Project;
+    root: Conversation;
+    receipt: WorkspaceReceipt;
+    busy(threadId: string): boolean;
+  }): Promise<WorkerFacts>;
   /** Exact facts for owner-approved worker cleanup. Unknown, dirty or unpublished work must refuse. */
   removalSnapshot?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt }): Promise<{ state: string; risks: string[] }>;
   /** Rechecks the snapshot and removes under its exact lease fence, without force or lease handoff. */
-  removeApproved?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; state: string }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
+  removeApproved?(input: {
+    project: Project;
+    root: Conversation;
+    receipt: WorkspaceReceipt;
+    state: string;
+  }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
   /** Exact registered mount and storage facts; local work may be unreadable until remount. */
   remountSnapshot?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt }): Promise<{ state: string; risks: string[] }>;
   /** Restores the approved mount without retiring its receipt or authorizing removal. */
-  remountApproved?(input: { project: Project; root: Conversation; receipt: WorkspaceReceipt; state: string }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
+  remountApproved?(input: {
+    project: Project;
+    root: Conversation;
+    receipt: WorkspaceReceipt;
+    state: string;
+  }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
   /** Removes a worker worktree or read-head snapshot (unforced, fenced). */
   remove(input: { entry: string; leaseOwner: string }): Promise<{ ok: true } | { ok: false; error: string }>;
   readHeadEntry(project: Project, path: string): { leaseOwner: string; entry: string };
@@ -197,9 +264,20 @@ export type PrCardData = {
   unresolved?: number;
 };
 /** Transitions the PR monitor can report. */
-export type PrTransition = "ci-failed" | "ci-recovered" | "conflicts" | "merge-failed" | "merged" | "closed" | "changes-requested" | "approved" | "review-comments";
+export type PrTransition =
+  "ci-failed" | "ci-recovered" | "conflicts" | "merge-failed" | "merged" | "closed" | "changes-requested" | "approved" | "review-comments";
 export type PrListing = { prs: PrCardData[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null };
-export type PrDetailData = { id: PrId; title: string; status: string; url: string; conflicts: boolean; counts: PrCounts; failedChecks: string[]; draft?: boolean; review?: PrCardData["review"] };
+export type PrDetailData = {
+  id: PrId;
+  title: string;
+  status: string;
+  url: string;
+  conflicts: boolean;
+  counts: PrCounts;
+  failedChecks: string[];
+  draft?: boolean;
+  review?: PrCardData["review"];
+};
 export type PrProvider = {
   id: string;
   /** Shown as the card group and in events ("GitHub", or a plugin's label). */
@@ -236,11 +314,44 @@ export type PrProvider = {
 };
 
 // ---- follow ----
-export type FollowPrState = { state: "open" | "closed" | "merged"; head: string; ref: string; title: string; updatedAt: string; ci: { sha: string; result: "failed" | "passed" } | null; lastReview: number; lastComment: number; lastLineComment: number };
+export type FollowPrState = {
+  state: "open" | "closed" | "merged";
+  head: string;
+  ref: string;
+  title: string;
+  updatedAt: string;
+  ci: { sha: string; result: "failed" | "passed" } | null;
+  lastReview: number;
+  lastComment: number;
+  lastLineComment: number;
+};
 export type FollowItem = { id: string; line: string; notice?: Pick<PrNotice, "kind" | "text"> };
-export type FollowFailure = { repo: { repositoryId: string; numericId?: number }; number: number; title: string; head: string; ref: string; checks: string[]; /** Failed-check detail for the built-in auto-fix brief (untrusted provider data, already capped). */ detail?: string; /** Set by a plugin provider: the auto-fix task text for this failure. */ brief?: (input: { attempt: number; cap: number; hasThread: boolean }) => string; provider?: string };
+export type FollowFailure = {
+  repo: { repositoryId: string; numericId?: number };
+  number: number;
+  title: string;
+  head: string;
+  ref: string;
+  checks: string[];
+  /** Failed-check detail for the built-in auto-fix brief (untrusted provider data, already capped). */ detail?: string;
+  /** Set by a plugin provider: the auto-fix task text for this failure. */ brief?: (input: {
+    attempt: number;
+    cap: number;
+    hasThread: boolean;
+  }) => string;
+  provider?: string;
+};
 export type FollowRepoState = { baselined: boolean; prs: Record<string, FollowPrState> };
-export type MergeReceipt = { sha: string; state: "uncertain" | "merged" | "failed"; at: number; marker: string; reviewerThreadId: string; mergeCommit: string | null; error: string | null; retryable?: boolean };
+export type MergeReceipt = {
+  sha: string;
+  state: "uncertain" | "merged" | "failed";
+  at: number;
+  marker: string;
+  reviewerThreadId: string;
+  mergeCommit: string | null;
+  error: string | null;
+  retryable?: boolean;
+};
 /** Helpers the host gives a provider's auto-merge (same receipts, review requests and gates as GitHub's). */
 export type AutoMergeKit = {
   repositoryId: string;
@@ -266,7 +377,13 @@ export type FollowProvider = {
   label: string;
   /** The current, workspace-bound provider authorization of the project, or undefined when Follow PRs should skip it. */
   repository(project: Project): { repositoryId: string } | undefined;
-  observe(input: { root: Conversation; project: Project; repositoryId: string; prior: FollowRepoState | undefined; signal: AbortSignal }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
+  observe(input: {
+    root: Conversation;
+    project: Project;
+    repositoryId: string;
+    prior: FollowRepoState | undefined;
+    signal: AbortSignal;
+  }): Promise<{ state: FollowRepoState; items: FollowItem[]; failed: FollowFailure[] }>;
   published(root: Conversation): Promise<Array<{ number: number; conversationId: number }>>;
   autoMerge(kit: AutoMergeKit, number: number, pr: FollowPrState): Promise<FollowItem | null>;
 };
@@ -274,7 +391,10 @@ export type FollowProvider = {
 // ---- coordinator tools / rpc / writes ----
 export type CoordinatorToolsProvider = {
   /** Installed always (recorded calls resolve), offered only where `applies`. */
-  create(input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }): { tools: ToolRegistration[]; extension: Extension };
+  create(input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean }): {
+    tools: ToolRegistration[];
+    extension: Extension;
+  };
   applies(project: Project): boolean;
   /** Appended to the coordinator instructions of matching projects. */
   instructions?(project: Project): string;
@@ -329,7 +449,9 @@ export type PluginCapabilities = {
   web?: WebContribution;
 };
 export type LeaseHolder = { projectId: string; threadId: string };
-export type LeaseAnswer = { acquired: true; resource: string; until: string } | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
+export type LeaseAnswer =
+  | { acquired: true; resource: string; until: string }
+  | { acquired: false; resource: string; heldBy: LeaseHolder; until: string; waitedMs: number };
 
 export type HostPluginApi = {
   /** The plugin's own name. */
@@ -368,7 +490,15 @@ export type HostPluginApi = {
   };
   workspace: {
     WHOLE_REPOSITORY_PREFIX: string;
-    repositoryFingerprint(repository: { repositoryId: string; provider: string; ownerCheckout: string; approvedRoot: string; fileOwnershipPrefix: string; sharedObjectStore?: string | null; subpath?: string }): string;
+    repositoryFingerprint(repository: {
+      repositoryId: string;
+      provider: string;
+      ownerCheckout: string;
+      approvedRoot: string;
+      fileOwnershipPrefix: string;
+      sharedObjectStore?: string | null;
+      subpath?: string;
+    }): string;
   };
   prs: {
     /** Shared, TTL-cached, rate-limit-aware list reads: one fetch serves every project and browser. */
@@ -385,7 +515,19 @@ export type ListCacheOptions<T> = {
   /** Fetches one list (key identifies the scope); throws RateLimitedError when the provider asks to back off. `backoff()`/`blocked()` let a long fetch stop early. */
   fetch(key: string, input: { force: boolean; backoff(): void; blocked(): boolean }): Promise<T[]>;
 };
-export type ListCache<T> = { list(key: string, options?: { force?: boolean }): Promise<{ items: T[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null }> };
+export type ListCache<T> = {
+  list(
+    key: string,
+    options?: { force?: boolean },
+  ): Promise<{ items: T[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null }>;
+};
 
 export type PluginModule = { name: string; register(api: HostPluginApi): void | Promise<void> };
-export type PluginStatus = { source: string; name: string | null; state: "loaded" | "failed"; error?: string; provides: string[]; loadedAtMs: number };
+export type PluginStatus = {
+  source: string;
+  name: string | null;
+  state: "loaded" | "failed";
+  error?: string;
+  provides: string[];
+  loadedAtMs: number;
+};

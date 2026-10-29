@@ -1,127 +1,523 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Pi Projects</title>
-  <meta name="color-scheme" content="light dark"><script src="/theme.js"></script>
-  <link rel="stylesheet" href="/styles.css"><script defer src="/app.js"></script>
-</head>
-<body>
-  <dialog id="sign-in" aria-labelledby="sign-in-title" aria-describedby="sign-in-note">
-    <div class="dialog-body">
-      <h2 id="sign-in-title">Sign in to Pi Projects</h2>
-      <p id="sign-in-note" class="note">Safari and Dock apps keep separate sign-ins. Run <code>npm run projects -- ui-url</code> in the pi-prjcts folder, then paste the full link containing <code>#token=</code> here. Keep this link private.</p>
-      <form>
-        <label class="field"><span>Inbox sign-in link</span><input id="sign-in-link" type="password" autocomplete="off" spellcheck="false" required autofocus></label>
-        <p id="sign-in-error" class="dialog-error" role="alert"></p>
-        <button type="submit" class="primary">Sign in</button>
-      </form>
-    </div>
-  </dialog>
-  <div class="app">
-    <aside class="side" id="side" aria-label="Projects">
-      <div class="brand-row"><div class="brand">π <span class="side-text"><b>Projects</b> <span class="local">LOCAL</span></span></div><button type="button" id="side-toggle" class="ghost small side-toggle" data-side-toggle aria-controls="side" aria-expanded="true" aria-label="Hide sidebar" title="Hide sidebar (⌘B / Ctrl+B)"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 3v10" stroke="currentColor" stroke-width="1.3"/></svg></button></div>
-      <button id="create" title="New project"><span class="create-plus">＋</span><span class="side-text">&nbsp;New project</span></button>
-      <div class="side-label">Projects</div>
-      <nav id="project-list"></nav>
-      <select id="projects" aria-label="Select project" hidden><option>Loading…</option></select>
-      <button class="ghost small quiet" data-action="open-retained">Open project by ID…</button>
-      <div class="side-foot"><span id="connection" role="status">Connecting…</span><a id="remote-hosts" class="ghost small" href="/" hidden>Hosts</a><button id="refresh" class="ghost small">Refresh</button></div>
-    </aside>
-    <main class="main">
-      <header class="phead">
-        <div class="row"><span id="avatar" class="avatar">π</span><h1 id="title">Opening your projects.</h1></div>
-        <nav class="tabs" role="tablist"><button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button><button data-tab="knowledge">Knowledge</button><button data-tab="observability">Observability</button><button data-tab="settings">Settings</button></nav>
-        <button id="search-button" class="ghost small search-button" data-action="search" title="Search chats, workers, knowledge and files (⌘K / Ctrl+K)" aria-label="Search" aria-keyshortcuts="Meta+K Control+K"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.4 10.4 3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="search-label">Search</span><kbd class="search-kbd"></kbd></button>
-        <div id="lifecycle" class="row" aria-label="Project lifecycle" hidden><span id="lifecycle-state" class="chip" role="status"></span><button id="project-pause" data-action="pause-project">❚❚ Pause</button><button id="project-resume" data-action="resume-project">▶ Resume</button><button class="ghost" data-action="lifecycle-more" title="Archive, delete or restore" aria-label="More project actions">⋯</button></div>
-      </header>
-      <div class="body">
-        <div id="error" role="alert" hidden></div><div id="warning" hidden></div>
-
-        <section class="panel grid2" data-panel="coordinator">
-          <div class="convo">
-            <div id="chat-bar" class="chat-bar"></div>
-            <div id="transcript" class="transcript"><div id="messages" aria-live="polite"></div><div id="live-reply" class="msg them live-reply" aria-live="polite" hidden></div><div id="questions" class="questions" aria-live="polite"></div><div class="pill-dock"><button id="working-pill" class="working-pill" data-action="jump-latest" hidden><span class="live-dot"></span><span class="pill-text"></span><span aria-hidden="true">↓</span></button></div></div>
-            <p id="paused-hint" class="paused-hint" role="status" hidden><span>Paused. Workers are stopped and the coordinator takes no new messages.</span><button class="primary small" data-action="resume-project">Resume</button></p>
-            <p id="question-hint" class="question-hint" hidden><span aria-hidden="true">↑</span> The coordinator asked you a question. <button type="button" class="ghost small" data-action="questions-jump">Answer it above</button></p>
-            <form id="compose" class="composer" aria-label="Coordinator messaging"><div id="skill-menu" class="skill-menu" role="listbox" aria-label="Skills" hidden></div><div id="attachments" class="attach-chips" aria-label="Attachments" hidden></div><input type="file" id="attach-input" multiple hidden><div class="compose-field"><div class="compose-backdrop" aria-hidden="true"></div><textarea name="message" aria-label="Message coordinator" placeholder="Message the coordinator…" rows="2" maxlength="32000" required role="combobox" aria-autocomplete="list" aria-controls="skill-menu"></textarea></div><div class="row between"><span class="row help-line"><span class="help-wrap"><button type="button" class="ghost small help-btn" data-action="composer-help" aria-label="Composer help" aria-haspopup="dialog" aria-expanded="false">ⓘ</button><div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span><span class="row compose-actions"><button type="button" class="ghost small model-cycle" id="model-cycle" data-action="model-cycle" hidden></button><button type="button" class="ghost small attach-button" data-action="attach-pick" title="Attach files (or drop them here)" aria-label="Attach files"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10.5 4.5 5.8 9.2a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4.2-4.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button><span class="context-meter" tabindex="0" role="group" aria-label="Context use unknown"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="8" class="track"/><circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/></svg><span class="context-pct" aria-hidden="true"></span><span class="context-popup">Context use unknown</span></span><button type="submit" class="primary">Send ↵</button></span></div></form>
-            <div id="reply-summary" hidden></div>
-          </div>
-          <aside class="col">
-            <div id="needs-card" class="card"><b>Needs you</b><span id="needs-badge" hidden></span><nav id="queue" aria-label="Pending decisions"></nav><div id="letter"></div><div id="needs-questions" class="needs-questions"></div></div>
-            <div class="card" id="prs-card" hidden><div class="row between"><b>Pull requests</b><span class="row"><small id="prs-meta" class="note"></small><button type="button" class="ghost small" data-action="prs-refresh" title="Refresh from the PR providers" aria-label="Refresh pull requests">↻</button></span></div><div id="prs"></div></div>
-            <div id="plugin-cards"></div>
-            <div class="card" id="workers-card"><div class="row between"><b>Workers</b><label class="row archive-toggle" id="archive-toggle" hidden><input type="checkbox" id="show-archived"> Show archived</label></div><div id="activity"></div></div>
-            <div class="card"><div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div><div id="notes"></div></div>
-            <div class="card"><b>Recent results</b><div id="outcomes"></div></div>
-          </aside>
-        </section>
-
-        <section id="inline-thread" class="worker-view" aria-label="Worker" hidden></section>
-
-        <section class="panel" data-panel="knowledge" hidden>
-          <div class="row between"><h2 class="pane-title">Knowledge</h2><span class="row knowledge-actions"><button class="primary small" data-action="knowledge-new">＋ New document</button><button class="small" data-action="notes">Notes</button><button class="small" data-action="library-list">Library</button><button class="small" data-action="upload-pick">Upload files</button></span></div>
-          <p class="note">What the coordinator remembers about this project. MEMORY.md is the index; topic documents load on demand.</p>
-          <div id="knowledge-inline"></div>
-          <div class="row between"><h3 class="section">Uploads</h3><small class="note">Drop files anywhere on this tab · up to 20 MB each</small></div><div id="uploads-inline" class="uploads"></div><input type="file" id="upload-input" multiple hidden>
-          <div class="row between"><h3 class="section">Evidence</h3><button class="ghost small" data-action="evidence-list">All evidence</button></div><div id="evidence-inline"></div>
-          <h3 class="section">Workspace</h3><p id="workspace" class="note mono"></p><p id="workspace-policy" class="note">Your Mac must stay awake. Workspace scope and isolation require explicit authorization.</p>
-        </section>
-
-        <section class="panel" data-panel="observability" hidden>
-          <div id="obs-kpis" class="kpis"></div>
-          <div class="grid-obs">
-            <div class="card"><div class="row between"><b>Usage by conversation</b><button class="ghost small" data-action="usage-list" id="usage-button">Full breakdown ↗</button></div><div id="obs-usage"></div></div>
-            <div class="card"><b>Host health</b><div id="obs-health"></div></div>
-          </div>
-          <div class="card"><b>Trace</b> <small class="inline">coordinator → reusable threads → work items</small><div id="obs-trace"></div></div>
-          <div class="grid-obs">
-            <div class="card"><b>Worker timeline</b><div id="obs-timeline"></div></div>
-            <div class="card"><b>Event log</b><div id="obs-event-log"></div><b>Usage over time</b><div id="obs-usage-time"></div></div>
-          </div>
-        </section>
-
-        <section class="panel settings" data-panel="settings" hidden>
-          <nav class="set-nav" aria-label="Settings sections">
-            <a href="#set-setup">Owner setup</a><a href="#set-project">Project</a><a href="#set-skills">Skills</a><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a><a href="#set-advanced">Advanced</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a><a href="#set-remote">Remote access</a><a href="#set-appearance">Appearance</a><a href="#set-approvals">Approvals</a><a href="#set-danger" class="danger">Danger zone</a>
-          </nav>
-          <div class="set-main">
-          <section class="set-section" id="set-setup"><header class="set-head"><div><h2>Owner setup</h2><p class="note">Workers edit the repository in their own isolated worktree by default. Pushes, PRs and merges need the GitHub target and command profile granted here (skills: see Skills below). Missing grants stay visible blockers.</p></div><button id="owner-setup-button" data-action="owner-setup" class="primary" hidden>Open owner setup</button></header>
-            <div class="card"><ol id="owner-steps" class="stepper"></ol></div></section>
-          <section class="set-section" id="set-project"><header class="set-head"><div><h2>Project</h2><p class="note">Name, objective, models and access.</p></div><button id="settings-button" data-action="settings-list" hidden>Edit settings ↗</button></header>
-            <div class="card"><div id="settings-summary"></div></div></section>
-          <section class="set-section" id="set-skills"><header class="set-head"><div><h2>Skills</h2><p class="note">Agents see only the names and descriptions of their profile's skills and read a skill when they need it. Every installed skill is on for every profile by default, including skills installed later; uncheck one to switch it off for all profiles or for a single profile. Child workers use their role's skills. The / picker in the chat still lists every skill.</p></div><span id="skills-summary" class="set-meta"></span></header>
-            <div class="card" id="skills-card"><div id="skills-picker"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-mcp"><header class="set-head"><div><h2>MCP servers</h2><p class="note">External tool servers from your mcp.json. Every ready server is on for every profile by default, including servers added later; uncheck one to switch it off for all profiles or for a single profile. Tools that change things stay blocked unless you allow writes for that server.</p></div><span id="mcp-summary" class="set-meta"></span></header>
-            <div class="card" id="mcp-card"><div id="mcp-picker"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-worktrees"><header class="set-head"><div><h2>Worktrees</h2><p class="note">Each coding worker gets its own git worktree; scouts and reviewers read PR heads from snapshots. A worktree is removed automatically once its work settled, it is clean, and its commits are pushed or its PR is merged or closed. Branches are always kept; anything with changes, unpushed commits, an open PR or running work stays.</p></div><span id="worktrees-summary" class="set-meta"></span></header>
-            <div class="card" id="worktrees-card"><div id="worktrees"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-context"><header class="set-head"><div><h2>Context and compaction</h2><p class="note">Chats and workers compact automatically with Pi's defaults: older messages are summarized and the recent part is kept verbatim. Use “Compact now” in a chat when you want it sooner. The overrides below are for models whose context size is reported wrongly.</p></div><span id="context-summary" class="set-meta"></span></header>
-            <div class="card" id="context-card"><details class="advanced"><summary>Override context window and thresholds</summary><div id="context-settings"><p class="note">Reading…</p></div></details></div></section>
-          <section class="set-section" id="set-advanced"><header class="set-head"><div><h2>Advanced: system prompts</h2><p class="note">Edit the role instructions of the coordinator, worker, scout, reviewer and verifier. These prompts are stored per project, not globally. Changes apply to new coordinator turns and new worker threads; running threads keep the prompt they started with. Only the role instructions are editable: tools, workspace scope, approvals and the project's identity are enforced and appended by the host and do not depend on this text, so a custom prompt cannot widen permissions. The verifier's evidence, cleanup and verdict protocol stays appended even with a custom verifier prompt.</p></div></header>
-            <div class="card" id="prompts-card"><div id="prompts"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-automations"><header class="set-head"><div><h2>Automations</h2><p class="note">Schedules, monitors and events. Toggling always asks for confirmation.</p></div><button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button></header>
-            <div class="card"><h3 class="card-title">Schedules and history</h3><div id="automation-history" class="automation-strip"><p class="note">Reading recent automation history…</p></div><div class="row"><button data-action="routine-history" data-project="" data-kind="intents" data-offset="0" data-text-offset="0">Recent run history</button></div></div>
-            <div class="card" id="events-in-card"><div class="row between"><h3 class="card-title">Events in</h3><button class="ghost small" data-action="automation-refresh">Refresh</button></div><p class="note">Follow PRs, the webhook and the worker watchdog send events to one chat. Text from GitHub or a webhook is untrusted.</p><div id="events-in"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-notifications"><header class="set-head"><div><h2>Notifications</h2><p class="note">Questions, approvals, finished results and errors from every project on this host.</p></div></header>
-            <div class="card" id="notify-card">
-              <fieldset class="events-group"><legend>This browser</legend><label class="check"><input type="checkbox" id="notify-browser"> Notify me while I'm away from this tab</label><p id="notify-browser-state" class="note"></p><div class="row"><button class="small" id="notify-test" type="button">Send a test notification</button></div></fieldset>
-              <fieldset class="events-group"><legend>Telegram</legend><div id="telegram"><p class="note">Reading…</p></div></fieldset>
-            </div></section>
-          <section class="set-section" id="set-remote"><header class="set-head"><div><h2>Remote access</h2><p class="note">Open this host's inbox from your phone or another computer through your relay. Traffic is end-to-end encrypted; the relay only forwards it.</p></div></header>
-            <div class="card" id="remote-card"><div id="remote"><p class="note">Reading…</p></div></div></section>
-          <section class="set-section" id="set-appearance"><header class="set-head"><div><h2>Appearance</h2><p class="note">Theme for this browser. System follows your OS light/dark setting.</p></div></header>
-            <div class="card" id="appearance-card"><div class="row seg" role="radiogroup" aria-label="Theme"><label class="check"><input type="radio" name="theme" value="system"> System</label><label class="check"><input type="radio" name="theme" value="light"> Light</label><label class="check"><input type="radio" name="theme" value="dark"> Dark</label></div></div></section>
-          <section class="set-section" id="set-approvals"><header class="set-head"><div><h2>Approvals and providers</h2><p id="approval-page-note" class="note"></p></div><span class="row"><button id="approvals-button" data-action="operation-list" hidden>All retained approvals ↗</button><button id="provider-button" data-action="provider-list" hidden>GitHub PR/CI/review receipts ↗</button></span></header></section>
-          <section class="set-section danger-zone" id="set-danger"><header class="set-head"><div><h2>Danger zone</h2><p class="note">Archive, delete or restore this project.</p></div><button data-action="lifecycle-more" class="danger">Archive / delete / restore…</button></header></section>
-          </div>
-        </section>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Pi Projects</title>
+    <meta name="color-scheme" content="light dark" />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <dialog id="sign-in" aria-labelledby="sign-in-title" aria-describedby="sign-in-note">
+      <div class="dialog-body">
+        <h2 id="sign-in-title">Sign in to Pi Projects</h2>
+        <p id="sign-in-note" class="note">
+          Safari and Dock apps keep separate sign-ins. Run <code>npm run projects -- ui-url</code> in the pi-prjcts folder, then paste the
+          full link containing <code>#token=</code> here. Keep this link private.
+        </p>
+        <form>
+          <label class="field"
+            ><span>Inbox sign-in link</span
+            ><input id="sign-in-link" type="password" autocomplete="off" spellcheck="false" required autofocus
+          /></label>
+          <p id="sign-in-error" class="dialog-error" role="alert"></p>
+          <button type="submit" class="primary">Sign in</button>
+        </form>
       </div>
-    </main>
-  </div>
-  <footer id="limits-bar" class="limits-bar" aria-label="Subscription limits"></footer>
-  <div id="toast" role="status" aria-live="polite"></div>
-  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
-  <dialog id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Image preview"><figure><button type="button" class="lightbox-x" aria-label="Close image" title="Close (Esc)">✕</button><img alt=""><figcaption hidden></figcaption></figure></dialog>
-</body>
+    </dialog>
+    <div class="app">
+      <aside class="side" id="side" aria-label="Projects">
+        <div class="brand-row">
+          <div class="brand">
+            π <span class="side-text"><b>Projects</b> <span class="local">LOCAL</span></span>
+          </div>
+          <button
+            type="button"
+            id="side-toggle"
+            class="ghost small side-toggle"
+            data-side-toggle
+            aria-controls="side"
+            aria-expanded="true"
+            aria-label="Hide sidebar"
+            title="Hide sidebar (⌘B / Ctrl+B)"
+          >
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" />
+              <path d="M6 3v10" stroke="currentColor" stroke-width="1.3" />
+            </svg>
+          </button>
+        </div>
+        <button id="create" title="New project"><span class="create-plus">＋</span><span class="side-text">&nbsp;New project</span></button>
+        <div class="side-label">Projects</div>
+        <nav id="project-list"></nav>
+        <select id="projects" aria-label="Select project" hidden>
+          <option>Loading…</option>
+        </select>
+        <button class="ghost small quiet" data-action="open-retained">Open project by ID…</button>
+        <div class="side-foot">
+          <span id="connection" role="status">Connecting…</span><a id="remote-hosts" class="ghost small" href="/" hidden>Hosts</a
+          ><button id="refresh" class="ghost small">Refresh</button>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="phead">
+          <div class="row">
+            <span id="avatar" class="avatar">π</span>
+            <h1 id="title">Opening your projects.</h1>
+          </div>
+          <nav class="tabs" role="tablist">
+            <button data-tab="coordinator">Coordinator <span id="needs-count" class="count" hidden></span></button
+            ><button data-tab="knowledge">Knowledge</button><button data-tab="observability">Observability</button
+            ><button data-tab="settings">Settings</button>
+          </nav>
+          <button
+            id="search-button"
+            class="ghost small search-button"
+            data-action="search"
+            title="Search chats, workers, knowledge and files (⌘K / Ctrl+K)"
+            aria-label="Search"
+            aria-keyshortcuts="Meta+K Control+K"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+              <path d="m10.4 10.4 3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg
+            ><span class="search-label">Search</span><kbd class="search-kbd"></kbd>
+          </button>
+          <div id="lifecycle" class="row" aria-label="Project lifecycle" hidden>
+            <span id="lifecycle-state" class="chip" role="status"></span
+            ><button id="project-pause" data-action="pause-project">❚❚ Pause</button
+            ><button id="project-resume" data-action="resume-project">▶ Resume</button
+            ><button class="ghost" data-action="lifecycle-more" title="Archive, delete or restore" aria-label="More project actions">
+              ⋯
+            </button>
+          </div>
+        </header>
+        <div class="body">
+          <div id="error" role="alert" hidden></div>
+          <div id="warning" hidden></div>
+
+          <section class="panel grid2" data-panel="coordinator">
+            <div class="convo">
+              <div id="chat-bar" class="chat-bar"></div>
+              <div id="transcript" class="transcript">
+                <div id="messages" aria-live="polite"></div>
+                <div id="live-reply" class="msg them live-reply" aria-live="polite" hidden></div>
+                <div id="questions" class="questions" aria-live="polite"></div>
+                <div class="pill-dock">
+                  <button id="working-pill" class="working-pill" data-action="jump-latest" hidden>
+                    <span class="live-dot"></span><span class="pill-text"></span><span aria-hidden="true">↓</span>
+                  </button>
+                </div>
+              </div>
+              <p id="paused-hint" class="paused-hint" role="status" hidden>
+                <span>Paused. Workers are stopped and the coordinator takes no new messages.</span
+                ><button class="primary small" data-action="resume-project">Resume</button>
+              </p>
+              <p id="question-hint" class="question-hint" hidden>
+                <span aria-hidden="true">↑</span> The coordinator asked you a question.
+                <button type="button" class="ghost small" data-action="questions-jump">Answer it above</button>
+              </p>
+              <form id="compose" class="composer" aria-label="Coordinator messaging">
+                <div id="skill-menu" class="skill-menu" role="listbox" aria-label="Skills" hidden></div>
+                <div id="attachments" class="attach-chips" aria-label="Attachments" hidden></div>
+                <input type="file" id="attach-input" multiple hidden />
+                <div class="compose-field">
+                  <div class="compose-backdrop" aria-hidden="true"></div>
+                  <textarea
+                    name="message"
+                    aria-label="Message coordinator"
+                    placeholder="Message the coordinator…"
+                    rows="2"
+                    maxlength="32000"
+                    required
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-controls="skill-menu"
+                  ></textarea>
+                </div>
+                <div class="row between">
+                  <span class="row help-line"
+                    ><span class="help-wrap"
+                      ><button
+                        type="button"
+                        class="ghost small help-btn"
+                        data-action="composer-help"
+                        aria-label="Composer help"
+                        aria-haspopup="dialog"
+                        aria-expanded="false"
+                      >
+                        ⓘ
+                      </button>
+                      <div class="help-pop" role="dialog" aria-label="Composer shortcuts" hidden></div></span></span
+                  ><span class="row compose-actions"
+                    ><button type="button" class="ghost small model-cycle" id="model-cycle" data-action="model-cycle" hidden></button
+                    ><button
+                      type="button"
+                      class="ghost small attach-button"
+                      data-action="attach-pick"
+                      title="Attach files (or drop them here)"
+                      aria-label="Attach files"
+                    >
+                      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                        <path
+                          d="M10.5 4.5 5.8 9.2a1.4 1.4 0 0 0 2 2l5-5a2.8 2.8 0 0 0-4-4l-5 5a4.2 4.2 0 0 0 6 6l4.2-4.2"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.3"
+                          stroke-linecap="round"
+                        />
+                      </svg></button
+                    ><span class="context-meter" tabindex="0" role="group" aria-label="Context use unknown"
+                      ><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+                        <circle cx="10" cy="10" r="8" class="track" />
+                        <circle cx="10" cy="10" r="8" class="fill" stroke-dasharray="0 50.27" transform="rotate(-90 10 10)" /></svg
+                      ><span class="context-pct" aria-hidden="true"></span><span class="context-popup">Context use unknown</span></span
+                    ><button type="submit" class="primary">Send ↵</button></span
+                  >
+                </div>
+              </form>
+              <div id="reply-summary" hidden></div>
+            </div>
+            <aside class="col">
+              <div id="needs-card" class="card">
+                <b>Needs you</b><span id="needs-badge" hidden></span>
+                <nav id="queue" aria-label="Pending decisions"></nav>
+                <div id="letter"></div>
+                <div id="needs-questions" class="needs-questions"></div>
+              </div>
+              <div class="card" id="prs-card" hidden>
+                <div class="row between">
+                  <b>Pull requests</b
+                  ><span class="row"
+                    ><small id="prs-meta" class="note"></small
+                    ><button
+                      type="button"
+                      class="ghost small"
+                      data-action="prs-refresh"
+                      title="Refresh from the PR providers"
+                      aria-label="Refresh pull requests"
+                    >
+                      ↻
+                    </button></span
+                  >
+                </div>
+                <div id="prs"></div>
+              </div>
+              <div id="plugin-cards"></div>
+              <div class="card" id="workers-card">
+                <div class="row between">
+                  <b>Workers</b
+                  ><label class="row archive-toggle" id="archive-toggle" hidden
+                    ><input type="checkbox" id="show-archived" /> Show archived</label
+                  >
+                </div>
+                <div id="activity"></div>
+              </div>
+              <div class="card">
+                <div class="row between"><b>Knowledge</b><button class="ghost small link-button" data-tab="knowledge">Open →</button></div>
+                <div id="notes"></div>
+              </div>
+              <div class="card">
+                <b>Recent results</b>
+                <div id="outcomes"></div>
+              </div>
+            </aside>
+          </section>
+
+          <section id="inline-thread" class="worker-view" aria-label="Worker" hidden></section>
+
+          <section class="panel" data-panel="knowledge" hidden>
+            <div class="row between">
+              <h2 class="pane-title">Knowledge</h2>
+              <span class="row knowledge-actions"
+                ><button class="primary small" data-action="knowledge-new">＋ New document</button
+                ><button class="small" data-action="notes">Notes</button><button class="small" data-action="library-list">Library</button
+                ><button class="small" data-action="upload-pick">Upload files</button></span
+              >
+            </div>
+            <p class="note">What the coordinator remembers about this project. MEMORY.md is the index; topic documents load on demand.</p>
+            <div id="knowledge-inline"></div>
+            <div class="row between">
+              <h3 class="section">Uploads</h3>
+              <small class="note">Drop files anywhere on this tab · up to 20 MB each</small>
+            </div>
+            <div id="uploads-inline" class="uploads"></div>
+            <input type="file" id="upload-input" multiple hidden />
+            <div class="row between">
+              <h3 class="section">Evidence</h3>
+              <button class="ghost small" data-action="evidence-list">All evidence</button>
+            </div>
+            <div id="evidence-inline"></div>
+            <h3 class="section">Workspace</h3>
+            <p id="workspace" class="note mono"></p>
+            <p id="workspace-policy" class="note">
+              Your Mac must stay awake. Workspace scope and isolation require explicit authorization.
+            </p>
+          </section>
+
+          <section class="panel" data-panel="observability" hidden>
+            <div id="obs-kpis" class="kpis"></div>
+            <div class="grid-obs">
+              <div class="card">
+                <div class="row between">
+                  <b>Usage by conversation</b
+                  ><button class="ghost small" data-action="usage-list" id="usage-button">Full breakdown ↗</button>
+                </div>
+                <div id="obs-usage"></div>
+              </div>
+              <div class="card">
+                <b>Host health</b>
+                <div id="obs-health"></div>
+              </div>
+            </div>
+            <div class="card">
+              <b>Trace</b> <small class="inline">coordinator → reusable threads → work items</small>
+              <div id="obs-trace"></div>
+            </div>
+            <div class="grid-obs">
+              <div class="card">
+                <b>Worker timeline</b>
+                <div id="obs-timeline"></div>
+              </div>
+              <div class="card">
+                <b>Event log</b>
+                <div id="obs-event-log"></div>
+                <b>Usage over time</b>
+                <div id="obs-usage-time"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel settings" data-panel="settings" hidden>
+            <nav class="set-nav" aria-label="Settings sections">
+              <a href="#set-setup">Owner setup</a><a href="#set-project">Project</a><a href="#set-skills">Skills</a
+              ><a href="#set-mcp">MCP servers</a><a href="#set-worktrees">Worktrees</a><a href="#set-context">Context</a
+              ><a href="#set-advanced">Advanced</a><a href="#set-automations">Automations</a><a href="#set-notifications">Notifications</a
+              ><a href="#set-remote">Remote access</a><a href="#set-appearance">Appearance</a><a href="#set-approvals">Approvals</a
+              ><a href="#set-danger" class="danger">Danger zone</a>
+            </nav>
+            <div class="set-main">
+              <section class="set-section" id="set-setup">
+                <header class="set-head">
+                  <div>
+                    <h2>Owner setup</h2>
+                    <p class="note">
+                      Workers edit the repository in their own isolated worktree by default. Pushes, PRs and merges need the GitHub target
+                      and command profile granted here (skills: see Skills below). Missing grants stay visible blockers.
+                    </p>
+                  </div>
+                  <button id="owner-setup-button" data-action="owner-setup" class="primary" hidden>Open owner setup</button>
+                </header>
+                <div class="card"><ol id="owner-steps" class="stepper"></ol></div>
+              </section>
+              <section class="set-section" id="set-project">
+                <header class="set-head">
+                  <div>
+                    <h2>Project</h2>
+                    <p class="note">Name, objective, models and access.</p>
+                  </div>
+                  <button id="settings-button" data-action="settings-list" hidden>Edit settings ↗</button>
+                </header>
+                <div class="card"><div id="settings-summary"></div></div>
+              </section>
+              <section class="set-section" id="set-skills">
+                <header class="set-head">
+                  <div>
+                    <h2>Skills</h2>
+                    <p class="note">
+                      Agents see only the names and descriptions of their profile's skills and read a skill when they need it. Every
+                      installed skill is on for every profile by default, including skills installed later; uncheck one to switch it off for
+                      all profiles or for a single profile. Child workers use their role's skills. The / picker in the chat still lists
+                      every skill.
+                    </p>
+                  </div>
+                  <span id="skills-summary" class="set-meta"></span>
+                </header>
+                <div class="card" id="skills-card">
+                  <div id="skills-picker"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-mcp">
+                <header class="set-head">
+                  <div>
+                    <h2>MCP servers</h2>
+                    <p class="note">
+                      External tool servers from your mcp.json. Every ready server is on for every profile by default, including servers
+                      added later; uncheck one to switch it off for all profiles or for a single profile. Tools that change things stay
+                      blocked unless you allow writes for that server.
+                    </p>
+                  </div>
+                  <span id="mcp-summary" class="set-meta"></span>
+                </header>
+                <div class="card" id="mcp-card">
+                  <div id="mcp-picker"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-worktrees">
+                <header class="set-head">
+                  <div>
+                    <h2>Worktrees</h2>
+                    <p class="note">
+                      Each coding worker gets its own git worktree; scouts and reviewers read PR heads from snapshots. A worktree is removed
+                      automatically once its work settled, it is clean, and its commits are pushed or its PR is merged or closed. Branches
+                      are always kept; anything with changes, unpushed commits, an open PR or running work stays.
+                    </p>
+                  </div>
+                  <span id="worktrees-summary" class="set-meta"></span>
+                </header>
+                <div class="card" id="worktrees-card">
+                  <div id="worktrees"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-context">
+                <header class="set-head">
+                  <div>
+                    <h2>Context and compaction</h2>
+                    <p class="note">
+                      Chats and workers compact automatically with Pi's defaults: older messages are summarized and the recent part is kept
+                      verbatim. Use “Compact now” in a chat when you want it sooner. The overrides below are for models whose context size
+                      is reported wrongly.
+                    </p>
+                  </div>
+                  <span id="context-summary" class="set-meta"></span>
+                </header>
+                <div class="card" id="context-card">
+                  <details class="advanced">
+                    <summary>Override context window and thresholds</summary>
+                    <div id="context-settings"><p class="note">Reading…</p></div>
+                  </details>
+                </div>
+              </section>
+              <section class="set-section" id="set-advanced">
+                <header class="set-head">
+                  <div>
+                    <h2>Advanced: system prompts</h2>
+                    <p class="note">
+                      Edit the role instructions of the coordinator, worker, scout, reviewer and verifier. These prompts are stored per
+                      project, not globally. Changes apply to new coordinator turns and new worker threads; running threads keep the prompt
+                      they started with. Only the role instructions are editable: tools, workspace scope, approvals and the project's
+                      identity are enforced and appended by the host and do not depend on this text, so a custom prompt cannot widen
+                      permissions. The verifier's evidence, cleanup and verdict protocol stays appended even with a custom verifier prompt.
+                    </p>
+                  </div>
+                </header>
+                <div class="card" id="prompts-card">
+                  <div id="prompts"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-automations">
+                <header class="set-head">
+                  <div>
+                    <h2>Automations</h2>
+                    <p class="note">Schedules, monitors and events. Toggling always asks for confirmation.</p>
+                  </div>
+                  <button id="routines-button" data-action="routine-list" hidden>Routines, history and confirmed toggles ↗</button>
+                </header>
+                <div class="card">
+                  <h3 class="card-title">Schedules and history</h3>
+                  <div id="automation-history" class="automation-strip"><p class="note">Reading recent automation history…</p></div>
+                  <div class="row">
+                    <button data-action="routine-history" data-project="" data-kind="intents" data-offset="0" data-text-offset="0">
+                      Recent run history
+                    </button>
+                  </div>
+                </div>
+                <div class="card" id="events-in-card">
+                  <div class="row between">
+                    <h3 class="card-title">Events in</h3>
+                    <button class="ghost small" data-action="automation-refresh">Refresh</button>
+                  </div>
+                  <p class="note">
+                    Follow PRs, the webhook and the worker watchdog send events to one chat. Text from GitHub or a webhook is untrusted.
+                  </p>
+                  <div id="events-in"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-notifications">
+                <header class="set-head">
+                  <div>
+                    <h2>Notifications</h2>
+                    <p class="note">Questions, approvals, finished results and errors from every project on this host.</p>
+                  </div>
+                </header>
+                <div class="card" id="notify-card">
+                  <fieldset class="events-group">
+                    <legend>This browser</legend>
+                    <label class="check"><input type="checkbox" id="notify-browser" /> Notify me while I'm away from this tab</label>
+                    <p id="notify-browser-state" class="note"></p>
+                    <div class="row"><button class="small" id="notify-test" type="button">Send a test notification</button></div>
+                  </fieldset>
+                  <fieldset class="events-group">
+                    <legend>Telegram</legend>
+                    <div id="telegram"><p class="note">Reading…</p></div>
+                  </fieldset>
+                </div>
+              </section>
+              <section class="set-section" id="set-remote">
+                <header class="set-head">
+                  <div>
+                    <h2>Remote access</h2>
+                    <p class="note">
+                      Open this host's inbox from your phone or another computer through your relay. Traffic is end-to-end encrypted; the
+                      relay only forwards it.
+                    </p>
+                  </div>
+                </header>
+                <div class="card" id="remote-card">
+                  <div id="remote"><p class="note">Reading…</p></div>
+                </div>
+              </section>
+              <section class="set-section" id="set-appearance">
+                <header class="set-head">
+                  <div>
+                    <h2>Appearance</h2>
+                    <p class="note">Theme for this browser. System follows your OS light/dark setting.</p>
+                  </div>
+                </header>
+                <div class="card" id="appearance-card">
+                  <div class="row seg" role="radiogroup" aria-label="Theme">
+                    <label class="check"><input type="radio" name="theme" value="system" /> System</label
+                    ><label class="check"><input type="radio" name="theme" value="light" /> Light</label
+                    ><label class="check"><input type="radio" name="theme" value="dark" /> Dark</label>
+                  </div>
+                </div>
+              </section>
+              <section class="set-section" id="set-approvals">
+                <header class="set-head">
+                  <div>
+                    <h2>Approvals and providers</h2>
+                    <p id="approval-page-note" class="note"></p>
+                  </div>
+                  <span class="row"
+                    ><button id="approvals-button" data-action="operation-list" hidden>All retained approvals ↗</button
+                    ><button id="provider-button" data-action="provider-list" hidden>GitHub PR/CI/review receipts ↗</button></span
+                  >
+                </header>
+              </section>
+              <section class="set-section danger-zone" id="set-danger">
+                <header class="set-head">
+                  <div>
+                    <h2>Danger zone</h2>
+                    <p class="note">Archive, delete or restore this project.</p>
+                  </div>
+                  <button data-action="lifecycle-more" class="danger">Archive / delete / restore…</button>
+                </header>
+              </section>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <footer id="limits-bar" class="limits-bar" aria-label="Subscription limits"></footer>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+    <dialog id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Image preview">
+      <figure>
+        <button type="button" class="lightbox-x" aria-label="Close image" title="Close (Esc)">✕</button><img alt="" />
+        <figcaption hidden></figcaption>
+      </figure>
+    </dialog>
+  </body>
 </html>

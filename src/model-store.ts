@@ -8,17 +8,36 @@ import { home } from "./state.ts";
 
 const modalities = Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]));
 const base = {
-  id: Type.String(), provider: Type.String(), name: Type.String(), api: Type.String(), baseUrl: Type.String(), input: modalities,
+  id: Type.String(),
+  provider: Type.String(),
+  name: Type.String(),
+  api: Type.String(),
+  baseUrl: Type.String(),
+  input: modalities,
   cost: Type.Object({ input: Type.Number(), output: Type.Number(), cacheRead: Type.Number(), cacheWrite: Type.Number() }),
 };
 const model = Type.Union([
-  Type.Object({ ...base, type: Type.Optional(Type.Literal("chat")), reasoning: Type.Boolean(), contextWindow: Type.Number(), maxTokens: Type.Number() }),
+  Type.Object({
+    ...base,
+    type: Type.Optional(Type.Literal("chat")),
+    reasoning: Type.Boolean(),
+    contextWindow: Type.Number(),
+    maxTokens: Type.Number(),
+  }),
   Type.Object({ ...base, type: Type.Literal("image"), output: modalities }),
   Type.Object({ ...base, type: Type.Literal("classifier"), contextWindow: Type.Number() }),
 ]);
-const catalog = Compile(Type.Record(Type.String(), Type.Object({
-  models: Type.Array(model), lastModified: Type.Optional(Type.Number()), checkedAt: Type.Optional(Type.Number()), etag: Type.Optional(Type.String()),
-})));
+const catalog = Compile(
+  Type.Record(
+    Type.String(),
+    Type.Object({
+      models: Type.Array(model),
+      lastModified: Type.Optional(Type.Number()),
+      checkedAt: Type.Optional(Type.Number()),
+      etag: Type.Optional(Type.String()),
+    }),
+  ),
+);
 
 const piProviders = new Set<string>();
 

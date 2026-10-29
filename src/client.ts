@@ -32,11 +32,22 @@ export async function openInbox(id?: string): Promise<string> {
 }
 
 export async function ensureHost(): Promise<void> {
-  try { await health(); return; } catch { /* A missing socket is normal before the first project. */ }
+  try {
+    await health();
+    return;
+  } catch {
+    /* A missing socket is normal before the first project. */
+  }
   mkdirSync(home(), { recursive: true, mode: 0o700 });
   if (remoteConfig()?.enabled) {
     kickstartRemoteHost();
-    for (let attempt = 0; attempt < hostStartAttempts; attempt++) { await sleep(100); try { await health(); return; } catch {} }
+    for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
+      await sleep(100);
+      try {
+        await health();
+        return;
+      } catch {}
+    }
     throw new Error(`Remote host did not start. Read ${join(home(), "host.log")}`);
   }
   const log = openSync(join(home(), "host.log"), "a", 0o600);
@@ -45,12 +56,23 @@ export async function ensureHost(): Promise<void> {
     // Kept after the legacy runtime removal: the host loads global extensions, and pi-subagent-manager reads PI_SUBAGENT_*.
     if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE" || key === "PI_PROJECTS_LAUNCHD") delete env[key];
   }
-  const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], { detached: true, stdio: ["ignore", log, log], env, cwd: fileURLToPath(new URL("..", import.meta.url)) });
+  const child = spawn(process.execPath, [fileURLToPath(new URL("./host.ts", import.meta.url))], {
+    detached: true,
+    stdio: ["ignore", log, log],
+    env,
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+  });
   child.on("error", () => {});
-  child.unref(); closeSync(log);
+  child.unref();
+  closeSync(log);
   for (let attempt = 0; attempt < hostStartAttempts; attempt++) {
     await sleep(100);
-    try { await health(); return; } catch { /* The host may still be loading the SDK. */ }
+    try {
+      await health();
+      return;
+    } catch {
+      /* The host may still be loading the SDK. */
+    }
   }
   throw new Error(`Projects host did not start. Read ${join(home(), "host.log")}`);
 }
@@ -58,17 +80,27 @@ export async function ensureHost(): Promise<void> {
 /** Transfer an already-running detached host before starting the remote LaunchAgent. */
 export async function ensureRemoteHost(): Promise<void> {
   let running: { pid?: number } | null = null;
-  try { running = await health() as { pid?: number }; } catch {}
+  try {
+    running = (await health()) as { pid?: number };
+  } catch {}
   if (running) {
     // A host from before remote access rejects remote-status; it is detached by definition.
-    const status = await request({ action: "remote-status" }, false).catch(() => ({})) as { launchd?: boolean };
-    if (status.launchd) { await request({ action: "remote-reload" }, false); return; }
+    const status = (await request({ action: "remote-status" }, false).catch(() => ({}))) as { launchd?: boolean };
+    if (status.launchd) {
+      await request({ action: "remote-reload" }, false);
+      return;
+    }
     const pid = running.pid;
     if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error("Invalid running host PID");
     await request({ action: "shutdown" }, false);
     const deadline = Date.now() + 120000;
     for (;;) {
-      try { process.kill(pid!, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") break; throw error; }
+      try {
+        process.kill(pid!, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+        throw error;
+      }
       if (Date.now() >= deadline) throw new Error("Existing host did not stop; remote LaunchAgent has not taken ownership");
       await sleep(100);
     }
@@ -78,7 +110,7 @@ export async function ensureRemoteHost(): Promise<void> {
     await sleep(100);
     try {
       await health();
-      const status = await request({ action: "remote-status" }, false) as { launchd?: boolean };
+      const status = (await request({ action: "remote-status" }, false)) as { launchd?: boolean };
       if (status.launchd) return;
     } catch {}
   }
@@ -91,23 +123,31 @@ export function health(): Promise<unknown> {
 
 function exchange(method: string, path: string, body?: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const call = httpRequest({ socketPath: socketPath(), path, method, headers: { "content-type": "application/json" }, timeout: 120000 }, response => {
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      response.on("data", chunk => {
-        bytes += chunk.length;
-        if (bytes > 4 * 1024 * 1024) { call.destroy(new Error("Host response exceeds 4 MiB")); return; }
-        chunks.push(chunk);
-      });
-      response.on("end", () => {
-        try {
-          const reply = parse(Reply, JSON.parse(Buffer.concat(chunks).toString("utf8")));
-          if (reply.ok) resolve(reply.data);
-          else reject(new Error(reply.error));
-        } catch (error) { reject(error); }
-      });
-      response.on("error", reject);
-    });
+    const call = httpRequest(
+      { socketPath: socketPath(), path, method, headers: { "content-type": "application/json" }, timeout: 120000 },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk) => {
+          bytes += chunk.length;
+          if (bytes > 4 * 1024 * 1024) {
+            call.destroy(new Error("Host response exceeds 4 MiB"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          try {
+            const reply = parse(Reply, JSON.parse(Buffer.concat(chunks).toString("utf8")));
+            if (reply.ok) resolve(reply.data);
+            else reject(new Error(reply.error));
+          } catch (error) {
+            reject(error);
+          }
+        });
+        response.on("error", reject);
+      },
+    );
     call.on("timeout", () => call.destroy(new Error("Projects request timed out")));
     call.on("error", reject);
     call.end(body);

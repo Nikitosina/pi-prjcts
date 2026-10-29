@@ -35,96 +35,30 @@
     "worker-quota-retry-receipts",
     "worker-quota-settlement-race"
   ],
-  "browser": [
-    "web/**"
-  ],
+  "browser": ["web/**"],
   "map": {
-    "src/web.ts": [
-      "*-ui-e2e",
-      "chat-*",
-      "settings-*",
-      "theme-e2e",
-      "search-ui-e2e"
-    ],
-    "src/notify.ts": [
-      "browser-notify-e2e",
-      "telegram-e2e"
-    ],
-    "src/web-push.ts": [
-      "browser-notify-e2e"
-    ],
-    "src/telegram*.ts": [
-      "telegram-e2e"
-    ],
-    "src/usage-limits.ts": [
-      "usage-limits-unit",
-      "usage-limits-recovery-unit",
-      "quota-status-e2e",
-      "status-dots-e2e"
-    ],
-    "src/coordinator-gh.ts": [
-      "coordinator-gh*"
-    ],
-    "src/mcp-*.ts": [
-      "mcp-e2e"
-    ],
-    "src/plugins.ts": [
-      "vcs-plugins-e2e",
-      "provider-extensions-e2e"
-    ],
-    "src/plugin-types.ts": [
-      "vcs-plugins-e2e",
-      "provider-extensions-e2e"
-    ],
-    "src/provider-extensions.ts": [
-      "provider-extensions-e2e",
-      "scoped-model-environment-e2e"
-    ],
-    "src/project-models.ts": [
-      "model-refresh-e2e",
-      "scoped-models-e2e",
-      "scoped-model-environment-e2e"
-    ],
-    "src/skill-profiles.ts": [
-      "skill-profiles-e2e",
-      "coordinator-github-skills-e2e"
-    ],
-    "src/worker-skill-*.ts": [
-      "skill-profiles-e2e",
-      "coordinator-github-skills-e2e"
-    ],
-    "src/durable-*.ts": [
-      "durable-runtime-e2e",
-      "durable-threads-e2e",
-      "verification-*"
-    ],
-    "src/github-*.ts": [
-      "github-*",
-      "follow-prs-e2e",
-      "durable-project-github-*"
-    ],
-    "src/pr-*.ts": [
-      "github-pr-watch-e2e",
-      "follow-prs-e2e",
-      "auto-merge-e2e"
-    ],
-    "src/workspace-*.ts": [
-      "workspace-*",
-      "durable-workspace-*"
-    ],
-    "src/worktree-*.ts": [
-      "worktree-lifecycle-e2e",
-      "workspace-*"
-    ],
-    "plugins/**": [
-      "vcs-plugins-e2e"
-    ],
+    "src/web.ts": ["*-ui-e2e", "chat-*", "settings-*", "theme-e2e", "search-ui-e2e"],
+    "src/notify.ts": ["browser-notify-e2e", "telegram-e2e"],
+    "src/web-push.ts": ["browser-notify-e2e"],
+    "src/telegram*.ts": ["telegram-e2e"],
+    "src/usage-limits.ts": ["usage-limits-unit", "usage-limits-recovery-unit", "quota-status-e2e", "status-dots-e2e"],
+    "src/coordinator-gh.ts": ["coordinator-gh*"],
+    "src/mcp-*.ts": ["mcp-e2e"],
+    "src/plugins.ts": ["vcs-plugins-e2e", "provider-extensions-e2e"],
+    "src/plugin-types.ts": ["vcs-plugins-e2e", "provider-extensions-e2e"],
+    "src/provider-extensions.ts": ["provider-extensions-e2e", "scoped-model-environment-e2e"],
+    "src/project-models.ts": ["model-refresh-e2e", "scoped-models-e2e", "scoped-model-environment-e2e"],
+    "src/skill-profiles.ts": ["skill-profiles-e2e", "coordinator-github-skills-e2e"],
+    "src/worker-skill-*.ts": ["skill-profiles-e2e", "coordinator-github-skills-e2e"],
+    "src/durable-*.ts": ["durable-runtime-e2e", "durable-threads-e2e", "verification-*"],
+    "src/github-*.ts": ["github-*", "follow-prs-e2e", "durable-project-github-*"],
+    "src/pr-*.ts": ["github-pr-watch-e2e", "follow-prs-e2e", "auto-merge-e2e"],
+    "src/workspace-*.ts": ["workspace-*", "durable-workspace-*"],
+    "src/worktree-*.ts": ["worktree-lifecycle-e2e", "workspace-*"],
+    "plugins/**": ["vcs-plugins-e2e"],
     "docs/**": [],
     "*.md": [],
-    "src/machine-status.ts": [
-      "machine-status-unit",
-      "status-dots-e2e"
-    ],
+    "src/machine-status.ts": ["machine-status-unit", "status-dots-e2e"],
     "src/role-prompts.ts": [
       "role-prompts",
       "quiet-coordinator",
@@ -134,18 +68,9 @@
       "verification-loop",
       "verification-trusted-browser"
     ],
-    ".agents/skills/pr-review/**": [
-      "repo-skill-overrides-unit",
-      "role-prompts"
-    ],
-    ".agents/skills/code-review/**": [
-      "repo-skill-overrides-unit",
-      "role-prompts"
-    ],
-    ".agents/skills/ask-user/**": [
-      "repo-skill-overrides-unit",
-      "role-prompts"
-    ]
+    ".agents/skills/pr-review/**": ["repo-skill-overrides-unit", "role-prompts"],
+    ".agents/skills/code-review/**": ["repo-skill-overrides-unit", "role-prompts"],
+    ".agents/skills/ask-user/**": ["repo-skill-overrides-unit", "role-prompts"]
   },
   "knownFailing": [
     "artifacts-e2e",

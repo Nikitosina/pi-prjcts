@@ -2,7 +2,13 @@
 export const TELEGRAM_LIMIT = 4096;
 export const escapeHtml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 /** What the owner sees if Telegram refuses the HTML: tags dropped, entities decoded. */
-export const htmlToPlain = (html: string) => html.replace(/<[^>]+>/g, "").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", "\"").replaceAll("&amp;", "&");
+export const htmlToPlain = (html: string) =>
+  html
+    .replace(/<[^>]+>/g, "")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&amp;", "&");
 
 const SAFE_URL = /^(https?:|mailto:|tg:)/i;
 function inline(raw: string): string {
@@ -10,17 +16,22 @@ function inline(raw: string): string {
   // Code spans and link targets are held out first, so nothing inside them is formatted; placeholders use characters escaping never produces.
   const hold = (html: string) => `\u0000${held.push(html) - 1}\u0000`;
   let text = raw.replace(/`([^`\n]+)`/g, (_, code: string) => hold(`<code>${escapeHtml(code)}</code>`));
-  text = text.replace(/\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, (_, label: string, url: string) => SAFE_URL.test(url) ? `${hold(`<a href="${escapeHtml(url).replaceAll("\"", "%22")}">`)}${label}${hold("</a>")}` : label);
+  text = text.replace(/\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, (_, label: string, url: string) =>
+    SAFE_URL.test(url) ? `${hold(`<a href="${escapeHtml(url).replaceAll('"', "%22")}">`)}${label}${hold("</a>")}` : label,
+  );
   text = escapeHtml(text);
   text = text.replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, "<b>$1</b>").replace(/(^|[^\w])__(?=\S)([^_\n]*?\S)__(?!\w)/g, "$1<b>$2</b>");
-  text = text.replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, "$1<i>$2</i>").replace(/(^|[^\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, "$1<i>$2</i>");
+  text = text
+    .replace(/(^|[^\w*])\*(?=\S)([^*\n]*?\S)\*(?![\w*])/g, "$1<i>$2</i>")
+    .replace(/(^|[^\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, "$1<i>$2</i>");
   text = text.replace(/~~(?=\S)([^~\n]*?\S)~~/g, "<s>$1</s>");
   return text.replace(/\u0000(\d+)\u0000/g, (_, index: string) => held[Number(index)]);
 }
 
 /** Headings become bold lines, lists `•`/numbered lines, `>` runs one blockquote, fences and pipe tables `<pre>`; an unterminated fence is closed. */
 export function markdownToTelegramHtml(markdown: string): string {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n"), out: string[] = [];
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n"),
+    out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const fence = /^\s*(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/.exec(line);
@@ -40,14 +51,23 @@ export function markdownToTelegramHtml(markdown: string): string {
     if (/^\s*>/.test(line)) {
       const quoted = [line];
       while (i + 1 < lines.length && /^\s*>/.test(lines[i + 1])) quoted.push(lines[++i]);
-      out.push(`<blockquote>${quoted.map(item => inline(item.replace(/^\s*>\s?/, ""))).join("\n")}</blockquote>`);
+      out.push(`<blockquote>${quoted.map((item) => inline(item.replace(/^\s*>\s?/, ""))).join("\n")}</blockquote>`);
       continue;
     }
     const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
-    if (heading) { out.push(`<b>${inline(heading[1])}</b>`); continue; }
-    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("──────"); continue; }
+    if (heading) {
+      out.push(`<b>${inline(heading[1])}</b>`);
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      out.push("──────");
+      continue;
+    }
     const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
-    if (bullet) { out.push(`${bullet[1]}• ${inline(bullet[2])}`); continue; }
+    if (bullet) {
+      out.push(`${bullet[1]}• ${inline(bullet[2])}`);
+      continue;
+    }
     out.push(inline(line));
   }
   return out.join("\n");
@@ -58,30 +78,52 @@ export function markdownToTelegramHtml(markdown: string): string {
  * one part and reopened at the start of the next, so every part is balanced; entities are never cut.
  */
 export function splitTelegramHtml(html: string, limit = TELEGRAM_LIMIT): string[] {
-  const parts: string[] = [], stack: { name: string; open: string }[] = [];
+  const parts: string[] = [],
+    stack: { name: string; open: string }[] = [];
   let current = "";
-  const closers = () => stack.map(tag => `</${tag.name}>`).reverse().join("");
-  const flush = () => { if (htmlToPlain(current).trim()) parts.push(current + closers()); current = stack.map(tag => tag.open).join(""); };
+  const closers = () =>
+    stack
+      .map((tag) => `</${tag.name}>`)
+      .reverse()
+      .join("");
+  const flush = () => {
+    if (htmlToPlain(current).trim()) parts.push(current + closers());
+    current = stack.map((tag) => tag.open).join("");
+  };
   const room = () => limit - current.length - closers().length;
   for (const token of html.split(/(<[^>]+>)/)) {
     if (!token) continue;
     if (token.startsWith("<")) {
-      const close = /^<\/([\w-]+)/.exec(token), open = /^<([\w-]+)/.exec(token);
-      if (close) { current += token; stack.pop(); continue; }
+      const close = /^<\/([\w-]+)/.exec(token),
+        open = /^<([\w-]+)/.exec(token);
+      if (close) {
+        current += token;
+        stack.pop();
+        continue;
+      }
       if (token.length + `</${open![1]}>`.length > room()) flush();
-      stack.push({ name: open![1], open: token }); current += token;
+      stack.push({ name: open![1], open: token });
+      current += token;
       continue;
     }
     for (const line of token.split(/(?<=\n)/)) {
       let rest = line;
       while (rest) {
-        if (rest.length <= room()) { current += rest; break; }
-        if (htmlToPlain(current).trim() && rest.length <= limit - stack.map(tag => tag.open).join("").length - closers().length) { flush(); continue; }
+        if (rest.length <= room()) {
+          current += rest;
+          break;
+        }
+        if (htmlToPlain(current).trim() && rest.length <= limit - stack.map((tag) => tag.open).join("").length - closers().length) {
+          flush();
+          continue;
+        }
         // A single line longer than a part: cut at the room left, never inside an entity.
         let cut = Math.max(1, room());
         const amp = rest.lastIndexOf("&", cut - 1);
         if (amp > 0 && rest.indexOf(";", amp) >= cut) cut = amp;
-        current += rest.slice(0, cut); rest = rest.slice(cut); flush();
+        current += rest.slice(0, cut);
+        rest = rest.slice(cut);
+        flush();
       }
     }
   }
@@ -91,20 +133,37 @@ export function splitTelegramHtml(html: string, limit = TELEGRAM_LIMIT): string[
 
 /** Caption limit is parsed characters, not serialized HTML. Spillover uses the text-message limit. */
 export function splitTelegramCaption(html: string): string[] {
-  const parts: string[] = [], stack: { name: string; open: string }[] = [];
-  let current = "", length = 0;
-  const close = () => stack.map(tag => `</${tag.name}>`).reverse().join("");
-  const flush = () => { parts.push(current + close()); current = stack.map(tag => tag.open).join(""); length = 0; };
+  const parts: string[] = [],
+    stack: { name: string; open: string }[] = [];
+  let current = "",
+    length = 0;
+  const close = () =>
+    stack
+      .map((tag) => `</${tag.name}>`)
+      .reverse()
+      .join("");
+  const flush = () => {
+    parts.push(current + close());
+    current = stack.map((tag) => tag.open).join("");
+    length = 0;
+  };
   for (const token of html.replace(/\r\n?/g, "\n").match(/<[^>]+>|&(?:lt|gt|amp|quot|#\d+);|[^<&]|[<&]/gu) ?? []) {
     if (token.startsWith("<") && token.endsWith(">")) {
-      const end = /^<\//.test(token), name = /^<\/?([\w-]+)/.exec(token)?.[1];
-      if (end) { current += token; stack.pop(); }
-      else if (name) { stack.push({ name, open: token }); current += token; }
+      const end = /^<\//.test(token),
+        name = /^<\/?([\w-]+)/.exec(token)?.[1];
+      if (end) {
+        current += token;
+        stack.pop();
+      } else if (name) {
+        stack.push({ name, open: token });
+        current += token;
+      }
       continue;
     }
     const size = Array.from(htmlToPlain(token)).length;
     if (length + size > (parts.length ? TELEGRAM_LIMIT : 1024)) flush();
-    current += token; length += size;
+    current += token;
+    length += size;
   }
   if (length) parts.push(current + close());
   return parts;

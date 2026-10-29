@@ -1,0 +1,6 @@
+web/vendor/
+artifacts/
+.smoke/
+node_modules/
+package-lock.json
+*.md

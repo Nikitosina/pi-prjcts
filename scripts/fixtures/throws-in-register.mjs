@@ -1,2 +1,21 @@
 // Provides a PR provider and then throws: nothing it provided may stay registered.
-export default { name: 'throws', register(api) { api.provide({ prs: { id: 'ghost', label: 'Ghost', watchDocKind: 'projects.ghost', applies: () => true, list: async () => ({ prs: [], fetchedAtMs: 1, error: null, rateLimitedUntilMs: null }), detail: async () => ({}), parseRefs: () => [], status: async () => ({}), published: async () => [], url: () => '' } }); throw new Error('boom in register'); } };
+export default {
+  name: "throws",
+  register(api) {
+    api.provide({
+      prs: {
+        id: "ghost",
+        label: "Ghost",
+        watchDocKind: "projects.ghost",
+        applies: () => true,
+        list: async () => ({ prs: [], fetchedAtMs: 1, error: null, rateLimitedUntilMs: null }),
+        detail: async () => ({}),
+        parseRefs: () => [],
+        status: async () => ({}),
+        published: async () => [],
+        url: () => "",
+      },
+    });
+    throw new Error("boom in register");
+  },
+};
