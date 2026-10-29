@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import { defineDoc, type Conversation, type Tx } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
-import { hasUncertainGithubOperations } from "./github-operations.ts";
 import { hasUncertainVcsOperations } from "./vcs-operation-state.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
@@ -147,7 +146,6 @@ export function scheduleRuntime(
   const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> =>
     (await hasUncertainGithubWrites(tx, root.id)) ||
     (await plugins.anyUncertainWrites(tx, root.id)) ||
-    (await hasUncertainGithubOperations(tx, root.id)) ||
     (await hasUncertainVcsOperations(tx, root.id))
       ? "uncertain-provider-write"
       : (await hasUncertainCommands(tx, root.id))
@@ -342,10 +340,10 @@ export function scheduleRuntime(
     if (intent.status !== "recorded") return intent;
     if (isClosed()) return mark(intent.requestId, "interrupted", "Project closed");
     const allowed = await root.commit(async (tx) => {
-      const planning = await tx.doc(DurablePlanning, root.id);
+      const planning = await tx.doc(Jobs, root.id);
       const state = await tx.doc(DurableSchedule, root.id);
       const current = own(state.intents, intent.requestId);
-      if (!current || current.status !== "recorded" || planning.paused || planning.pausing) return "paused";
+      if (!current || current.status !== "recorded" || planning.paused) return "paused";
       return !effectFree && (await uncertainEffects(tx)) ? "uncertain" : "allowed";
     }, BACKGROUND_CONTEXT);
     if (allowed !== "allowed")
@@ -400,8 +398,8 @@ export function scheduleRuntime(
   const nextDeadline = () =>
     root.commit(async (tx) => {
       const state = await tx.doc(DurableSchedule, root.id),
-        planning = await tx.doc(DurablePlanning, root.id);
-      if (isClosed() || planning.paused || planning.pausing) return null;
+        planning = await tx.doc(Jobs, root.id);
+      if (isClosed() || planning.paused) return null;
       if (await uncertainEffects(tx))
         return Object.values(state.schedules).some((schedule) => schedule.enabled) ? Date.now() + 60000 : null;
       const deadlines = Object.values(state.schedules).flatMap((schedule) => {
@@ -424,8 +422,8 @@ export function scheduleRuntime(
       if (isClosed()) return null;
       const due = await root.commit(async (tx) => {
         const state = await tx.doc(DurableSchedule, root.id),
-          planning = await tx.doc(DurablePlanning, root.id);
-        if (planning.paused || planning.pausing || (await uncertainEffects(tx))) return null;
+          planning = await tx.doc(Jobs, root.id);
+        if (planning.paused || (await uncertainEffects(tx))) return null;
         const schedule = Object.values(state.schedules)
           .filter((item) => eligible(item, state) && (item.kind === "once" ? item.atMs : item.nextAtMs) <= now)
           .sort((a, b) => (a.kind === "once" ? a.atMs : a.nextAtMs) - (b.kind === "once" ? b.atMs : b.nextAtMs))[0];

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { loadAutomations } from "./project-automations.ts";
 import { loadProject, type Project } from "./state.ts";
 import { clip } from "./pr-cache.ts";
@@ -77,8 +77,8 @@ export function prMonitorRuntime(
     }, BACKGROUND_CONTEXT);
   const paused = () =>
     root.commit(async (tx) => {
-      const planning = await tx.doc(DurablePlanning, root.id);
-      return planning.paused || planning.pausing;
+      const planning = await tx.doc(Jobs, root.id);
+      return planning.paused;
     }, BACKGROUND_CONTEXT);
   const active = () => {
     const project = loadProject(projectId);

@@ -254,7 +254,7 @@ try {
     id: project.id,
     confirm: project.id,
     expectedRevision: settings.revision,
-    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" }, workerCap: 2 },
+    changes: { models: { worker: "fake/fake-model", scout: "fake/fake-model", reviewer: "fake/fake-model" } },
   });
   const setup = await rpc({ action: "owner-setup-snapshot", id: project.id });
   await rpc({ action: "workspace-quick-grant", id: project.id, confirm: project.id, expectedRevision: setup.workspaceRevision });

@@ -22,7 +22,7 @@ export const AutomationConfig = Type.Object(
     webhook: Type.Object({ enabled: Type.Boolean(), secret: Type.String({ pattern: "^[a-f0-9]{64}$" }) }, { additionalProperties: false }),
     /** Merge project-published PRs once CI (all required checks) is green and a reviewer approved the exact head. Absent (pre-feature files) means off. */
     autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
-    /** Worker watchdog: while any worker runs, the coordinator gets a check turn every everyMs. Absent means on, every 15 minutes. */
+    /** Retired worker watchdog (replaced by the stall detector); accepted so old files load. */
     watchdog: Type.Optional(
       Type.Object(
         { enabled: Type.Boolean(), everyMs: Type.Integer({ minimum: 60_000, maximum: 86_400_000 }) },
@@ -32,11 +32,7 @@ export const AutomationConfig = Type.Object(
   },
   { additionalProperties: false },
 );
-export type AutomationConfig = Static<typeof AutomationConfig> & {
-  autoMerge: { enabled: boolean };
-  watchdog: { enabled: boolean; everyMs: number };
-};
-export const WATCHDOG_DEFAULT = { enabled: true, everyMs: 900_000 };
+export type AutomationConfig = Omit<Static<typeof AutomationConfig>, "watchdog"> & { autoMerge: { enabled: boolean } };
 
 const file = (id: string) => join(projectDir(id), "automations.json");
 const secret = () => randomBytes(32).toString("hex");
@@ -50,13 +46,12 @@ export function loadAutomations(id: string): AutomationConfig {
       follow: { enabled: false, everyMs: 300_000, autoFix: true, fixCap: 3 },
       webhook: { enabled: false, secret: secret() },
       autoMerge: { enabled: false },
-      watchdog: { ...WATCHDOG_DEFAULT },
     };
     saveJson(path, initial);
     return initial;
   }
-  const config = parse(AutomationConfig, JSON.parse(readFileSync(path, "utf8")));
-  return { ...config, autoMerge: config.autoMerge ?? { enabled: false }, watchdog: config.watchdog ?? { ...WATCHDOG_DEFAULT } };
+  const { watchdog: _retired, ...config } = parse(AutomationConfig, JSON.parse(readFileSync(path, "utf8")));
+  return { ...config, autoMerge: config.autoMerge ?? { enabled: false } };
 }
 export function updateAutomations(id: string, change: Static<typeof AutomationChange>): AutomationConfig {
   const current = loadAutomations(id);
@@ -66,7 +61,6 @@ export function updateAutomations(id: string, change: Static<typeof AutomationCh
     follow: { ...current.follow, ...change.follow },
     webhook: { ...current.webhook, ...change.webhook },
     autoMerge: { ...current.autoMerge, ...change.autoMerge },
-    watchdog: { ...current.watchdog, ...change.watchdog },
   }) as AutomationConfig;
   saveJson(file(id), next);
   return next;

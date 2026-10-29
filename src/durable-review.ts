@@ -1,9 +1,9 @@
 import { defineDoc, defineExtension, defineTool, type Conversation, type ConversationId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 
-/** A reviewer thread's verdict on one exact PR head. Auto-merge needs an `approve` for the head it merges. */
+/** A reviewer agent's verdict on one exact PR head. Auto-merge needs an `approve` for the head it merges. */
 export type ReviewVerdict = {
   repositoryId: string;
   pullRequest: number;
@@ -37,7 +37,7 @@ export async function reviewVerdict(
   }, BACKGROUND_CONTEXT);
 }
 
-/** `projects_review_verdict`, offered to reviewer threads only; the call is refused from any other thread or a coordinator. */
+/** `projects_review_verdict`, offered to reviewer agents only; the call is refused from any other thread or a coordinator. */
 export function reviewVerdictTools(options: {
   planRoot: () => ConversationId | undefined;
   repositories: () => string[];
@@ -58,17 +58,16 @@ export function reviewVerdictTools(options: {
     async execute(args, api, context) {
       const root = options.planRoot(),
         repos = options.repositories();
-      if (root === undefined) throw new Error("Project plan is unavailable");
+      if (root === undefined) throw new Error("Project Jobs are unavailable");
       const repositoryId = args.repository ?? (repos.length === 1 ? repos[0] : undefined);
       if (!repositoryId || !repos.includes(repositoryId))
         throw new Error(`Repository must be one this project authorizes: ${repos.join(", ") || "none"}`);
       const recorded = await api.commit(async (tx) => {
-        const plan = await tx.doc(DurablePlanning, root);
-        const threadId = Object.entries(plan.threads).find(
-          ([, thread]) => Number(thread.conversationId) === Number(api.conversationId),
-        )?.[0];
-        const role = threadId ? Object.values(plan.work).findLast((work) => work.threadId === threadId)?.role : undefined;
-        if (!threadId || role !== "reviewer") throw new Error("Only reviewer threads can record a review verdict");
+        const agent = Object.values((await tx.doc(Jobs, root)).agents).find(
+          (item) => Number(item.conversationId) === Number(api.conversationId),
+        );
+        if (agent?.role !== "reviewer") throw new Error("Only a reviewer agent can record a review verdict");
+        const threadId = agent.id;
         const doc = await tx.doc(Verdicts, root),
           item: ReviewVerdict = {
             repositoryId,

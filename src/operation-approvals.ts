@@ -99,27 +99,18 @@ export function operationApprovals({ root, harness, project }: { root: Conversat
             allocationAttemptId: source.allocationAttemptId,
             requestId: source.requestId,
           }
-        : source.kind === "vcs"
-          ? {
-              provider: source.provider,
-              kind: source.kind,
-              repositoryId: source.repositoryId,
-              scopeId: source.scopeId,
-              action: source.action,
-              checkout: source.checkout,
-              target: source.target,
-              expectedState: source.expectedState,
-              state: source.state,
-              risks: [...source.risks],
-            }
-          : {
-              provider: source.provider,
-              kind: source.kind,
-              repositoryId: source.repositoryId,
-              scopeId: source.scopeId,
-              pullRequest: source.pullRequest,
-              expectedHead: source.expectedHead,
-            };
+        : {
+            provider: source.provider,
+            kind: source.kind,
+            repositoryId: source.repositoryId,
+            scopeId: source.scopeId,
+            action: source.action,
+            checkout: source.checkout,
+            target: source.target,
+            expectedState: source.expectedState,
+            state: source.state,
+            risks: [...source.risks],
+          };
     const fingerprint = createHash("sha256")
       .update(JSON.stringify({ id: input.requestId, projectId: project.id, bindingRevision, operation }))
       .digest("hex");

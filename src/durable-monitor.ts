@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createGithubInspection } from "./github-inspection.ts";
-import { DurablePlanning } from "./durable-planning.ts";
+import { Jobs } from "./jobs.ts";
 import { loadProject } from "./state.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
 import { DurableSchedule, type scheduleRuntime } from "./durable-schedule.ts";
@@ -137,8 +137,8 @@ export function monitorRuntime(
       const policy = await schedules.snapshot({ includeHistory: false });
       if (!policy.eventOptIn || policy.automaticAdmissionBlocker !== null) return;
       selected = await root.commit(async (tx) => {
-        const planning = await tx.doc(DurablePlanning, root.id);
-        if (planning.paused || planning.pausing) return null;
+        const planning = await tx.doc(Jobs, root.id);
+        if (planning.paused) return null;
         const item = (await tx.doc(Monitors, root.id)).items
           .filter((candidate) => candidate.enabled && candidate.nextAtMs <= Date.now())
           .sort((a, b) => a.nextAtMs - b.nextAtMs)[0];
@@ -237,9 +237,9 @@ export function monitorRuntime(
         throw new Error("Monitor authority changed during read");
       const cursor = hash(JSON.stringify(observations));
       const allowed = await root.commit(async (tx) => {
-        const planning = await tx.doc(DurablePlanning, root.id),
+        const planning = await tx.doc(Jobs, root.id),
           item = (await tx.doc(Monitors, root.id)).items.find((candidate) => candidate.id === selected?.id);
-        return Boolean(item?.enabled && item.cursor === selected?.cursor && !planning.paused && !planning.pausing);
+        return Boolean(item?.enabled && item.cursor === selected?.cursor && !planning.paused);
       }, BACKGROUND_CONTEXT);
       if (!allowed || controller.signal.aborted || isClosed()) return;
       if (selected.cursor !== null && selected.cursor !== cursor) {
@@ -257,13 +257,12 @@ export function monitorRuntime(
           },
           async (tx) => {
             if (isClosed() || controller.signal.aborted || !selected) return false;
-            const planning = await tx.doc(DurablePlanning, root.id),
+            const planning = await tx.doc(Jobs, root.id),
               item = (await tx.doc(Monitors, root.id)).items.find((candidate) => candidate.id === selected?.id);
             return Boolean(
               item?.enabled &&
               item.cursor === selected.cursor &&
               !planning.paused &&
-              !planning.pausing &&
               authorizationFingerprint(authorize(selected)) === selected.authorizationRevision,
             );
           },
@@ -284,12 +283,11 @@ export function monitorRuntime(
       await root.commit(async (tx) => {
         if (controller.signal.aborted || isClosed() || !selected) return;
         const observation = selected;
-        const planning = await tx.doc(DurablePlanning, root.id);
+        const planning = await tx.doc(Jobs, root.id);
         if (!(await tx.doc(DurableSchedule, root.id)).eventOptIn) return;
         const item = (await tx.doc(Monitors, root.id)).items.find((candidate) => candidate.id === observation.id);
         if (
           planning.paused ||
-          planning.pausing ||
           !item?.enabled ||
           item.cursor !== observation.cursor ||
           (item.sequence ?? 0) !== sequence ||
@@ -321,8 +319,8 @@ export function monitorRuntime(
             item.sequence !== selected?.sequence
           )
             return;
-          const planning = await tx.doc(DurablePlanning, root.id);
-          if (planning.paused || planning.pausing || !(await tx.doc(DurableSchedule, root.id)).eventOptIn) return;
+          const planning = await tx.doc(Jobs, root.id);
+          if (planning.paused || !(await tx.doc(DurableSchedule, root.id)).eventOptIn) return;
           item.failures = Math.min(16, item.failures + 1);
           item.error =
             error instanceof Error && error.message === "Observed legacy monitor requires a new explicitly enabled monitor"

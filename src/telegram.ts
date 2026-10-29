@@ -23,7 +23,6 @@ type Action =
   | { t: "project"; projectId: string }
   | { t: "chat"; projectId: string; chatId: string }
   | { t: "answer"; projectId: string; entryId: string; text: string }
-  | { t: "approve" | "reject"; projectId: string; operationId: string; fingerprint: string }
   | { t: "approve-job"; projectId: string; jobId: string };
 type Target = { projectId: string; chatId: string; entryId?: string };
 type DeliveryError = { at: number; method: string; description: string } & (
@@ -402,37 +401,7 @@ export function startTelegram(options: {
         await clear();
         return await say(reply);
       }
-      if (action.t === "approve-job") return await approveJob(action.projectId, action.jobId, clear);
-      const pending = (
-        (await options.dispatch({ action: "operation-snapshot", id: action.projectId, status: "pending", offset: 0, limit: 100 })) as {
-          items: { id: string; fingerprint: string }[];
-        }
-      ).items.find((item) => item.id === action.operationId);
-      if (!pending) {
-        await clear();
-        return await say("Already decided.");
-      }
-      if (pending.fingerprint !== action.fingerprint) return await say("The approval changed; decide it in the browser.");
-      await options.dispatch(
-        action.t === "approve"
-          ? {
-              action: "operation-decide",
-              id: action.projectId,
-              operationId: action.operationId,
-              fingerprint: action.fingerprint,
-              decision: "approve",
-              confirm: action.projectId,
-            }
-          : {
-              action: "operation-decide",
-              id: action.projectId,
-              operationId: action.operationId,
-              fingerprint: action.fingerprint,
-              decision: "reject",
-            },
-      );
-      await clear();
-      return await say(action.t === "approve" ? "Approved (consent recorded; nothing was executed)." : "Rejected.");
+      return await approveJob(action.projectId, action.jobId, clear);
     } catch (error) {
       return say(`Failed: ${errorText(error)}`);
     }
@@ -549,32 +518,7 @@ export function startTelegram(options: {
           },
         ]),
       };
-    if (notice.kind === "approval")
-      return {
-        text: head,
-        buttons: [
-          [
-            {
-              text: "Approve record only",
-              callback_data: key({
-                t: "approve",
-                projectId: notice.projectId,
-                operationId: notice.operationId!,
-                fingerprint: notice.fingerprint!,
-              }),
-            },
-            {
-              text: "Reject",
-              callback_data: key({
-                t: "reject",
-                projectId: notice.projectId,
-                operationId: notice.operationId!,
-                fingerprint: notice.fingerprint!,
-              }),
-            },
-          ],
-        ],
-      };
+    if (notice.kind === "approval") return { text: head + "\n\n<i>Decide it in the browser approval inbox.</i>", buttons: [] };
     return {
       text: head + "\n\n<i>Reply to this message to write to this chat.</i>",
       buttons: notice.jobId && notice.mergeable ? approveButton(notice.projectId, notice.jobId) : [],

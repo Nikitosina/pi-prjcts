@@ -260,7 +260,7 @@ try {
     sends.map((s) => s.method),
     ["sendPhoto"],
   );
-  assert.equal(JSON.parse(sends[0].input.reply_markup).inline_keyboard[0].length, 2);
+  assert.equal(sends[0].input.reply_markup, undefined);
   mapped();
 
   reset(`![Fallback](${ref("demo.png")})`);
@@ -368,10 +368,8 @@ try {
   await bridge.flush();
   assert.deepEqual(
     sends.map((s) => s.method),
-    ["sendPhoto", "sendVideo"],
+    ["sendMediaGroup"],
   );
-  assert.equal(sends[0].input.reply_markup, undefined);
-  assert.equal(JSON.parse(sends[1].input.reply_markup).inline_keyboard[0].length, 2);
   mapped();
 
   reset("Metadata marker test");

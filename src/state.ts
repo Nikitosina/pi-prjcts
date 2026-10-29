@@ -22,9 +22,10 @@ export const PromptOverrides = Type.Object(
 );
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
-export const DEFAULT_WORKER_CAP = 5;
+export const DEFAULT_VERIFY_ROUNDS = 3;
+export const DEFAULT_STALL_MINUTES = 20;
 export const VerificationSettings = Type.Object(
-  { enabled: Type.Boolean(), skill: Type.String({ maxLength: 128 }) },
+  { enabled: Type.Boolean(), skill: Type.String({ maxLength: 128 }), rounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) },
   { additionalProperties: false },
 );
 export type VerificationSettings = Static<typeof VerificationSettings>;
@@ -97,17 +98,6 @@ export const WorkspaceAuthorizationHistory = Type.Array(
   { maxItems: 2048 },
 );
 export const OperationSpec = Type.Union([
-  Type.Object(
-    {
-      provider: Provider,
-      kind: Type.Union([Type.Literal("merge"), Type.Literal("auto-merge")]),
-      repositoryId: Type.String({ minLength: 1, maxLength: 256 }),
-      scopeId: Id,
-      pullRequest: Type.Integer({ minimum: 1 }),
-      expectedHead: Type.String({ pattern: "^[a-f0-9]{40,64}$" }),
-    },
-    { additionalProperties: false },
-  ),
   Type.Object(
     {
       provider: Provider,
@@ -185,8 +175,10 @@ export const Project = Type.Object(
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
     githubAuthorization: Type.Optional(Type.Array(GithubAuthorization, { maxItems: 64 })),
     githubAuthorizationHistory: Type.Optional(GithubAuthorizationHistory),
-    /** Concurrent workers; absent = DEFAULT_WORKER_CAP. */
+    /** Retired worker limit; kept so old project files load. */
     workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+    /** Minutes without progress before a stall notice; absent = DEFAULT_STALL_MINUTES. */
+    stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
     commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
     /** Retired owner-issued worker skill grants (replaced by skillProfiles); kept so old project files load. */
     workerSkillGrants: Type.Optional(Type.Array(WorkerSkillGrant, { maxItems: 128 })),
@@ -267,12 +259,6 @@ export const AutomationChange = Type.Object(
     ),
     webhook: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
     autoMerge: Type.Optional(Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false })),
-    watchdog: Type.Optional(
-      Type.Object(
-        { enabled: Type.Optional(Type.Boolean()), everyMs: Type.Optional(Type.Integer({ minimum: 60_000, maximum: 86_400_000 })) },
-        { additionalProperties: false },
-      ),
-    ),
   },
   { additionalProperties: false },
 );
@@ -690,6 +676,8 @@ export const Request = Type.Union([
           libraryAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
           decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
           githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
+          stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 240 })),
+          /** Retired worker limit: accepted and ignored so older clients keep saving settings. */
           workerCap: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
           /** null restores the default (repository skills for every profile). */
           skills: Type.Optional(Type.Union([SkillProfiles, Type.Null()])),
@@ -762,7 +750,8 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("pause"), id: Id }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("plan-snapshot"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("jobs-snapshot"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("job-approve"), id: Id, jobId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("resume"), id: Id }, { additionalProperties: false }),
   Type.Object(
     { action: Type.Literal("resume"), id: Id, recovery: Type.Literal("leave-interrupted"), confirm: Type.Optional(Id) },
@@ -1002,27 +991,6 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("thread-steer"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-stop"), id: Id, threadId: Id }, { additionalProperties: false }),
-  Type.Object(
-    {
-      action: Type.Literal("work-archive"),
-      id: Id,
-      workIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 64 })),
-      terminal: Type.Optional(Type.Boolean()),
-    },
-    { additionalProperties: false },
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("legacy-thread-history"),
-      id: Id,
-      name: Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" }),
-      offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-      textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })),
-      textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16000 })),
-    },
-    { additionalProperties: false },
-  ),
   Type.Object(
     {
       action: Type.Literal("thread-history"),
