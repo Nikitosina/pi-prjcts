@@ -22,6 +22,7 @@ Export `{ name, register(api) }` (default or named). `register` calls `api.provi
 | `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts, setup cards |
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief, auto-merge (host supplies receipts and review kit) |
+| `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it; without it a Job of this kind cannot be approved |
 | `coordinatorTools` | tools and an instruction snippet for matching projects |
 | `rpc` | namespaced host RPCs: `{ action: "plugin", plugin, method, id?, params? }`; context offers `withRoot`, `mutateIdle` |
 | `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
@@ -29,6 +30,8 @@ Export `{ name, register(api) }` (default or named). `register` calls `api.provi
 | `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |
 | `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
 | `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
+
+Merge contract (`src/plugin-types.ts`, used by `src/result-acceptance.ts`): `merge` must refuse when the PR head differs from `head`, and return `{ ok: false, refused }` when the provider answered and nothing merged. A throw means the outcome is unknown; Approve then reads the PR through `inspect` before deciding and reports `merge-uncertain` if it cannot confirm. `enableAutoMerge` returns `waiting: false` when the PR is already mergeable and nothing was armed. `pullMain` fast-forwards only a clean checkout on `base` and returns `{ pulled: false, reason }` for an expected skip instead of throwing. The host resolves the provider with `plugins.mergeProvider(kind)`.
 
 Host API extras: `api.leases` (host-wide advisory leases; the plugin's own holds are not released by project stops), `api.projects.dir(id)`, `api.lib.value` (typebox `Value`).
 
