@@ -13,18 +13,16 @@ export async function projectModelCatalog(options: { provider?: string; offset?:
     throw new Error("Invalid model catalog page");
   const registry = await openRegistry();
   const models = [...registry.getModels(options.provider)].sort((a, b) => `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`));
-  const items = models
-    .slice(offset, offset + limit)
-    .map((model) => ({
-      reference: `${model.provider}/${model.id}`,
-      provider: model.provider,
-      id: model.id,
-      name: model.name,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      reasoning: model.reasoning,
-      configured: registry.getProviderAuthStatus(model.provider).configured,
-    }));
+  const items = models.slice(offset, offset + limit).map((model) => ({
+    reference: `${model.provider}/${model.id}`,
+    provider: model.provider,
+    id: model.id,
+    name: model.name,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    reasoning: model.reasoning,
+    configured: registry.getProviderAuthStatus(model.provider).configured,
+  }));
   return {
     items,
     total: models.length,

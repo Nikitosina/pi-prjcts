@@ -3106,16 +3106,14 @@ function refItems(data) {
         meta: ago(item.at),
         at: item.at,
       })),
-    ...data.files
-      .filter(ok)
-      .map((path) => ({
-        kind: "file",
-        token: `@file:${quoteRef(path)}`,
-        label: base(path).name,
-        detail: base(path).folder,
-        search: path,
-        recent: data.recentFiles.indexOf(path),
-      })),
+    ...data.files.filter(ok).map((path) => ({
+      kind: "file",
+      token: `@file:${quoteRef(path)}`,
+      label: base(path).name,
+      detail: base(path).folder,
+      search: path,
+      recent: data.recentFiles.indexOf(path),
+    })),
   ];
 }
 const pickedKey = () => `pi-projects:picked:${projectId}`;

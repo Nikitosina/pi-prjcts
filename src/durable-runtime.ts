@@ -336,9 +336,7 @@ export type DurableProjectRuntime = {
   /** CI-failed and merged notices raised by Follow PRs and the provider PR monitors; the notifier turns each into one host notice. */
   prNotices(): Promise<PrNotice[]>;
   /** PR cards of every provider serving this project (cached, shared across projects) plus this project's watch state; `refresh` bypasses the cache and runs one monitor poll per provider. */
-  prs(
-    refresh: boolean,
-  ): Promise<
+  prs(refresh: boolean): Promise<
     Array<{
       provider: string;
       label: string;
@@ -1207,12 +1205,10 @@ export async function openDurableProject(input: {
       },
       () => closed,
     );
-    const prMonitors = plugins
-      .prProviders()
-      .map((provider) => ({
-        provider,
-        runtime: prMonitorRuntime(provider, root, project.id, schedules, { target: eventTarget }, () => closed),
-      }));
+    const prMonitors = plugins.prProviders().map((provider) => ({
+      provider,
+      runtime: prMonitorRuntime(provider, root, project.id, schedules, { target: eventTarget }, () => closed),
+    }));
     const monitorOf = (providerId: string) => {
       const found = prMonitors.find((monitor) => monitor.provider.id === providerId);
       if (!found) throw new Error(`PR provider "${providerId}" is not loaded`);

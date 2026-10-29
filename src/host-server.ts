@@ -1599,18 +1599,16 @@ const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
     if (request.method === "GET" && request.url === "/health") {
-      response
-        .writeHead(200, { "content-type": "application/json" })
-        .end(
-          JSON.stringify({
-            ok: true,
-            data: {
-              pid: process.pid,
-              home: home(),
-              plugins: plugins.status().map(({ source, name, state, error }) => ({ source, name, state, ...(error ? { error } : {}) })),
-            },
-          }),
-        );
+      response.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          ok: true,
+          data: {
+            pid: process.pid,
+            home: home(),
+            plugins: plugins.status().map(({ source, name, state, error }) => ({ source, name, state, ...(error ? { error } : {}) })),
+          },
+        }),
+      );
       return;
     }
     if (request.method !== "POST" || request.url !== "/api") throw new Error("Unknown endpoint");

@@ -2271,9 +2271,7 @@ export function planningRuntime(options: {
     }, BACKGROUND_CONTEXT);
   }
   /** Re-enumerate persisted pause targets after a crash, before reopening dispatch. */
-  async function recoverPause(
-    root: Conversation,
-  ): Promise<{
+  async function recoverPause(root: Conversation): Promise<{
     taskIds: TaskId[];
     conversationIds: ConversationId[];
     stops: { threadId: string; stopId: NonNullable<PlanningState["threads"][string]["stopping"]> }[];

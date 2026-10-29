@@ -93,14 +93,12 @@ function fitWorkers(snapshot: ReturnType<typeof compactWorkers>) {
             fallback: () => ({
               ...snapshot,
               threads: [],
-              work: snapshot.work
-                .slice(0, 1)
-                .map((row) => ({
-                  id: row.id,
-                  threadId: row.threadId,
-                  status: row.status,
-                  omitted: "row exceeds 8 KiB; pass workId or limit to read it",
-                })),
+              work: snapshot.work.slice(0, 1).map((row) => ({
+                id: row.id,
+                threadId: row.threadId,
+                status: row.status,
+                omitted: "row exceeds 8 KiB; pass workId or limit to read it",
+              })),
               nextOffset: after(1),
             }),
           },
