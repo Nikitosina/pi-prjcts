@@ -334,11 +334,17 @@ try {
   );
   await delay(400);
 
-  // Long turn: the owner's message and every step stay in the transcript (failure 5).
-  const long = await evaluate(
-    `({ you: document.querySelector('#messages').innerText.includes('MARK-LONG run a long chain'), tools: document.querySelectorAll('#messages .tool-call').length })`,
-    s,
-  );
+  // Long turn: the owner's message and every step stay in the transcript (failure 5); older pages are one request away.
+  const long = { you: false, tools: 0 };
+  for (let before; ;) {
+    const page = await rpc({ action: "chat-history", id, ...(before ? { before } : {}) });
+    for (const item of page.items) {
+      if (item.kind === "message" && item.text?.includes("MARK-LONG run a long chain")) long.you = true;
+      if (item.kind === "tool-call") long.tools++;
+    }
+    if (long.you || page.before === null) break;
+    before = page.before;
+  }
   if (!long.you || long.tools < LONG) throw Error("Long turn truncated: " + JSON.stringify(long));
   result.checks.push(`LC5 a ${LONG}-tool turn keeps the owner's message and all ${LONG} steps`);
 

@@ -668,7 +668,11 @@ function restoreLiveSelection(saved) {
   if (!saved || saved.projectId !== getProjectId() || saved.chatId !== chatId) return;
   const root = [...document.querySelectorAll("#messages .msg.them .text")]
     .reverse()
-    .find((node) => node.textContent.startsWith(saved.text));
+    // A long reply is committed as a cut preview ending in "…", which is a prefix of the live text.
+    .find(
+      (node) =>
+        node.textContent.startsWith(saved.text) || (node.textContent.length > 1 && saved.text.startsWith(node.textContent.slice(0, -1))),
+    );
   // At block boundaries, start inside the next text node rather than selecting a rendered line break.
   const anchor = root && selectionPoint(root, saved.anchor, saved.anchor > saved.focus),
     focus = root && selectionPoint(root, saved.focus, saved.focus > saved.anchor);
@@ -694,7 +698,11 @@ function restoreLiveReading(saved) {
   if (!saved || stickToBottom || saved.projectId !== getProjectId() || saved.chatId !== chatId) return;
   const root = [...document.querySelectorAll("#messages .msg.them .text")]
     .reverse()
-    .find((node) => node.textContent.startsWith(saved.text));
+    // A long reply is committed as a cut preview ending in "…", which is a prefix of the live text.
+    .find(
+      (node) =>
+        node.textContent.startsWith(saved.text) || (node.textContent.length > 1 && saved.text.startsWith(node.textContent.slice(0, -1))),
+    );
   const block = root?.querySelectorAll(liveReadingBlocks)[saved.index];
   if (!block) return;
   document.querySelector("#transcript").scrollTop += block.getBoundingClientRect().top - saved.top;

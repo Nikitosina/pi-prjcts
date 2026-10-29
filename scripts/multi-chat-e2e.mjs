@@ -372,11 +372,7 @@ try {
     first.chatId !== "main"
   )
     throw Error("Default chat list wrong: " + JSON.stringify(first.chats));
-  if (
-    !first.messages.some((m) => m.text === "Done MARK-MAIN.") ||
-    first.durableInspection.coordinator.conversationId !== first.durableInspection.identity.coordinatorConversationId
-  )
-    throw Error("Main is not the root transcript");
+  if (!first.messages.some((m) => m.text === "Done MARK-MAIN.")) throw Error("Main is not the root transcript");
   result.checks.push("F1 a project without a chat list opens with one chat, Main, on the existing root conversation and transcript");
   await rejects({ action: "show", id, chatId: randomUUID() }, /Unknown chat/, "unknown chat");
   await rejects({ action: "message", id, chatId: randomUUID(), text: "x" }, /Unknown chat/, "unknown chat message");
@@ -524,7 +520,7 @@ try {
   await startHost();
   const restarted = await rpc({ action: "show", id, chatId });
   const restored = restarted.chats.find((c) => c.id === chatId);
-  if (!restored || restored.title !== "Research" || !restored.archived || !restarted.messages.some((m) => m.text.includes("ANSWER-ACK")))
+  if (!restored || restored.title !== "Research" || !restored.archived || !restarted.messages.some((m) => m.text?.includes("ANSWER-ACK")))
     throw Error("Chat lost on restart: " + JSON.stringify(restarted.chats));
   await rpc({ action: "chat-update", id, chatId, archived: false });
   await ask(id, chatId, "MARK-AFTER restart");

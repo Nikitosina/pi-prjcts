@@ -39,6 +39,14 @@ mkdirSync(artifacts, { recursive: true, mode: 0o700 });
 mkdirSync(root, { recursive: true, mode: 0o700 });
 for (const dir of [home, workspace, agentDir]) mkdirSync(dir, { mode: 0o700 });
 
+const openWorker = async (s, id) => {
+  const node = `document.querySelector('[data-action="thread"][data-thread="${id}"]')`;
+  if (!(await evaluate(`!!${node}`, s))) {
+    await evaluate(`document.querySelector('.job-toggle[data-job="${id}"]').click()`, s);
+    await waitFor(`!!${node}`, s, "job expanded");
+  }
+  await evaluate(`${node}.click()`, s);
+};
 let hold = true;
 const held = new Set();
 const chunk = (delta, finish) =>
@@ -329,7 +337,11 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] }, s); // colour assertions below are for the light theme
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`document.querySelectorAll('#messages .tool-call').length >= 2`, s, "coordinator tool calls");
+  await waitFor(
+    `document.querySelectorAll('#messages .tool-call').length >= 4 && !document.querySelector('#messages .tool-call[data-status="pending"]')`,
+    s,
+    "coordinator tool calls",
+  );
   const colors = await evaluate(
     `[...document.querySelectorAll('#messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`,
     s,
@@ -348,7 +360,7 @@ try {
   const active = await rpc({ action: "jobs-snapshot", id: project.id });
   if (active.jobs.filter((job) => job.status === "running").length !== 2) throw Error("Jobs were not concurrent");
   result.checks.push("C7 two Jobs run concurrently");
-  await evaluate(`document.querySelector('[data-action="thread"][data-thread="${threadId}"]').click()`, s);
+  await openWorker(s, threadId);
   await waitFor(`!!document.querySelector('#worker-messages .tool-call[data-status="pending"]')`, s, "pending worker tool");
   if (!(await evaluate(`document.querySelector('#worker-messages .tool-call[data-status="pending"] .tool-icon')?.innerText === '…'`, s)))
     throw Error("Pending tool icon wrong");
@@ -389,7 +401,7 @@ try {
   )
     throw Error("Closed worker reopened");
   result.checks.push("C5 close remains closed after refresh");
-  for (let i = 0; i < 14; i++) {
+  for (let i = 0; i < 34; i++) {
     await rpc({ action: "thread-send", id: project.id, threadId, requestId: randomUUID(), text: "History turn " + i });
     for (let j = 0; j < 100; j++) {
       const p = await rpc({ action: "jobs-snapshot", id: project.id });
@@ -397,10 +409,12 @@ try {
       await delay(50);
     }
   }
-  await evaluate(`document.querySelector('[data-action="thread"][data-thread="${threadId}"]').click()`, s);
-  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('History turn 13')`, s, "latest history page");
-  await evaluate(`document.querySelector('#worker-history-pages [data-action="thread-history-page"]').click()`, s);
-  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('MARK-CHAT')`, s, "older history page");
+  await openWorker(s, threadId);
+  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('History turn 33')`, s, "latest history page");
+  const shown = () => `document.querySelectorAll('#worker-messages .msg.you').length`;
+  const latestCount = await evaluate(shown(), s);
+  await evaluate(`document.querySelector('#worker-history-pages [data-action="thread-older"]').click()`, s);
+  await waitFor(`${shown()} > ${latestCount}`, s, "older history page");
   result.checks.push("C8 opens latest page with older history accessible");
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, s);
   await shot("03-worker-mobile", s, true);

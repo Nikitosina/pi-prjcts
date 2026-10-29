@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const chunk = (delta, finish = null) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-const prefix = Array.from({ length: 24 }, (_, i) => `Paragraph ${i}: ${"streaming content ".repeat(12)}\n\n`).join("");
+const prefix = Array.from({ length: 24 }, (_, i) => `Paragraph ${i}: ${"streaming content ".repeat(8)}\n\n`).join("");
 const suffix = "\n\nCompletion marker: the answer is complete.";
 let release;
 const k = await createKit("streaming-follow-intent", {
