@@ -28,6 +28,7 @@ import "./app/notifications.js";
 import "./app/search.js";
 import "./app/limits.js";
 import "./app/archive.js";
+import "./app/tabs.js";
 
 let refusal = null;
 async function start() {
