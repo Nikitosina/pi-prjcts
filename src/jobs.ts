@@ -139,8 +139,16 @@ export const liveAgentIds = (doc: Readonly<JobsState>, readOnly?: boolean): stri
     .map((agent) => agent.id);
 const isLive = (status: JobStatus) => status === "running";
 
+/** A step in progress counts down from its start; one that overran its estimate still has a minute left. */
+const remaining = (step: PlanStep, accuracy: number, now: number) =>
+  step.status === "doing" && step.startedAt !== null
+    ? Math.max(1, step.estimateMin! * accuracy - (now - step.startedAt) / 60_000)
+    : step.estimateMin! * accuracy;
+/** Whole minutes up to an hour, then 5-minute steps, so the Telegram progress message is not edited every minute. */
+const roundEta = (minutes: number) => (minutes > 60 ? Math.round(minutes / 5) * 5 : Math.max(1, Math.round(minutes)));
+
 /** Remaining estimated minutes, scaled by how accurate this plan's finished estimates were. */
-export function planEta(plan: readonly PlanStep[]): { done: number; total: number; etaMin: number | null } {
+export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: number; total: number; etaMin: number | null } {
   const done = plan.filter((step) => step.status === "done");
   const measured = done.flatMap((step) =>
     step.estimateMin && step.startedAt !== null && step.doneAt !== null
@@ -153,7 +161,7 @@ export function planEta(plan: readonly PlanStep[]): { done: number; total: numbe
   return {
     done: done.length,
     total: plan.length,
-    etaMin: open.length ? Math.round(open.reduce((sum, step) => sum + step.estimateMin!, 0) * accuracy) : null,
+    etaMin: open.length ? roundEta(open.reduce((sum, step) => sum + remaining(step, accuracy, now), 0)) : null,
   };
 }
 
@@ -972,7 +980,7 @@ export function createJobs(host: JobsHost) {
           conversationId: job.workerConversation,
           working: await working(harness, job.workerConversation),
           leaf,
-          eta: planEta(job.plan),
+          eta: planEta(job.plan, clock()),
           children: await Promise.all(job.children.map(async (child) => ({ ...child, working: await working(harness, child.id) }))),
           quota: doc.agents[job.id]?.quota ?? null,
           modelMoves: doc.agents[job.id]?.modelMoves ?? [],

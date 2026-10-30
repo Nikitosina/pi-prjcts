@@ -12,12 +12,19 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createJobs, Jobs } from "../src/jobs.ts";
+import { createJobs, Jobs, planEta } from "../src/jobs.ts";
 import { guardedStream } from "../src/model-guard.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
+
+// The ETA counts down inside the step in progress and keeps a minute for an overrun one.
+{
+  const step = (status, estimateMin, startedAt = null) => ({ title: status, status, estimateMin, startedAt, doneAt: null });
+  assert.equal(planEta([step("doing", 20, 0), step("todo", 30)], 15 * 60_000).etaMin, 35, "ETA counts down within the doing step");
+  assert.equal(planEta([step("doing", 20, 0)], 90 * 60_000).etaMin, 1, "an overrun step still has a minute left");
+}
 
 // ── Scripted model: the system prompt names the role, the last message decides the move.
 const requests = [];
