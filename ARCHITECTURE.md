@@ -65,7 +65,7 @@ Rules:
 
 ## Deploy
 
-`src/deploy.ts`, CLI `deploy [checkout]`. Records the running sha, runs `npm ci` when the lockfile changed, runs `npm run check`, stops the host, starts it from the checkout and runs a smoke test (health, every active project opens, Telegram polling when paired, web page loads). A failure after the stop checks out the recorded sha, restarts, and tells the owner through Telegram. `idleDeployTick` runs the same deploy once per day inside a time window (default 02:00 to 07:00) when new code is waiting and no Job is running. State is `deploy.json` and `deploy.lock` in the home.
+`src/deploy.ts`, CLI `deploy` asks the host (`deploy-start`), which queues it while any project has work running; the host's own detached child (`PI_PROJECTS_DEPLOY_CHILD=1`) is the only direct caller. Records the running sha, runs `npm ci` when the lockfile changed, runs `npm run check`, stops the host, starts it from the checkout and runs a smoke test (health, every active project opens, Telegram polling when paired, web page loads). A failure after the stop checks out the recorded sha, restarts, and tells the owner through Telegram. Host-level notices carry the label "Pi Projects host · Deploy". A Job run cut short by a restart (the delivery settles under another boot id) is resent a "continue" note, not failed; a failed worker has no notice of its own, the coordinator's settled answer explains it. `idleDeployTick` runs the same deploy once per day inside a time window (default 02:00 to 07:00) when new code is waiting and no Job is running. State is `deploy.json` and `deploy.lock` in the home.
 
 Rule: a failed preparation must leave the running host untouched. Every external effect goes through `DeployDeps` so tests drive a temporary checkout.
 

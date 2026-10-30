@@ -106,8 +106,6 @@ export function startNotifier(options: {
         text: clip(item.text),
       });
     }
-    // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
-    const quietWork = silent || !entry.workBaselined;
     const { jobs, agents } = await owner.jobs();
     for (const job of jobs) {
       if (job.status !== "running" || !job.plan.length) continue;
@@ -124,28 +122,7 @@ export function startNotifier(options: {
       progressSeen.set(job.id, fingerprint);
       options.progress?.(view);
     }
-    // A failed worker goes to its chat at once. A Ready report is not its own notice: the coordinator's settled answer carries it (and Approve).
-    for (const job of jobs) {
-      const failed = job.status === "failed";
-      const ready = job.status === "ready" || job.status === "ready-with-gaps";
-      if (!failed && !ready) continue;
-      const key = `${failed ? "work" : "ready"}:${job.id}:${job.endedAt ?? 0}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (quietWork || !failed) continue;
-      const chat = chatOf(Number(job.chat));
-      const task = job.title.replace(/\s+/g, " ").trim();
-      push({
-        ...base,
-        chatId: chat.id,
-        chat: chat.title,
-        kind: "error",
-        title: "Worker failed",
-        text: clip(`worker failed: ${task}${job.reason ? `\n${job.reason}` : ""}`),
-        workId: job.id,
-        threadId: job.id,
-      });
-    }
+    // Failed workers and Ready reports have no notice of their own: the coordinator's settled answer carries the explanation (and Approve).
     entry.workBaselined = true;
     // A coordinator turn is a result only when nothing is still running in its chat and no work report follows it (a later report turn means
     // work was still running when it was written); batched submissions share one answer and notify once. Intermediate status lines stay quiet.

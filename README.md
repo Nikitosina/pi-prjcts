@@ -26,7 +26,7 @@ npm run projects -- create "My project" /absolute/workspace "Build the approved 
 npm run projects -- send <project-id> "Implement this feature"
 npm run projects -- show <project-id>
 npm run projects -- jobs <project-id>
-npm run projects -- deploy [checkout]
+npm run projects -- deploy
 npm run projects -- host-stop
 ```
 

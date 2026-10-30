@@ -47,7 +47,11 @@ try {
   assert.equal(result.ok, true, JSON.stringify(result));
   const first = (await health()).pid;
   assert.equal(readDeployState().lastGood, git("rev-parse", "HEAD"));
-  assert.match(told.at(-1), /Deployed/);
+  assert.match(
+    told.at(-1),
+    /^Pi Projects host · Deploy\nDeployed [0-9a-f]{8} \(.+\); the host passed/,
+    "the notice says it is the host's and names the commit",
+  );
   // The host records the sha it started from.
   assert.equal(await deployPending(clone), false);
 

@@ -1539,7 +1539,7 @@ function startDeploy(): void {
   const child = spawn(process.execPath, [join(repoRoot, "src", "cli.ts"), "deploy", repoRoot], {
     detached: true,
     stdio: ["ignore", log, log],
-    env: { ...process.env, PI_PROJECTS_HOME: home() },
+    env: { ...process.env, PI_PROJECTS_HOME: home(), PI_PROJECTS_DEPLOY_CHILD: "1" },
     cwd: repoRoot,
   });
   child.on("error", (error) => recordHostEvent("deploy", `deploy did not start: ${errorText(error)}`));

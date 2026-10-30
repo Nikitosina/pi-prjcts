@@ -8,6 +8,8 @@ import { errorText, home, listProjects, saveJson } from "./state.ts";
 import { sendOwnerMessage } from "./telegram.ts";
 
 const exec = promisify(execFile);
+/** Host-level messages belong to no project; the label says so. */
+const HOST_LABEL = "Pi Projects host · Deploy";
 
 /** Hours of the local day, end exclusive; a window that ends before it starts wraps midnight, equal hours mean always. */
 export type DeployWindow = { startHour: number; endHour: number };
@@ -111,7 +113,7 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
       Boolean(await git("diff", "--name-only", from, to, "--", "package-lock.json")) || !existsSync(join(deps.repo, "node_modules"));
     const fail = async (result: DeployResult & { ok: false }) => {
       writeDeployState({ lastResult: { at: Date.now(), ok: false, sha, message: result.reason } });
-      await deps.tell(`Deploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
+      await deps.tell(`${HOST_LABEL}\nDeploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
       return result;
     };
     const changed = await lockfileChanged(previous, sha);
@@ -141,7 +143,10 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
     }
     if (!reason) {
       writeDeployState({ lastGood: sha, lastResult: { at: Date.now(), ok: true, sha, message: "deployed" } });
-      await deps.tell(`Deployed ${sha.slice(0, 8)}; the host passed its smoke test.`).catch(() => {});
+      const subject = await git("log", "-1", "--format=%s", sha).catch(() => "");
+      await deps
+        .tell(`${HOST_LABEL}\nDeployed ${sha.slice(0, 8)}${subject ? ` (${subject.slice(0, 120)})` : ""}; the host passed its smoke test.`)
+        .catch(() => {});
       return { ok: true, sha };
     }
     try {

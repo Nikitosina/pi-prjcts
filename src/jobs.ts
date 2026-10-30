@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "typebox";
@@ -207,6 +207,8 @@ export type JobsHost = {
   refuseSend?(agent: Agent): string | null;
   /** Workspace scope a worker runs in when its spawn names none. */
   defaultScope?(): string | undefined;
+  /** Id of this host process; a delivery that settles under another id was interrupted by a restart. Tests set it to simulate one. */
+  boot?: string;
   now?: () => number;
 };
 
@@ -223,7 +225,9 @@ type Delivery = {
   seq?: number;
 };
 type DeliveryState =
-  { phase: "prepare" } | { phase: "deliver"; attempt: number; checked?: boolean } | { phase: "report"; report?: string; waits?: number };
+  | { phase: "prepare" }
+  | { phase: "deliver"; attempt: number; checked?: boolean; boot?: string; note?: string }
+  | { phase: "report"; report?: string; waits?: number };
 
 const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string => {
   const message = entry?.model?.[0] as { content?: { type: string; text?: string }[] } | undefined;
@@ -231,6 +235,8 @@ const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string
 };
 
 /** The background anchor that owns a spawned agent's conversation; it finishes at once. */
+/** One id per host process: a delivery that settles under another id was interrupted by a restart. */
+const BOOT = randomUUID();
 const Anchor = defineTask<null, { phase: "done" }, null>({
   name: "projects.agent-anchor",
   version: 1,
@@ -302,7 +308,7 @@ const reporterTask = (host: JobsHost) =>
       },
       deliver: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId, message, followUp, requestId } = reporter.input;
-        const { attempt, checked } = reporter.state.checkpoint;
+        const { attempt, checked, boot, note } = reporter.state.checkpoint;
         // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
         const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
         if (waiting && waiting.retryAt > runtime.now()) await runtime.sleep(waiting.retryAt, taskContext);
@@ -315,7 +321,10 @@ const reporterTask = (host: JobsHost) =>
             if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
               return { status: "running", checkpoint: { phase: "report" } } as const;
             if (message === record.brief) record.briefed = true;
-            return { status: "running", checkpoint: { phase: "deliver", attempt, checked: true } } as const;
+            return {
+              status: "running",
+              checkpoint: { phase: "deliver", attempt, checked: true, boot: boot ?? host.boot ?? BOOT, note },
+            } as const;
           }, taskContext);
           return;
         }
@@ -323,8 +332,8 @@ const reporterTask = (host: JobsHost) =>
         const submission = await agent.submit(
           {
             type: "input",
-            content: message,
-            whenBusy: followUp ? "followUp" : "steer",
+            content: note ?? message,
+            whenBusy: followUp || note ? "followUp" : "steer",
             requestId: requestId ? `send:${requestId}:${attempt}` : `agent:${reporter.id}:${attempt}`,
           },
           taskContext,
@@ -391,6 +400,19 @@ const reporterTask = (host: JobsHost) =>
             // A follow-up on a finished Job that only needed an answer: the earlier Ready report stands.
             Object.assign(job, { status: job.resume.status, ready: job.resume.ready, endedAt: job.resume.endedAt, resume: null });
             return next(`[worker ${job.id} answered: ${job.title}]\n${answer.trim()}`);
+          }
+          if (isLive(job.status) && boot !== undefined && boot !== (host.boot ?? BOOT)) {
+            // The run was cut short by a host restart, not ended by the model: continue it instead of failing the Job.
+            record.endedAt = null;
+            record.reported.pop();
+            return {
+              status: "running",
+              checkpoint: {
+                phase: "deliver",
+                attempt: attempt + 1,
+                note: "The host restarted and interrupted your last turn. Continue where you left off.",
+              },
+            } as const;
           }
           if (isLive(job.status)) {
             Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });

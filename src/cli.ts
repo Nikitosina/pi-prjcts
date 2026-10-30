@@ -56,11 +56,22 @@ if (command === "remote") {
 if (command === "deploy") {
   try {
     if (!startHost) throw new Error("--no-start is not supported for deploy");
-    if (second) throw new Error("Usage: deploy [checkout]");
-    const { deploy, hostDeps } = await import("./deploy.ts");
-    const result = await deploy(hostDeps(first ?? fileURLToPath(new URL("..", import.meta.url))));
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    if (!result.ok) process.exitCode = 1;
+    if (second) throw new Error("Usage: deploy");
+    if (process.env.PI_PROJECTS_DEPLOY_CHILD === "1") {
+      // The host's own detached deploy: it stops and restarts the host, so it must not go back through it.
+      const { deploy, hostDeps } = await import("./deploy.ts");
+      const result = await deploy(hostDeps(first ?? fileURLToPath(new URL("..", import.meta.url))));
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      if (!result.ok) process.exitCode = 1;
+    } else {
+      // The host decides: it queues the deploy while any project has work running, so a deploy never kills it.
+      if (first) throw new Error("Usage: deploy (it deploys the checkout the host runs from)");
+      const answer = (await request({ action: "deploy-start" })) as { running: boolean; queued: boolean; line?: string };
+      process.stdout.write(
+        (answer.line ??
+          (answer.running ? "Deploy started; the host restarts when it is done (see deploy.log and Telegram)." : "Not started.")) + "\n",
+      );
+    }
   } catch (error) {
     process.stderr.write(errorText(error) + "\n");
     process.exitCode = 1;

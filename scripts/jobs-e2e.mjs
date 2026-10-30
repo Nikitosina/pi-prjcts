@@ -58,8 +58,9 @@ function route(request) {
         proof: ["test run"],
         review: "REVIEW-OK",
       });
-    if (user.includes("BRIEF-GATE") && !messages.some((message) => message.role === "toolResult")) return call("gate", {});
-    if (user.includes("BRIEF-") || result.startsWith("gate open"))
+    if (/BRIEF-(GATE|INTR)/.test(user) && !messages.some((message) => message.role === "toolResult")) return call("gate", {});
+    if (tag === "BRIEF-INTR" && result.startsWith("gate open")) return say("Interrupted before it finished.");
+    if (user.includes("BRIEF-") || result.startsWith("gate open") || user.includes("host restarted"))
       return call("job", {
         action: "plan",
         steps: [
@@ -93,7 +94,8 @@ const prepareHeld = new Set(),
   prepareEntered = new Set(),
   prepareRuns = [];
 let gateOpen = false,
-  gateEntered = false;
+  gateEntered = false,
+  bootId = "boot-A";
 const TestTools = defineExtension({
   name: "test-tools",
   tools: [
@@ -139,6 +141,7 @@ faux.setResponses(Array.from({ length: 600 }, () => route));
 async function open() {
   const killed = [];
   const jobs = createJobs({
+    boot: bootId,
     agentChange: ({ role }) => ({
       model,
       instructions: `ROLE:${role}`,
@@ -247,6 +250,25 @@ assert.equal(
   "one report after the restart",
 );
 assert.equal((await jobsOf(harness)).length, 2, "no duplicate workers after the restart");
+
+// 3b. A restart that cuts a run short is not a worker failure: no failed state, no report to the coordinator, the worker is told to continue.
+gateOpen = false;
+gateEntered = false;
+await say_(root, "Start INTR");
+await until(() => gateEntered, "worker inside the gate");
+await harness.close(context);
+bootId = "boot-B";
+({ harness, root, jobs, killed } = await open());
+gateOpen = true;
+await quiet(harness);
+const intr = (await jobsOf(harness)).find((item) => item.title === "Job INTR");
+assert.equal(intr.status, "ready", "the interrupted worker continued to Ready instead of failing");
+assert.equal(
+  (await chatText(root)).filter((line) => line.includes(`[worker ${intr.id} failed`)).length,
+  0,
+  "no failure report after a restart",
+);
+assert.equal(requests.filter((item) => item.role === "worker" && item.user.includes("host restarted")).length, 1, "told once to continue");
 
 // 4. A worker waiting on its active verifier is not stalled; a silent one is, once.
 const before = (await chatText(root)).length;
