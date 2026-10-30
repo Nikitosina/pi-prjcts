@@ -1,5 +1,5 @@
 import { changeProject, getProjectId, getView, onProjectChange, onRender, projects, registerActions, setTab } from "./shell.js";
-import { changeChat, chatId, chatState, projectState, stateDot } from "./chat.js";
+import { backgroundChatState, changeChat, chatId, chatState, stateDot } from "./chat.js";
 import { clip, esc } from "./format.js";
 
 // Browser-style tabs: one per open coordinator chat, kept per browser. A tab is only a pointer (project + chat) plus the last names seen.
@@ -47,7 +47,7 @@ const stateOf = (tab) => {
     const chat = view.chats.find((item) => item.id === tab.chat);
     return chat ? chatState(chat) : { state: "idle", label: "Idle" };
   }
-  return project ? projectState(project) : { state: "idle", label: "Idle" };
+  return backgroundChatState(project, tab.chat);
 };
 
 function draw() {

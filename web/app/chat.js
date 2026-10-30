@@ -833,6 +833,16 @@ export const stateDot = (state, label, className) =>
 // The open project folds its chats. Every other project comes from the host's list: unanswered questions and its live activity
 // (turn or workers running, failure or blocked worker, last finish), so a project keeps showing its own state after you leave it.
 export const PROJECT_SEEN = "__project";
+// A chat of a project this page has not opened: the host's per-chat activity, folded with the same rules as chatState.
+export function backgroundChatState(project, chat) {
+  const item = project?.activity?.chats?.[chat];
+  if (!item) return { state: "idle", label: "Idle" };
+  if (item.needs) return { state: "needs", label: "Needs you" };
+  if (item.working) return { state: "working", label: "Working" };
+  const seen = seenAt(project.id, chat);
+  if (seen !== null && item.finishedAt > seen) return { state: "done", label: "Done, not yet checked" };
+  return { state: "idle", label: "Idle" };
+}
 export function projectState(project) {
   if (project.id !== getProjectId() || !getView()?.chats) {
     const questions = project.notice?.questions ?? 0,
