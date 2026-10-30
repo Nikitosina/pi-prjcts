@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -9,6 +9,9 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceIsolation } from "../src/workspace-isolation.ts";
+import { currentWorktreeRoot } from "../src/durable-workspace-binding.ts";
+import { archiveHome } from "../src/archive-host.ts";
+import { projectDir } from "../src/state.ts";
 
 const id = randomUUID(),
   stamp = new Date().toISOString().replaceAll(":", "-");
@@ -112,6 +115,83 @@ try {
   r = await iso.release(cleanIntent);
   report.receipts.push(r);
   check(r.state === "released", "owned Git lock unlocked and unforced clean removal");
+  // A continued branch held by the previous host's worktree: taken over only when clean and pushed, and only under the old home.
+  const git = (cwd, ...args) => run("/usr/bin/git", args, cwd).trim();
+  const remote = join(fixture, "remote.git");
+  git(fixture, "init", "--bare", "--initial-branch=main", remote);
+  git(owner, "remote", "add", "origin", remote);
+  git(owner, "push", "origin", "main");
+  const oldHome = join(fixture, "old-home");
+  mkdirSync(join(oldHome, "wt"), { recursive: true });
+  const held = (name, where) => {
+    git(owner, "branch", name, "main");
+    git(owner, "push", "origin", name);
+    const path = join(where, name);
+    git(owner, "worktree", "add", "--lock", "--reason", "old host", path, name);
+    return path;
+  };
+  const continueIntent = (name) => ({
+    ...gitIntent,
+    id: randomUUID(),
+    attemptId: randomUUID(),
+    scope: { ...gitIntent.scope, workspacePath: join(fixture, `new-${name}`), workspaceName: name, branch: name, continueBranch: true },
+  });
+  const takeover = async (name, where, prepare = () => {}) => {
+    const path = held(name, where);
+    prepare(path);
+    iso = workspaceIsolation({ ...isoOptions, oldHome });
+    return [path, await iso.allocate(continueIntent(name))];
+  };
+  const isoOptions = {
+    conversation: root,
+    authority: { projectId: gitProject, owner: gitOwner },
+    authorizedRepositories: [
+      { repositoryId: "git-e2e", provider: "git", approvedRoot: fixture, ownerCheckout: owner, fileOwnershipPrefix: "owned" },
+    ],
+  };
+  let [oldPath, taken] = await takeover("held-clean", join(oldHome, "wt"));
+  report.receipts.push(taken);
+  check(
+    taken.state === "allocated" && !existsSync(oldPath),
+    "clean pushed worktree under the old home is removed and the branch continued",
+  );
+  check(
+    taken.providerFacts.reclaimedWorktree === realpathSync(join(oldHome, "wt")) + "/held-clean",
+    "the removal is recorded in the receipt facts",
+  );
+  [oldPath, taken] = await takeover("held-dirty", join(oldHome, "wt"), (path) => writeFileSync(join(path, "scratch.txt"), "keep\n"));
+  check(taken.state === "blocked" && existsSync(oldPath), "a dirty old worktree is kept");
+  check(
+    /held-dirty/.test(taken.reason) && taken.reason.includes(oldPath) && /scratch\.txt/.test(taken.reason),
+    "the refusal names the path, branch and file",
+  );
+  [oldPath, taken] = await takeover("held-ahead", join(oldHome, "wt"), (path) => {
+    writeFileSync(join(path, "ahead.txt"), "x\n");
+    git(path, "add", "ahead.txt");
+    git(path, "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-m", "unpushed");
+  });
+  check(
+    taken.state === "blocked" && existsSync(oldPath) && /not pushed/.test(taken.reason),
+    "an old worktree with an unpushed commit is kept",
+  );
+  const outside = join(fixture, "herdr");
+  mkdirSync(outside, { recursive: true });
+  [oldPath, taken] = await takeover("held-outside", outside);
+  check(
+    taken.state === "blocked" && existsSync(oldPath) && /outside the previous host/.test(taken.reason),
+    "a worktree outside the old home is never removed",
+  );
+  const { continueBranch: _drop, ...plainScope } = continueIntent("plain").scope;
+  taken = await iso.allocate({ ...continueIntent("plain"), scope: { ...plainScope, branch: "main" } });
+  check(taken.state === "blocked" && /already exists/.test(taken.reason), "a blocked reason carries git's own message");
+  // A carried project's approved root inside the old home is replaced by this host's own folder, without touching the stored grant.
+  process.env.PI_PROJECTS_HOME = join(fixture, "new-home");
+  const carried = join(archiveHome(), gitProject, "worktrees");
+  check(
+    currentWorktreeRoot(gitProject, carried) === realpathSync(join(projectDir(gitProject), "worktrees")),
+    "an approved root in the old home maps to this host's folder",
+  );
+  check(currentWorktreeRoot(gitProject, fixture) === fixture, "any other approved root is used as granted");
   await h.close(BACKGROUND_CONTEXT);
   save(); // Provider-plugin backends are tested in their own repositories.
 } catch (error) {

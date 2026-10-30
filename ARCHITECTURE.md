@@ -111,7 +111,7 @@ Rules:
 
 ## Workspaces, knowledge and other modules
 
-- Workspaces: `workspace-types.ts`, `workspace-isolation.ts`, `workspace-capabilities.ts`, `durable-workspace-binding.ts` (per-agent worktree, tools and shell guard), `worktree-maintenance.ts`, `resource-leases.ts`. Only the workspace grant gives a worker repository access.
+- Workspaces: `workspace-types.ts`, `workspace-isolation.ts`, `workspace-capabilities.ts`, `durable-workspace-binding.ts` (per-agent worktree, tools and shell guard), `worktree-maintenance.ts`, `resource-leases.ts`. Only the workspace grant gives a worker repository access. A grant whose approved root is the old host's worktree folder allocates under this host's project folder instead (the stored grant is unchanged, since the root is part of its fingerprint). A continued branch held by an old-host worktree is taken over only if that worktree is under the archive home, idle, clean and fully pushed; otherwise the block names the path and reason.
 - Knowledge: `knowledge.ts`, `knowledge-search.ts`, `knowledge-types.ts`. Markdown under `knowledge/` is the source of truth; a revision is required to write. Preferences, runbooks and decisions only.
 - Skills: `skill-profiles.ts`, `coordinator-skills.ts` (`projects_skill_file` reads a skill body on demand for the roles that have it). Skills are discovered fresh from disk on each catalog request.
 - GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Approve is the only merge path.

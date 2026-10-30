@@ -570,7 +570,11 @@ export function createJobs(host: JobsHost) {
           : args.brief;
       doc.agents[agentId]!.brief = message;
       await tx.createTask(Reporter, { agentId, conversationId: child.id, chat: chat, message, followUp: false, prepare: true }, background);
-      return { text: `Started ${role} ${agentId}.`, id: agentId, conversationId: child.id };
+      return {
+        text: `Queued ${role} ${agentId}. Its workspace is prepared next; if that fails the failure is reported back to you, so do not tell the owner it has started yet.`,
+        id: agentId,
+        conversationId: child.id,
+      };
     }, spawnContext);
   }
 

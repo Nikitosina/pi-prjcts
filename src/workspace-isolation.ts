@@ -44,6 +44,7 @@ type Options = {
   authority: { projectId: string; owner: string };
   authorizedRepositories?: readonly Authorization[];
   context?: Context;
+  /** The previous host's home: a clean, fully pushed worktree under it may be removed so its branch can be continued. */ oldHome?: string;
   /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void;
   /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string;
   /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean;
@@ -85,7 +86,7 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     if (missing) return put(receipt(intent, "blocked", {}, null, null, missing));
     const pre = await preflight(intent.scope, false);
     if (pre.reason) return put(receipt(intent, "blocked", pre.facts, null, null, pre.reason));
-    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts) : await addPlugin(intent, pre.facts);
+    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts, options.oldHome) : await addPlugin(intent, pre.facts);
     if (effect.state === "allocated") await options.afterProviderEffect?.(dto(effect));
     return put(effect);
   }
@@ -298,12 +299,13 @@ async function preflight(s: WorkspaceScope, exists: boolean): Promise<Facts> {
     return { facts: {}, reason: e instanceof Error ? e.message : String(e) };
   }
 }
-async function addGit(i: Intent, facts: Record<string, string>) {
+async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string) {
   const existing = i.scope.continueBranch
     ? (await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${i.scope.branch}`], i.scope.ownerCheckout)).stdout.trim()
     : "";
-  /* A continued branch that exists locally at the intended tip is checked out as is; at any other commit it is never reset (git refuses -b). */ const x =
-    await command(
+  /* A continued branch that exists locally at the intended tip is checked out as is; at any other commit it is never reset (git refuses -b). */
+  const add = () =>
+    command(
       cli.git(),
       [
         "worktree",
@@ -317,11 +319,67 @@ async function addGit(i: Intent, facts: Record<string, string>) {
       ],
       i.scope.ownerCheckout,
     );
-  if (x.code) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, "Git add failed");
+  let x = await add();
+  if (x.code && i.scope.continueBranch && oldHome) {
+    const taken = await reclaimOldWorktree(i.scope, oldHome);
+    if (taken.refusal) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${taken.refusal}`);
+    if (taken.removed) {
+      facts = { ...facts, reclaimedWorktree: taken.removed };
+      x = await add();
+    }
+  }
+  if (x.code) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${short(x.stderr)}`);
   const found = await gitEntry(i.scope);
   return found && exact(i.scope, found)
     ? receipt(i, "allocated", { ...facts, ...found.facts }, i.scope.workspacePath, null, null)
     : receipt(i, "uncertain", facts, i.scope.workspacePath, null, "Git effect lacks exact receipt facts");
+}
+/**
+ * A branch that the previous host left checked out in one of its own worktrees cannot be continued. That worktree is removed only when it lives
+ * under the old host's home, nothing runs in it, it has no uncommitted or untracked files and its HEAD is already on the remote branch.
+ * Returns the removed path, or a refusal naming the path and the reason; neither when no worktree holds the branch.
+ */
+async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{ removed?: string; refusal?: string }> {
+  const list = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
+  const holder = list.stdout
+    .trim()
+    .split("\n\n")
+    .map((block) => Object.fromEntries(block.split("\n").map((line) => [line.split(" ")[0], line.split(" ").slice(1).join(" ")])))
+    .find((entry) => entry.branch === `refs/heads/${s.branch}` && entry.worktree !== resolve(s.workspacePath));
+  if (!holder) return {};
+  const path = holder.worktree!,
+    refuse = (why: string) => ({ refusal: `branch ${s.branch} is checked out in ${path}: ${why}` });
+  let real: string, home: string;
+  try {
+    real = realpathSync(path);
+    home = realpathSync(oldHome);
+  } catch {
+    return refuse("that folder or the old host's home is missing, so it was not touched");
+  }
+  if (!inside(home, real) || home === real)
+    return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+  const busy = await active(real);
+  if (busy !== false) return refuse("a process is running in it");
+  const status = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], real);
+  if (status.code) return refuse(`its status is unreadable (${short(status.stderr)})`);
+  const dirty = status.stdout.split("\n").filter(Boolean);
+  if (dirty.length)
+    return refuse(
+      `it has uncommitted changes: ${dirty
+        .slice(0, 10)
+        .map((line) => line.slice(3))
+        .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`,
+    );
+  // Best effort: a stale remote ref only makes the check stricter. HOME is needed for the owner's git credentials.
+  await command(cli.git(), ["fetch", "--quiet", "origin", s.branch], s.ownerCheckout, { HOME: process.env.HOME ?? "" });
+  const remote = `refs/remotes/origin/${s.branch}`;
+  if ((await command(cli.git(), ["rev-parse", "--verify", "--quiet", remote], s.ownerCheckout)).code)
+    return refuse("the branch is not on the remote, so its commits may be unpushed");
+  const ahead = await command(cli.git(), ["rev-list", "--count", `${remote}..${holder.HEAD}`], s.ownerCheckout);
+  if (ahead.code || ahead.stdout.trim() !== "0") return refuse(`${ahead.stdout.trim() || "some"} commit(s) are not pushed`);
+  if (holder.locked !== undefined) await command(cli.git(), ["worktree", "unlock", real], s.ownerCheckout);
+  const removed = await command(cli.git(), ["worktree", "remove", real], s.ownerCheckout);
+  return removed.code ? refuse(`git could not remove it: ${short(removed.stderr)}`) : { removed: real };
 }
 async function addPlugin(i: Intent, facts: Record<string, string>) {
   const out = await backendOf(i.scope.provider)!.add(i, facts);
@@ -430,12 +488,12 @@ function inside(a: string, b: string) {
 function short(x: string) {
   return x.trim().slice(-1000);
 }
-export function command(file: string, args: string[], cwd?: string): Promise<Command> {
+export function command(file: string, args: string[], cwd?: string, env: Record<string, string> = {}): Promise<Command> {
   return new Promise((done) => {
     const c = spawn(file, args, {
       cwd,
       shell: false,
-      env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" },
+      env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let o = "",

@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createCodingTools, type ResourceLoader } from "@earendil-works/pi-coding-agent";
 import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-types.ts";
-import { loadProject, type Project } from "./state.ts";
+import { loadProject, projectDir, type Project } from "./state.ts";
+import { archiveHome } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
 import { Jobs } from "./jobs.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
@@ -108,14 +109,16 @@ export function durableWorkspaceBinding(input: {
       (item) => item.repositoryId === repository.repositoryId && item.workspaceRevision === authorizationFingerprint(input.project),
     );
     const publication = githubAuthorization;
+    const approvedRoot = currentWorktreeRoot(input.project.id, repository.approvedRoot);
     const isolation = workspaceIsolation({
       conversation: input.conversation(),
       authority: { projectId: input.project.id, owner: leaseOwner },
+      oldHome: archiveHome(),
       authorizedRepositories: [
         {
           repositoryId: repository.repositoryId,
           provider,
-          approvedRoot: repository.approvedRoot,
+          approvedRoot,
           ownerCheckout: repository.ownerCheckout,
           fileOwnershipPrefix: repository.fileOwnershipPrefix,
         },
@@ -145,7 +148,7 @@ export function durableWorkspaceBinding(input: {
     // A provider plugin names the worktree and branch (frozen with the receipt); git derives them here.
     const plan = plug ? await plug.plan(bindContext) : undefined;
     const name = plan?.name ?? allocated?.workspaceName ?? `durable-${intentId.slice(0, 12)}`,
-      workspacePath = allocated?.workspacePath ?? join(repository.approvedRoot, name);
+      workspacePath = allocated?.workspacePath ?? join(approvedRoot, name);
     const baseRevision =
       plan?.baseRevision ??
       (!whole ? scope.baseRevision : (allocated?.baseRevision ?? (continued ? continued.sha : ownerHead(repository.ownerCheckout))));
@@ -162,7 +165,7 @@ export function durableWorkspaceBinding(input: {
         repositoryId: repository.repositoryId,
         provider,
         ownerCheckout: repository.ownerCheckout,
-        approvedRoot: repository.approvedRoot,
+        approvedRoot,
         workspacePath,
         workspaceName: name,
         branch,
@@ -545,6 +548,16 @@ export function guardWorkerGitCommand(
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
 /** Real and given spellings of the owner checkout; empty when the worktree itself sits inside it (nothing to separate). */
+/**
+ * Projects carried over from the previous host still name its worktree folder as their approved root. Changing the stored value would change the
+ * authorization fingerprint, so new worktrees go under this host's own project folder and the stored grant stays as it is.
+ */
+export function currentWorktreeRoot(projectId: string, approvedRoot: string): string {
+  if (resolve(approvedRoot) !== resolve(archiveHome(), projectId, "worktrees")) return approvedRoot;
+  const root = join(projectDir(projectId), "worktrees");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  return realpathSync(root);
+}
 function ownerRoots(checkout: string, workDir: string): string[] {
   const roots = [...new Set([resolve(checkout), realpathSync(checkout)])];
   return roots.some((root) => inside(root, resolve(workDir)) || inside(root, realpathSync(workDir))) ? [] : roots;
