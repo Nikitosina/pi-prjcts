@@ -416,6 +416,12 @@ try {
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status !== "running", "held Job did not finish");
   result.checks.push("A1 the Jobs tree lists failed and running Jobs; a held Job finishes");
   await shot("01-jobs-tree", s);
+  await evaluate(
+    `[...document.querySelectorAll('.job-dismiss')].find((b) => b.getAttribute('aria-label').includes('MARK-FAILTASK')).click()`,
+    s,
+  );
+  await waitFor(`!document.querySelector('#job-tree').innerText.includes('MARK-FAILTASK')`, s, "dismissed Job leaves the tree");
+  result.checks.push("A2 Dismiss clears an ended Job from the Workers card");
 
   // Inline streaming with sticky auto-scroll.
   await waitFor(`!document.querySelector('#compose textarea').disabled`, s, "composer ready");

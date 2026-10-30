@@ -352,6 +352,20 @@ assert.equal(
   "resume sends the brief once",
 );
 
+// 7b. Dismiss clears an ended Job from the list (not a running one); a send to it retries the task and sends the unsent brief first.
+const dismissTool = (id) => jobs.dismiss(harness, id);
+assert.match(await dismissTool(gate.id), /already|still running|Dismissed/, "dismiss answers");
+assert.match(await dismissTool(prep.id), /^Dismissed/);
+assert.match(await dismissTool(prep.id), /already dismissed/);
+assert.ok((await jobsOf(harness)).find((item) => item.id === prep.id).dismissedAt, "the mark is kept on the record");
+await jobs.steer(harness, prep.id, "Try again");
+await quiet(harness);
+assert.ok(
+  requests.some((item) => item.role === "worker" && item.user.includes("BRIEF-PREP")),
+  "a retry sends the brief that never arrived",
+);
+assert.equal((await jobsOf(harness)).find((item) => item.id === prep.id).dismissedAt, undefined, "a new message clears the mark");
+
 // 8. Approve: an armed auto-merge answers at once; the background finish marks the Job approved and tells the chat.
 const outcome = await jobs.approve(harness, job.id);
 assert.deepEqual(outcome, { outcome: { kind: "auto-merge-pending" } });

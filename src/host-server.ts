@@ -1224,6 +1224,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
       return { result: await (await durable(input.id)).steerJob(input.threadId, input.text, { requestId: input.requestId }) };
     }
+    case "thread-dismiss": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
+      const text = await (await durable(input.id)).dismissJob(input.threadId);
+      if (/still running|No agent|No Job|subagent/.test(text)) throw new Error(text);
+      return { text, threadId: input.threadId };
+    }
     case "thread-stop": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");

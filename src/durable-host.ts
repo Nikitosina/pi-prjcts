@@ -127,7 +127,7 @@ const chatProblems = (all: JobLedger, chats: { id: string; title: string }[], vi
 export async function durableHostActivity(owner: DurableProjectRuntime, projectId: string): Promise<ProjectActivity> {
   const chats = (await owner.chats()).filter((chat) => !chat.archived);
   const all = jobs(projectId),
-    work = (await owner.jobs()).jobs,
+    work = (await owner.jobs()).jobs.filter((job) => !job.dismissedAt),
     questions = inbox(projectDir(projectId)).filter((item) => item.kind === "question" && !item.result);
   const byChat: Record<string, ChatActivity> = {};
   for (const chat of chats) {

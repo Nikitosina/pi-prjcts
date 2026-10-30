@@ -72,6 +72,8 @@ export type Job = {
   stalledAt: number | null;
   /** The finished state a follow-up interrupted; restored when the worker answers without a new Ready report. */
   resume: { status: "ready" | "ready-with-gaps"; ready: ReadyReport; endedAt: number | null } | null;
+  /** The owner or coordinator cleared this ended Job from view; history and files stay. A new message to it clears the mark. */
+  dismissedAt?: number;
 };
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
@@ -98,6 +100,8 @@ export type Agent = {
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: { at: number; from: string; to: string }[];
+  /** An ended scout or reviewer cleared from view (a Job's worker is dismissed through its Job). */
+  dismissedAt?: number;
 };
 export type JobsState = {
   paused: boolean;
@@ -320,7 +324,7 @@ const reporterTask = (host: JobsHost) =>
             const job = record?.jobId ? state.jobs[record.jobId] : undefined;
             if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
               return { status: "running", checkpoint: { phase: "report" } } as const;
-            if (message === record.brief) record.briefed = true;
+            if (message.startsWith(record.brief)) record.briefed = true;
             return {
               status: "running",
               checkpoint: { phase: "deliver", attempt, checked: true, boot: boot ?? host.boot ?? BOOT, note },
@@ -604,10 +608,17 @@ export function createJobs(host: JobsHost) {
     name: "agents",
     description:
       "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. " +
-      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. status: one id or all. wait: block up to timeoutSec until id is idle. " +
+      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
       "Every answer arrives in full in this chat as a message.",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("spawn"), Type.Literal("send"), Type.Literal("stop"), Type.Literal("status"), Type.Literal("wait")]),
+      action: Type.Union([
+        Type.Literal("spawn"),
+        Type.Literal("send"),
+        Type.Literal("stop"),
+        Type.Literal("status"),
+        Type.Literal("wait"),
+        Type.Literal("dismiss"),
+      ]),
       role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])),
       brief: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),
@@ -635,14 +646,20 @@ export function createJobs(host: JobsHost) {
       if (action === "status") {
         const ids = id ? [id] : Object.keys(state.agents);
         const lines: string[] = [];
+        let hidden = 0;
         for (const each of ids) {
           const agent = Object.hasOwn(state.agents, each) ? state.agents[each] : undefined;
           if (!agent) continue;
+          if (!id && (agent.jobId ? state.jobs[agent.jobId]?.dismissedAt : agent.dismissedAt)) {
+            hidden++;
+            continue;
+          }
           const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
           lines.push(
             `${agent.id} ${agent.role} "${agent.title}": ${job ? job.status : agent.endedAt ? "ended" : "open"}, ${(await working(api, agent.conversationId)) ? "working" : "idle"}`,
           );
         }
+        if (hidden) lines.push(`(${hidden} dismissed agent${hidden === 1 ? "" : "s"} not listed; status with an id still shows them)`);
         return reply(lines.join("\n") || "No agents.");
       }
       const agent = id && Object.hasOwn(state.agents, id) ? state.agents[id] : undefined;
@@ -660,6 +677,7 @@ export function createJobs(host: JobsHost) {
         if (!args.reason?.trim()) return reply("stop needs a reason.");
         return reply(bound ? await stopAgent(bound, agent!.id, args.reason.trim()) : "Jobs are not attached to a host.");
       }
+      if (action === "dismiss") return reply(await dismissAgent(api, agent!.id));
       if (action === "send") {
         if (!args.message?.trim()) return reply("send needs a message.");
         return reply(await sendTo(api, agent!.id, args.message, args.followUp === true));
@@ -823,6 +841,8 @@ export function createJobs(host: JobsHost) {
       if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
       if (key) doc.requests[key] = id;
+      // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
+      if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       if (job) {
         if (job.status === "ready" || job.status === "ready-with-gaps")
@@ -834,6 +854,8 @@ export function createJobs(host: JobsHost) {
         job.stalledAt = null;
       }
       agent.endedAt = null;
+      delete agent.dismissedAt;
+      if (job) delete job.dismissedAt;
       agent.sends = (agent.sends ?? 0) + 1;
       const background = { ownership: { kind: "conversation" }, background: true, conversationId: agent.chat } as const;
       await tx.createTask(
@@ -876,6 +898,23 @@ export function createJobs(host: JobsHost) {
       await host.killProcesses?.(owned);
     }
     return `Stopped ${id}.`;
+  }
+
+  /** Clear an ended agent or Job from the lists. Not a delete: the record, transcripts and files stay. */
+  async function dismissAgent(api: Pick<Session, "commit">, id: string): Promise<string> {
+    return api.commit(async (tx) => {
+      const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      const agent = doc.agents[id];
+      if (!agent) return `No agent ${id}.`;
+      const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+      if (agent.jobId && !job) return `No Job ${agent.jobId}.`;
+      if (job && agent.id !== job.id) return `${id} is a subagent; dismiss its Job ${job.id}.`;
+      if (job ? isLive(job.status) : agent.endedAt === null) return `${id} is still running; stop it first.`;
+      const target = job ?? agent;
+      if (target.dismissedAt) return `${id} is already dismissed.`;
+      target.dismissedAt = clock();
+      return `Dismissed ${id}. Its history stays readable; send to it to bring it back.`;
+    }, context);
   }
 
   /** Agents that should be working: running Jobs' workers and scouts or reviewers still answering. */
@@ -1109,6 +1148,7 @@ export function createJobs(host: JobsHost) {
       const root = await harness.root(context);
       return sendTo(root, id, message, followUp, requestId);
     },
+    dismiss: async (harness: Harness, id: string) => dismissAgent(await harness.root(context), id),
     approve,
     finishApproval,
     stallTick,

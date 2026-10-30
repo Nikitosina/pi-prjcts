@@ -867,6 +867,7 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
+  Type.Object({ action: Type.Literal("thread-dismiss"), id: Id, threadId: Id }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("thread-steer"), id: Id, threadId: Id, requestId: Id, text }, { additionalProperties: false }),
   Type.Object(
     { action: Type.Literal("thread-stop"), id: Id, threadId: Id, reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })) },

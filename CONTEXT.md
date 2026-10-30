@@ -17,6 +17,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
   - **Verifier**: runs the project's verify skill against a pinned candidate and returns a verdict with evidence.
 - **Spawn**: starting an agent as a conversation owned by the spawning tool call. The coordinator spawns workers, scouts and reviewers in the background; a worker spawns verifiers, reviewers and scouts in the foreground. Children of a worker cannot spawn.
 - **Steer**: a message queued into a running agent's conversation, placed after its current tool round.
+- **Dismiss**: clearing an ended Job or agent from the lists. Nothing is deleted.
 - **Stop**: an explicit abort of an agent with a stated reason. Aborting drains everything the agent owns.
 - **Candidate**: the exact commit a verifier or reviewer judges.
 - **Proof**: verifier runs, logs, screenshots and videos tied to a candidate, kept in the Job's artifacts.

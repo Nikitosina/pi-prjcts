@@ -167,6 +167,13 @@ registerActions({
     requireAgent(node.dataset.thread);
     textDialog("thread-steer", node.dataset.thread);
   },
+  async "thread-dismiss"(node) {
+    requireProject(node.dataset.project);
+    await mutate(
+      { action: "thread-dismiss", id: node.dataset.project, threadId: node.dataset.thread },
+      "Dismissed. History and files kept.",
+    );
+  },
   "thread-stop"(node) {
     requireProject(node.dataset.project);
     const info = requireAgent(node.dataset.thread);
@@ -364,7 +371,7 @@ function contextRing(context) {
   return `<span class="ctx-ring" data-level="${level}" title="${esc(contextLine(context))}"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" class="track"/><circle cx="8" cy="8" r="6" class="fill" stroke-dasharray="${((c * (percent ?? 0)) / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 8 8)"/></svg>${percent === null ? "window unknown" : `${percent}%`}</span>`;
 }
 // A node of the Jobs tree: status dot, name, then status, plan progress (done/total) and ETA.
-function nodeRow({ id, role, title, state, job, withPlan, stop }) {
+function nodeRow({ id, role, title, state, job, withPlan, stop, dismiss }) {
   const meta = [
     `<span class="job-status">${esc(state.label)}</span>`,
     ...(withPlan
@@ -378,7 +385,7 @@ function nodeRow({ id, role, title, state, job, withPlan, stop }) {
   // Context use belongs to the agent that owns a conversation: worker rows and loose scouts/reviewers.
   const measured = role && /^[a-f0-9-]{36}$/.test(id);
   const ring = measured ? contextRing(workerContexts.get(id)) : "";
-  return `<div class="job-row" data-thread="${esc(id)}"${measured ? ` data-context="${esc(id)}"` : ""}>${open}${ring}${stop ? `<button type="button" class="ghost small job-stop" data-action="thread-stop" data-project="${esc(getProjectId())}" data-thread="${esc(id)}" aria-label="Stop ${esc(title)}">Stop…</button>` : ""}</div>`;
+  return `<div class="job-row" data-thread="${esc(id)}"${measured ? ` data-context="${esc(id)}"` : ""}>${open}${ring}${stop ? `<button type="button" class="ghost small job-stop" data-action="thread-stop" data-project="${esc(getProjectId())}" data-thread="${esc(id)}" aria-label="Stop ${esc(title)}">Stop…</button>` : ""}${dismiss ? `<button type="button" class="ghost small job-dismiss" data-action="thread-dismiss" data-project="${esc(getProjectId())}" data-thread="${esc(id)}" aria-label="Dismiss ${esc(title)}" title="Clear from this list; history stays">Dismiss</button>` : ""}</div>`;
 }
 function jobHtml(job) {
   const expanded = openJobs.get(job.id) ?? job.status === "running",
@@ -387,7 +394,7 @@ function jobHtml(job) {
   const children = job.children
     .map((child) => nodeRow({ id: `${job.id}/${child.id}`, role: child.role, title: child.title, state: subagentState(child) }))
     .join("");
-  return `<div class="job" data-job="${esc(job.id)}" data-status="${esc(job.status)}"><div class="job-head"><button type="button" class="job-toggle" data-action="job-toggle" data-job="${esc(job.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(job.title)}"><span aria-hidden="true">${expanded ? "▾" : "▸"}</span></button>${nodeRow({ id: job.id, title: job.title, state, job, withPlan: true, stop: job.status === "running" })}</div>${reason}${
+  return `<div class="job" data-job="${esc(job.id)}" data-status="${esc(job.status)}"><div class="job-head"><button type="button" class="job-toggle" data-action="job-toggle" data-job="${esc(job.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(job.title)}"><span aria-hidden="true">${expanded ? "▾" : "▸"}</span></button>${nodeRow({ id: job.id, title: job.title, state, job, withPlan: true, stop: job.status === "running", dismiss: finishedJob(job) })}</div>${reason}${
     expanded
       ? `<div class="job-children">${nodeRow({ id: job.id, role: "worker", title: job.title, state: workerState(job), job, withPlan: true })}${children}</div>`
       : ""

@@ -236,8 +236,13 @@ registerDrafts({
     for (const [id, value] of pairs) answers.set(id, value);
   },
 });
+// Dismissed Jobs and agents are cleared from every list, dots and warning; the host keeps their records.
 export function setJobsSnap(value) {
-  return (jobsSnap = value);
+  return (jobsSnap = value && {
+    ...value,
+    jobs: value.jobs.filter((job) => !job.dismissedAt),
+    agents: value.agents.filter((agent) => !agent.dismissedAt && !value.jobs.find((job) => job.id === agent.jobId)?.dismissedAt),
+  });
 }
 // The chat that spawned a Job (job.chat is the chat's conversation id).
 export function jobChatId(job) {

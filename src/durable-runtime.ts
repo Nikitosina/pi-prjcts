@@ -254,6 +254,8 @@ export type DurableProjectRuntime = {
   spawn(chat: number | undefined, args: SpawnArgs & { requestId: string }): Promise<{ text: string; id?: string }>;
   /** Stop an agent and everything it owns; `reason` is required and recorded on the Job. */
   stopJob(id: string, reason: string): Promise<string>;
+  /** Clear an ended agent or Job from the lists; refuses a running one. History stays. */
+  dismissJob(id: string): Promise<string>;
   /** Message an agent; a finished Job runs again. `followUp` queues it after the agent's current answer. */
   steerJob(id: string, text: string, options?: { followUp?: boolean; requestId?: string }): Promise<string>;
   /** Approve a Ready Job: merge its candidate through result acceptance. */
@@ -1621,6 +1623,10 @@ export async function openDurableProject(input: {
         await releaseIdleLeases(new Set([id]));
         if (!closed) await cleanup().catch((error) => report(input.onReport, project.id, error));
         return text;
+      },
+      dismissJob: async (id) => {
+        assertOpen();
+        return jobs.dismiss(openedHarness, id);
       },
       steerJob: (id, text, options = {}) =>
         admitting(async () => {
