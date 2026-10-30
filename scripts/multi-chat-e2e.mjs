@@ -474,6 +474,13 @@ try {
   await click(s, `#chat-list .chat[data-chat="${chatId}"]`);
   await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "chat two reopened");
   result.checks.push("Tabs follow the open chat, close to their neighbour, and the Workers card shows only that chat's work");
+  // A tab of another project is drawn from the host's list: it must carry each chat's own activity, not only the project's.
+  await new Promise((done) => setTimeout(done, 1700));
+  const listed = (await rpc({ action: "list" })).find((project) => project.id === id);
+  const perChat = listed?.activity?.chats;
+  if (!perChat || !perChat.main || !perChat[chatId] || typeof perChat[chatId].working !== "boolean")
+    throw Error("List lacks per-chat activity: " + JSON.stringify(listed?.activity));
+  result.checks.push("The project list carries each chat's own activity, so background tabs show their chat's state");
 
   // F13: the live bubble belongs to its chat.
   const slow = await rpc({ action: "message", id, chatId, text: "MARK-SLOW stream please" });

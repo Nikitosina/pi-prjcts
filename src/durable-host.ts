@@ -86,7 +86,8 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
   }
 }
 
-export type ProjectActivity = { working: boolean; needs: boolean; finishedAt: number };
+export type ChatActivity = { working: boolean; needs: boolean; finishedAt: number };
+export type ProjectActivity = ChatActivity & { chats: Record<string, ChatActivity> };
 
 /** Brings the job ledger of every chat in line with the runtime and records the project's phase and problem. Called by commits, never by a read. */
 export async function settleProject(owner: DurableProjectRuntime, projectId: string): Promise<void> {
@@ -125,20 +126,32 @@ const chatProblems = (all: JobLedger, chats: { id: string; title: string }[], vi
 // a failed newest turn or a blocked worker, and when anything last finished. Same rules the chat tabs use, so the dots agree.
 export async function durableHostActivity(owner: DurableProjectRuntime, projectId: string): Promise<ProjectActivity> {
   const chats = (await owner.chats()).filter((chat) => !chat.archived);
-  const all = jobs(projectId);
-  let needs = false,
-    finishedAt = 0;
+  const all = jobs(projectId),
+    work = (await owner.jobs()).jobs,
+    questions = inbox(projectDir(projectId)).filter((item) => item.kind === "question" && !item.result);
+  const byChat: Record<string, ChatActivity> = {};
   for (const chat of chats) {
-    const ledger = all.filter((job) => (job.chatId ?? "main") === chat.id);
-    if (ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed") needs = true;
+    const ledger = all.filter((job) => (job.chatId ?? "main") === chat.id),
+      mine = work.filter((item) => Number(item.chat) === chat.conversationId),
+      asked = questions.some((item) => (item.native ? item.native.conversationId === chat.conversationId : chat.id === "main"));
+    let finishedAt = 0;
     for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
+    for (const item of mine) if (item.status !== "running") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
+    byChat[chat.id] = {
+      working: chat.busy || mine.some((item) => item.status === "running"),
+      needs:
+        asked ||
+        ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed" ||
+        mine.some((item) => item.status === "running" && item.stalledAt !== null),
+      finishedAt,
+    };
   }
-  const work = (await owner.jobs()).jobs;
-  for (const item of work) if (item.status !== "running") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
+  const states = Object.values(byChat);
   return {
-    working: chats.some((chat) => chat.busy) || work.some((item) => item.status === "running"),
-    needs: needs || work.some((item) => item.status === "ready" || item.status === "ready-with-gaps"),
-    finishedAt,
+    working: states.some((item) => item.working),
+    needs: states.some((item) => item.needs),
+    finishedAt: Math.max(0, ...states.map((item) => item.finishedAt)),
+    chats: byChat,
   };
 }
 
