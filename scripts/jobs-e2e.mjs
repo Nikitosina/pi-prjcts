@@ -7,11 +7,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { Type } from "typebox";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createJobs, Jobs } from "../src/jobs.ts";
+import { guardedStream } from "../src/model-guard.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
@@ -382,6 +384,36 @@ await harness.commit(async (tx) => {
 }, context);
 assert.deepEqual(await jobs.stallTick(harness, T), []);
 assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an idle running Job is stalled");
+
+// 10. A provider that hangs and ignores its abort signal cannot keep a stopped conversation busy; a silent one is cut off.
+{
+  const hung = createModels();
+  const fake = fauxProvider();
+  hung.setProvider(fake.provider);
+  const dispatch = () => createAssistantMessageEventStream(); // never yields, never ends, ignores the signal
+  let idleMs = 400;
+  hung.streamSimple = (m, r, o) => guardedStream(dispatch, m, r, o, o?.signal, idleMs);
+  const registry = createRegistry();
+  const h = await Harness.open(
+    await openNodeSqliteStorage(join(dir, "hung.sqlite")),
+    { models: hung, registry, settings: { retry: { maxRetries: 0 } } },
+    context,
+  );
+  h.resume();
+  const conversation = await h.root(context, { agent: { model, instructions: "x" } });
+  const submission = await conversation.submit({ type: "input", content: "hello" }, context);
+  const answer = await Promise.race([submission.wait(context), delay(5_000).then(() => "hung")]);
+  assert.notEqual(answer, "hung", "a silent request ends after the idle bound");
+  assert.equal(answer.status, "unanswered");
+  idleMs = 60_000;
+  const second = await conversation.submit({ type: "input", content: "again" }, context);
+  await delay(100);
+  const stopped = await Promise.race([conversation.abort(context).then(() => "idle"), delay(3_000).then(() => "hung")]);
+  assert.equal(stopped, "idle", "abort of a request that ignores the signal still ends the run");
+  await second.wait(context).catch(() => {});
+  assert.equal((await h.snapshot(LiveDoc, conversation.id, context))?.run, undefined, "the stopped conversation is no longer working");
+  await h.close(context);
+}
 
 await harness.close(context);
 rmSync(dir, { recursive: true, force: true });

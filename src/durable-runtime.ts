@@ -29,6 +29,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { observeProviderPrompt } from "./provider-extensions.ts";
 import { liveModelRuntime } from "./live-models.ts";
+import { guardedStream } from "./model-guard.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
@@ -521,12 +522,7 @@ export async function openDurableProject(input: {
         } catch {}
         await options?.onResponse?.(response, responseModel);
       };
-      const stream = dispatch(model, request, {
-        ...options,
-        onResponse,
-        ...(sessionId ? { sessionId } : {}),
-        ...(signal ? { signal } : {}),
-      });
+      const stream = guardedStream(dispatch, model, request, { ...options, onResponse, ...(sessionId ? { sessionId } : {}) }, signal);
       const settle = () => {
         settled = true;
       };
