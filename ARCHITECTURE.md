@@ -88,7 +88,7 @@ Rules: reads (`show`, snapshots, history) have no side effects. Anything that ch
 
 ## Telegram
 
-`src/telegram.ts` runs the bot (long polling, pairing, chat routing, inline buttons); `src/notify.ts` turns host notices into messages; `src/telegram-html.ts` and `src/telegram-media.ts` convert markdown and upload artifacts (`docs/telegram-media.md`). Per Job it sends one progress message with plan steps and ETA and edits it in place. A Ready notice that is mergeable carries an Approve button that calls the same approver as the web UI.
+`src/telegram.ts` runs the bot (long polling, pairing, chat routing, inline buttons); `src/notify.ts` turns host notices into messages; `src/telegram-html.ts` and `src/telegram-media.ts` convert markdown and upload artifacts (`docs/telegram-media.md`). Per Job it sends one progress message with plan steps and ETA and edits it in place. There is one push per task: a Ready report is not its own notice; the coordinator's settled answer is, once nothing started from that chat (running Jobs, revived workers, scouts, reviewers) is still working, and it carries Approve when a mergeable Job of that chat is Ready (same approver as the web UI). Follow PRs events wake the chat that started the Job whose PR they concern; the Job's own opened/new-head lines wake nobody. PR notices and auto-fix reports go to that chat too. Everything not tied to a Job goes to the Settings events chat (Main if archived or gone).
 
 Rule: Telegram never decides. Its buttons call host actions that re-check the Job's state.
 

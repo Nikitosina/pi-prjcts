@@ -200,7 +200,7 @@ function renderEventsIn() {
     )
     .join("");
   node.innerHTML = `<div class="events-in">
-    <label class="field">Send events to <select id="event-chat">${chats.map((chat) => `<option value="${esc(chat.id)}" ${chat.id === data.eventChat ? "selected" : ""}>${esc(chat.title)}${chat.archived ? " (archived, using Main)" : ""}</option>`).join("")}</select></label>
+    <label class="field">Send events not tied to a Job to <select id="event-chat">${chats.map((chat) => `<option value="${esc(chat.id)}" ${chat.id === data.eventChat ? "selected" : ""}>${esc(chat.title)}${chat.archived ? " (archived, using Main)" : ""}</option>`).join("")}</select></label>
     <fieldset class="events-group"><legend>Follow PRs</legend>
       <p class="note">${data.githubRepositories.length ? `Repositories: ${esc(data.githubRepositories.join(", "))}. Opened, merged and closed PRs, CI results, reviews and comments (bots too). The first check records what exists without sending it.` : "Connect GitHub in Owner setup first."}</p>
       <label class="check"><input type="checkbox" id="follow-enabled" ${f?.enabled ? "checked" : ""}> Follow all PRs</label>

@@ -1130,7 +1130,16 @@ export async function openDurableProject(input: {
           return id;
         },
         threads: async () =>
-          (await jobs.snapshot(openedHarness)).jobs.map((job) => ({ threadId: job.id, conversationId: Number(job.workerConversation) })),
+          (await jobs.snapshot(openedHarness)).jobs.map((job) => ({
+            threadId: job.id,
+            conversationId: Number(job.workerConversation),
+            chat: Number(job.chat),
+            pr: job.pr,
+          })),
+        chatConversation: async (chat) => {
+          const found = (await chatList()).find((item) => item.conversationId === chat);
+          return found && !found.archived ? (await resolveChat(found.id)).conversation : null;
+        },
         workStatus: async (id) => {
           const view = await jobs.snapshot(openedHarness);
           const job = view.jobs.find((item) => item.id === id);

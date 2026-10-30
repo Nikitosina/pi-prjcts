@@ -1,6 +1,7 @@
 /** A PR event worth a host notice (browser and Telegram): CI failed or recovered, merged, conflicts, review changes. `key` is unique per (PR, diff-set or head, transition), so a notice is raised once. */
 export type PrNoticeKind = "ci-failed" | "merged" | "ci-recovered" | "conflicts" | "changes-requested" | "approved" | "review-comments";
-export type PrNotice = { key: string; kind: PrNoticeKind; text: string; at: number };
+/** `chat`: the chat conversation of the Job that opened the PR; absent notices go to the event chat. */
+export type PrNotice = { key: string; kind: PrNoticeKind; text: string; at: number; chat?: number };
 const NOTICES = 50;
 const short = (text: string, max: number) => {
   const value = text.replace(/\s+/g, " ").trim();

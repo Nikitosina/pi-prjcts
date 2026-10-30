@@ -736,9 +736,15 @@ await kit.run(async () => {
     const list = await monitorEvents(id);
     return list.length === 1 && list;
   }, "monitor event not delivered");
+  // A Job's PR reports to its own chat and the rest to the event chat, so the batch can arrive as several events.
   const follow1 = await kit.eventually(async () => {
     const list = await followEvents(id);
-    return list.length === 1 && list;
+    const joined = list.map((item) => item.text).join("\n");
+    return (
+      list.length >= 1 &&
+      /PR #4 “Add swipe typing” CI failed/.test(joined) &&
+      /PR #2 “Fix login copy” CI failed/.test(joined) && [{ text: joined }]
+    );
   }, "follow event not delivered");
   await settleAll(id);
   const notices1 = await kit.eventually(

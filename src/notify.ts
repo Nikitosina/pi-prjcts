@@ -92,14 +92,15 @@ export function startNotifier(options: {
     const eventChat = loadAutomations(project.id).eventChat,
       eventTarget = chats.find((chat) => chat.id === eventChat && !chat.archived) ?? chats[0];
     for (const item of await owner.prNotices()) {
+      const target = (item.chat !== undefined && chats.find((chat) => chat.conversationId === item.chat && !chat.archived)) || eventTarget;
       const key = `prnotice:${item.key}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (silent) continue;
       push({
         ...base,
-        chatId: eventTarget.id,
-        chat: eventTarget.title,
+        chatId: target.id,
+        chat: target.title,
         kind: "pr",
         title: PR_NOTICE_TITLE[item.kind] ?? "Pull request",
         text: clip(item.text),

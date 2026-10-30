@@ -490,29 +490,37 @@ try {
     state.checks[E1] = [{ name: "lint", conclusion: "failure" }];
   });
   await evaluate(`document.querySelector('[data-action="follow-poll"]').click()`, s);
-  const [event] = await eventually(async () => {
+  const both = await eventually(async () => {
     const list = await events();
-    return list.length === 1 && list;
-  }, "Check now did not deliver one event");
+    return list.length === 2 && list;
+  }, "Check now did not deliver one event per chat");
+  const event = both.find((item) => item.conversationId === alerts.conversationId),
+    own = both.find((item) => item.conversationId == null);
+  if (!event || !own)
+    throw Error("Events not split between Alerts and the Job's chat: " + JSON.stringify(both.map((i) => i.conversationId)));
   const text = event.text;
   for (const want of [
     "PR #4 “Add settings page” opened by pi-bot",
     "PR #3 “Docs tweak” merged",
-    "PR #2 “Fix login copy” CI failed at",
-    "lint (failure)",
     "PR #4 “Add settings page” CI passed",
-    "review by alice CHANGES_REQUESTED: MARK-REVIEW",
-    "comment by ci-bot[bot] (bot): MARK-BOT",
     "untrusted",
     "PR #5 “Fork change” CI failed",
     "not published by this project; no auto-fix",
+  ])
+    if (!text.includes(want)) throw Error(`Event lacks "${want}": ${text}`);
+  for (const want of [
+    "PR #2 “Fix login copy” CI failed at",
+    "lint (failure)",
+    "review by alice CHANGES_REQUESTED: MARK-REVIEW",
+    "comment by ci-bot[bot] (bot): MARK-BOT",
     "auto-fix sent to the thread that opened it",
     "attempt 1 of 3",
   ])
-    if (!text.includes(want)) throw Error(`Event lacks "${want}": ${text}`);
-  if (/OLD-COMMENT|OLD-REVIEW|Old work/.test(text)) throw Error("Baseline items re-delivered: " + text);
+    if (!own.text.includes(want)) throw Error(`Job chat event lacks "${want}": ${own.text}`);
+  if (text.includes("PR #2")) throw Error("A Job's PR leaked into the event chat: " + text);
+  if (/OLD-COMMENT|OLD-REVIEW|Old work/.test(text + own.text)) throw Error("Baseline items re-delivered: " + text);
   result.checks.push(
-    "F8 one event lists opened, merged, CI failed/passed, review and bot comment, marked untrusted; baseline items stay out",
+    "F8 activity on a Job's PR (#2) is one event for the chat that started the Job; the rest is one event in the Settings chat; baseline items stay out",
   );
   if (event.conversationId !== alerts.conversationId)
     throw Error("Event not routed to Alerts: " + JSON.stringify({ event: event.conversationId, alerts: alerts.conversationId }));
@@ -523,11 +531,11 @@ try {
     fixes1.length !== 1 ||
     !fixes1[0].text.includes("PR #2") ||
     !fixes1[0].text.includes(fixBranch) ||
-    fixes1[0].chatConversationId !== alerts.conversationId
+    (await rpc({ action: "jobs-snapshot", id })).jobs.some((j) => j.chat === alerts.conversationId)
   )
     throw Error("Fix dispatch wrong: " + JSON.stringify(fixes1));
   result.checks.push(
-    "F12/F16 only the project-published PR (#2) gets a fix worker, scoped to the repository, reporting to Alerts; external #5 does not",
+    "F12/F16 only the project-published PR (#2) gets a fix worker, scoped to the repository, reporting to the chat that started the Job (not Alerts); external #5 does not",
   );
   if (!/PR #8 “Orphan branch” CI failed[\s\S]*not published by this project; no auto-fix/.test(text))
     throw Error("Receipt-less pi/ PR not refused: " + text);
@@ -537,10 +545,9 @@ try {
   if (!["write", "edit"].every((name) => fixTools.includes(name)))
     throw Error("Fix worker is not scoped to the repository: " + JSON.stringify(fixTools));
   const mainView = await rpc({ action: "show", id });
-  if (mainView.messages.some((m) => m.text?.includes("[Owner-local event") || m.text?.includes("[Follow PRs auto-fix]")))
-    throw Error("Event in the wrong chat");
-  if (result.calls.filter((c) => c.coordinator && c.kind === "event").length !== 1)
-    throw Error("More than one coordinator turn for one batch");
+  if (mainView.messages.some((m) => m.text?.includes("PR #4") || m.text?.includes("PR #5")))
+    throw Error("Another PR's event reached the Job's chat");
+  if (result.calls.filter((c) => c.coordinator && c.kind === "event").length !== 2) throw Error("Expected one coordinator turn per chat");
   result.checks.push("F16 the event reaches Alerts as one coordinator turn; Main sees neither the event nor the fix request");
 
   // F11: the transcript renders an event card.
@@ -553,14 +560,14 @@ try {
     `(() => { const c = document.querySelector('#messages .event-card.github'); c.open = true; return { title: c.querySelector('summary b').innerText, summary: c.querySelector('.report-task').innerText, raw: document.querySelector('#messages').innerText.includes('[Owner-local event') }; })()`,
     s,
   );
-  if (card.title !== "GitHub activity" || !/changes · auto-fix sent/.test(card.summary) || card.raw)
+  if (card.title !== "GitHub activity" || !/changes/.test(card.summary) || card.raw)
     throw Error("Event card wrong: " + JSON.stringify(card));
   result.checks.push('F11 the event shows as a "GitHub activity" card, not as an owner message');
   await shot("01-alerts-event-card", s);
 
   // F5/F7/F13: nothing new, no repeat.
   const again = await poll();
-  if (again.result.events !== 0 || (await events()).length !== 1 || (await fixWork()).length !== 1)
+  if (again.result.events !== 0 || (await events()).length !== 2 || (await fixWork()).length !== 1)
     throw Error("Second poll repeated something: " + JSON.stringify(again.result));
   result.checks.push("F5/F7/F13 a second poll with no changes sends nothing and dispatches nothing");
 
