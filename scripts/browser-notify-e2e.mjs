@@ -128,9 +128,10 @@ try {
     300,
   );
   await k.ask(a, "main", "MARK-SHIP a job");
-  await eventually(async () => (await notes(s)).some((n) => n.body.includes("MARK-JOB shipped")), "no Ready notification", 300);
-  const ready = (await rpc({ action: "notify-feed", after: 0 })).items.find((n) => n.kind === "result" && n.jobId);
-  if (!ready || ready.mergeable !== true) throw Error("Ready notice lacks jobId or mergeable: " + JSON.stringify(ready));
+  await eventually(async () => (await notes(s)).some((n) => n.body.includes("Done MARK-JOB.")), "no final notification", 300);
+  const shipped = (await rpc({ action: "notify-feed", after: 0 })).items.filter((n) => n.kind === "result" && /MARK-JOB/.test(n.text));
+  if (shipped.length !== 1 || shipped[0].mergeable !== true || !shipped[0].jobId)
+    throw Error("A Job must push one final notice carrying jobId and mergeable: " + JSON.stringify(shipped));
   const failed = await k.ask(a, two.id, "MARK-FAIL break");
   if (failed.state !== "failed") throw Error("Fixture turn did not fail: " + failed.state);
   await eventually(

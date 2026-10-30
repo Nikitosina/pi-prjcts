@@ -389,7 +389,7 @@ try {
   )
     throw Error("Progress was sent more than once");
   k.release("ready");
-  const readyMsg = await lastTo(/MARK-JOB shipped/, "Ready message", mark);
+  const readyMsg = await lastTo(/Done MARK-JOB\./, "final message", mark);
   const approve = buttons(readyMsg).find((btn) => btn.text === "Approve");
   if (!approve) throw Error("Ready message has no Approve button: " + JSON.stringify(readyMsg));
   mark = toOwner().length;

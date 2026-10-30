@@ -107,7 +107,7 @@ export function startNotifier(options: {
     }
     // A failed worker goes to the chat that delegated it. Stopped and interrupted work (owner stop, pause, restart) is not a failure.
     const quietWork = silent || !entry.workBaselined;
-    const jobs = (await owner.jobs()).jobs;
+    const { jobs, agents } = await owner.jobs();
     for (const job of jobs) {
       if (job.status !== "running" || !job.plan.length) continue;
       const view: JobProgress = {
@@ -123,6 +123,7 @@ export function startNotifier(options: {
       progressSeen.set(job.id, fingerprint);
       options.progress?.(view);
     }
+    // A failed worker goes to its chat at once. A Ready report is not its own notice: the coordinator's settled answer carries it (and Approve).
     for (const job of jobs) {
       const failed = job.status === "failed";
       const ready = job.status === "ready" || job.status === "ready-with-gaps";
@@ -130,25 +131,26 @@ export function startNotifier(options: {
       const key = `${failed ? "work" : "ready"}:${job.id}:${job.endedAt ?? 0}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      if (quietWork) continue;
+      if (quietWork || !failed) continue;
       const chat = chatOf(Number(job.chat));
       const task = job.title.replace(/\s+/g, " ").trim();
       push({
         ...base,
         chatId: chat.id,
         chat: chat.title,
-        kind: failed ? "error" : "result",
-        title: failed ? "Worker failed" : job.status === "ready" ? "Ready" : "Ready with gaps",
-        text: clip(failed ? `worker failed: ${task}${job.reason ? `\n${job.reason}` : ""}` : `${task}\n${job.ready?.summary ?? ""}`),
+        kind: "error",
+        title: "Worker failed",
+        text: clip(`worker failed: ${task}${job.reason ? `\n${job.reason}` : ""}`),
         workId: job.id,
         threadId: job.id,
-        ...(ready ? { jobId: job.id, mergeable: Boolean(job.pr && job.candidate) } : {}),
       });
     }
     entry.workBaselined = true;
     // A coordinator turn is a result only when nothing is still running in its chat and no work report follows it (a later report turn means
     // work was still running when it was written); batched submissions share one answer and notify once. Intermediate status lines stay quiet.
+    // Work started from a chat (running Jobs, revived workers, open scouts and reviewers) keeps its turns quiet until it settles.
     const working = new Set(jobs.filter((job) => job.status === "running").map((job) => chatOf(Number(job.chat)).id));
+    for (const agent of agents) if (agent.working || (!agent.jobId && agent.endedAt === null)) working.add(chatOf(Number(agent.chat)).id);
     for (const chat of chats) {
       const after = entry.chats[chat.id];
       // Archived chats are skipped, but baselined once so a restored chat does not replay its history.
@@ -164,12 +166,14 @@ export function startNotifier(options: {
           submission.status === "done" &&
           submission.text?.trim() &&
           !working.has(chat.id) &&
-          !submissions
-            .slice(index + 1)
-            .some(
-              (later) => later.requestId?.startsWith("plan-report:") || (later.answerId !== null && later.answerId === submission.answerId),
-            )
-        )
+          // Follow PRs events about the project's own PRs wake the coordinator; PR notices already cover CI and merges.
+          !submission.requestId?.startsWith("event:follow:") &&
+          !submissions.slice(index + 1).some((later) => later.answerId !== null && later.answerId === submission.answerId)
+        ) {
+          const approvable = jobs
+            .filter((job) => (job.status === "ready" || job.status === "ready-with-gaps") && job.pr && job.candidate)
+            .filter((job) => chatOf(Number(job.chat)).id === chat.id)
+            .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))[0];
           push({
             ...base,
             chatId: chat.id,
@@ -179,8 +183,9 @@ export function startNotifier(options: {
             text: extractTelegramMedia(submission.text).media.some((media) => media.ref.startsWith("artifact:"))
               ? submission.text.trim()
               : clip(submission.text.trim()),
+            ...(approvable ? { jobId: approvable.id, mergeable: true } : {}),
           });
-        else if (submission.status === "unanswered" && submission.reason !== "aborted")
+        } else if (submission.status === "unanswered" && submission.reason !== "aborted")
           push({
             ...base,
             chatId: chat.id,
