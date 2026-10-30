@@ -2,6 +2,7 @@ import { defineExtension, defineTool, type Conversation, type ToolExecutionApi }
 import { Type } from "typebox";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 import { fitJson } from "./response-limit.ts";
+import { coordinatorArchiveTools } from "./archive-tools.ts";
 
 const Id = Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" });
 const HISTORY_ENTRIES = 8;
@@ -11,6 +12,7 @@ const json = (value: unknown): { content: { type: "text"; text: string }[] } => 
 
 /** The coordinator's read-only view into its agents: a conversation page and a worktree diff. Spawning, steering and stopping are the `agents` tool. */
 export function coordinatorJobReadTools(input: {
+  projectId: string;
   root: () => Conversation | undefined;
   runtime: () => DurableProjectRuntime | undefined;
   /** Main and every project chat; never a worker. */ isCoordinator: (id: Conversation["id"]) => boolean;
@@ -122,6 +124,6 @@ export function coordinatorJobReadTools(input: {
       return json({ scopes: input.catalog() });
     },
   });
-  const tools = [read, diff, catalog];
+  const tools = [read, diff, catalog, ...coordinatorArchiveTools({ projectId: input.projectId, isCoordinator: input.isCoordinator }).tools];
   return { tools, extension: defineExtension({ name: "projects.coordinator-job-read", tools }) };
 }

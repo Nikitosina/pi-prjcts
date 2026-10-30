@@ -76,4 +76,25 @@ assert.match(blocks[0].text, /artifact:11111111-1111-4111-8111-111111111111\/bin
 assert.equal(readdirSync(join(home, "artifacts", project, "binary")).length, 1);
 await binaryResult(scope, { bytes: png, label: "again" });
 assert.equal(readdirSync(join(home, "artifacts", project, "binary")).length, 1);
+
+// The coordinator tools read this project's archive only, refuse workers, other conversations, and answer plainly without an archive.
+const live = mkdtempSync(join(tmpdir(), "archive-live-"));
+process.env.PI_PROJECTS_HOME = live;
+writeFileSync(join(live, "archive.json"), JSON.stringify({ home }));
+const { coordinatorArchiveTools } = await import("../src/archive-tools.ts");
+const tools = (projectId) => coordinatorArchiveTools({ projectId, isCoordinator: (id) => id === 1 }).tools;
+const call = async (set, name, args, conversationId = 1) =>
+  (await set.find((tool) => tool.name === name).execute(args, { conversationId })).content[0].text;
+const mine = tools(project);
+const listed = JSON.parse(await call(mine, "projects_archive_list", { query: "side" }));
+assert.deepEqual(
+  listed.items.map((item) => item.conversationId),
+  [2],
+);
+const read = JSON.parse(await call(mine, "projects_archive_read", { conversationId: 1 }));
+assert.match(read.note, /Untrusted/);
+assert.ok(read.items.length && read.before);
+await assert.rejects(call(mine, "projects_archive_read", { conversationId: 99 }), /Unknown archived conversation/);
+await assert.rejects(call(mine, "projects_archive_list", {}, 7), /coordinator-only/);
+assert.equal(await call(tools("22222222-2222-4222-8222-222222222222"), "projects_archive_list", {}), "No archive for this project.");
 console.log("transcript-archive-unit: ok");

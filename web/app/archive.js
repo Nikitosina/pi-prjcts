@@ -1,4 +1,4 @@
-import { api, dlgBtn, registerActions, registerForms, setDialogBody, showDialog, showError } from "./shell.js";
+import { api, closeDialog, dlgBtn, getProjectId, registerActions, registerForms, setDialogBody, showDialog, showError } from "./shell.js";
 import { esc, clip } from "./format.js";
 import { chatMessageHtml } from "./chat.js";
 import { when } from "./observability.js";
@@ -68,7 +68,9 @@ async function showConversation(conversationId, title) {
   state.conversation = { id: conversationId, title };
   forget(transcriptKey());
   setDialogBody(
-    `<p>${dlgBtn("← " + state.project.name, { action: "archive-back" }, "ghost small")} <b>${esc(title)}</b></p><div class="archive-transcript transcript" aria-live="polite"><p class="note">Reading…</p></div>`,
+    `<p>${dlgBtn("← " + state.project.name, { action: "archive-back" }, "ghost small")} <b>${esc(title)}</b>${
+      state.project.projectId === getProjectId() ? ` ${dlgBtn("Continue in chat", { action: "archive-continue" }, "small")}` : ""
+    }</p><div class="archive-transcript transcript" aria-live="polite"><p class="note">Reading…</p></div>`,
   );
   const root = document.querySelector("#dialog .archive-transcript");
   bindTranscript(root, {
@@ -134,6 +136,14 @@ registerActions({
   },
   async "archive-back"() {
     await showProject(state.project.projectId);
+  },
+  async "archive-continue"() {
+    const { id, title } = state.conversation;
+    const input = document.querySelector("#compose textarea");
+    closeDialog();
+    input.value = `Continue from archived conversation ${id} "${title}": read it with projects_archive_read, then `;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
   },
   async "archive-older"() {
     await older(document.querySelector("#dialog .archive-transcript"));

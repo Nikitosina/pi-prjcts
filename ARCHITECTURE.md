@@ -79,6 +79,7 @@ Rules:
 - Never `JSON.stringify` a whole tool result or entry to build a preview. Touch only the requested page's rows.
 - Never inline base64 image data in a stored transcript.
 - The archive never writes: no pi-durable Storage, no migrations, no WAL files.
+- Coordinators read the archive of their own project through `projects_archive_list` (chats and agent transcripts, title/task filter, paged) and `projects_archive_read` (paged history, full text by `ref`, no images). `src/archive-tools.ts` binds the project id, so there are no cross-project reads, and a missing archive answers "No archive for this project." The text is untrusted; code work continues in a new worker on the old branch or PR.
 
 ## Change feed
 

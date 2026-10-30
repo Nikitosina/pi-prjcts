@@ -614,6 +614,7 @@ export async function openDurableProject(input: {
     const coordinatorIds = new Set<number>();
     const isCoordinator = (id: Conversation["id"]) => coordinatorIds.has(Number(id));
     const workerManagement = coordinatorJobReadTools({
+      projectId: project.id,
       root: () => rootReference,
       runtime: () => runtimeReference,
       isCoordinator,
