@@ -1,6 +1,6 @@
 # Jobs, Approve and Deploy
 
-The user asks the coordinator for work, watches the Job in the sidebar tree, approves its Ready message, and finds the Deploy controls in Settings.
+The user asks the coordinator for work, watches the Job in the Workers card (right column, current chat only), approves its Ready message, and finds the Deploy controls in Settings.
 
 ## Sub-features
 

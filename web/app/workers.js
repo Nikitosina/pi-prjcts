@@ -34,7 +34,7 @@ import {
 } from "./shell.js";
 import { badge, clip, esc, uuid } from "./format.js";
 import { admissionBlocked, chatId, chatMessageHtml, ensureChanges, stateDot } from "./chat.js";
-import { jobsSnap, setJobsSnap } from "./decisions.js";
+import { jobChatId, jobsSnap, setJobsSnap } from "./decisions.js";
 import { artifactButton, lightbox, loadWorkerArtifacts, renderArtifactBrowser } from "./artifacts.js";
 import { refMenu } from "./composer.js";
 import { focusNode, setWorkerFocus, workerFocus } from "./search.js";
@@ -397,9 +397,11 @@ const jobsByRecency = (jobs) =>
   jobs.toSorted((a, b) => Number(finishedJob(a)) - Number(finishedJob(b)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt));
 export function renderJobTree() {
   if (!getView()) return;
-  const jobs = jobsByRecency(jobsSnap?.jobs ?? []);
+  const jobs = jobsByRecency((jobsSnap?.jobs ?? []).filter((job) => jobChatId(job) === chatId));
   const shown = allJobs ? jobs : jobs.filter((job, index) => !finishedJob(job) || index < 8);
-  const loose = (jobsSnap?.agents ?? []).filter((agent) => agent.jobId === null && agent.endedAt === null);
+  const chats = getView().chats ?? [];
+  const agentChat = (agent) => chats.find((chat) => chat.conversationId === agent.chat)?.id ?? "main";
+  const loose = (jobsSnap?.agents ?? []).filter((agent) => agent.jobId === null && agent.endedAt === null && agentChat(agent) === chatId);
   const html = !jobsSnap
     ? '<p class="note">Reading Jobs…</p>'
     : (shown.map(jobHtml).join("") +
@@ -413,7 +415,7 @@ export function renderJobTree() {
               stop: true,
             }),
           )
-          .join("") || '<p class="note">No Jobs yet. Ask the coordinator for something and it starts one.</p>') +
+          .join("") || '<p class="note">No workers in this chat yet. Ask the coordinator for something and it starts one.</p>') +
       (jobs.length > shown.length || allJobs
         ? `<button type="button" class="ghost small all-jobs" data-action="all-jobs">${allJobs ? "Show recent only" : `Show all Jobs (${jobs.length})`}</button>`
         : "");

@@ -649,7 +649,7 @@ const journeys = {
       "seeded project and composer",
     );
     await page.waitFor(`!document.querySelector('#job-tree').innerText.includes('Reading Jobs')`, "Jobs tree loaded");
-    record("entry", `opened ${origin}; sidebar shows Chats then Jobs`);
+    record("entry", `opened ${origin}; sidebar shows Chats, the right column the Workers card`);
     await page.shot(dir, "00-before-send");
     await page.click(composer);
     await page.cdp("Input.insertText", { text: prompt });
@@ -658,7 +658,7 @@ const journeys = {
     record("action", `pointer-clicked Send with ${JSON.stringify(prompt)}`);
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
     // The Job appears in the sidebar tree and its Ready report arrives as a regular chat message.
-    await page.waitFor(`document.querySelector('#job-tree .job')?.innerText.includes('VERIFY-JOB')`, "Job in the sidebar tree", 60000);
+    await page.waitFor(`document.querySelector('#job-tree .job')?.innerText.includes('VERIFY-JOB')`, "Job in the Workers card", 60000);
     await page.shot(dir, "01-job-in-tree");
     await page.waitFor(`!!document.querySelector('#messages .job-msg[data-status="ready"]')`, "Ready message", 90000);
     await page.waitFor(`!!document.querySelector('#messages [data-action="job-approve"]')`, "Approve button on the Ready message");
@@ -703,6 +703,21 @@ const journeys = {
     record("visible", "opening the worker node shows its transcript");
     await page.click('[data-action="thread-close"]');
     await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to the chat");
+    // A second chat opens a second tab; its Workers card is empty while the first chat keeps the Job.
+    await page.click('[data-action="chat-new"]');
+    await page.waitFor(
+      `document.querySelectorAll('#tab-strip .chat-tab').length === 2 && !document.querySelector('#tab-strip').hidden`,
+      "two tabs",
+    );
+    await page.waitFor(`document.querySelector('#job-tree').innerText.includes('No workers in this chat')`, "empty card in the new chat");
+    await page.shot(dir, "04b-tabs-new-chat");
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await page.shot(dir, "04c-tabs-390");
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await page.click('#tab-strip .chat-tab-open[data-index="0"]');
+    await page.waitFor(`document.querySelector('#job-tree').innerText.includes('VERIFY-JOB')`, "Job card back on the first tab");
+    await page.shot(dir, "04d-tabs-back");
+    record("visible", "second chat opens a second tab with an empty Workers card; the first tab shows the Job again");
     // Host settings: the Deploy section.
     await page.click("button[data-tab=settings]");
     await page.waitFor(`!!document.querySelector('#deploy [data-action="deploy-start"]')`, "Deploy section", 30000);

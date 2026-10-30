@@ -806,7 +806,7 @@ function syncSeen() {
 }
 const STATE_PRIORITY = ["needs", "working", "done", "idle"];
 const plural = (count, noun) => `${count} ${noun}${count === 1 ? "" : "s"}`;
-function chatState(chat) {
+export function chatState(chat) {
   const questions = getView().inbox.filter(
     (item) => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === chat.id,
   ).length;
@@ -833,7 +833,7 @@ export const stateDot = (state, label, className) =>
 // The open project folds its chats. Every other project comes from the host's list: unanswered questions and its live activity
 // (turn or workers running, failure or blocked worker, last finish), so a project keeps showing its own state after you leave it.
 export const PROJECT_SEEN = "__project";
-function projectState(project) {
+export function projectState(project) {
   if (project.id !== getProjectId() || !getView()?.chats) {
     const questions = project.notice?.questions ?? 0,
       activity = project.activity;

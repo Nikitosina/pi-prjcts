@@ -59,8 +59,6 @@
         <div class="side-work" id="side-work">
           <div class="side-label">Chats</div>
           <div id="chat-bar" class="chat-bar"></div>
-          <div class="side-label">Jobs</div>
-          <div id="job-tree" class="job-tree" aria-label="Jobs"></div>
         </div>
         <div class="side-foot">
           <span id="connection" role="status">Connecting…</span><a id="remote-hosts" class="ghost small" href="/" hidden>Hosts</a
@@ -68,6 +66,7 @@
         </div>
       </aside>
       <main class="main">
+        <div id="tab-strip" class="tab-strip" role="tablist" aria-label="Open chats" hidden></div>
         <header class="phead">
           <div class="row">
             <span id="avatar" class="avatar">π</span>
@@ -186,6 +185,10 @@
               <div id="reply-summary" hidden></div>
             </div>
             <aside class="col">
+              <div class="card" id="workers-card">
+                <b>Workers</b>
+                <div id="job-tree" class="job-tree" aria-label="Workers of this chat"></div>
+              </div>
               <div id="needs-card" class="card">
                 <b>Needs you</b><span id="needs-badge" hidden></span>
                 <div id="needs-questions" class="needs-questions"></div>

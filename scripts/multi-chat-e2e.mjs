@@ -453,6 +453,28 @@ try {
   await setComposer(s, "");
   result.checks.push("F12 switching chats swaps transcript and keeps a draft per chat");
 
+  // Tabs: one per opened chat, the active one follows the chat, closing the active tab opens its neighbour, and the Workers card shows only the open chat.
+  const tabNames = () =>
+    evaluate(
+      `[...document.querySelectorAll('#tab-strip .chat-tab')].map(n => (n.classList.contains('on') ? '*' : '') + n.querySelector('.chat-tab-title').innerText).join('|')`,
+      s,
+    );
+  const tabs = await tabNames();
+  if (!/^Main\|\*/.test(tabs) || (await evaluate(`document.querySelector('#tab-strip').hidden`, s))) throw Error("Tabs wrong: " + tabs);
+  await click(s, '#tab-strip .chat-tab-open[data-index="0"]');
+  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main tab opened");
+  if (!(await tabNames()).startsWith("*Main")) throw Error("Active tab did not follow: " + (await tabNames()));
+  if ((await evaluate(`document.querySelector('#job-tree').innerText`, s)).includes("MARK-SCOUTJOB"))
+    throw Error("Main card shows chat two's work");
+  await click(s, '#tab-strip .chat-tab-close[data-index="0"]');
+  await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "closing the active tab opened its neighbour");
+  if ((await tabNames()).split("|").length !== 1) throw Error("Tab not closed: " + (await tabNames()));
+  await click(s, '#chat-list .chat[data-chat="main"]');
+  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main reopened");
+  await click(s, `#chat-list .chat[data-chat="${chatId}"]`);
+  await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "chat two reopened");
+  result.checks.push("Tabs follow the open chat, close to their neighbour, and the Workers card shows only that chat's work");
+
   // F13: the live bubble belongs to its chat.
   const slow = await rpc({ action: "message", id, chatId, text: "MARK-SLOW stream please" });
   await waitFor(
