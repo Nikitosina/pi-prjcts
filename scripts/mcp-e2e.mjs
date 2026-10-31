@@ -1,6 +1,7 @@
 // Browser E2E: MCP servers per profile (Settings picker, gateway tools, write guard, pool resilience, recovery). Fakes only:
 // fake stdio MCP server, temp mcp.json via PI_PROJECTS_MCP_CONFIG, fake model, private HOME. Failure cases: mcp-failures.md.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { createKit, call, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
 
@@ -31,6 +32,52 @@ const server = (tag) => ({
   timeout: 2,
   description: `Fake ${tag} server`,
 });
+// Real HTTP transport and Pi credential format; no external OAuth endpoints or tools.
+let refreshes = 0;
+const oauthHeaders = [];
+const oauth = createServer(async (req, res) => {
+  const input = [];
+  for await (const chunk of req) input.push(chunk);
+  const text = Buffer.concat(input).toString();
+  const json = (value, status = 200) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(value));
+  };
+  if (req.url === "/token") {
+    refreshes++;
+    const form = new URLSearchParams(text);
+    return json(
+      form.get("refresh_token") === "refresh-secret"
+        ? { access_token: "fresh-secret", refresh_token: "rotated-secret", token_type: "Bearer", expires_in: 3600 }
+        : { error: "invalid_grant", error_description: "refresh-secret must not escape" },
+      form.get("refresh_token") === "refresh-secret" ? 200 : 400,
+    );
+  }
+  oauthHeaders.push(req.headers.authorization);
+  if (!["Bearer fresh-secret", "Bearer static-secret"].includes(req.headers.authorization)) {
+    res.setHeader("www-authenticate", 'Bearer error="invalid_token"');
+    return json({ error: "fresh-secret must not escape" }, 401);
+  }
+  if (req.method === "GET") {
+    res.writeHead(405);
+    return res.end();
+  }
+  const msg = JSON.parse(text);
+  if (!msg.id) {
+    res.writeHead(202);
+    return res.end();
+  }
+  json({
+    jsonrpc: "2.0",
+    id: msg.id,
+    result:
+      msg.method === "initialize"
+        ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "fake-oauth", version: "1" } }
+        : { tools: [{ name: "read_info", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }] },
+  });
+});
+await new Promise((resolve) => oauth.listen(0, "127.0.0.1", resolve));
+const oauthUrl = `http://127.0.0.1:${oauth.address().port}/mcp`;
 const configPath = join(root, "fake-mcp.json");
 const config = {
   mcpServers: {
@@ -38,7 +85,7 @@ const config = {
     "fake-tracker": server("tracker"),
     "fake-xcode": server("xcode"),
     "fake-off": { ...server("off"), enabled: false },
-    "fake-oauth": { url: "http://127.0.0.1:9/mcp", oauth: {}, description: "Needs a browser sign-in" },
+    "fake-oauth": { url: oauthUrl, oauth: {}, description: "Needs a browser sign-in" },
   },
 };
 writeFileSync(configPath, JSON.stringify(config));
@@ -358,6 +405,65 @@ await kit.run(async () => {
   check("probe reports the tool count", probe.ok === true && probe.tools === 10, probe);
   check("probe refuses unavailable servers", (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok === false);
 
+  await page.navigate("about:blank");
+
+  // Saved OAuth is shared with Pi, refreshed once, and never used for another named server.
+  const authPath = join(kit.agentDir, "mcp-auth.json");
+  const state = {
+    serverUrl: oauthUrl,
+    clientInformation: { client_id: "fake-client", redirect_uris: ["http://127.0.0.1/callback"] },
+    tokens: { access_token: "old-secret", refresh_token: "refresh-secret", token_type: "Bearer", expires_in: 1 },
+    tokensExpireAt: 0,
+    discovery: {
+      authorizationServerUrl: new URL(oauthUrl).origin,
+      authorizationServerMetadata: {
+        issuer: new URL(oauthUrl).origin,
+        authorization_endpoint: new URL("/authorize", oauthUrl).href,
+        token_endpoint: new URL("/token", oauthUrl).href,
+        response_types_supported: ["code"],
+        token_endpoint_auth_methods_supported: ["none"],
+      },
+    },
+  };
+  writeFileSync(authPath, JSON.stringify({ [`mcp__another|${oauthUrl}`]: state }), { mode: 0o600 });
+  const wrongIdentity = await rpc({ action: "mcp-probe", id, server: "fake-oauth" });
+  check("OAuth never borrows a different server's credentials", !wrongIdentity.ok && refreshes === 0, wrongIdentity);
+  writeFileSync(authPath, JSON.stringify({ [`mcp__fake_oauth|${oauthUrl}`]: state }), { mode: 0o600 });
+  const authProbe = await rpc({ action: "mcp-probe", id, server: "fake-oauth" });
+  check(
+    "saved Pi OAuth refreshes and lists tools without browser login",
+    authProbe.ok && authProbe.tools === 1 && refreshes === 1,
+    authProbe,
+  );
+  const stored = JSON.parse(readFileSync(authPath, "utf8"));
+  check("SDK persists rotated credentials", stored[`mcp__fake_oauth|${oauthUrl}`].tokens.refresh_token === "rotated-secret");
+  check(
+    "authenticated server is available in the catalog",
+    (await rpc({ action: "mcp-catalog", id })).servers.find((s) => s.name === "fake-oauth").status === "ready",
+  );
+  delete config.mcpServers["fake-oauth"].oauth;
+  config.mcpServers["fake-oauth"].headers = { aUtHoRiZaTiOn: "Bearer static-secret" };
+  writeFileSync(configPath, JSON.stringify(config));
+  await kit.restartHost();
+  check(
+    "explicit Authorization retains priority over stored OAuth",
+    (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok && oauthHeaders.at(-1) === "Bearer static-secret",
+  );
+  delete config.mcpServers["fake-oauth"].headers;
+  writeFileSync(configPath, JSON.stringify(config));
+  await kit.restartHost();
+  check("implicit OAuth works without an oauth config block", (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok);
+  const revoked = structuredClone(state);
+  revoked.tokens.refresh_token = "revoked-secret";
+  writeFileSync(authPath, JSON.stringify({ [`mcp__fake_oauth|${oauthUrl}`]: revoked }), { mode: 0o600 });
+  await kit.restartHost();
+  const rejectedAuth = await rpc({ action: "mcp-probe", id, server: "fake-oauth" });
+  check(
+    "revoked auth reports login instructions without tokens or remote payload",
+    !rejectedAuth.ok && /pi mcp login fake-oauth/.test(rejectedAuth.error) && !/secret/.test(JSON.stringify(rejectedAuth)),
+    rejectedAuth,
+  );
+
   // Chats and recovery.
   const chat = await rpc({ action: "chat-create", id, title: "Second" });
   const chatId = chat.id ?? chat.chat?.id ?? chat.chatId;
@@ -381,6 +487,7 @@ await kit.run(async () => {
   result.pids = [...new Set(serverLog().map((entry) => entry.pid))];
   kit.pids = result.pids;
 });
+await new Promise((resolve) => oauth.close(resolve));
 if (kit.pids) {
   await delay(1500);
   const alive = kit.pids.filter((pid) => {

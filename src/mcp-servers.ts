@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Compile } from "typebox/compile";
+import { Type } from "typebox";
+import { createMcpOAuth, hasMcpOAuth, mcpOAuthFailure } from "./mcp-sign-in.ts";
 import {
   McpAbortError,
   McpClient,
@@ -22,8 +25,24 @@ type Config = McpServerInfo & {
   url?: string;
   headers: Record<string, string>;
   timeoutMs: number;
+  oauth?: Parameters<typeof createMcpOAuth>[2];
 };
 
+const oauthConfig = Compile(
+  Type.Object(
+    {
+      clientId: Type.Optional(Type.String()),
+      clientSecret: Type.Optional(Type.String()),
+      callbackPort: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
+      callbackUrl: Type.Optional(Type.String()),
+      scope: Type.Optional(Type.String()),
+      clientName: Type.Optional(Type.String()),
+      clientRegistration: Type.Optional(Type.Union([Type.Literal("dcr"), Type.Literal("cimd")])),
+      authServerMetadataUrl: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
+);
 const DEFAULT_TIMEOUT_MS = 60_000,
   IDLE_MS = 10 * 60_000,
   SERVER_NAME = /^[A-Za-z0-9_-]+$/;
@@ -72,6 +91,32 @@ function parseServer(name: string, raw: unknown): Config {
     if (!url || !/^https?:$/.test(url.protocol) || !headers) return invalid("bad url or headers", "http");
     const resolved = resolveAll(headers);
     if (!resolved) return invalid("headers use !command values (unsupported)", "http");
+    if (raw.oauth !== undefined && !oauthConfig.Check(raw.oauth)) return invalid("bad OAuth settings", "http");
+    const { authServerMetadataUrl, clientSecret, ...oauth } = raw.oauth ?? {};
+    const secret = clientSecret === undefined ? undefined : resolveValue(clientSecret);
+    if (secret === null) return invalid("OAuth secret uses !command values (unsupported)", "http");
+    if (
+      authServerMetadataUrl !== undefined &&
+      (!URL.canParse(authServerMetadataUrl) ||
+        (new URL(authServerMetadataUrl).protocol !== "https:" &&
+          !(
+            new URL(authServerMetadataUrl).protocol === "http:" &&
+            ["localhost", "127.0.0.1", "[::1]"].includes(new URL(authServerMetadataUrl).hostname)
+          )))
+    )
+      return invalid("bad OAuth metadata URL", "http");
+    if (oauth.callbackUrl !== undefined) {
+      const callback = URL.canParse(oauth.callbackUrl) ? new URL(oauth.callbackUrl) : null;
+      if (!callback || callback.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(callback.hostname))
+        return invalid("OAuth callback must be a loopback HTTP URL", "http");
+    }
+    const explicitAuth = Object.keys(resolved).some((key) => key.toLowerCase() === "authorization");
+    let signedIn = false;
+    try {
+      signedIn = !explicitAuth && raw.auth === undefined && hasMcpOAuth(name, raw.url);
+    } catch (error) {
+      return invalid(error instanceof Error ? error.message : "OAuth credentials are unreadable", "http");
+    }
     return {
       ...base,
       timeoutMs,
@@ -79,8 +124,15 @@ function parseServer(name: string, raw: unknown): Config {
       url: raw.url,
       headers: resolved,
       description: describe(`http: ${url.origin}`),
-      status: state(raw.oauth !== undefined || raw.auth !== undefined),
-      ...(raw.oauth !== undefined || raw.auth !== undefined ? { detail: "Needs an interactive sign-in, which Projects does not run" } : {}),
+      oauth: {
+        ...oauth,
+        ...(secret !== undefined ? { clientSecret: secret } : {}),
+        ...(authServerMetadataUrl ? { authServerMetadataUrl: new URL(authServerMetadataUrl) } : {}),
+      },
+      status: state(raw.auth !== undefined || (!explicitAuth && raw.oauth !== undefined && !signedIn)),
+      ...(raw.auth !== undefined || (!explicitAuth && raw.oauth !== undefined && !signedIn)
+        ? { detail: `Sign in with pi mcp login ${name}; Projects never opens a browser` }
+        : {}),
     };
   }
   if (typeof raw.command === "string") {
@@ -208,7 +260,13 @@ export function isWriteTool(tool: Pick<Tool, "name" | "annotations">): boolean {
     .some((word) => WRITE_WORDS.has(word));
 }
 
-type Entry = { client: McpClient; tools?: Promise<Tool[]>; timer?: ReturnType<typeof setTimeout>; config: Config };
+type Entry = {
+  client: McpClient;
+  auth?: ReturnType<typeof createMcpOAuth>;
+  tools?: Promise<Tool[]>;
+  timer?: ReturnType<typeof setTimeout>;
+  config: Config;
+};
 export class McpUnavailableError extends Error {}
 export function createMcpPool() {
   const entries = new Map<string, Promise<Entry>>();
@@ -217,7 +275,7 @@ export function createMcpPool() {
     if (!found) throw new McpUnavailableError(`MCP server ${server} is unknown: it is not in the owner's mcp.json`);
     if (found.status === "disabled") throw new McpUnavailableError(`MCP server ${server} is disabled in mcp.json`);
     if (found.status === "needs-sign-in")
-      throw new McpUnavailableError(`MCP server ${server} needs an interactive sign-in, which is not supported here (needs-sign-in)`);
+      throw new McpUnavailableError(`MCP server ${server} needs sign-in; run pi mcp login ${server} (Projects never opens a browser)`);
     if (found.status === "invalid")
       throw new McpUnavailableError(`MCP server ${server} has an invalid configuration (${found.detail ?? "invalid"})`);
     return found;
@@ -230,6 +288,7 @@ export function createMcpPool() {
     const value = await entry.catch(() => undefined);
     if (value) {
       clearTimeout(value.timer);
+      await value.auth?.settled();
       await value.client.close().catch(() => undefined);
     }
   };
@@ -244,6 +303,10 @@ export function createMcpPool() {
     }
     const entry = (async (): Promise<Entry> => {
       const client = new McpClient({ name: "pi-projects", version: "1.0.0", requestTimeoutMs: cfg.timeoutMs });
+      const auth =
+        cfg.transport === "http" && !Object.keys(cfg.headers).some((key) => key.toLowerCase() === "authorization")
+          ? createMcpOAuth(cfg.name, cfg.url!, cfg.oauth)
+          : undefined;
       const transport =
         cfg.transport === "stdio"
           ? new StdioTransport({
@@ -254,9 +317,15 @@ export function createMcpPool() {
               inheritEnv: true,
               stderr: "pipe",
             })
-          : new StreamableHttpTransport({ url: cfg.url!, headers: cfg.headers });
-      await client.connect(transport);
-      const made: Entry = { client, config: cfg };
+          : new StreamableHttpTransport({ url: cfg.url!, headers: cfg.headers, authProvider: auth });
+      try {
+        await client.connect(transport);
+      } catch (error) {
+        await auth?.settled();
+        await client.close().catch(() => undefined);
+        throw auth ? mcpOAuthFailure(cfg.name, error) : error;
+      }
+      const made: Entry = { client, config: cfg, auth };
       client.onClose(() => {
         clearTimeout(made.timer);
         forget(key, entry);
@@ -283,9 +352,9 @@ export function createMcpPool() {
       return await run(entry);
     } catch (error) {
       // A timed-out, crashed or closed connection is discarded; the next call reconnects.
-      if (error instanceof McpTimeoutError || error instanceof McpAbortError || entry.client.connectionState !== "connected")
+      if (entry.auth || error instanceof McpTimeoutError || error instanceof McpAbortError || entry.client.connectionState !== "connected")
         await drop(key, pending);
-      throw error;
+      throw entry.auth ? mcpOAuthFailure(server, error) : error;
     } finally {
       entry.timer = setTimeout(() => {
         void drop(key, pending);
