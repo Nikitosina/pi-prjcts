@@ -183,6 +183,7 @@ export const Project = Type.Object(
 export type Project = Static<typeof Project>;
 export const Note = Type.Object({ id: Id, at: text, author: text, text }, { additionalProperties: false });
 export type Note = Static<typeof Note>;
+const messageOrigin = Type.Optional(Type.Literal("telegram"));
 export const Job = Type.Object(
   {
     id: Id,
@@ -502,7 +503,7 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("web") }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object(
     {
@@ -961,6 +962,7 @@ export const Request = Type.Union([
       action: Type.Literal("message"),
       id: Id,
       text,
+      origin: messageOrigin,
       chatId: Type.Optional(ChatId),
       requestId: Type.Optional(Id),
       attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),

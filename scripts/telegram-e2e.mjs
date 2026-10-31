@@ -545,6 +545,49 @@ try {
   k.hold("ready");
   text(OWNER, "MARK-SHIP via telegram");
   const progress = await lastTo(/Step 1/, "plan progress message", mark);
+  // Owner replies must arrive while the worker is held, without making unrelated progress noisy.
+  await k.ask(a, two.id, "MARK-QUIET unsolicited progress");
+  await delay(1000);
+  assert.ok(
+    !toOwner()
+      .slice(mark)
+      .some((m) => /Done MARK-QUIET/.test(m.text)),
+  );
+  text(OWNER, "/project Beta");
+  await lastTo(/Beta.*Main/, "changed route while worker runs", mark);
+  const direct = text(OWNER, "MARK-DIRECT what is happening?", {
+    reply_to_message: { message_id: progress.message_id, chat: OWNER, date: 0, text: progress.text },
+  });
+  const directReply = await lastTo(/Done MARK-DIRECT\./, "direct reply while worker runs", mark);
+  assert.match(directReply.text, /Alpha · Two/);
+  assert.equal(buttons(directReply).length, 0, "status replies do not offer an unrelated approval");
+  tg.updates.push(direct);
+  wake();
+  text(OWNER, "MARK-ASK while worker runs", {
+    reply_to_message: { message_id: progress.message_id, chat: OWNER, date: 0, text: progress.text },
+  });
+  const busyQuestion = await lastTo(/MARK-Q Pick a colour/, "question during work", toOwner().length - 1);
+  const answerFrom = toOwner().length;
+  press(OWNER, busyQuestion, buttons(busyQuestion).find((btn) => btn.text === "blue").callback_data);
+  await lastTo(/ANSWER-ACK blue/, "question answer reply during work", answerFrom);
+  text(OWNER, "MARK-FAIL explicit failure", {
+    reply_to_message: { message_id: progress.message_id, chat: OWNER, date: 0, text: progress.text },
+  });
+  await lastTo(/Coordinator turn failed/, "direct request failure while worker runs", toOwner().length - 1);
+  await delay(1000);
+  assert.equal(
+    toOwner()
+      .slice(mark)
+      .filter((m) => /Done MARK-DIRECT\./.test(m.text)).length,
+    1,
+  );
+  text(OWNER, "/project Alpha");
+  await lastTo(/Alpha.*Main/, "restore project route", mark);
+  text(OWNER, "/chat Two");
+  await lastTo(/Alpha.*Two/, "restore chat route", mark);
+  result.checks.push(
+    "Telegram owner replies arrive once during active work, including reply-to routing and errors, while unsolicited output stays quiet",
+  );
   k.release("plan2");
   await eventually(
     async () => tg.edits.some((e) => e.message_id === progress.message_id && /Step 2/.test(e.text)),
@@ -558,6 +601,14 @@ try {
     throw Error("Progress was sent more than once");
   k.release("ready");
   const readyMsg = await lastTo(/Done MARK-JOB\./, "final message", mark);
+  await delay(1000);
+  assert.equal(
+    toOwner()
+      .slice(mark)
+      .filter((m) => /Done MARK-JOB\./.test(m.text)).length,
+    1,
+    "one final Job notice",
+  );
   const approve = buttons(readyMsg).find((btn) => btn.text === "Approve");
   if (!approve) throw Error("Ready message has no Approve button: " + JSON.stringify(readyMsg));
   mark = toOwner().length;

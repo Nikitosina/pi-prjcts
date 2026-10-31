@@ -480,6 +480,7 @@ export function startTelegram(options: {
         id: target.projectId,
         text: text.slice(0, 32000),
         requestId: updateRequestId(state.bot!.id, updateId),
+        origin: "telegram",
         ...(target.chatId !== "main" ? { chatId: target.chatId } : {}),
       });
       await say(
@@ -493,7 +494,7 @@ export function startTelegram(options: {
     const entry = inbox(projectDir(projectId)).find((item) => item.id === entryId);
     if (!entry || entry.kind !== "question") return "That question is gone.";
     if (entry.result) return `Already answered: ${entry.result.text}`;
-    await options.dispatch({ action: "answer", id: projectId, entry: entryId, text: text.slice(0, 32000) });
+    await options.dispatch({ action: "answer", id: projectId, entry: entryId, text: text.slice(0, 32000), origin: "telegram" });
     return `Answered: ${text}`;
   }
 

@@ -157,7 +157,7 @@ export const chatTitle = (text: string): string => {
   return line.length > 60 ? `${line.slice(0, 59)}…` : line || "New chat";
 };
 
-const AdmittedInputs = defineDoc<{ ids: number[] }>({
+const AdmittedInputs = defineDoc<{ ids: number[]; telegramRequests?: string[] }>({
   kind: "projects.admitted-inputs",
   version: 1,
   scope: "conversation",
@@ -175,6 +175,7 @@ export type DurableRuntimeReport = {
 export type DurableSubmissionState = {
   id: number;
   requestId: string | null;
+  origin?: "telegram";
   status: "queued" | "placed" | "done" | "unanswered";
   answerId: number | null;
   reason: string | null;
@@ -235,7 +236,7 @@ export type DurableProjectRuntime = {
   /** Content is text, or text plus image parts when the coordinator model accepts images (see `acceptsImages`). */
   admit(
     content: AdmitContent,
-    options: { requestId: string; steer?: boolean; chatId?: string; /** Names an untitled chat. */ title?: string },
+    options: { requestId: string; origin?: "telegram"; steer?: boolean; chatId?: string; /** Names an untitled chat. */ title?: string },
   ): Promise<{ submissionId: number }>;
   /** The coordinator model declares image input. */
   acceptsImages: boolean;
@@ -1538,8 +1539,12 @@ export async function openDurableProject(input: {
           await openedHarness.inspect(context),
           admitted?.ids ?? [],
         );
-        return Promise.all(
+        const submissions = await Promise.all(
           ids.filter((submission) => submission > after).map((submission) => projectSubmission(openedHarness, conversation, submission)),
+        );
+        const origins = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
+        return submissions.map((submission) =>
+          origins?.telegramRequests?.includes(submission.requestId ?? "") ? { ...submission, origin: "telegram" } : submission,
         );
       },
       searchSources: async () => {
@@ -2202,13 +2207,20 @@ function textPage(
 async function admit(
   root: Conversation,
   content: AdmitContent,
-  options: { requestId: string; steer?: boolean },
+  options: { requestId: string; origin?: "telegram"; steer?: boolean },
 ): Promise<{ submissionId: number }> {
   const text = typeof content === "string" ? content : messageText(content);
   // Owner text is capped at 32000 by the request schema; an expanded /skill command may be longer.
   if (text.length === 0 || text.length > 120_000) throw new Error("Project message must contain 1 to 120000 characters");
   if (options.requestId.length === 0 || options.requestId.length > 32000)
     throw new Error("Project admission requires a requestId of 1 to 32000 characters");
+  // Record origin before the input can settle; the notifier reads it after fetching submissions.
+  if (options.origin === "telegram")
+    await root.commit(async (tx) => {
+      const admitted = await tx.doc(AdmittedInputs, root.id);
+      const requests = (admitted.telegramRequests ??= []);
+      if (!requests.includes(options.requestId)) requests.push(options.requestId);
+    }, context);
   const submission = await root.submit(
     { type: "input", content, requestId: options.requestId, whenBusy: options.steer ? "steer" : "followUp" },
     context,

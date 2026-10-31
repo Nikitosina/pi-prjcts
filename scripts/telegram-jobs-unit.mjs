@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,6 +157,70 @@ try {
   editFault = "Bad Request: message is not modified";
   await bridge.progress(plan(["done", "doing"]));
   assert.equal(calls.filter((c) => c.method === "sendMessage").length, 2);
+  // Mixed-origin batches keep a Telegram reply even when an event is the last input sharing its answer.
+  const { saveProject } = await import("../src/state.ts");
+  const { startNotifier } = await import("../src/notify.ts");
+  const projectId = randomUUID(),
+    requestId = randomUUID();
+  saveProject({
+    version: 1,
+    id: projectId,
+    name: "Notify",
+    cwd: root,
+    objective: "test",
+    runtime: "durable",
+    createdAt: new Date(Date.now() + 60000).toISOString(),
+    model: "fake/fake",
+    models: {},
+    phase: "ready",
+    problem: null,
+  });
+  let active = true;
+  const submission = (id, requestId, answerId, text) => ({ id, requestId, answerId, text, status: "done", reason: null });
+  const submissions = [
+    { ...submission(1, requestId, 10, "Explicit reply"), origin: "telegram" },
+    submission(2, "event:follow:latest", 10, "Explicit reply"),
+    submission(3, "report:intermediate", 11, "Unsolicited update"),
+    submission(4, randomUUID(), 12, "UI reply"),
+  ];
+  const errors = [];
+  const owner = {
+    chats: async () => [{ id: "main", title: "Main", conversationId: 1 }],
+    prNotices: async () => [],
+    jobs: async () => ({
+      jobs: [
+        { id: "ready", chat: 1, status: "ready", pr: "https://example.invalid/pr/1", candidate: "a".repeat(40), endedAt: 1 },
+        ...(active ? [{ id: "busy", chat: 1, status: "running", plan: [] }] : []),
+      ],
+      agents: [],
+    }),
+    chatSubmissions: async (_, after) => submissions.filter((item) => item.id > after),
+  };
+  const openNotifier = () =>
+    startNotifier({ owner: () => Promise.resolve(owner), tickMs: 25, onNotice() {}, report: (e) => errors.push(e) });
+  let notifier = openNotifier();
+  try {
+    await until(() => notifier.feed(0).items.length === 1);
+    assert.deepEqual(
+      notifier.feed(0).items.map((item) => [item.text, item.jobId]),
+      [["Explicit reply", undefined]],
+    );
+    active = false;
+    submissions.push(submission(5, "report:final", 13, "Task finished"));
+    await until(() => notifier.feed(0).items.length === 2);
+    assert.equal(notifier.feed(0).items[1].jobId, "ready");
+    await notifier.close();
+    notifier = openNotifier();
+    await sleep(100);
+    assert.equal(notifier.feed(0).items.length, 2, "reopening retains the notice cursor");
+    const idleRequest = randomUUID();
+    submissions.push({ ...submission(6, idleRequest, 14, "Another explicit reply"), origin: "telegram" });
+    await until(() => notifier.feed(0).items.length === 3);
+    assert.equal(notifier.feed(0).items[2].jobId, undefined, "idle direct reply does not borrow an old Ready approval");
+    assert.deepEqual(errors, []);
+  } finally {
+    await notifier.close();
+  }
   console.log("telegram-jobs-unit ok");
 } finally {
   bridge.close();

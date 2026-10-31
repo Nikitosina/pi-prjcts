@@ -124,9 +124,7 @@ export function startNotifier(options: {
     }
     // Failed workers and Ready reports have no notice of their own: the coordinator's settled answer carries the explanation (and Approve).
     entry.workBaselined = true;
-    // A coordinator turn is a result only when nothing is still running in its chat and no work report follows it (a later report turn means
-    // work was still running when it was written); batched submissions share one answer and notify once. Intermediate status lines stay quiet.
-    // Work started from a chat (running Jobs, revived workers, open scouts and reviewers) keeps its turns quiet until it settles.
+    // Background turns stay quiet while work runs; answers to Telegram owner messages do not wait for the workers.
     const working = new Set(jobs.filter((job) => job.status === "running").map((job) => chatOf(Number(job.chat)).id));
     for (const agent of agents) if (agent.working || (!agent.jobId && agent.endedAt === null)) working.add(chatOf(Number(agent.chat)).id);
     for (const chat of chats) {
@@ -135,29 +133,38 @@ export function startNotifier(options: {
       if (chat.archived && after !== undefined) continue;
       const quiet = after === undefined && (silent || chat.archived);
       const submissions = await owner.chatSubmissions(chat.id, after ?? -1);
+      // A batch can end with an event but still answer an earlier owner message.
+      const telegramAnswers = new Set(
+        submissions.flatMap((item) => (item.answerId !== null && item.origin === "telegram" ? [item.answerId] : [])),
+      );
       let last = after ?? -1;
       for (const [index, submission] of submissions.entries()) {
         if (submission.status === "queued" || submission.status === "placed") break;
         last = submission.id;
         if (quiet) continue;
+        const direct = submission.origin === "telegram" || (submission.answerId !== null && telegramAnswers.has(submission.answerId));
         if (
           submission.status === "done" &&
           submission.text?.trim() &&
-          !working.has(chat.id) &&
+          (direct || !working.has(chat.id)) &&
           // Follow PRs events about the project's own PRs wake the coordinator; PR notices already cover CI and merges.
-          !submission.requestId?.startsWith("event:follow:") &&
+          (direct || !submission.requestId?.startsWith("event:follow:")) &&
           !submissions.slice(index + 1).some((later) => later.answerId !== null && later.answerId === submission.answerId)
         ) {
-          const approvable = jobs
-            .filter((job) => (job.status === "ready" || job.status === "ready-with-gaps") && job.pr && job.candidate)
-            .filter((job) => chatOf(Number(job.chat)).id === chat.id)
-            .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))[0];
+          const report = submissions.some((item) => item.answerId === submission.answerId && item.requestId?.startsWith("report:"));
+          const approvable =
+            !working.has(chat.id) && (!direct || report)
+              ? jobs
+                  .filter((job) => (job.status === "ready" || job.status === "ready-with-gaps") && job.pr && job.candidate)
+                  .filter((job) => chatOf(Number(job.chat)).id === chat.id)
+                  .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))[0]
+              : undefined;
           push({
             ...base,
             chatId: chat.id,
             chat: chat.title,
             kind: "result",
-            title: "Finished",
+            title: direct && !report ? "Reply" : "Finished",
             text: extractTelegramMedia(submission.text).media.some((media) => media.ref.startsWith("artifact:"))
               ? submission.text.trim()
               : clip(submission.text.trim()),

@@ -411,6 +411,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           action: "message",
           id: input.id,
           text: `Owner answered your question "${entry.title}":\n${input.text}`,
+          ...(input.origin ? { origin: input.origin } : {}),
           ...(asked && asked !== "main" ? { chatId: asked } : {}),
         });
       } catch (error) {
@@ -1335,6 +1336,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           saveJob(input.id, job);
           await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
             requestId: job.id,
+            origin: input.origin,
             chatId: input.chatId,
             title: job.text,
           });
