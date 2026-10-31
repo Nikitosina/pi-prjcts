@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
-import { errorText, home, listProjects, loadProject, projectDir, saveJson, type Request } from "./state.ts";
+import { errorText, home, listProjects, loadProject, projectDir, saveJson, Project, type Request } from "./state.ts";
 import type { Notice, Notifier } from "./notify.ts";
 import type { DurableChat } from "./durable-runtime.ts";
 import {
@@ -95,6 +95,15 @@ const telegramResponse = Compile(
     { additionalProperties: true },
   ),
 );
+
+const modelSettingsResponse = Compile(Type.Object({ revision: Type.String(), values: Type.Pick(Project, ["name", "model", "models"]) }));
+const modelPickerResponse = Compile(
+  Type.Object({ items: Type.Array(Type.Object({ reference: Type.String(), name: Type.String(), configured: Type.Boolean() })) }),
+);
+const modelRole = Compile(Type.Union([Type.Literal("coordinator"), Type.KeyOf(Project.properties.models)]));
+const inheritedModelRoles: (keyof Project["models"])[] = ["worker", "scout", "reviewer"];
+const modelUsage =
+  "Usage: /model <coordinator|worker|scout|reviewer|verifier> <provider/model>\n/model worker inherit\n/model verifier none\n/models <query> finds configured models.";
 
 /** Keep the error wording, but never persist credentials or chat identifiers from an API echo. */
 export function redactTelegramError(text: string, token: string | null, identifiers: readonly (string | number)[]): string {
@@ -282,11 +291,74 @@ export function startTelegram(options: {
     await say(`Now talking to ${project.name} · ${chat.title}. Send text to it, or /chats to pick another chat.`);
   }
   const help =
-    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
+    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes. /models shows project models; /models <query> finds models; /model <role> <provider/model> changes one. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
+
+  async function modelCommand(name: string, query: string) {
+    if (!state.route) return say("Pick a project first: /projects");
+    const id = state.route.projectId;
+    let confirmation: string;
+    try {
+      const project = loadProject(id);
+      if (project.deleted || project.archived) throw new Error("That project is inactive. Pick another with /projects.");
+      if (name === "models" && query) {
+        const catalog = await options.dispatch({ action: "model-picker-snapshot", id });
+        if (!modelPickerResponse.Check(catalog)) throw new Error("Invalid model catalog response");
+        const terms = query.toLowerCase().split(/\s+/),
+          matches = catalog.items.filter(
+            (item) => item.configured && terms.every((term) => `${item.reference} ${item.name}`.toLowerCase().includes(term)),
+          );
+        if (!matches.length) return say(`No configured models match "${clip(query, 200)}". Try /models <provider or model name>.`);
+        const lines = [`Configured models for ${project.name}:`];
+        let shown = 0;
+        for (const item of matches) {
+          if (shown === 20 || lines.join("\n").length + item.reference.length > 3400) break;
+          lines.push(item.reference);
+          shown++;
+        }
+        lines.push(`${shown} of ${matches.length} matches.${shown < matches.length ? " Refine your search: /models <query>." : ""}`);
+        lines.push("Set one: /model worker <provider/model>");
+        return say(lines.join("\n"));
+      }
+      const snapshot = await options.dispatch({ action: "settings-snapshot", id });
+      if (!modelSettingsResponse.Check(snapshot)) throw new Error("Invalid model settings response");
+      const { values, revision } = snapshot;
+      if (!query)
+        return say(
+          [
+            `Models for ${values.name}:`,
+            `coordinator: ${values.model}`,
+            ...inheritedModelRoles.map(
+              (role) => `${role}: ${values.models[role] ?? values.model}${values.models[role] ? "" : " (inherited)"}`,
+            ),
+            `verifier: ${values.models.verifier ?? "not configured"}`,
+            "",
+            modelUsage,
+          ].join("\n"),
+        );
+      const [role, choice, ...extra] = query.split(/\s+/);
+      if (!modelRole.Check(role) || !choice || extra.length) return say(modelUsage);
+      if (role === "coordinator" && choice === "inherit") return say("The coordinator cannot inherit a model.\n" + modelUsage);
+      if (role === "verifier" && choice === "inherit")
+        return say("The verifier never inherits. Use /model verifier none to clear it when verification is off.");
+      const selected = (role !== "coordinator" && choice === "inherit") || (role === "verifier" && choice === "none") ? null : choice;
+      await options.dispatch({
+        action: "settings-update",
+        id,
+        confirm: id,
+        expectedRevision: revision,
+        changes: role === "coordinator" ? { model: choice } : { models: { [role]: selected } },
+      });
+      confirmation = `Saved models for ${values.name}: ${role} = ${selected ?? (role === "verifier" ? "not configured" : "inherit coordinator")}. Coordinator changes apply to subsequent requests; agents use the new choice when created or retried. Running agents keep their model. No tasks were restarted.`;
+    } catch (error) {
+      return say(`Models not changed: ${errorText(error)}. Use /models to reread settings, or /models <query> to find a model.`);
+    }
+    return say(confirmation);
+  }
 
   async function command(text: string) {
     const [, name, rest = ""] = /^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/.exec(text) ?? [];
     const query = rest.trim();
+    if (name === "models" || name === "model") return modelCommand(name, query);
     if (name === "projects" || (name === "project" && !query)) {
       const projects = active();
       return say(

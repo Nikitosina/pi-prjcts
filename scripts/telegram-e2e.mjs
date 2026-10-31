@@ -1,5 +1,6 @@
 // Browser E2E for Telegram two-way: isolated host, fake model, and a local fake Telegram Bot API server (PI_PROJECTS_TELEGRAM_API). Never real Telegram.
 // Failure cases recorded in telegram-failures.md before implementation.
+import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -320,6 +321,8 @@ try {
   let mark = toOwner().length;
   text(OWNER, "MARK-NOROUTE hi");
   await lastTo(/\/projects?/, "no-route hint", mark);
+  text(OWNER, "/models");
+  await lastTo(/Pick a project first/, "models need a selected project", mark);
   text(OWNER, "/projects");
   const list = await lastTo(/Alpha/, "project list", mark);
   if (!list.text.includes("Beta") || !buttons(list).some((btn) => btn.text.includes("Alpha"))) throw Error("Project list wrong");
@@ -351,6 +354,84 @@ try {
   result.checks.push(
     "T13/T14/T7 /projects and /chats pick a target by button; unknown names are refused; text goes to that chat and the result comes back; strangers are ignored",
   );
+
+  // Model commands use the selected project's settings RPC, never the coordinator or a new task.
+  {
+    const modelFile = join(k.root, "agent", "models.json"),
+      catalog = JSON.parse(readFileSync(modelFile, "utf8"));
+    catalog.providers.fake.models.push(
+      { ...catalog.providers.fake.models[0], id: "other-model", name: "Other" },
+      ...Array.from({ length: 25 }, (_, i) => ({
+        ...catalog.providers.fake.models[0],
+        id: `catalog-${String(i).padStart(2, "0")}-${"x".repeat(170)}`,
+      })),
+    );
+    writeFileSync(modelFile, JSON.stringify(catalog));
+    const command = async (value, pattern) => {
+      const from = toOwner().length;
+      text(OWNER, value);
+      return lastTo(pattern, value, from);
+    };
+    const settings = () => rpc({ action: "settings-snapshot", id: a });
+    await rpc({
+      action: "settings-update",
+      id: a,
+      confirm: a,
+      expectedRevision: (await settings()).revision,
+      changes: { models: { worker: null, scout: null, reviewer: null } },
+    });
+    const initial = await settings(),
+      otherProject = await rpc({ action: "settings-snapshot", id: b }),
+      route = JSON.parse(readFileSync(file, "utf8")).route;
+    const view = await command("/models", /Models for Alpha/);
+    assert.match(view.text, /coordinator: fake\/fake-model/);
+    assert.match(view.text, /worker: fake\/fake-model.*inherited/);
+    assert.match(view.text, /verifier: not configured/);
+    assert.match(view.text, /\/models <query>/);
+    assert.match((await command("/models OtHeR", /fake\/other-model/)).text, /configured/i);
+    const many = await command("/models catalog", /fake\/catalog-/);
+    assert.ok(many.text.length <= 4000 && /refine/i.test(many.text), "catalog output stays bounded and offers refinement");
+    for (const line of many.text.split("\n").filter((line) => line.startsWith("fake/catalog-")))
+      assert.ok(
+        catalog.providers.fake.models.some((model) => `fake/${model.id}` === line),
+        "catalog references are not clipped",
+      );
+    await command("/models no-such-model", /No configured models match/);
+    for (const role of ["coordinator", "worker", "scout", "reviewer", "verifier"]) {
+      await command(`/model ${role} fake/other-model`, /Saved.*Alpha/);
+      const values = (await settings()).values;
+      assert.equal(role === "coordinator" ? values.model : values.models[role], "fake/other-model");
+    }
+    for (const role of ["worker", "scout", "reviewer"]) {
+      await command(`/model ${role} inherit`, /Saved.*Alpha/);
+      assert.equal((await settings()).values.models[role], undefined);
+    }
+    await command("/model verifier none", /Saved.*Alpha/);
+    assert.equal((await settings()).values.models.verifier, undefined);
+    const beforeBad = await settings(),
+      unconfigured = (await rpc({ action: "model-picker-snapshot", id: a })).items.find((item) => !item.configured);
+    for (const [value, pattern] of [
+      ["/model stranger fake/other-model", /Usage:/],
+      ["/model worker", /Usage:/],
+      ["/model coordinator inherit", /cannot inherit/i],
+      ["/model verifier inherit", /verifier.*none/i],
+      ["/model worker missing/model", /not changed/i],
+      ...(unconfigured ? [[`/model worker ${unconfigured.reference}`, /not changed/i]] : []),
+    ])
+      await command(value, pattern);
+    assert.equal((await settings()).revision, beforeBad.revision);
+    text(STRANGER, "/model worker fake/other-model");
+    text(GROUP, "/model worker fake/other-model");
+    await command("/status", /Alpha.*Two/);
+    assert.equal((await settings()).revision, beforeBad.revision);
+    assert.equal((await rpc({ action: "settings-snapshot", id: b })).revision, otherProject.revision);
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).route, route);
+    await command("/model coordinator fake/fake-model", /Saved.*Alpha/);
+    assert.equal((await settings()).revision, initial.revision);
+    result.checks.push(
+      "Telegram model inspection, bounded discovery, role settings and inheritance use the selected project's settings RPC; invalid and foreign commands cannot change settings or routing",
+    );
+  }
 
   // T17/T18: question with buttons.
   mark = toOwner().length;
