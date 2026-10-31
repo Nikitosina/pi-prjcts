@@ -1,3 +1,4 @@
+import { objectUnion } from "./tool-schema.ts";
 import { execFile } from "node:child_process";
 import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
@@ -262,7 +263,7 @@ export function coordinatorGithubTools(input: {
     name: "projects_github_issue_write",
     description:
       "Manage issues in an authorized repository; the owner's GitHub authorization covers it, so do not ask again. create opens an issue; comment posts on an issue or PR; update edits title/body/labels/assignees/milestone (lists replace the current ones); close (reason completed or not_planned, optional closing comment) and reopen change state. Never merges or deletes. If a call is interrupted, search before retrying so nothing is posted twice. Returns the URL.",
-    parameters: Type.Union([
+    parameters: objectUnion([
       Type.Object(
         {
           action: Type.Literal("create"),

@@ -240,9 +240,10 @@ try {
   await update({ scopedModels: null });
   mkdirSync(join(k.workspace, ".pi"), { recursive: true });
   writeFileSync(join(k.workspace, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["zzz/none"] }));
+  let oldPage = await evaluate("performance.timeOrigin", page);
   await evaluate(`location.reload()`, page);
   await waitFor(
-    `!!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
+    `performance.timeOrigin !== ${oldPage} && !!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
     page,
     "model button after reload",
   );
@@ -254,9 +255,10 @@ try {
   );
   rmSync(join(k.workspace, ".pi"), { recursive: true });
   await update({ scopedModels: ["fake/fake-model", "fake/fake-two", "fake/fake-three"] });
+  oldPage = await evaluate("performance.timeOrigin", page);
   await evaluate(`location.reload()`, page);
   await waitFor(
-    `!!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
+    `performance.timeOrigin !== ${oldPage} && !!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
     page,
     "model button restored",
   );

@@ -1,3 +1,4 @@
+import { objectUnion } from "./tool-schema.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -710,7 +711,7 @@ export function createJobs(host: JobsHost) {
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
       "candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
-    parameters: Type.Union([
+    parameters: objectUnion([
       Type.Object({
         action: Type.Literal("plan"),
         steps: Type.Array(
@@ -860,6 +861,17 @@ export function createJobs(host: JobsHost) {
         job.endedAt = null;
         job.reason = null;
         job.stalledAt = null;
+      }
+      // An explicit retry adopts current role settings; steering a running agent keeps its model and frozen prompt.
+      if (agent.endedAt !== null) {
+        const model = host.agentChange({
+          role: agent.role,
+          id: agent.id,
+          title: agent.title,
+          jobId: agent.jobId,
+          parent: agent.chat,
+        }).model;
+        if (model) await configure(tx, agent.conversationId, { model });
       }
       agent.endedAt = null;
       delete agent.dismissedAt;

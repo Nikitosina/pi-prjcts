@@ -54,6 +54,7 @@ Rule: the detector only notifies. It never steers, stops or restarts an agent.
 
 Rules:
 - A new settings field needs an `EFFECTS` entry (the type forces it) and must not need a host restart.
+- A new send to an ended agent adopts the current role model without replacing its frozen prompt. Steering a running agent keeps its model.
 - Validate against the live catalog before saving; a refusal leaves the settings untouched.
 
 ## Result acceptance (Approve)

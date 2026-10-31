@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { createKit } from "./lib/e2e-kit.mjs";
+import { createKit, randomUUID } from "./lib/e2e-kit.mjs";
 
 let release;
 const held = new Promise((resolve) => {
@@ -65,6 +65,32 @@ await k.run(async () => {
   );
   await k.ask(id, "After live selection");
   check("live selection dispatches actual new model", k.result.calls.at(-1)?.model === "kimi-k3.1");
+  const scopeId = (await rpc({ action: "workspace-catalog", id })).find((scope) => scope.wholeRepository).id;
+  const worker = await rpc({
+    action: "work-submit",
+    id,
+    threadId: randomUUID(),
+    requestId: randomUUID(),
+    workspaceScopeId: scopeId,
+    text: "WORKER-MODEL-RETRY",
+  });
+  await k.eventually(
+    async () => (await k.jobs(id)).find((job) => job.id === worker.id && job.status !== "running"),
+    "worker did not finish",
+  );
+  const prompt = k.result.calls.find((call) => call.role === "worker" && call.user.includes("WORKER-MODEL-RETRY")).system;
+  await k.updateSettings(id, { models: { worker: "fake/kimi-k3.1" } });
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: randomUUID(), text: "RETRY-ON-NEW-MODEL" });
+  await k.eventually(
+    () => k.result.calls.some((call) => call.role === "worker" && call.user.includes("RETRY-ON-NEW-MODEL")),
+    "retry did not dispatch",
+  );
+  const retried = k.result.calls.findLast((call) => call.role === "worker" && call.user.includes("RETRY-ON-NEW-MODEL"));
+  check(
+    "ended worker retries use current role model without replacing its frozen prompt",
+    retried.model === "kimi-k3.1" && retried.system === prompt,
+  );
+  await k.updateSettings(id, { models: { worker: "fake/fake-model" } });
   config.providers.fake.models.find((m) => m.id === "kimi-k3.1").contextWindow = 64000;
   save();
   await rpc({ action: "chat-reload", id });
