@@ -412,7 +412,7 @@ try {
       unconfigured = (await rpc({ action: "model-picker-snapshot", id: a })).items.find((item) => !item.configured);
     for (const [value, pattern] of [
       ["/model stranger fake/other-model", /Usage:/],
-      ["/model worker", /Usage:/],
+      ["/model worker fake/other-model extra", /Usage:/],
       ["/model coordinator inherit", /cannot inherit/i],
       ["/model verifier inherit", /verifier.*none/i],
       ["/model worker missing/model", /not changed/i],
@@ -428,6 +428,93 @@ try {
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).route, route);
     await command("/model coordinator fake/fake-model", /Saved.*Alpha/);
     assert.equal((await settings()).revision, initial.revision);
+
+    // Scoped pickers remain tied to their original project, role and settings revision.
+    const update = async (changes) =>
+      rpc({ action: "settings-update", id: a, confirm: a, expectedRevision: (await settings()).revision, changes });
+    const tap = async (message, pattern, reply) => {
+      const from = toOwner().length,
+        button = buttons(message).find((item) => pattern.test(item.text));
+      assert.ok(button, `missing model button ${pattern}`);
+      assert.ok(Buffer.byteLength(button.callback_data) <= 64);
+      press(OWNER, message, button.callback_data);
+      return lastTo(reply, String(pattern), from);
+    };
+    await update({ scopedModels: ["fake/other-model", "fake/fake-model"] });
+    const picker = await command("/model worker", /Choose worker.*Alpha/);
+    assert.match(picker.text, /Current: fake\/fake-model.*inherited/);
+    assert.equal(buttons(picker).length, 3);
+    assert.ok(buttons(picker).some((item) => /Current.*fake\/fake-model/.test(item.text)));
+    for (const role of ["coordinator", "scout", "reviewer", "verifier"]) {
+      const menu = await command(`/model ${role}`, new RegExp(`Choose ${role}.*Alpha`));
+      assert.equal(
+        buttons(menu).some((item) => /Inherit coordinator/.test(item.text)),
+        ["scout", "reviewer"].includes(role),
+      );
+      assert.equal(
+        buttons(menu).some((item) => /No verifier/.test(item.text)),
+        role === "verifier",
+      );
+    }
+    press(STRANGER, picker, buttons(picker)[0].callback_data);
+    await command("/status", /Alpha.*Two/);
+    assert.equal((await settings()).values.models.worker, undefined);
+    await command("/project Beta", /Beta.*Main/);
+    await tap(picker, /fake\/other-model/, /Saved.*Alpha/);
+    assert.equal((await settings()).values.models.worker, "fake/other-model");
+    assert.equal((await rpc({ action: "settings-snapshot", id: b })).revision, otherProject.revision);
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).route.projectId, b);
+    assert.ok(
+      tg.edits.some((item) => item.message_id === picker.message_id),
+      "saved picker keyboard is cleared",
+    );
+    const savedRevision = (await settings()).revision;
+    await tap(picker, /fake\/other-model/, /expired/i);
+    assert.equal((await settings()).revision, savedRevision);
+    await command("/project Alpha", /Alpha.*Main/);
+    await command("/chat Two", /Alpha.*Two/);
+    const stale = await command("/model reviewer", /Choose reviewer.*Alpha/);
+    await update({ objective: initial.values.objective + " revised" });
+    await tap(stale, /fake\/other-model/, /stale|revision conflict/i);
+    assert.equal((await settings()).values.models.reviewer, undefined);
+
+    // Pi's inherited scope can change without changing the project's revision.
+    await update({ scopedModels: null });
+    const piSettings = join(k.root, "agent", "settings.json");
+    writeFileSync(piSettings, JSON.stringify({ enabledModels: ["fake/other-model"] }));
+    const inherited = await command("/model worker", /Choose worker.*Alpha/);
+    assert.equal(buttons(inherited).length, 2);
+    writeFileSync(piSettings, JSON.stringify({ enabledModels: ["fake/fake-model"] }));
+    const beforeScopeChange = (await settings()).revision;
+    await tap(inherited, /fake\/other-model/, /scope|available|stale/i);
+    assert.equal((await settings()).revision, beforeScopeChange);
+    writeFileSync(piSettings, "{}");
+    await update({ scopedModels: catalog.providers.fake.models.map((item) => `fake/${item.id}`) });
+    const page = await command("/model worker", /Choose worker.*Alpha/);
+    assert.ok(buttons(page).length <= 12, "scoped model pages stay bounded");
+    const next = await tap(page, /Next/, /Page 2\//);
+    assert.ok(buttons(next).some((item) => /Previous/.test(item.text)));
+    await tap(next, /Inherit coordinator/, /Saved.*Alpha/);
+    assert.equal((await settings()).values.models.worker, undefined);
+    await update({ scopedModels: ["fake/other-model"] });
+    writeFileSync(
+      modelFile,
+      JSON.stringify({
+        providers: { ...catalog.providers, fake: { ...catalog.providers.fake, models: [catalog.providers.fake.models[0]] } },
+      }),
+    );
+    const unavailable = await command("/model coordinator", /Choose coordinator.*Alpha/);
+    assert.match(unavailable.text, /None.*scoped models.*usable/i);
+    assert.equal(buttons(unavailable).length, 0);
+    writeFileSync(modelFile, JSON.stringify(catalog));
+    await update({ scopedModels: null, objective: initial.values.objective });
+    const empty = await command("/model coordinator", /Choose coordinator.*Alpha/);
+    assert.match(empty.text, /No scoped models/);
+    assert.equal(buttons(empty).length, 0);
+    assert.equal((await settings()).revision, initial.revision);
+    result.checks.push(
+      "Scoped model buttons mark current/inherited choices, paginate, reject stale settings or changed Pi scopes, stay bound after routing changes and expire after saving",
+    );
     result.checks.push(
       "Telegram model inspection, bounded discovery, role settings and inheritance use the selected project's settings RPC; invalid and foreign commands cannot change settings or routing",
     );

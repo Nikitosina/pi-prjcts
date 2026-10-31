@@ -19,11 +19,15 @@ import {
 import { describeAcceptance, type AcceptanceOutcome } from "./result-acceptance.ts";
 import { escapeHtml, htmlToPlain, markdownToTelegramHtml, splitTelegramHtml, splitTelegramCaption } from "./telegram-html.ts";
 
+type ModelRole = "coordinator" | keyof Project["models"];
+type ModelSelection = { role: "coordinator"; choice: string } | { role: keyof Project["models"]; choice: string | null };
 type Action =
   | { t: "project"; projectId: string }
   | { t: "chat"; projectId: string; chatId: string }
   | { t: "answer"; projectId: string; entryId: string; text: string }
-  | { t: "approve-job"; projectId: string; jobId: string };
+  | { t: "approve-job"; projectId: string; jobId: string }
+  | { t: "model-page"; projectId: string; role: ModelRole; revision: string; offset: number }
+  | ({ t: "model-set"; projectId: string; revision: string } & ModelSelection);
 type Target = { projectId: string; chatId: string; entryId?: string };
 type DeliveryError = { at: number; method: string; description: string } & (
   { kind: "api"; httpStatus: number; code: number; descriptionProvided: boolean } | { kind: "network" | "not-sent" | "incomplete-response" }
@@ -98,12 +102,16 @@ const telegramResponse = Compile(
 
 const modelSettingsResponse = Compile(Type.Object({ revision: Type.String(), values: Type.Pick(Project, ["name", "model", "models"]) }));
 const modelPickerResponse = Compile(
-  Type.Object({ items: Type.Array(Type.Object({ reference: Type.String(), name: Type.String(), configured: Type.Boolean() })) }),
+  Type.Object({
+    items: Type.Array(Type.Object({ reference: Type.String(), name: Type.String(), configured: Type.Boolean() })),
+    scoped: Type.Array(Type.String()),
+    scopeSet: Type.Boolean(),
+  }),
 );
 const modelRole = Compile(Type.Union([Type.Literal("coordinator"), Type.KeyOf(Project.properties.models)]));
 const inheritedModelRoles: (keyof Project["models"])[] = ["worker", "scout", "reviewer"];
 const modelUsage =
-  "Usage: /model <coordinator|worker|scout|reviewer|verifier> <provider/model>\n/model worker inherit\n/model verifier none\n/models <query> finds configured models.";
+  "Usage: /model <coordinator|worker|scout|reviewer|verifier> [provider/model]\n/model worker opens scoped model buttons\n/model worker inherit\n/model verifier none\n/models <query> finds configured models.";
 
 /** Keep the error wording, but never persist credentials or chat identifiers from an API echo. */
 export function redactTelegramError(text: string, token: string | null, identifiers: readonly (string | number)[]): string {
@@ -291,24 +299,96 @@ export function startTelegram(options: {
     await say(`Now talking to ${project.name} · ${chat.title}. Send text to it, or /chats to pick another chat.`);
   }
   const help =
-    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes. /models shows project models; /models <query> finds models; /model <role> <provider/model> changes one. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
+    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes. /models shows project models; /models <query> finds models; /model <role> opens scoped model buttons, or add <provider/model> to set one. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
+
+  async function readModelSettings(id: string) {
+    const project = loadProject(id);
+    if (project.deleted || project.archived) throw new Error("That project is inactive. Pick another with /projects.");
+    const snapshot = await options.dispatch({ action: "settings-snapshot", id });
+    if (!modelSettingsResponse.Check(snapshot)) throw new Error("Invalid model settings response");
+    return snapshot;
+  }
+  async function readModelCatalog(id: string) {
+    const catalog = await options.dispatch({ action: "model-picker-snapshot", id });
+    if (!modelPickerResponse.Check(catalog)) throw new Error("Invalid model catalog response");
+    return catalog;
+  }
+  async function saveModel(id: string, selection: ModelSelection, snapshot: Awaited<ReturnType<typeof readModelSettings>>) {
+    await options.dispatch({
+      action: "settings-update",
+      id,
+      confirm: id,
+      expectedRevision: snapshot.revision,
+      changes: selection.role === "coordinator" ? { model: selection.choice } : { models: { [selection.role]: selection.choice } },
+    });
+    return `Saved models for ${snapshot.values.name}: ${selection.role} = ${selection.choice ?? (selection.role === "verifier" ? "not configured" : "inherit coordinator")}. Coordinator changes apply to subsequent requests; agents use the new choice when created or retried. Running agents keep their model. No tasks were restarted.`;
+  }
+  async function showModelPicker(id: string, role: ModelRole, snapshot: Awaited<ReturnType<typeof readModelSettings>>, offset = 0) {
+    const catalog = await readModelCatalog(id),
+      choices = catalog.scoped.flatMap((reference) => {
+        const item = catalog.items.find((item) => item.reference === reference);
+        return item?.configured ? [item] : [];
+      }),
+      pageSize = 8,
+      start = Math.max(0, Math.min(offset, Math.floor(Math.max(0, choices.length - 1) / pageSize) * pageSize)),
+      { values, revision } = snapshot,
+      current = role === "coordinator" ? values.model : (values.models[role] ?? (role === "verifier" ? null : values.model)),
+      inherited = role !== "coordinator" && role !== "verifier" && !values.models[role],
+      rows: Button[][] = choices.slice(start, start + pageSize).map((item) => [
+        {
+          text: clip(`${item.reference === current ? "Current · " : ""}${item.reference}`, 64),
+          callback_data: key({ t: "model-set", projectId: id, role, revision, choice: item.reference }),
+        },
+      ]);
+    if (role !== "coordinator" && role !== "verifier")
+      rows.push([
+        {
+          text: `${inherited ? "Current · " : ""}Inherit coordinator`,
+          callback_data: key({ t: "model-set", projectId: id, role, revision, choice: null }),
+        },
+      ]);
+    if (role === "verifier" && !loadProject(id).verification?.enabled)
+      rows.push([
+        {
+          text: `${current === null ? "Current · " : ""}No verifier`,
+          callback_data: key({ t: "model-set", projectId: id, role, revision, choice: null }),
+        },
+      ]);
+    const pages: Button[] = [];
+    if (start > 0)
+      pages.push({ text: "Previous", callback_data: key({ t: "model-page", projectId: id, role, revision, offset: start - pageSize }) });
+    if (start + pageSize < choices.length)
+      pages.push({ text: "Next", callback_data: key({ t: "model-page", projectId: id, role, revision, offset: start + pageSize }) });
+    if (pages.length) rows.push(pages);
+    return say(
+      [
+        `Choose ${role} model for ${clip(values.name, 120)}.`,
+        `Current: ${clip(current ?? "not configured", 1000)}${inherited ? " (inherited)" : ""}`,
+        choices.length
+          ? `Page ${Math.floor(start / pageSize) + 1}/${Math.ceil(choices.length / pageSize)}. Scoped models only.`
+          : catalog.scopeSet
+            ? "None of your scoped models is usable. Check the scope and provider credentials in Settings."
+            : "No scoped models configured. Set scoped models in Settings or Pi's enabledModels.",
+        `Tap a choice, or use /models <query> and /model ${role} <provider/model>.`,
+      ].join("\n"),
+      rows,
+    );
+  }
 
   async function modelCommand(name: string, query: string) {
     if (!state.route) return say("Pick a project first: /projects");
     const id = state.route.projectId;
     let confirmation: string;
     try {
-      const project = loadProject(id);
-      if (project.deleted || project.archived) throw new Error("That project is inactive. Pick another with /projects.");
+      const snapshot = await readModelSettings(id);
       if (name === "models" && query) {
-        const catalog = await options.dispatch({ action: "model-picker-snapshot", id });
-        if (!modelPickerResponse.Check(catalog)) throw new Error("Invalid model catalog response");
+        const catalog = await readModelCatalog(id);
         const terms = query.toLowerCase().split(/\s+/),
           matches = catalog.items.filter(
             (item) => item.configured && terms.every((term) => `${item.reference} ${item.name}`.toLowerCase().includes(term)),
           );
         if (!matches.length) return say(`No configured models match "${clip(query, 200)}". Try /models <provider or model name>.`);
-        const lines = [`Configured models for ${project.name}:`];
+        const lines = [`Configured models for ${snapshot.values.name}:`];
         let shown = 0;
         for (const item of matches) {
           if (shown === 20 || lines.join("\n").length + item.reference.length > 3400) break;
@@ -319,9 +399,7 @@ export function startTelegram(options: {
         lines.push("Set one: /model worker <provider/model>");
         return say(lines.join("\n"));
       }
-      const snapshot = await options.dispatch({ action: "settings-snapshot", id });
-      if (!modelSettingsResponse.Check(snapshot)) throw new Error("Invalid model settings response");
-      const { values, revision } = snapshot;
+      const { values } = snapshot;
       if (!query)
         return say(
           [
@@ -336,19 +414,13 @@ export function startTelegram(options: {
           ].join("\n"),
         );
       const [role, choice, ...extra] = query.split(/\s+/);
-      if (!modelRole.Check(role) || !choice || extra.length) return say(modelUsage);
+      if (!modelRole.Check(role) || extra.length) return say(modelUsage);
+      if (!choice) return await showModelPicker(id, role, snapshot);
       if (role === "coordinator" && choice === "inherit") return say("The coordinator cannot inherit a model.\n" + modelUsage);
       if (role === "verifier" && choice === "inherit")
         return say("The verifier never inherits. Use /model verifier none to clear it when verification is off.");
       const selected = (role !== "coordinator" && choice === "inherit") || (role === "verifier" && choice === "none") ? null : choice;
-      await options.dispatch({
-        action: "settings-update",
-        id,
-        confirm: id,
-        expectedRevision: revision,
-        changes: role === "coordinator" ? { model: choice } : { models: { [role]: selected } },
-      });
-      confirmation = `Saved models for ${values.name}: ${role} = ${selected ?? (role === "verifier" ? "not configured" : "inherit coordinator")}. Coordinator changes apply to subsequent requests; agents use the new choice when created or retried. Running agents keep their model. No tasks were restarted.`;
+      confirmation = await saveModel(id, role === "coordinator" ? { role, choice } : { role, choice: selected }, snapshot);
     } catch (error) {
       return say(`Models not changed: ${errorText(error)}. Use /models to reread settings, or /models <query> to find a model.`);
     }
@@ -469,6 +541,31 @@ export function startTelegram(options: {
       if (action.t === "chat") return await select(action.projectId, action.chatId);
       if (action.t === "answer") {
         const reply = await answer(action.projectId, action.entryId, action.text);
+        await clear();
+        return await say(reply);
+      }
+      if (action.t === "model-set" || action.t === "model-page") {
+        const snapshot = await readModelSettings(action.projectId);
+        if (snapshot.revision !== action.revision) throw new Error(`Model picker is stale. Reopen /model ${action.role}.`);
+        if (action.t === "model-page") {
+          await clear();
+          return await showModelPicker(action.projectId, action.role, snapshot, action.offset);
+        }
+        if (action.choice !== null) {
+          const catalog = await readModelCatalog(action.projectId);
+          if (!catalog.scoped.includes(action.choice) || !catalog.items.some((item) => item.reference === action.choice && item.configured))
+            throw new Error(`That model is no longer available in the scope. Reopen /model ${action.role}.`);
+        }
+        const reply = await saveModel(action.projectId, action, snapshot);
+        for (const [id, entry] of Object.entries(state.keys))
+          if (
+            (entry.t === "model-set" || entry.t === "model-page") &&
+            entry.projectId === action.projectId &&
+            entry.role === action.role &&
+            entry.revision === action.revision
+          )
+            delete state.keys[id];
+        persist();
         await clear();
         return await say(reply);
       }
