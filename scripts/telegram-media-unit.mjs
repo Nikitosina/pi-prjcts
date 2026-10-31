@@ -48,6 +48,7 @@ writeFileSync(join(dir, "demo.png"), image);
 writeFileSync(join(dir, "Screenshot (1 (copy)).png"), image);
 writeFileSync(join(dir, "demo.mp4"), video);
 writeFileSync(join(dir, "demo.webm"), video);
+writeFileSync(join(dir, "PLAN.html"), "<!doctype html><title>Plan</title>");
 mkdirSync(join(root, project, "artifacts", other));
 writeFileSync(join(root, project, "artifacts", other, "demo.png"), image);
 symlinkSync(join(dir, "demo.png"), join(dir, "link.png"));
@@ -64,6 +65,17 @@ for (const path of ["../project.json", "missing.png", "link.png", "large.png", "
 assert.equal(extractTelegramMedia("`![example](x)`\n```\n![code](y)\n```").media.length, 0);
 assert.equal(extractTelegramMedia("\uE0000\uE001").markdown, "0");
 for (const fence of ["```", "~~~"]) assert.equal(extractTelegramMedia(`${fence}\n![example](${ref("demo.png")})`).media.length, 0);
+const documentLink = `[Plan](${ref("PLAN.html")})`;
+assert.equal(extractTelegramMedia(`Before ${documentLink} after`).media.length, 1);
+assert.equal(extractTelegramMedia(`[Copy](${ref("Screenshot (1 (copy)).png")})`).media[0].ref, ref("Screenshot (1 (copy)).png"));
+for (const text of [
+  `\`${documentLink}\``,
+  "```\n" + documentLink + "\n```",
+  "~~~\n" + documentLink,
+  "[External](https://example.com/report.pdf)",
+  "[Local](/etc/passwd)",
+])
+  assert.equal(extractTelegramMedia(text).media.length, 0);
 const fakeCredential = "999999999:FAKE_CREDENTIAL_FOR_REDACTION_ONLY";
 assert.equal(
   redactTelegramError(
@@ -380,7 +392,7 @@ try {
   assert.equal(sends.length, 1);
 
   reset(
-    `![Traversal](${ref("../project.json")}) ![Unknown](artifact:${other}/demo.png) ![Missing](${ref("missing.png")}) ![Large](${ref("large.png")}) ![URL](http://127.0.0.1/private)`,
+    `[Traversal](${ref("../project.json")}) [Unknown](artifact:${other}/demo.png) [Missing](${ref("missing.png")}) [Large](${ref("large.png")}) ![URL](http://127.0.0.1/private)`,
   );
   start();
   await bridge.flush();
@@ -439,9 +451,9 @@ try {
   assert.equal((sends[0].input.media[0].caption + sends[1].input.text).match(/<b>Test · Main/g).length, 1);
   mapped();
 
-  reset(`First ![Retry](${ref("demo.png")}) Last`);
+  reset(`First ${documentLink} Last`);
   notices.push(notice(2, "Next notice"));
-  fault = { method: "sendPhoto", code: 429 };
+  fault = { method: "sendDocument", code: 429 };
   start();
   await bridge.flush();
   assert.equal(sends.length, 0);
@@ -450,8 +462,10 @@ try {
   await bridge.flush();
   assert.deepEqual(
     sends.map((s) => s.method),
-    ["sendPhoto", "sendMessage"],
+    ["sendDocument", "sendMessage"],
   );
+  assert.equal(sends[0].input.file.name, "PLAN.html");
+  assert.deepEqual(sends[0].input.file.bytes, readFileSync(join(dir, "PLAN.html")));
   assert.equal(sends.at(-1).input.reply_parameters, undefined);
 
   reset(`${"long ".repeat(500)} ![](${ref("demo.png")}) end`);

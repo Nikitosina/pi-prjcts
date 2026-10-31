@@ -7,13 +7,13 @@ export type MediaRef = { ref: string; caption: string };
 export type TelegramPart =
   { kind: "text"; text: string } | { kind: "media"; ref: string; caption: string } | { kind: "album"; refs: string[]; caption: string };
 
-// Code examples are not attachments. All other image syntax is consumed, including unsafe URLs.
+// Code examples stay text; only artifact links attach files. Image syntax is consumed even for unsafe URLs.
 export function extractTelegramMedia(markdown: string): { markdown: string; media: MediaRef[] } {
   const media: MediaRef[] = [];
   markdown = markdown.replace(/[\uE000\uE001]/g, "");
   let text = "",
     cursor = 0;
-  for (const match of markdown.matchAll(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)|!\[([^\]\n]*)\]\(/g)) {
+  for (const match of markdown.matchAll(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]*`)|(!?)\[([^\]\n]*)\]\(/g)) {
     if (match[1] || match.index < cursor) continue;
     const start = match.index + match[0].length;
     let end = start,
@@ -23,7 +23,9 @@ export function extractTelegramMedia(markdown: string): { markdown: string; medi
       if (markdown[end] === ")" && --depth === 0) break;
     }
     if (depth !== 0) continue;
-    const index = media.push({ ref: markdown.slice(start, end), caption: match[2] }) - 1;
+    const ref = markdown.slice(start, end);
+    if (!match[2] && !ref.startsWith("artifact:")) continue;
+    const index = media.push({ ref, caption: match[3] }) - 1;
     text += markdown.slice(cursor, match.index) + `\uE000${index}\uE001`;
     cursor = end + 1;
   }

@@ -43,7 +43,7 @@ const api = createServer(async (req, res) => {
       );
     } else {
       const file = input.photo ?? input.video ?? input.document;
-      input.file = { mime: file.type, bytes: Buffer.from(await file.arrayBuffer()) };
+      input.file = { mime: file.type, bytes: Buffer.from(await file.arrayBuffer()), name: file.name };
       input.caption = input.caption.replaceAll("\r\n", "\n");
     }
     if (input.reply_parameters) input.reply_parameters = JSON.parse(input.reply_parameters);
@@ -77,6 +77,7 @@ const api = createServer(async (req, res) => {
   });
 });
 await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
+const documentBytes = "<!doctype html><title>Plan</title><p>Coordinator file fixture</p>";
 let output, fixtureThread;
 const k = await createKit("telegram-media", {
   env: {
@@ -89,7 +90,7 @@ const k = await createKit("telegram-media", {
       if (user.includes("MARK-MEDIASINGLE")) return say(`COORDINATOR-SINGLE before ![Image](artifact:${fixtureThread}/image.png) after.`);
       if (user.includes("MARK-MEDIAVIDEO")) return say(`COORDINATOR-VIDEO before ![Video](artifact:${fixtureThread}/video.mp4) after.`);
       if (user.includes("MARK-MEDIALONG"))
-        return say(`COORDINATOR-LONG ${"long text ".repeat(650)} ![Image](artifact:${fixtureThread}/image.png) TAIL-PRESERVED`);
+        return say(`COORDINATOR-LONG ${"long text ".repeat(650)} [**Download plan**](artifact:${fixtureThread}/PLAN.html) TAIL-PRESERVED`);
       if (/MARK-MEDIA\b/.test(user) && !user.startsWith("[worker "))
         return results.length
           ? say("Waiting for fixture work.")
@@ -104,7 +105,7 @@ const k = await createKit("telegram-media", {
     if (role === "worker" && user.includes("MEDIA-FIXTURE")) {
       if (!results.length)
         return call("bash", {
-          command: `node -e 'const fs=require("node:fs"), p=process.env.PI_ARTIFACTS_DIR; fs.writeFileSync(p+"/image.png",Buffer.from("${image.toString("base64")}","base64"));fs.writeFileSync(p+"/video.mp4",Buffer.from("${video.toString("base64")}","base64")); console.log("Saved generated fixtures");'`,
+          command: `node -e 'const fs=require("node:fs"), p=process.env.PI_ARTIFACTS_DIR; fs.writeFileSync(p+"/image.png",Buffer.from("${image.toString("base64")}","base64"));fs.writeFileSync(p+"/video.mp4",Buffer.from("${video.toString("base64")}","base64"));fs.writeFileSync(p+"/PLAN.html",${JSON.stringify(documentBytes)}); console.log("Saved generated fixtures");'`,
         });
       if (results.length === 1) return call("job", { action: "ready", summary: "MEDIA-FIXTURE-DONE saved image.png and video.mp4" });
       return say("MEDIA-FIXTURE-DONE saved image.png and video.mp4");
@@ -192,25 +193,30 @@ await k.run(async () => {
 
     incoming("MARK-MEDIALONG preserve the entire response");
     await k.eventually(() => sends.some((s) => s.input.text?.includes("TAIL-PRESERVED")), "Long response was truncated");
-    const longMedia = sends.find((s) => s.method === "sendPhoto" && s.input.caption.includes("COORDINATOR-LONG"));
+    const longMedia = sends.find((s) => s.method === "sendDocument" && s.input.caption.includes("COORDINATOR-LONG"));
+    assert.equal(longMedia.input.file.name, "PLAN.html");
+    assert.equal(longMedia.input.file.bytes.toString(), documentBytes);
     const longParts = sends.filter((s) => s === longMedia || s.input.reply_parameters?.message_id === longMedia.message_id);
     assert.deepEqual(
       longParts.map((s) => s.method),
-      ["sendPhoto", "sendMessage", "sendMessage"],
+      ["sendDocument", "sendMessage", "sendMessage"],
     );
     const whole = longParts.map((s) => htmlToPlain(s.input.caption ?? s.input.text)).join("");
     assert(whole.includes("long text ".repeat(650)));
     assert(whole.includes("TAIL-PRESERVED"));
     assert.equal((whole.match(/Media envelope · Attachment context/g) ?? []).length, 1);
-    k.check(
-      "Long actual coordinator result survives notifier intact and uses one caption plus only the two required text spillovers",
-      true,
-    );
+    k.check("Ordinary artifact link uploads exact document bytes/name, preserving the long reply through notifier and outbox", true);
     incoming("/chat 1");
     await k.eventually(
       () => sends.some((s) => s.input.text?.includes("Now talking to") && s.input.text.includes("Main")),
       "Inbound route did not switch",
     );
+    incoming("MARK-DOCUMENTREPLY reply to the file, not the current route", longMedia.message_id);
+    await k.eventually(
+      async () => (await k.rpc({ action: "show", id: project, chatId: chat.id })).jobs.some((j) => j.text.startsWith("MARK-DOCUMENTREPLY")),
+      "Reply to document lost originating coordinator chat",
+    );
+    assert(!(await k.rpc({ action: "show", id: project })).jobs.some((j) => j.text.startsWith("MARK-DOCUMENTREPLY")));
     incoming("MARK-MEDIAREPLY reply to the attachment, not the current route", photo.message_id);
     await k.eventually(
       async () => (await k.rpc({ action: "show", id: project, chatId: chat.id })).jobs.some((j) => j.text.startsWith("MARK-MEDIAREPLY")),
