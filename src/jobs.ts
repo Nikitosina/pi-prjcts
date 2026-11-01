@@ -19,6 +19,7 @@ import {
   type Extension,
   type Harness,
   type Session,
+  type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
 import { providerFailure, QUOTA_RETRY_BASE_MS, QUOTA_RETRY_LIMIT, quotaRetryDelay, unansweredReason } from "./provider-failure.ts";
@@ -196,6 +197,8 @@ export type JobsHost = {
     parent: ConversationId;
     cwd?: string;
   }): AgentChange;
+  /** Refresh host instructions on an explicit retry, leaving the ended agent's repository prompt frozen. */
+  onRetry?(tx: Tx, conversationId: ConversationId): Promise<void>;
   /**
    * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
    * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
@@ -864,6 +867,7 @@ export function createJobs(host: JobsHost) {
       }
       // An explicit retry adopts current role settings; steering a running agent keeps its model and frozen prompt.
       if (agent.endedAt !== null) {
+        await host.onRetry?.(tx, agent.conversationId);
         const model = host.agentChange({
           role: agent.role,
           id: agent.id,

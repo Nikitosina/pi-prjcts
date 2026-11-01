@@ -1,5 +1,6 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { home } from "./state.ts";
 
 /** Bounded repository standing resources; knowledge documents are intentionally never read here. */
 export type DurableStanding = Readonly<{ revision: string; text: string; paths: readonly string[] }>;
@@ -31,6 +32,23 @@ export function loadDurableStanding(cwd: string): DurableStanding {
   const text = chunks.join("\n\n");
   return { revision: `${found.join(",")}:${text.length}:${hash(text)}`, text, paths: found };
 }
+/** Instance instructions stay outside repository standing revisions and workspace authorization fingerprints. */
+export function loadInstanceInstructions(): string {
+  const configured = join(home(), "AGENTS.md");
+  if (!optionalFacts(configured)) return "";
+  try {
+    const root = realpathSync(home()),
+      rootFacts = lstatSync(root),
+      path = join(root, "AGENTS.md"),
+      facts = lstatSync(path);
+    if (!facts.isFile() || facts.isSymbolicLink()) throw new Error("must be a regular file, not a symlink");
+    const text = readStandingFile(path, configured, facts, "Instance instructions");
+    if (!sameDirectory(rootFacts, lstatSync(root)) || realpathSync(home()) !== root) throw new Error("home changed during reading");
+    return text;
+  } catch (error) {
+    throw new Error(`Cannot load instance instructions from ${configured}: ${error instanceof Error ? error.message : "read failed"}`);
+  }
+}
 function optionalFacts(path: string) {
   try {
     return lstatSync(path);
@@ -54,15 +72,14 @@ function sameFile(before: StandingFacts, after: StandingFacts): boolean {
     before.ctimeMs === after.ctimeMs
   );
 }
-function readStandingFile(path: string, relative: string, expected: StandingFacts): string {
+function readStandingFile(path: string, relative: string, expected: StandingFacts, label = "Repository standing resource"): string {
   const maxBytes = 64_000;
-  if (expected.size > maxBytes) throw new Error(`Repository standing resource exceeds ${maxBytes} bytes: ${relative}`);
+  if (expected.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes: ${relative}`);
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let text: string;
   try {
     const before = fstatSync(fd);
-    if (!sameFile(expected, before) || realpathSync(path) !== path)
-      throw new Error(`Repository standing resource changed or escaped its root: ${relative}`);
+    if (!sameFile(expected, before) || realpathSync(path) !== path) throw new Error(`${label} changed or escaped its root: ${relative}`);
     const bytes = Buffer.alloc(maxBytes + 1);
     let length = 0;
     while (length < bytes.length) {
@@ -70,14 +87,12 @@ function readStandingFile(path: string, relative: string, expected: StandingFact
       if (count === 0) break;
       length += count;
     }
-    if (length > maxBytes) throw new Error(`Repository standing resource exceeds ${maxBytes} bytes: ${relative}`);
+    if (length > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes: ${relative}`);
     if (length !== before.size || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(path)) || realpathSync(path) !== path)
-      throw new Error(`Repository standing resource changed during reading: ${relative}`);
+      throw new Error(`${label} changed during reading: ${relative}`);
     text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, length));
     if (text.length > 16_000)
-      throw new Error(
-        `Repository standing resource exceeds 16000 UTF-16 code units; split the instructions instead of truncating: ${relative}`,
-      );
+      throw new Error(`${label} exceeds 16000 UTF-16 code units; split the instructions instead of truncating: ${relative}`);
   } catch (primary) {
     try {
       closeSync(fd);

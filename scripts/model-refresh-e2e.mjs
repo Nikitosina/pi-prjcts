@@ -1,17 +1,41 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, symlinkSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { createKit, randomUUID } from "./lib/e2e-kit.mjs";
+import { createKit, randomUUID, call } from "./lib/e2e-kit.mjs";
 
 let release;
 const held = new Promise((resolve) => {
   release = resolve;
 });
+let releaseCoordinator;
+const heldCoordinator = new Promise((resolve) => {
+  releaseCoordinator = resolve;
+});
+let releaseInstructions;
+const heldInstructions = new Promise((resolve) => {
+  releaseInstructions = resolve;
+});
 const k = await createKit("model-refresh", {
-  handler: async ({ user }) => {
+  handler: async ({ role, user, results }) => {
     if (user.includes("HELD-REFRESH")) await held;
+    if (role === "coordinator" && user === "INSTANCE-COORD-HELD" && !results.length) {
+      await heldCoordinator;
+      return call("projects_knowledge_list", {});
+    }
+    if (role === "coordinator" && user === "INSTANCE-PROFILES" && !results.length)
+      return call("projects_delegate", { role: "worker", task: "INSTANCE-WORKER" });
+    if (role === "worker" && user.includes("INSTANCE-WORKER") && results.length < 3)
+      return call("subagent", { role: ["verifier", "reviewer", "scout"][results.length], task: "INSTANCE-CHILD" });
+    if (role === "worker" && user.includes("INSTANCE-HELD") && !results.length) {
+      await heldInstructions;
+      return call("projects_knowledge_list", {});
+    }
   },
 });
 k.initRepo();
+writeFileSync(join(k.workspace, "AGENTS.md"), "REPOSITORY-INSTRUCTIONS.\n");
+k.git(k.workspace, "add", "AGENTS.md");
+k.git(k.workspace, "commit", "-qm", "repository instructions");
+writeFileSync(join(k.agentDir, "AGENTS.md"), "PERSONAL-INSTRUCTIONS-NOT-LOADED.\n");
 const { rpc, check } = k;
 const file = join(k.agentDir, "models.json");
 const config = JSON.parse(readFileSync(file, "utf8"));
@@ -30,6 +54,126 @@ const fail = async (fn) => {
 await k.run(async () => {
   const id = await k.createProject("Refresh");
   await k.ask(id, "Before refresh");
+  check(
+    "missing instance file does not load personal instructions",
+    !k.result.calls.at(-1).system.includes("PERSONAL-INSTRUCTIONS-NOT-LOADED"),
+  );
+  const instanceFile = join(k.home, "AGENTS.md");
+  writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-A.\n");
+  await k.updateSettings(id, { models: { verifier: "fake/fake-model" } });
+  await k.ask(id, "INSTANCE-PROFILES");
+  for (const role of ["coordinator", "worker", "scout", "reviewer", "verifier"]) {
+    const request = k.result.calls.find((c) => c.role === role && c.user.includes("INSTANCE-"));
+    check(
+      `${role} loads instance instructions before repository instructions`,
+      request?.system.includes("INSTANCE-INSTRUCTIONS-A.") &&
+        request.system.indexOf("INSTANCE-INSTRUCTIONS-A.") < request.system.indexOf("REPOSITORY-INSTRUCTIONS."),
+    );
+  }
+  const scope = (await rpc({ action: "workspace-catalog", id })).find((s) => s.wholeRepository).id;
+  const active = await rpc({
+    action: "work-submit",
+    id,
+    threadId: randomUUID(),
+    requestId: randomUUID(),
+    workspaceScopeId: scope,
+    text: "INSTANCE-HELD",
+  });
+  await k.eventually(() => k.lastCall("worker", "INSTANCE-HELD"), "instance worker not held");
+  writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-B.\n");
+  await rpc({ action: "message", id, text: "INSTANCE-COORD-B" });
+  await k.eventually(() => k.lastCall("coordinator", "INSTANCE-COORD-B"), "updated coordinator did not dispatch");
+  check(
+    "next coordinator admission refreshes shared instructions",
+    k.lastCall("coordinator", "INSTANCE-COORD-B").system.includes("INSTANCE-INSTRUCTIONS-B."),
+  );
+  releaseInstructions();
+  await k.settle(id);
+  check(
+    "an active worker keeps its snapshot across tool rounds",
+    k.lastCall("worker", "INSTANCE-HELD").system.includes("INSTANCE-INSTRUCTIONS-A.") &&
+      !k.lastCall("worker", "INSTANCE-HELD").system.includes("INSTANCE-INSTRUCTIONS-B."),
+  );
+  await rpc({ action: "thread-send", id, threadId: active.id, requestId: randomUUID(), text: "INSTANCE-RETRY" });
+  await k.settle(id);
+  check(
+    "an ended worker retry refreshes only shared instructions without reauthorization",
+    k.lastCall("worker", "INSTANCE-RETRY")?.system.includes("INSTANCE-INSTRUCTIONS-B.") &&
+      k.lastCall("worker", "INSTANCE-RETRY").system.replace("INSTANCE-INSTRUCTIONS-B.", "INSTANCE-INSTRUCTIONS-A.") ===
+        k.lastCall("worker", "INSTANCE-HELD").system,
+  );
+  await rpc({ action: "message", id, text: "INSTANCE-COORD-HELD" });
+  await k.eventually(() => k.lastCall("coordinator", "INSTANCE-COORD-HELD"), "coordinator not held");
+  writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-C.\n");
+  await rpc({ action: "message", id, text: "INSTANCE-COORD-QUEUED" });
+  releaseCoordinator();
+  await k.settle(id);
+  check(
+    "busy coordinator keeps its snapshot through its current tool round",
+    k.lastCall("coordinator", "INSTANCE-COORD-HELD").system.includes("INSTANCE-INSTRUCTIONS-B."),
+  );
+  check(
+    "queued coordinator input picks up edits on its next turn",
+    k.lastCall("coordinator", "INSTANCE-COORD-QUEUED").system.includes("INSTANCE-INSTRUCTIONS-C."),
+  );
+  writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-B.\n");
+  check("reload clears a deferred snapshot even when the file was reverted", (await rpc({ action: "chat-reload", id })).changed);
+  const other = await k.createProject("Other instance project");
+  await k.ask(other, "INSTANCE-OTHER-PROJECT");
+  check(
+    "instance instructions apply across projects",
+    k.lastCall("coordinator", "INSTANCE-OTHER-PROJECT").system.includes("INSTANCE-INSTRUCTIONS-B."),
+  );
+  await k.stopHost();
+  k.startHost();
+  await k.waitHost();
+  await rpc({ action: "thread-send", id, threadId: active.id, requestId: randomUUID(), text: "INSTANCE-AFTER-RESTART" });
+  await k.settle(id);
+  check(
+    "instruction snapshots survive reopen without duplicate sections",
+    (k.lastCall("worker", "INSTANCE-AFTER-RESTART")?.system.match(/INSTANCE-INSTRUCTIONS-B\./g) ?? []).length === 1,
+  );
+  for (const [label, make] of [
+    [
+      "symlink",
+      () => {
+        rmSync(instanceFile);
+        symlinkSync(join(k.workspace, "AGENTS.md"), instanceFile);
+      },
+    ],
+    ...(process.getuid?.() === 0 ? [] : [["unreadable", () => chmodSync(instanceFile, 0)]]),
+    ["invalid UTF-8", () => writeFileSync(instanceFile, Buffer.from([255]))],
+    ["oversized", () => writeFileSync(instanceFile, "x".repeat(64001))],
+    [
+      "directory",
+      () => {
+        rmSync(instanceFile);
+        mkdirSync(instanceFile);
+      },
+    ],
+  ]) {
+    make();
+    let problem = "";
+    try {
+      await rpc({ action: "message", id, text: "INVALID-INSTANCE" });
+    } catch (error) {
+      problem = String(error);
+    }
+    check(
+      `${label} instance instructions fail admission with a bounded source error`,
+      problem.includes("AGENTS.md") && problem.length < 2000,
+    );
+    check(`${label} instance instructions fail reload safely`, await fail(() => rpc({ action: "chat-reload", id })));
+    rmSync(instanceFile, { recursive: true, force: true });
+    writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-B.\n");
+  }
+  rmSync(instanceFile);
+  await k.ask(id, "INSTANCE-REMOVED");
+  check(
+    "removing instance instructions clears them on next coordinator turn",
+    !k.lastCall("coordinator", "INSTANCE-REMOVED").system.includes("INSTANCE-INSTRUCTIONS-"),
+  );
+
   await picker(id);
   await rpc({ action: "message", id, text: "HELD-REFRESH" });
   await k.eventually(() => k.result.calls.some((call) => call.user.includes("HELD-REFRESH")), "held request did not start");

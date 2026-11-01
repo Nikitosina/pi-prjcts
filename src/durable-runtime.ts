@@ -9,6 +9,7 @@ import {
   AssistantEntry,
   GenerationTask,
   Harness,
+  LiveDoc,
   ROOT_CONVERSATION_ID,
   ToolTask,
   configure,
@@ -22,6 +23,8 @@ import {
   type Conversation,
   type Extension,
   type Storage,
+  type Tx,
+  type ConversationId,
   type Submission,
   type ToolExecutionApi,
   type SubmissionId,
@@ -65,7 +68,7 @@ import { mcpPool } from "./mcp-servers.ts";
 import { MCP_NOTE } from "./mcp-profiles.ts";
 import type { DurableRole, DurableGenerationLifecycleObserver } from "./durable-types.ts";
 export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } from "./durable-types.ts";
-import { loadDurableStanding } from "./durable-standing.ts";
+import { loadDurableStanding, loadInstanceInstructions } from "./durable-standing.ts";
 import { durableWorkspaceBinding, verifierShell } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
 import {
@@ -133,6 +136,31 @@ const DurableProjectIdentity = defineDoc<{
   fork: "initial",
   initial: () => ({ projectId: null, coordinatorConversationId: null }),
 });
+
+type InstanceInstructionState = { text: string; pending?: string; heldInput?: number };
+const InstanceInstructions = defineDoc<InstanceInstructionState>({
+  kind: "projects.instance-instructions",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ text: "" }),
+});
+const instanceText = (saved: InstanceInstructionState | undefined, run?: number) =>
+  saved?.pending !== undefined && saved.heldInput !== run ? saved.pending : (saved?.text ?? "");
+async function refreshInstanceInstructions(tx: Tx, id: ConversationId, text = loadInstanceInstructions(), heldInput?: number) {
+  const saved = await tx.doc(InstanceInstructions, id);
+  if (heldInput === undefined) {
+    saved.text = text;
+    delete saved.pending;
+    delete saved.heldInput;
+  } else {
+    // A follow-up may be admitted during a tool round: defer the new text until that run ends.
+    saved.text = instanceText(saved, heldInput);
+    saved.pending = text;
+    saved.heldInput = heldInput;
+  }
+}
 
 /** Extra coordinator chats; the root conversation is always the implicit first chat, "main". */
 type StoredChat = { id: string; conversationId: number; title: string | null; createdAt: number; archivedAt?: number };
@@ -745,7 +773,15 @@ export async function openDurableProject(input: {
     const policy = defineExtension({
       name: "projects.durable-policy",
       tools,
-      sections: [section("projects-memory-index", () => knowledgeContext(dir))],
+      sections: [
+        section("instance-instructions", async (input, context) => {
+          const saved = await input.read.snapshot(InstanceInstructions, input.conversationId, context);
+          const live = await input.read.snapshot(LiveDoc, input.conversationId, context);
+          const text = instanceText(saved, live?.run?.inputs[0]);
+          return text ? `Instance instructions ($PI_PROJECTS_HOME/AGENTS.md):\n${text}` : undefined;
+        }),
+        section("projects-memory-index", () => knowledgeContext(dir)),
+      ],
       hooks: [
         hook(GenerationTask, {
           beforeRequest: (request, api) => observeModelRequest(input, project.id, api.conversationId, request.messages),
@@ -893,6 +929,7 @@ export async function openDurableProject(input: {
         : null;
     const jobs = createJobs({
       agentChange: agentSetup,
+      onRetry: refreshInstanceInstructions,
       defaultScope: () => {
         const scopes = catalog(loadProject(project.id));
         return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
@@ -996,6 +1033,7 @@ export async function openDurableProject(input: {
       {
         models,
         registry,
+        conversationCreated: (tx, conversation) => refreshInstanceInstructions(tx, conversation.id),
         // Reasoning models can stay silent for minutes; Durable checkpoints retries and resends only the failed request.
         // followUpMode "all": worker reports queued while the coordinator is busy are answered in one turn, not one turn each.
         // Compaction is a getter: Durable reads settings on every resolution, so Settings changes apply to the next generation.
@@ -1489,12 +1527,21 @@ export async function openDurableProject(input: {
       if (current.deleted || current.archived) throw new Error("Project is not active; reload is unavailable");
       const next = rolesOf(loader, current.skillProfiles);
       const agent = await conversation.agent(context);
+      const instance = loadInstanceInstructions();
       const instructions = coordinatorInstructions(current, loadDurableStanding(project.cwd).text, skillIndex(next.coordinator) + MCP_NOTE);
       const tools = coordinatorToolsFor(agent, current),
         extensions = coordinatorExtensionsFor(agent);
       const names = (list: readonly { name: string }[]) => JSON.stringify(list.map((item) => item.name).sort());
-      const changed = agent.instructions !== instructions || names(agent.tools) !== names(tools);
-      if (changed) await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context);
+      const saved = await openedHarness.snapshot(InstanceInstructions, conversation.id, context);
+      const changed =
+        agent.instructions !== instructions ||
+        names(agent.tools) !== names(tools) ||
+        (saved?.text ?? "") !== instance ||
+        saved?.pending !== undefined;
+      if (changed)
+        await configureWhenIdle(root, conversation, { instructions, tools, extensions }, context, "reloading", async (tx) => {
+          await refreshInstanceInstructions(tx, conversation.id, instance);
+        });
       remember(loader);
       coordinatorSkills.set(Number(conversation.id), new Set(next.coordinator.map((skill) => skill.name)));
       staleChats.delete(Number(conversation.id));
@@ -2214,6 +2261,10 @@ async function admit(
   if (text.length === 0 || text.length > 120_000) throw new Error("Project message must contain 1 to 120000 characters");
   if (options.requestId.length === 0 || options.requestId.length > 32000)
     throw new Error("Project admission requires a requestId of 1 to 32000 characters");
+  await root.commit(async (tx) => {
+    const live = await tx.doc(LiveDoc, root.id);
+    await refreshInstanceInstructions(tx, root.id, loadInstanceInstructions(), live.run?.inputs[0]);
+  }, context);
   // Record origin before the input can settle; the notifier reads it after fetching submissions.
   if (options.origin === "telegram")
     await root.commit(async (tx) => {

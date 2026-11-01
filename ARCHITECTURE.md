@@ -15,6 +15,14 @@ Rules:
 - Take a project's lock (`withProjectLock` in `host-server.ts`) only for short local state changes. Open or replace a runtime through `withDurableOwner`, outside the lock, and never wait on a model, a provider or an abort drain while holding it.
 - A request that fails validation must fail before it opens a runtime.
 
+## Instance instructions
+
+`src/durable-standing.ts` reads the optional `$PI_PROJECTS_HOME/AGENTS.md` (using `state.home()`, default `~/.pi/agent/projects/AGENTS.md`). It applies across projects to coordinators, workers, scouts, reviewers and verifiers, in a distinct prompt section before repository standing instructions. Repository instructions can specialize shared guidance; neither changes immutable role, tool or security contracts. Projects does not read or copy personal `~/.pi/agent/AGENTS.md`.
+
+The file must be regular, valid UTF-8, at most 64,000 bytes and 16,000 UTF-16 code units. Missing means no extra instructions. Unreadable, invalid, oversized, symlinked or changing files fail loading with a source-path error; content is never silently truncated. The reader keeps existing home/realpath semantics.
+
+Each conversation persists its shared-instruction snapshot separately from its frozen repository/role prompt. New agents and explicit retries of ended agents load current instructions. A running agent keeps its snapshot, including after restart and between tool rounds. Coordinators refresh on owner admission, Reload and prompt-affecting settings application. An owner follow-up queued during a coordinator turn defers the new snapshot until that turn ends; background reports otherwise use the last snapshot. Editing/removing the file needs no host restart or watcher. Saved snapshots survive reopening; the additive document does not migrate SQLite or change repository revisions, workspace authorization fingerprints or grants.
+
 ## Jobs engine
 
 `src/jobs.ts` replaces the old planning engine, the host verification cycle and the watchdog policy. It is built on pi-durable's ownership tree: a conversation owned by a task is aborted and drained with that task.
@@ -54,7 +62,7 @@ Rule: the detector only notifies. It never steers, stops or restarts an agent.
 
 Rules:
 - A new settings field needs an `EFFECTS` entry (the type forces it) and must not need a host restart.
-- A new send to an ended agent adopts the current role model without replacing its frozen prompt. Steering a running agent keeps its model.
+- A new send to an ended agent adopts the current role model and instance instructions without replacing its frozen repository/role prompt. Steering a running agent keeps its model.
 - Validate against the live catalog before saving; a refusal leaves the settings untouched.
 
 ## Result acceptance (Approve)
