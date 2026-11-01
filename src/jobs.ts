@@ -365,12 +365,9 @@ const reporterTask = (host: JobsHost) =>
             const now = runtime.now();
             const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
             const from = current ? `${current.provider}/${current.modelId}` : "";
-            const stored = record.quota && record.quota.attempts === previous ? record.quota : null;
             const retryAt = switched
               ? now
-              : (stored?.retryAt ??
-                host.quotaResetAt?.(from, now) ??
-                now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
+              : (host.quotaResetAt?.(from, now) ?? now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
             await runtime.commit(async (tx) => {
               const doc = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
               if (!doc) return undefined;
@@ -408,7 +405,7 @@ const reporterTask = (host: JobsHost) =>
           const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
           record.reported.push(settled.answer);
           // A newer message is already queued for this agent: it keeps the Job running and decides how it ends.
-          if (reporter.input.seq !== undefined && (record.sends ?? 0) > reporter.input.seq)
+          if ((record.sends ?? 0) > (reporter.input.seq ?? 0))
             return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer.trim()}`);
           record.endedAt = Date.now();
           if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);

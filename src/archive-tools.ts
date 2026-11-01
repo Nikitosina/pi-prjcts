@@ -2,6 +2,7 @@ import { defineTool, type Conversation, type ToolExecutionApi } from "@earendil-
 import { Type } from "typebox";
 import { archiveHistory, archiveProject, archiveText } from "./archive-host.ts";
 import { fitJson } from "./response-limit.ts";
+import { transcriptEntryCount, trimTranscriptPage } from "./transcript-reader.ts";
 
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }],
@@ -103,18 +104,11 @@ export function coordinatorArchiveTools(input: { projectId: string; isCoordinato
         limit: args.limit ?? HISTORY_ENTRIES,
       });
       if (args.limit !== undefined) return json({ note: NOTE, ...page });
-      // Trim whole entries from the old end so `before` still continues exactly where this answer stops.
-      const entryIds = [...new Set(page.items.map((item) => item.entryId))];
       return json(
-        fitJson(entryIds.length, (kept) => {
-          const first = entryIds[entryIds.length - kept]!;
-          return {
-            note: NOTE,
-            ...page,
-            items: page.items.filter((item) => item.entryId >= first),
-            before: kept < entryIds.length ? first : page.before,
-          };
-        }),
+        fitJson(transcriptEntryCount(page), (kept) => ({
+          note: NOTE,
+          ...trimTranscriptPage(page, kept),
+        })),
       );
     },
   });

@@ -1,4 +1,15 @@
-import { api, closeDialog, dlgBtn, getProjectId, registerActions, registerForms, setDialogBody, showDialog, showError } from "./shell.js";
+import {
+  api,
+  closeDialog,
+  dlgBtn,
+  getProjectId,
+  registerActions,
+  registerForms,
+  setDialogBody,
+  showDialog,
+  showError,
+  uiFrame,
+} from "./shell.js";
 import { esc, clip } from "./format.js";
 import { chatMessageHtml } from "./chat.js";
 import { when } from "./observability.js";
@@ -10,10 +21,17 @@ let state = null;
 
 const transcriptKey = () => `archive/${state.project.projectId}/${state.conversation.id}`;
 const read = (action, input = {}) => api({ action, ...input });
+const fresh = (frame) => {
+  const now = uiFrame();
+  return frame.projectId === now.projectId && frame.generation === now.generation && frame.dialogVersion === now.dialogVersion;
+};
 
 async function openArchive() {
   showDialog("Archive", '<p class="note">Reading the old host…</p>', "Read-only copy of an earlier host's projects");
-  state = { config: await read("archive-config"), projects: null, project: null, conversation: null, shown: WORKERS_PER_PAGE };
+  const frame = uiFrame(),
+    config = await read("archive-config");
+  if (!fresh(frame)) return;
+  state = { config, projects: null, project: null, conversation: null, shown: WORKERS_PER_PAGE };
   await showProjects();
 }
 
@@ -22,10 +40,12 @@ function homeForm(config) {
 }
 
 async function showProjects() {
+  const frame = uiFrame();
   state.project = state.conversation = null;
   let body;
   try {
     const { projects } = await read("archive-projects");
+    if (!fresh(frame)) return;
     state.projects = projects;
     body = projects.length
       ? `<ul class="archive-list">${projects
@@ -36,13 +56,16 @@ async function showProjects() {
           .join("")}</ul>`
       : '<p class="note">No old projects in this folder.</p>';
   } catch (error) {
+    if (!fresh(frame)) return;
     body = `<p class="dialog-error" role="alert">${esc(error.message)}</p>`;
   }
   setDialogBody(`${homeForm(state.config)}${body}`);
 }
 
 async function showProject(projectId) {
-  const project = await read("archive-project", { projectId });
+  const frame = uiFrame(),
+    project = await read("archive-project", { projectId });
+  if (!fresh(frame)) return;
   state.project = { projectId, name: state.projects?.find((item) => item.projectId === projectId)?.name ?? projectId, ...project };
   state.conversation = null;
   const chats = project.chats
@@ -72,10 +95,12 @@ async function showConversation(conversationId, title) {
       state.project.projectId === getProjectId() ? ` ${dlgBtn("Continue in chat", { action: "archive-continue" }, "small")}` : ""
     }</p><div class="archive-transcript transcript" aria-live="polite"><p class="note">Reading…</p></div>`,
   );
-  const root = document.querySelector("#dialog .archive-transcript");
+  const root = document.querySelector("#dialog .archive-transcript"),
+    frame = uiFrame(),
+    projectId = state.project.projectId;
   bindTranscript(root, {
-    text: (ref, offset) => read("archive-text", { projectId: state.project.projectId, conversationId, ref, offset, limit: 20000 }),
-    image: (ref) => read("archive-image", { projectId: state.project.projectId, conversationId, ref }),
+    text: (ref, offset) => read("archive-text", { projectId, conversationId, ref, offset, limit: 20000 }),
+    image: (ref) => read("archive-image", { projectId, conversationId, ref }),
   });
   root.addEventListener(
     "scroll",
@@ -84,7 +109,8 @@ async function showConversation(conversationId, title) {
     },
     { passive: true },
   );
-  const page = await read("archive-history", { projectId: state.project.projectId, conversationId });
+  const page = await read("archive-history", { projectId, conversationId });
+  if (!fresh(frame)) return;
   mergeNewest(transcriptKey(), page);
   paint(root, true);
 }
@@ -105,9 +131,11 @@ async function older(root) {
   const before = { height: root.scrollHeight, top: root.scrollTop },
     key = transcriptKey(),
     { projectId } = state.project,
-    conversationId = state.conversation.id;
+    conversationId = state.conversation.id,
+    frame = uiFrame();
   try {
     if (await loadOlder(key, (cursor) => read("archive-history", { projectId, conversationId, before: cursor }))) {
+      if (!fresh(frame) || !root.isConnected) return;
       paint(root);
       root.scrollTop = before.top + root.scrollHeight - before.height;
     }
@@ -153,7 +181,10 @@ registerForms([
   [
     "[data-archive-home]",
     async (form) => {
-      state.config = await read("archive-config", { home: new FormData(form).get("home").trim() });
+      const frame = uiFrame(),
+        config = await read("archive-config", { home: new FormData(form).get("home").trim() });
+      if (!fresh(frame)) return;
+      state.config = config;
       await showProjects();
     },
   ],

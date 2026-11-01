@@ -7,6 +7,7 @@ import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
+import { ThreadReference } from "./transcript-reader.ts";
 export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
 export const PromptOverrides = Type.Object(
@@ -879,7 +880,7 @@ export const Request = Type.Union([
       action: Type.Literal("thread-history"),
       id: Id,
       /** An agent id, or `<job id>/<conversation id>` for a subagent of a Job. */
-      threadId: Type.String({ pattern: "^[a-f0-9-]{36}(/[0-9]+)?$" }),
+      threadId: ThreadReference,
       before: Type.Optional(Type.Integer({ minimum: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
       context: Type.Optional(Type.Boolean()),
@@ -901,7 +902,7 @@ export const Request = Type.Union([
       action: Type.Literal("transcript-text"),
       id: Id,
       chatId: Type.Optional(ChatId),
-      threadId: Type.Optional(Id),
+      threadId: Type.Optional(ThreadReference),
       ref: TranscriptRef,
       offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 100_000_000 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20_000 })),
@@ -909,7 +910,13 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
-    { action: Type.Literal("transcript-image"), id: Id, chatId: Type.Optional(ChatId), threadId: Type.Optional(Id), ref: TranscriptRef },
+    {
+      action: Type.Literal("transcript-image"),
+      id: Id,
+      chatId: Type.Optional(ChatId),
+      threadId: Type.Optional(ThreadReference),
+      ref: TranscriptRef,
+    },
     { additionalProperties: false },
   ),
   Type.Object(

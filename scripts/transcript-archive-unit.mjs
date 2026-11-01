@@ -6,12 +6,21 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { listArchiveProjects, openArchiveProject } from "../src/archive-reader.ts";
 import { binaryResult } from "../src/binary-results.ts";
+import { parse, Request } from "../src/state.ts";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const home = mkdtempSync(join(tmpdir(), "archive-"));
 const project = "11111111-1111-4111-8111-111111111111";
 mkdirSync(join(home, project));
 writeFileSync(join(home, project, "project.json"), JSON.stringify({ name: "Old" }));
+const childThread = `${project}/2`;
+for (const action of ["thread-history", "transcript-text", "transcript-image"]) {
+  const request = { action, id: project, threadId: childThread };
+  if (action === "transcript-text") request.ref = "1.1";
+  if (action === "transcript-image") request.ref = "1.1.0";
+  assert.equal(parse(Request, request).threadId, childThread, `${action} accepts a Job child reference`);
+}
+
 const db = new DatabaseSync(join(home, project, "durable.sqlite"));
 db.exec(`CREATE TABLE entries (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, head INTEGER, commit_seq INTEGER NOT NULL, record TEXT NOT NULL);
 CREATE TABLE documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, owner_id INTEGER NOT NULL);

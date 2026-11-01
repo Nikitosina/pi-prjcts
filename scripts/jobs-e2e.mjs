@@ -71,6 +71,16 @@ function route(request) {
       });
     if (/BRIEF-(GATE|INTR)/.test(user) && !messages.some((message) => message.role === "toolResult")) return call("gate", {});
     if (tag === "BRIEF-INTR" && result.startsWith("gate open")) return say("Interrupted before it finished.");
+    if (user === "Race follow-up") {
+      gateOpen = false;
+      return call("gate", {});
+    }
+    if (tag === "BRIEF-RACE" && result === "gate open")
+      return say(
+        messages.some((message) => message.role === "user" && text(message.content) === "Race follow-up")
+          ? "Follow-up closing answer."
+          : "Initial closing answer.",
+      );
     if (user.includes("BRIEF-") || result.startsWith("gate open") || user.includes("host restarted"))
       return call("job", {
         action: "plan",
@@ -87,6 +97,7 @@ function route(request) {
     if (result === "PASS") return call("subagent", { role: "reviewer", task: "REVIEW" });
     if (result === "REVIEW-OK")
       return call("job", { action: "ready", summary: "Built it", pr: "12", candidate: sha, proof: ["verifier PASS"], review: "REVIEW-OK" });
+    if (tag === "BRIEF-RACE" && result.startsWith("Ready recorded")) return call("gate", {});
     return say("Done.");
   }
   if (role === "verifier") {
@@ -335,6 +346,27 @@ assert.equal(
   2,
   "the follow-up answer reports once more, and the retried steer did not run twice",
 );
+
+// 6b. The initial closing answer cannot settle a worker after a follow-up has been queued.
+gateOpen = false;
+gateEntered = false;
+await say_(root, "Start RACE");
+await until(() => gateEntered, "initial Ready answer held open");
+const race = (await jobsOf(harness)).find((item) => item.title === "Job RACE");
+await jobs.steer(harness, race.id, "Race follow-up", true);
+gateOpen = true;
+await until(
+  () => requests.some((item) => item.role === "worker" && item.tag === "BRIEF-RACE" && item.user === "Race follow-up"),
+  "queued follow-up started",
+);
+assert.equal(
+  (await harness.snapshot(Jobs, (await harness.root(context)).id, context)).agents[race.id].endedAt,
+  null,
+  "the initial reporter leaves the worker live for its follow-up",
+);
+gateOpen = true;
+await quiet(harness);
+assert.equal((await jobsOf(harness)).find((item) => item.id === race.id).status, "ready");
 
 // 7. Stop or pause while the agent is still preparing never submits its brief; resume sends it once.
 const holdPrepare = async (title, name) => {

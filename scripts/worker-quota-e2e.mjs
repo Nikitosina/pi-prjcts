@@ -13,7 +13,7 @@ const kit = await createKit("worker-quota", {
   handler: ({ role, model, user }) => {
     if (role !== "worker") return say("Noted.");
     const marker = ["FALLBACK", "EXHAUST", "UNKNOWN"].find((value) => user.includes(value));
-    requests.push({ marker, model });
+    requests.push({ marker, model, at: Date.now() });
     if (marker === "FALLBACK" && model === "fallback-model") return say("Finished on the fallback model.");
     return QUOTA;
   },
@@ -37,10 +37,14 @@ await kit.run(async () => {
   const submit = async (text) =>
     (await kit.rpc({ action: "work-submit", id, threadId: randomUUID(), requestId: randomUUID(), workspaceScopeId: scopeId, text })).id;
   const settled = (jobId) =>
-    kit.eventually(async () => {
-      const job = (await kit.jobs(id)).find((item) => item.id === jobId);
-      return job && job.status !== "running" ? job : false;
-    }, `Job ${jobId} did not settle`);
+    kit.eventually(
+      async () => {
+        const job = (await kit.jobs(id)).find((item) => item.id === jobId);
+        return job && job.status !== "running" ? job : false;
+      },
+      `Job ${jobId} did not settle`,
+      1200,
+    );
   const callsFor = (marker) => requests.filter((call) => call.marker === marker);
 
   await kit.updateSettings(id, { fallbackModels: { worker: "fake/fallback-model" } });
@@ -66,12 +70,25 @@ await kit.run(async () => {
     { exhausted, calls: callsFor("EXHAUST").length },
   );
 
+  const exhaustedCalls = callsFor("EXHAUST");
+  kit.check(
+    "every exhausted-fallback failure waits for a fresh backoff",
+    exhaustedCalls.slice(2).every((call, index) => call.at - exhaustedCalls[index + 1].at >= 40),
+    exhaustedCalls,
+  );
+
   await kit.updateSettings(id, { fallbackModels: { worker: null } });
   const unknown = await settled(await submit("UNKNOWN reset time"));
   kit.check(
     "without a fallback the worker retries on its own model, then fails",
     unknown.status === "failed" && unknown.modelMoves.length === 0 && callsFor("UNKNOWN").length === 9,
     { unknown, calls: callsFor("UNKNOWN").length },
+  );
+  const unknownCalls = callsFor("UNKNOWN");
+  kit.check(
+    "every same-model quota failure waits for a fresh backoff",
+    unknownCalls.slice(1).every((call, index) => call.at - unknownCalls[index].at >= 40),
+    unknownCalls,
   );
   const total = requests.length;
   await delay(400);

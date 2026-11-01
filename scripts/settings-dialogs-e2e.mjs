@@ -475,6 +475,30 @@ await kit.run(async () => {
   check("lifecycle: Back keeps the project untouched", (await rpc({ action: "show", id })).project.archived !== true);
   await ev(`document.querySelector('#dialog').close()`);
 
+  // A late Archive response cannot replace a dialog opened after it.
+  await ev(`(() => {
+    const original = window.fetch.bind(window);
+    window.__archiveFetch = original;
+    window.fetch = async (...args) => {
+      if (args[1]?.body?.includes('"archive-config"')) await new Promise(resolve => { window.__releaseArchive = resolve; });
+      return original(...args);
+    };
+    document.querySelector('[data-action=archive]').click();
+  })()`);
+  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Archive'`, "archive loading");
+  await open(
+    `document.querySelector('#settings-button').click()`,
+    `!!document.querySelector('#dialog [data-settings-form]')`,
+    "settings over archive",
+  );
+  await ev(`window.__releaseArchive(); window.fetch = window.__archiveFetch`);
+  await delay(200);
+  check(
+    "late Archive read leaves the newer Settings dialog alone",
+    await dlg(`!!d.querySelector('[data-settings-form]') && !d.querySelector('[data-archive-home]')`),
+  );
+  await ev(`document.querySelector('#dialog').close()`);
+
   // ---- Usage, provider receipts, known PR ----
   await page.navigate(await kit.webUrl(id, "observability"));
   await page.waitFor(`!!document.querySelector('#usage-button')`, "usage button");

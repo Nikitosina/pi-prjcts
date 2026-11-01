@@ -1,10 +1,13 @@
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, EntryId, Storage } from "@earendil-works/pi-durable";
+import { Type } from "typebox";
 
 /**
  * Reads a conversation's entries for display: newest page first, bounded text, images by reference.
  * It touches only the rows of the requested page and never serializes a whole result, so a 1 MB tool result or an inline base64 image costs one row parse.
  */
+/** A worker/Job id, optionally followed by its durable child conversation id. */
+export const ThreadReference = Type.String({ pattern: "^[a-f0-9-]{36}(/[0-9]+)?$" });
 export const PAGE_ENTRIES = 40;
 export const TEXT_PREVIEW_CHARS = 4000;
 const THINKING_PREVIEW_CHARS = 600,
@@ -82,6 +85,14 @@ export type TranscriptPage = {
   before: number | null;
   entries: number;
 };
+
+/** Shared default-limit trimming: keep newest whole entries and point `before` at the first omitted one. */
+export const transcriptEntryCount = (page: TranscriptPage): number => new Set(page.items.map((item) => item.entryId)).size;
+export function trimTranscriptPage(page: TranscriptPage, kept: number): TranscriptPage {
+  const entryIds = [...new Set(page.items.map((item) => item.entryId))];
+  const first = entryIds[entryIds.length - kept]!;
+  return { ...page, items: page.items.filter((item) => item.entryId >= first), before: kept < entryIds.length ? first : page.before };
+}
 
 export function validateEntryId(value: unknown, name = "before"): number | undefined {
   if (value === undefined || value === null) return undefined;
