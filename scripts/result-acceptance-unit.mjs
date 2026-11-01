@@ -40,12 +40,16 @@ writeFileSync(
   `#!/usr/bin/env node
 const fs = require("fs"); const a = process.argv.slice(2); const s = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, "utf8"));
 fs.appendFileSync(${JSON.stringify(calls)}, a.join(" ") + "\\n");
-if (a[1] === "view") { process.stdout.write(JSON.stringify(s)); process.exit(0); }
+if (a[1] === "view") { process.stdout.write(JSON.stringify({ ...s, url: "https://github.com/owner/repo/pull/7" })); process.exit(0); }
 if (a[1] === "ready") { s.isDraft = false; fs.writeFileSync(${JSON.stringify(state)}, JSON.stringify(s)); process.exit(0); }
 if (s.mergeFail) { process.stderr.write(s.mergeFail + "\\n"); process.exit(1); }
 if (s.hang) { setTimeout(() => {}, 1e6); return; }
 if (a.includes("--auto") && s.mergeStateStatus === "CLEAN") { process.stderr.write("Pull request is in clean status\\n"); process.exit(1); }
-if (!a.includes("--auto")) { s.state = "MERGED"; fs.writeFileSync(${JSON.stringify(state)}, JSON.stringify(s)); }
+if (a[0] === "api") {
+ if (!a.includes("sha=" + s.headRefOid)) { process.stderr.write("head mismatch"); process.exit(1); }
+ s.state = "MERGED"; fs.writeFileSync(${JSON.stringify(state)}, JSON.stringify(s));
+ process.stdout.write(JSON.stringify({ merged: true, message: "merged" }));
+}
 `,
 );
 chmodSync(join(root, "gh"), 0o755);
@@ -70,7 +74,7 @@ const job = (patch = {}) => ({ id: `job-${++n}`, pr: "7", candidateSha: head, ..
 const merges = () =>
   readFileSync(calls, "utf8")
     .split("\n")
-    .filter((l) => l.startsWith("pr merge"));
+    .filter((l) => l.startsWith("api "));
 
 // Mergeable: one pinned squash merge, clean main pulled.
 save({});
@@ -78,7 +82,7 @@ writeFileSync(join(other, "a.txt"), "2\n");
 (git(other, "commit", "-qam", "two"), git(other, "push", "-q", "origin", "main"));
 let outcome = await approver.approve(job());
 assert.equal(outcome.kind, "accepted");
-assert.match(merges()[0], /--squash --match-head-commit a{40}/);
+assert.match(merges()[0], /--method PUT repos\/owner\/repo\/pulls\/7\/merge -f sha=a{40} -f merge_method=squash/);
 assert.equal(readFileSync(join(checkout, "a.txt"), "utf8"), "2\n");
 
 // Head moved: nothing is merged.
@@ -108,13 +112,13 @@ assert.equal(outcome.kind, "merged-pull-skipped");
 assert.match(outcome.reason, /default branch is unknown/);
 git(checkout, "remote", "set-head", "origin", "--auto");
 
-// Not mergeable yet: auto-merge armed, Approve answers pending at once, and the flow finishes in the background.
+// Not mergeable yet: wait locally, answer pending at once, then merge the pinned head in the background.
 save({ mergeStateStatus: "BLOCKED" });
 const armed = job();
 assert.equal((await approver.approve(armed)).kind, "auto-merge-pending");
 assert.equal(finished.length, 0, "Approve answered before the merge finished");
-assert.ok(readFileSync(calls, "utf8").includes("--auto"));
-setTimeout(() => save({ state: "MERGED", mergeStateStatus: "BLOCKED" }), 50);
+assert.ok(!readFileSync(calls, "utf8").includes("--auto"));
+setTimeout(() => save({ mergeStateStatus: "CLEAN" }), 50);
 assert.equal((await settled(armed.id)).kind, "accepted");
 
 // Auto-merge never completes within the wait: the background flow ends pending, resumable.
@@ -136,7 +140,7 @@ save({ isDraft: true });
 const draft = job();
 assert.equal((await approver.approve(draft)).kind, "accepted");
 const trail = readFileSync(calls, "utf8").split("\n");
-assert.ok(trail.indexOf("pr ready 7") >= 0 && trail.indexOf("pr ready 7") < trail.findLastIndex((l) => l.startsWith("pr merge")));
+assert.ok(trail.indexOf("pr ready 7") >= 0 && trail.indexOf("pr ready 7") < trail.findLastIndex((l) => l.startsWith("api ")));
 
 // Conflicts and refusals are errors, not outcomes.
 save({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });

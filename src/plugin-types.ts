@@ -382,7 +382,7 @@ export type MergeProvider = {
   markReady?(input: MergeTarget): Promise<MergeAnswer>;
   /** Merges exactly `head`; must refuse when the PR head differs. */
   merge(input: MergeTarget & { head: string }): Promise<MergeAnswer>;
-  /** Merges as soon as the PR becomes mergeable, pinned to `head`. `waiting: false` when the PR is already mergeable and nothing was armed. */
+  /** May arm a head-pinned merge or leave waiting to the caller. `waiting: false` requests an immediate direct merge. */
   enableAutoMerge(input: MergeTarget & { head: string }): Promise<{ ok: true; waiting: boolean } | { ok: false; refused: string }>;
   /** Fast-forwards the main checkout of `base` when it is clean and on that branch; never throws for an expected skip. */
   pullMain(input: { checkout: string; base: string; signal: AbortSignal }): Promise<{ pulled: true } | { pulled: false; reason: string }>;

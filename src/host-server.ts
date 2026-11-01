@@ -301,7 +301,8 @@ async function ownerBusy(owner: DurableProjectRuntime): Promise<boolean> {
   return (
     current.coordinator.busy ||
     current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-    workBusy(plan)
+    workBusy(plan) ||
+    owner.approvalsBusy()
   );
 }
 
@@ -347,8 +348,13 @@ async function knowledgeDir(id: string): Promise<string> {
 
 function dispatch(input: RequestData): Promise<unknown> {
   // This request closes admission itself and must not wait on its own entry in activeRequests.
-  if (input.action === "deploy-shutdown") return stopForDeploy();
-  const operation = dispatchRequest(input);
+  if (input.action === "deploy-shutdown") return stopForDeploy(input.sha);
+  return trackRequest(() => dispatchRequest(input));
+}
+
+function trackRequest<T>(start: () => Promise<T>): Promise<T> {
+  if (closing) return Promise.reject(new Error("Host is stopping"));
+  const operation = start();
   activeRequests.add(operation);
   void operation.finally(() => activeRequests.delete(operation)).catch(() => {});
   return operation;
@@ -1436,7 +1442,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       recordHostEvent("deploy", "deploy started by the owner");
       return { settings: loadDeploySettings(), state: readDeployState(), running: true, queued: false };
     case "deploy-shutdown":
-      return stopForDeploy();
+      return stopForDeploy(input.sha);
     case "shutdown":
       closing = true;
       setTimeout(() => {
@@ -1514,9 +1520,11 @@ let pushCursor = notifier.seq();
 const telegram = startTelegram({
   dispatch: (input) => dispatch(parse(Request, input)),
   approve: async (projectId, jobId) => {
-    const result = await (await durable(projectId)).approveJob(jobId);
-    if ("refused" in result) throw new Error(result.refused);
-    return result.outcome;
+    return trackRequest(async () => {
+      const result = await (await durable(projectId)).approveJob(jobId);
+      if ("refused" in result) throw new Error(result.refused);
+      return result.outcome;
+    });
   },
   chats: async (id) => (await durable(id)).chats(),
   notifier,
@@ -1567,22 +1575,27 @@ async function noOwnerBusy(): Promise<boolean> {
   for (const opening of durableRuntimes.values()) if (await ownerBusy(await opening)) return false;
   return true;
 }
-/** A deploy may have taken minutes to prepare. Close new work first, drain admitted requests, then check again. */
-async function stopForDeploy(): Promise<{ stopping: boolean; queued?: boolean }> {
+/** Drain requests before checking the checkout: an admitted Approve may still pull. */
+async function stopForDeploy(sha: string): Promise<{ stopping: boolean; queued?: boolean }> {
   closing = true;
   try {
     await Promise.allSettled([...activeRequests]);
-    if (shutdownOperation || (await noOwnerBusy())) {
+    const idle = shutdownOperation || (await noOwnerBusy());
+    // No await between these reads and shutdown, so host requests cannot change the checked checkout.
+    const git = (...args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 10_000 }).trim();
+    if (idle && git("rev-parse", "HEAD") === sha && !git("status", "--porcelain", "--untracked-files=no")) {
       setTimeout(() => void shutdown(), 50);
       return { stopping: true };
     }
     closing = false;
     queueDeploy();
-    recordHostEvent("deploy", "deploy requeued: work started during deployment preparation");
+    recordHostEvent("deploy", "deploy requeued: work or checkout changed during deployment preparation");
     return { stopping: false, queued: true };
   } catch (error) {
     closing = false;
-    throw error;
+    queueDeploy();
+    recordHostEvent("deploy", `deploy requeued: preparation failed: ${errorText(error)}`);
+    return { stopping: false, queued: true };
   }
 }
 const idleDeployTimer = setInterval(

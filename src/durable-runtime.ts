@@ -290,6 +290,8 @@ export type DurableProjectRuntime = {
   steerJob(id: string, text: string, options?: { followUp?: boolean; requestId?: string }): Promise<string>;
   /** Approve a Ready Job: merge its candidate through result acceptance. */
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
+  /** Includes background approvals that may still pull after returning a pending answer. */
+  approvalsBusy(): boolean;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
   /** A page of an agent's transcript with its tool names and recent generation state; text beyond a preview is read with `transcriptText`. */
@@ -1008,6 +1010,7 @@ export async function openDurableProject(input: {
           const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
           if (!provider)
             throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
+          assertOpen();
           mergeTargets.set(job.id, { provider, checkout: repository.ownerCheckout });
           return approver.approve(job, mergeFlows.signal);
         },
@@ -1687,6 +1690,7 @@ export async function openDurableProject(input: {
         assertOpen();
         return jobs.approve(openedHarness, id);
       },
+      approvalsBusy: () => approver.busy(),
       workerDiff: async (threadId, base, page) => {
         assertOpen();
         return workerChanges(await agentCwd(threadId), base, page);
@@ -2018,6 +2022,7 @@ export async function openDurableProject(input: {
         closeOperation = Promise.resolve().then(async () => {
           const errors: unknown[] = [];
           const drains = await Promise.allSettled([
+            approver.drain(),
             Promise.resolve().then(() => stopOperations?.()),
             Promise.resolve().then(() => stopMonitors?.()),
             Promise.resolve().then(() => stopCommands?.()),

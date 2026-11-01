@@ -66,8 +66,8 @@ export type DeployDeps = {
   repo: string;
   run?: RunCommand;
   stopHost(): Promise<void>;
-  /** Close admission and stop only if still idle; false means work arrived and the deploy must requeue. */
-  stopForDeploy?(): Promise<boolean>;
+  /** Drain admitted requests, then stop only if idle and still clean at sha; false requeues preparation. */
+  stopForDeploy?(sha: string): Promise<boolean>;
   startHost(): Promise<void>;
   /** Undefined when the new host is healthy, else the first failed check. */
   smoke(): Promise<string | undefined>;
@@ -134,13 +134,19 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
     } finally {
       await git("worktree", "remove", "--force", checkDir).catch(() => rmSync(checkDir, { recursive: true, force: true }));
     }
+    try {
+      if ((await git("rev-parse", "HEAD")) !== sha || (await git("status", "--porcelain", "--untracked-files=no"))) {
+        queueDeploy();
+        return { ok: true, sha, queued: true };
+      }
+    } catch (error) {
+      return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
+    }
     let reason: string | undefined;
     try {
-      if (deps.stopForDeploy) {
-        if (!(await deps.stopForDeploy())) {
-          queueDeploy();
-          return { ok: true, sha, queued: true };
-        }
+      if (deps.stopForDeploy && !(await deps.stopForDeploy(sha))) {
+        queueDeploy();
+        return { ok: true, sha, queued: true };
       }
       await deps.stopHost();
       if (changed) await run("npm", ["ci"], deps.repo);
@@ -197,7 +203,7 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
   const smokeMs = options.smokeMs ?? 30_000;
   return {
     repo,
-    async stopForDeploy() {
+    async stopForDeploy(sha) {
       try {
         const pid = Number(readFileSync(join(home(), "host.lock"), "utf8").trim());
         if (!Number.isSafeInteger(pid) || pid <= 0) return true;
@@ -205,7 +211,7 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
       } catch {
         return true;
       }
-      return ((await request({ action: "deploy-shutdown" }, false)) as { stopping: boolean }).stopping;
+      return ((await request({ action: "deploy-shutdown", sha }, false)) as { stopping: boolean }).stopping;
     },
     async stopHost() {
       // The host lock holds the pid; a failing health read alone does not prove the host is down.

@@ -11,7 +11,7 @@ import type { MergeAnswer, MergeFacts, MergeProvider, MergeTarget } from "./plug
 /** What Approve needs from a Job record; core's Job carries more. `pr` is the provider's PR id (a number for GitHub). */
 export type AcceptJob = { id: string; pr: string; candidateSha: string };
 
-/** `auto-merge-pending`: auto-merge is armed but the wait ended; approve again later, it resumes. */
+/** `auto-merge-pending`: approval is waiting for mergeability; approve again after the wait ends to resume. */
 export type AcceptanceOutcome =
   | { kind: "accepted"; head: string }
   | { kind: "merged-pull-skipped"; head: string; reason: string }
@@ -64,13 +64,13 @@ export function describeAcceptance(outcome: AcceptanceOutcome): string {
     case "merge-uncertain":
       return `The merge outcome is unknown: ${outcome.detail}. Check the PR before approving again.`;
     case "auto-merge-pending":
-      return "Auto-merge is armed and waiting for the PR to become mergeable; approve again later to finish.";
+      return "Approval is waiting for the PR to become mergeable; approve again later if the wait ends.";
   }
 }
 
 /**
  * Approve: merge the approved head (now, or when it becomes mergeable), then pull the main checkout when that is safe.
- * Once auto-merge is armed, `approve` answers `auto-merge-pending` at once and the flow finishes in the background, reporting through `finished`.
+ * While waiting, `approve` answers `auto-merge-pending` at once and the flow finishes in the background, reporting through `finished`.
  */
 export function createApprover(options: {
   provider: (job: AcceptJob) => MergeProvider;
@@ -80,7 +80,7 @@ export function createApprover(options: {
   waitMs?: number;
   finished?: (job: AcceptJob, result: AcceptanceOutcome | Error) => void;
 }) {
-  const inflight = new Map<string, Promise<AcceptanceOutcome>>();
+  const inflight = new Map<string, { first: Promise<AcceptanceOutcome>; settled: Promise<void> }>();
   const pollMs = options.pollMs ?? 30_000,
     waitMs = options.waitMs ?? 6 * 3_600_000;
 
@@ -143,7 +143,13 @@ export function createApprover(options: {
             facts = await provider.inspect(target);
             exact(facts);
             if (facts.state === "merged") break;
-            if (facts.state === "closed") throw new Error("The PR was closed while waiting for auto-merge");
+            if (facts.state === "closed") throw new Error("The PR was closed while waiting to merge");
+            if (facts.mergeable === "no") throw new Error("The PR has conflicts and cannot merge");
+            if (facts.mergeable === "yes") {
+              const done = await direct();
+              if (done !== "merged") return done;
+              break;
+            }
             if (Date.now() >= deadline) return { kind: "auto-merge-pending" };
           }
         }
@@ -158,22 +164,27 @@ export function createApprover(options: {
   }
 
   return {
+    /** An early pending answer does not settle the flow or its eventual checkout pull. */
+    busy: (): boolean => inflight.size > 0,
+    async drain(): Promise<void> {
+      await Promise.all([...inflight.values()].map((flow) => flow.settled));
+    },
     /** One flow per Job at a time; a second Approve (double tap) joins the running one. */
     approve(job: AcceptJob, signal: AbortSignal = new AbortController().signal): Promise<AcceptanceOutcome> {
       const running = inflight.get(job.id);
-      if (running) return running;
+      if (running) return running.first;
       let early = false;
       let settleFirst!: { resolve(value: AcceptanceOutcome): void; reject(error: unknown): void };
       const first = new Promise<AcceptanceOutcome>((resolve, reject) => (settleFirst = { resolve, reject }));
       const done = () => inflight.delete(job.id);
-      void run(job, signal, () => {
+      const settled = run(job, signal, () => {
         early = true;
         settleFirst.resolve({ kind: "auto-merge-pending" });
       }).then(
         (outcome) => (done(), early ? options.finished?.(job, outcome) : settleFirst.resolve(outcome)),
         (error) => (done(), early ? options.finished?.(job, error as Error) : settleFirst.reject(error)),
       );
-      inflight.set(job.id, first);
+      inflight.set(job.id, { first, settled });
       return first;
     },
   };
@@ -189,15 +200,14 @@ const View = Type.Object({
   mergeable: Type.String(),
 });
 
-/** Merge capability for GitHub checkouts through the owner's gh; every merge is pinned to the approved head with --match-head-commit. */
+/** GitHub merges use the direct API with a head match; the CLI merge command can enqueue an unpinned later merge. */
 export function githubMergeProvider(): MergeProvider {
   const gh = (target: MergeTarget, args: string[]) =>
     exec(githubCli(), args, { cwd: target.checkout, signal: target.signal, timeout: 60_000, maxBuffer: 1048576, encoding: "utf8" });
   // gh exiting non-zero means GitHub answered; a kill or timeout means nobody knows.
-  const answer = async (call: Promise<unknown>): Promise<MergeAnswer> => {
+  const answer = async (call: () => Promise<MergeAnswer>): Promise<MergeAnswer> => {
     try {
-      await call;
-      return { ok: true };
+      return await call();
     } catch (error) {
       const failure = error as { code?: unknown; killed?: boolean; signal?: unknown; stderr?: string };
       if (typeof failure.code !== "number" || failure.killed || failure.signal) throw error;
@@ -224,14 +234,38 @@ export function githubMergeProvider(): MergeProvider {
             : "later";
       return { state, draft: view.isDraft, head: view.headRefOid, base: view.baseRefName, mergeable };
     },
-    markReady: (target) => answer(gh(target, ["pr", "ready", target.pr])),
-    merge: (input) => answer(gh(input, ["pr", "merge", input.pr, "--squash", "--match-head-commit", input.head])),
-    async enableAutoMerge(input) {
-      const result = await answer(gh(input, ["pr", "merge", input.pr, "--auto", "--squash", "--match-head-commit", input.head]));
-      // GitHub rejects auto-merge on a PR that can merge right now; the caller merges instead.
-      if (!result.ok && /clean status/i.test(result.refused)) return { ok: true, waiting: false };
-      return result.ok ? { ok: true, waiting: true } : result;
-    },
+    markReady: (target) =>
+      answer(async () => {
+        await gh(target, ["pr", "ready", target.pr]);
+        return { ok: true };
+      }),
+    merge: (input) =>
+      answer(async () => {
+        const pr = parse(
+          Type.Object({ url: Type.String() }),
+          JSON.parse((await gh(input, ["pr", "view", input.pr, "--json", "url"])).stdout),
+        );
+        const url = new URL(pr.url);
+        const path = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)$/.exec(url.pathname);
+        if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || !path)
+          throw new Error("GitHub returned an invalid PR URL");
+        const result = await gh(input, [
+          "api",
+          "--hostname",
+          url.host,
+          "--method",
+          "PUT",
+          `repos/${path[1]}/${path[2]}/pulls/${path[3]}/merge`,
+          "-f",
+          `sha=${input.head}`,
+          "-f",
+          "merge_method=squash",
+        ]);
+        const merged = parse(Type.Object({ merged: Type.Boolean(), message: Type.String() }), JSON.parse(result.stdout));
+        return merged.merged ? { ok: true } : { ok: false, refused: merged.message };
+      }),
+    // Server auto-merge and merge queues do not keep the owner's head pin after a push.
+    enableAutoMerge: async () => ({ ok: true, waiting: true }),
     async pullMain({ checkout, base, signal }) {
       try {
         if (await git(checkout, signal, "status", "--porcelain")) return { pulled: false, reason: "the checkout has uncommitted changes" };

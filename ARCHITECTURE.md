@@ -67,7 +67,7 @@ Rules:
 
 ## Result acceptance (Approve)
 
-`src/result-acceptance.ts`: `createApprover` merges the Job's candidate sha, then pulls the main checkout when it is clean and on the default branch. Outcomes: `accepted`, `merged-pull-skipped` (with a reason), `merge-uncertain`, `auto-merge-pending`. When the PR is mergeable now it merges; when it is blocked on checks or review it arms auto-merge and polls. The provider comes from the checkout kind: `githubMergeProvider()` for GitHub, otherwise the plugin's `merge` capability (`plugins.mergeProvider`). The web action `job-approve`, the Telegram Approve button and `Jobs.approve` share this path; on `accepted` or `merged-pull-skipped` the Job becomes `approved`.
+`src/result-acceptance.ts`: `createApprover` merges the Job's candidate sha, then pulls the main checkout when it is clean and on the default branch. Outcomes: `accepted`, `merged-pull-skipped` (with a reason), `merge-uncertain`, `auto-merge-pending`. When the PR is mergeable now it merges; when it is blocked on checks or review it waits and polls. GitHub waits locally and uses the direct merge API with a head match, never server auto-merge or queue admission. Plugins may arm a head-pinned auto-merge. The provider comes from the checkout kind: `githubMergeProvider()` for GitHub, otherwise the plugin's `merge` capability (`plugins.mergeProvider`). The web action `job-approve`, the Telegram Approve button and `Jobs.approve` share this path; on `accepted` or `merged-pull-skipped` the Job becomes `approved`.
 
 Rules:
 - Write the intent to the acceptance log (`<project>/acceptance/<job>.json`) before calling `merge`. After a call that throws, read the PR before deciding; never retry blind.

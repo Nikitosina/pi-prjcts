@@ -1021,7 +1021,8 @@ export function createJobs(host: JobsHost) {
     if (outcome?.kind !== "accepted" && outcome?.kind !== "merged-pull-skipped") return;
     await harness.commit(async (tx) => {
       const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
-      if (current && (current.status === "ready" || current.status === "ready-with-gaps")) current.status = "approved";
+      if (current?.candidate === outcome.head && (current.status === "ready" || current.status === "ready-with-gaps"))
+        current.status = "approved";
     }, context);
   }
 
