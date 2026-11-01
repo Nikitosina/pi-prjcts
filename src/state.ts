@@ -1113,6 +1113,7 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("knowledge-history"), id: Id, path: knowledgePath }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("shutdown") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("deploy-shutdown") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("deploy-snapshot") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("deploy-settings"), settings: DeploySettings }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("deploy-start") }, { additionalProperties: false }),

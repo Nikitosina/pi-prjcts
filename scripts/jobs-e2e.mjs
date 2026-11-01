@@ -14,10 +14,12 @@ import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createJobs, Jobs, planEta } from "../src/jobs.ts";
 import { guardedStream } from "../src/model-guard.ts";
+import { DEFAULT_ROLE_PROMPTS } from "../src/role-prompts.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
+assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
 
 // The ETA counts down inside the step in progress and keeps a minute for an overrun one.
 {

@@ -55,12 +55,20 @@ try {
   // The host records the sha it started from.
   assert.equal(await deployPending(clone), false);
 
+  // 1b. Work admitted during preparation requeues the deploy instead of stopping the host.
+  const beforeRace = (await health()).pid;
+  result = await deploy({ ...deps, stopForDeploy: async () => false });
+  assert.equal(result.queued, true);
+  assert.equal((await health()).pid, beforeRace);
+  assert.ok(readDeployState().queuedAt > 0);
+  clearQueuedDeploy();
+
   // 2. A lockfile change runs npm ci once, and the host restarts.
   appendFileSync(join(clone, "package-lock.json"), "\n");
   commit("lock");
   commands.length = 0;
   result = await deploy(deps);
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   // Install and check run in a separate worktree while the host is up; the checkout installs only after the stop.
   const stopAt = commands.indexOf("stop host");
   assert.equal(commands.filter((c) => c === "check: npm ci").length, 1);

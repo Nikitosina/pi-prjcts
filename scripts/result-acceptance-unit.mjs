@@ -18,6 +18,7 @@ for (const dir of [checkout, other]) (git(dir, "config", "user.email", "t@exampl
 writeFileSync(join(other, "a.txt"), "1\n");
 (git(other, "add", "."), git(other, "commit", "-qm", "one"), git(other, "push", "-q", "origin", "main"));
 git(checkout, "pull", "-q", "origin", "main");
+git(checkout, "remote", "set-head", "origin", "--auto");
 const head = "a".repeat(40);
 const state = join(root, "state.json"),
   calls = join(root, "calls.log");
@@ -98,6 +99,14 @@ outcome = await approver.approve(job());
 assert.equal(outcome.kind, "merged-pull-skipped");
 assert.match(outcome.reason, /uncommitted/);
 git(checkout, "checkout", "-q", "--", "a.txt");
+
+// Unknown remote default: merged, but never pull on the assumption that the current branch is default.
+git(checkout, "remote", "set-head", "origin", "--delete");
+save({});
+outcome = await approver.approve(job());
+assert.equal(outcome.kind, "merged-pull-skipped");
+assert.match(outcome.reason, /default branch is unknown/);
+git(checkout, "remote", "set-head", "origin", "--auto");
 
 // Not mergeable yet: auto-merge armed, Approve answers pending at once, and the flow finishes in the background.
 save({ mergeStateStatus: "BLOCKED" });

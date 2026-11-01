@@ -66,12 +66,14 @@ export type DeployDeps = {
   repo: string;
   run?: RunCommand;
   stopHost(): Promise<void>;
+  /** Close admission and stop only if still idle; false means work arrived and the deploy must requeue. */
+  stopForDeploy?(): Promise<boolean>;
   startHost(): Promise<void>;
   /** Undefined when the new host is healthy, else the first failed check. */
   smoke(): Promise<string | undefined>;
   tell(text: string): Promise<void>;
 };
-export type DeployResult = { ok: true; sha: string } | { ok: false; sha: string; rolledBack: boolean; reason: string };
+export type DeployResult = { ok: true; sha: string; queued?: boolean } | { ok: false; sha: string; rolledBack: boolean; reason: string };
 
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const path = lockPath();
@@ -134,6 +136,12 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
     }
     let reason: string | undefined;
     try {
+      if (deps.stopForDeploy) {
+        if (!(await deps.stopForDeploy())) {
+          queueDeploy();
+          return { ok: true, sha, queued: true };
+        }
+      }
       await deps.stopHost();
       if (changed) await run("npm", ["ci"], deps.repo);
       await deps.startHost();
@@ -189,6 +197,16 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
   const smokeMs = options.smokeMs ?? 30_000;
   return {
     repo,
+    async stopForDeploy() {
+      try {
+        const pid = Number(readFileSync(join(home(), "host.lock"), "utf8").trim());
+        if (!Number.isSafeInteger(pid) || pid <= 0) return true;
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+      return ((await request({ action: "deploy-shutdown" }, false)) as { stopping: boolean }).stopping;
+    },
     async stopHost() {
       // The host lock holds the pid; a failing health read alone does not prove the host is down.
       const alive = (pid: number) => {

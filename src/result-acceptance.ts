@@ -238,8 +238,8 @@ export function githubMergeProvider(): MergeProvider {
         const branch = await git(checkout, signal, "branch", "--show-current");
         if (branch !== base) return { pulled: false, reason: `the checkout is on ${branch || "a detached head"}, not ${base}` };
         const remoteDefault = await git(checkout, signal, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").catch(() => "");
-        if (remoteDefault && remoteDefault !== `origin/${base}`)
-          return { pulled: false, reason: `${base} is not the default branch (${remoteDefault})` };
+        if (!remoteDefault) return { pulled: false, reason: "the default branch is unknown (origin/HEAD is not set)" };
+        if (remoteDefault !== `origin/${base}`) return { pulled: false, reason: `${base} is not the default branch (${remoteDefault})` };
         await git(checkout, signal, "pull", "--ff-only");
         return { pulled: true };
       } catch (error) {
