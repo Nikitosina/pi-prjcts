@@ -1,6 +1,6 @@
 # Subscription limits bar
 
-The bottom bar shows one compact item per provider with the 5-hour and weekly (7-day) usage windows, a percent bar, a reset countdown on hover, and the time and source of the last reading. It is modelled on the status bar in [Orca](https://www.onorca.dev/).
+The bottom bar shows one compact item per visible provider with its 5-hour, weekly (7-day), or monthly usage windows, a percent bar, a reset countdown on hover, and the time and source of the last reading. The Providers menu independently shows or hides each provider and persists that display preference for the host instance. It is modelled on the status bar in [Orca](https://www.onorca.dev/).
 
 ## How Orca does it (research)
 
@@ -26,6 +26,8 @@ Orca does not read response headers. It polls (default every 15 minutes, minimum
 ## What Pi prjcts does
 
 Everything is host-side (`src/usage-limits.ts`). The browser calls the authenticated `limits-snapshot` action and receives normalized samples `{ provider, window, usedPercent, resetsAt, observedAt }` (plus `source: "headers" | "endpoint"` and a status/reason per provider). Tokens and raw responses never leave the host. The CSP is unchanged (no new script origin, no CDN).
+
+The Providers menu writes one boolean per provider through `limits-visibility` to `$PI_PROJECTS_HOME/limits-visibility.json`. Missing or unreadable preferences default to all visible. Visibility affects presentation only: hidden providers retain normal polling and quota observations, and the menu remains available when every provider is hidden.
 
 **1. Passive response headers (preferred).** `src/durable-runtime.ts` wraps the model stream and passes an `onResponse` observer to pi-ai, which fires it with the response headers of every request ([`anthropic-messages.js`](../node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js), [`openai-codex-responses.js`](../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js)). Header names were checked against real responses:
 
@@ -53,9 +55,11 @@ Claude and Codex logins are read through Pi's own credential resolver, which ren
 
 **4. Eliza: actual USD month-to-date cost.** The item immediately after Cursor reads `Eliza $X.XX`. The host calls the documented `GET https://api.eliza.yandex.net/v2/usage` with the existing `ELIZA_TOKEN` and sums `usage.*.stats.monthly.cost` across the returned usage buckets. Eliza's `EffectiveUsage` implementation partitions those buckets so chain and dedicated-model spend is counted once. The request-start time selects the UTC month; a response that crosses a month boundary is discarded and retried. The tooltip names the account, optional pool, USD, UTC calendar-month period and fetch time. See [Eliza USD usage](eliza-usage.md) for the source documentation, verified response shape and limitations.
 
+**5. Kimi Coding: 5-hour and monthly percentages.** The host calls the undocumented read-only `GET https://api.kimi.com/coding/v1/usages` with the existing `kimi-coding.key` API key from Pi's `auth.json`. The current response's `usages.limit_5h` and `usages.limit_month_total` supply fractional `used_ratio` values and ISO `reset_time` timestamps. The duplicate `limit_month_code` reading is not shown as another quota. A real read-only request returned HTTP 200 and this shape; no model request was made. Kimi uses the same polling, cooldown, backoff and normalized browser payload as the other providers.
+
 **No invented numbers.** No sample means `—`; hover says "No data yet" with the reason and the time of the last attempt. A reading whose reset time has passed is dimmed and shown as `—` until a new reading arrives. Eliza's empty or malformed response never becomes $0.
 
 ## Checks
 
-- `node scripts/usage-limits-unit.mjs`: header parsing against recorded real shapes, window classification, poll cadence and passive-over-poll precedence.
-- `node scripts/status-dots-e2e.mjs`: browser run with fixture data (`PI_PROJECTS_LIMITS_FIXTURE=<file>` replaces the Claude and Codex endpoints; `PI_PROJECTS_CURSOR_DASHBOARD` / `PI_PROJECTS_CURSOR_API` point Cursor at a local fake that also exercises Connect Cursor; no provider is contacted).
+- `node scripts/usage-limits-unit.mjs`: recorded response shapes, Kimi normalization, visibility persistence/defaults, window classification, poll cadence and passive-over-poll precedence.
+- `node scripts/status-dots-e2e.mjs`: browser run with fixture data (`PI_PROJECTS_LIMITS_FIXTURE=<file>` replaces non-Cursor endpoints; `PI_PROJECTS_CURSOR_DASHBOARD` / `PI_PROJECTS_CURSOR_API` point Cursor at a local fake that also exercises Connect Cursor). Covers provider visibility, reload and narrow layout; no provider is contacted.

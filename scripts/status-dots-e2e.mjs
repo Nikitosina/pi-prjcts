@@ -25,6 +25,10 @@ const elizaFixture = {
     "chain:top_opensource": { stats: { monthly: { requests: 2, cost: 0.005 } } },
   },
 };
+const kimiFixture = [
+  { window: "5h", usedPercent: 48.49, resetsAt: fixtureAt + 2 * 3600e3 },
+  { window: "mo", usedPercent: 27.03, resetsAt: fixtureAt + 20 * 86400e3 },
+];
 const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
 const save = () => writeFileSync(join(artifacts, "result.json"), JSON.stringify(result, null, 2) + "\n", { mode: 0o600 });
 const redact = (text) => String(text).replace(/token=[^&#\s"]+/gi, "token=[redacted]");
@@ -407,6 +411,7 @@ try {
       ],
       codex: [{ window: "7d", usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }],
       eliza: elizaFixture,
+      kimi: kimiFixture,
     }),
   );
   await eventually(async () => {
@@ -654,7 +659,7 @@ try {
 
   // Limits bar (fixture data; the host never contacted a provider).
   await waitFor(
-    `document.querySelectorAll('#limits-bar .lim').length === 4 && /42%/.test(document.querySelector('#limits-bar').innerText)`,
+    `document.querySelectorAll('#limits-bar .lim').length === 5 && /42%/.test(document.querySelector('#limits-bar').innerText)`,
     s,
     "limits bar",
   );
@@ -673,13 +678,72 @@ try {
     !/not connected/i.test(bar.cursor.label) ||
     bar.eliza.text !== "Eliza $12.35" ||
     !/^Eliza: \$12.35 month to date/.test(bar.eliza.label) ||
+    !/5h.*48%.*month.*27%/.test(bar.kimi.text) ||
+    !/^Kimi: 5h/.test(bar.kimi.label) ||
     /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, ""))
   )
     throw Error("Limits bar content wrong: " + JSON.stringify(bar));
   const providerOrder = await evaluate(`[...document.querySelectorAll('#limits-bar .lim')].map(n => n.dataset.provider).join(',')`, s);
-  if (providerOrder !== "claude,codex,cursor,eliza") throw Error("Eliza is not immediately after Cursor: " + providerOrder);
+  if (providerOrder !== "claude,codex,cursor,eliza,kimi") throw Error("Provider order wrong: " + providerOrder);
   result.checks.push(
-    "B1 bottom bar with explicit fixture data: Claude 5h 42% / 7d 24%, Codex 7d 3%, Cursor unavailable, then Eliza $12.35 month to date",
+    "B1 bottom bar with fixture data: Claude 5h/7d, Codex 7d, Cursor unavailable, Eliza month-to-date cost, Kimi 5h 48% / month 27%",
+  );
+
+  // Provider visibility is durable, independent, and reversible even when every provider is hidden.
+  await click("#limits-bar .lim-providers-toggle", s);
+  await waitFor(
+    `!document.querySelector('#limits-providers').hidden && document.querySelectorAll('#limits-providers input').length === 5`,
+    s,
+    "provider menu",
+  );
+  await evaluate(
+    `document.querySelector('.lim-providers-toggle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`,
+    s,
+  );
+  await waitFor(
+    `document.querySelector('#limits-providers').hidden && document.activeElement === document.querySelector('.lim-providers-toggle')`,
+    s,
+    "Escape closes provider menu and restores focus",
+  );
+  await click("#limits-bar .lim-providers-toggle", s);
+  await click('#limits-providers input[data-provider="claude"]', s);
+  await waitFor(
+    `!document.querySelector('#limits-bar .lim[data-provider="claude"]') && document.querySelectorAll('#limits-bar .lim').length === 4`,
+    s,
+    "hide Claude only",
+  );
+  const visibilityNavigation = await evaluate(`performance.timeOrigin`, s);
+  await send("Page.navigate", { url: launch.toString() }, s);
+  await waitFor(
+    `performance.timeOrigin !== ${visibilityNavigation} && document.querySelectorAll('#limits-bar .lim').length === 4 && !document.querySelector('#limits-bar .lim[data-provider="claude"]') && !!document.querySelector('#limits-bar .lim[data-provider="kimi"]')`,
+    s,
+    "visibility survives reload",
+  );
+  await click("#limits-bar .lim-providers-toggle", s);
+  await waitFor(`!document.querySelector('#limits-providers').hidden`, s, "provider menu after reload");
+  for (const provider of ["codex", "cursor", "eliza", "kimi"]) {
+    await click(`#limits-providers input[data-provider="${provider}"]`, s);
+    await waitFor(`!document.querySelector('#limits-bar .lim[data-provider="${provider}"]')`, s, `hide ${provider}`);
+  }
+  await waitFor(
+    `document.querySelectorAll('#limits-bar .lim').length === 0 && !!document.querySelector('#limits-bar .lim-providers-toggle') && !!document.querySelector('#limits-bar .lim-refresh') && !!document.querySelector('#limits-bar .mach')`,
+    s,
+    "all providers hidden leaves controls and machine status",
+  );
+  await shot("06a-provider-visibility-all-hidden", s);
+  let invalidVisibility = false;
+  try {
+    await rpc({ action: "limits-visibility", provider: "bogus", visible: false });
+  } catch {
+    invalidVisibility = true;
+  }
+  if (!invalidVisibility) throw Error("Unknown visibility provider was accepted");
+  for (const provider of ["claude", "codex", "cursor", "eliza", "kimi"]) {
+    await click(`#limits-providers input[data-provider="${provider}"]`, s);
+    await waitFor(`!!document.querySelector('#limits-bar .lim[data-provider="${provider}"]')`, s, `show ${provider}`);
+  }
+  result.checks.push(
+    "B1c provider menu: five named checkboxes, Escape/focus, independent hide/show, reload persistence, all-hidden recovery, unknown provider rejected",
   );
   const elizaBox = await box('#limits-bar .lim[data-provider="eliza"]', s);
   await send(
@@ -738,7 +802,7 @@ try {
   await shot("07-limits-bar-unavailable", s);
   // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
   const refreshInfo = await evaluate(
-    `(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.dataset.provider === 'eliza', margin: getComputedStyle(b).marginLeft }; })()`,
+    `(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.classList.contains('lim-settings'), margin: getComputedStyle(b).marginLeft }; })()`,
     s,
   );
   if (refreshInfo.label !== "Refresh limits" || !refreshInfo.title || !refreshInfo.last || refreshInfo.margin !== "0px")
@@ -789,6 +853,7 @@ try {
       ],
       codex: [{ window: "7d", usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }],
       eliza: elizaFixture,
+      kimi: kimiFixture,
     }),
   );
   await click("#limits-bar .lim-refresh", s);
@@ -798,7 +863,7 @@ try {
     "refreshed numbers",
   );
   result.checks.push(
-    "B3 refresh icon: aria-label and tooltip, directly after the last provider with no auto margin; clicking refetches now (42% -> 61%) and re-enables the button",
+    "B3 refresh icon: aria-label and tooltip beside the provider menu; clicking refetches now (42% -> 61%) and re-enables the button",
   );
   writeFileSync(
     join(root, "limits.json"),
@@ -897,7 +962,7 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   await waitFor(
-    `document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 4`,
+    `document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 5`,
     s,
     "narrow load",
   );

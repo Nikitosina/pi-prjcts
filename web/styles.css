@@ -4763,6 +4763,12 @@ a.button-link:hover {
     bottom: 36px;
     min-width: 0;
   }
+  .lim-providers {
+    position: fixed;
+    left: auto;
+    right: 8px;
+    bottom: 36px;
+  }
 }
 
 /* Composer help popover */
@@ -4827,6 +4833,47 @@ a.button-link:hover {
   color: var(--muted);
   display: inline-flex;
   align-items: center;
+}
+.lim-settings {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.lim-providers-toggle {
+  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.lim-providers {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 7px);
+  min-width: 140px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px #0002;
+  color: var(--text);
+  z-index: 7;
+}
+.lim-providers[hidden] {
+  display: none;
+}
+.lim-providers label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lim-providers input {
+  margin: 0;
 }
 .lim-refresh:hover:not(:disabled) {
   color: var(--text);
@@ -4981,16 +5028,28 @@ details.advanced[open] > summary {
     gap: 0;
   }
   .lim {
-    gap: 4px;
-    padding: 2px 4px;
+    gap: 2px;
+    padding: 2px;
+    font-size: 11px;
   }
   .lim-win {
-    gap: 3px;
+    gap: 2px;
+  }
+  .lim[data-provider="eliza"] .lim-name {
+    display: none;
   }
   .limits-bar > .lim > .lim-win > .lim-bar {
     width: 0;
   }
-  .lim[data-provider="cursor"] .lim-win-name {
+  .lim-win-name {
+    display: none;
+  }
+  .lim-providers-toggle {
+    width: 27px;
+    justify-content: center;
+    padding: 2px 4px;
+  }
+  .lim-providers-toggle span {
     display: none;
   }
 }

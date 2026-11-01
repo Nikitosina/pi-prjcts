@@ -955,6 +955,20 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("limits-snapshot"), visit: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("limits-refresh") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("limits-visibility"),
+      provider: Type.Union([
+        Type.Literal("claude"),
+        Type.Literal("codex"),
+        Type.Literal("cursor"),
+        Type.Literal("eliza"),
+        Type.Literal("kimi"),
+      ]),
+      visible: Type.Boolean(),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("machine-status") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("cursor-connect") }, { additionalProperties: false }),
   Type.Object(

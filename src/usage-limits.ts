@@ -1,8 +1,10 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { home, saveJson } from "./state.ts";
 
 /**
  * Subscription limits for the bottom bar. Host-side only: tokens and raw provider responses stay here, the browser gets
@@ -10,7 +12,7 @@ import { join } from "node:path";
  *   headers  - rate-limit headers on responses Pi already receives (pi-ai `onResponse`)
  *   endpoint - read-only GET of the provider's own usage endpoint with the login Pi or the Codex CLI already holds
  */
-export type LimitProvider = "claude" | "codex" | "cursor" | "eliza";
+export type LimitProvider = "claude" | "codex" | "cursor" | "eliza" | "kimi";
 /** "mo" is Cursor's monthly billing cycle. */
 export type LimitWindow = "5h" | "7d" | "mo";
 export type LimitSample = {
@@ -42,7 +44,26 @@ export type ProviderLimits = {
 };
 export type CursorConnect = { state: "idle" | "waiting" | "failed"; loginUrl: string | null; error: string | null };
 
-const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", eliza: "Eliza" };
+const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", eliza: "Eliza", kimi: "Kimi" };
+export type LimitVisibility = Record<LimitProvider, boolean>;
+const DEFAULT_VISIBILITY: LimitVisibility = { claude: true, codex: true, cursor: true, eliza: true, kimi: true };
+const visibilityPath = () => join(home(), "limits-visibility.json");
+/** Display only: hidden providers keep polling so quota recovery and a later re-enable retain their normal behavior. */
+export function limitsVisibility(): LimitVisibility {
+  try {
+    const saved = JSON.parse(readFileSync(visibilityPath(), "utf8"));
+    return Object.fromEntries(
+      (Object.keys(LABELS) as LimitProvider[]).map((provider) => [provider, saved?.[provider] !== false]),
+    ) as LimitVisibility;
+  } catch {
+    return { ...DEFAULT_VISIBILITY };
+  }
+}
+export function setLimitVisibility(provider: LimitProvider, visible: boolean): LimitVisibility {
+  const next = { ...limitsVisibility(), [provider]: visible };
+  saveJson(visibilityPath(), next);
+  return next;
+}
 /** Never poll an endpoint more often than this, and back off on failure. */
 export const MIN_POLL_MS = 5 * 60_000,
   MANUAL_COOLDOWN_MS = 15_000,
@@ -150,7 +171,9 @@ export function quotaResetAt(model: string, now = Date.now()): number | undefine
       ? "codex"
       : model.startsWith("cursor/")
         ? "cursor"
-        : undefined;
+        : model.startsWith("kimi-coding/")
+          ? "kimi"
+          : undefined;
   if (!provider) return undefined;
   const resets = [...(state.get(provider)?.samples.values() ?? [])].flatMap((sample) =>
     sample.usedPercent >= 100 &&
@@ -276,10 +299,46 @@ async function getJson(
   }
 }
 
+/** Current Kimi Coding response: fractions under `usages`; monthly code duplicates monthly total and is not another window. */
+export function parseKimiUsage(data: unknown): Polled {
+  const usages = data !== null && typeof data === "object" ? (data as { usages?: unknown }).usages : null;
+  const samples: Polled = [];
+  for (const [window, key] of [
+    ["5h", "limit_5h"],
+    ["mo", "limit_month_total"],
+  ] as const) {
+    const raw = usages !== null && typeof usages === "object" ? (usages as Record<string, any>)[key] : undefined;
+    if (raw === undefined) continue;
+    const used = finite(raw?.used_ratio);
+    if (used === null) throw new Retry("Kimi returned an unreadable usage response");
+    samples.push({
+      window,
+      usedPercent: clamp(used * 100),
+      resetsAt: typeof raw?.reset_time === "string" ? Date.parse(raw.reset_time) || null : null,
+    });
+  }
+  return samples;
+}
+const kimiUsageUrl = () => process.env.PI_PROJECTS_KIMI_USAGE_URL ?? "https://api.kimi.com/coding/v1/usages";
+async function pollKimi(): Promise<Polled> {
+  // Kimi Coding is subscription-backed but authenticates this read-only usage endpoint with its existing API key.
+  const data = await withToken(
+    "kimi-coding",
+    "Kimi",
+    () => storedKey("kimi-coding"),
+    (token) => getJson(kimiUsageUrl(), { Authorization: `Bearer ${token}` }, "Kimi", "Log in to kimi-coding with /login"),
+  );
+  return parseKimiUsage(data);
+}
+
 const claudeUsageUrl = () => process.env.PI_PROJECTS_CLAUDE_USAGE_URL ?? "https://api.anthropic.com/api/oauth/usage";
 const codexUsageUrl = () => process.env.PI_PROJECTS_CODEX_USAGE_URL ?? "https://chatgpt.com/backend-api/wham/usage";
 const storedAccess = async (key: string) => {
   const token = (await readJson(join(getAgentDir(), "auth.json")))?.[key]?.access;
+  return typeof token === "string" && token ? token : undefined;
+};
+const storedKey = async (key: string) => {
+  const token = (await readJson(join(getAgentDir(), "auth.json")))?.[key]?.key;
   return typeof token === "string" && token ? token : undefined;
 };
 async function pollClaude(): Promise<Polled> {
@@ -456,11 +515,14 @@ const fixture = (provider: LimitProvider): (() => Promise<PollResult>) | undefin
         };
       }
     : undefined;
-const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) =>
-  fixture(provider) ??
-  (provider === "eliza"
-    ? pollEliza
-    : async () => ({ samples: await (provider === "claude" ? pollClaude : provider === "codex" ? pollCodex : pollCursor)() }));
+const POLLERS: Record<LimitProvider, () => Promise<PollResult>> = {
+  claude: async () => ({ samples: await pollClaude() }),
+  codex: async () => ({ samples: await pollCodex() }),
+  cursor: async () => ({ samples: await pollCursor() }),
+  eliza: pollEliza,
+  kimi: async () => ({ samples: await pollKimi() }),
+};
+const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) => fixture(provider) ?? POLLERS[provider];
 
 /**
  * Every mode waits out the provider's Retry-After. `manual` (the refresh button) otherwise skips the minimum interval, failure backoff
@@ -584,7 +646,7 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
 export async function limitsSnapshot(
   now = Date.now(),
   refresh: boolean | "visit" = false,
-): Promise<{ providers: ProviderLimits[]; observedAt: number }> {
+): Promise<{ providers: ProviderLimits[]; visibility: LimitVisibility; observedAt: number }> {
   await Promise.all(
     (Object.keys(LABELS) as LimitProvider[]).map((provider) =>
       refreshProvider(provider, now, refresh === true ? "manual" : refresh === "visit" ? "visit" : "auto"),
@@ -606,7 +668,7 @@ export async function limitsSnapshot(
       ...(provider === "eliza" ? { usage: own.usage } : {}),
     };
   });
-  return { providers, observedAt: Date.now() };
+  return { providers, visibility: limitsVisibility(), observedAt: Date.now() };
 }
 
 /** Test seam: forget everything observed. */

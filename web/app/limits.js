@@ -16,6 +16,26 @@ registerActions({
       renderLimits();
     }
   },
+  async "limits-providers"() {
+    limitsProvidersOpen = !limitsProvidersOpen;
+    renderLimits();
+  },
+  async "limits-visibility"(node) {
+    if (visibilitySaving) return;
+    const provider = node.dataset.provider,
+      visible = node.checked;
+    visibilitySaving = provider;
+    try {
+      const loaded = await api({ action: "limits-visibility", provider, visible });
+      if (loaded?.providers) limits = loaded;
+    } catch (error) {
+      report(error);
+    } finally {
+      visibilitySaving = null;
+      renderLimits();
+      document.querySelector(`#limits-providers input[data-provider="${provider}"]`)?.focus({ preventScroll: true });
+    }
+  },
   async "cursor-connect"() {
     const started = await api({ action: "cursor-connect" });
     const cursor = limits?.providers.find((item) => item.provider === "cursor");
@@ -29,7 +49,9 @@ registerActions({
 });
 // Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once every 5 minutes (the refresh button polls now, with a short per-provider cooldown on the host); the bar re-renders every 30 s so countdowns stay current.
 let limits = null,
-  limitsRefreshing = false;
+  limitsRefreshing = false,
+  limitsProvidersOpen = false,
+  visibilitySaving = null;
 const limitTone = (percent) => (percent >= 90 ? "high" : percent >= 70 ? "mid" : "low");
 function untilReset(at) {
   const ms = at - Date.now();
@@ -58,6 +80,9 @@ const providerIcon = {
   ),
   cursor: iconSvg(
     '<rect x=".5" y=".5" width="23" height="23" rx="5.5" fill="#14120B" stroke="#8a8a8a" stroke-opacity=".55"/><path fill="#fff" transform="translate(4.8 4.8) scale(.6)" d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/>',
+  ),
+  kimi: iconSvg(
+    '<text x="12" y="17" text-anchor="middle" font-family="system-ui" font-size="16" font-weight="700" fill="currentColor">K</text>',
   ),
 };
 function elizaItem(provider) {
@@ -107,17 +132,49 @@ function limitItem(provider) {
 function renderLimits() {
   const bar = document.querySelector("#limits-bar");
   const refresh = `<button type="button" class="ghost small lim-refresh${limitsRefreshing ? " spinning" : ""}" data-action="limits-refresh" aria-label="Refresh limits" title="Refresh limits now"${limitsRefreshing ? " disabled" : ""}><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`;
-  const next = limits ? limits.providers.map(limitItem).join("") + refresh : "";
+  const controls = limits
+    ? `<div class="lim-settings"><button type="button" class="ghost small lim-providers-toggle" data-action="limits-providers" aria-label="Choose visible providers" aria-expanded="${limitsProvidersOpen}" aria-controls="limits-providers" title="Show or hide providers"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>Providers</span></button><div id="limits-providers" class="lim-providers" role="group" aria-label="Visible providers"${limitsProvidersOpen ? "" : " hidden"}>${limits.providers
+        .map(
+          (provider) =>
+            `<label><input type="checkbox" data-action="limits-visibility" data-provider="${esc(provider.provider)}"${limits.visibility?.[provider.provider] === false ? "" : " checked"}${visibilitySaving ? " disabled" : ""}> ${esc(provider.label)}</label>`,
+        )
+        .join("")}</div></div>`
+    : "";
+  const next = limits
+    ? limits.providers
+        .filter((provider) => limits.visibility?.[provider.provider] !== false)
+        .map(limitItem)
+        .join("") +
+      controls +
+      refresh
+    : "";
   if (bar.dataset.html === next) {
     renderMachine();
     return;
   }
-  const focused = bar.contains(document.activeElement) ? document.activeElement.closest(".lim")?.dataset.provider : null;
+  const active = bar.contains(document.activeElement) ? document.activeElement : null,
+    focused = active?.closest(".lim")?.dataset.provider,
+    focusedControl = active?.matches("#limits-providers input") ? active.dataset.provider : null,
+    toggleFocused = active?.matches(".lim-providers-toggle");
   bar.innerHTML = next;
   bar.dataset.html = next;
   renderMachine();
   if (focused) bar.querySelector(`.lim[data-provider="${focused}"]`)?.focus({ preventScroll: true });
+  else if (focusedControl) bar.querySelector(`#limits-providers input[data-provider="${focusedControl}"]`)?.focus({ preventScroll: true });
+  else if (toggleFocused) bar.querySelector(".lim-providers-toggle")?.focus({ preventScroll: true });
 }
+document.addEventListener("click", (event) => {
+  if (limitsProvidersOpen && !event.target.closest(".lim-settings")) {
+    limitsProvidersOpen = false;
+    renderLimits();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !limitsProvidersOpen) return;
+  limitsProvidersOpen = false;
+  renderLimits();
+  document.querySelector(".lim-providers-toggle")?.focus({ preventScroll: true });
+});
 // Machine status (host-sampled, cached ~5 s there): polled every 10 s while the tab is visible. A null value means unreadable (—); a missing one is hidden.
 let machine = null;
 const machineIcon = {

@@ -15,6 +15,7 @@ mkdirSync(agent);
 mkdirSync(userHome);
 process.env.PI_CODING_AGENT_DIR = agent;
 process.env.HOME = userHome;
+process.env.PI_PROJECTS_HOME = join(dir, "projects");
 const seen = [];
 const fake = createServer((req, res) => {
   seen.push({ url: req.url, cookie: req.headers.cookie });
@@ -25,9 +26,55 @@ const fake = createServer((req, res) => {
 });
 await new Promise((ok) => fake.listen(0, "127.0.0.1", ok));
 process.env.PI_PROJECTS_CURSOR_DASHBOARD = `http://127.0.0.1:${fake.address().port}`;
-const { MIN_POLL_MS, MANUAL_COOLDOWN_MS, observeLimitHeaders, limitsSnapshot, resetLimitsForTest, windowForSeconds, parseElizaUsage } =
-  await import("../src/usage-limits.ts");
+const {
+  MIN_POLL_MS,
+  MANUAL_COOLDOWN_MS,
+  observeLimitHeaders,
+  limitsSnapshot,
+  resetLimitsForTest,
+  windowForSeconds,
+  parseElizaUsage,
+  parseKimiUsage,
+  limitsVisibility,
+  setLimitVisibility,
+} = await import("../src/usage-limits.ts");
 const find = (snapshot, provider) => snapshot.providers.find((item) => item.provider === provider);
+
+// Exact current Kimi shape: fractional five-hour and monthly-total quotas. The duplicate monthly-code quota is not another window.
+const kimiSamples = parseKimiUsage({
+  limits: [{ detail: { limit: "100", used: "48", remaining: "52" }, window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" } }],
+  usages: {
+    limit_5h: { used_ratio: 0.4849, reset_time: "2026-11-01T10:42:30Z" },
+    limit_month_total: { used_ratio: 0.2703, reset_time: "2026-12-01T00:00:00Z" },
+    limit_month_code: { used_ratio: 0.2703, reset_time: "2026-12-01T00:00:00Z" },
+  },
+});
+assert.deepEqual(
+  kimiSamples.map(({ window, resetsAt }) => ({ window, resetsAt })),
+  [
+    { window: "5h", resetsAt: Date.parse("2026-11-01T10:42:30Z") },
+    { window: "mo", resetsAt: Date.parse("2026-12-01T00:00:00Z") },
+  ],
+);
+assert.ok(Math.abs(kimiSamples[0].usedPercent - 48.49) < 1e-9);
+assert.ok(Math.abs(kimiSamples[1].usedPercent - 27.03) < 1e-9);
+assert.deepEqual(parseKimiUsage({ usages: {} }), [], "missing Kimi quotas are no data, not zero");
+assert.throws(() => parseKimiUsage({ usages: { limit_5h: { used_ratio: "bad", reset_time: null } } }), /unreadable usage response/);
+assert.deepEqual(parseKimiUsage({ usages: { limit_5h: { used_ratio: 2, reset_time: "bad" } } })[0], {
+  window: "5h",
+  usedPercent: 100,
+  resetsAt: null,
+});
+
+// Visibility is instance-wide, durable and independent. A damaged file fails open to the established all-visible default.
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
+setLimitVisibility("claude", false);
+setLimitVisibility("kimi", false);
+assert.deepEqual(limitsVisibility(), { claude: false, codex: true, cursor: true, eliza: true, kimi: false });
+setLimitVisibility("claude", true);
+assert.equal(limitsVisibility().claude, true);
+writeFileSync(join(dir, "projects", "limits-visibility.json"), "not json");
+assert.deepEqual(limitsVisibility(), { claude: true, codex: true, cursor: true, eliza: true, kimi: true });
 
 // Eliza: sum actual monthly cost across usage buckets. The account and UTC calendar-month bounds come from the response and documented reset rule.
 const october = Date.parse("2026-10-26T18:00:00Z");

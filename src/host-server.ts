@@ -83,7 +83,7 @@ import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
-import { limitsSnapshot, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
+import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 
 process.env.PI_PROJECTS_HOST = "1";
@@ -1244,6 +1244,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return limitsSnapshot(Date.now(), input.visit === true ? "visit" : false);
     case "limits-refresh":
       return limitsSnapshot(Date.now(), true);
+    case "limits-visibility":
+      setLimitVisibility(input.provider, input.visible);
+      return limitsSnapshot();
     case "machine-status":
       return machineStatus();
     case "cursor-connect":
@@ -1444,7 +1447,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
 }
 
 let remote: RemoteAccess | null = null;
-// Subscription limits read the logins through Pi's own resolver, which renews an expiring OAuth token under the auth-store lock. Only an OAuth login is used here (an API key has no usage endpoint).
+// OAuth logins are renewed through Pi's auth-store lock. Kimi Coding reads its existing API key directly for its usage endpoint.
 let limitsModels: Promise<Awaited<ReturnType<typeof createModelRuntime>>> | null = null;
 setLimitsTokenResolver(async (providerId) => {
   limitsModels ??= createModelRuntime();
