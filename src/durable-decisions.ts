@@ -14,6 +14,7 @@ const Questions = defineDoc<{ items: Intent[] }>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ items: [] }),
 });
 function copy(entry: Question): Question {
@@ -104,7 +105,7 @@ export function durableDecisions(options: {
         intent.state = "materialized";
       }, context);
       return {
-        content: [
+        output: [
           {
             type: "text",
             text: JSON.stringify({

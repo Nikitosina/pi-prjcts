@@ -56,11 +56,11 @@ assert.equal(tool.name, "projects_gh");
 assert.deepEqual({ ...tool.outputLimits }, { maxBytes: 8 * 1024, maxLines: 400, retain: "tail" });
 const call = (args, id = 1) => tool.execute(args, { conversationId: id, callId: "c" }, { abortSignal: new AbortController().signal });
 const result = await call({ args: ["pr", "view", "x; rm -rf /"] });
-assert.deepEqual(JSON.parse(result.content[0].text).args, ["pr", "view", "x; rm -rf /"]);
+assert.deepEqual(JSON.parse(result.output[0].text).args, ["pr", "view", "x; rm -rf /"]);
 await assert.rejects(call({ args: ["pr", "list"] }, 2), /coordinator-only/);
 await assert.rejects(call({ args: ["fail"] }), /not logged in.*gh auth login/s);
 const big = await call({ args: ["big"] });
-assert.ok(big.content[0].text.includes("line 1999"));
+assert.ok(big.output[0].text.includes("line 1999"));
 const log = readFileSync(join(dir, "gh-calls.jsonl"), "utf8")
   .trim()
   .split("\n")

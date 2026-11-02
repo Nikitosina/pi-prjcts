@@ -133,7 +133,7 @@ export function coordinatorSkillTool(input: {
         offset = args.offset ?? 0,
         limit = args.limit ?? 20000;
       return {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: JSON.stringify({

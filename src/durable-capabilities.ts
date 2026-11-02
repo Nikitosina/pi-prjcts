@@ -131,7 +131,7 @@ export function createPermittedLocalCapabilities(options: PermittedLocalCapabili
           replay: binding.replay,
           async execute(args, _api, context) {
             const result = await callBoundMcp(binding, requireRecordArguments(args), context.abortSignal);
-            return { content: durableContent(result), isError: result.isError };
+            return { output: durableContent(result), isError: result.isError };
           },
         }),
       );
@@ -356,5 +356,5 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
+  return { output: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }

@@ -12,7 +12,7 @@ const TEXT_LIMIT = 64 * 1024,
 export type McpCaller = { role: SkillRole; cwd: string; binaries?: BinaryScope };
 type Block = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 const text = (value: string): Block[] => [{ type: "text", text: value }];
-const json = (value: unknown) => ({ content: text(JSON.stringify(value)) });
+const json = (value: unknown) => ({ output: text(JSON.stringify(value)) });
 
 /** Two stable tools instead of one tool per server tool: durable freezes tool names per conversation, and servers come and go. */
 export function mcpGatewayTools(input: {
@@ -47,7 +47,7 @@ export function mcpGatewayTools(input: {
     async execute(args, api: ToolExecutionApi, context) {
       const { caller, saved, servers } = await enabled(api, context);
       if (!args.server) {
-        if (!servers.size) return { content: text("No MCP servers are enabled for your role (the owner enables them in Settings).") };
+        if (!servers.size) return { output: text("No MCP servers are enabled for your role (the owner enables them in Settings).") };
         const known = new Map(mcpCatalog().servers.map((item) => [item.name, item]));
         return json({
           servers: [...servers].sort().map((name) => {
@@ -135,7 +135,7 @@ export function mcpGatewayTools(input: {
           used += Math.min(raw.length, room);
         }
       }
-      return { content: content.length ? content : text("(no output)"), ...(result.isError ? { isError: true } : {}) };
+      return { output: content.length ? content : text("(no output)"), ...(result.isError ? { isError: true } : {}) };
     },
   });
   return { tools: [list, callTool], extension: defineExtension({ name: "projects.mcp", tools: [list, callTool] }) };

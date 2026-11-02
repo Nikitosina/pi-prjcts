@@ -47,6 +47,7 @@ const Commands = defineDoc<{ items: Intent[] }>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ items: [] }),
 });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -486,7 +487,7 @@ export async function commandWorkerTools(input: {
             }, context);
             if (previous)
               return {
-                content: [
+                output: [
                   {
                     type: "text" as const,
                     text: JSON.stringify({ reused: true, key, ...previous, outputInReceipt: false, untrusted: true }),
@@ -565,7 +566,7 @@ export async function commandWorkerTools(input: {
               }, context);
             }
             return {
-              content: [
+              output: [
                 {
                   type: "text" as const,
                   text: JSON.stringify({

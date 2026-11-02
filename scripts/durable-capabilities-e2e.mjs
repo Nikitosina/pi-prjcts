@@ -93,7 +93,7 @@ async function runE2e() {
   options.bindings[1].server.args[3] = "malformed";
   options.bindings[1].inputSchema.properties.path.maxLength = 1;
   const preserved = await read.execute({ path: "fixture.txt" }, {}, { abortSignal: undefined });
-  assert.ok(preserved.content[0].text.includes("actual local MCP fixture read"));
+  assert.ok(preserved.output[0].text.includes("actual local MCP fixture read"));
   assert.equal(JSON.stringify(registered.identity), identityBefore, "mutable source binding broadened a captured scope");
   const rootIdentity = createPermittedLocalCapabilities({
     caller: "durable-worker",
@@ -145,8 +145,8 @@ async function runE2e() {
   const transcript = {
     transport: "@earendil-works/pi-mcp McpClient + StdioTransport",
     identity: registered.identity,
-    localResult: JSON.parse(local.content[0].text),
-    mcpResult: mcpResult.content,
+    localResult: JSON.parse(local.output[0].text),
+    mcpResult: mcpResult.output,
     failures,
     serverPhases: phases,
   };

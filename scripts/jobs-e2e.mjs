@@ -129,7 +129,7 @@ const TestTools = defineExtension({
       execute: async (_args, _api, callContext) => {
         gateEntered = true;
         while (!gateOpen && !callContext.abortSignal?.aborted) await delay(20);
-        return { content: [{ type: "text", text: "gate open" }] };
+        return { output: [{ type: "text", text: "gate open" }] };
       },
     }),
     defineTool({
@@ -139,7 +139,7 @@ const TestTools = defineExtension({
       execute: async (_args, api, callContext) => {
         processes.add(api.conversationId);
         while (!callContext.abortSignal?.aborted) await delay(20);
-        return { content: [{ type: "text", text: "aborted" }] };
+        return { output: [{ type: "text", text: "aborted" }] };
       },
     }),
     defineTool({
@@ -149,7 +149,7 @@ const TestTools = defineExtension({
       replay: "safe",
       execute: async (args) => {
         await delay(60);
-        return { content: [{ type: "text", text: `step ${args.n}` }] };
+        return { output: [{ type: "text", text: `step ${args.n}` }] };
       },
     }),
   ],

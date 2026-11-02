@@ -7,8 +7,8 @@ import { ThreadReference, transcriptEntryCount, trimTranscriptPage } from "./tra
 
 const Id = Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" });
 const HISTORY_ENTRIES = 8;
-const json = (value: unknown): { content: { type: "text"; text: string }[] } => ({
-  content: [{ type: "text", text: JSON.stringify(value) }],
+const json = (value: unknown): { output: { type: "text"; text: string }[] } => ({
+  output: [{ type: "text", text: JSON.stringify(value) }],
 });
 
 /** The coordinator's read-only view into its agents: a conversation page and a worktree diff. Spawning, steering and stopping are the `agents` tool. */
@@ -52,7 +52,7 @@ export function coordinatorJobReadTools(input: {
       const page = await runtime.workerRead(args.threadId, { before: args.before, limit: args.limit ?? HISTORY_ENTRIES });
       if (args.limit !== undefined) return json(page);
       return {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: fitJson(transcriptEntryCount(page), (kept) => trimTranscriptPage(page, kept)),
@@ -95,7 +95,7 @@ export function coordinatorJobReadTools(input: {
     replay: "safe",
     async execute(args, api) {
       return {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: await authorize(api).workerDiff(args.threadId, args.base, { path: args.path, offset: args.offset }),

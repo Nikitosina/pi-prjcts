@@ -59,6 +59,7 @@ const Writes = defineDoc<{ items: Record[] }>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ items: [] }),
 });
 type ReadIdentity = Pick<Record, "scopeId" | "conversationId" | "taskId" | "callId"> & {
@@ -123,6 +124,7 @@ const Reads = defineDoc<{ items: ReadRecord[] }>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ items: [] }),
 });
 export async function githubReadSnapshot(root: Conversation, options: { offset?: number; limit?: number } = {}) {
@@ -580,7 +582,7 @@ export async function githubWorkerTools(input: {
       return observed;
     }, context);
   }
-  const result = (effect: Effect): ToolExecutionResult => ({ content: [{ type: "text", text: JSON.stringify(effect) }] });
+  const result = (effect: Effect): ToolExecutionResult => ({ output: [{ type: "text", text: JSON.stringify(effect) }] });
   const localPublication = defineTool({
     name: `projects_github_${key}_verify_local_publication`,
     description:
@@ -622,7 +624,7 @@ export async function githubWorkerTools(input: {
       const manifestSha256 = hash(JSON.stringify(snapshot));
       const effect = await admitVerifiedHead(api, context, { head: args.expectedHead, base, previous, manifestSha256 });
       return {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: JSON.stringify({
@@ -736,7 +738,7 @@ export async function githubWorkerTools(input: {
         );
       }
       return {
-        content: [
+        output: [
           {
             type: "text",
             text: JSON.stringify({
@@ -1070,7 +1072,7 @@ export async function githubWorkerTools(input: {
       await check(api, context);
       if (!effect)
         return {
-          content: [{ type: "text", text: JSON.stringify({ key: record.key, state: "uncertain", retryAllowed: false, page, nextPage }) }],
+          output: [{ type: "text", text: JSON.stringify({ key: record.key, state: "uncertain", retryAllowed: false, page, nextPage }) }],
         };
       const verified = effect;
       await api.commit(async (tx) => {
@@ -1140,7 +1142,7 @@ export async function githubWorkerTools(input: {
                 : null,
           });
         }, context);
-        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+        return { output: [{ type: "text", text: JSON.stringify(data) }] };
       },
     });
   }
@@ -1192,7 +1194,7 @@ export async function githubWorkerTools(input: {
           },
         });
       }, context);
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      return { output: [{ type: "text", text: JSON.stringify(data) }] };
     },
   });
   const ciJob = defineTool({
@@ -1251,7 +1253,7 @@ export async function githubWorkerTools(input: {
           },
         });
       }, context);
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      return { output: [{ type: "text", text: JSON.stringify(data) }] };
     },
   });
   const conflict = defineTool({
@@ -1303,7 +1305,7 @@ export async function githubWorkerTools(input: {
           },
         });
       }, context);
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      return { output: [{ type: "text", text: JSON.stringify(data) }] };
     },
   });
   const baseFile = defineTool({
@@ -1352,7 +1354,7 @@ export async function githubWorkerTools(input: {
           file: { path: data.path, base: data.base, blob: data.blob, contentSha256: data.contentSha256, size: data.size },
         });
       }, context);
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      return { output: [{ type: "text", text: JSON.stringify(data) }] };
     },
   });
   // Whole-repository workers push with bash; open_draft_pr replaces the file-list publisher and its separate PR tools.

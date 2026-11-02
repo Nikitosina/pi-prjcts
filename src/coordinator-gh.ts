@@ -89,7 +89,7 @@ export function coordinatorGhTools(input: { cwd: string; dir: string; isCoordina
       const body = [result.stdout, result.stderr && `[stderr]\n${result.stderr}`].filter(Boolean).join("\n");
       if (result.problem || result.exitCode !== 0)
         throw new Error(`${result.problem ?? `gh exited with code ${result.exitCode}.`}${body ? `\n${body.slice(-8 * 1024)}` : ""}`);
-      return { content: [{ type: "text", text: body || "(no output)" }] };
+      return { output: [{ type: "text", text: body || "(no output)" }] };
     },
   });
   const tools = [tool];

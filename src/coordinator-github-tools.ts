@@ -25,7 +25,7 @@ const IssueNumber = Type.Integer({ minimum: 1, maximum: 100000000 });
 const Labels = Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 });
 const Logins = Type.Array(Type.String({ pattern: "^[A-Za-z0-9-]{1,39}$" }), { maxItems: 10 });
 const Body = Type.String({ minLength: 1, maxLength: 60000 });
-const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+const json = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }] });
 const clip = (value: unknown, limit: number) => {
   const text = typeof value === "string" ? value : "";
   return text.length > limit ? `${text.slice(0, limit)}… [${text.length - limit} more characters]` : text;

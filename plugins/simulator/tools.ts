@@ -12,7 +12,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
     { Type } = host.lib.typebox;
   const empty = Type.Object({}, { additionalProperties: false });
   const Udid = (description: string) => Type.Optional(Type.String({ pattern: "^[a-fA-F0-9-]{36}$", description }));
-  const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+  const json = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }] });
 
   function coordinatorSimulatorTools(input: { projectId: string; isCoordinator: (id: Conversation["id"]) => boolean }) {
     const authorize = (api: ToolExecutionApi) => {
@@ -156,7 +156,7 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
       { controlRoot: host.projects.dir(projectId), scope },
       { bytes: frame.bytes, label: `Simulator screenshot ${new Date(frame.capturedAt).toISOString()}` },
     );
-    return { content: stored };
+    return { output: stored };
   }
   return { coordinator: coordinatorSimulatorTools, worker: workerSimulatorTools };
 }

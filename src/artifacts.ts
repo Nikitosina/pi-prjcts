@@ -178,7 +178,7 @@ export function coordinatorArtifactTools(input: {
   const known = async (threadId: string) => {
     if (!(await input.threads()).some((thread) => thread.threadId === threadId)) throw new Error("Unknown thread for this project");
   };
-  const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+  const text = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }] });
   const list = defineTool({
     name: "projects_artifacts_list",
     description:
@@ -231,7 +231,7 @@ export function coordinatorArtifactTools(input: {
           return text({ ref, kind, size, note: "Image too large to attach; cite the ref so the owner sees it." });
         const { bytes } = readArtifactBytes(input.controlRoot, args.threadId, args.path, ARTIFACT_INLINE_IMAGE_BYTES);
         return {
-          content: [
+          output: [
             { type: "text" as const, text: JSON.stringify({ ref, kind, size }) },
             { type: "image" as const, data: bytes.toString("base64"), mimeType: mime },
           ],

@@ -122,6 +122,7 @@ export const Jobs = defineDoc<JobsState>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ paused: false, jobs: {}, agents: {}, subagents: {}, requests: {} }),
 });
 
@@ -327,7 +328,10 @@ const reporterTask = (host: JobsHost) =>
         const { attempt, checked, boot, note } = reporter.state.checkpoint;
         // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
         const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
-        if (waiting && waiting.retryAt > runtime.now()) await runtime.sleep(waiting.retryAt, taskContext);
+        if (waiting && waiting.retryAt > runtime.now()) {
+          await runtime.sleepUntil(waiting.retryAt, reporter.state.checkpoint, taskContext);
+          return;
+        }
         // A stop or pause during prepare or a quota sleep must not start the agent: decide inside a commit, right before submitting.
         if (!checked) {
           await runtime.commit(async (tx) => {
@@ -439,11 +443,7 @@ const reporterTask = (host: JobsHost) =>
         const { report, waits = 0 } = reporter.state.checkpoint;
         // A paused project runs no coordinator turns; the report waits for the resume.
         if (report !== undefined && (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.paused) {
-          await runtime.sleep(runtime.now() + 2000, taskContext);
-          await runtime.commit(
-            () => ({ status: "running", checkpoint: { phase: "report", report, waits: waits + 1 } }) as const,
-            taskContext,
-          );
+          await runtime.sleepUntil(runtime.now() + 2000, { phase: "report", report, waits: waits + 1 }, taskContext);
           return;
         }
         if (report !== undefined) {
@@ -460,7 +460,7 @@ const acceptanceText = (criteria: readonly string[]) =>
   criteria.length ? `\n\nAcceptance criteria:\n${criteria.map((item) => `- ${item}`).join("\n")}` : "";
 const sha = Type.String({ pattern: "^[0-9a-f]{40}$", description: "Full 40-character commit sha" });
 const reply = (text: string, details?: Record<string, string | number>) => ({
-  content: [{ type: "text" as const, text }],
+  output: [{ type: "text" as const, text }],
   ...(details ? { details } : {}),
 });
 
@@ -831,7 +831,7 @@ export function createJobs(host: JobsHost) {
       ).wait(callContext);
       if (settled.status !== "done" || settled.type !== "input") throw new Error(`The ${args.role} did not answer: ${settled.status}`);
       const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
-      return { content: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+      return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
     },
   });
 

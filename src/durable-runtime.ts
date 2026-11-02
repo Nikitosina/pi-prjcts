@@ -134,6 +134,7 @@ const DurableProjectIdentity = defineDoc<{
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ projectId: null, coordinatorConversationId: null }),
 });
 
@@ -144,6 +145,7 @@ const InstanceInstructions = defineDoc<InstanceInstructionState>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ text: "" }),
 });
 const instanceText = (saved: InstanceInstructionState | undefined, run?: number) =>
@@ -170,6 +172,7 @@ const ProjectChats = defineDoc<{ mainTitle: string | null; chats: StoredChat[] }
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ mainTitle: null, chats: [] }),
 });
 export type DurableChat = { id: string; title: string; conversationId: number; createdAt: number; archived: boolean; busy: boolean };
@@ -191,6 +194,7 @@ const AdmittedInputs = defineDoc<{ ids: number[]; telegramRequests?: string[] }>
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ ids: [] }),
 });
 
@@ -2158,7 +2162,7 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
       const found = await searchKnowledge(dir, args.query, args.limit ?? 8);
       if (args.limit !== undefined) return textResult(found);
       return {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: fitJson(
@@ -2194,7 +2198,7 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
       const { record, text } = uploadText(dir, args.uploadId);
       if (record.kind !== "image")
         return textPageResult(args.limit, (n) => ({ untrusted: true, record, ...textPage(text, args.offset, Math.min(n, 20_000)) }));
-      return { content: uploadImageResult(dir, record.id) };
+      return { output: uploadImageResult(dir, record.id) };
     },
   });
   return [list, read, history, allNotes, write, note, search, uploads, uploadRead];
@@ -2206,7 +2210,7 @@ function pageResult<T>(items: readonly T[], args: { offset?: number; limit?: num
   if (args.limit !== undefined) return textResult(view);
   const after = (kept: number) => (kept < view.items.length ? view.offset + kept : view.nextOffset);
   return {
-    content: [
+    output: [
       {
         type: "text" as const,
         text: fitJson(view.items.length, (kept) => ({ ...view, items: view.items.slice(0, kept), nextOffset: after(kept) }), {
@@ -2225,7 +2229,7 @@ function textPageResult(limit: number | undefined, build: (characters: number) =
   return limit !== undefined
     ? textResult(build(limit))
     : {
-        content: [
+        output: [
           {
             type: "text" as const,
             text: fitJson(6_000, build, {
@@ -2659,7 +2663,7 @@ function assertConfiguredModel(models: ModelRuntime, provider: string, modelId: 
 }
 
 function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
+  return { output: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 function coordinatorInstructions(project: Project, repositoryStanding: string, skills: string): string {
   const github = project.githubAuthorization?.length

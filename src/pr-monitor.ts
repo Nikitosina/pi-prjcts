@@ -40,6 +40,7 @@ function watchDoc(kind: string) {
     scope: "conversation",
     history: "latest",
     fork: "initial",
+    checkpointWhen: () => false,
     initial: () => ({ watched: [], prs: {}, sent: [], lastPollAtMs: null, lastError: null, polls: 0, events: 0 }),
   });
 }

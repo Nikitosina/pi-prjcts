@@ -68,7 +68,7 @@ export function checkProofRefs(controlRoot: string, job: Pick<Job, "id" | "candi
 }
 
 const text = (value: unknown, isError = false) => ({
-  content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }],
+  output: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }],
   ...(isError ? { isError: true } : {}),
 });
 

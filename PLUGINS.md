@@ -16,6 +16,8 @@ Additive: env `PI_PROJECTS_PLUGINS=/path/a:/path/b` (tests, one-off runs). A pat
 
 Export `{ name, register(api) }` (default or named). `register` calls `api.provide({...})` once or more; nothing is visible until it returns. Types: `src/plugin-types.ts` (`HostPluginApi`). Use `api.lib` (Durable, typebox, chord context) instead of importing your own copies.
 
+The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `content`; adapters for Pi coding-agent or MCP tools must map their `content` to `output`. Plugin document definitions need an explicit `checkpointWhen` policy (`() => false` keeps changes as deltas). Plugin tasks must replace `runtime.sleep()` with a phase-ending `sleepUntil(until, checkpoint, context)` and handle the `sleeping` status. Check external plugins against these APIs before deploying the upgraded host.
+
 | capability | purpose |
 |---|---|
 | `vcs` | checkout kind: root marker, status, diffs, PR-head snapshots, branch continuation, private dirs, worker rule |

@@ -105,9 +105,10 @@ export function coordinatorShellTools(input: { cwd: string; isCoordinator: (id: 
     outputLimits: { maxBytes: 8 * 1024, maxLines: 400, retain: "tail" },
     async execute(args, api, context) {
       authorize(api);
-      return bash.execute(api.callId, args, context.abortSignal, (update) =>
+      const { content, ...result } = await bash.execute(api.callId, args, context.abortSignal, (update) =>
         api.output(update.content.map((item) => (item.type === "text" ? item.text : "")).join("")),
       );
+      return { ...result, output: content };
     },
   });
   const tools = [shell];

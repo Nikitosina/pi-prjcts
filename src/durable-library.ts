@@ -33,7 +33,7 @@ export function coordinatorLibraryTools(input: {
       const result = await libraryList(input.dir, args);
       authorize(api);
       context.abortSignal?.throwIfAborted();
-      return { content: [{ type: "text", text: JSON.stringify({ untrusted: true, ...result }) }] };
+      return { output: [{ type: "text", text: JSON.stringify({ untrusted: true, ...result }) }] };
     },
   });
   const read = defineTool({
@@ -56,7 +56,7 @@ export function coordinatorLibraryTools(input: {
       const result = await libraryRead(input.dir, { ...args, limit: args.limit ?? 4096 });
       authorize(api);
       context.abortSignal?.throwIfAborted();
-      return { content: [{ type: "text", text: JSON.stringify({ untrusted: true, ...result }) }] };
+      return { output: [{ type: "text", text: JSON.stringify({ untrusted: true, ...result }) }] };
     },
   });
   return [list, read];

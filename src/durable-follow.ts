@@ -50,6 +50,7 @@ const Follow = defineDoc<FollowState>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ repos: {}, fixes: {}, lastPollAtMs: null, lastError: null, polls: 0, events: 0, lastEventAtMs: null }),
 });
 const own = <T>(record: Record<string, T>, key: string): T | undefined =>

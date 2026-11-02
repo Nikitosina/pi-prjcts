@@ -79,7 +79,7 @@ export default {
       parameters: Type.Object({ title: Type.String({ minLength: 1, maxLength: 100 }) }, { additionalProperties: false }),
       replay: "unsafe",
       async execute(args) {
-        return { content: [{ type: "text", text: JSON.stringify({ published: args.title }) }] };
+        return { output: [{ type: "text", text: JSON.stringify({ published: args.title }) }] };
       },
     });
 
@@ -287,7 +287,7 @@ export default {
             parameters: Type.Object({ id: Type.Integer({ minimum: 1 }) }, { additionalProperties: false }),
             replay: "safe",
             async execute(args) {
-              return { content: [{ type: "text", text: JSON.stringify(data().prs.find((item) => item.id === args.id) ?? null) }] };
+              return { output: [{ type: "text", text: JSON.stringify(data().prs.find((item) => item.id === args.id) ?? null) }] };
             },
           });
           return { tools: [lookup], extension: defineExtension({ name: "projects.coordinator-fake", tools: [lookup] }) };

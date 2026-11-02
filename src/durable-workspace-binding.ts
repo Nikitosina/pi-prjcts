@@ -372,9 +372,10 @@ export function durableWorkspaceBinding(input: {
           async execute(args, api, context) {
             if (tool.name === "write" || tool.name === "edit")
               assertOutsideOwner(String((args as { path?: unknown }).path ?? ""), workDir, owners);
-            return tool.execute(api.callId, args, context.abortSignal, (update) =>
+            const { content, ...result } = await tool.execute(api.callId, args, context.abortSignal, (update) =>
               api.output(update.content.map((item) => (item.type === "text" ? item.text : "")).join("")),
             );
+            return { ...result, output: content };
           },
         }),
       );

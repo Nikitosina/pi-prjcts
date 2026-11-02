@@ -93,7 +93,7 @@ writeFileSync(join(live, "archive.json"), JSON.stringify({ home }));
 const { coordinatorArchiveTools } = await import("../src/archive-tools.ts");
 const tools = (projectId) => coordinatorArchiveTools({ projectId, isCoordinator: (id) => id === 1 }).tools;
 const call = async (set, name, args, conversationId = 1) =>
-  (await set.find((tool) => tool.name === name).execute(args, { conversationId })).content[0].text;
+  (await set.find((tool) => tool.name === name).execute(args, { conversationId })).output[0].text;
 const mine = tools(project);
 const listed = JSON.parse(await call(mine, "projects_archive_list", { query: "side" }));
 assert.deepEqual(

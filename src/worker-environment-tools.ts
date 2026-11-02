@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { BackgroundCommands } from "./background-commands.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 
-const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }], details: undefined });
+const json = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }], details: undefined });
 const Resource = Type.String({
   pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
   description: "Neutral name agreed by workers, e.g. ios-simulator or a device name.",

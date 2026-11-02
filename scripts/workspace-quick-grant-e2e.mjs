@@ -47,7 +47,7 @@ const rejects = async (promise, pattern) => {
 };
 const call = (tool, args, conversationId) =>
   tool.execute(args, { conversationId, taskId: 1, callId: randomUUID() }, { abortSignal: undefined });
-const payload = (out) => JSON.parse(out.content[0].text);
+const payload = (out) => JSON.parse(out.output[0].text);
 
 let hostStopped = false,
   errorText = null,

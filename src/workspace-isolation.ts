@@ -27,6 +27,7 @@ const Receipts = defineDoc<{ receipts: Record<string, WorkspaceReceipt> }>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ receipts: {} }),
 });
 export type WorkspaceIsolation = {

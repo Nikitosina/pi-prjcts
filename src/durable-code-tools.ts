@@ -66,13 +66,14 @@ export function readOnlyCodeTools(
         const tool = built(root).find((item) => item.name === template.name)!;
         const path = (args as { path?: unknown }).path;
         if (typeof path === "string") assertInside(root, path);
-        return clipped(
+        const { content, ...result } = clipped(
           template.name,
           args as { limit?: unknown; offset?: unknown },
           await tool.execute(api.callId, args, context.abortSignal, (update) =>
             api.output(update.content.map((item) => (item.type === "text" ? item.text : "")).join("")),
           ),
         );
+        return { ...result, output: content };
       },
     }),
   );
@@ -102,9 +103,7 @@ export function readOnlyCodeTools(
       replay: "safe",
       async execute(args, api, context) {
         return {
-          content: [
-            { type: "text", text: await codeDiff(await rootOf(api, context), args.base, { path: args.path, offset: args.offset }) },
-          ],
+          output: [{ type: "text", text: await codeDiff(await rootOf(api, context), args.base, { path: args.path, offset: args.offset }) }],
           details: undefined,
         };
       },

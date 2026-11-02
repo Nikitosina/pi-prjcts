@@ -112,6 +112,7 @@ export const DurableSchedule = defineDoc<ScheduleState>({
   scope: "conversation",
   history: "latest",
   fork: "initial",
+  checkpointWhen: () => false,
   initial: () => ({ eventOptIn: false, schedules: {}, events: {}, intents: {} }),
 });
 export class AdmissionMutex {

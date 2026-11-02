@@ -464,7 +464,7 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 function result<Details extends object>(value: Details) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value };
+  return { output: [{ type: "text" as const, text: JSON.stringify(value) }], details: value };
 }
 function blocked(blocker: string) {
   return { ...result({ blocker }), isError: true };

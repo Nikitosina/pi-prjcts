@@ -351,6 +351,7 @@ const DurableGenerationTask = Type.Object(
       Type.Literal("running"),
       Type.Literal("waiting"),
       Type.Literal("completing"),
+      Type.Literal("sleeping"),
       Type.Literal("terminal"),
     ]),
     terminal: Type.Boolean(),
