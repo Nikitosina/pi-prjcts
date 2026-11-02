@@ -336,6 +336,7 @@ function jobState(job) {
       : job.quota
         ? { label: "waiting for quota", dot: "working" }
         : { label: "running", dot: "working" };
+  if (job.status === "completed") return { label: "returned", dot: "done" };
   if (job.status === "failed") return { label: "failed", dot: "needs" };
   if (job.status === "stopped") return { label: "stopped", dot: "idle" };
   return { label: job.status === "ready-with-gaps" ? "ready, gaps" : job.status, dot: "done" };
@@ -374,6 +375,7 @@ function contextRing(context) {
 function nodeRow({ id, role, title, state, job, withPlan, stop, dismiss }) {
   const meta = [
     `<span class="job-status">${esc(state.label)}</span>`,
+    ...(job?.workspace ? [`<span class="job-workspace">${esc(job.workspace.kind)} workspace</span>`] : []),
     ...(withPlan
       ? [
           `<span class="job-progress">${esc(jobProgress(job))}</span>`,
@@ -422,7 +424,7 @@ export function renderJobTree() {
               stop: true,
             }),
           )
-          .join("") || '<p class="note">No workers in this chat yet. Ask the coordinator for something and it starts one.</p>') +
+          .join("") || '<p class="note">No workers in this chat yet. The Coordinator can work directly or delegate.</p>') +
       (jobs.length > shown.length || allJobs
         ? `<button type="button" class="ghost small all-jobs" data-action="all-jobs">${allJobs ? "Show recent only" : `Show all Jobs (${jobs.length})`}</button>`
         : "");
@@ -446,8 +448,11 @@ function workerDetailHtml(chat, page, info) {
   const plan = job?.plan.length
     ? `<ol class="job-plan">${job.plan.map((step) => `<li data-status="${esc(step.status)}"><span class="plan-mark" aria-hidden="true">${step.status === "done" ? "✓" : step.status === "doing" ? "…" : "○"}</span> ${esc(step.title)}${step.estimateMin ? ` <small>${step.estimateMin}m</small>` : ""}</li>`).join("")}</ol>`
     : "";
+  const workspace = job?.workspace
+    ? `<p class="note">${esc(job.workspace.kind === "shared" ? "Shared Coordinator workspace" : "Isolated task workspace")}${job.branch ? ` · <code>${esc(job.branch)}</code>` : ""}${job.status === "completed" ? ". Returned to the Coordinator, not independently accepted." : ""}</p>`
+    : "";
   const head = job
-    ? `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full request">${esc(job.request)}</p><p class="job-summary-line"><span class="job-progress">${esc(jobProgress(job))}</span>${jobEta(job) ? ` · <span class="job-eta">${esc(jobEta(job))}</span>` : ""}${job.reason ? ` · <span class="job-reason-inline">${esc(job.reason)}</span>` : ""}</p>${plan}`
+    ? `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full request">${esc(job.request)}</p><p class="job-summary-line"><span class="job-progress">${esc(jobProgress(job))}</span>${jobEta(job) ? ` · <span class="job-eta">${esc(jobEta(job))}</span>` : ""}${job.reason ? ` · <span class="job-reason-inline">${esc(job.reason)}</span>` : ""}</p>${workspace}${plan}`
     : `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(info.title)}</p>`;
   const title =
     info.kind === "subagent" ? `${role[0].toUpperCase()}${role.slice(1)} of ${job.title}` : `${role[0].toUpperCase()}${role.slice(1)}`;

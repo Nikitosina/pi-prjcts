@@ -70,3 +70,26 @@ Work item lifecycle: Ask → Running → Ready (PR, proof, 3-line summary) or Re
 - Old host: launchd `dev.pi-projects.host.11a08742` booted out and disabled; `~/.pi/agent/projects-dev` untouched and readable in Archive.
 - Rollback: `launchctl bootout gui/$(id -u)/dev.pi-projects.host.3c435db9; launchctl enable gui/$(id -u)/dev.pi-projects.host.11a08742; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.pi-projects.host.11a08742.plist`.
 - After the trial: PR `lean-runtime` → main; merge the plugin clone's `lean-runtime` into the live plugin repo after the owner commits or stashes their uncommitted work there.
+
+## Trusted Coordinator decision (2026-11-02)
+
+The owner approved replacing the coordinator-as-dispatcher rule with a normal trusted Pi-style agent that owns delivery and chooses whether to work directly or delegate. This supersedes the earlier coordinator prohibition on source edits.
+
+- Give coordinators standard read/edit/write/bash execution, configured MCPs and skills, with browser automation through installed commands or configured MCPs.
+- Keep a persistent worktree per chat, separate from the owner's checkout and workers. Preserve existing allocation grants and provider ownership; show missing/unsupported workspace prerequisites explicitly.
+- Delegate substantial or independent work, not every change. Investigation may finish with findings and evidence without creating a Job or PR. Independent reviewers remain static readers.
+- Remove the coordinator shell allowlist. Commands run as the host user, not in a sandbox. Merge, deployment and destructive operations still require explicit owner approval as behavioral rules.
+- Show the selected chat's actual offered tools, worktree and practical restrictions in the UI. Do not mistake a prompt instruction for a tool grant.
+
+## Coordinator-selected worker workspaces (2026-11-02)
+
+After PR33 was opened, the owner clarified that one Coordinator chat owns a large task and completes smaller steps iteratively. The owner approved choosing shared or isolated worker workspaces per spawn, preparing the environment and integrating worker results in the task branch. This supersedes mandatory separation of every worker from its Coordinator and mandatory worker PRs for task helpers. Independent Job/PR delivery remains available.
+
+- A shared helper borrows the spawning chat's actual persistent workspace, including prepared dependencies and dirty/untracked files. It does not own or release that allocation.
+- An isolated helper gets a fresh workspace and branch from an explicit chosen commit. Uncommitted files and dependencies are not implicitly copied.
+- The Coordinator drains its writes before a shared handoff and waits for the worker to settle before resuming mutations. Shared work is a single-writer handoff, not a sandbox or a general parallel-write scheduler.
+- Helpers finish by returning their answer. Completed means control returned, not independently verified or accepted delivery. No worker PR or Ready report is required.
+- The Coordinator inspects changes, integrates isolated branches and verifies the combined result. It can delegate static review of a committed candidate; dirty shared changes are not a pinned snapshot.
+- Integrating worker branches into the task branch is ordinary task work. Final merge to main, deployment, destructive actions and new authority still require owner approval.
+- Missing grants, invalid ownership and unsupported isolated provider capabilities fail visibly. There is no fallback to the owner's checkout or provider trunk.
+- This decision does not authorize merging PR33, deploying it, restarting the live host or publishing the private Arc plugin.

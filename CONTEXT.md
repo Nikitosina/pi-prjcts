@@ -8,20 +8,22 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Project**: a repository checkout (Git or Arc) with its settings, models, knowledge and automations.
 - **Host**: the one process that owns every project's durable storage and serves the web UI, CLI and Telegram.
 - **Chat**: a coordinator conversation in a project. A project has a main chat and may have more.
-- **Coordinator**: the agent in a chat. It answers the owner, spawns agents and judges their results. It never edits source.
-- **Job**: one owner request or trigger handed to a worker. It owns the worker, the worker's subagents, the branch, the PR and the proof. Lifecycle: `running → ready | ready-with-gaps | failed → approved`, and `stopped` when explicitly stopped. A Job is not a pi-durable task.
+- **Coordinator**: the trusted agent in a chat that owns delivery. It investigates and makes changes directly in its own persistent workspace, or delegates work and judges the results.
+- **Job**: one delegated request with its worker, plan and result. An independent Job delivers a PR for owner approval; a task helper returns its work to the Coordinator. A Job is not a pi-durable task.
+- **Task helper**: a worker doing a subtask for its Coordinator, either in the chat's shared workspace or in an isolated workspace from a chosen commit. It returns changes and findings without needing its own PR.
+- **Completed**: a task helper has returned control and an answer. This does not mean acceptance criteria passed, the result was independently verified or delivery was approved.
 - **Agent roles**: coordinator, worker, scout, reviewer, verifier.
-  - **Worker**: implements one Job in its own workspace, verifies, gets reviewed, and reports Ready.
+  - **Worker**: implements one Job. An independent worker verifies, gets reviewed and reports Ready; a task helper returns its answer for the Coordinator to inspect and integrate.
   - **Scout**: read-only investigation.
   - **Reviewer**: read-only review of a pinned candidate.
   - **Verifier**: runs the project's verify skill against a pinned candidate and returns a verdict with evidence.
-- **Spawn**: starting an agent as a conversation owned by the spawning tool call. The coordinator spawns workers, scouts and reviewers in the background; a worker spawns verifiers, reviewers and scouts in the foreground. Children of a worker cannot spawn.
+- **Spawn**: starting an agent as a conversation owned by the spawning tool call. The Coordinator spawns workers, scouts and reviewers in the background; an independent worker spawns verifiers, reviewers and scouts in the foreground. Task helpers leave further delegation to the Coordinator. Children of a worker cannot spawn.
 - **Steer**: a message queued into a running agent's conversation, placed after its current tool round.
 - **Dismiss**: clearing an ended Job or agent from the lists. Nothing is deleted.
 - **Stop**: an explicit abort of an agent with a stated reason. Aborting drains everything the agent owns.
 - **Candidate**: the exact commit a verifier or reviewer judges.
 - **Proof**: verifier runs, logs, screenshots and videos tied to a candidate, kept in the Job's artifacts.
-- **Ready report**: the worker's completion, posted by the coordinator as a regular message: PR link, three-line summary, proof, review result with the Not fixed list, gaps, time and cost.
+- **Ready report**: an independent worker's delivery report, posted by the Coordinator as a regular message: PR link, three-line summary, proof, review result with the Not fixed list, gaps, time and cost.
 - **Approve**: the owner's one consequential action on a Job: merge the PR when mergeable, then pull the project's main checkout if it is clean.
 - **Deploy**: restart the pi-prjcts host from its main checkout, with a smoke test and rollback. Separate from Approve.
 - **Stall**: an agent with no transcript progress for a set time, an identical tool call with an identical result five times, or a hung process. An agent waiting on an active subagent is not stalled.

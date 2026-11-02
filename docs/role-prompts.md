@@ -4,12 +4,13 @@
 
 Each prompt states the outcome the role owns, not a procedure:
 
-- Coordinator: turns owner requests into Jobs and answers; never edits code. It starts and steers agents with the `agents` tool and receives full reports.
-- Worker: owns one Job from request to Ready. It plans with the `job` tool, builds, records the candidate commit, proves it with a fresh verifier (up to the project's round limit), has an independent reviewer look at the diff, and reports with `job ready`; unproven criteria are reported as gaps.
+- Coordinator: owns delivery, investigates and makes small changes directly in its persistent chat worktree, and delegates substantial or parallel work with `agents`. Investigations need no Job or PR. It chooses shared or isolated workspaces for task helpers, prepares the environment and integrates their results into its task branch. Its unrestricted shell is trusted local execution; final merge to main, deployment and destructive actions still require explicit owner approval.
+- Independent worker: owns one Job from request to Ready. It plans with the `job` tool, builds, records the candidate commit, proves it with a fresh verifier up to the project's round limit, has an independent reviewer look at the diff, and reports with `job ready`; unproven criteria are reported as gaps.
+- Task helper: works in its explicitly selected shared or isolated workspace and returns its answer normally. It reports changed files, checks, artifacts, gaps and integration instructions without publishing a worker PR. The Coordinator judges the return and delegates any pinned independent review. Shared helpers preserve the prepared environment and task branch. Explicit owner worker instructions still apply, but the fixed helper contract replaces independent PR/Ready requirements and retains the shared authority rules.
 - Scout: read-only investigation with sources.
 - Reviewer: reads pinned code and reports findings with evidence; never edits.
 - Verifier: runs the project's verify skill against the candidate with `projects_verify_run` and reports per criterion what is proven, with run ids.
 
-Verification and review are worker-owned (see "Verification and review" in `ARCHITECTURE.md`); the host only checks that a Ready report's proof ids are passing runs on the candidate commit.
+Independent Job verification and review are worker-owned. The host checks that a Ready report's proof ids are passing runs on the candidate commit. A task helper's `completed` status only means it returned control and an answer. It is not a verification verdict or approval.
 
 Coverage: `role-prompts-e2e` (actual model-request text and tool sets per role), `jobs-e2e` (engine), `repo-skill-overrides-unit` (skill discovery).

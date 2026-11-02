@@ -425,8 +425,9 @@ try {
   const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  const card = await evaluate(`[...document.querySelectorAll('#messages .job-msg .who')].map(n => n.innerText).join('|')`, s);
-  if (!/Scout answered/.test(card)) throw Error("Report message missing in chat two: " + card);
+  await click(s, '#messages .event-card[data-kind="scout.answered"] > summary');
+  const card = await evaluate(`document.querySelector('#messages .event-card[data-kind="scout.answered"]')?.innerText`, s);
+  if (!card?.includes("SCOUT-RESULT-42")) throw Error("Report message missing in chat two: " + card);
   const mainText = await transcript(id, "main");
   if (/\[(worker|scout|reviewer) [0-9a-f-]{36} /.test(mainText) || mainText.includes("REPORT-ACK")) throw Error("Report also went to Main");
   result.checks.push("F8 the worker report goes to the delegating chat only and renders as a regular message there");

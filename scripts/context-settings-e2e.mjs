@@ -55,23 +55,23 @@ try {
   const s = await openPage(url.toString());
   await waitFor(`!!document.querySelector('#context-settings #context-window')`, s, "context card");
   await evaluate(
-    `(() => { const set = (q, v) => { document.querySelector(q).value = v; }; set('#context-window', '20000'); set('#context-threshold', '50'); document.querySelector('#context-threshold').dispatchEvent(new Event('input', { bubbles: true })); set('#context-keep', '2000'); document.querySelector('#context-auto').checked = true; document.querySelector('[data-action="context-save"]').click(); })()`,
+    `(() => { const set = (q, v) => { document.querySelector(q).value = v; }; set('#context-window', '30000'); set('#context-threshold', '50'); document.querySelector('#context-threshold').dispatchEvent(new Event('input', { bubbles: true })); set('#context-keep', '2000'); document.querySelector('#context-auto').checked = true; document.querySelector('[data-action="context-save"]').click(); })()`,
     s,
   );
   await eventually(
-    async () => (await rpc({ action: "settings-snapshot", id })).values.context?.contextWindow === 20000,
+    async () => (await rpc({ action: "settings-snapshot", id })).values.context?.contextWindow === 30000,
     "context settings not saved from the UI",
   );
   const saved = (await rpc({ action: "settings-snapshot", id })).values.context;
   check(
     "X1 Settings card saves window, auto-compact, threshold and keep-recent",
-    JSON.stringify(saved) === JSON.stringify({ autoCompact: true, contextWindow: 20000, thresholdPercent: 50, keepRecentTokens: 2000 }),
+    JSON.stringify(saved) === JSON.stringify({ autoCompact: true, contextWindow: 30000, thresholdPercent: 50, keepRecentTokens: 2000 }),
     saved,
   );
   view = await show();
   check(
-    "X6/X7 the override applies at once (context meter window 20000, catalog kept)",
-    view.context.window === 20000 && view.context.catalogWindow === 128000,
+    "X6/X7 the override applies at once (context meter window 30000, catalog kept)",
+    view.context.window === 30000 && view.context.catalogWindow === 128000,
     view.context,
   );
   check("X8 another project keeps the catalog window", (await rpc({ action: "show", id: other })).context.window === 128000);
@@ -81,7 +81,7 @@ try {
   await shot("01-context-settings", s);
   check(
     "X1 card summary shows window and threshold",
-    /20,000 tokens · compacts at 50%/.test(await evaluate(`document.querySelector('#context-summary').innerText`, s)),
+    /30,000 tokens · compacts at 50%/.test(await evaluate(`document.querySelector('#context-summary').innerText`, s)),
   );
 
   // X2: invalid values refused.
@@ -109,7 +109,7 @@ try {
           id,
           confirm: id,
           expectedRevision: await rev(),
-          changes: { context: { autoCompact: true, contextWindow: 20000, keepRecentTokens: 15000 } },
+          changes: { context: { autoCompact: true, contextWindow: 30000, keepRecentTokens: 20000 } },
         }),
       /at most half/,
     ),
@@ -169,7 +169,7 @@ try {
   await eventually(async () => !(await show()).busy, "busy turn did not finish");
   await rpc({ action: "settings-update", id, confirm: id, expectedRevision: await rev(), changes: { context: saved } });
 
-  // X10/X12: threshold compaction at 50% of the 20000 override, keeping the newest message verbatim.
+  // Leave room for the tool schemas and an older fill turn before compaction keeps the newest fill verbatim.
   const fill = (n) => `MARK-FILL FILL-${n} ` + `${"lorem ipsum dolor sit amet ".repeat(480)}`;
   let n = 0;
   while (brain.summaries.length === 0 && n < 8) {
@@ -178,7 +178,7 @@ try {
   }
   const firstSummary = brain.summaries[0] ?? "";
   check(
-    "X10 auto-compaction ran once the context passed 50% of the 20000 window (default would wait for ~78k)",
+    "X10 auto-compaction ran once the context passed 50% of the 30000 window (default would wait for ~78k)",
     brain.summaries.length === 1 && n <= 5,
     { n, summaries: brain.summaries.length },
   );
@@ -188,7 +188,7 @@ try {
     { n, head: firstSummary.slice(0, 300) },
   );
   view = await show();
-  check("X10 context drops after compaction", view.context.tokens < 10000, view.context);
+  check("X10 context drops after compaction", view.context.tokens < 15000, view.context);
   result.afterAuto = view.context;
 
   // X11: auto-compact off: no more threshold compaction.
@@ -201,7 +201,7 @@ try {
   });
   for (let i = 0; i < 3; i++) await k.ask(id, "main", fill(100 + i));
   view = await show();
-  check("X11 auto-compact off: past the threshold, nothing compacts", brain.summaries.length === 1 && view.context.tokens > 10000, {
+  check("X11 auto-compact off: past the threshold, nothing compacts", brain.summaries.length === 1 && view.context.tokens > 15000, {
     summaries: brain.summaries.length,
     context: view.context,
   });
@@ -226,7 +226,7 @@ try {
   brain.hold = null;
   await eventually(async () => {
     const c = (await show()).context;
-    return !c.compacting && c.tokens < 10000;
+    return !c.compacting && c.tokens < 15000;
   }, "context did not drop after Compact now");
   check(
     "X14/X16 Compact now (ring) summarizes the chat while auto-compact is off; the meter drops",
@@ -256,7 +256,7 @@ try {
   view = await show();
   check(
     "X4 settings survive a host restart",
-    view.context.window === 20000 && (await rpc({ action: "settings-snapshot", id })).values.context?.autoCompact === false,
+    view.context.window === 30000 && (await rpc({ action: "settings-snapshot", id })).values.context?.autoCompact === false,
   );
   await rpc({ action: "settings-update", id, confirm: id, expectedRevision: await rev(), changes: { context: null } });
   view = await show();

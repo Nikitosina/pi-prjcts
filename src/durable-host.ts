@@ -180,6 +180,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     notes: notes(dir),
     evidence: evidence(dir),
     context: view.coordinator.context,
+    ...(view.coordinator.access === undefined ? {} : { coordinatorAccess: view.coordinator.access }),
     chatId: view.chatId,
     chats,
     uploads: listUploads(dir),
