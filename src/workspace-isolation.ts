@@ -37,8 +37,8 @@ export type WorkspaceIsolation = {
   /** Re-creates the worktree of a git receipt the host cleaned up, on its kept branch; a still-released receipt carries the reason it cannot be revived. */ revive(
     intent: Intent,
   ): Promise<WorkspaceReceipt>;
-  /** Checks Git ownership on reopen without resetting dirty files or an advanced HEAD. */
-  checkOwned(intent: Intent): Promise<void>;
+  /** Checks Git ownership without resetting local work; trusted chats may change branches. */
+  checkOwned(intent: Intent, options?: { branch: "allocated" | "any" }): Promise<void>;
   snapshot(): Promise<WorkspaceSnapshot>;
 };
 type Command = { code: number; stdout: string; stderr: string };
@@ -245,7 +245,7 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
       context,
     );
   }
-  async function checkOwned(intent: Intent): Promise<void> {
+  async function checkOwned(intent: Intent, policy: { branch: "allocated" | "any" } = { branch: "allocated" }): Promise<void> {
     authorize(intent, allowed, authority);
     const old = await get(intent.id);
     if (!old || !sameFrozenIntent(old, intent)) throw new Error("No matching owned workspace receipt");
@@ -254,9 +254,11 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     if (pre.reason) throw new Error(pre.reason);
     const found = await gitEntry(intent.scope);
     if (!found || found.facts.path !== resolve(intent.scope.workspacePath)) throw new Error("Owned Git registration is missing");
-    const branch = await command(cli.git(), ["symbolic-ref", "--quiet", "HEAD"], intent.scope.workspacePath);
-    if (found.facts.branch !== `refs/heads/${intent.scope.branch}` || branch.code || branch.stdout.trim() !== found.facts.branch)
-      throw new Error("Owned Git branch differs");
+    if (policy.branch === "allocated") {
+      const branch = await command(cli.git(), ["symbolic-ref", "--quiet", "HEAD"], intent.scope.workspacePath);
+      if (found.facts.branch !== `refs/heads/${intent.scope.branch}` || branch.code || branch.stdout.trim() !== found.facts.branch)
+        throw new Error("Owned Git branch differs");
+    }
     if (found.facts.locked !== `workspace-intent:${intent.id}`) throw new Error("Git lock is not owned by this exact intent");
     const common = async (cwd: string) => {
       const result = await command(cli.git(), ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);

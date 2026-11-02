@@ -208,7 +208,7 @@ export function coordinatorWorkspaces(input: {
           check(binding);
         }
         await attachment.checkOwned();
-      } else await isolation.checkOwned(intent);
+      } else await isolation.checkOwned(intent, { branch: "any" });
       check(binding);
       const cwd = attachment ? realpathSync(attachment.workDir) : intent.scope.workspacePath;
       if (!ownedOnly)
@@ -222,7 +222,7 @@ export function coordinatorWorkspaces(input: {
         });
       check(binding);
       if (attachment) await attachment.checkOwned();
-      else await isolation.checkOwned(intent);
+      else await isolation.checkOwned(intent, { branch: "any" });
       check(binding);
       const ready: CoordinatorWorkspaceReady = {
         ...request,
