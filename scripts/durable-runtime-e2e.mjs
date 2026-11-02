@@ -96,6 +96,13 @@ try {
   assert.equal(answer.status, "done");
   assert.match(answer.text, /ADAPTER_READY/);
   pass("Fake-model coordinator answers");
+  const ownerHistory = await runtime.chatHistory();
+  assert.equal(ownerHistory.items.find((item) => item.kind === "message" && item.role === "user").origin, "owner");
+  assert.equal(
+    (await runtime.snapshot()).coordinator.history.items.find((item) => item.kind === "message" && item.role === "user").origin,
+    "owner",
+  );
+  pass("History and snapshot preserve owner admission provenance");
   await assert.rejects(runtime.result(99999999));
   pass("Unknown submission rejected");
   const before = await runtime.snapshot();
@@ -114,6 +121,10 @@ try {
   await untilSettled(workerId);
   assert.ok(workerContextSawSecret, "worker tool result was not present in a subsequent actual model request");
   pass("Worker reads topic on demand and receives its tool result in context");
+  await until((view) =>
+    view.coordinator.history.items.some((item) => item.kind === "message" && item.role === "user" && item.origin === "internal"),
+  );
+  pass("Worker reports carry internal origin in coordinator history");
   await runtime.say('Record a note. FAKE-CALL projects_note {"text":"COORDINATOR_NOTE"} FAKE-SAY noted', { requestId: "coordinator-note" });
   assert.ok(notes(dir).some((note) => note.text === "COORDINATOR_NOTE"));
   pass("Coordinator may record notes");

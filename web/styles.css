@@ -1481,6 +1481,9 @@ details.advanced > summary {
     max-height: 96px;
     overflow-y: auto;
   }
+  .side .side-work:has(.coordinator-access[open]) {
+    max-height: 45vh;
+  }
   .side .side-work .chat-list {
     flex-direction: row;
     overflow-x: auto;
@@ -2065,6 +2068,43 @@ pre.diff .del {
   flex-direction: column;
   gap: 4px;
   min-width: 0;
+}
+.coordinator-access {
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.coordinator-access summary {
+  cursor: pointer;
+  border-radius: 4px;
+  color: var(--text);
+}
+.coordinator-access summary:hover {
+  background: var(--hover);
+}
+.coordinator-access summary:active {
+  background: var(--hover-strong);
+}
+.coordinator-access p {
+  margin: 8px 0;
+}
+.coordinator-access dl {
+  margin: 8px 0;
+}
+.coordinator-access dt {
+  margin-top: 6px;
+  font-weight: 600;
+}
+.coordinator-access dd {
+  margin: 2px 0 0;
+}
+.coordinator-tool-list {
+  margin: 8px 0;
+  padding-left: 16px;
 }
 .chat-list {
   display: flex;

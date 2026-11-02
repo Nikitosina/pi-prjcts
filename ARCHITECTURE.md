@@ -23,14 +23,34 @@ The file must be regular, valid UTF-8, at most 64,000 bytes and 16,000 UTF-16 co
 
 Each conversation persists its shared-instruction snapshot separately from its frozen repository/role prompt. New agents and explicit retries of ended agents load current instructions. A running agent keeps its snapshot, including after restart and between tool rounds. Coordinators refresh on owner admission, Reload and prompt-affecting settings application. An owner follow-up queued during a coordinator turn defers the new snapshot until that turn ends; background reports otherwise use the last snapshot. Editing/removing the file needs no host restart or watcher. Saved snapshots survive reopening; the additive document does not migrate SQLite or change repository revisions, workspace authorization fingerprints or grants.
 
+## Coordinator execution
+
+The coordinator owns delivery and can investigate, reproduce, test and make small changes directly; delegation is optional. `coordinator-execution.ts` adapts Pi's ordinary read/edit/write/bash tools to Durable, resolving the calling chat's workspace before each invocation. It preserves errors, aborts and progress, and retains image results through the binary artifact mechanism. Browser automation uses installed shell commands or configured MCPs, not an invented built-in browser tool.
+
+`coordinator-workspace.ts` persists one chat owner and frozen workspace intent on the project root, then reuses the existing isolation allocator. Main and additional chats own distinct persistent worktrees. The first execution selects one existing whole-repository grant; missing, revoked, ambiguous or unsupported grants give a visible blocker, never a writable owner-checkout fallback. Reuse checks preserve advanced HEAD and dirty/untracked files while verifying workspace identity and ownership. Runtime attachments close without deleting the worktree; worker cleanup retains coordinator allocations. Provider-specific chat attachments use the optional workspace provider coordinator adapter rather than a fabricated Job.
+
+Root creation, extra chats, reopen and Reload all bind the shared execution tools. Calls resolve their own target instead of copying Main's worktree. Coordinator MCP and GitHub CLI calls use that same target. `show` projects actual selected-chat tool names and workspace state through `coordinatorAccess`; the Tools/access panel does not allocate a workspace or contact MCP servers. The historical `projects_vcs_shell` registration resolves recorded calls but is not offered to new turns.
+
+This is trusted local execution, not confinement. Unrestricted bash can act outside the worktree and bypass tool-gateway settings. Final PR merge to main, deployment and destructive actions require explicit owner approval as behavioral rules. Integrating worker branches into the Coordinator's task branch is ordinary task work. Static scouts/reviewers do not gain execution tools. An investigation can finish with findings and evidence without a Job or PR; direct changes report their branch, files, checks and gaps. Independent Jobs retain the worker verification/Ready/Approve workflow below. Explicit task helpers use the return-to-Coordinator workflow instead.
+
+### Task helper workspaces
+
+The Coordinator selects `workspace: {kind: "shared"}` or `workspace: {kind: "isolated", baseCommit: "<full commit>"}` on worker spawn. The model cannot supply a cwd, chat identity, lease or provider. Omission preserves independent Jobs and existing recorded workers. Explicit task selection cannot be combined with independent branch continuation or scope/read-ref overrides.
+
+Shared helpers borrow the spawning chat's verified allocation and prepared filesystem. They never allocate, set up, reset, release or delete it. Their process, artifact and host-lease identities remain their own. Shared selection freezes the chat/conversation/allocation identity; retry cannot retarget another workspace. A durable live-agent handoff prevents a second shared writer and new Coordinator mutation calls until the helper actually settles. The Coordinator must drain its own writes before handing off; unrestricted host-user execution is not confinement.
+
+Isolated helpers freeze a fresh owned allocation at the explicitly chosen commit. Git's selected base is distinct from the observed owner HEAD used by allocation preflight. Provider task support is explicit; unsupported providers refuse rather than substituting their independent-worker default base. Dirty files, untracked files and dependencies are not copied. Retry preserves the frozen intent, while runtime ownership checks allow the worker's HEAD and files to advance.
+
+A helper returns an ordinary answer and becomes `completed`, `failed` or `stopped`. Completion is a worker-reported execution handback, not independently accepted delivery. Helpers do not publish PRs, report Ready or enter Approve. The Coordinator inspects and integrates their changes, then verifies the combined task. Helpers leave further delegation to the Coordinator. Independent reviewers read committed snapshots, never a helper's mutable shared tree.
+
 ## Jobs engine
 
 `src/jobs.ts` replaces the old planning engine, the host verification cycle and the watchdog policy. It is built on pi-durable's ownership tree: a conversation owned by a task is aborted and drained with that task.
 
-- **State.** One document, `projects.jobs`, on the project's root conversation (`JobsState`: `jobs`, `agents`, `subagents`, `requests`, `paused`). A Job record holds small facts only: request verbatim, acceptance, status, branch, PR, candidate sha, plan, Ready report, stop reason. Transcripts, prompts and tool output stay in the conversations.
-- **Coordinator `agents` tool** (replay unsafe): `spawn`, `send`, `stop`, `status`, `wait`. Roles are worker, scout and reviewer. A worker spawn creates the Job. There is no worker cap.
+- **State.** One document, `projects.jobs`, on the project's root conversation (`JobsState`: `jobs`, `agents`, `subagents`, `requests`, `paused`). A Job record holds small facts only: request verbatim, acceptance, status, optional task workspace choice, branch, PR, candidate sha, plan, Ready report, stop reason. Transcripts, prompts and tool output stay in the conversations.
+- **Coordinator `agents` tool** (replay unsafe): `spawn`, `send`, `stop`, `status`, `wait`. Roles are worker, scout and reviewer. A worker spawn creates the Job. Explicit `workspace` selects a task helper; omitted selection keeps independent delivery. There is no global worker cap.
 - **Anchor and reporter.** Each spawn creates a background anchor task that owns the child conversation, and a background reporter task that prepares the agent (`host.prepare`), submits the message, waits, and posts the agent's answer in full to the chat as a follow-up. Quota failures switch once to the owner's fallback model, otherwise wait for the stored retry time and resend.
-- **Worker `job` tool** (replay safe): `plan`, `candidate`, `ready`. `ready` sets `ready` or `ready-with-gaps` (any gaps) after `host.checkProof` accepts the proof references. **Worker `subagent` tool**: a foreground verifier, reviewer or scout, owned by the tool call's task. Subagents get neither tool.
+- **Worker `job` tool** (replay safe): `plan`, `candidate`, `ready`. Independent `ready` sets `ready` or `ready-with-gaps` after `host.checkProof` accepts the proof references. Helpers may record a plan and local candidate, but finish by returning their answer, not Ready. **Independent worker `subagent` tool**: a foreground verifier, reviewer or scout, owned by the tool call's task. Helpers leave subdelegation to the Coordinator. Subagents get neither tool.
 - **Stop and steer.** `stop` requires a reason, marks the Job `stopped`, aborts the agent's conversation with `{ background: true }` (the tree drains its subagents) and then calls `host.killProcesses`. Steer is `send` into the running conversation; sending to a finished, failed or stopped Job reopens it (a worker that never got its brief gets it first, so a send is a retry). `dismiss` (coordinator `agents` action, owner Dismiss button, `thread-dismiss`) stamps `dismissedAt` on an ended Job or scout/reviewer; records, transcripts and files stay, the lists, dots and warnings skip it, and a new message clears the mark.
 - **Hung providers.** pi-durable awaits a provider stream without racing the abort, so a provider that ignores its signal (claude-bridge) would keep a stopped conversation busy forever. `model-guard.ts` wraps every dispatch in `durable-runtime.ts`: the stream ends `aborted` on a real abort and ends with a retryable "timed out" error after 10 minutes without an event; the provider's late events are dropped.
 - **Restart.** pi-durable resumes anchors and reporters once `install(registry)` has run. `recover` rebuilds workspace tools for live agents. Request ids (`requests`, `agent:<reporter>:<attempt>`, `report:<reporter>`) keep spawn, delivery and report exactly-once.
@@ -40,7 +60,7 @@ Rules:
 - Every commit that creates a task, conversation or submission must be replay safe: derive ids from the seed or request id so a retry returns the same agent.
 - Do not store transcripts or tool output in the Jobs document. Do not add a state that makes a Job wait on the host (there is no `blocked`).
 
-## Verification and review (worker-owned)
+## Independent Job verification and review (worker-owned)
 
 The worker commits, pushes a draft PR, records the candidate with `job candidate`, then spawns a fresh verifier on that sha. It repairs and repeats up to `verification.rounds` (project setting, default 3). It runs one review before `ready`, and at most one re-check. Without a verify skill the worker self-verifies and says so in the Ready report. Prompts are in `src/role-prompts.ts` (see `docs/role-prompts.md`); the workflow lives in tool descriptions and these prompts once.
 
@@ -83,7 +103,7 @@ Rule: a failed preparation must leave the running host untouched. Guarded shutdo
 
 ## Reads: transcripts, binary results, archive
 
-- `src/transcript-reader.ts` pages a conversation's entries newest first (`PAGE_ENTRIES`), with bounded previews and images by reference. A `TranscriptSource` supplies entries, either live (`storageSource`) or from an archive file.
+- `src/transcript-reader.ts` pages a conversation's entries newest first (`PAGE_ENTRIES`), with bounded previews and images by reference. A `TranscriptSource` supplies entries, either live (`storageSource`) or from an archive file. Owner and internal inputs carry native entry kinds, exposed as message `origin`. Coordinator reads attribute older inputs by exact matches in the newest 200 submissions; unmatched legacy inputs stay unclassified.
 - `src/binary-results.ts` stores bytes from MCP, simulator, upload and image results as content-addressed artifacts under `artifacts/<scope>/binary/` (25 MiB limit, mime sniffed from bytes). The transcript keeps a markdown reference and a model copy of at most 200 KiB and 1024 px per side.
 - `src/archive-reader.ts` opens an old host's `durable.sqlite` read-only (`readOnly`, `query_only`) and lists its chats and worker transcripts through the transcript reader. `src/archive-host.ts` keeps the old-home path in `<home>/archive.json` (default `~/.pi/agent/projects-dev`) and a few open readers; `web/app/archive.js` browses it. Host RPCs `chat-history`, `thread-history`, `transcript-text` and `transcript-image` page live conversations the same way (`web/app/transcript.js`).
 
@@ -116,6 +136,7 @@ Rule: Telegram never decides. Its buttons call host actions that re-check the Jo
 Rules:
 - Features never assign shell state directly. They use the setters, and they check `getGeneration()` after every `await` before touching the page, so a late response cannot render into another project.
 - Everything from a provider, a transcript or a plugin is data: escape it (`esc`) before inserting HTML.
+- Coordinator chat hides tool diagnostics, thinking and reset handoffs; worker and archive transcripts retain them. Internal inputs never appear as the owner speaking: Ready reports stay readable, other known events are collapsed, and other attributed internal inputs are hidden. Owner-origin text is never parsed as an internal report or event. Unclassified legacy input stays readable with a neutral label, not "You".
 
 ## Plugins
 
@@ -131,5 +152,5 @@ Rules:
 - Knowledge: `knowledge.ts`, `knowledge-search.ts`, `knowledge-types.ts`. Markdown under `knowledge/` is the source of truth; a revision is required to write. Preferences, runbooks and decisions only.
 - MCP: `mcp-servers.ts` owns lazy connections and `mcp-profiles.ts` gates servers/writes by role. HTTP connections without an Authorization header reuse Pi's named-server OAuth credentials and refresh locks. `mcp-sign-in.ts` pins private credential/refresh helpers to the locally installed Pi SDK 1.4.0; an SDK upgrade must check this adapter. Projects never launches browser sign-in; missing/rejected grants direct the owner to `pi mcp login <server>`. Static Authorization and stdio behavior are unchanged, and OAuth/server error bodies never reach callers.
 - Skills: `skill-profiles.ts`, `coordinator-skills.ts` (`projects_skill_file` reads a skill body on demand for the roles that have it). Skills are discovered fresh from disk on each catalog request.
-- GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Approve is the only merge path.
+- GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Approve is the independent Job PR merge path. Coordinator task-branch integration is ordinary work; final direct PR merge still requires owner approval.
 - Remote access: `remote.ts`, `relay/`, `REMOTE_SPEC.md`.

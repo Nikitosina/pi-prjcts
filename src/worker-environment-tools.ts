@@ -25,8 +25,11 @@ export function workerEnvironmentTools(input: {
   projectId: string;
   leases: ResourceLeases;
   background: BackgroundCommands;
+  owner?: (api: ToolExecutionApi, context: ToolContext) => string | Promise<string>;
   target: (api: ToolExecutionApi, context: ToolContext) => EnvironmentTarget | Promise<EnvironmentTarget>;
 }): ToolRegistration[] {
+  const owner = async (api: ToolExecutionApi, context: ToolContext) =>
+    input.owner ? input.owner(api, context) : (await input.target(api, context)).threadId;
   const acquire = defineTool({
     name: "projects_lease_acquire",
     description:
@@ -60,7 +63,7 @@ export function workerEnvironmentTools(input: {
     parameters: Type.Object({ resource: Resource }, { additionalProperties: false }),
     replay: "unsafe",
     async execute(args, api, context) {
-      const holder = { projectId: input.projectId, threadId: (await input.target(api, context)).threadId };
+      const holder = { projectId: input.projectId, threadId: await owner(api, context) };
       return json({ resource: args.resource, released: input.leases.release(args.resource, holder) });
     },
   });
@@ -102,7 +105,7 @@ export function workerEnvironmentTools(input: {
     replay: "safe",
     async execute(args, api, context) {
       return json(
-        await input.background.wait((await input.target(api, context)).threadId, args.id, {
+        await input.background.wait(await owner(api, context), args.id, {
           tailLines: args.tailLines ?? 40,
           after: args.after,
           waitSeconds: args.waitSeconds ?? 0,
@@ -117,7 +120,7 @@ export function workerEnvironmentTools(input: {
     parameters: Type.Object({ id: Id }, { additionalProperties: false }),
     replay: "unsafe",
     async execute(args, api, context) {
-      const { command: _command, ...info } = await input.background.stop((await input.target(api, context)).threadId, args.id);
+      const { command: _command, ...info } = await input.background.stop(await owner(api, context), args.id);
       return json(info);
     },
   });

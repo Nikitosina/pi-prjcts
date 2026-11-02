@@ -10,6 +10,7 @@ import { retireWorkspaceReceipt, workspaceReceipts } from "./workspace-isolation
 import type { Project } from "./state.ts";
 import { findVcsRoot } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
+import { coordinatorWorkspaceOwners } from "./coordinator-workspace-state.ts";
 
 /* Worktree lifecycle around the frozen isolation receipts: a per-project setup command after allocation (C4),
  * read-only PR-head snapshots for scouts/reviewers (C3), and safe cleanup of settled worktrees (C9).
@@ -17,13 +18,18 @@ import { plugins } from "./plugins.ts";
 
 type Run = { code: number; stdout: string; stderr: string };
 const PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-function run(file: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<Run> {
+function run(
+  file: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Run> {
+  options.signal?.throwIfAborted();
   return new Promise((done) => {
     const child = spawn(file, args, {
       cwd: options.cwd,
       env: options.env ?? { PATH, HOME: process.env.HOME ?? "", GIT_TERMINAL_PROMPT: "0" },
       stdio: ["ignore", "pipe", "pipe"],
-      detached: options.timeoutMs !== undefined,
+      detached: options.timeoutMs !== undefined || options.signal !== undefined,
     });
     let stdout = "",
       stderr = "";
@@ -34,23 +40,34 @@ function run(file: string, args: string[], options: { cwd?: string; env?: NodeJS
     child.stderr.on("data", (part) => {
       stderr = cap(stderr, part);
     });
+    const stop = () => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    };
     const timer =
       options.timeoutMs === undefined
         ? undefined
         : setTimeout(() => {
             stderr += `\nTimed out after ${options.timeoutMs} ms`;
-            try {
-              process.kill(-child.pid!, "SIGKILL");
-            } catch {
-              child.kill("SIGKILL");
-            }
+            stop();
           }, options.timeoutMs);
-    child.on("error", (error) => {
+    const clear = () => {
       if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", stop);
+    };
+    options.signal?.addEventListener("abort", stop, { once: true });
+    if (options.signal?.aborted) stop();
+    // A cancellable setup owns its descendants even if its shell exits first.
+    if (options.signal) child.once("exit", stop);
+    child.on("error", (error) => {
+      clear();
       done({ code: -1, stdout, stderr: String(error) });
     });
     child.on("close", (code) => {
-      if (timer) clearTimeout(timer);
+      clear();
       done({ code: code ?? -1, stdout, stderr });
     });
   });
@@ -83,7 +100,9 @@ export async function worktreeSetup(input: {
   intentId: string;
   workspacePath: string;
   cwd?: string;
+  signal?: AbortSignal;
 }): Promise<string> {
+  input.signal?.throwIfAborted();
   const command = input.command?.trim();
   let record = setupRecord(input.controlRoot, input.intentId);
   if (!record && command) {
@@ -92,7 +111,10 @@ export async function worktreeSetup(input: {
       cwd: input.cwd ?? input.workspacePath,
       env: { ...process.env, PI_WORKTREE: input.workspacePath },
       timeoutMs: Number(process.env.PI_PROJECTS_SETUP_TIMEOUT_MS) || 900_000,
+      signal: input.signal,
     });
+    // An interrupted setup has no completion record, so an explicit retry can finish it.
+    input.signal?.throwIfAborted();
     record = {
       command,
       workspacePath: input.workspacePath,
@@ -158,7 +180,7 @@ export function readHeads(checkout: string, controlRoot: string, owner?: { proje
 
 // ---- C9: inventory and cleanup ----
 export type WorktreeItem = {
-  kind: "worker" | "read-head";
+  kind: "worker" | "read-head" | "coordinator";
   path: string;
   threadId: string | null;
   branch: string | null;
@@ -221,7 +243,26 @@ export async function worktreeInventory(input: {
   }, BACKGROUND_CONTEXT);
   const busy = (threadId: string) => live.has(threadId);
   const items: WorktreeItem[] = [];
+  const coordinators = await coordinatorWorkspaceOwners(input.root);
   for (const receipt of await workspaceReceipts(input.root)) {
+    const coordinator = coordinators.get(receipt.intentId);
+    if (coordinator) {
+      items.push({
+        kind: "coordinator",
+        path: receipt.workspacePath ?? receipt.scope.workspacePath,
+        threadId: coordinator.threadId,
+        branch: receipt.scope.branch,
+        sizeKb: -1,
+        removable: false,
+        reasons: [`persistent coordinator workspace for chat ${coordinator.chatId}; retained even when idle or archived`],
+        setup: setupRecord(input.controlRoot, receipt.intentId),
+        pullRequests: [],
+        intentId: receipt.intentId,
+        checkout: receipt.scope.ownerCheckout,
+        ...(receipt.scope.provider === "git" ? {} : { provider: receipt.scope.provider }),
+      });
+      continue;
+    }
     if (receipt.state !== "allocated" || !receipt.workspacePath || !existsSync(receipt.workspacePath)) continue;
     if (receipt.scope.provider !== "git") {
       // A plugin provider's worktree; without the plugin it is kept untouched and not listed.

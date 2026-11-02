@@ -47,6 +47,16 @@ PR watch documents store ids as strings; documents written with numeric ids are 
 
 Tests: `scripts/vcs-plugins-e2e.mjs` with the fake plugin in `scripts/fixtures/` (failure modes: `scripts/vcs-plugins-failures.md`).
 
+## Coordinator and task workspaces
+
+`workspace.coordinator` is an optional chat-ownership adapter with `plan(CoordinatorBindContext)` and `attach(CoordinatorAttachContext)`. The attachment supplies `workDir`, `start`, `checkOwned` and `detach`. Ownership checks must validate the frozen receipt, repository, real root, branch and lease while allowing advanced HEAD and dirty files. Detach drains runtime handles; it must not release or remove the allocation. Missing support blocks Coordinator execution for that provider.
+
+Shared task helpers borrow that verified chat attachment. They do not call independent worker `plan`, `attach`, `tools` or publication hooks, and they never acquire the chat's ownership identity. Their processes, artifacts and host leases remain keyed to their real worker ID.
+
+Isolated task helpers require the separate optional `workspace.task` adapter. `plan(TaskPlanContext)` receives the verified source chat workspace, actual worker identity and explicit `baseCommit`; it must return that exact base and a fresh branch, never fetch trunk as a substitute or continue another branch. Core freezes the resulting allocation intent before allocation. `attach(TaskAttachContext)` returns the same owned-attachment operations plus task instructions. Its checks must retain task-specific receipt and lease ownership, not relax Coordinator checks to accept arbitrary paths.
+
+Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
+
 ## GitHub PR watching (built in)
 
 The `github` provider reads through `gh` (`PI_PROJECTS_GH_CLI`): one `gh api graphql` call per card refresh (open PRs with check runs and commit statuses, mergeability, review decision, unresolved threads), cached and shared by `pr-cache` (TTL `PI_PROJECTS_PR_TTL_MS`, jittered rate-limit backoff `PI_PROJECTS_PR_BACKOFF_MS`). Detail, status of a vanished PR and the coordinator tool `projects_github_pr` are one query each; nothing mutates. It applies to projects with a GitHub authorization (first repository).

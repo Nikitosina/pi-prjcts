@@ -155,7 +155,9 @@ export function startNotifier(options: {
           const approvable =
             !working.has(chat.id) && (!direct || report)
               ? jobs
-                  .filter((job) => (job.status === "ready" || job.status === "ready-with-gaps") && job.pr && job.candidate)
+                  .filter(
+                    (job) => !job.workspace && (job.status === "ready" || job.status === "ready-with-gaps") && job.pr && job.candidate,
+                  )
                   .filter((job) => chatOf(Number(job.chat)).id === chat.id)
                   .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))[0]
               : undefined;

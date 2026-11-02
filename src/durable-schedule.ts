@@ -350,7 +350,13 @@ export function scheduleRuntime(
       );
     try {
       const submission = await (intent.conversationId === undefined ? root : target).submit(
-        { type: "input", content: intent.text, requestId: intent.requestId, whenBusy: "followUp" },
+        {
+          type: "input",
+          content: intent.text,
+          entry: { kind: "projects.internal-input" },
+          requestId: intent.requestId,
+          whenBusy: "followUp",
+        },
         BACKGROUND_CONTEXT,
       );
       await hooks.beforeScheduleReceiptCommit?.({ requestId: intent.requestId, submissionId: Number(submission.id) });

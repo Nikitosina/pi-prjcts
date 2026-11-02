@@ -1,6 +1,6 @@
 # Jobs: host data for the UI
 
-Jobs replace the plan/work model. One Job is one owner request with one worker; the worker owns planning, verification and review. Everything below is host RPC (`dispatch`) or CLI.
+Jobs replace the plan/work model. One Job is one delegated request with one worker. Independent Jobs own PR delivery, verification and review; task helpers return their work to the Coordinator. Everything below is host RPC (`dispatch`) or CLI.
 
 ## Reads
 
@@ -14,7 +14,8 @@ Jobs replace the plan/work model. One Job is one owner request with one worker; 
 
 `JobsSnapshot = { paused, jobs[], agents[] }`
 
-- `jobs[]`: `id` (= worker agent id), `chat` (conversation id of the spawning chat), `title`, `request`, `acceptance[]`, `status` (`running | ready | ready-with-gaps | failed | stopped | approved`), `workerConversation`, `scopeId`, `branch`, `pr`, `candidate` (sha), `plan[]` (`{title, status: todo|doing|done, estimateMin, startedAt, doneAt}`), `ready` (`{summary, proof[], review, notFixed[{text,reason}], gaps[], at}` once reported), `reason` (stop/failure text), `createdAt`, `endedAt`, `stalls`, `stalledAt` (non-null while a stall notice stands), plus live fields:
+- `jobs[]`: `id` (= worker agent id), `chat` (conversation id of the spawning chat), `title`, `request`, `acceptance[]`, `status` (`running | completed | ready | ready-with-gaps | failed | stopped | approved`), `workerConversation`, `scopeId`, `branch`, `pr`, `candidate` (sha), `plan[]` (`{title, status: todo|doing|done, estimateMin, startedAt, doneAt}`), `ready` (`{summary, proof[], review, notFixed[{text,reason}], gaps[], at}` once reported), `reason` (stop/failure text), `createdAt`, `endedAt`, `stalls`, `stalledAt` (non-null while a stall notice stands), plus live fields:
+  - `workspace`, when present: `{kind: "shared"}` or `{kind: "isolated", baseCommit: "<full commit>"}` identifies a task helper. Omission, including old records, means independent Job delivery. Helper `completed` means an ordinary answer returned, not verified or approved delivery; helper PR and Ready report remain null.
   - `working`: the worker conversation is generating or running tools.
   - `leaf`: conversation id of the deepest working conversation (a verifier or reviewer the worker waits on); open its history for live progress.
   - `eta`: `{done, total, etaMin}` from the plan, scaled by estimate accuracy.
@@ -30,10 +31,16 @@ Jobs replace the plan/work model. One Job is one owner request with one worker; 
 | `thread-send {id, threadId, requestId, text}` | Queue a message after the agent's current answer. |
 | `thread-stop {id, threadId}` | Stop an agent, its subagents and their background processes. Job becomes `stopped` with reason "Stopped by the owner". |
 | `job-approve {id, jobId}` | Merge a Ready Job's candidate through result acceptance (same path as Telegram Approve). Returns the `AcceptanceOutcome`. A draft PR is marked ready first. When auto-merge is armed it answers `auto-merge-pending` at once; the flow finishes in an owner-scoped background task (aborted when the project closes), marks the Job approved and posts the result to the Job's chat. |
-| `work-submit {id, requestId, workspaceScopeId, text, threadId}` | Spawn a worker Job from the host (`threadId` is ignored). |
+| `work-submit {id, requestId, workspaceScopeId, text, threadId}` | Spawn an independent worker Job in Main from the host (`threadId` is ignored). It does not select task helper workspaces. |
 | `pause` / `resume` | Pause aborts every running agent (they continue on resume). |
 
 Removed: `plan-snapshot`, `work-archive`, `legacy-thread-history`, the `workerCap` setting (still accepted in old project files, unused) and the watchdog automation. New settings: `stallMinutes` (default 20) and `verification.rounds` (default 3).
+
+## Coordinator task helpers
+
+The chat's `agents` tool selects task helpers with explicit `workspace`. Shared helpers borrow that chat's persistent workspace; isolated helpers allocate from the supplied full commit. Paths and owner identities are host-resolved. Shared handoff lasts until actual agent settlement, not merely the start of a closing answer. A follow-up reruns the same worker in its frozen binding.
+
+Helpers finish by returning their answer. They do not need a Ready report or worker PR, never offer Approve, and cannot be passed to result acceptance. The Coordinator receives the complete worker-reported answer and owns inspection, branch integration and combined verification.
 
 ## Stall notices
 
