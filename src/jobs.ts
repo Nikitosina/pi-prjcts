@@ -99,6 +99,8 @@ export type Agent = {
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
   sends?: number;
+  /** The newest admitted delivery, so reporters can recognize a shared answer without scanning history. */
+  latestInput?: { seq: number; requestId: string };
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: { at: number; from: string; to: string }[];
@@ -326,6 +328,7 @@ const reporterTask = (host: JobsHost) =>
       deliver: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId, message, followUp, requestId } = reporter.input;
         const { attempt, checked, boot, note } = reporter.state.checkpoint;
+        const deliveryRequestId = requestId ? `send:${requestId}:${attempt}` : `agent:${reporter.id}:${attempt}`;
         // A quota wait is stored, so a restart waits out the rest of it instead of resending at once.
         const waiting = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.quota;
         if (waiting && waiting.retryAt > runtime.now()) {
@@ -341,6 +344,8 @@ const reporterTask = (host: JobsHost) =>
             if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
               return { status: "running", checkpoint: { phase: "report" } } as const;
             if (message.startsWith(record.brief)) record.briefed = true;
+            if ((record.sends ?? 0) === (reporter.input.seq ?? 0))
+              record.latestInput = { seq: reporter.input.seq ?? 0, requestId: deliveryRequestId };
             return {
               status: "running",
               checkpoint: { phase: "deliver", attempt, checked: true, boot: boot ?? host.boot ?? BOOT, note },
@@ -354,7 +359,7 @@ const reporterTask = (host: JobsHost) =>
             type: "input",
             content: note ?? message,
             whenBusy: followUp || note ? "followUp" : "steer",
-            requestId: requestId ? `send:${requestId}:${attempt}` : `agent:${reporter.id}:${attempt}`,
+            requestId: deliveryRequestId,
           },
           taskContext,
         );
@@ -374,7 +379,8 @@ const reporterTask = (host: JobsHost) =>
               : (host.quotaResetAt?.(from, now) ?? now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
             await runtime.commit(async (tx) => {
               const doc = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
-              if (!doc) return undefined;
+              if (!doc || (doc.sends ?? 0) > (reporter.input.seq ?? 0))
+                return { status: "running", checkpoint: { phase: "report" } } as const;
               doc.quota = { attempts: previous + 1, retryAt, lastError: failure.slice(0, 500) };
               if (switched) {
                 doc.modelMoves.push({ at: now, from, to: switched.label });
@@ -394,6 +400,8 @@ const reporterTask = (host: JobsHost) =>
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
           const record = state.agents[agentId];
           if (!record) return next();
+          // A newer send owns recovery and failure reporting for a turn shared by several inputs.
+          if (failure && (record.sends ?? 0) > (reporter.input.seq ?? 0)) return next();
           record.quota = null;
           const job = record.jobId ? state.jobs[record.jobId] : undefined;
           if (settled.status === "unanswered") {
@@ -406,6 +414,11 @@ const reporterTask = (host: JobsHost) =>
           if (settled.type !== "input") return next();
           if (record.reported.includes(settled.answer)) return next();
           if (job && job.status === "stopped") return next();
+          // Leave a shared answer to the newest reporter, which carries the final Job state and Ready payload.
+          if (record.latestInput && record.latestInput.seq > (reporter.input.seq ?? 0)) {
+            const latest = await tx.submissionByRequest(conversationId, record.latestInput.requestId);
+            if (latest?.type === "input" && latest.status === "done" && latest.answer === settled.answer) return next();
+          }
           const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
           record.reported.push(settled.answer);
           // A newer message is already queued for this agent: it keeps the Job running and decides how it ends.
@@ -448,7 +461,16 @@ const reporterTask = (host: JobsHost) =>
         }
         if (report !== undefined) {
           const chat = await runtime.conversation(reporter.input.chat, taskContext);
-          await chat?.submit({ type: "input", content: report, whenBusy: "followUp", requestId: `report:${reporter.id}` }, taskContext);
+          await chat?.submit(
+            {
+              type: "input",
+              content: report,
+              entry: { kind: "projects.internal-input" },
+              whenBusy: "followUp",
+              requestId: `report:${reporter.id}`,
+            },
+            taskContext,
+          );
         }
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
       },
@@ -689,7 +711,7 @@ export function createJobs(host: JobsHost) {
       if (action === "dismiss") return reply(await dismissAgent(api, agent!.id));
       if (action === "send") {
         if (!args.message?.trim()) return reply("send needs a message.");
-        return reply(await sendTo(api, agent!.id, args.message, args.followUp === true));
+        return reply(await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId));
       }
       // spawn
       if (!args.role) return reply("spawn needs a role and a brief.");
@@ -1035,6 +1057,7 @@ export function createJobs(host: JobsHost) {
       {
         type: "input",
         content: `[worker ${jobId} approve: ${job!.title}] ${line}`,
+        entry: { kind: "projects.internal-input" },
         whenBusy: "followUp",
         requestId: `approve:${jobId}:${clock()}`,
       },
@@ -1133,6 +1156,7 @@ export function createJobs(host: JobsHost) {
           content: `[worker ${job.id} stalled: ${job.title}] ${problem}${leaf !== worker ? ` (in its ${job.children.find((child) => child.id === leaf)?.role ?? "subagent"} conversation ${leaf})` : ""}.${steps ? `\nLast steps:\n${steps}` : ""}\nSteer or stop it if needed.`,
           whenBusy: "followUp",
           requestId: `stall:${job.id}:${episode}`,
+          entry: { kind: "projects.internal-input" },
         },
         context,
       );

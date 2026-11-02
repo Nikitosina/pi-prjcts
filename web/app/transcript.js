@@ -54,6 +54,7 @@ export function displayMessages(items) {
           {
             ...base,
             role: item.role,
+            origin: item.origin,
             text: item.text,
             thinking: item.thinking,
             images: item.images,
@@ -95,7 +96,7 @@ export function displayMessages(items) {
       case "compaction":
         return [{ ...base, kind: "compaction" }];
       case "reset":
-        return [{ ...base, role: "assistant", text: item.handoff }];
+        return [{ ...base, kind: "reset", role: "assistant", text: item.handoff }];
     }
     return [];
   });

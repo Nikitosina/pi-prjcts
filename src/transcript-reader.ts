@@ -18,6 +18,7 @@ const THINKING_PREVIEW_CHARS = 600,
 export type RawEntry = {
   id: number;
   kind: string;
+  origin?: "owner" | "internal";
   model?: readonly { role: string; content?: unknown; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean }[];
   head?: number;
 };
@@ -44,12 +45,45 @@ export function storageSource(storage: Pick<Storage, "scanEntries" | "entry">, c
   };
 }
 
+/** Coordinator-only provenance. Exact legacy matches are bounded to the newest submission page; unknown entries stay unknown. */
+export function coordinatorStorageSource(
+  storage: Pick<Storage, "scanEntries" | "entry" | "scanSubmissions">,
+  context: Context,
+  ownerSubmissionIds: readonly number[],
+): TranscriptSource {
+  const source = storageSource(storage, context);
+  const owners = new Set(ownerSubmissionIds);
+  return {
+    ...source,
+    async newest(conversationId, before, limit) {
+      const rows = await source.newest(conversationId, before, limit);
+      const legacy = rows.filter((row) => row.kind === "pi.user");
+      if (!legacy.length) return rows;
+      const page = await storage.scanSubmissions(
+        { conversationId: conversationId as ConversationId, order: "descending" },
+        200,
+        undefined,
+        context,
+      );
+      const origins = new Map<number, "owner" | "internal">();
+      for (const submission of page.items)
+        if (submission.conversationId === conversationId && submission.type === "input" && submission.entry !== undefined)
+          origins.set(submission.entry, owners.has(submission.id) ? "owner" : "internal");
+      return rows.map((row) => {
+        const origin = row.kind === "pi.user" ? origins.get(row.id) : undefined;
+        return origin ? { ...row, origin } : row;
+      });
+    },
+  };
+}
+
 export type ImageRef = { ref: string; mime: string; bytes: number };
 export type TranscriptItem =
   | {
       kind: "message";
       entryId: number;
       role: "user" | "assistant";
+      origin?: "owner" | "internal";
       at: number;
       text: string;
       textChars: number;
@@ -122,6 +156,12 @@ export async function readTranscriptPage(
   };
 }
 
+function inputOrigin(entry: RawEntry): RawEntry["origin"] {
+  if (entry.kind === "projects.owner-input") return "owner";
+  if (entry.kind === "projects.internal-input") return "internal";
+  return entry.origin;
+}
+
 /** Items of one entry in display order. Calls come out right after their assistant text. */
 function entryItems(entry: RawEntry, display?: PageOptions["display"]): TranscriptItem[] {
   if (entry.kind === "pi.compaction")
@@ -148,6 +188,7 @@ function entryItems(entry: RawEntry, display?: PageOptions["display"]): Transcri
         kind: "message",
         entryId: entry.id,
         role: message.role,
+        ...(message.role === "user" && inputOrigin(entry) ? { origin: inputOrigin(entry) } : {}),
         at,
         text: text.text,
         textChars: text.total,
