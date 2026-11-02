@@ -489,18 +489,21 @@ try {
   result.checks.push("W9/W11 a binary body arrives as text with replacement characters; a 2 MiB body gets 413 and the host keeps running");
   await idle();
 
-  // W15: event cards in the Hooks chat.
+  // W15: only coordinator replies appear; delivery evidence remains stored.
   const chatUrl = new URL(launch);
   chatUrl.searchParams.set("tab", "coordinator");
   chatUrl.searchParams.set("chat", hooks.id);
   await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(`document.querySelectorAll('#messages .event-card.webhook').length >= 4`, s, "webhook cards");
-  const cards = await evaluate(`[...document.querySelectorAll('#messages .event-card.webhook summary b')].map(b => b.innerText)`, s);
-  const raw = await evaluate(`document.querySelector('#messages').innerText.includes('[Owner-local event')`, s);
-  if (!cards.includes("Webhook · deploy.finished") || !cards.includes("Webhook · push") || raw)
-    throw Error("Cards wrong: " + JSON.stringify(cards));
-  await evaluate(`document.querySelector('#messages .event-card.webhook').open = true`, s);
-  result.checks.push('W15 deliveries show as "Webhook · <type>" cards, not as owner messages');
+  await waitFor(`!!document.querySelector('#messages .msg.them')`, s, "webhook coordinator replies");
+  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .msg.you')`, s))
+    throw Error("Internal webhook event appeared as a chat bubble");
+  const retained = (await rpc({ action: "show", id, chatId: hooks.id })).messages;
+  if (
+    !retained.some((message) => message.text?.includes("deploy.finished")) ||
+    !retained.some((message) => message.text?.includes("webhook.push"))
+  )
+    throw Error("Webhook delivery evidence missing from stored history");
+  result.checks.push("W15 coordinator replies remain visible without raw event bubbles; delivery evidence is retained");
   await shot("02-hooks-chat", s);
 
   // W3: rotate from the UI (two clicks), old secret refused, new accepted.

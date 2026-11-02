@@ -23,10 +23,11 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Stop**: an explicit abort of an agent with a stated reason. Aborting drains everything the agent owns.
 - **Candidate**: the exact commit a verifier or reviewer judges.
 - **Proof**: verifier runs, logs, screenshots and videos tied to a candidate, kept in the Job's artifacts.
-- **Ready report**: an independent worker's delivery report, posted by the Coordinator as a regular message: PR link, three-line summary, proof, review result with the Not fixed list, gaps, time and cost.
+- **Checkpoint**: an independent worker's intermediate handback while work is unfinished or needs a decision. It preserves the workspace and evidence for continuation, without offering Approve.
+- **Ready report**: an independent worker's delivery report, distinct from an unfinished Checkpoint. It includes the PR, summary, proof, review findings, gaps and cumulative Job time and cost.
 - **Approve**: the owner's one consequential action on a Job: merge the PR when mergeable, then pull the project's main checkout if it is clean.
 - **Deploy**: restart the pi-prjcts host from its main checkout, with a smoke test and rollback. Separate from Approve.
-- **Stall**: an agent with no transcript progress for a set time, an identical tool call with an identical result five times, or a hung process. An agent waiting on an active subagent is not stalled.
+- **Stall**: an agent with no transcript progress for a set time or an identical tool call with an identical result five times. A quiet background service alone is not evidence of stalled work. An agent waiting on an active subagent is not stalled.
 - **Plan**: an agent's own list of steps with status and estimates, shown as progress and ETA.
 - **Knowledge**: durable project memory: preferences, runbooks, decisions. Not reviews or proof.
 - **Archive**: read-only view of chats and transcripts from the pre-Job host.

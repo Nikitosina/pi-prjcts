@@ -1,5 +1,5 @@
 // Fake OpenAI-completions provider for verification runs. Usage: node fake-provider.mjs <port-file> <request-log>
-// Answers every model call with `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
+// Ordinary messages receive `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -43,7 +43,35 @@ const server = createServer((req, res) => {
     const say = (content) => chunk({ role: "assistant", content }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
     const title = "VERIFY-JOB greet the world";
     let reply;
-    if (user.includes("VERIFY-JOB") && names.includes("agents") && !user.startsWith("[worker")) {
+    if (names.includes("agents") && user.startsWith("[worker")) {
+      reply = say(
+        user.includes(" checkpoint:")
+          ? "The intermediate result needs your decision."
+          : "The work is ready. Proof is available in the task details.",
+      );
+    } else if (user.includes("VERIFY-CHECKPOINT") && names.includes("agents")) {
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "worker",
+              title: "VERIFY-CHECKPOINT intermediate work",
+              brief: "VERIFY-CHECKPOINT preserve the intermediate result and return for an owner decision.",
+              acceptance: ["Preserve the intermediate result for an owner decision."],
+              requestId: "verify-checkpoint",
+            })
+          : say("Preparing the intermediate result.");
+    } else if (user.includes("VERIFY-CHECKPOINT") && names.includes("job")) {
+      reply =
+        stage === 0
+          ? call("job", {
+              action: "checkpoint",
+              summary: "Preserved the intermediate changes.",
+              proof: ["checkpoint-evidence"],
+              gaps: ["Owner decision needed before continuing."],
+            })
+          : say("Checkpoint recorded.");
+    } else if (user.includes("VERIFY-JOB") && names.includes("agents") && !user.startsWith("[worker")) {
       reply =
         stage === 0
           ? call("agents", {

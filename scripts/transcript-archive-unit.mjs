@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { listArchiveProjects, openArchiveProject } from "../src/archive-reader.ts";
 import { binaryResult } from "../src/binary-results.ts";
 import { parse, Request } from "../src/state.ts";
-import { coordinatorStorageSource, readTranscriptPage } from "../src/transcript-reader.ts";
+import { coordinatorStorageSource, readTranscriptPage, readTranscriptText } from "../src/transcript-reader.ts";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
 // Exact submission attribution, not text matching. The source reads one bounded submission page.
@@ -65,6 +65,23 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
   assert.equal(scans[0].query.conversationId, 7);
   assert.equal(scans[0].limit, 200);
   assert.equal(scans[0].cursor, undefined, "backend-owned cursors are never synthesized from entry IDs");
+}
+
+// Report archives are non-model entries but remain readable through the normal transcript interfaces.
+{
+  const text = `[worker 11111111-1111-4111-8111-111111111111 checkpoint: Held]\n${"evidence ".repeat(1000)}END-PROOF`;
+  const row = { id: 60, kind: "projects.agent-report", data: { text, at: 1700000000000 } };
+  const source = { newest: () => [row], entry: (_conversation, id) => (id === row.id ? row : undefined) };
+  const page = await readTranscriptPage(source, 7);
+  assert.equal(page.items.length, 1, "retained reports remain visible in worker history");
+  const item = page.items[0];
+  assert.equal(item.origin, "internal");
+  assert.equal(item.at, 1700000000000);
+  assert.ok(item.truncated && item.text.length <= 4000);
+  const full = await readTranscriptText(source, 7, item.ref, { limit: 20000 });
+  assert.equal(full.text, text, "full evidence survives the bounded preview");
+  await assert.rejects(readTranscriptText(source, 7, "60.1"), /not found/);
+  assert.deepEqual((await readTranscriptPage({ ...source, newest: () => [{ ...row, data: { text: 42 } }] }, 7)).items, []);
 }
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");

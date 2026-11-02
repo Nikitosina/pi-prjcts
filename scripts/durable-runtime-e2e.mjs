@@ -36,7 +36,8 @@ const project = {
 };
 saveProject(project);
 const checks = [],
-  diagnostics = [];
+  diagnostics = [],
+  modelRequests = [];
 let runtime,
   workerContextSawSecret = false;
 function pass(name) {
@@ -49,6 +50,7 @@ async function open() {
     dir,
     onReport: (value) => diagnostics.push(value),
     onModelRequest: (value) => {
+      modelRequests.push(JSON.stringify(value.messages));
       if (secretForWorkerContext && JSON.stringify(value.messages).includes(secretForWorkerContext)) workerContextSawSecret = true;
     },
   });
@@ -96,6 +98,9 @@ try {
   assert.equal(answer.status, "done");
   assert.match(answer.text, /ADAPTER_READY/);
   pass("Fake-model coordinator answers");
+  assert.ok(modelRequests.some((request) => request.includes("After asking for an owner decision, end your turn")));
+  assert.ok(modelRequests.some((request) => request.includes("agents report")));
+  pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();
   assert.equal(ownerHistory.items.find((item) => item.kind === "message" && item.role === "user").origin, "owner");
   assert.equal(
@@ -121,10 +126,22 @@ try {
   await untilSettled(workerId);
   assert.ok(workerContextSawSecret, "worker tool result was not present in a subsequent actual model request");
   pass("Worker reads topic on demand and receives its tool result in context");
+  const workerRequest = modelRequests.findLast(
+    (request) => request.includes("Role profile: worker.") && request.includes(secretForWorkerContext),
+  );
+  assert.ok(workerRequest.includes("job checkpoint"));
+  assert.ok(workerRequest.includes("End with one short acknowledgment"));
+  pass("Independent worker receives checkpoint and nonduplicated closing-report instructions");
   await until((view) =>
     view.coordinator.history.items.some((item) => item.kind === "message" && item.role === "user" && item.origin === "internal"),
   );
   pass("Worker reports carry internal origin in coordinator history");
+  const workerHistory = await runtime.workerRead(workerId);
+  const storedReport = workerHistory.items.find(
+    (item) => item.kind === "message" && item.origin === "internal" && item.text.startsWith(`[worker ${workerId} `),
+  );
+  assert.ok(storedReport?.at > 0, "full report remains readable and timestamped in worker history");
+  pass("Archived worker report is available through the live transcript reader");
   await runtime.say('Record a note. FAKE-CALL projects_note {"text":"COORDINATOR_NOTE"} FAKE-SAY noted', { requestId: "coordinator-note" });
   assert.ok(notes(dir).some((note) => note.text === "COORDINATOR_NOTE"));
   pass("Coordinator may record notes");

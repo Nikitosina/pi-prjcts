@@ -33,6 +33,7 @@ import {
   tab,
 } from "./shell.js";
 import { badge, clip, esc, uuid } from "./format.js";
+import { renderMarkdown } from "./markdown.js";
 import { admissionBlocked, chatId, chatMessageHtml, ensureChanges, stateDot } from "./chat.js";
 import { jobChatId, jobsSnap, setJobsSnap } from "./decisions.js";
 import { artifactButton, lightbox, loadWorkerArtifacts, renderArtifactBrowser } from "./artifacts.js";
@@ -336,6 +337,7 @@ function jobState(job) {
       : job.quota
         ? { label: "waiting for quota", dot: "working" }
         : { label: "running", dot: "working" };
+  if (job.status === "checkpoint") return { label: "intermediate checkpoint", dot: "idle" };
   if (job.status === "completed") return { label: "returned", dot: "done" };
   if (job.status === "failed") return { label: "failed", dot: "needs" };
   if (job.status === "stopped") return { label: "stopped", dot: "idle" };
@@ -410,26 +412,51 @@ export function renderJobTree() {
   const shown = allJobs ? jobs : jobs.filter((job, index) => !finishedJob(job) || index < 8);
   const chats = getView().chats ?? [];
   const agentChat = (agent) => chats.find((chat) => chat.conversationId === agent.chat)?.id ?? "main";
-  const loose = (jobsSnap?.agents ?? []).filter((agent) => agent.jobId === null && agent.endedAt === null && agentChat(agent) === chatId);
+  const loose = (jobsSnap?.agents ?? [])
+    .filter((agent) => agent.jobId === null && agentChat(agent) === chatId)
+    .toSorted((a, b) => (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt));
+  const shownAgents = allJobs ? loose : loose.filter((agent, index) => agent.endedAt === null || index < 8);
   const html = !jobsSnap
     ? '<p class="note">Reading Jobs…</p>'
     : (shown.map(jobHtml).join("") +
-        loose
+        shownAgents
           .map((agent) =>
             nodeRow({
               id: agent.id,
               role: agent.role,
               title: agent.title,
-              state: agent.working ? { label: "working", dot: "working" } : { label: "waiting", dot: "idle" },
-              stop: true,
+              state:
+                agent.endedAt !== null
+                  ? { label: "returned", dot: "done" }
+                  : agent.working
+                    ? { label: "working", dot: "working" }
+                    : { label: "waiting", dot: "idle" },
+              stop: agent.endedAt === null,
+              dismiss: agent.endedAt !== null,
             }),
           )
           .join("") || '<p class="note">No workers in this chat yet. The Coordinator can work directly or delegate.</p>') +
-      (jobs.length > shown.length || allJobs
-        ? `<button type="button" class="ghost small all-jobs" data-action="all-jobs">${allJobs ? "Show recent only" : `Show all Jobs (${jobs.length})`}</button>`
+      (jobs.length > shown.length || loose.length > shownAgents.length || allJobs
+        ? `<button type="button" class="ghost small all-jobs" data-action="all-jobs">${allJobs ? "Show recent only" : `Show all agents (${jobs.length + loose.length})`}</button>`
         : "");
   setHtml("#job-tree", html);
   void loadWorkerContexts(getGeneration());
+}
+function jobResultHtml(job) {
+  if (!job) return "";
+  const checkpoint = job.status === "checkpoint",
+    result = checkpoint ? job.checkpoint : job.ready;
+  const list = (label, items) =>
+    items?.length ? `<h4>${label}</h4><ul>${items.map((item) => `<li>${renderMarkdown(item)}</li>`).join("")}</ul>` : "";
+  const details = result
+    ? `<section class="job-result"><h3>${checkpoint ? "Intermediate checkpoint" : "Delivery report"}</h3><div class="text">${renderMarkdown(result.summary ?? "")}${list("Proof", result.proof)}${result.review ? `<h4>Review</h4>${renderMarkdown(result.review)}` : ""}${list(
+        "Not fixed",
+        result.notFixed?.map((item) => `${item.text}: ${item.reason}`),
+      )}${list("Gaps", result.gaps)}</div></section>`
+    : "";
+  const line = approveLine(job.id);
+  const eligible = !job.workspace && ["ready", "ready-with-gaps"].includes(job.status) && job.pr && job.candidate;
+  return `${details}${eligible ? `<div class="job-actions"><button type="button" class="primary small" data-action="job-approve" data-project="${esc(getProjectId())}" data-job="${esc(job.id)}">Approve</button></div>` : ""}${line ? `<p class="job-outcome">${esc(line)}</p>` : ""}`;
 }
 function workerDetailHtml(chat, page, info) {
   const threadId = chat.threadId,
@@ -452,7 +479,7 @@ function workerDetailHtml(chat, page, info) {
     ? `<p class="note">${esc(job.workspace.kind === "shared" ? "Shared Coordinator workspace" : "Isolated task workspace")}${job.branch ? ` · <code>${esc(job.branch)}</code>` : ""}${job.status === "completed" ? ". Returned to the Coordinator, not independently accepted." : ""}</p>`
     : "";
   const head = job
-    ? `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full request">${esc(job.request)}</p><p class="job-summary-line"><span class="job-progress">${esc(jobProgress(job))}</span>${jobEta(job) ? ` · <span class="job-eta">${esc(jobEta(job))}</span>` : ""}${job.reason ? ` · <span class="job-reason-inline">${esc(job.reason)}</span>` : ""}</p>${workspace}${plan}`
+    ? `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full request">${esc(job.request)}</p><p class="job-summary-line"><span class="job-progress">${esc(jobProgress(job))}</span>${jobEta(job) ? ` · <span class="job-eta">${esc(jobEta(job))}</span>` : ""}${job.reason ? ` · <span class="job-reason-inline">${esc(job.reason)}</span>` : ""}</p>${workspace}${plan}<div id="worker-result">${jobResultHtml(job)}</div>`
     : `<p class="thread-task clamp" data-action="toggle-clamp" title="Show the full task">${esc(info.title)}</p>`;
   const title =
     info.kind === "subagent" ? `${role[0].toUpperCase()}${role.slice(1)} of ${job.title}` : `${role[0].toUpperCase()}${role.slice(1)}`;
@@ -521,6 +548,8 @@ function renderWorkerChat(chat, page, opening = false) {
     ? `Latest: <code>${esc(lastTool.name)}</code> ${esc(clip(lastTool.argsPreview ?? "", 90))}`
     : "";
   document.querySelector("#worker-context").innerHTML = contextRing(page.context);
+  const result = document.querySelector("#worker-result");
+  if (result) result.innerHTML = jobResultHtml(nodeInfo(chat.threadId)?.job);
   if (workerFocus?.threadId === chat.threadId && workerFocus.project === chat.id)
     focusNode(transcript.querySelector(`[data-index="${workerFocus.index}"]`), workerFocus);
   document.querySelector("#worker-history-pages").innerHTML = page.older
