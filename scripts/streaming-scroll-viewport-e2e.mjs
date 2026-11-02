@@ -1,5 +1,7 @@
 // Browser regression for streaming paint cadence, transcript anchoring and the mobile viewport shell.
 // Isolated host, deterministic local fake model and real Chrome/CDP input. Mobile metrics are not Safari proof.
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { createKit, delay } from "./lib/e2e-kit.mjs";
 
 const burstText = Array.from({ length: 24 }, (_, i) => `Burst paragraph ${i}: ${"readable text ".repeat(8)}`).join("\n\n");
@@ -96,12 +98,75 @@ const readOlder = async (page) => {
 await k.run(async () => {
   const id = await k.createProject("Streaming and viewport", { grant: false });
   for (let i = 0; i < 34; i++) await k.ask(id, `MARK-FILL ${i}`);
+  const otherDir = join(k.root, "other-workspace");
+  mkdirSync(otherDir);
+  k.initRepo(otherDir);
+  const other = await k.createProject("Other long project", { grant: false, cwd: otherDir });
+  const longDir = join(k.root, "long-workspace");
+  mkdirSync(longDir);
+  k.initRepo(longDir);
+  const long = await k.createProject("Long project", { grant: false, cwd: longDir });
+  for (let i = 0; i < 34; i++) {
+    await k.ask(other, `MARK-FILL other ${i} ${"long conversation text ".repeat(20)}`);
+    await k.ask(long, `MARK-FILL long ${i} ${"long conversation text ".repeat(20)}`);
+  }
   const url = new URL(await k.webUrl(id, "coordinator"));
   url.searchParams.set("e2e", "1");
   const page = await k.openPage(url.toString());
   await page.waitFor(`document.querySelectorAll('#messages .msg').length >= 20`, "seeded transcript");
   await page.shot("01-desktop", { force: true });
   result.measurements = {};
+  await page.evaluate(`(() => {
+    window.__historyRequests = [];
+    const fetchOriginal = window.fetch;
+    window.fetch = function(input, init) {
+      try { const body = JSON.parse(init?.body); if (body.action === 'chat-history') window.__historyRequests.push(body); } catch {}
+      return fetchOriginal.apply(this, arguments);
+    };
+  })()`);
+  const selectProject = async (project, title) => {
+    const point = await page.evaluate(
+      `(() => { const r = document.querySelector('[data-select-project="${project}"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
+    await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    const marker = project === id ? "MARK-FILL 33" : project === long ? "MARK-FILL long 33" : "MARK-FILL other 33";
+    await page.waitFor(
+      `document.querySelector('#title').textContent === ${JSON.stringify(title)} && document.querySelector('#messages').innerText.includes(${JSON.stringify(marker)})`,
+      title,
+    );
+    await delay(300);
+  };
+  await selectProject(long, "Long project");
+  await selectProject(other, "Other long project");
+  await selectProject(long, "Long project");
+  const switchBack = await anchored(page);
+  const requestsAfterSwitch = await page.evaluate(`window.__historyRequests`);
+  result.measurements.projectSwitch = { switchBack, requestsAfterSwitch };
+  await page.shot("02-project-switch", { force: true });
+  k.check(
+    "R0 switching cached long projects follows newest without loading older pages",
+    switchBack.gap < 2 && requestsAfterSwitch.length === 0,
+    result.measurements.projectSwitch,
+  );
+  await selectProject(other, "Other long project");
+  const otherBottom = await anchored(page);
+  const target = await page.evaluate(
+    `(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...target, deltaX: 0, deltaY: -otherBottom.top - 100 });
+  await page.waitFor(`!document.querySelector('#messages .earlier-messages')`, "scroll loads older history");
+  await delay(200);
+  const afterScroll = await anchored(page);
+  const requestsAfterScroll = await page.evaluate(`window.__historyRequests`);
+  result.measurements.scrollOlder = { otherBottom, afterScroll, requestsAfterScroll };
+  await page.shot("03-scroll-older", { force: true });
+  k.check(
+    "R0A scrolling to top loads older history without jumping to newest",
+    requestsAfterScroll.length === 1 && afterScroll.gap > 100,
+    result.measurements.scrollOlder,
+  );
+  await selectProject(id, "Streaming and viewport");
 
   // A trailing user message used to re-enable following on every refresh. Real polling must not do that.
   const beforePoll = await readOlder(page);
