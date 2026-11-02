@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, realpathSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, readFileSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -74,6 +74,47 @@ try {
   const receipt = await iso.allocate(intent);
   report.receipts.push(receipt);
   assert.equal(receipt.state, "allocated");
+  // Coordinator reuse permits branch changes; ordinary workers still require the allocated branch.
+  const git = (cwd, ...args) => execFileSync("/usr/bin/git", args, { cwd, encoding: "utf8" }).trim();
+  const path = intent.scope.workspacePath;
+  git(path, "switch", "-c", "coordinator/followup");
+  await assert.rejects(iso.checkOwned(intent), /Owned Git branch differs/);
+  await iso.checkOwned(intent, { branch: "any" });
+  git(path, "switch", "--detach", "HEAD");
+  await assert.rejects(iso.checkOwned(intent), /Owned Git branch differs/);
+  await iso.checkOwned(intent, { branch: "any" });
+  await assert.rejects(iso.checkOwned({ ...intent, attemptId: randomUUID() }, { branch: "any" }), /matching owned workspace receipt/);
+  await assert.rejects(
+    iso.checkOwned({ ...intent, scope: { ...intent.scope, workspacePath: owner } }, { branch: "any" }),
+    /matching owned workspace receipt/,
+  );
+  git(owner, "worktree", "unlock", path);
+  await assert.rejects(iso.checkOwned(intent, { branch: "any" }), /Git lock is not owned/);
+  git(owner, "worktree", "lock", "--reason", "another intent", path);
+  await assert.rejects(iso.checkOwned(intent, { branch: "any" }), /Git lock is not owned/);
+  git(owner, "worktree", "unlock", path);
+  git(owner, "worktree", "lock", "--reason", `workspace-intent:${intent.id}`, path);
+  const saved = `${path}-saved`;
+  renameSync(path, saved);
+  symlinkSync(saved, path);
+  await assert.rejects(iso.checkOwned(intent, { branch: "any" }), /symlink/);
+  unlinkSync(path);
+  renameSync(saved, path);
+  const foreign = join(alloc, "foreign");
+  mkdirSync(foreign);
+  git(foreign, "init", "-b", "main");
+  git(foreign, "-c", "user.name=E2E", "-c", "user.email=e2e@example.invalid", "commit", "--allow-empty", "-m", "foreign");
+  const replacement = join(alloc, "replacement");
+  git(foreign, "worktree", "add", "--detach", replacement);
+  renameSync(path, saved);
+  renameSync(replacement, path);
+  await assert.rejects(iso.checkOwned(intent, { branch: "any" }), /repository association differs/);
+  renameSync(path, replacement);
+  renameSync(saved, path);
+  await iso.checkOwned(intent, { branch: "any" });
+  git(path, "switch", intent.scope.branch);
+  await iso.checkOwned(intent);
+  report.checks.push("Coordinator branch freedom retains receipt/path/lock/repository ownership; default worker checks remain strict");
   await h.close(BACKGROUND_CONTEXT);
   [h, conversation] = await open();
   iso = workspaceIsolation({
