@@ -12,35 +12,40 @@
     "e2e:durable-host": "node scripts/durable-host-e2e.mjs",
     "e2e:durable-knowledge": "node scripts/durable-knowledge-e2e.mjs",
     "setup": "npm ci",
-    "e2e:legacy-removal": "node scripts/legacy-removal-e2e.mjs",
-    "e2e:coordinator-efficiency": "node scripts/coordinator-efficiency-e2e.mjs",
     "e2e:quota-status": "node scripts/quota-status-e2e.mjs",
     "e2e:coordinator-gh": "node scripts/coordinator-gh-e2e.mjs",
     "unit:machine-status": "node scripts/machine-status-unit.mjs",
     "unit:usage-limits-recovery": "node scripts/usage-limits-recovery-unit.mjs",
-    "verify": "npm run check && node scripts/run-e2e.mjs --jobs 3 --timeout 240 --retry-failed-serially durable-runtime durable-knowledge coordinator-efficiency quota-status coordinator-gh machine-status-unit usage-limits-recovery-unit worker-quota-recovery worker-quota-known-reset worker-quota-reset-unit worker-quota-retry-receipts worker-quota-settlement-race telegram-media-unit telegram-media-e2e",
-    "projects": "node src/cli.ts"
+    "verify": "npm run check && npm run format:check && node scripts/run-e2e.mjs --jobs 3 --timeout 240 --retry-failed-serially durable-runtime durable-knowledge coordinator-gh jobs machine-status-unit usage-limits-recovery-unit worker-quota-known-reset worker-quota-reset-unit worker-quota telegram-media-unit telegram-media-e2e result-acceptance-unit telegram-jobs-unit deploy-e2e",
+    "projects": "node src/cli.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
-  "pi": { "extensions": [] },
-  "engines": { "node": ">=22.19.0" },
+  "pi": {
+    "extensions": []
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "dependencies": {
-    "@earendil-works/chord": "1.0.2",
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-coding-agent": "1.0.2",
-    "@earendil-works/pi-durable": "1.0.0",
-    "@earendil-works/pi-mcp": "1.0.2",
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
+    "@earendil-works/pi-mcp": "1.4.0",
     "qrcode-generator": "2.0.4",
     "typebox": "1.3.27",
     "unpdf": "1.8.1"
   },
   "overrides": {
-    "@earendil-works/pi-agent-core": "1.0.2",
-    "@earendil-works/pi-codemode": "1.0.2",
-    "@earendil-works/pi-telemetry": "1.0.2",
-    "@earendil-works/pi-tui": "1.0.2"
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-codemode": "1.4.0",
+    "@earendil-works/pi-telemetry": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0"
   },
   "devDependencies": {
     "@types/node": "22.19.0",
+    "prettier": "3.9.10",
     "typescript": "5.9.3"
   }
 }

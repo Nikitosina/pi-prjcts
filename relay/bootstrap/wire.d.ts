@@ -35,12 +35,25 @@ export function decodeMessage(bytes: Uint8Array): { header: TunnelHeader; body: 
 
 export type Hello = { v: 1; mode: "device" | "pair"; deviceId: string; e: string; n: string; name?: string; sig: string; mac?: string };
 export type Welcome = { v: 1; e: string; n: string; sig: string };
-type SessionHandlers = { send: (record: Uint8Array) => void | Promise<void>; onMessage: (header: TunnelHeader, body: Uint8Array) => void | Promise<void>; onClose?: (reason: string) => void };
+type SessionHandlers = {
+  send: (record: Uint8Array) => void | Promise<void>;
+  onMessage: (header: TunnelHeader, body: Uint8Array) => void | Promise<void>;
+  onClose?: (reason: string) => void;
+};
 
-export function clientHello(input: { hostId: string; mode: "device" | "pair"; deviceKey: CryptoKey; deviceId: string; name?: string; code?: string }): Promise<{ hello: Hello; state: unknown }>;
+export function clientHello(input: {
+  hostId: string;
+  mode: "device" | "pair";
+  deviceKey: CryptoKey;
+  deviceId: string;
+  name?: string;
+  code?: string;
+}): Promise<{ hello: Hello; state: unknown }>;
 export function readHello(hostId: string, hello: unknown): Promise<string>;
 export function verifyPairMac(code: string, t1: string, mac: string): Promise<boolean>;
-export function hostWelcome(input: { hostKey: CryptoKey; hello: Hello; t1: string } & SessionHandlers): Promise<{ welcome: Welcome; session: Session }>;
+export function hostWelcome(
+  input: { hostKey: CryptoKey; hello: Hello; t1: string } & SessionHandlers,
+): Promise<{ welcome: Welcome; session: Session }>;
 export function clientFinish(state: unknown, welcome: unknown, handlers: SessionHandlers): Promise<Session>;
 
 export class Session {

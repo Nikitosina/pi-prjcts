@@ -9,20 +9,45 @@ const limit = 10 * 1024 * 1024;
 export function evidence(dir: string): Evidence[] {
   const path = join(dir, "evidence");
   mkdirSync(path, { recursive: true, mode: 0o700 });
-  return readdirSync(path).filter(name => name.endsWith(".json")).map(name => parse(Evidence, readJson(join(path, name)))).sort((a, b) => a.at.localeCompare(b.at));
+  return readdirSync(path)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => parse(Evidence, readJson(join(path, name))))
+    .sort((a, b) => a.at.localeCompare(b.at));
 }
 
-export async function captureEvidenceBytes(input: { dir: string; filename: string; title: string; sessionFile: string | null; bytes: Buffer; native?: Evidence["native"]; id?: string }): Promise<Evidence> {
+export async function captureEvidenceBytes(input: {
+  dir: string;
+  filename: string;
+  title: string;
+  sessionFile: string | null;
+  bytes: Buffer;
+  native?: Evidence["native"];
+  id?: string;
+}): Promise<Evidence> {
   const bytes = Buffer.from(input.bytes);
   if (bytes.length > limit) throw new Error("Captured evidence exceeds the 10 MiB limit");
-  const record = parse(Evidence, { id: input.id === undefined ? randomUUID() : parse(Id, input.id), at: new Date().toISOString(), title: input.title, filename: basename(input.filename), size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), sessionFile: input.sessionFile, ...(input.native ? { native: input.native } : {}) });
+  const record = parse(Evidence, {
+    id: input.id === undefined ? randomUUID() : parse(Id, input.id),
+    at: new Date().toISOString(),
+    title: input.title,
+    filename: basename(input.filename),
+    size: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    sessionFile: input.sessionFile,
+    ...(input.native ? { native: input.native } : {}),
+  });
   const project = lstatSync(input.dir);
   if (!project.isDirectory() || project.isSymbolicLink()) throw new Error("Evidence project root must be a physical directory");
   mkdirSync(join(input.dir, "evidence"), { recursive: true, mode: 0o700 });
   const folder = lstatSync(join(input.dir, "evidence"));
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error("Evidence folder must be a physical directory");
   const data = await open(join(input.dir, "evidence", `${record.id}.data`), "wx", 0o600);
-  try { await data.writeFile(bytes); await data.sync(); } finally { await data.close(); }
+  try {
+    await data.writeFile(bytes);
+    await data.sync();
+  } finally {
+    await data.close();
+  }
   saveJson(join(input.dir, "evidence", `${record.id}.json`), record);
   return record;
 }
@@ -42,12 +67,15 @@ export async function readEvidenceRecord(dir: string, id: string): Promise<Evide
       offset += result.bytesRead;
     }
     const after = await file.stat();
-    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("Library metadata changed during read");
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+      throw new Error("Library metadata changed during read");
     const raw: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     const record = parse(Evidence, raw);
     if (record.id !== id) throw new Error("Library metadata identity does not match");
     return record;
-  } finally { await file.close(); }
+  } finally {
+    await file.close();
+  }
 }
 export async function readEvidence(dir: string, id: string): Promise<{ record: Evidence; bytes: Buffer; mime: string }> {
   parse(Id, id);
@@ -66,11 +94,18 @@ export async function readEvidence(dir: string, id: string): Promise<{ record: E
       offset += read.bytesRead;
     }
     const after = await file.stat();
-    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || bytes.length !== record.size) throw new Error("Stored evidence changed during read");
-  } finally { await file.close(); }
+    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || bytes.length !== record.size)
+      throw new Error("Stored evidence changed during read");
+  } finally {
+    await file.close();
+  }
   if (createHash("sha256").update(bytes).digest("hex") !== record.sha256) throw new Error("Stored evidence hash does not match");
-  const mime = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? "image/png"
-    : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 ? "image/jpeg"
-    : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP" ? "image/webp" : "text/plain; charset=utf-8";
+  const mime = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ? "image/png"
+    : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+      ? "image/jpeg"
+      : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP"
+        ? "image/webp"
+        : "text/plain; charset=utf-8";
   return { record, bytes, mime };
 }

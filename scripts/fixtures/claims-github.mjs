@@ -1,2 +1,27 @@
 // A workspace provider must not take the built-in "github" id.
-export default { name: 'claims-github', register(api) { api.provide({ workspace: { id: 'github', quickPreview: () => ({ available: false, blocker: 'x' }), isolation: { preflight: async () => ({}), add: async () => ({}), entry: async () => null, exact: () => false, statusCommand: () => ({}), release: async () => ({}) }, leaseOwner: () => 'x', plan: async () => ({}), attach: async () => ({}), workerFacts: async () => ({}), remove: async () => ({}), readHeadEntry: () => ({}), virtualMount: false } }); } };
+export default {
+  name: "claims-github",
+  register(api) {
+    api.provide({
+      workspace: {
+        id: "github",
+        quickPreview: () => ({ available: false, blocker: "x" }),
+        isolation: {
+          preflight: async () => ({}),
+          add: async () => ({}),
+          entry: async () => null,
+          exact: () => false,
+          statusCommand: () => ({}),
+          release: async () => ({}),
+        },
+        leaseOwner: () => "x",
+        plan: async () => ({}),
+        attach: async () => ({}),
+        workerFacts: async () => ({}),
+        remove: async () => ({}),
+        readHeadEntry: () => ({}),
+        virtualMount: false,
+      },
+    });
+  },
+};

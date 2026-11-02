@@ -41,4 +41,3 @@ Verified by `scripts/uploads-search-e2e.mjs` (fake model, headless Chrome, priva
 
 ## Leftovers
 - L1 Observability health "Failed jobs" counts only the viewed chat; "Project" ignores a failing other chat.
-- L2 CLI `owner-skills-catalog` returns only the first 16 candidates of a larger catalog.

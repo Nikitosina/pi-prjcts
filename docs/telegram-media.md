@@ -1,6 +1,6 @@
 # Telegram artifact attachments
 
-Coordinator results enter the persistent notification feed in `src/notify.ts`. Previously the Telegram HTML converter dropped private artifact link targets and left `!caption`, without uploading a file. The bridge now extracts `![caption](artifact:<threadUUID>/<path>)`, authorizes the project's thread through existing `thread-history` dispatch, and reads actual bytes through `openArtifact`. It never fetches private artifact URLs, arbitrary URLs, or arbitrary host paths. Code examples remain text.
+Coordinator results enter the persistent notification feed in `src/notify.ts`. Previously the Telegram HTML converter dropped private artifact link targets and left `!caption`, without uploading a file. The bridge extracts `![caption](artifact:<threadUUID>/<path>)` and normal `[name](artifact:<threadUUID>/<path>)` links, authorizes the project's thread through existing `thread-history` dispatch, and reads actual bytes through `openArtifact`. It never fetches private artifact URLs, arbitrary URLs, or arbitrary host paths. Code examples and ordinary external links remain text. Each reference uploads in order, including repeated references, matching existing image/album behavior. Cite each file once to send it once. Coordinators return artifact links in their answers; they need no Telegram-specific tool and must not treat a generated link as a delivery receipt.
 
 ## Message layout and counts
 

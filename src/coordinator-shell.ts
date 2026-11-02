@@ -2,9 +2,31 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { plugins } from "./plugins.ts";
 
-
 // None of these can write files or run other programs (find is checked separately; rg --pre and sort -o could, so they are absent).
-const HELPERS = new Set(["ls", "pwd", "cat", "head", "tail", "grep", "wc", "find", "jq", "echo", "printf", "cd", "test", "true", "which", "basename", "dirname", "realpath", "stat", "du", "df", "date"]);
+const HELPERS = new Set([
+  "ls",
+  "pwd",
+  "cat",
+  "head",
+  "tail",
+  "grep",
+  "wc",
+  "find",
+  "jq",
+  "echo",
+  "printf",
+  "cd",
+  "test",
+  "true",
+  "which",
+  "basename",
+  "dirname",
+  "realpath",
+  "stat",
+  "du",
+  "df",
+  "date",
+]);
 
 /** Git rules for the owner's checkout: refuses publication, deletion and discarding work. Arguments follow the subcommand. */
 function gitBlocked(args: string): boolean {
@@ -19,8 +41,10 @@ function gitBlocked(args: string): boolean {
   const sub = words.slice(at).join(" ");
   // Options that run another program or write a file.
   if (/(?:^|\s)--(?:output|upload-pack|receive-pack|exec|ext-diff|textconv|open-files-in-pager|extcmd)(?:[\s=]|$)/.test(sub)) return true;
-  if (/^(?:difftool|mergetool|bisect|archive|bundle|format-patch)(?:\s|$)/.test(sub) || /^submodule\s+foreach(?:\s|$)/.test(sub)) return true;
-  if (/^rebase\s(?:.*\s)?-[a-zA-Z]*x/.test(sub) || /^grep\s(?:.*\s)?-[a-zA-Z]*O/.test(sub) || /^clone\s(?:.*\s)?-[a-zA-Z]*u/.test(sub)) return true;
+  if (/^(?:difftool|mergetool|bisect|archive|bundle|format-patch)(?:\s|$)/.test(sub) || /^submodule\s+foreach(?:\s|$)/.test(sub))
+    return true;
+  if (/^rebase\s(?:.*\s)?-[a-zA-Z]*x/.test(sub) || /^grep\s(?:.*\s)?-[a-zA-Z]*O/.test(sub) || /^clone\s(?:.*\s)?-[a-zA-Z]*u/.test(sub))
+    return true;
   if (/^config(?:\s|$)/.test(sub) && !/^config\s+(?:--get\S*|--list|-l)(?:\s|$)/.test(sub)) return true;
   if (/^(?:push|clean|gc|prune|filter-branch|filter-repo|update-ref|replace)(?:\s|$)/.test(sub)) return true;
   if (/^branch\s+.*(?:-\w*[dDmM]|--delete|--move|--force)(?:\s|$)/.test(sub)) return true;
@@ -34,7 +58,7 @@ function gitBlocked(args: string): boolean {
 
 /** Best-effort shell-text check, not a sandbox: every segment must start with an allowed executable; one refused segment refuses the command. */
 export function guardCoordinatorCommand(command: string): string {
-  const providers = plugins.vcsProviders().flatMap(provider => provider.coordinatorShell ? [provider.coordinatorShell] : []);
+  const providers = plugins.vcsProviders().flatMap((provider) => (provider.coordinatorShell ? [provider.coordinatorShell] : []));
   const refuse = (at: string, why: string) => {
     const message = `Blocked by coordinator VCS shell policy at: ${at.slice(0, 200)} -- ${why}. Nothing in this command ran. Delegate edits, commits, pushes and PRs to a worker.`;
     return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
@@ -44,14 +68,20 @@ export function guardCoordinatorCommand(command: string): string {
   const plain = command.replace(/[0-9&]?>{1,2}\s*(?:&[12]|\/dev\/null)(?=\s|$|[;&|])/g, " ");
   if (plain.includes(">")) return refuse(command, "file redirects are not allowed");
   const chunks = plain.match(/(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^;&|\n])+/g) ?? [];
-  for (const chunk of chunks.map(part => part.trim()).filter(Boolean)) {
+  for (const chunk of chunks.map((part) => part.trim()).filter(Boolean)) {
     // GIT_EXTERNAL_DIFF, GIT_PAGER and similar variables make git run other programs.
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(chunk)) return refuse(chunk, "environment assignments are not allowed");
-    const [path = "", ...rest] = chunk.split(/\s+/), executable = path.split("/").at(-1)!, args = rest.join(" ");
-    if (executable === "git") { if (gitBlocked(args)) return refuse(chunk, "pushes, deletes, forced or discarding operations are not allowed"); continue; }
-    if (executable === "find" && /\s-(?:delete|exec|execdir|ok|fprint|fls)/.test(` ${args}`)) return refuse(chunk, "find may only list files");
+    const [path = "", ...rest] = chunk.split(/\s+/),
+      executable = path.split("/").at(-1)!,
+      args = rest.join(" ");
+    if (executable === "git") {
+      if (gitBlocked(args)) return refuse(chunk, "pushes, deletes, forced or discarding operations are not allowed");
+      continue;
+    }
+    if (executable === "find" && /\s-(?:delete|exec|execdir|ok|fprint|fls)/.test(` ${args}`))
+      return refuse(chunk, "find may only list files");
     if (HELPERS.has(executable)) continue;
-    const provider = providers.find(item => item.executables.includes(executable));
+    const provider = providers.find((item) => item.executables.includes(executable));
     if (!provider) return refuse(chunk, `${executable} is not a VCS executable or read-only helper`);
     const why = provider.blocked(executable, args);
     if (why) return refuse(chunk, why);
@@ -60,12 +90,27 @@ export function guardCoordinatorCommand(command: string): string {
 }
 
 export function coordinatorShellTools(input: { cwd: string; isCoordinator: (id: Conversation["id"]) => boolean }) {
-  const bash = createBashTool(input.cwd, { spawnHook: ({ command, ...context }) => ({ ...context, command: guardCoordinatorCommand(command) }) });
-  const authorize = (api: ToolExecutionApi) => { if (!input.isCoordinator(api.conversationId)) throw Error("projects_vcs_shell is coordinator-only"); };
-  const shell = defineTool({ name: "projects_vcs_shell", description: "Run a VCS command (git, and arc/arc-wt in Arcadia) or a read-only helper (ls, cat, grep, head, tail, wc, find, jq, echo, cd) in the project checkout to fetch and inspect branches, PRs and history, create or check out a branch, and prepare worktrees (git worktree, arc-wt). Pushing, merging or publishing PRs, deleting or renaming branches, forced removal, hard resets, cleaning, redirects and command substitution are refused: publication stays with workers and the owner. Leave the owner's checkout on its branch unless asked; hand a prepared branch to a worker with the branch field of projects_delegate; worktree removal uses projects_vcs_operation. Never edit files here. Output is capped at 400 lines / 8 KB, keeping the end: bound history with -n or --max-count and narrow listings with paths, grep or head.", parameters: bash.parameters, replay: "unsafe", outputLimits: { maxBytes: 8 * 1024, maxLines: 400, retain: "tail" }, async execute(args, api, context) {
-    authorize(api);
-    return bash.execute(api.callId, args, context.abortSignal, update => api.output(update.content.map(item => item.type === "text" ? item.text : "").join("")));
-  } });
+  const bash = createBashTool(input.cwd, {
+    spawnHook: ({ command, ...context }) => ({ ...context, command: guardCoordinatorCommand(command) }),
+  });
+  const authorize = (api: ToolExecutionApi) => {
+    if (!input.isCoordinator(api.conversationId)) throw Error("projects_vcs_shell is coordinator-only");
+  };
+  const shell = defineTool({
+    name: "projects_vcs_shell",
+    description:
+      "Run a VCS command (git, or the VCS command the project's plugin provides) or a read-only helper (ls, cat, grep, head, tail, wc, find, jq, echo, cd) in the project checkout to fetch and inspect branches, PRs and history, create or check out a branch, and prepare worktrees. Pushing, merging or publishing PRs, deleting or renaming branches, forced removal, hard resets, cleaning, redirects and command substitution are refused: publication stays with workers and the owner. Leave the owner's checkout on its branch unless asked; hand a prepared branch to a worker with the branch field of the agents tool; worktree removal uses projects_vcs_operation. Never edit files here. Output is capped at 400 lines / 8 KB, keeping the end: bound history with -n or --max-count and narrow listings with paths, grep or head.",
+    parameters: bash.parameters,
+    replay: "unsafe",
+    outputLimits: { maxBytes: 8 * 1024, maxLines: 400, retain: "tail" },
+    async execute(args, api, context) {
+      authorize(api);
+      const { content, ...result } = await bash.execute(api.callId, args, context.abortSignal, (update) =>
+        api.output(update.content.map((item) => (item.type === "text" ? item.text : "")).join("")),
+      );
+      return { ...result, output: content };
+    },
+  });
   const tools = [shell];
   return { tools, extension: defineExtension({ name: "projects.coordinator-shell", tools }) };
 }

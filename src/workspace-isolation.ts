@@ -8,108 +8,525 @@ import type { Context } from "@earendil-works/chord";
 import { cli } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
 import type { IsolationBackend } from "./plugin-types.ts";
-import { AuthorizedRepository, WorkspaceIntent, type AuthorizedRepository as Authorization, type WorkspaceIntent as Intent, type WorkspaceLease, type WorkspaceReceipt, type WorkspaceScope, type WorkspaceSnapshot } from "./workspace-types.ts";
+import {
+  AuthorizedRepository,
+  WorkspaceIntent,
+  type AuthorizedRepository as Authorization,
+  type WorkspaceIntent as Intent,
+  type WorkspaceLease,
+  type WorkspaceReceipt,
+  type WorkspaceScope,
+  type WorkspaceSnapshot,
+} from "./workspace-types.ts";
 
 /* Before effects: preserve crash-after-effect, dirty/foreign/active work, lease
  * changes, source/provider drift, low disk, and shared-store ambiguity. */
-const Receipts = defineDoc<{ receipts: Record<string, WorkspaceReceipt> }>({ kind: "projects.workspace-isolation", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ receipts: {} }) });
-export type WorkspaceIsolation = { allocate(intent: Intent): Promise<WorkspaceReceipt>; reconcile(intent: Intent): Promise<WorkspaceReceipt>; release(intent: Intent): Promise<WorkspaceReceipt>; /** Re-creates the worktree of a git receipt the host cleaned up, on its kept branch; a still-released receipt carries the reason it cannot be revived. */ revive(intent: Intent): Promise<WorkspaceReceipt>; snapshot(): Promise<WorkspaceSnapshot> };
+const Receipts = defineDoc<{ receipts: Record<string, WorkspaceReceipt> }>({
+  kind: "projects.workspace-isolation",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  checkpointWhen: () => false,
+  initial: () => ({ receipts: {} }),
+});
+export type WorkspaceIsolation = {
+  allocate(intent: Intent): Promise<WorkspaceReceipt>;
+  reconcile(intent: Intent): Promise<WorkspaceReceipt>;
+  release(intent: Intent): Promise<WorkspaceReceipt>;
+  /** Re-creates the worktree of a git receipt the host cleaned up, on its kept branch; a still-released receipt carries the reason it cannot be revived. */ revive(
+    intent: Intent,
+  ): Promise<WorkspaceReceipt>;
+  snapshot(): Promise<WorkspaceSnapshot>;
+};
 type Command = { code: number; stdout: string; stderr: string };
-type Options = { conversation: Conversation; authority: { projectId: string; owner: string }; authorizedRepositories?: readonly Authorization[]; context?: Context; /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void; /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string; /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean };  
+type Options = {
+  conversation: Conversation;
+  authority: { projectId: string; owner: string };
+  authorizedRepositories?: readonly Authorization[];
+  context?: Context;
+  /** The previous host's home: a clean, fully pushed worktree under it may be removed so its branch can be continued. */ oldHome?: string;
+  /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void;
+  /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string;
+  /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean;
+};
 type Facts = { facts: Record<string, string>; reason: string | null };
 
 /** A receipt-only module: host configuration, not a model, supplies authority. */
 export function workspaceIsolation(options: Options): WorkspaceIsolation {
-  const context = options.context ?? BACKGROUND_CONTEXT; const allowed = options.authorizedRepositories ?? []; const authority = options.authority; if (options.testMissingProbeExecutable !== undefined) { if (!isAbsolute(options.testMissingProbeExecutable)) throw new Error("Test missing probe executable must be absolute"); if (lstatSync(options.testMissingProbeExecutable, { throwIfNoEntry: false })) throw new Error("Test missing probe executable must not exist"); }
-  async function get(id: string) { return options.conversation.commit(async tx => { const x = await tx.doc(Receipts, options.conversation.id); return x.receipts[id] ? dto(x.receipts[id]) : undefined; }, context); }
-  async function put(value: WorkspaceReceipt) { const out = dto(value); await options.conversation.commit(async tx => { (await tx.doc(Receipts, options.conversation.id)).receipts[out.intentId] = out; }, context); return out; }
+  const context = options.context ?? BACKGROUND_CONTEXT;
+  const allowed = options.authorizedRepositories ?? [];
+  const authority = options.authority;
+  if (options.testMissingProbeExecutable !== undefined) {
+    if (!isAbsolute(options.testMissingProbeExecutable)) throw new Error("Test missing probe executable must be absolute");
+    if (lstatSync(options.testMissingProbeExecutable, { throwIfNoEntry: false }))
+      throw new Error("Test missing probe executable must not exist");
+  }
+  async function get(id: string) {
+    return options.conversation.commit(async (tx) => {
+      const x = await tx.doc(Receipts, options.conversation.id);
+      return x.receipts[id] ? dto(x.receipts[id]) : undefined;
+    }, context);
+  }
+  async function put(value: WorkspaceReceipt) {
+    const out = dto(value);
+    await options.conversation.commit(async (tx) => {
+      (await tx.doc(Receipts, options.conversation.id)).receipts[out.intentId] = out;
+    }, context);
+    return out;
+  }
   async function allocate(intent: Intent) {
-    authorize(intent, allowed, authority); const old = await get(intent.id); if (old) { if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption"); return old; }
+    authorize(intent, allowed, authority);
+    const old = await get(intent.id);
+    if (old) {
+      if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption");
+      return old;
+    }
     await put(receipt(intent, "prepared", {}, null, null, null)); // Durable intent precedes unsafe CLI.
-    const missing = pluginMissing(intent.scope.provider); if (missing) return put(receipt(intent, "blocked", {}, null, null, missing));
-    const pre = await preflight(intent.scope, false); if (pre.reason) return put(receipt(intent, "blocked", pre.facts, null, null, pre.reason));
-    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts) : await addPlugin(intent, pre.facts);
+    const missing = pluginMissing(intent.scope.provider);
+    if (missing) return put(receipt(intent, "blocked", {}, null, null, missing));
+    const pre = await preflight(intent.scope, false);
+    if (pre.reason) return put(receipt(intent, "blocked", pre.facts, null, null, pre.reason));
+    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts, options.oldHome) : await addPlugin(intent, pre.facts);
     if (effect.state === "allocated") await options.afterProviderEffect?.(dto(effect));
     return put(effect);
   }
   async function reconcile(intent: Intent) {
-    authorize(intent, allowed, authority); const old = await get(intent.id); if (!old) return receipt(intent, "blocked", {}, null, null, "No prepared Durable intent exists"); if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing reconciliation");
+    authorize(intent, allowed, authority);
+    const old = await get(intent.id);
+    if (!old) return receipt(intent, "blocked", {}, null, null, "No prepared Durable intent exists");
+    if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing reconciliation");
     if (["blocked", "released"].includes(old.state)) return old;
-    const missing = pluginMissing(intent.scope.provider); if (missing) return put(receipt(intent, old.state === "prepared" ? "blocked" : "preserved", {}, old.workspacePath, old.lease, missing));
-    const pre = await preflight(intent.scope, true); if (pre.reason) return put(receipt(intent, old.state === "prepared" ? "blocked" : "preserved", pre.facts, old.workspacePath, old.lease, pre.reason));
-    const actual = intent.scope.provider === "git" ? await gitEntry(intent.scope) : await backendOf(intent.scope.provider)!.entry(intent.scope);
-    if (!actual || !exact(intent.scope, actual)) return put(receipt(intent, "uncertain", { ...pre.facts, ...(actual?.facts ?? {}) }, old.workspacePath, actual?.lease ?? old.lease, "Observed provider state is absent, ambiguous, or differs from the frozen intent; refusing recreation"));
+    const missing = pluginMissing(intent.scope.provider);
+    if (missing) return put(receipt(intent, old.state === "prepared" ? "blocked" : "preserved", {}, old.workspacePath, old.lease, missing));
+    const pre = await preflight(intent.scope, true);
+    if (pre.reason)
+      return put(receipt(intent, old.state === "prepared" ? "blocked" : "preserved", pre.facts, old.workspacePath, old.lease, pre.reason));
+    const actual =
+      intent.scope.provider === "git" ? await gitEntry(intent.scope) : await backendOf(intent.scope.provider)!.entry(intent.scope);
+    if (!actual || !exact(intent.scope, actual))
+      return put(
+        receipt(
+          intent,
+          "uncertain",
+          { ...pre.facts, ...(actual?.facts ?? {}) },
+          old.workspacePath,
+          actual?.lease ?? old.lease,
+          "Observed provider state is absent, ambiguous, or differs from the frozen intent; refusing recreation",
+        ),
+      );
     return put(receipt(intent, "allocated", { ...pre.facts, ...actual.facts }, intent.scope.workspacePath, actual.lease, null));
   }
   async function release(intent: Intent) {
-    authorize(intent, allowed, authority); const old = await get(intent.id); if (!old || !["allocated", "preserved"].includes(old.state)) return receipt(intent, "blocked", {}, null, null, "Only an allocated or freshly rechecked preserved receipt can be released");
-    const current = await reconcile(intent); if (current.state !== "allocated") return current;
-    const probe = await active(intent.scope.workspacePath, options.testMissingProbeExecutable, options.testProbeWithoutCwdNames); if (probe) return put(receipt(intent, "preserved", current.providerFacts, current.workspacePath, current.lease, typeof probe === "string" ? `Workspace activity probe failed: ${probe}` : "An active process has this workspace as cwd"));
-    const statusCommand = intent.scope.provider === "git" ? { file: cli.git(), args: ["status", "--porcelain=v1", "--untracked-files=all"] } : backendOf(intent.scope.provider)!.statusCommand();
+    authorize(intent, allowed, authority);
+    const old = await get(intent.id);
+    if (!old || !["allocated", "preserved"].includes(old.state))
+      return receipt(intent, "blocked", {}, null, null, "Only an allocated or freshly rechecked preserved receipt can be released");
+    const current = await reconcile(intent);
+    if (current.state !== "allocated") return current;
+    const probe = await active(intent.scope.workspacePath, options.testMissingProbeExecutable, options.testProbeWithoutCwdNames);
+    if (probe)
+      return put(
+        receipt(
+          intent,
+          "preserved",
+          current.providerFacts,
+          current.workspacePath,
+          current.lease,
+          typeof probe === "string" ? `Workspace activity probe failed: ${probe}` : "An active process has this workspace as cwd",
+        ),
+      );
+    const statusCommand =
+      intent.scope.provider === "git"
+        ? { file: cli.git(), args: ["status", "--porcelain=v1", "--untracked-files=all"] }
+        : backendOf(intent.scope.provider)!.statusCommand();
     const status = await command(statusCommand.file, statusCommand.args, intent.scope.workspacePath);
-    if (status.code || status.stdout.trim()) return put(receipt(intent, "preserved", current.providerFacts, current.workspacePath, current.lease, "Workspace is dirty or status cannot be verified"));
+    if (status.code || status.stdout.trim())
+      return put(
+        receipt(
+          intent,
+          "preserved",
+          current.providerFacts,
+          current.workspacePath,
+          current.lease,
+          "Workspace is dirty or status cannot be verified",
+        ),
+      );
     if (intent.scope.provider === "git") {
-      const lock = await command(cli.git(), ["worktree", "list", "--porcelain"], intent.scope.ownerCheckout); const entry = parseGit(lock.stdout, intent.scope.workspacePath);
-      if (!entry || entry.locked !== `workspace-intent:${intent.id}`) return put(receipt(intent, "preserved", current.providerFacts, current.workspacePath, null, "Git lock is absent or not owned by this exact intent"));
-      const unlock = await command(cli.git(), ["worktree", "unlock", intent.scope.workspacePath], intent.scope.ownerCheckout); if (unlock.code) return put(receipt(intent, "preserved", current.providerFacts, current.workspacePath, null, "Owned Git worktree could not be unlocked"));
-      const remove = await command(cli.git(), ["worktree", "remove", intent.scope.workspacePath], intent.scope.ownerCheckout); if (remove.code) return put(receipt(intent, "preserved", { ...current.providerFacts, remove: short(remove.stderr) }, current.workspacePath, null, "Unforced Git removal failed after unlock; preserving work"));
+      const lock = await command(cli.git(), ["worktree", "list", "--porcelain"], intent.scope.ownerCheckout);
+      const entry = parseGit(lock.stdout, intent.scope.workspacePath);
+      if (!entry || entry.locked !== `workspace-intent:${intent.id}`)
+        return put(
+          receipt(
+            intent,
+            "preserved",
+            current.providerFacts,
+            current.workspacePath,
+            null,
+            "Git lock is absent or not owned by this exact intent",
+          ),
+        );
+      const unlock = await command(cli.git(), ["worktree", "unlock", intent.scope.workspacePath], intent.scope.ownerCheckout);
+      if (unlock.code)
+        return put(
+          receipt(intent, "preserved", current.providerFacts, current.workspacePath, null, "Owned Git worktree could not be unlocked"),
+        );
+      const remove = await command(cli.git(), ["worktree", "remove", intent.scope.workspacePath], intent.scope.ownerCheckout);
+      if (remove.code)
+        return put(
+          receipt(
+            intent,
+            "preserved",
+            { ...current.providerFacts, remove: short(remove.stderr) },
+            current.workspacePath,
+            null,
+            "Unforced Git removal failed after unlock; preserving work",
+          ),
+        );
       return put(receipt(intent, "released", { ...current.providerFacts, remove: "unlocked-unforced" }, null, null, null));
     }
     const out = await backendOf(intent.scope.provider)!.release(intent, current);
-    return out.ok ? put(receipt(intent, "released", out.facts, null, null, null)) : put(receipt(intent, "preserved", out.facts ?? current.providerFacts, current.workspacePath, out.lease === undefined ? current.lease : out.lease, out.reason));
+    return out.ok
+      ? put(receipt(intent, "released", out.facts, null, null, null))
+      : put(
+          receipt(
+            intent,
+            "preserved",
+            out.facts ?? current.providerFacts,
+            current.workspacePath,
+            out.lease === undefined ? current.lease : out.lease,
+            out.reason,
+          ),
+        );
   }
   async function revive(intent: Intent) {
-    authorize(intent, allowed, authority); const old = await get(intent.id);
+    authorize(intent, allowed, authority);
+    const old = await get(intent.id);
     if (!old || !sameFrozenIntent(old, intent)) throw new Error("No matching workspace receipt to revive");
     const refused = (reason: string) => receipt(intent, "released", old.providerFacts, null, null, reason);
     if (old.state !== "released" || old.providerFacts.remove !== "cleanup-unforced" || intent.scope.provider !== "git") return old;
-    const kept = await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${intent.scope.branch}`], intent.scope.ownerCheckout);
+    const kept = await command(
+      cli.git(),
+      ["rev-parse", "--verify", "--quiet", `refs/heads/${intent.scope.branch}`],
+      intent.scope.ownerCheckout,
+    );
     if (kept.code) return refused(`branch ${intent.scope.branch} no longer exists`);
     // A crash after `git worktree add` but before the receipt put leaves the worktree behind; only one locked by this exact intent on this branch is adopted.
     let found = await gitEntry(intent.scope);
-    if (found && (found.facts.locked !== `workspace-intent:${intent.id}` || found.facts.branch !== `refs/heads/${intent.scope.branch}`)) return refused("a worktree at this path belongs to another allocation");
+    if (found && (found.facts.locked !== `workspace-intent:${intent.id}` || found.facts.branch !== `refs/heads/${intent.scope.branch}`))
+      return refused("a worktree at this path belongs to another allocation");
     if (!found) {
-      const pre = await preflight(intent.scope, false); if (pre.reason) return refused(pre.reason);
-      const added = await command(cli.git(), ["worktree", "add", "--lock", "--reason", `workspace-intent:${intent.id}`, intent.scope.workspacePath, intent.scope.branch], intent.scope.ownerCheckout);
+      const pre = await preflight(intent.scope, false);
+      if (pre.reason) return refused(pre.reason);
+      const added = await command(
+        cli.git(),
+        ["worktree", "add", "--lock", "--reason", `workspace-intent:${intent.id}`, intent.scope.workspacePath, intent.scope.branch],
+        intent.scope.ownerCheckout,
+      );
       if (added.code) return refused(`git could not re-create the worktree: ${short(added.stderr)}`);
       await options.afterProviderEffect?.(old);
       found = await gitEntry(intent.scope);
     }
-    if (!found || found.facts.branch !== `refs/heads/${intent.scope.branch}`) return put(receipt(intent, "uncertain", old.providerFacts, intent.scope.workspacePath, null, "Revived worktree is not on the kept branch"));
+    if (!found || found.facts.branch !== `refs/heads/${intent.scope.branch}`)
+      return put(
+        receipt(intent, "uncertain", old.providerFacts, intent.scope.workspacePath, null, "Revived worktree is not on the kept branch"),
+      );
     // The allocation-time facts come back unchanged, so the thread's frozen binding revision still matches.
     const { remove: _remove, cleanedAt: _cleanedAt, ...facts } = old.providerFacts;
-    return put(receipt(intent, "allocated", { ...facts, branch: `refs/heads/${intent.scope.branch}` }, intent.scope.workspacePath, null, null));
+    return put(
+      receipt(intent, "allocated", { ...facts, branch: `refs/heads/${intent.scope.branch}` }, intent.scope.workspacePath, null, null),
+    );
   }
-  async function snapshot(): Promise<WorkspaceSnapshot> { return options.conversation.commit(async tx => ({ receipts: Object.values((await tx.doc(Receipts, options.conversation.id)).receipts).map(dto) }), context); }
+  async function snapshot(): Promise<WorkspaceSnapshot> {
+    return options.conversation.commit(
+      async (tx) => ({ receipts: Object.values((await tx.doc(Receipts, options.conversation.id)).receipts).map(dto) }),
+      context,
+    );
+  }
   return { allocate, reconcile, release, revive, snapshot };
 }
 
-function sameFrozenIntent(receipt: WorkspaceReceipt, intent: Intent): boolean { return receipt.intentId === intent.id && receipt.attemptId === intent.attemptId && JSON.stringify(receipt.scope) === JSON.stringify(intent.scope); }
+function sameFrozenIntent(receipt: WorkspaceReceipt, intent: Intent): boolean {
+  return (
+    receipt.intentId === intent.id &&
+    receipt.attemptId === intent.attemptId &&
+    JSON.stringify(receipt.scope) === JSON.stringify(intent.scope)
+  );
+}
 function authorize(intent: Intent, allowed: readonly Authorization[], authority: { projectId: string; owner: string }) {
   if (!Value.Check(WorkspaceIntent, intent)) throw new Error("Invalid workspace intent");
-  if (intent.scope.projectId !== authority.projectId || intent.scope.owner !== authority.owner) throw new Error("Workspace project or lease owner does not match host authority");
-  const match = allowed.find(a => Value.Check(AuthorizedRepository, a) && a.repositoryId === intent.scope.repositoryId && a.provider === intent.scope.provider && a.approvedRoot === intent.scope.approvedRoot && a.ownerCheckout === intent.scope.ownerCheckout);
+  if (intent.scope.projectId !== authority.projectId || intent.scope.owner !== authority.owner)
+    throw new Error("Workspace project or lease owner does not match host authority");
+  const match = allowed.find(
+    (a) =>
+      Value.Check(AuthorizedRepository, a) &&
+      a.repositoryId === intent.scope.repositoryId &&
+      a.provider === intent.scope.provider &&
+      a.approvedRoot === intent.scope.approvedRoot &&
+      a.ownerCheckout === intent.scope.ownerCheckout,
+  );
   if (!match) throw new Error("Workspace repository/scope is not authorized by host configuration");
-  for (const file of intent.scope.fileOwnership) if (isAbsolute(file) || file.split(/[\\/]/).includes("..") || !(file === match.fileOwnershipPrefix || file.startsWith(`${match.fileOwnershipPrefix}/`))) throw new Error("File ownership is outside the host-approved prefix");
+  for (const file of intent.scope.fileOwnership)
+    if (
+      isAbsolute(file) ||
+      file.split(/[\\/]/).includes("..") ||
+      !(file === match.fileOwnershipPrefix || file.startsWith(`${match.fileOwnershipPrefix}/`))
+    )
+      throw new Error("File ownership is outside the host-approved prefix");
 }
 async function preflight(s: WorkspaceScope, exists: boolean): Promise<Facts> {
-  try { const owner = dir(s.ownerCheckout), root = dir(s.approvedRoot), target = resolve(realpathSync(dirname(s.workspacePath)), basename(s.workspacePath)); if (!inside(root, target) || owner === target) return { facts: {}, reason: "Workspace path escapes its approved allocation root" }; if (Boolean(lstatSync(target, { throwIfNoEntry: false })) !== exists) return { facts: { ownerCheckout: owner, workspacePath: target }, reason: exists ? "Expected workspace path is absent" : "Workspace target already exists" };
-    if (s.provider === "git") { const head = await command(cli.git(), ["rev-parse", "HEAD"], owner), clean = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], owner); if (head.code || clean.code || (!exists && clean.stdout.trim() && !s.allowDirtyOwner)) return { facts: {}, reason: "Git owner is unreadable or dirty" }; return { facts: { ownerCheckout: owner, ownerHead: head.stdout.trim(), workspacePath: target }, reason: !exists && head.stdout.trim() !== s.headRevision ? "Git owner head drifted" : null }; }
+  try {
+    const owner = dir(s.ownerCheckout),
+      root = dir(s.approvedRoot),
+      target = resolve(realpathSync(dirname(s.workspacePath)), basename(s.workspacePath));
+    if (!inside(root, target) || owner === target) return { facts: {}, reason: "Workspace path escapes its approved allocation root" };
+    if (Boolean(lstatSync(target, { throwIfNoEntry: false })) !== exists)
+      return {
+        facts: { ownerCheckout: owner, workspacePath: target },
+        reason: exists ? "Expected workspace path is absent" : "Workspace target already exists",
+      };
+    if (s.provider === "git") {
+      const head = await command(cli.git(), ["rev-parse", "HEAD"], owner),
+        clean = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], owner);
+      if (head.code || clean.code || (!exists && clean.stdout.trim() && !s.allowDirtyOwner))
+        return { facts: {}, reason: "Git owner is unreadable or dirty" };
+      return {
+        facts: { ownerCheckout: owner, ownerHead: head.stdout.trim(), workspacePath: target },
+        reason: !exists && head.stdout.trim() !== s.headRevision ? "Git owner head drifted" : null,
+      };
+    }
     return await backendOf(s.provider)!.preflight(s, { owner, target });
-  } catch (e) { return { facts: {}, reason: e instanceof Error ? e.message : String(e) }; }
+  } catch (e) {
+    return { facts: {}, reason: e instanceof Error ? e.message : String(e) };
+  }
 }
-async function addGit(i: Intent, facts: Record<string,string>) { const existing = i.scope.continueBranch ? (await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${i.scope.branch}`], i.scope.ownerCheckout)).stdout.trim() : ""; /* A continued branch that exists locally at the intended tip is checked out as is; at any other commit it is never reset (git refuses -b). */ const x = await command(cli.git(), ["worktree", "add", "--lock", "--reason", `workspace-intent:${i.id}`, ...(existing === i.scope.baseRevision ? [i.scope.workspacePath, i.scope.branch] : ["-b", i.scope.branch, i.scope.workspacePath, i.scope.baseRevision])], i.scope.ownerCheckout); if (x.code) return receipt(i,"blocked",{...facts,add:short(x.stderr)},null,null,"Git add failed"); const found=await gitEntry(i.scope); return found&&exact(i.scope,found)?receipt(i,"allocated",{...facts,...found.facts},i.scope.workspacePath,null,null):receipt(i,"uncertain",facts,i.scope.workspacePath,null,"Git effect lacks exact receipt facts"); }
-async function addPlugin(i: Intent, facts: Record<string,string>) { const out = await backendOf(i.scope.provider)!.add(i, facts); return receipt(i, out.state, out.facts, out.state === "blocked" ? null : i.scope.workspacePath, out.lease, out.reason); }
+async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string) {
+  const existing = i.scope.continueBranch
+    ? (await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${i.scope.branch}`], i.scope.ownerCheckout)).stdout.trim()
+    : "";
+  /* A continued branch that exists locally at the intended tip is checked out as is; at any other commit it is never reset (git refuses -b). */
+  const add = () =>
+    command(
+      cli.git(),
+      [
+        "worktree",
+        "add",
+        "--lock",
+        "--reason",
+        `workspace-intent:${i.id}`,
+        ...(existing === i.scope.baseRevision
+          ? [i.scope.workspacePath, i.scope.branch]
+          : ["-b", i.scope.branch, i.scope.workspacePath, i.scope.baseRevision]),
+      ],
+      i.scope.ownerCheckout,
+    );
+  let x = await add();
+  if (x.code && i.scope.continueBranch && oldHome) {
+    const taken = await reclaimOldWorktree(i.scope, oldHome);
+    if (taken.refusal) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${taken.refusal}`);
+    if (taken.removed) {
+      facts = { ...facts, reclaimedWorktree: taken.removed };
+      x = await add();
+    }
+  }
+  if (x.code) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${short(x.stderr)}`);
+  const found = await gitEntry(i.scope);
+  return found && exact(i.scope, found)
+    ? receipt(i, "allocated", { ...facts, ...found.facts }, i.scope.workspacePath, null, null)
+    : receipt(i, "uncertain", facts, i.scope.workspacePath, null, "Git effect lacks exact receipt facts");
+}
+/**
+ * A branch that the previous host left checked out in one of its own worktrees cannot be continued. That worktree is removed only when it lives
+ * under the old host's home, nothing runs in it, it has no uncommitted or untracked files and its HEAD is already on the remote branch.
+ * Returns the removed path, or a refusal naming the path and the reason; neither when no worktree holds the branch.
+ */
+async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{ removed?: string; refusal?: string }> {
+  const list = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
+  const holder = list.stdout
+    .trim()
+    .split("\n\n")
+    .map((block) => Object.fromEntries(block.split("\n").map((line) => [line.split(" ")[0], line.split(" ").slice(1).join(" ")])))
+    .find((entry) => entry.branch === `refs/heads/${s.branch}` && entry.worktree !== resolve(s.workspacePath));
+  if (!holder) return {};
+  const path = holder.worktree!,
+    refuse = (why: string) => ({ refusal: `branch ${s.branch} is checked out in ${path}: ${why}` });
+  let real: string, home: string;
+  try {
+    real = realpathSync(path);
+    home = realpathSync(oldHome);
+  } catch {
+    return refuse("that folder or the old host's home is missing, so it was not touched");
+  }
+  if (!inside(home, real) || home === real)
+    return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+  const busy = await active(real);
+  if (busy !== false) return refuse("a process is running in it");
+  const status = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], real);
+  if (status.code) return refuse(`its status is unreadable (${short(status.stderr)})`);
+  const dirty = status.stdout.split("\n").filter(Boolean);
+  if (dirty.length)
+    return refuse(
+      `it has uncommitted changes: ${dirty
+        .slice(0, 10)
+        .map((line) => line.slice(3))
+        .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`,
+    );
+  // Best effort: a stale remote ref only makes the check stricter. HOME is needed for the owner's git credentials.
+  await command(cli.git(), ["fetch", "--quiet", "origin", s.branch], s.ownerCheckout, { HOME: process.env.HOME ?? "" });
+  const remote = `refs/remotes/origin/${s.branch}`;
+  if ((await command(cli.git(), ["rev-parse", "--verify", "--quiet", remote], s.ownerCheckout)).code)
+    return refuse("the branch is not on the remote, so its commits may be unpushed");
+  const ahead = await command(cli.git(), ["rev-list", "--count", `${remote}..${holder.HEAD}`], s.ownerCheckout);
+  if (ahead.code || ahead.stdout.trim() !== "0") return refuse(`${ahead.stdout.trim() || "some"} commit(s) are not pushed`);
+  if (holder.locked !== undefined) await command(cli.git(), ["worktree", "unlock", real], s.ownerCheckout);
+  const removed = await command(cli.git(), ["worktree", "remove", real], s.ownerCheckout);
+  return removed.code ? refuse(`git could not remove it: ${short(removed.stderr)}`) : { removed: real };
+}
+async function addPlugin(i: Intent, facts: Record<string, string>) {
+  const out = await backendOf(i.scope.provider)!.add(i, facts);
+  return receipt(i, out.state, out.facts, out.state === "blocked" ? null : i.scope.workspacePath, out.lease, out.reason);
+}
 const backendOf = (provider: string): IsolationBackend | undefined => plugins.workspaceProvider(provider)?.isolation;
-const pluginMissing = (provider: string): string | null => provider === "git" || backendOf(provider) ? null : `The workspace provider plugin "${provider}" is not loaded; its worktrees are kept as they are`;
-async function gitEntry(s: WorkspaceScope) { const x=await command(cli.git(),["worktree","list","--porcelain"],s.ownerCheckout); const e=parseGit(x.stdout,s.workspacePath); return e?{facts:{path:e.worktree,head:e.HEAD,branch:e.branch,locked:e.locked??""},lease:null}:null; }
-function exact(s:WorkspaceScope, a:{facts:Record<string,string>;lease:WorkspaceLease|null}) { return s.provider === "git" ? a.facts.path===resolve(s.workspacePath)&&a.facts.head===s.baseRevision&&a.facts.branch === `refs/heads/${s.branch}` : backendOf(s.provider)!.exact(s, a); }
-function parseGit(text:string,path:string) { return text.trim().split("\n\n").map(b=>Object.fromEntries(b.split("\n").map(l=>{const [k,...v]=l.split(" ");return[k,v.join(" ")]}))).find(x=>x.worktree===resolve(path)); }
-export async function active(path:string, missingProbeExecutable?:string, pidOnly?:boolean):Promise<boolean|string>{const x=await command(missingProbeExecutable??"/usr/sbin/lsof",["-a","-d","cwd",pidOnly?"-Fp":"-Fn"]); if (x.code === 1 && x.stderr === "" && x.stdout === "") return false; if (x.code !== 0) return `exit ${x.code}: ${short(x.stderr)}`; if (x.stderr !== "") return `stderr: ${short(x.stderr)}`; const lines=x.stdout.split("\n"); if (x.stdout === "") return "empty successful cwd probe"; let pid=false,cwd=false,names=0,matched=false; const target=resolve(path); for(const line of lines){if(line==="")continue; if(/^p\d+$/.test(line)){if(pid&&(!cwd||names!==1))return "malformed or incomplete cwd probe records";pid=true;cwd=false;names=0;continue;} if(line==="fcwd"&&pid&&!cwd){cwd=true;continue;} if(line.startsWith("n")&&pid&&cwd){const name=line.slice(1),unreadable=/^cwd\|rtd info error: /.test(name);/* lsof reports a process whose cwd was deleted this way; it cannot be inside an existing worktree */if((!isAbsolute(name)&&!unreadable)||++names!==1)return "malformed or incomplete cwd probe records";if(!unreadable&&inside(target,resolve(name)))matched=true;continue;} return "malformed or incomplete cwd probe records";} if(!pid||!cwd||names!==1)return "malformed or incomplete cwd probe records"; return matched;}
-function receipt(i:Intent,state:WorkspaceReceipt["state"],facts:Record<string,string>,path:string|null,lease:WorkspaceLease|null,reason:string|null):WorkspaceReceipt{return {intentId:i.id,attemptId:i.attemptId,state,scope:dto(i.scope),providerFacts:dto(facts),workspacePath:path,lease:lease?dto(lease):null,reason};} function dto<T>(v:T):T{return JSON.parse(JSON.stringify(v)) as T;} function dir(p:string){if(!isAbsolute(p)||lstatSync(p).isSymbolicLink())throw Error("Path must be absolute and not a symlink");return realpathSync(p);}function inside(a:string,b:string){const x=relative(a,b);return x===""||(!x.startsWith(`..${sep}`)&&x!==".."&&!isAbsolute(x));}function short(x:string){return x.trim().slice(-1000);}export function command(file:string,args:string[],cwd?:string):Promise<Command>{return new Promise(done=>{const c=spawn(file,args,{cwd,shell:false,env:{PATH:"/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"},stdio:["ignore","pipe","pipe"]});let o="",e="";c.stdout.on("data",x=>o+=x);c.stderr.on("data",x=>e+=x);c.on("error",x=>done({code:-1,stdout:o,stderr:String(x)}));c.on("close",x=>done({code:x??-1,stdout:o,stderr:e}));});}
+const pluginMissing = (provider: string): string | null =>
+  provider === "git" || backendOf(provider)
+    ? null
+    : `The workspace provider plugin "${provider}" is not loaded; its worktrees are kept as they are`;
+async function gitEntry(s: WorkspaceScope) {
+  const x = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
+  const e = parseGit(x.stdout, s.workspacePath);
+  return e ? { facts: { path: e.worktree, head: e.HEAD, branch: e.branch, locked: e.locked ?? "" }, lease: null } : null;
+}
+function exact(s: WorkspaceScope, a: { facts: Record<string, string>; lease: WorkspaceLease | null }) {
+  return s.provider === "git"
+    ? a.facts.path === resolve(s.workspacePath) && a.facts.head === s.baseRevision && a.facts.branch === `refs/heads/${s.branch}`
+    : backendOf(s.provider)!.exact(s, a);
+}
+function parseGit(text: string, path: string) {
+  return text
+    .trim()
+    .split("\n\n")
+    .map((b) =>
+      Object.fromEntries(
+        b.split("\n").map((l) => {
+          const [k, ...v] = l.split(" ");
+          return [k, v.join(" ")];
+        }),
+      ),
+    )
+    .find((x) => x.worktree === resolve(path));
+}
+export async function active(path: string, missingProbeExecutable?: string, pidOnly?: boolean): Promise<boolean | string> {
+  const x = await command(missingProbeExecutable ?? "/usr/sbin/lsof", ["-a", "-d", "cwd", pidOnly ? "-Fp" : "-Fn"]);
+  if (x.code === 1 && x.stderr === "" && x.stdout === "") return false;
+  if (x.code !== 0) return `exit ${x.code}: ${short(x.stderr)}`;
+  if (x.stderr !== "") return `stderr: ${short(x.stderr)}`;
+  const lines = x.stdout.split("\n");
+  if (x.stdout === "") return "empty successful cwd probe";
+  let pid = false,
+    cwd = false,
+    names = 0,
+    matched = false;
+  const target = resolve(path);
+  for (const line of lines) {
+    if (line === "") continue;
+    if (/^p\d+$/.test(line)) {
+      if (pid && (!cwd || names !== 1)) return "malformed or incomplete cwd probe records";
+      pid = true;
+      cwd = false;
+      names = 0;
+      continue;
+    }
+    if (line === "fcwd" && pid && !cwd) {
+      cwd = true;
+      continue;
+    }
+    if (line.startsWith("n") && pid && cwd) {
+      const name = line.slice(1),
+        unreadable = /^cwd\|rtd info error: /.test(name);
+      /* lsof reports a process whose cwd was deleted this way; it cannot be inside an existing worktree */ if (
+        (!isAbsolute(name) && !unreadable) ||
+        ++names !== 1
+      )
+        return "malformed or incomplete cwd probe records";
+      if (!unreadable && inside(target, resolve(name))) matched = true;
+      continue;
+    }
+    return "malformed or incomplete cwd probe records";
+  }
+  if (!pid || !cwd || names !== 1) return "malformed or incomplete cwd probe records";
+  return matched;
+}
+function receipt(
+  i: Intent,
+  state: WorkspaceReceipt["state"],
+  facts: Record<string, string>,
+  path: string | null,
+  lease: WorkspaceLease | null,
+  reason: string | null,
+): WorkspaceReceipt {
+  return {
+    intentId: i.id,
+    attemptId: i.attemptId,
+    state,
+    scope: dto(i.scope),
+    providerFacts: dto(facts),
+    workspacePath: path,
+    lease: lease ? dto(lease) : null,
+    reason,
+  };
+}
+function dto<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T;
+}
+function dir(p: string) {
+  if (!isAbsolute(p) || lstatSync(p).isSymbolicLink()) throw Error("Path must be absolute and not a symlink");
+  return realpathSync(p);
+}
+function inside(a: string, b: string) {
+  const x = relative(a, b);
+  return x === "" || (!x.startsWith(`..${sep}`) && x !== ".." && !isAbsolute(x));
+}
+function short(x: string) {
+  return x.trim().slice(-1000);
+}
+export function command(file: string, args: string[], cwd?: string, env: Record<string, string> = {}): Promise<Command> {
+  return new Promise((done) => {
+    const c = spawn(file, args, {
+      cwd,
+      shell: false,
+      env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let o = "",
+      e = "";
+    c.stdout.on("data", (x) => (o += x));
+    c.stderr.on("data", (x) => (e += x));
+    c.on("error", (x) => done({ code: -1, stdout: o, stderr: String(x) }));
+    c.on("close", (x) => done({ code: x ?? -1, stdout: o, stderr: e }));
+  });
+}
 /** Every retained allocation receipt (cleanup inventory). */
-export async function workspaceReceipts(conversation: Conversation, context: Context = BACKGROUND_CONTEXT): Promise<WorkspaceReceipt[]> { return conversation.commit(async tx => Object.values((await tx.doc(Receipts, conversation.id)).receipts).map(dto), context); }
+export async function workspaceReceipts(conversation: Conversation, context: Context = BACKGROUND_CONTEXT): Promise<WorkspaceReceipt[]> {
+  return conversation.commit(async (tx) => Object.values((await tx.doc(Receipts, conversation.id)).receipts).map(dto), context);
+}
 /** Marks a worktree the host removed after its unforced `git worktree remove`; the branch ref is kept. */
-export async function retireWorkspaceReceipt(conversation: Conversation, intentId: string, facts: Record<string, string>, context: Context = BACKGROUND_CONTEXT): Promise<void> {
-  await conversation.commit(async tx => { const doc = await tx.doc(Receipts, conversation.id), old = doc.receipts[intentId]; if (!old || old.state !== "allocated") throw new Error("Only an allocated receipt can be retired"); doc.receipts[intentId] = { ...old, state: "released", providerFacts: { ...old.providerFacts, ...facts }, workspacePath: null, lease: null, reason: null }; }, context);
+export async function retireWorkspaceReceipt(
+  conversation: Conversation,
+  intentId: string,
+  facts: Record<string, string>,
+  context: Context = BACKGROUND_CONTEXT,
+): Promise<void> {
+  await conversation.commit(async (tx) => {
+    const doc = await tx.doc(Receipts, conversation.id),
+      old = doc.receipts[intentId];
+    if (!old || old.state !== "allocated") throw new Error("Only an allocated receipt can be retired");
+    doc.receipts[intentId] = {
+      ...old,
+      state: "released",
+      providerFacts: { ...old.providerFacts, ...facts },
+      workspacePath: null,
+      lease: null,
+      reason: null,
+    };
+  }, context);
 }

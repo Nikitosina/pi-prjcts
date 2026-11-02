@@ -4,25 +4,49 @@
 import { CHUNK, MAX_IN_FLIGHT, clientAuthText, clientFinish, clientHello, pairId, sign, text, utf8 } from "./wire.js";
 import { device } from "./store.js";
 
-const HANDSHAKE_MS = 15_000, HIGH_WATER = 1024 * 1024;
+const HANDSHAKE_MS = 15_000,
+  HIGH_WATER = 1024 * 1024;
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
-const CLOSED = { 4403: "This device is not allowed on that host. It may have been revoked, or the pairing link expired.", 4404: "The host is offline.", 4409: "The host reconnected elsewhere." };
+const CLOSED = {
+  4403: "This device is not allowed on that host. It may have been revoked, or the pairing link expired.",
+  4404: "The host is offline.",
+  4409: "The host reconnected elsewhere.",
+};
 
 export class TunnelError extends Error {
-  constructor(message, code = 0) { super(message); this.code = code; }
+  constructor(message, code = 0) {
+    super(message);
+    this.code = code;
+  }
 }
-const closeError = event => new TunnelError(CLOSED[event.code] ?? (event.reason || "Connection to the relay closed."), event.code);
+const closeError = (event) => new TunnelError(CLOSED[event.code] ?? (event.reason || "Connection to the relay closed."), event.code);
 
 /** Reads socket messages in order; rejects every waiter once the socket closes. */
 function reader(ws) {
-  const queue = [], waiters = [];
+  const queue = [],
+    waiters = [];
   let ended = null;
-  ws.onmessage = event => { const waiter = waiters.shift(); if (waiter) waiter.resolve(event.data); else queue.push(event.data); };
-  ws.onclose = event => { ended = event; for (const waiter of waiters.splice(0)) waiter.reject(closeError(event)); };
+  ws.onmessage = (event) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter.resolve(event.data);
+    else queue.push(event.data);
+  };
+  ws.onclose = (event) => {
+    ended = event;
+    for (const waiter of waiters.splice(0)) waiter.reject(closeError(event));
+  };
   ws.onerror = () => {};
-  return () => queue.length ? Promise.resolve(queue.shift()) : ended ? Promise.reject(closeError(ended)) : new Promise((resolve, reject) => waiters.push({ resolve, reject }));
+  return () =>
+    queue.length
+      ? Promise.resolve(queue.shift())
+      : ended
+        ? Promise.reject(closeError(ended))
+        : new Promise((resolve, reject) => waiters.push({ resolve, reject }));
 }
-const json = data => { if (typeof data !== "string") throw new TunnelError("Unexpected binary frame from the relay"); return JSON.parse(data); };
+const json = (data) => {
+  if (typeof data !== "string") throw new TunnelError("Unexpected binary frame from the relay");
+  return JSON.parse(data);
+};
 
 /**
  * Connect to `hostId`. With `pair: {code, name}` the hello pairs this device first; the session then continues as the device.
@@ -37,9 +61,22 @@ export async function openTunnel({ hostId, pair = null }) {
   try {
     const challenge = json(await next());
     if (challenge.t !== "challenge") throw new TunnelError("Unexpected relay message");
-    ws.send(JSON.stringify(pair ? { t: "pair", hostId, pairId: await pairId(pair.code) } : { t: "client", hostId, deviceId: me.id, sig: await sign(me.privateKey, clientAuthText(hostId, challenge.nonce)) }));
+    ws.send(
+      JSON.stringify(
+        pair
+          ? { t: "pair", hostId, pairId: await pairId(pair.code) }
+          : { t: "client", hostId, deviceId: me.id, sig: await sign(me.privateKey, clientAuthText(hostId, challenge.nonce)) },
+      ),
+    );
     if (json(await next()).t !== "ready") throw new TunnelError("Unexpected relay message");
-    const { hello, state } = await clientHello({ hostId, mode: pair ? "pair" : "device", deviceKey: me.privateKey, deviceId: me.id, name: pair?.name, code: pair?.code });
+    const { hello, state } = await clientHello({
+      hostId,
+      mode: pair ? "pair" : "device",
+      deviceKey: me.privateKey,
+      deviceId: me.id,
+      name: pair?.name,
+      code: pair?.code,
+    });
     ws.send(utf8(JSON.stringify(hello)));
     const welcome = await next();
     if (typeof welcome === "string") throw new TunnelError("Unexpected relay message");
@@ -49,27 +86,43 @@ export async function openTunnel({ hostId, pair = null }) {
   } catch (error) {
     ws.close();
     throw error instanceof TunnelError ? error : new TunnelError(error instanceof Error ? error.message : String(error));
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 class Tunnel {
-  #ws; #session = null; #next = 1; #requests = new Map(); #slots = []; #closed = null;
+  #ws;
+  #session = null;
+  #next = 1;
+  #requests = new Map();
+  #slots = [];
+  #closed = null;
   /** Called once with the reason when the session ends. */
   onClose = null;
-  constructor(ws) { this.#ws = ws; }
-  get closed() { return this.#closed !== null; }
+  constructor(ws) {
+    this.#ws = ws;
+  }
+  get closed() {
+    return this.#closed !== null;
+  }
 
   async start(state, welcome) {
     this.#session = await clientFinish(state, welcome, {
-      send: record => this.#ws.send(record),
+      send: (record) => this.#ws.send(record),
       onMessage: (header, body) => this.#receive(header, body),
-      onClose: reason => this.#end(new TunnelError(reason)),
+      onClose: (reason) => this.#end(new TunnelError(reason)),
     });
-    this.#ws.onmessage = event => { if (typeof event.data !== "string") void this.#session.receive(event.data); };
-    this.#ws.onclose = event => this.#end(closeError(event));
+    this.#ws.onmessage = (event) => {
+      if (typeof event.data !== "string") void this.#session.receive(event.data);
+    };
+    this.#ws.onclose = (event) => this.#end(closeError(event));
   }
 
-  close() { this.#ws.close(); this.#end(new TunnelError("Closed")); }
+  close() {
+    this.#ws.close();
+    this.#end(new TunnelError("Closed"));
+  }
 
   #end(error) {
     if (this.#closed) return;
@@ -82,47 +135,106 @@ class Tunnel {
     this.onClose?.(error);
   }
 
-  async #drain() { while (this.#ws.bufferedAmount > HIGH_WATER && !this.#closed) await new Promise(resolve => setTimeout(resolve, 20)); }
-  async #slot() { while (this.#requests.size >= MAX_IN_FLIGHT && !this.#closed) await new Promise(resolve => this.#slots.push(resolve)); }
+  async #drain() {
+    while (this.#ws.bufferedAmount > HIGH_WATER && !this.#closed) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  async #slot() {
+    while (this.#requests.size >= MAX_IN_FLIGHT && !this.#closed) await new Promise((resolve) => this.#slots.push(resolve));
+  }
 
   /** HTTP request to the host's inbox. Resolves with a Response whose body streams; `signal` cancels on the host too. */
   async request({ method = "GET", path, headers = {}, body = null, signal = null }) {
     await this.#slot();
     if (this.#closed) throw this.#closed;
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    const id = this.#next++, bytes = body ? new Uint8Array(body) : new Uint8Array(0);
-    let controller = null, settle, demand = false, finished = false;
+    const id = this.#next++,
+      bytes = body ? new Uint8Array(body) : new Uint8Array(0);
+    let controller = null,
+      settle,
+      demand = false,
+      finished = false;
     const queued = [];
     const deliver = () => {
       if (demand && queued.length) {
-        const data = queued.shift(); demand = false; controller.enqueue(data);
-        void this.#session.write({ t: "ack", id, bytes: data.length }).catch(error => this.#end(error));
+        const data = queued.shift();
+        demand = false;
+        controller.enqueue(data);
+        void this.#session.write({ t: "ack", id, bytes: data.length }).catch((error) => this.#end(error));
       }
-      if (finished && !queued.length) { try { controller?.close(); } catch {} this.#forget(id); }
+      if (finished && !queued.length) {
+        try {
+          controller?.close();
+        } catch {}
+        this.#forget(id);
+      }
     };
-    const head = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    const head = new Promise((resolve, reject) => {
+      settle = { resolve, reject };
+    });
     const entry = {
-      response: header => {
+      response: (header) => {
         const status = header.status;
-        const stream = NULL_BODY.has(status) ? null : new ReadableStream({ start: c => { controller = c; }, pull: () => { demand = true; deliver(); }, cancel: () => { queued.length = 0; this.#cancel(id); } }, { highWaterMark: 0 });
+        const stream = NULL_BODY.has(status)
+          ? null
+          : new ReadableStream(
+              {
+                start: (c) => {
+                  controller = c;
+                },
+                pull: () => {
+                  demand = true;
+                  deliver();
+                },
+                cancel: () => {
+                  queued.length = 0;
+                  this.#cancel(id);
+                },
+              },
+              { highWaterMark: 0 },
+            );
         settle.resolve(new Response(stream, { status, headers: header.headers ?? {} }));
         return stream !== null;
       },
-      chunk: data => { if (data.length) { queued.push(data.slice()); deliver(); } },
-      finish: () => { finished = true; deliver(); },
-      fail: error => { queued.length = 0; settle.reject(error); try { controller?.error(error); } catch {} this.#forget(id); },
+      chunk: (data) => {
+        if (data.length) {
+          queued.push(data.slice());
+          deliver();
+        }
+      },
+      finish: () => {
+        finished = true;
+        deliver();
+      },
+      fail: (error) => {
+        queued.length = 0;
+        settle.reject(error);
+        try {
+          controller?.error(error);
+        } catch {}
+        this.#forget(id);
+      },
     };
     this.#requests.set(id, entry);
-    signal?.addEventListener("abort", () => { entry.fail(new DOMException("Aborted", "AbortError")); void this.#session.write({ t: "cancel", id }).catch(() => {}); }, { once: true });
+    signal?.addEventListener(
+      "abort",
+      () => {
+        entry.fail(new DOMException("Aborted", "AbortError"));
+        void this.#session.write({ t: "cancel", id }).catch(() => {});
+      },
+      { once: true },
+    );
     try {
       for (let at = 0, first = true; first || at < bytes.length; first = false) {
-        const end = Math.min(at + CHUNK, bytes.length), fin = end >= bytes.length;
+        const end = Math.min(at + CHUNK, bytes.length),
+          fin = end >= bytes.length;
         await this.#drain();
         if (!this.#requests.has(id)) break;
         await this.#session.write(first ? { t: "req", id, method, path, headers, fin } : { t: "data", id, fin }, bytes.subarray(at, end));
         at = end;
       }
-    } catch (error) { entry.fail(this.#closed ?? error); }
+    } catch (error) {
+      entry.fail(this.#closed ?? error);
+    }
     return head;
   }
 
@@ -141,7 +253,10 @@ class Tunnel {
     if (!entry) return;
     if (header.t === "res") {
       const streaming = entry.response(header);
-      if (!streaming) { this.#forget(header.id); return; }
+      if (!streaming) {
+        this.#forget(header.id);
+        return;
+      }
       entry.chunk(body);
       if (header.fin) entry.finish();
     } else if (header.t === "data") {

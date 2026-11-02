@@ -17,7 +17,7 @@ const SKILLS_PER_MESSAGE = 5;
 
 /** Skill names referenced in owner text, in order, without repeats. */
 export function skillNames(text: string): string[] {
-  return [...new Set([...text.matchAll(SKILL_TOKEN)].map(match => match[1]!))];
+  return [...new Set([...text.matchAll(SKILL_TOKEN)].map((match) => match[1]!))];
 }
 
 function source(skill: Skill): SkillSource {
@@ -26,17 +26,31 @@ function source(skill: Skill): SkillSource {
 const order: Record<SkillSource, number> = { repo: 0, global: 1, package: 2 };
 
 export function listSkills(loader: Loader) {
-  return loader.getSkills().skills
-    .map(skill => ({ name: skill.name, description: skill.description, source: source(skill), manual: skill.disableModelInvocation }))
+  return loader
+    .getSkills()
+    .skills.map((skill) => ({
+      name: skill.name,
+      description: skill.description,
+      source: source(skill),
+      manual: skill.disableModelInvocation,
+    }))
     .sort((left, right) => order[left.source] - order[right.source] || left.name.localeCompare(right.name));
 }
 
 /** SKILL.md of one listed skill for the owner's preview (first 64,000 characters). */
 export async function skillPreview(loader: Loader, name: string) {
-  const skill = loader.getSkills().skills.find(item => item.name === name);
+  const skill = loader.getSkills().skills.find((item) => item.name === name);
   if (!skill) throw new Error(`Unknown skill ${name}`);
   const text = await readFile(skill.filePath, "utf8");
-  return { kind: "skill" as const, name: skill.name, description: skill.description, source: source(skill), path: skill.filePath, text: text.slice(0, 64_000), truncated: text.length > 64_000 };
+  return {
+    kind: "skill" as const,
+    name: skill.name,
+    description: skill.description,
+    source: source(skill),
+    path: skill.filePath,
+    text: text.slice(0, 64_000),
+    truncated: text.length > 64_000,
+  };
 }
 
 /** Returns the text for the model: one skill block per referenced skill, then the owner's text (without a leading `/skill:<name>`). Text without skill tokens is returned as is. An unknown skill is an error, never sent as text. */
@@ -44,51 +58,95 @@ export async function expandSkillCommand(loader: Loader, text: string): Promise<
   const names = skillNames(text);
   if (!names.length) return text;
   if (names.length > SKILLS_PER_MESSAGE) throw new Error(`At most ${SKILLS_PER_MESSAGE} skills per message`);
-  const blocks = await Promise.all(names.map(async name => {
-    const skill = loader.getSkills().skills.find(item => item.name === name);
-    if (!skill) throw new Error(`Unknown skill /skill:${name}. Pick one from the / list.`);
-    const body = parseFrontmatter(await readFile(skill.filePath, "utf8")).body.trim();
-    return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-  }));
+  const blocks = await Promise.all(
+    names.map(async (name) => {
+      const skill = loader.getSkills().skills.find((item) => item.name === name);
+      if (!skill) throw new Error(`Unknown skill /skill:${name}. Pick one from the / list.`);
+      const body = parseFrontmatter(await readFile(skill.filePath, "utf8")).body.trim();
+      return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+    }),
+  );
   // A leading command keeps pi's form (blocks, then the args); compactSkillText restores `/skill:<name> args` for the transcript.
   const rest = text.trim().replace(new RegExp(`^/skill:${names[0]!.replace(/[.]/g, "\\.")}(?:\\s+|$)`), "");
   const expanded = [...blocks, ...(rest ? [rest] : [])].join("\n\n");
-  if (expanded.length > SKILL_TEXT_LIMIT) throw new Error(`Skills ${names.join(", ")} are too large to send (${expanded.length} characters)`);
+  if (expanded.length > SKILL_TEXT_LIMIT)
+    throw new Error(`Skills ${names.join(", ")} are too large to send (${expanded.length} characters)`);
   return expanded;
 }
 
 /** Shows the owner's text instead of the skill bodies. Rows written before inline skills (`<block>\n\nargs`) show as `/skill:<name> args`. */
 export function compactSkillText(text: string): string {
-  let rest = text, first: string | null = null;
-  for (let match = SKILL_BLOCK.exec(rest); match; match = SKILL_BLOCK.exec(rest)) { first ??= match[1]!; rest = rest.slice(match[0].length); }
+  let rest = text,
+    first: string | null = null;
+  for (let match = SKILL_BLOCK.exec(rest); match; match = SKILL_BLOCK.exec(rest)) {
+    first ??= match[1]!;
+    rest = rest.slice(match[0].length);
+  }
   if (first === null) return text;
   return rest.includes(`/skill:${first}`) ? rest : `/skill:${first}${rest ? ` ${rest}` : ""}`;
 }
 
 /** One reader for every role: the caller's effective skill set (see skill-profiles.ts) decides what it may open. */
-export function coordinatorSkillTool(input: { /** Resolves a skill by name from the runtime's own snapshots; never rebuilds the catalog per read. */ skill: (name: string) => Promise<Skill | undefined>; root: () => Conversation | undefined; allowed: (api: ToolExecutionApi, context: Context) => Promise<ReadonlySet<string>> }) {
+export function coordinatorSkillTool(input: {
+  /** Resolves a skill by name from the runtime's own snapshots; never rebuilds the catalog per read. */ skill: (
+    name: string,
+  ) => Promise<Skill | undefined>;
+  root: () => Conversation | undefined;
+  allowed: (api: ToolExecutionApi, context: Context) => Promise<ReadonlySet<string>>;
+}) {
   const tool = defineTool({
     name: "projects_skill_file",
-    description: "Read a file of a skill listed for your role (or a skill the owner invoked): SKILL.md by default, or a file it references. path is relative to the skill's directory. Paged by characters.",
-    parameters: Type.Object({ skill: Type.String({ minLength: 1, maxLength: 128 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40000 })) }, { additionalProperties: false }),
+    description:
+      "Read a file of a skill listed for your role (or a skill the owner invoked): SKILL.md by default, or a file it references. path is relative to the skill's directory. Paged by characters.",
+    parameters: Type.Object(
+      {
+        skill: Type.String({ minLength: 1, maxLength: 128 }),
+        path: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 40000 })),
+      },
+      { additionalProperties: false },
+    ),
     replay: "safe",
     async execute(args, api: ToolExecutionApi, context) {
       if (!input.root()) throw new Error("Project is unavailable");
       const allowed = await input.allowed(api, context);
       const skill = await input.skill(args.skill);
       if (!skill) throw new Error(`Unknown skill ${args.skill}`);
-      if (!allowed.has(skill.name)) throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
+      if (!allowed.has(skill.name))
+        throw new Error(`Skill ${skill.name} is not in your role's skill set; the owner chooses skills per role in Settings`);
       // Checked lexically first, then again after symlinks resolve.
-      const escapes = (from: string, to: string) => { const inside = relative(from, to); return isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`); };
+      const escapes = (from: string, to: string) => {
+        const inside = relative(from, to);
+        return isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`);
+      };
       const requested = resolve(skill.baseDir, args.path ?? "SKILL.md");
       if (escapes(resolve(skill.baseDir), requested)) throw new Error("Path escapes the skill directory");
       const base = await realpath(skill.baseDir);
-      const target = await realpath(requested).catch(() => { throw new Error(`No file ${args.path ?? "SKILL.md"} in skill ${skill.name}`); });
+      const target = await realpath(requested).catch(() => {
+        throw new Error(`No file ${args.path ?? "SKILL.md"} in skill ${skill.name}`);
+      });
       if (escapes(base, target)) throw new Error("Path escapes the skill directory");
       const inside = relative(base, target);
       if (!(await lstat(target)).isFile()) throw new Error("Not a file");
-      const text = await readFile(target, "utf8"), offset = args.offset ?? 0, limit = args.limit ?? 20000;
-      return { content: [{ type: "text" as const, text: JSON.stringify({ skill: skill.name, path: inside, offset, nextOffset: offset + limit < text.length ? offset + limit : null, totalCharacters: text.length, text: text.slice(offset, offset + limit) }) }] };
+      const text = await readFile(target, "utf8"),
+        offset = args.offset ?? 0,
+        limit = args.limit ?? 20000;
+      return {
+        output: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              skill: skill.name,
+              path: inside,
+              offset,
+              nextOffset: offset + limit < text.length ? offset + limit : null,
+              totalCharacters: text.length,
+              text: text.slice(offset, offset + limit),
+            }),
+          },
+        ],
+      };
     },
   });
   return { tool, extension: defineExtension({ name: "projects.coordinator-skills", tools: [tool] }) };
