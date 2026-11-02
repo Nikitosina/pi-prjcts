@@ -110,6 +110,7 @@ export function followTranscript() {
 // Older pages: the transcript starts at the newest page; scrolling to the top (or the button) loads the next older one and keeps the reading position.
 const windowKey = () => `${getProjectId()}/${chatId}`;
 let earlierLoading = false;
+let transcriptGeneration = null;
 async function showEarlier() {
   const key = windowKey(),
     generation = getGeneration(),
@@ -184,7 +185,10 @@ export async function refresh(topics = ALL_TOPICS) {
     if (current !== getGeneration()) return;
     if (nextJobs && (!Array.isArray(nextJobs.jobs) || !Array.isArray(nextJobs.agents) || nextJobs.jobs.some((job) => !uuid(job.id))))
       throw new Error("Invalid Jobs projection");
-    if (next) setView(next);
+    if (next) {
+      setView(next);
+      transcriptGeneration = current;
+    }
     if (nextJobs) setJobsSnap(nextJobs);
     if (nextDocs) {
       setKnowledgeDocs(Array.isArray(nextDocs) ? nextDocs.filter((doc) => knowledgePath(doc.path)) : []);
@@ -1218,7 +1222,7 @@ transcript.addEventListener(
     if (
       view?.project.id === getProjectId() &&
       view.chatId === chatId &&
-      view.messages.length > 0 &&
+      transcriptGeneration === getGeneration() &&
       transcript.clientHeight > 0 &&
       transcript.scrollTop < 80 &&
       hasOlder(windowKey())

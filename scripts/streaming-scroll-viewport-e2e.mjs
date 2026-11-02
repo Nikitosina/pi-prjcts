@@ -127,6 +127,11 @@ await k.run(async () => {
     await k.ask(other, `MARK-FILL other ${i} ${"long conversation text ".repeat(20)}`);
     await k.ask(long, `MARK-FILL long ${i} ${"long conversation text ".repeat(20)}`);
   }
+  const emptyDir = join(k.root, "empty-page-workspace");
+  mkdirSync(emptyDir);
+  k.initRepo(emptyDir);
+  const emptyPage = await k.createProject("Empty newest page", { grant: false, cwd: emptyDir });
+  for (let i = 0; i < 34; i++) await k.ask(emptyPage, `MARK-FILL empty ${i}`);
   const namedLong = await k.rpc({ action: "chat-create", id: long, title: "Bugs wave 1" });
   const namedOther = await k.rpc({ action: "chat-create", id: other, title: "iPad layout" });
   for (const [project, chat] of [
@@ -351,6 +356,43 @@ await k.run(async () => {
   const afterReturn = await anchored(page);
   result.measurements.pendingReturn = afterReturn;
   k.check("R0TR stale older response cannot move a reopened chat", afterReturn.gap < 2, afterReturn);
+  await page.evaluate(`(() => {
+    const original = window.fetch;
+    let replace = true;
+    window.fetch = async function(input, init) {
+      let body;
+      try { body = JSON.parse(init?.body); } catch {}
+      const response = await original.apply(this, arguments);
+      if (!replace || body?.action !== 'show' || body.id !== '${emptyPage}') return response;
+      replace = false;
+      const view = await response.json();
+      return new Response(JSON.stringify({ ...view, data: { ...view.data, messages: [], before: 50 } }), { status: response.status, headers: response.headers });
+    };
+  })()`);
+  await click(`[data-select-project="${emptyPage}"]`);
+  await page.waitFor(
+    `document.querySelector('#title').textContent === 'Empty newest page' && !!document.querySelector('#messages .earlier-messages')`,
+    "empty newest page loaded",
+  );
+  k.check(
+    "R0TE empty newest page has no messages",
+    await page.evaluate(`document.querySelectorAll('#messages [data-index]').length === 0`),
+  );
+  const emptyRequests = await page.evaluate(`window.__namedHistoryRequests.length`);
+  await page.evaluate(
+    `(() => { document.querySelector('#messages').style.minHeight = '800px'; const t = document.querySelector('#transcript'); t.scrollTop = t.scrollHeight; })()`,
+  );
+  await delay(300);
+  const emptyWheel = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: -t.scrollTop - 100 }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...emptyWheel, deltaX: 0 });
+  await page.waitFor(`window.__namedHistoryRequests.length > ${emptyRequests}`, "wheel loads history from empty newest page");
+  k.check(
+    "R0TEW wheel loads older history from empty newest page",
+    (await page.evaluate(`window.__namedHistoryRequests`)).length === emptyRequests + 1,
+  );
+  await page.evaluate(`document.querySelector('#messages').style.minHeight = ''`);
   await page.cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
   await page.viewport(1440, 1000, false);
   await click(`[data-select-project="${id}"]`);
