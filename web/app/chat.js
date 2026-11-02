@@ -112,10 +112,10 @@ const windowKey = () => `${getProjectId()}/${chatId}`;
 let earlierLoading = false;
 async function showEarlier() {
   const key = windowKey(),
+    generation = getGeneration(),
     node = document.querySelector("#transcript");
   if (earlierLoading || !hasOlder(key)) return;
   earlierLoading = true;
-  const before = { height: node.scrollHeight, top: node.scrollTop, anchor: captureTranscriptAnchor() };
   stickToBottom = false;
   try {
     const id = getProjectId(),
@@ -123,7 +123,8 @@ async function showEarlier() {
     const added = await loadOlder(key, (cursor) =>
       api({ action: "chat-history", id, ...(chat === "main" ? {} : { chatId: chat }), before: cursor }),
     );
-    if (!added || windowKey() !== key) return;
+    if (!added || getGeneration() !== generation || windowKey() !== key) return;
+    const before = { height: node.scrollHeight, top: node.scrollTop, anchor: captureTranscriptAnchor() };
     setView({ ...getView(), messages: displayMessages(loadedItems(key)) });
     render();
     node.scrollTop = before.top + node.scrollHeight - before.height;

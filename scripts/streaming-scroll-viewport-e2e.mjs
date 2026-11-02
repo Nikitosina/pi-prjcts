@@ -223,8 +223,12 @@ await k.run(async () => {
     transcript.addEventListener('scroll', () => window.__namedScrollEvents.push({ top: transcript.scrollTop, height: transcript.clientHeight, total: transcript.scrollHeight, chat: new URL(location.href).searchParams.get('chat'), count: transcript.querySelectorAll('[data-index]').length }));
     const original = window.fetch;
     window.fetch = function(input, init) {
-      try { const body = JSON.parse(init?.body); if (body.action === 'chat-history' && body.before != null) window.__namedHistoryRequests.push(body); } catch {}
-      return original.apply(this, arguments);
+      let older = false;
+      try { const body = JSON.parse(init?.body); if (body.action === 'chat-history' && body.before != null) { window.__namedHistoryRequests.push(body); older = true; } } catch {}
+      const response = original.apply(this, arguments);
+      if (!older || !window.__holdOlder) return response;
+      window.__holdOlder = false;
+      return response.then(async value => { await new Promise(resolve => { window.__releaseOlder = resolve; }); return value; });
     };
   })()`);
   const tracedBack = await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-long-traced");
@@ -238,13 +242,16 @@ await k.run(async () => {
     result.measurements.namedTabsTraced,
   );
   await delay(1000);
+  await page.evaluate(`window.__holdOlder = true`);
   const namedCount = await page.evaluate(`document.querySelectorAll('#messages [data-index]').length`);
   const wheelTarget = await page.evaluate(
     `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: -t.scrollTop - 100 }; })()`,
   );
   await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...wheelTarget, deltaX: 0 });
   await page.waitFor(`window.__namedHistoryRequests.length === 1`, "intentional wheel requests older history");
+  await page.waitFor(`!!window.__releaseOlder`, "older response held");
   const beforeNamedPage = await anchored(page);
+  await page.evaluate(`window.__releaseOlder(); window.__releaseOlder = null`);
   await page.waitFor(`document.querySelectorAll('#messages [data-index]').length > ${namedCount}`, "wheel older page rendered");
   await delay(150);
   const afterNamedPage = await page.evaluate(
@@ -259,6 +266,45 @@ await k.run(async () => {
       afterNamedPage.gap > 100,
     result.measurements.namedWheel,
   );
+  await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-before-pending");
+  await delay(1000);
+  await page.evaluate(`window.__holdOlder = true`);
+  const pendingCount = await page.evaluate(`document.querySelectorAll('#messages [data-index]').length`);
+  const pendingWheel = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: -t.scrollTop - 100 }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...pendingWheel, deltaX: 0 });
+  await page.waitFor(`!!window.__releaseOlder`, "pending older response held");
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", x: pendingWheel.x, y: pendingWheel.y, deltaX: 0, deltaY: 300 });
+  await delay(200);
+  const movedAnchor = await anchored(page);
+  await page.evaluate(`window.__releaseOlder(); window.__releaseOlder = null`);
+  await page.waitFor(`document.querySelectorAll('#messages [data-index]').length > ${pendingCount}`, "pending older page rendered");
+  await delay(150);
+  const movedAfter = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), row = t.querySelector('[data-index="${movedAnchor.index}"]'); return { index: row?.dataset.index, offset: row?.getBoundingClientRect().top - t.getBoundingClientRect().top }; })()`,
+  );
+  result.measurements.pendingWheel = { movedAnchor, movedAfter };
+  k.check(
+    "R0TP moving while an older page loads preserves the new reading anchor",
+    movedAnchor.index === movedAfter.index && Math.abs(movedAnchor.offset - movedAfter.offset) < 2,
+    result.measurements.pendingWheel,
+  );
+  await switchTab("Other long project · iPad layout", namedOther.id, "named-tab-pending-start");
+  await delay(1000);
+  await page.evaluate(`window.__holdOlder = true`);
+  const returnWheel = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: -t.scrollTop - 100 }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...returnWheel, deltaX: 0 });
+  await page.waitFor(`!!window.__releaseOlder`, "returning chat older response held");
+  await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-pending-away");
+  await switchTab("Other long project · iPad layout", namedOther.id, "named-tab-pending-return");
+  await page.evaluate(`window.__releaseOlder(); window.__releaseOlder = null`);
+  await delay(800);
+  const afterReturn = await anchored(page);
+  result.measurements.pendingReturn = afterReturn;
+  k.check("R0TR stale older response cannot move a reopened chat", afterReturn.gap < 2, afterReturn);
   await page.cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
   await click(`[data-select-project="${id}"]`);
   await page.waitFor(`document.querySelector('#messages').innerText.includes('MARK-FILL 33')`, "original project selected");
