@@ -161,6 +161,14 @@ export type WorkerAttachment = {
   /** Appended to the worker's frozen instructions in whole-repository mode. */
   instructions: string;
 };
+export type CoordinatorBindContext = Omit<BindContext, "workId" | "taskText" | "continued"> & { chatId: string };
+export type CoordinatorAttachContext = CoordinatorBindContext & Pick<AttachContext, "receipt" | "receipts" | "plan">;
+export type CoordinatorAttachment = Pick<WorkerAttachment, "workDir" | "start"> & {
+  /** Verifies allocation and lease ownership without requiring clean files or the original HEAD. Throws to refuse execution. */
+  checkOwned(): Promise<void>;
+  /** Stops and drains runtime handles without removing the workspace or transferring ownership. */
+  detach(): Promise<void>;
+};
 export type SetupCard = {
   id: string;
   state: "connected" | "available" | "blocked";
@@ -199,6 +207,11 @@ export type WorkspaceProvider = {
   /** Names, branch and base of a worker worktree: frozen with the receipt on first allocation, then reused. */
   plan(context: BindContext): Promise<AllocationPlan>;
   attach(context: AttachContext): Promise<WorkerAttachment>;
+  /** Explicit chat ownership, without worker publication policy or a fabricated Job. */
+  coordinator?: {
+    plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
+    attach(context: CoordinatorAttachContext): Promise<CoordinatorAttachment>;
+  };
   /** Cleanup inventory: facts of one allocated worker worktree and the removal. */
   workerFacts(input: {
     project: Project;

@@ -8,7 +8,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Project**: a repository checkout (Git or Arc) with its settings, models, knowledge and automations.
 - **Host**: the one process that owns every project's durable storage and serves the web UI, CLI and Telegram.
 - **Chat**: a coordinator conversation in a project. A project has a main chat and may have more.
-- **Coordinator**: the agent in a chat. It answers the owner, spawns agents and judges their results. It never edits source.
+- **Coordinator**: the trusted agent in a chat that owns delivery. It investigates and makes changes directly in its own persistent workspace, or delegates work and judges the results.
 - **Job**: one owner request or trigger handed to a worker. It owns the worker, the worker's subagents, the branch, the PR and the proof. Lifecycle: `running → ready | ready-with-gaps | failed → approved`, and `stopped` when explicitly stopped. A Job is not a pi-durable task.
 - **Agent roles**: coordinator, worker, scout, reviewer, verifier.
   - **Worker**: implements one Job in its own workspace, verifies, gets reviewed, and reports Ready.

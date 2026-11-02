@@ -37,6 +37,8 @@ export type WorkspaceIsolation = {
   /** Re-creates the worktree of a git receipt the host cleaned up, on its kept branch; a still-released receipt carries the reason it cannot be revived. */ revive(
     intent: Intent,
   ): Promise<WorkspaceReceipt>;
+  /** Checks Git ownership on reopen without resetting dirty files or an advanced HEAD. */
+  checkOwned(intent: Intent): Promise<void>;
   snapshot(): Promise<WorkspaceSnapshot>;
 };
 type Command = { code: number; stdout: string; stderr: string };
@@ -243,7 +245,30 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
       context,
     );
   }
-  return { allocate, reconcile, release, revive, snapshot };
+  async function checkOwned(intent: Intent): Promise<void> {
+    authorize(intent, allowed, authority);
+    const old = await get(intent.id);
+    if (!old || !sameFrozenIntent(old, intent)) throw new Error("No matching owned workspace receipt");
+    if (intent.scope.provider !== "git") throw new Error("Provider ownership requires its coordinator adapter");
+    const pre = await preflight(intent.scope, true, { ownerStatus: false });
+    if (pre.reason) throw new Error(pre.reason);
+    const found = await gitEntry(intent.scope);
+    if (!found || found.facts.path !== resolve(intent.scope.workspacePath)) throw new Error("Owned Git registration is missing");
+    const branch = await command(cli.git(), ["symbolic-ref", "--quiet", "HEAD"], intent.scope.workspacePath);
+    if (found.facts.branch !== `refs/heads/${intent.scope.branch}` || branch.code || branch.stdout.trim() !== found.facts.branch)
+      throw new Error("Owned Git branch differs");
+    if (found.facts.locked !== `workspace-intent:${intent.id}`) throw new Error("Git lock is not owned by this exact intent");
+    const common = async (cwd: string) => {
+      const result = await command(cli.git(), ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
+      if (result.code) throw new Error("Owned Git repository association is unreadable");
+      return realpathSync(result.stdout.trim());
+    };
+    if ((await common(intent.scope.workspacePath)) !== (await common(intent.scope.ownerCheckout)))
+      throw new Error("Owned worktree repository association differs");
+    if (realpathSync(intent.scope.workspacePath) !== resolve(intent.scope.workspacePath))
+      throw new Error("Owned workspace path changed through a symlink");
+  }
+  return { allocate, reconcile, release, revive, checkOwned, snapshot };
 }
 
 function sameFrozenIntent(receipt: WorkspaceReceipt, intent: Intent): boolean {
@@ -274,7 +299,7 @@ function authorize(intent: Intent, allowed: readonly Authorization[], authority:
     )
       throw new Error("File ownership is outside the host-approved prefix");
 }
-async function preflight(s: WorkspaceScope, exists: boolean): Promise<Facts> {
+async function preflight(s: WorkspaceScope, exists: boolean, options = { ownerStatus: true }): Promise<Facts> {
   try {
     const owner = dir(s.ownerCheckout),
       root = dir(s.approvedRoot),
@@ -286,9 +311,11 @@ async function preflight(s: WorkspaceScope, exists: boolean): Promise<Facts> {
         reason: exists ? "Expected workspace path is absent" : "Workspace target already exists",
       };
     if (s.provider === "git") {
-      const head = await command(cli.git(), ["rev-parse", "HEAD"], owner),
-        clean = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], owner);
-      if (head.code || clean.code || (!exists && clean.stdout.trim() && !s.allowDirtyOwner))
+      const head = await command(cli.git(), ["rev-parse", "HEAD"], owner);
+      const clean = options.ownerStatus
+        ? await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], owner)
+        : undefined;
+      if (head.code || clean?.code || (!exists && clean?.stdout.trim() && !s.allowDirtyOwner))
         return { facts: {}, reason: "Git owner is unreadable or dirty" };
       return {
         facts: { ownerCheckout: owner, ownerHead: head.stdout.trim(), workspacePath: target },

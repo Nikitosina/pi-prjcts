@@ -39,6 +39,7 @@ import {
   probe,
 } from "./shell.js";
 import { clip, esc, uuid } from "./format.js";
+import { renderCoordinatorAccess } from "./access.js";
 import { renderMarkdown } from "./markdown.js";
 import { answeredCard, jobChatId, jobsSnap, pendingItems, questionChat, questionPlacement, setJobsSnap } from "./decisions.js";
 import {
@@ -700,6 +701,7 @@ onProjectChange((id, chat) => {
   clearTranscriptSelection();
   chatId = chat;
   setView(null);
+  renderCoordinatorAccess(null, id, chat);
   setChatUrl(chat);
   for (const selector of ["#chat-bar", "#messages", "#reply-summary"]) document.querySelector(selector).replaceChildren();
   document.querySelector("#chat-bar").dataset.html = "";
@@ -731,7 +733,7 @@ export function changeChat(chat) {
   textarea.value = drafts.get(draftKey()) ?? "";
   autosize(textarea);
   if (getView()) {
-    setView({ ...getView(), chatId: chat, messages: [], jobs: [] });
+    setView({ ...getView(), chatId: chat, coordinatorAccess: undefined, messages: [], jobs: [] });
     render();
   }
   void refresh();
@@ -740,6 +742,7 @@ export function currentChat() {
   return getView()?.chats?.find((chat) => chat.id === chatId) ?? null;
 }
 function renderChats() {
+  renderCoordinatorAccess(getView(), getProjectId(), chatId);
   const node = document.querySelector("#chat-bar"),
     chats = getView()?.chats ?? [];
   const current = currentChat(),

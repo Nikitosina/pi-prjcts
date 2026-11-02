@@ -23,6 +23,16 @@ The file must be regular, valid UTF-8, at most 64,000 bytes and 16,000 UTF-16 co
 
 Each conversation persists its shared-instruction snapshot separately from its frozen repository/role prompt. New agents and explicit retries of ended agents load current instructions. A running agent keeps its snapshot, including after restart and between tool rounds. Coordinators refresh on owner admission, Reload and prompt-affecting settings application. An owner follow-up queued during a coordinator turn defers the new snapshot until that turn ends; background reports otherwise use the last snapshot. Editing/removing the file needs no host restart or watcher. Saved snapshots survive reopening; the additive document does not migrate SQLite or change repository revisions, workspace authorization fingerprints or grants.
 
+## Coordinator execution
+
+The coordinator owns delivery and can investigate, reproduce, test and make small changes directly; delegation is optional. `coordinator-execution.ts` adapts Pi's ordinary read/edit/write/bash tools to Durable, resolving the calling chat's workspace before each invocation. It preserves errors, aborts and progress, and retains image results through the binary artifact mechanism. Browser automation uses installed shell commands or configured MCPs, not an invented built-in browser tool.
+
+`coordinator-workspace.ts` persists one chat owner and frozen workspace intent on the project root, then reuses the existing isolation allocator. Main and additional chats own distinct persistent worktrees. The first execution selects one existing whole-repository grant; missing, revoked, ambiguous or unsupported grants give a visible blocker, never a writable owner-checkout fallback. Reuse checks preserve advanced HEAD and dirty/untracked files while verifying workspace identity and ownership. Runtime attachments close without deleting the worktree; worker cleanup retains coordinator allocations. Provider-specific chat attachments use the optional workspace provider coordinator adapter rather than a fabricated Job.
+
+Root creation, extra chats, reopen and Reload all bind the shared execution tools. Calls resolve their own target instead of copying Main's worktree. Coordinator MCP and GitHub CLI calls use that same target. `show` projects actual selected-chat tool names and workspace state through `coordinatorAccess`; the Tools/access panel does not allocate a workspace or contact MCP servers. The historical `projects_vcs_shell` registration resolves recorded calls but is not offered to new turns.
+
+This is trusted local execution, not confinement. Unrestricted bash can act outside the worktree and bypass tool-gateway settings. Merge, deployment and destructive actions require explicit owner approval as behavioral rules. Static scouts/reviewers do not gain execution tools. An investigation can finish with findings and evidence without a Job or PR; direct changes report their branch, files, checks and gaps. Delegated Jobs retain the worker verification/Ready/Approve workflow below.
+
 ## Jobs engine
 
 `src/jobs.ts` replaces the old planning engine, the host verification cycle and the watchdog policy. It is built on pi-durable's ownership tree: a conversation owned by a task is aborted and drained with that task.

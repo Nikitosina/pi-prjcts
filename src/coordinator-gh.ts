@@ -58,11 +58,15 @@ export function runGh(input: { args: string[]; cwd: string; input?: string; time
   });
 }
 
-export function coordinatorGhTools(input: { cwd: string; dir: string; isCoordinator: (id: Conversation["id"]) => boolean }) {
+export function coordinatorGhTools(input: {
+  cwd: string | ((api: ToolExecutionApi, context: Parameters<ToolExecutionApi["commit"]>[1]) => Promise<string>);
+  dir: string;
+  isCoordinator: (id: Conversation["id"]) => boolean;
+}) {
   const tool = defineTool({
     name: "projects_gh",
     description:
-      "Run the GitHub CLI (gh) with exactly this argv, no shell, in the project checkout, signed in as the owner. Full access, any subcommand: when the owner asks you may mark PRs ready, review, comment, close, create or edit PRs, issues and releases, and call the API. Never merge a PR with it: the owner merges with Approve. These act on GitHub as the owner and are hard to undo, so do them only on the owner's request or clear approval. Pass each argument as its own array item without shell quoting (['pr','view','12','--json','state']). input is sent on stdin only for things like api --input -. Interactive prompts are off. Times out after 120 s. Output is capped at 400 lines / 8 KB, keeping the end; narrow with --json, --jq and --limit. Failures return the exit code and gh's error.",
+      "Run the GitHub CLI (gh) with exactly this argv, no shell, in your chat's worktree, signed in as the owner. Full access, any subcommand: when the owner asks you may mark PRs ready, review, comment, close, create or edit PRs, issues and releases, and call the API. Merging, deployment and destructive operations require explicit owner approval. These act on GitHub as the owner and are hard to undo, so do them only on the owner's request or clear approval. Pass each argument as its own array item without shell quoting (['pr','view','12','--json','state']). input is sent on stdin only for things like api --input -. Interactive prompts are off. Times out after 120 s. Output is capped at 400 lines / 8 KB, keeping the end; narrow with --json, --jq and --limit. Failures return the exit code and gh's error.",
     parameters: Type.Object(
       { args: Type.Array(Type.String(), { minItems: 1, maxItems: 256 }), input: Type.Optional(Type.String({ maxLength: 1_000_000 })) },
       { additionalProperties: false },
@@ -72,7 +76,8 @@ export function coordinatorGhTools(input: { cwd: string; dir: string; isCoordina
     async execute(args, api: ToolExecutionApi, context) {
       if (!input.isCoordinator(api.conversationId)) throw new Error("projects_gh is coordinator-only");
       const started = Date.now();
-      const result = await runGh({ args: args.args, cwd: input.cwd, input: args.input, signal: context.abortSignal });
+      const cwd = typeof input.cwd === "string" ? input.cwd : await input.cwd(api, context);
+      const result = await runGh({ args: args.args, cwd, input: args.input, signal: context.abortSignal });
       // Argv, exit code and duration only; never output bodies.
       try {
         appendFileSync(

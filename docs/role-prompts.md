@@ -4,7 +4,7 @@
 
 Each prompt states the outcome the role owns, not a procedure:
 
-- Coordinator: turns owner requests into Jobs and answers; never edits code. It starts and steers agents with the `agents` tool and receives full reports.
+- Coordinator: owns delivery, investigates and makes small changes directly in its persistent chat worktree, and delegates substantial or parallel work with `agents`. Investigations need no Job or PR. Its unrestricted shell is trusted local execution; merge, deployment and destructive actions still require explicit owner approval.
 - Worker: owns one Job from request to Ready. It plans with the `job` tool, builds, records the candidate commit, proves it with a fresh verifier (up to the project's round limit), has an independent reviewer look at the diff, and reports with `job ready`; unproven criteria are reported as gaps.
 - Scout: read-only investigation with sources.
 - Reviewer: reads pinned code and reports findings with evidence; never edits.

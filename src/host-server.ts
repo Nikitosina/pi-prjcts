@@ -270,6 +270,7 @@ async function persistWorkspaceGrant<T>(
       const current = await owner.snapshot(),
         plan = await owner.jobs();
       if (
+        current.chats.some((chat) => chat.busy) ||
         current.coordinator.busy ||
         current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
         workBusy(plan)
@@ -299,6 +300,7 @@ async function ownerBusy(owner: DurableProjectRuntime): Promise<boolean> {
   const current = await owner.snapshot(),
     plan = await owner.jobs();
   return (
+    current.chats.some((chat) => chat.busy) ||
     current.coordinator.busy ||
     current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
     workBusy(plan) ||
@@ -925,6 +927,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const view = await owner.snapshot(),
           plan = await owner.jobs();
         if (
+          view.chats.some((chat) => chat.busy) ||
           view.coordinator.busy ||
           view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
           workBusy(plan)
@@ -962,6 +965,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             const view = await owner.snapshot(),
               plan = await owner.jobs();
             if (
+              view.chats.some((chat) => chat.busy) ||
               view.coordinator.busy ||
               view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
               workBusy(plan)
@@ -1023,6 +1027,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           const view = await owner.snapshot(),
             plan = await owner.jobs();
           if (
+            view.chats.some((chat) => chat.busy) ||
             view.coordinator.busy ||
             view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
             workBusy(plan)
@@ -1141,6 +1146,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           const current = await owner.snapshot(),
             plan = await owner.jobs();
           if (
+            current.chats.some((chat) => chat.busy) ||
             current.coordinator.busy ||
             current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
             workBusy(plan)

@@ -397,7 +397,26 @@ export const DurableInspection = Type.Object(
   { additionalProperties: false },
 );
 export type DurableInspection = Static<typeof DurableInspection>;
+export const CoordinatorAccess = Type.Object(
+  {
+    chatId: ChatId,
+    conversationId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    toolNames: Type.Array(Type.String()),
+    trust: Type.Literal("trusted-local"),
+    workspace: Type.Union([
+      Type.Object({ state: Type.Literal("unallocated") }, { additionalProperties: false }),
+      Type.Object({ state: Type.Literal("unavailable"), reason: Type.String() }, { additionalProperties: false }),
+      Type.Object(
+        { state: Type.Literal("ready"), cwd: Type.String(), provider: Type.String(), branch: Type.String() },
+        { additionalProperties: false },
+      ),
+    ]),
+  },
+  { additionalProperties: false },
+);
+export type CoordinatorAccess = Static<typeof CoordinatorAccess>;
 export const Snapshot = Type.Object({
+  coordinatorAccess: Type.Optional(CoordinatorAccess),
   project: Project,
   busy: Type.Boolean(),
   paused: Type.Optional(Type.Boolean()),
