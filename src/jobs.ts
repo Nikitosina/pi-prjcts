@@ -2,7 +2,8 @@ import { objectUnion } from "./tool-schema.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
+import { Value } from "typebox/value";
 import {
   AgentDoc,
   AssistantEntry,
@@ -28,7 +29,15 @@ import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 const context = BACKGROUND_CONTEXT;
 
 export type AgentRole = "worker" | "scout" | "reviewer" | "verifier";
-export type JobStatus = "running" | "ready" | "ready-with-gaps" | "failed" | "stopped" | "approved";
+export const TaskWorkspaceSchema = Type.Union([
+  Type.Object({ kind: Type.Literal("shared") }, { additionalProperties: false }),
+  Type.Object(
+    { kind: Type.Literal("isolated"), baseCommit: Type.String({ pattern: "^[0-9a-f]{40,64}$" }) },
+    { additionalProperties: false },
+  ),
+]);
+export type TaskWorkspace = Static<typeof TaskWorkspaceSchema>;
+export type JobStatus = Job["status"];
 export type PlanStep = {
   title: string;
   status: "todo" | "doing" | "done";
@@ -44,27 +53,24 @@ export type ReadyReport = {
   gaps: string[];
   at: number;
 };
-/** One owner request with its worker. Small facts only: transcripts, instructions and tool output stay in the conversations. */
-export type Job = {
+/** One delegated request with its worker. Transcripts, instructions and tool output stay in the conversations. */
+type JobFacts = {
   /** Also the id of the Job's worker agent. */
   id: string;
   /** Conversation that spawned the worker and receives its reports. */
   chat: ConversationId;
   title: string;
-  /** The owner's request, verbatim. */
+  /** The delegated request, verbatim. */
   request: string;
   acceptance: string[];
-  status: JobStatus;
   workerConversation: ConversationId;
   /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
   scopeId: string | null;
   /** Verifier, reviewer and scout subagents the worker started, oldest first. */
   children: { id: ConversationId; role: AgentRole; title: string }[];
   branch: string | null;
-  pr: string | null;
   candidate: string | null;
   plan: PlanStep[];
-  ready: ReadyReport | null;
   /** Why the Job stopped or failed. */
   reason: string | null;
   createdAt: number;
@@ -72,11 +78,21 @@ export type Job = {
   /** Stall notices sent so far, and when the current one was raised (null: not stalled). */
   stalls: number;
   stalledAt: number | null;
-  /** The finished state a follow-up interrupted; restored when the worker answers without a new Ready report. */
-  resume: { status: "ready" | "ready-with-gaps"; ready: ReadyReport; endedAt: number | null } | null;
   /** The owner or coordinator cleared this ended Job from view; history and files stay. A new message to it clears the mark. */
   dismissedAt?: number;
 };
+export type Job = JobFacts &
+  (
+    | {
+        workspace?: null;
+        status: "running" | "ready" | "ready-with-gaps" | "failed" | "stopped" | "approved";
+        pr: string | null;
+        ready: ReadyReport | null;
+        /** The finished state a follow-up interrupted; restored when the worker answers without a new Ready report. */
+        resume: { status: "ready" | "ready-with-gaps"; ready: ReadyReport; endedAt: number | null } | null;
+      }
+    | { workspace: TaskWorkspace; status: "running" | "completed" | "failed" | "stopped"; pr: null; ready: null; resume: null }
+  );
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
   id: string;
@@ -142,6 +158,16 @@ export const liveAgentIds = (doc: Readonly<JobsState>, readOnly?: boolean): stri
   Object.values(doc.agents)
     .filter((agent) => agent.endedAt === null && (readOnly === undefined || (agent.role !== "worker") === readOnly))
     .map((agent) => agent.id);
+/** A chat lends its shared workspace until the borrowing agent actually settles. */
+export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, exceptAgentId?: string): Agent | undefined =>
+  Object.values(state.agents).find(
+    (agent) =>
+      agent.id !== exceptAgentId &&
+      agent.chat === chat &&
+      agent.endedAt === null &&
+      agent.jobId !== null &&
+      state.jobs[agent.jobId]?.workspace?.kind === "shared",
+  );
 const isLive = (status: JobStatus) => status === "running";
 
 /** A step in progress counts down from its start; one that overran its estimate still has a minute left. */
@@ -246,6 +272,7 @@ type Delivery = {
 type DeliveryState =
   | { phase: "prepare" }
   | { phase: "deliver"; attempt: number; checked?: boolean; boot?: string; note?: string }
+  | { phase: "settle"; report?: string }
   | { phase: "report"; report?: string; waits?: number };
 
 const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string => {
@@ -308,20 +335,24 @@ const reporterTask = (host: JobsHost) =>
         await runtime.commit(async (tx) => {
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
           const agent = state.agents[agentId];
-          if (!agent) return { status: "running", checkpoint: { phase: "report" } } as const;
+          const job = agent?.jobId ? state.jobs[agent.jobId] : undefined;
+          if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
+            return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
             // A prepared agent keeps its frozen prompt; preparing again only restores its workspace, tools and extensions.
             if (change) await configure(tx, conversationId, agent.prepared ? { ...change, instructions: undefined } : change);
             agent.prepared = true;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
-          const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
           if (job && job.status === "running")
             Object.assign(job, { status: "failed", reason: `The worker could not start: ${failure}`, endedAt: Date.now() });
-          agent.endedAt = Date.now();
+          agent.endedAt = job?.workspace ? null : Date.now();
           return {
             status: "running",
-            checkpoint: { phase: "report", report: `[${agent.role} ${agent.id} failed to start: ${agent.title}] ${failure}` },
+            checkpoint: {
+              phase: job?.workspace ? "settle" : "report",
+              report: `[${agent.role} ${agent.id} failed to start: ${agent.title}] ${failure}`,
+            },
           } as const;
         }, taskContext);
       },
@@ -404,12 +435,18 @@ const reporterTask = (host: JobsHost) =>
           if (failure && (record.sends ?? 0) > (reporter.input.seq ?? 0)) return next();
           record.quota = null;
           const job = record.jobId ? state.jobs[record.jobId] : undefined;
+          const finished = (report: string) => {
+            if (!job?.workspace) return next(report);
+            record.endedAt = null;
+            return { status: "running", checkpoint: { phase: "settle", report } } as const;
+          };
+          if (job?.workspace?.kind === "shared" && job.status === "stopped") return next();
           if (settled.status === "unanswered") {
             if (!failure) return next();
             if (job && isLive(job.status))
               Object.assign(job, { status: "failed", reason: `The worker failed: ${failure}`, endedAt: Date.now() });
             record.endedAt = Date.now();
-            return next(`[${record.role} ${record.id} failed: ${record.title}] ${failure}`);
+            return finished(`[${record.role} ${record.id} failed: ${record.title}] ${failure}`);
           }
           if (settled.type !== "input") return next();
           if (record.reported.includes(settled.answer)) return next();
@@ -444,12 +481,49 @@ const reporterTask = (host: JobsHost) =>
               },
             } as const;
           }
+          if (isLive(job.status) && job.workspace) {
+            const now = Date.now();
+            const reason = answer.trim() ? null : "The task helper ended without an answer";
+            job.status = reason ? "failed" : "completed";
+            job.reason = reason;
+            job.endedAt = now;
+            job.stalledAt = null;
+            const configured = await tx.doc(AgentDoc, conversationId);
+            return finished(
+              [
+                `[worker ${job.id} ${job.status}: ${job.title}]`,
+                "Worker-reported handback, not independently verified or accepted.",
+                `Workspace: ${job.workspace.kind}`,
+                `Cwd: ${configured.cwd ?? "unknown"}`,
+                `Branch: ${job.branch ?? "unknown"}`,
+                `Candidate: ${job.candidate ?? "none"}`,
+                `Time: ${minutes(now - job.createdAt)}`,
+                `Cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
+                "",
+                reason ?? answer.trim(),
+              ].join("\n"),
+            );
+          }
           if (isLive(job.status)) {
             Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });
             return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
           }
           if (job.status === "failed") return next();
           return next(readyText(job, answer, cost));
+        }, taskContext);
+      },
+      settle: async (reporter, runtime, taskContext) => {
+        // Keep the handoff until worker-owned processes and attachments have drained.
+        await host.killProcesses?.([reporter.input.conversationId]);
+        await runtime.commit(async (tx) => {
+          const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+          const agent = state.agents[reporter.input.agentId];
+          const job = agent?.jobId ? state.jobs[agent.jobId] : undefined;
+          if (agent && job?.workspace && job.status !== "running" && job.status !== "stopped") agent.endedAt = Date.now();
+          return {
+            status: "running",
+            checkpoint: { phase: "report", report: job?.status === "stopped" ? undefined : reporter.state.checkpoint.report },
+          } as const;
         }, taskContext);
       },
       report: async (reporter, runtime, taskContext) => {
@@ -510,6 +584,7 @@ export type SpawnArgs = {
   scopeId?: string;
   readRef?: string;
   requestId?: string;
+  workspace?: TaskWorkspace;
 };
 
 export function createJobs(host: JobsHost) {
@@ -566,6 +641,14 @@ export function createJobs(host: JobsHost) {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       if (requestId && doc.requests[requestId])
         return { text: `Already started as ${doc.requests[requestId]}.`, id: doc.requests[requestId] };
+      if (args.workspace !== undefined) {
+        if (!Value.Check(TaskWorkspaceSchema, args.workspace))
+          return { text: "Invalid task workspace: choose shared or isolated with a full lowercase 40-64 hex baseCommit." };
+        if (role !== "worker" || args.branch !== undefined || args.scopeId !== undefined || args.readRef !== undefined)
+          return { text: "Explicit workspace is worker-only and cannot be combined with branch, scopeId or readRef." };
+        const borrower = args.workspace.kind === "shared" ? sharedHandoff(doc, chat) : undefined;
+        if (borrower) return { text: `Shared workspace is still handed to ${borrower.id}; wait for it to settle.` };
+      }
       if (doc.paused) return { text: "The project is paused; spawn again after it resumes." };
       const agentId = uuidOf(seed);
       const title = args.title?.trim() || clip(args.brief, 80);
@@ -619,6 +702,7 @@ export function createJobs(host: JobsHost) {
           stalls: 0,
           stalledAt: null,
           resume: null,
+          ...(args.workspace ? { workspace: args.workspace } : {}),
         };
       if (requestId) doc.requests[requestId] = agentId;
       const message =
@@ -640,7 +724,7 @@ export function createJobs(host: JobsHost) {
     description:
       "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. " +
       "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
-      "Every answer arrives in full in this chat as a message.",
+      "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Every answer arrives in full in this chat as a message.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("spawn"),
@@ -654,6 +738,7 @@ export function createJobs(host: JobsHost) {
       brief: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),
       acceptance: Type.Optional(Type.Array(Type.String())),
+      workspace: Type.Optional(TaskWorkspaceSchema),
       branch: Type.Optional(Type.String()),
       scopeId: Type.Optional(Type.String()),
       readRef: Type.Optional(Type.String()),
@@ -732,7 +817,7 @@ export function createJobs(host: JobsHost) {
     name: "job",
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
-      "candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
+      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
     parameters: objectUnion([
       Type.Object({
         action: Type.Literal("plan"),
@@ -759,14 +844,15 @@ export function createJobs(host: JobsHost) {
     ]),
     replay: "safe",
     execute: async (args, api, callContext) => {
-      if (args.action === "ready" && host.checkProof) {
+      if (args.action === "ready") {
         const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
           (item) => item.workerConversation === api.conversationId,
         );
-        const problem = current
-          ? await host.checkProof({ ...current, candidate: args.candidate ?? current.candidate } as Job, args.proof ?? [])
-          : null;
-        if (problem) return reply(`Not recorded: ${problem}`);
+        if (current?.workspace) return reply("Task helpers return their answer normally; job ready is only for independent Jobs.");
+        if (current && host.checkProof) {
+          const problem = await host.checkProof({ ...current, candidate: args.candidate ?? current.candidate }, args.proof ?? []);
+          if (problem) return reply(`Not recorded: ${problem}`);
+        }
       }
       return reply(
         await api.commit(async (tx) => {
@@ -791,11 +877,18 @@ export function createJobs(host: JobsHost) {
             return `Plan saved: ${job.plan.filter((step) => step.status === "done").length}/${job.plan.length} done.`;
           }
           if (args.action === "candidate") {
+            if (job.workspace) {
+              if (args.pr !== undefined || args.branch !== undefined)
+                return "Task helpers may record a local candidate SHA only; preserve the prepared branch and do not publish a PR.";
+              job.candidate = args.sha;
+              return `Candidate ${args.sha.slice(0, 8)} recorded.`;
+            }
             job.candidate = args.sha;
             job.branch = args.branch ?? job.branch;
             job.pr = args.pr ?? job.pr;
             return `Candidate ${args.sha.slice(0, 8)} recorded.`;
           }
+          if (job.workspace) return "Task helpers return their answer normally; do not call job ready.";
           if (!args.summary.trim()) return "ready needs a summary.";
           const gaps = args.gaps ?? [];
           job.ready = {
@@ -828,6 +921,13 @@ export function createJobs(host: JobsHost) {
     }),
     replay: "safe",
     execute: async (args, api, callContext) => {
+      const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
+        (item) => item.workerConversation === api.conversationId,
+      );
+      if (current?.workspace)
+        return reply(
+          "Task helpers cannot spawn subagents. Return findings and ask the Coordinator to spawn a static reviewer against a committed full SHA.",
+        );
       const cwd = (await api.agent(callContext)).cwd;
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
@@ -868,13 +968,17 @@ export function createJobs(host: JobsHost) {
       if (!agent) return `No agent ${id}.`;
       const key = requestId ? `send:${requestId}` : undefined;
       if (key && doc.requests[key]) return `Already sent to ${id}.`;
-      const refusal = host.refuseSend?.(agent);
+      const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+      const refusal = job?.workspace ? null : host.refuseSend?.(agent);
       if (refusal) return refusal;
       if (doc.paused) return "The project is paused.";
+      const borrower = job?.workspace?.kind === "shared" ? sharedHandoff(doc, agent.chat, id) : undefined;
+      if (borrower) return `Shared workspace is still handed to ${borrower.id}; wait for it to settle.`;
+      if (job?.workspace && job.status !== "running" && agent.endedAt === null)
+        return "The task helper is still draining; wait for its workspace handoff to settle.";
       if (key) doc.requests[key] = id;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
       if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
-      const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       if (job) {
         if (job.status === "ready" || job.status === "ready-with-gaps")
           job.resume = { status: job.status, ready: job.ready!, endedAt: job.endedAt };
@@ -919,27 +1023,61 @@ export function createJobs(host: JobsHost) {
     }, context);
   }
 
+  const stops = new Map<string, Promise<string>>();
+
+  /** Concurrent Stops join one drain; durable Agent.endedAt still owns the workspace handoff. */
+  function stopAgent(harness: Harness, id: string, reason: string): Promise<string> {
+    const pending = stops.get(id);
+    if (pending) return pending;
+    const stopping = stopAgentOnce(harness, id, reason).finally(() => stops.delete(id));
+    stops.set(id, stopping);
+    return stopping;
+  }
+
   /** Mark stopped, abort the agent and everything it owns, then kill their background processes. */
-  async function stopAgent(harness: Harness, id: string, reason: string): Promise<string> {
+  async function stopAgentOnce(harness: Harness, id: string, reason: string): Promise<string> {
     const target = await harness.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
       if (!agent) return { text: `No agent ${id}.` };
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
-      if (job && !isLive(job.status)) return { text: `The Job is already ${job.status}.` };
+      const helper = Boolean(job?.workspace);
+      if (job && !isLive(job.status) && !(job.workspace && agent.endedAt === null)) return { text: `The Job is already ${job.status}.` };
       if (!job && agent.endedAt) return { text: `${id} already ended.` };
       const now = clock();
       if (job) Object.assign(job, { status: "stopped", reason, endedAt: now, stalledAt: null, resume: null });
-      agent.endedAt = now;
-      return { conversationId: agent.conversationId };
+      if (!helper) agent.endedAt = now;
+      return { conversationId: agent.conversationId, helper };
     }, context);
     if (!target.conversationId) return target.text!;
     const owned = [target.conversationId, ...(await descendants(harness, target.conversationId))];
-    try {
-      await (await harness.conversation(target.conversationId, context))?.abort(context, { background: true });
-    } finally {
-      await host.killProcesses?.(owned);
+    // Reporters belong to the spawning chat, so a child abort alone cannot drain a helper still preparing.
+    const reporters = target.helper
+      ? (await harness.inspect(context)).tasks.map((task) => task.record).filter((task) => task.kind === "projects.agent-reporter")
+      : [];
+    const deliveries = [];
+    for (const task of reporters) {
+      if (task.input && typeof task.input === "object" && !Array.isArray(task.input) && task.input.agentId === id) deliveries.push(task.id);
     }
+    try {
+      const drains = await Promise.allSettled([
+        (await harness.conversation(target.conversationId, context))?.abort(context, { background: true }),
+        ...deliveries.map(async (task) => {
+          await harness.abortTask(task, context);
+          await harness.waitForTask(task, context);
+        }),
+        ...(target.helper ? [host.killProcesses?.(owned)] : []),
+      ]);
+      const errors = drains.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+      if (errors.length) throw new AggregateError(errors, "Agent stop drainage failed");
+    } finally {
+      if (!target.helper) await host.killProcesses?.(owned);
+    }
+    if (target.helper)
+      await harness.commit(async (tx) => {
+        const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[id];
+        if (agent) agent.endedAt = clock();
+      }, context);
     return `Stopped ${id}.`;
   }
 
@@ -995,7 +1133,7 @@ export function createJobs(host: JobsHost) {
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return;
     for (const agent of liveAgents(doc))
-      if (agent.prepared)
+      if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
         await host.prepare?.({ agent: agent as Agent, job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null });
   }
 
@@ -1029,9 +1167,11 @@ export function createJobs(host: JobsHost) {
   }
 
   async function approve(harness: Harness, jobId: string): Promise<{ outcome: AcceptanceOutcome } | { refused: string }> {
-    if (!host.approver) return { refused: "Approve is not configured." };
     const job = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.jobs[jobId];
     if (!job) return { refused: `No Job ${jobId}.` };
+    if (job.workspace)
+      return { refused: "A task helper reports execution only; it cannot be approved. The Coordinator owns integration and delivery." };
+    if (!host.approver) return { refused: "Approve is not configured." };
     if (job.status !== "ready" && job.status !== "ready-with-gaps") return { refused: `The Job is ${job.status}, not ready.` };
     if (!job.pr || !job.candidate) return { refused: "The Job has no PR and candidate to merge." };
     const outcome = await host.approver.approve({ id: job.id, pr: job.pr, candidateSha: job.candidate });
@@ -1043,7 +1183,12 @@ export function createJobs(host: JobsHost) {
     if (outcome?.kind !== "accepted" && outcome?.kind !== "merged-pull-skipped") return;
     await harness.commit(async (tx) => {
       const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
-      if (current?.candidate === outcome.head && (current.status === "ready" || current.status === "ready-with-gaps"))
+      if (
+        current &&
+        !current.workspace &&
+        current.candidate === outcome.head &&
+        (current.status === "ready" || current.status === "ready-with-gaps")
+      )
         current.status = "approved";
     }, context);
   }

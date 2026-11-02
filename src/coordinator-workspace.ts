@@ -77,13 +77,14 @@ export function coordinatorWorkspaces(input: {
     if (plug && !plug.coordinator) throw new Error(`Unsupported coordinator adapter for workspace provider "${provider}"`);
     return { project, authorization, scope, repository, grant, provider, plug };
   }
-  async function prepare(request: CoordinatorWorkspaceRequest, signal: AbortSignal): Promise<CoordinatorWorkspaceReady> {
+  async function prepare(request: CoordinatorWorkspaceRequest, signal: AbortSignal, ownedOnly = false): Promise<CoordinatorWorkspaceReady> {
     const check = (binding?: CoordinatorWorkspaceBinding) => {
       signal.throwIfAborted();
       return current(request, binding);
     };
     check();
     let binding = await read(request.chatId);
+    if (ownedOnly && !binding?.ready) throw new Error("Source chat workspace must already be ready");
     const selected = check(binding);
     const { project, authorization, scope, repository, grant, provider, plug } = selected;
     const threadId = `coordinator:${request.chatId}`;
@@ -210,14 +211,15 @@ export function coordinatorWorkspaces(input: {
       } else await isolation.checkOwned(intent);
       check(binding);
       const cwd = attachment ? realpathSync(attachment.workDir) : intent.scope.workspacePath;
-      await worktreeSetup({
-        command: binding.ready ? undefined : input.project().worktreeSetup,
-        controlRoot: input.controlRoot,
-        intentId: intent.id,
-        workspacePath: intent.scope.workspacePath,
-        cwd,
-        signal,
-      });
+      if (!ownedOnly)
+        await worktreeSetup({
+          command: binding.ready ? undefined : input.project().worktreeSetup,
+          controlRoot: input.controlRoot,
+          intentId: intent.id,
+          workspacePath: intent.scope.workspacePath,
+          cwd,
+          signal,
+        });
       check(binding);
       if (attachment) await attachment.checkOwned();
       else await isolation.checkOwned(intent);
@@ -239,7 +241,7 @@ export function coordinatorWorkspaces(input: {
       if (fresh) attachments.set(request.chatId, fresh);
       return ready;
     } catch (error) {
-      if (attachment) {
+      if (attachment && (!ownedOnly || fresh)) {
         attachments.delete(request.chatId);
         try {
           await attachment.detach();
@@ -250,13 +252,13 @@ export function coordinatorWorkspaces(input: {
       throw error;
     }
   }
-  function ensure(request: CoordinatorWorkspaceRequest, signal?: AbortSignal): Promise<CoordinatorWorkspaceReady> {
+  function ensure(request: CoordinatorWorkspaceRequest, signal?: AbortSignal, ownedOnly = false): Promise<CoordinatorWorkspaceReady> {
     if (closed || input.isClosed()) return Promise.reject(new Error("Coordinator workspaces are closed"));
     const preparationSignal = signal ? AbortSignal.any([signal, shutdown.signal]) : shutdown.signal;
     const previous = queues.get(request.chatId) ?? Promise.resolve();
     const operation = previous
       .catch(() => {})
-      .then(() => prepare(request, preparationSignal))
+      .then(() => prepare(request, preparationSignal, ownedOnly))
       .then(
         (ready) => {
           blockers.delete(request.chatId);
@@ -274,6 +276,21 @@ export function coordinatorWorkspaces(input: {
       })
       .catch(() => {});
     return operation;
+  }
+  async function ready(request: CoordinatorWorkspaceRequest, signal?: AbortSignal): Promise<CoordinatorWorkspaceReady> {
+    signal?.throwIfAborted();
+    // Borrower cancellation must not cancel the chat-owned attachment's checks or renewal.
+    const result = await ensure(request, undefined, true);
+    signal?.throwIfAborted();
+    return result;
+  }
+  async function borrow(
+    source: CoordinatorWorkspaceRequest & { intentId: string },
+    signal?: AbortSignal,
+  ): Promise<CoordinatorWorkspaceReady> {
+    const binding = await read(source.chatId);
+    if (binding?.intent.id !== source.intentId) throw new Error("Source chat workspace identity changed");
+    return ready(source, signal);
   }
   async function inspect(request: CoordinatorWorkspaceRequest): Promise<CoordinatorWorkspaceView> {
     const binding = await read(request.chatId);
@@ -304,7 +321,7 @@ export function coordinatorWorkspaces(input: {
       if (errors.length) throw new AggregateError(errors, "Coordinator workspace detach failed");
     })());
   }
-  return { ensure, inspect, close };
+  return { ensure, ready, borrow, inspect, close };
 }
 
 function copy<T>(value: T): T {

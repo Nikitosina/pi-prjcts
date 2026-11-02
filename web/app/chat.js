@@ -789,7 +789,7 @@ const latestFinish = (chat) =>
   Math.max(
     chat.finishedAt ?? 0,
     ...chatJobs(chat)
-      .filter((job) => ["ready", "ready-with-gaps", "approved"].includes(job.status))
+      .filter((job) => ["completed", "ready", "ready-with-gaps", "approved"].includes(job.status))
       .map((job) => job.endedAt ?? 0),
   );
 // First sight of a chat starts its clock; the open chat is always up to date, so opening a chat clears its dot.
@@ -1028,7 +1028,7 @@ function trackReports() {
 }
 function reportActions(message, jobId) {
   const job = jobsSnap?.jobs.find((item) => item.id === jobId);
-  if (!job || latestReport.get(jobId) !== message.index) return "";
+  if (!job || job.workspace || latestReport.get(jobId) !== message.index) return "";
   const line = approveLine(jobId);
   if (job.status === "approved") return `<p class="job-outcome" data-outcome="approved">${esc(line ?? "Approved.")}</p>`;
   if (!["ready", "ready-with-gaps"].includes(job.status)) return "";
@@ -1038,7 +1038,13 @@ function reportActions(message, jobId) {
 function reportHtml(message, match) {
   const [, role, jobId, status, title, body] = match;
   const label =
-    status === "ready" ? "Ready" : status === "ready-with-gaps" ? "Ready with gaps" : `${role[0].toUpperCase()}${role.slice(1)} ${status}`;
+    status === "completed"
+      ? "Worker returned"
+      : status === "ready"
+        ? "Ready"
+        : status === "ready-with-gaps"
+          ? "Ready with gaps"
+          : `${role[0].toUpperCase()}${role.slice(1)} ${status}`;
   const known = jobsSnap?.jobs.some((job) => job.id === jobId) || jobsSnap?.agents.some((agent) => agent.id === jobId);
   return `<article class="msg them job-msg" data-job="${esc(jobId)}" data-status="${esc(status)}"${indexAttr(message)}><div class="who">${esc(label)} · ${esc(clip(title, 80))} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${renderMarkdown(reportMarkdown(body))}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(jobId)}">Open ${esc(role)} transcript ↗</button>` : ""}</div>${reportActions(message, jobId)}</article>`;
 }

@@ -19,7 +19,7 @@ export function coordinatorAccessHtml(view, projectId, chatId) {
         ? "<p>Worktree not allocated.</p>"
         : `<p>Worktree unavailable: ${esc(workspace.reason)}</p>`;
   return `${location}
-    <p>Trusted local execution. Commands run as the host user, not sandboxed. Merge, deployment and destructive operations require owner approval as behavioral policy, not technical enforcement.</p>
+    <p>Trusted local execution. Commands run as the host user, not sandboxed. Task-branch integration is ordinary Coordinator work. Final merge to main, deployment and destructive operations require owner approval as behavioral policy, not technical enforcement.</p>
     <p>Resolved tools for the next request. Remote service reachability is not verified.</p>
     ${access.toolNames.length ? `<ul class="coordinator-tool-list">${access.toolNames.map((name) => `<li><code>${esc(name)}</code></li>`).join("")}</ul>` : "<p>No tools offered.</p>"}
     <p>Browser execution uses installed automation through bash or configured MCPs, not a built-in browser tool.</p>

@@ -169,6 +169,12 @@ export type CoordinatorAttachment = Pick<WorkerAttachment, "workDir" | "start"> 
   /** Stops and drains runtime handles without removing the workspace or transferring ownership. */
   detach(): Promise<void>;
 };
+export type TaskPlanContext = Omit<BindContext, "continued"> & {
+  source: import("./coordinator-workspace-state.ts").CoordinatorWorkspaceReady;
+  baseCommit: string;
+};
+export type TaskAttachContext = Omit<BindContext, "continued"> & Pick<AttachContext, "receipt" | "receipts" | "plan">;
+export type TaskAttachment = CoordinatorAttachment & { instructions: string };
 export type SetupCard = {
   id: string;
   state: "connected" | "available" | "blocked";
@@ -211,6 +217,11 @@ export type WorkspaceProvider = {
   coordinator?: {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
     attach(context: CoordinatorAttachContext): Promise<CoordinatorAttachment>;
+  };
+  /** Chosen-commit task allocation without independent publication policy. */
+  task?: {
+    plan(context: TaskPlanContext): Promise<AllocationPlan>;
+    attach(context: TaskAttachContext): Promise<TaskAttachment>;
   };
   /** Cleanup inventory: facts of one allocated worker worktree and the removal. */
   workerFacts(input: {

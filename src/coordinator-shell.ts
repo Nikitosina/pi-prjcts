@@ -4,7 +4,8 @@ import { defineExtension, defineTool, type ToolRegistration } from "@earendil-wo
 export function coordinatorShellTools(bash: ToolRegistration) {
   const legacy = defineTool({
     name: "projects_vcs_shell",
-    description: "Run a shell command in this chat's worktree. Merge, deployment and destructive actions require explicit owner approval.",
+    description:
+      "Run a shell command in this chat's worktree. Integrating task branches is ordinary work. Final merge to main, deployment and destructive actions require explicit owner approval.",
     parameters: bash.parameters,
     replay: "unsafe",
     execute: (args, api, context) => bash.execute(args, api, context),

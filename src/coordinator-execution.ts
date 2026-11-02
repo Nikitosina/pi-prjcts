@@ -7,6 +7,7 @@ import { binaryResult, decodeBase64, type ResultBlock } from "./binary-results.t
 /** Trusted local tools. The resolver must authorize the chat's persisted worktree on every call, with no fallback. */
 export function coordinatorExecutionTools(input: {
   controlRoot: string;
+  name?: string;
   target: (api: ToolExecutionApi, context: Context) => Promise<{ cwd: string; scope: string }>;
 }): { tools: ToolRegistration[]; extension: ReturnType<typeof defineExtension> } {
   // These instances supply schemas only; execution always builds tools for the resolved chat.
@@ -46,5 +47,5 @@ export function coordinatorExecutionTools(input: {
       },
     }),
   );
-  return { tools, extension: defineExtension({ name: "projects.coordinator-execution", tools }) };
+  return { tools, extension: defineExtension({ name: input.name ?? "projects.coordinator-execution", tools }) };
 }

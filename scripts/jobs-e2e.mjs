@@ -90,6 +90,7 @@ function route(request) {
       return say("Recovered once.");
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
+    if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
     if (user.startsWith("Just a question")) return say("Answer.");
     if (user.startsWith("Add a test"))
       return call("job", {
@@ -548,6 +549,30 @@ assert.equal(
   "projects.internal-input",
   "approval notices carry machine provenance",
 );
+// Task helpers return normally, retain their workspace choice on follow-up, and cannot be approved.
+const helperSpawn = await jobs.spawn(root, root.id, {
+  role: "worker",
+  title: "Task helper",
+  brief: "BRIEF-HELPER",
+  acceptance: ["return findings"],
+  workspace: { kind: "shared" },
+  requestId: "task-helper",
+});
+await quiet(harness);
+let helper = (await jobsOf(harness)).find((item) => item.id === helperSpawn.id);
+assert.equal(helper.status, "completed", "a task helper's ordinary answer completes execution without Ready or PR");
+assert.deepEqual(helper.workspace, { kind: "shared" });
+assert.equal(helper.pr, null);
+assert.equal(helper.ready, null);
+assert.match((await jobs.approve(harness, helper.id)).refused, /task helper/i);
+await jobs.steer(harness, helper.id, "Continue the same task");
+await quiet(harness);
+helper = (await jobsOf(harness)).find((item) => item.id === helper.id);
+assert.equal(helper.status, "completed");
+assert.deepEqual(helper.workspace, { kind: "shared" }, "follow-ups preserve the selected workspace");
+const helperReports = (await chatText(root)).filter((line) => line.startsWith(`[worker ${helper.id} completed`));
+assert.equal(helperReports.length, 2, "each settled helper answer reports once");
+for (const part of ["shared", "Candidate: none", "Time:", "Cost:", "Helper changed files"]) assert.ok(helperReports[0].includes(part));
 
 // 9. A running Job whose idle worker never reported is flagged once it has been quiet past the limit.
 const rootId = (await harness.root(context)).id;
