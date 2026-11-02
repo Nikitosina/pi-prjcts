@@ -290,6 +290,10 @@ async function copyReadonlySdkRecords(dir, expected) {
       );
       const input = byId(entries, submission?.record?.entry),
         answer = byId(entries, submission?.record?.answer);
+      pass(
+        `native ${target.label} input persists its admission source`,
+        input?.record?.kind === (target.label === "normal" ? "projects.owner-input" : "projects.internal-input"),
+      );
       const assistant = answer?.record?.model?.find((message) => message.role === "assistant");
       const content = assistant?.content;
       const text =

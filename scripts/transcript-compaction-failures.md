@@ -13,3 +13,13 @@ Verified by `scripts/transcript-compaction-e2e.mjs`. The transcript is display h
 - T9 Past 30 messages the older ones cannot be reached, or Show earlier messages reorders, duplicates or jumps the reading position.
 - T10 Reading the history triggers summaries or changes the context meter.
 - T11 A host restart loses the history.
+
+## Coordinator input provenance
+
+- P1 Machine-generated user-role entries lack source metadata and appear as owner messages.
+- P2 Owner messages that quote a report/event prefix are classified by prose instead of admission provenance.
+- P3 Looking up legacy input origins scans an entire chat's submissions on every page or fails to respect page/conversation bounds.
+- P4 An owner message rendered before its admission ledger update is mistaken for internal input.
+- P5 Unknown legacy entries are hidden or assigned internal origin without a matching submission; archives and worker transcripts lose diagnostics.
+
+Legacy origin lookup reads at most the newest 200 submissions of this conversation. Older or unmatched legacy entries retain unknown origin and stay visible. New owner/internal input kinds carry their source in the entry and need no submission lookup. Cursors are backend-owned and are never synthesized from entry IDs.

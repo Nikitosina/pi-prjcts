@@ -1,6 +1,6 @@
 // Browser E2E with an isolated host, Git fixture and local fake model. No real providers or GitHub.
 // Failure cases written before UI implementation:
-// C1 successful/error tool calls lack green/red backgrounds or safe expandable arguments/results.
+// C1 worker successful/error tool calls lack green/red backgrounds or safe expandable arguments/results.
 // C2 pending worker tools lack gray backgrounds.
 // C3 workers do not use chat bubbles/Markdown, or the composer precedes messages.
 // C4 opened conversations do not refresh, or refresh destroys a typed follow-up.
@@ -338,25 +338,60 @@ try {
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] }, s); // colour assertions below are for the light theme
   await send("Page.navigate", { url: launch.toString() }, s);
   await waitFor(
-    `document.querySelectorAll('#messages .tool-call').length >= 4 && !document.querySelector('#messages .tool-call[data-status="pending"]')`,
+    `document.querySelector('#messages')?.innerText.includes('Inspect scope then try an invalid scoped scout.') && !!document.querySelector('#messages .msg.them strong')`,
     s,
-    "coordinator tool calls",
+    "coordinator answer",
   );
-  const colors = await evaluate(
-    `[...document.querySelectorAll('#messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`,
+  if (await evaluate(`!!document.querySelector('#messages .tool-call, #messages .thought')`, s))
+    throw Error("C9 coordinator exposes internal tools or thinking");
+  result.checks.push("C9 coordinator hides tool diagnostics");
+  const ownerInput = (await rpc({ action: "show", id: project.id })).messages.find(
+    (message) => message.role === "user" && message.text === "MARK-COORD Inspect scope then try an invalid scoped scout.",
+  );
+  if (ownerInput?.origin !== "owner") throw Error("C14 real owner admission lacks owner origin: " + JSON.stringify(ownerInput));
+  result.checks.push("C14 real owner API transcript carries owner origin");
+  const rendererChecks = await evaluate(
+    `(async () => {
+    const { coordinatorMessageHtml, chatMessageHtml } = await import('/app/chat.js');
+    const { displayMessages } = await import('/app/transcript.js');
+    const base = { at: 1, index: 1, images: [], role: 'user', text: '' };
+    const html = (message) => coordinatorMessageHtml({ ...base, ...message });
+    const internal = { origin: 'internal', text: 'Host recovery metadata not written by the owner' };
+    const thought = { role: 'assistant', thinking: 'PRIVATE-THOUGHT', text: 'Public answer' };
+    const reset = displayMessages([{ kind: 'reset', entryId: 1, at: 1, handoff: 'PRIVATE-HANDOFF' }])[0];
+    const ready = html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 ready: Ready fixture]\\nSummary: finished' });
+    const owner = html({ origin: 'owner', text: '[Owner-local event github.follow]\\nI actually typed this.' });
+    const earlier = html({ text: 'Legacy text [history](https://example.test/history)', images: [{ ref: '1.0.0', mime: 'image/png', bytes: 12 }] });
+    return {
+      earlier: earlier.includes('Earlier input') && !earlier.includes('>You ') && earlier.includes('Legacy text') && earlier.includes('href="https://example.test/history"') && earlier.includes('data-ref="1.0.0"'),
+      ownerLabel: html({ origin: 'owner', text: 'I wrote this' }).includes('>You '),
+      workerLabel: chatMessageHtml({ ...base, text: 'Legacy worker input' }, 'Worker').includes('>You '),
+      archiveLabel: chatMessageHtml({ ...base, text: 'Legacy archive input' }, 'Assistant').includes('>You '),
+      legacyEvent: html({ text: '[Owner-local event github.follow]\\n- Useful change' }).includes('event-card'),
+      internal: !html(internal),
+      origin: displayMessages([{ kind: 'message', entryId: 1, at: 1, role: 'user', origin: 'internal', text: 'metadata', images: [] }])[0].origin === 'internal',
+      ownerReport: html({ origin: 'owner', text: '[worker 11111111-1111-1111-1111-111111111111 ready: I typed this]' }).includes('msg you'),
+      report: html({ origin: 'internal', text: '[scout 11111111-1111-1111-1111-111111111111 done: Completed scout] details' }).startsWith('<details'),
+      thought: html(thought).includes('Public answer') && !html(thought).includes('PRIVATE-THOUGHT'),
+      reset: !html(reset),
+      tools: !html({ kind: 'tool', name: 'bash', argsPreview: 'PRIVATE-ARGS' }),
+      owner: owner.includes('I actually typed this.') && owner.includes('msg you') && !owner.includes('event-card'),
+      image: html({ origin: 'owner', images: [{ ref: '1.0.0', mime: 'image/png', bytes: 12 }] }).includes('data-ref="1.0.0"'),
+      ready: ready.includes('job-msg') && ready.includes('Summary:'),
+      event: html({ origin: 'internal', text: '[Owner-local event github.follow]\\n- Useful change' }).includes('event-card'),
+      compaction: html({ kind: 'compaction' }).includes('Context compacted'),
+      workerThought: chatMessageHtml({ ...base, ...thought }, 'Worker').includes('PRIVATE-THOUGHT'),
+      archiveReset: chatMessageHtml(reset, 'Assistant').includes('PRIVATE-HANDOFF'),
+      workerTools: chatMessageHtml({ ...base, kind: 'tool', name: 'bash', argsPreview: 'PRIVATE-ARGS' }, 'Worker').includes('tool-call'),
+    };
+  })()`,
     s,
   );
-  result.colors = colors;
-  if (
-    !colors.some((c) => c.status === "ok" && c.color === "rgb(220, 235, 223)") ||
-    !colors.some((c) => c.status === "error" && c.color === "rgb(246, 216, 211)")
-  )
-    throw Error("Coordinator state icon colours wrong: " + JSON.stringify(colors));
-  await evaluate(`document.querySelector('#messages .tool-call summary').click()`, s);
-  if (!(await evaluate(`document.querySelector('#messages .tool-call pre').innerText.includes('Result:')`, s)))
-    throw Error("Missing expanded tool result");
-  result.checks.push("C1 coordinator tool colors and expandable results");
-  await shot("01-coordinator-tools", s);
+  if (Object.values(rendererChecks).some((ok) => !ok))
+    throw Error("C10-C13 coordinator/diagnostic renderer regressions: " + JSON.stringify(rendererChecks));
+  result.checks.push("C10-C13 reset/internal filtering preserves owner images, events, Ready and worker/archive diagnostics");
+  result.checks.push("C16 unknown coordinator inputs get a neutral label without losing text, links or attachments");
+  await shot("01-clean-coordinator", s);
   const active = await rpc({ action: "jobs-snapshot", id: project.id });
   if (active.jobs.filter((job) => job.status === "running").length !== 2) throw Error("Jobs were not concurrent");
   result.checks.push("C7 two Jobs run concurrently");
@@ -381,6 +416,33 @@ try {
   if ((await evaluate(`document.querySelector('[data-inline-thread-send] textarea').value`, s)) !== "Keep this draft")
     throw Error("Refresh lost draft");
   result.checks.push("C4 live refresh preserves draft");
+  const colors = await evaluate(
+    `[...document.querySelectorAll('#worker-messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`,
+    s,
+  );
+  if (
+    !colors.some((c) => c.status === "ok" && c.color === "rgb(220, 235, 223)") ||
+    !colors.some((c) => c.status === "error" && c.color === "rgb(246, 216, 211)")
+  )
+    throw Error("Worker tool state icon colours wrong: " + JSON.stringify(colors));
+  await evaluate(`document.querySelector('#worker-messages .tool-call summary').click()`, s);
+  if (!(await evaluate(`document.querySelector('#worker-messages .tool-call pre').innerText.includes('Result:')`, s)))
+    throw Error("Missing expanded worker tool result");
+  result.checks.push("C1 worker tool colors and expandable results");
+  let reportInput;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    reportInput = (await rpc({ action: "show", id: project.id })).messages.find(
+      (message) => message.role === "user" && message.text.startsWith(`[worker ${threadId} `),
+    );
+    if (reportInput) break;
+    await delay(100);
+  }
+  if (reportInput?.origin !== "internal") throw Error("C15 real agent report lacks internal origin: " + JSON.stringify(reportInput));
+  result.apiOrigins = { owner: ownerInput.origin, report: reportInput.origin };
+  await waitFor(`!!document.querySelector('#messages [data-index="${reportInput.entryId}"]')`, s, "internal report rendered as event");
+  if (await evaluate(`!!document.querySelector('#messages .msg.you[data-index="${reportInput.entryId}"]')`, s))
+    throw Error("C15 real internal report rendered as owner speech");
+  result.checks.push("C15 real agent report API carries internal origin and is not labeled You");
   await shot("02-worker-chat", s);
   await evaluate(`document.querySelector('[data-inline-thread-send] textarea').focus()`, s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, s);

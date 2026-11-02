@@ -30,6 +30,7 @@ assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job 
 
 // ── Scripted model: the system prompt names the role, the last message decides the move.
 const requests = [];
+let quotaFailed = false;
 const text = (content) =>
   typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const call = (name, args) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -55,10 +56,40 @@ function route(request) {
         requestId: id,
       });
     if (user.startsWith("Start ")) return spawn(user.slice(6), user.slice(6).toLowerCase());
+    const lastInput = messages.findLast((message) => message.role === "user");
+    const command = text(lastInput.content);
+    if (command.startsWith("Send twice ")) {
+      const sent = messages.slice(messages.lastIndexOf(lastInput) + 1).filter((message) => message.role === "toolResult").length;
+      return sent < 2
+        ? call("agents", { action: "send", id: command.slice("Send twice ".length), message: "Just a question", requestId: "tool-send-1" })
+        : say("Sent once.");
+    }
     if (user.startsWith("Scout")) return call("agents", { action: "spawn", role: "scout", brief: "Look around", requestId: "scout-1" });
     return result ? say("OK.") : say("Noted.");
   }
   if (role === "worker") {
+    if (/BRIEF-BATCH/.test(user) && !messages.some((message) => message.role === "toolResult")) return call("gate", {});
+    if (tag?.startsWith("BRIEF-BATCHREADY") && messages.some((message) => message.role === "toolResult")) {
+      if (result.startsWith("Ready recorded")) return say("Shared Ready answer.");
+      return call("job", {
+        action: "ready",
+        summary: "Shared Ready",
+        pr: "12",
+        candidate: sha,
+        proof: ["batch proof"],
+        review: "REVIEW-OK",
+      });
+    }
+    if (tag === "BRIEF-BATCHFAIL" && messages.some((message) => message.role === "toolResult"))
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage: "Billing conflict" });
+    if (tag === "BRIEF-BATCHQUOTA" && messages.some((message) => message.role === "toolResult")) {
+      if (!quotaFailed) {
+        quotaFailed = true;
+        return fauxAssistantMessage([], { stopReason: "error", errorMessage: "insufficient_quota" });
+      }
+      return say("Recovered once.");
+    }
+    if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
     if (user.startsWith("Just a question")) return say("Answer.");
     if (user.startsWith("Add a test"))
       return call("job", {
@@ -112,6 +143,7 @@ function route(request) {
 // ── Host tools standing in for the project's: a gate, a silent blocking "process", and a chatty step.
 const processes = new Set();
 // Titles whose prepare step is held open, and the ones that have entered it.
+const prepareFirstHeld = new Set();
 const prepareHeld = new Set(),
   prepareEntered = new Set(),
   prepareRuns = [];
@@ -156,7 +188,7 @@ const TestTools = defineExtension({
 });
 
 const models = createModels();
-const faux = fauxProvider();
+const faux = fauxProvider({ models: [{ id: "faux-1" }, { id: "faux-2" }] });
 models.setProvider(faux.provider);
 faux.setResponses(Array.from({ length: 600 }, () => route));
 
@@ -164,6 +196,8 @@ async function open() {
   const killed = [];
   const jobs = createJobs({
     boot: bootId,
+    quotaRetryBaseMs: 60,
+    fallbackModel: () => ({ change: { model: { provider: "faux", modelId: "faux-2" } }, label: "faux/faux-2" }),
     agentChange: ({ role }) => ({
       model,
       instructions: `ROLE:${role}`,
@@ -175,8 +209,9 @@ async function open() {
     },
     prepare: async ({ agent }) => {
       prepareEntered.add(agent.title);
+      const first = !prepareRuns.includes(agent.id);
       prepareRuns.push(agent.id);
-      while (prepareHeld.has(agent.title)) await delay(20);
+      while (prepareHeld.has(agent.title) || (first && prepareFirstHeld.has(agent.title))) await delay(20);
     },
     approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
     backgroundSilence: () => null,
@@ -187,7 +222,7 @@ async function open() {
   jobs.install(registry);
   const harness = await Harness.open(
     await openNodeSqliteStorage(join(dir, "session.sqlite")),
-    { models, registry, settings: { followUpMode: "all" } },
+    { models, registry, settings: { followUpMode: "all", steeringMode: "all", retry: { maxRetries: 0 } } },
     context,
   );
   jobs.attach(harness);
@@ -230,6 +265,13 @@ assert.equal(job.candidate, sha);
 assert.equal(job.plan.length, 2);
 const report = (await chatText(root)).filter((line) => line.startsWith(`[worker ${job.id} ready`));
 assert.equal(report.length, 1, "exactly one Ready report");
+assert.equal(
+  (await root.entries({}, 200, undefined, context)).items.find(
+    (entry) => entry.model?.[0]?.role === "user" && text(entry.model[0].content) === report[0],
+  ).kind,
+  "projects.internal-input",
+  "Ready reports carry machine provenance",
+);
 for (const part of [
   "Candidate: " + sha,
   "PR: 12",
@@ -309,6 +351,13 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [silent.id]);
 assert.deepEqual(await jobs.stallTick(harness, T + 30 * 60_000), [], "one notice per stall");
 await until(async () => (await chatText(root)).some((line) => line.startsWith(`[worker ${silent.id} stalled`)), "stall notice in chat");
 assert.equal((await chatText(root)).filter((line) => line.includes("stalled")).length, 1);
+assert.equal(
+  (await root.entries({}, 200, undefined, context)).items.find(
+    (entry) => entry.model?.[0]?.role === "user" && text(entry.model[0].content).startsWith(`[worker ${silent.id} stalled`),
+  ).kind,
+  "projects.internal-input",
+  "stall notices carry machine provenance",
+);
 assert.ok((await chatText(root)).slice(before).every((line) => !line.includes(`[worker ${silent.id} ready`)));
 
 // 5. Stop drains the worker and its verifier, kills the process, and reports nothing.
@@ -368,6 +417,81 @@ gateOpen = true;
 await quiet(harness);
 assert.equal((await jobsOf(harness)).find((item) => item.id === race.id).status, "ready");
 
+// 6c. Steers sharing one turn settle once and recover once, rather than waking the coordinator per input.
+for (const name of ["BATCHFAIL", "BATCHOK", "BATCHQUOTA"]) {
+  gateOpen = false;
+  gateEntered = false;
+  await say_(root, `Start ${name}`);
+  await until(() => gateEntered, `${name} inside the gate`);
+  const batch = (await jobsOf(harness)).find((item) => item.title === `Job ${name}`);
+  const conversation = await harness.conversation(batch.workerConversation, context);
+  await jobs.steer(harness, batch.id, "Shared steer one");
+  await jobs.steer(harness, batch.id, "Shared steer two");
+  await until(
+    async () => (await harness.inspect(context)).submissions.filter((item) => item.conversationId === conversation.id).length === 3,
+    "all three inputs admitted before opening the gate",
+  );
+  gateOpen = true;
+  await quiet(harness);
+  const reports = (await chatText(root)).filter((line) => line.startsWith(`[worker ${batch.id} `));
+  const record = (await harness.snapshot(Jobs, root.id, context)).agents[batch.id];
+  const ended = (await jobsOf(harness)).find((item) => item.id === batch.id);
+  assert.equal(reports.length, 1, `${name}: one report for a shared turn`);
+  assert.notEqual(record.endedAt, null, `${name}: the shared answer settles the latest send`);
+  assert.equal(ended.status, "failed", `${name}: an ended worker without Ready is settled`);
+  if (name === "BATCHQUOTA") {
+    assert.equal(record.quota, null, "quota recovery ended");
+    assert.equal(record.modelMoves.length, 1, "one fallback move for the shared failure");
+    assert.equal(record.modelMoves[0].to, "faux/faux-2");
+    const inputs = (await conversation.entries({}, 100, undefined, context)).items.filter((entry) => entry.model?.[0]?.role === "user");
+    assert.equal(inputs.length, 4, "one recovery input for a shared quota failure");
+  }
+}
+
+// Shared Ready answers retain their full report whether the oldest or newest reporter reaches it first.
+for (const name of ["BATCHREADYOLD", "BATCHREADYNEW"]) {
+  gateOpen = false;
+  gateEntered = false;
+  if (name.endsWith("NEW")) prepareFirstHeld.add(`Job ${name}`);
+  await say_(root, `Start ${name}`);
+  const batch = (await jobsOf(harness)).find((item) => item.title === `Job ${name}`);
+  if (name.endsWith("OLD")) await until(() => gateEntered, "oldest reporter submitted first");
+  await jobs.steer(harness, batch.id, "Shared Ready steer");
+  await until(() => gateEntered, "shared Ready worker inside gate");
+  prepareFirstHeld.delete(`Job ${name}`);
+  await until(
+    async () =>
+      (await harness.inspect(context)).submissions.filter((item) => item.conversationId === batch.workerConversation).length === 2,
+    "both Ready inputs admitted",
+  );
+  const firstInput = (await (await harness.conversation(batch.workerConversation, context)).entries({}, 20, undefined, context)).items
+    .toReversed()
+    .find((entry) => entry.model?.[0]?.role === "user");
+  assert.equal(
+    text(firstInput.model[0].content).includes("Shared Ready steer"),
+    name.endsWith("NEW"),
+    "reporter registration order is controlled",
+  );
+  gateOpen = true;
+  await quiet(harness);
+  const reports = (await chatText(root)).filter((line) => line.startsWith(`[worker ${batch.id} `));
+  assert.equal(reports.length, 1, `${name}: one shared Ready report`);
+  assert.match(reports[0], new RegExp(`^\\[worker ${batch.id} ready:`), `${name}: the latest full Ready report wins`);
+  for (const part of ["Summary: Shared Ready", "PR: 12", `Candidate: ${sha}`, "batch proof", "Review: REVIEW-OK"])
+    assert.ok(reports[0].includes(part), `${name}: full report carries ${part}`);
+  assert.notEqual((await harness.snapshot(Jobs, root.id, context)).agents[batch.id].endedAt, null);
+}
+
+// 6d. The coordinator tool uses the same request-id deduplication as host steers.
+const toolSendsBefore = (await harness.snapshot(Jobs, root.id, context)).agents[job.id].sends;
+await say_(root, `Send twice ${job.id}`);
+await quiet(harness);
+assert.equal(
+  (await harness.snapshot(Jobs, root.id, context)).agents[job.id].sends,
+  toolSendsBefore + 1,
+  "tool send request id delivers once",
+);
+
 // 7. Stop or pause while the agent is still preparing never submits its brief; resume sends it once.
 const holdPrepare = async (title, name) => {
   prepareHeld.add(title);
@@ -416,6 +540,14 @@ assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, 
 await jobs.finishApproval(harness, job.id, { kind: "accepted", head: sha }, "Merged aaaaaaaa.");
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "approved");
 await until(async () => (await chatText(root)).some((line) => line.startsWith(`[worker ${job.id} approve`)), "approve notice in chat");
+
+assert.equal(
+  (await root.entries({}, 200, undefined, context)).items.find(
+    (entry) => entry.model?.[0]?.role === "user" && text(entry.model[0].content).startsWith(`[worker ${job.id} approve`),
+  ).kind,
+  "projects.internal-input",
+  "approval notices carry machine provenance",
+);
 
 // 9. A running Job whose idle worker never reported is flagged once it has been quiet past the limit.
 const rootId = (await harness.root(context)).id;

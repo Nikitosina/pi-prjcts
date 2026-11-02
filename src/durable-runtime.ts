@@ -106,6 +106,7 @@ import { CHATS_KIND, JOBS_KIND, topicsOfCommit, type FeedEvent, type TopicMap } 
 import {
   readTranscriptImage,
   readTranscriptPage,
+  coordinatorStorageSource,
   readTranscriptText,
   storageSource,
   type TranscriptPage,
@@ -1946,7 +1947,9 @@ export async function openDurableProject(input: {
       },
       chatHistory: async (id, options = {}) => {
         assertOpen();
-        return readTranscriptPage(storageSource(openedStorage, context), Number((await resolveChat(id)).conversation.id), {
+        const conversation = (await resolveChat(id)).conversation;
+        const admitted = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
+        return readTranscriptPage(coordinatorStorageSource(openedStorage, context, admitted?.ids ?? []), Number(conversation.id), {
           ...options,
           display: displayText,
         });
@@ -2282,7 +2285,13 @@ async function admit(
       if (!requests.includes(options.requestId)) requests.push(options.requestId);
     }, context);
   const submission = await root.submit(
-    { type: "input", content, requestId: options.requestId, whenBusy: options.steer ? "steer" : "followUp" },
+    {
+      type: "input",
+      content,
+      entry: { kind: "projects.owner-input" },
+      requestId: options.requestId,
+      whenBusy: options.steer ? "steer" : "followUp",
+    },
     context,
   );
   await root.commit(async (tx) => {
@@ -2359,7 +2368,11 @@ async function snapshot(
       coordinator: {
         busy: submissions.some((submission) => submission.status === "placed"),
         submissions,
-        history: await readTranscriptPage(storageSource(storage, context), Number(chat.id), { display: displayText }),
+        history: await readTranscriptPage(
+          coordinatorStorageSource(storage, context, (await harness.snapshot(AdmittedInputs, chat.id, context))?.ids ?? []),
+          Number(chat.id),
+          { display: displayText },
+        ),
         context: {
           tokens: contextTokens((await chat.context(context)).messages),
           ...windows,

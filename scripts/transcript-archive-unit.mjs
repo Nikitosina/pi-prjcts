@@ -7,6 +7,65 @@ import { DatabaseSync } from "node:sqlite";
 import { listArchiveProjects, openArchiveProject } from "../src/archive-reader.ts";
 import { binaryResult } from "../src/binary-results.ts";
 import { parse, Request } from "../src/state.ts";
+import { coordinatorStorageSource, readTranscriptPage } from "../src/transcript-reader.ts";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+
+// Exact submission attribution, not text matching. The source reads one bounded submission page.
+{
+  const rows = [
+    { id: 50, kind: "projects.owner-input", model: [{ role: "user", content: "[Owner-local event example]\nquoted owner text" }] },
+    { id: 45, kind: "projects.internal-input", model: [{ role: "user", content: "native event" }] },
+    { id: 40, kind: "pi.user", model: [{ role: "user", content: "legacy owner" }] },
+    { id: 30, kind: "pi.user", model: [{ role: "user", content: "automated input" }] },
+    { id: 20, kind: "pi.user", model: [{ role: "user", content: "unknown old input" }] },
+    { id: 10, kind: "pi.assistant", model: [{ role: "assistant", content: "answer" }] },
+  ];
+  const scans = [];
+  const storage = {
+    scanEntries: async () => ({ items: rows }),
+    entry: async () => undefined,
+    scanSubmissions: async (query, limit, cursor) => {
+      scans.push({ query, limit, cursor });
+      return {
+        items: [
+          { id: 39, conversationId: 7, type: "input", status: "done", entry: 40, answer: 41 },
+          { id: 29, conversationId: 7, type: "input", status: "done", entry: 30, answer: 31, requestId: "report:9" },
+          { id: 19, conversationId: 8, type: "input", status: "done", entry: 20, answer: 21 },
+        ],
+        next: { after: 19, order: "descending" },
+      };
+    },
+  };
+  const page = await readTranscriptPage(coordinatorStorageSource(storage, BACKGROUND_CONTEXT, [39]), 7);
+  assert.deepEqual(
+    page.items.map((item) => [item.entryId, item.origin]),
+    [
+      [10, undefined],
+      [20, undefined],
+      [30, "internal"],
+      [40, "owner"],
+      [45, "internal"],
+      [50, "owner"],
+    ],
+  );
+  const native = await readTranscriptPage(
+    { newest: () => rows.filter((row) => row.kind.startsWith("projects.")), entry: () => undefined },
+    7,
+    { display: (_role, text) => `display:${text}` },
+  );
+  assert.deepEqual(
+    native.items.map((item) => item.origin),
+    ["internal", "owner"],
+  );
+  assert.ok(
+    native.items.every((item) => item.text.startsWith("display:")),
+    "display rewriting preserves native origins",
+  );
+  assert.equal(scans.length, 1, "no whole-history provenance scans");
+  assert.equal(scans[0].query.conversationId, 7);
+  assert.equal(scans[0].limit, 200);
+  assert.equal(scans[0].cursor, undefined, "backend-owned cursors are never synthesized from entry IDs");
+}
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const home = mkdtempSync(join(tmpdir(), "archive-"));

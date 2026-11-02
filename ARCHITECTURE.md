@@ -83,7 +83,7 @@ Rule: a failed preparation must leave the running host untouched. Guarded shutdo
 
 ## Reads: transcripts, binary results, archive
 
-- `src/transcript-reader.ts` pages a conversation's entries newest first (`PAGE_ENTRIES`), with bounded previews and images by reference. A `TranscriptSource` supplies entries, either live (`storageSource`) or from an archive file.
+- `src/transcript-reader.ts` pages a conversation's entries newest first (`PAGE_ENTRIES`), with bounded previews and images by reference. A `TranscriptSource` supplies entries, either live (`storageSource`) or from an archive file. Owner and internal inputs carry native entry kinds, exposed as message `origin`. Coordinator reads attribute older inputs by exact matches in the newest 200 submissions; unmatched legacy inputs stay unclassified.
 - `src/binary-results.ts` stores bytes from MCP, simulator, upload and image results as content-addressed artifacts under `artifacts/<scope>/binary/` (25 MiB limit, mime sniffed from bytes). The transcript keeps a markdown reference and a model copy of at most 200 KiB and 1024 px per side.
 - `src/archive-reader.ts` opens an old host's `durable.sqlite` read-only (`readOnly`, `query_only`) and lists its chats and worker transcripts through the transcript reader. `src/archive-host.ts` keeps the old-home path in `<home>/archive.json` (default `~/.pi/agent/projects-dev`) and a few open readers; `web/app/archive.js` browses it. Host RPCs `chat-history`, `thread-history`, `transcript-text` and `transcript-image` page live conversations the same way (`web/app/transcript.js`).
 
@@ -116,6 +116,7 @@ Rule: Telegram never decides. Its buttons call host actions that re-check the Jo
 Rules:
 - Features never assign shell state directly. They use the setters, and they check `getGeneration()` after every `await` before touching the page, so a late response cannot render into another project.
 - Everything from a provider, a transcript or a plugin is data: escape it (`esc`) before inserting HTML.
+- Coordinator chat hides tool diagnostics, thinking and reset handoffs; worker and archive transcripts retain them. Internal inputs never appear as the owner speaking: Ready reports stay readable, other known events are collapsed, and other attributed internal inputs are hidden. Owner-origin text is never parsed as an internal report or event. Unclassified legacy input stays readable with a neutral label, not "You".
 
 ## Plugins
 

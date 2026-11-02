@@ -417,8 +417,7 @@ function liveStatus(frame) {
   if (frame.compacting) return "Compacting context…";
   if (tools.length) return `${tools.map((tool) => toolLabel({ name: tool.name })).join(", ")}…`;
   if (frame.text) return "Writing…";
-  const thought = frame.thinkingText ? thoughtText(frame.thinkingText) : "";
-  return thought ? `Thinking · ${thought}` : "Thinking…";
+  return "Thinking…";
 }
 export function renderWorkingPill() {
   const pill = document.querySelector("#working-pill"),
@@ -564,14 +563,9 @@ function renderLive(immediate = false) {
   if (selection && !selection.isCollapsed && (node.contains(selection.anchorNode) || node.contains(selection.focusNode))) return;
   if (!node.querySelector(".text")) {
     node.innerHTML =
-      '<div class="who">Coordinator <small class="inline">live</small></div><p class="thought live" hidden><span class="thought-mark">Thinking</span><span class="thought-text"></span></p><div class="text"></div><p class="note live-limit" hidden>Live preview limit reached. The full reply will appear when it finishes.</p><p class="live-status"><span class="live-dot"></span><span></span></p>';
+      '<div class="who">Coordinator <small class="inline">live</small></div><div class="text"></div><p class="note live-limit" hidden>Live preview limit reached. The full reply will appear when it finishes.</p><p class="live-status"><span class="live-dot"></span><span></span></p>';
     liveRenderedText = null;
   }
-  const thought = node.querySelector(".thought"),
-    summary = frame.text && frame.thinkingText ? thoughtText(frame.thinkingText) : "";
-  thought.hidden = !summary;
-  const thoughtTextNode = thought.querySelector(".thought-text");
-  if (thoughtTextNode.textContent !== summary) thoughtTextNode.textContent = summary;
   const now = performance.now(),
     animate = !immediate && !document.hidden && !streamMotion.matches;
   let shown = frame.text;
@@ -946,7 +940,7 @@ function renderChat() {
   );
   if (!stickToBottom) restoreTranscriptAnchor(readingAnchor);
   hydrate(document.querySelector("#transcript"));
-  const reply = getView().messages.findLast((message) => message.role === "assistant" && message.text.trim());
+  const reply = getView().messages.findLast((message) => message.role === "assistant" && message.kind !== "reset" && message.text.trim());
   setHtml(
     "#reply-summary",
     reply
@@ -1025,7 +1019,7 @@ let latestReport = new Map();
 function trackReports() {
   latestReport = new Map();
   for (const message of getView().messages) {
-    const match = message.role === "user" && reportPattern.exec(message.text ?? "");
+    const match = message.role === "user" && message.origin !== "owner" && reportPattern.exec(message.text ?? "");
     if (match && Number.isInteger(message.index)) latestReport.set(match[2], message.index);
   }
 }
@@ -1066,7 +1060,23 @@ function eventHtml(message, kind, body) {
 function indexAttr(message) {
   return Number.isInteger(message.index) ? ` data-index="${message.index}"` : "";
 }
-export function chatMessageHtml(message, assistant) {
+// The coordinator is a conversation, not the agent's execution log. Worker and archive views keep diagnostics.
+export function coordinatorMessageHtml(message) {
+  if (message.kind === "tool" || message.role === "tool" || message.kind === "reset") return "";
+  if (message.role === "user" && message.origin !== "owner") {
+    const report = reportPattern.exec(message.text ?? "");
+    if (report) {
+      if (["ready", "ready-with-gaps"].includes(report[3])) return reportHtml(message, report);
+      return eventHtml(message, `${report[1]}.${report[3]}`, `${report[4]}\n${report[5].trim()}`);
+    }
+    const event = /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text ?? "");
+    if (event) return eventHtml(message, event[1], event[2]);
+    if (message.origin === "internal") return "";
+  }
+  return chatMessageHtml({ ...message, thinking: undefined }, "Coordinator", message.origin === "owner" ? "You" : "Earlier input");
+}
+
+export function chatMessageHtml(message, assistant, userLabel = "You") {
   if (message.kind === "compaction")
     return `<div class="compaction-divider" role="separator" aria-label="Context compacted"${indexAttr(message)} title="${esc(when(message.at))}"><span>Context compacted</span></div>`;
   if (message.kind === "tool" || message.role === "tool") return toolCallHtml(message) + imagesHtml(message.images) + moreTextHtml(message);
@@ -1074,11 +1084,11 @@ export function chatMessageHtml(message, assistant) {
     ? `<p class="thought" title="${esc(thoughtText(message.thinking))}"><span class="thought-mark">Thought</span>${esc(thoughtText(message.thinking))}</p>`
     : "";
   if (!message.text?.trim()) return thought + imagesHtml(message.images);
-  const report = message.role === "user" && reportPattern.exec(message.text);
+  const report = message.role === "user" && message.origin !== "owner" && reportPattern.exec(message.text);
   if (report) return reportHtml(message, report);
-  const event = message.role === "user" && /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text);
+  const event = message.role === "user" && message.origin !== "owner" && /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text);
   if (event) return eventHtml(message, event[1], event[2]);
-  const label = message.role === "user" ? "You" : message.role === "assistant" ? assistant : message.role;
+  const label = message.role === "user" ? userLabel : message.role === "assistant" ? assistant : message.role;
   // Owner references (/skill:, @…, #PR) render inline as clickable chips; the host's appended blocks are stripped from the bubble.
   const user = message.role === "user";
   const attached = user ? attachmentChips(message.text) : { text: message.text, chips: "" };
@@ -1093,7 +1103,7 @@ function transcriptHtml(answered) {
     rest = answered.toSorted((a, b) => a.at.localeCompare(b.at));
   for (const message of getView().messages) {
     while (rest.length && Number.isFinite(message.at) && message.at > Date.parse(rest[0].at)) out.push(answeredCard(rest.shift()));
-    out.push(chatMessageHtml(message, "Coordinator"));
+    out.push(coordinatorMessageHtml(message));
   }
   const earlier = hasOlder(windowKey())
     ? [`<button type="button" class="ghost small earlier-messages" data-action="history-earlier">Show earlier messages</button>`]
