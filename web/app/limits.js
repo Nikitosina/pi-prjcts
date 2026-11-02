@@ -48,6 +48,7 @@ registerActions({
   },
 });
 // Subscription limits. The host fetches and normalizes them (no tokens or raw responses reach the browser) and itself polls a provider at most once every 5 minutes (the refresh button polls now, with a short per-provider cooldown on the host); the bar re-renders every 30 s so countdowns stay current.
+const automaticUsageRefresh = false;
 let limits = null,
   limitsRefreshing = false,
   limitsProvidersOpen = false,
@@ -147,7 +148,7 @@ function renderLimits() {
         .join("") +
       controls +
       refresh
-    : "";
+    : refresh;
   if (bar.dataset.html === next) {
     renderMachine();
     return;
@@ -222,7 +223,7 @@ async function loadMachine() {
 }
 setInterval(() => void loadMachine(), 10000);
 async function loadLimits(visit = false) {
-  if (document.hidden) return;
+  if (!automaticUsageRefresh || document.hidden) return;
   // A page load or the tab coming back retries a provider that is showing an error instead of waiting out its backoff.
   const loaded = await api({ action: "limits-snapshot", ...(visit ? { visit: true } : {}) }).catch(() => null);
   if (loaded?.providers) {
@@ -246,5 +247,5 @@ document.addEventListener("visibilitychange", () => {
     void loadMachine();
   }
 });
-void loadLimits(true);
+renderLimits();
 void loadMachine();

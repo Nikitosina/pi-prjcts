@@ -19,7 +19,9 @@ Read `CONTEXT.md` (domain terms; use them exactly) and `ARCHITECTURE.md` (module
 
 ## Live data
 
-Never point a command, script or host at a live `PI_PROJECTS_HOME` (`~/.pi/agent/projects*`, including `projects-dev` and `projects-next`) or at `~/Projects/pi-prjcts`. Any host you start gets a fresh `PI_PROJECTS_HOME` in a temp directory and the fake provider. Do not restart, deploy or migrate a running host.
+Tests and verification must use a fresh `PI_PROJECTS_HOME` in a temp directory and the fake provider. Never point them at a live `PI_PROJECTS_HOME` (`~/.pi/agent/projects*`, including `projects-dev` and `projects-next`) or at `~/Projects/pi-prjcts`.
+
+For owner-requested deployment, use the normal Deploy flow described in `ARCHITECTURE.md`. Do not deploy the host while any project is `working`; wait until all projects are `idle` and recheck before deployment. Do not bypass this check with a manual restart or migrate a running host.
 
 ## Verifying the UI
 
