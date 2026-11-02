@@ -127,7 +127,8 @@ export function health(): Promise<unknown> {
 function exchange(method: string, path: string, body?: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const call = httpRequest(
-      { socketPath: socketPath(), path, method, headers: { "content-type": "application/json" }, timeout: 120000 },
+      // A deploy replaces the server behind this path; pooled sockets can still belong to the stopped host.
+      { socketPath: socketPath(), path, method, agent: false, headers: { "content-type": "application/json" }, timeout: 120000 },
       (response) => {
         const chunks: Buffer[] = [];
         let bytes = 0;
