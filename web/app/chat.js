@@ -1214,7 +1214,16 @@ bindTranscript(transcript, {
 transcript.addEventListener(
   "scroll",
   () => {
-    if (transcript.clientHeight > 0 && transcript.scrollTop < 80 && hasOlder(windowKey())) void showEarlier().catch(showError);
+    const view = getView();
+    if (
+      view?.project.id === getProjectId() &&
+      view.chatId === chatId &&
+      view.messages.length > 0 &&
+      transcript.clientHeight > 0 &&
+      transcript.scrollTop < 80 &&
+      hasOlder(windowKey())
+    )
+      void showEarlier().catch(showError);
   },
   { passive: true },
 );

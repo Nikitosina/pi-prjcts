@@ -82,7 +82,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
   for (const dir of [artifacts, root, ...Object.values(dirs)]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const result = { root, checks: [], calls: [], errors: [], httpErrors: [] };
   const redact = (text) => String(text).replace(/token=[^&#\s"]+/gi, "token=[redacted]");
-  const kit = { repo, core, artifacts, root, ...dirs, result, delay, call, say, redact };
+  const kit = { repo, core, artifacts, root, ...dirs, result, delay, call, say, redact, browserHistoryRequests: [] };
   kit.save = () => writeFileSync(join(artifacts, "report.json"), JSON.stringify(result, null, 2) + "\n", { mode: 0o600 });
   kit.check = (label, ok, detail) => {
     if (!ok) throw Error(`${label}: ${JSON.stringify(detail ?? null).slice(0, 3000)}`);
@@ -389,6 +389,11 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
             pending.delete(msg.id);
             msg.error ? p.reject(Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
           }
+        } else if (msg.method === "Network.requestWillBeSent" && msg.params.request.postData) {
+          try {
+            const body = JSON.parse(msg.params.request.postData);
+            if (body.action === "chat-history") kit.browserHistoryRequests.push(body);
+          } catch {}
         } else if (msg.method === "Runtime.exceptionThrown")
           result.errors.push(redact(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text));
         else if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") result.errors.push(redact(msg.params.entry.text));

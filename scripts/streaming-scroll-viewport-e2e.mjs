@@ -2,7 +2,7 @@
 // Isolated host, deterministic local fake model and real Chrome/CDP input. Mobile metrics are not Safari proof.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createKit, delay, say } from "./lib/e2e-kit.mjs";
+import { createKit, delay, say, call, randomUUID } from "./lib/e2e-kit.mjs";
 
 const mediaThread = "11111111-1111-4111-8111-111111111111";
 
@@ -34,7 +34,18 @@ const longGates = [
   }),
 ];
 const k = await createKit("streaming-scroll-viewport", {
-  handler: async ({ role, user }) => {
+  handler: async ({ role, user, results }) => {
+    if (role === "coordinator" && user.includes("MARK-CARD") && !user.startsWith("[worker "))
+      return results.length
+        ? say("Worker card started.")
+        : call("agents", {
+            action: "spawn",
+            role: "worker",
+            title: "Fixture worker card",
+            brief: "Fixture worker card",
+            acceptance: ["done"],
+            requestId: randomUUID(),
+          });
     if (role !== "coordinator") return undefined;
     if (user.includes("MARK-LONG"))
       return (async function* () {
@@ -107,11 +118,11 @@ await k.run(async () => {
   const otherDir = join(k.root, "other-workspace");
   mkdirSync(otherDir);
   k.initRepo(otherDir);
-  const other = await k.createProject("Other long project", { grant: false, cwd: otherDir });
+  const other = await k.createProject("Other long project", { grant: true, cwd: otherDir });
   const longDir = join(k.root, "long-workspace");
   mkdirSync(longDir);
   k.initRepo(longDir);
-  const long = await k.createProject("Long project", { grant: false, cwd: longDir });
+  const long = await k.createProject("Long project", { grant: true, cwd: longDir });
   for (let i = 0; i < 34; i++) {
     await k.ask(other, `MARK-FILL other ${i} ${"long conversation text ".repeat(20)}`);
     await k.ask(long, `MARK-FILL long ${i} ${"long conversation text ".repeat(20)}`);
@@ -134,9 +145,24 @@ await k.run(async () => {
       );
     }
   }
+  for (const [project, chat] of [
+    [long, namedLong.id],
+    [other, namedOther.id],
+  ]) {
+    await k.rpc({ action: "message", id: project, chatId: chat, text: "MARK-CARD" });
+    await k.eventually(
+      async () =>
+        (await k.rpc({ action: "jobs-snapshot", id: project })).jobs.some(
+          (job) => job.title === "Fixture worker card" && job.status === "failed",
+        ),
+      "worker card failed",
+      1200,
+    );
+  }
   const url = new URL(await k.webUrl(id, "coordinator"));
   url.searchParams.set("e2e", "1");
   const page = await k.openPage(url.toString());
+  await page.viewport(1024, 650, false);
   const video = await page.evaluate(`(async () => {
     const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
     const ctx = canvas.getContext('2d'); ctx.fillStyle = '#243056'; ctx.fillRect(0, 0, 320, 180);
@@ -156,9 +182,19 @@ await k.run(async () => {
   await page.shot("01-desktop", { force: true });
   result.measurements = {};
   const click = async (selector) => {
-    const point = await page.evaluate(
-      `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
-    );
+    let point;
+    for (let i = 0; i < 12; i++) {
+      point = await page.evaluate(
+        `(() => { const n = document.querySelector(${JSON.stringify(selector)}); if (!n) return null; const r = n.getBoundingClientRect(); for (let fx of [0.5,0.2,0.8]) for (let fy of [0.5,0.2,0.8]) { const x=r.left+r.width*fx, y=r.top+r.height*fy, hit=document.elementFromPoint(x,y); if (n.contains(hit)) return {x,y}; } return null; })()`,
+      );
+      if (point) break;
+      if (selector.startsWith("#tab-strip"))
+        await page.evaluate(
+          `document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest',inline:'center',behavior:'instant'})`,
+        );
+      await delay(200);
+    }
+    if (!point) throw Error(`no hittable point for ${selector}`);
     await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
     await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   };
@@ -205,9 +241,19 @@ await k.run(async () => {
     writeFileSync(join(k.artifacts, `${shot}.png`), Buffer.from(image.data, "base64"));
     return { ...position, visible };
   };
+  const beforeTabs = await anchored(page);
+  k.check("R0TB named tab switch starts at bottom", beforeTabs.gap < 2, beforeTabs);
+  await page.evaluate(`new Promise(requestAnimationFrame)`);
+  const beforeImage = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  writeFileSync(join(k.artifacts, "named-tab-before.png"), Buffer.from(beforeImage.data, "base64"));
+  const requestsBeforeTabs = k.browserHistoryRequests.length;
   const tabBack = await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-long");
   const tabOther = await switchTab("Other long project · iPad layout", namedOther.id, "named-tab-other");
-  result.measurements.namedTabs = { tabBack, tabOther };
+  const firstOlderRequests = k.browserHistoryRequests
+    .slice(requestsBeforeTabs)
+    .filter((request) => request.action === "chat-history" && request.before != null);
+  result.measurements.namedTabs = { beforeTabs, tabBack, tabOther, firstOlderRequests };
+  k.check("R0TC first named tab switches do not load older history", firstOlderRequests.length === 0, result.measurements.namedTabs);
   k.check(
     "R0T top-strip named chats in both projects follow newest",
     tabBack.gap < 2 &&
@@ -306,6 +352,7 @@ await k.run(async () => {
   result.measurements.pendingReturn = afterReturn;
   k.check("R0TR stale older response cannot move a reopened chat", afterReturn.gap < 2, afterReturn);
   await page.cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  await page.viewport(1440, 1000, false);
   await click(`[data-select-project="${id}"]`);
   await page.waitFor(`document.querySelector('#messages').innerText.includes('MARK-FILL 33')`, "original project selected");
   await page.evaluate(`(() => {
