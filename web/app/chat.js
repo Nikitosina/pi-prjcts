@@ -115,7 +115,7 @@ async function showEarlier() {
     node = document.querySelector("#transcript");
   if (earlierLoading || !hasOlder(key)) return;
   earlierLoading = true;
-  const before = { height: node.scrollHeight, top: node.scrollTop };
+  const before = { height: node.scrollHeight, top: node.scrollTop, anchor: captureTranscriptAnchor() };
   stickToBottom = false;
   try {
     const id = getProjectId(),
@@ -127,6 +127,7 @@ async function showEarlier() {
     setView({ ...getView(), messages: displayMessages(loadedItems(key)) });
     render();
     node.scrollTop = before.top + node.scrollHeight - before.height;
+    restoreTranscriptAnchor(before.anchor);
   } finally {
     earlierLoading = false;
   }

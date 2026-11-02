@@ -1,8 +1,10 @@
 // Browser regression for streaming paint cadence, transcript anchoring and the mobile viewport shell.
 // Isolated host, deterministic local fake model and real Chrome/CDP input. Mobile metrics are not Safari proof.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createKit, delay } from "./lib/e2e-kit.mjs";
+import { createKit, delay, say } from "./lib/e2e-kit.mjs";
+
+const mediaThread = "11111111-1111-4111-8111-111111111111";
 
 const burstText = Array.from({ length: 24 }, (_, i) => `Burst paragraph ${i}: ${"readable text ".repeat(8)}`).join("\n\n");
 const chunk = (delta, finish = null) =>
@@ -66,6 +68,10 @@ const k = await createKit("streaming-scroll-viewport", {
         "data: [DONE]\n\n"
       );
     }
+    if (user.includes("MARK-NAMED"))
+      return say(
+        `## Rich reply\n\n${"Long readable reply with **emphasis** and a [link](https://example.invalid). ".repeat(15)}\n\n\`\`\`text\nworker result\n\`\`\`\n\n${user.endsWith(" 79") ? `![Demo](artifact:${mediaThread}/demo.webm)` : ""}`,
+      );
     if (user.includes("MARK-FILL")) return undefined;
     return undefined;
   },
@@ -110,12 +116,152 @@ await k.run(async () => {
     await k.ask(other, `MARK-FILL other ${i} ${"long conversation text ".repeat(20)}`);
     await k.ask(long, `MARK-FILL long ${i} ${"long conversation text ".repeat(20)}`);
   }
+  const namedLong = await k.rpc({ action: "chat-create", id: long, title: "Bugs wave 1" });
+  const namedOther = await k.rpc({ action: "chat-create", id: other, title: "iPad layout" });
+  for (const [project, chat] of [
+    [long, namedLong.id],
+    [other, namedOther.id],
+  ]) {
+    for (let i = 0; i < 80; i++) {
+      const job = await k.rpc({ action: "message", id: project, chatId: chat, text: `MARK-NAMED ${chat} ${i}` });
+      await k.eventually(
+        async () => {
+          const view = await k.rpc({ action: "show", id: project, chatId: chat });
+          return view.jobs.some((item) => item.id === job.id && item.state === "done");
+        },
+        "named turn settled",
+        1200,
+      );
+    }
+  }
   const url = new URL(await k.webUrl(id, "coordinator"));
   url.searchParams.set("e2e", "1");
   const page = await k.openPage(url.toString());
+  const video = await page.evaluate(`(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
+    const ctx = canvas.getContext('2d'); ctx.fillStyle = '#243056'; ctx.fillRect(0, 0, 320, 180);
+    ctx.fillStyle = '#fff'; ctx.font = '24px sans-serif'; ctx.fillText('Demo video', 85, 90);
+    const recorder = new MediaRecorder(canvas.captureStream(10), { mimeType: 'video/webm' }), parts = [];
+    recorder.ondataavailable = event => parts.push(event.data);
+    const done = new Promise(resolve => recorder.onstop = resolve); recorder.start();
+    await new Promise(resolve => setTimeout(resolve, 200)); recorder.stop(); await done;
+    const bytes = new Uint8Array(await new Blob(parts).arrayBuffer()); return btoa(String.fromCharCode(...bytes));
+  })()`);
+  for (const project of [long, other]) {
+    const mediaDir = join(k.home, project, "artifacts", mediaThread);
+    mkdirSync(mediaDir, { recursive: true });
+    writeFileSync(join(mediaDir, "demo.webm"), Buffer.from(video, "base64"));
+  }
   await page.waitFor(`document.querySelectorAll('#messages .msg').length >= 20`, "seeded transcript");
   await page.shot("01-desktop", { force: true });
   result.measurements = {};
+  const click = async (selector) => {
+    const point = await page.evaluate(
+      `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
+    await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+  };
+  const openNamed = async (project, chat) => {
+    await click(`[data-select-project="${project}"]`);
+    await page.waitFor(`!!document.querySelector('[data-action="chat-select"][data-chat="${chat}"]')`, "named chat listed");
+    await click(`[data-action="chat-select"][data-chat="${chat}"]`);
+    await page.waitFor(
+      `document.querySelector('#chat-list .chat.on')?.dataset.chat === '${chat}' && document.querySelector('#messages').innerText.includes('MARK-NAMED ${chat} 79')`,
+      "named chat opened",
+    );
+    await page.waitFor(`!!document.querySelector('#messages video')`, "named chat video hydrated");
+    k.check("named fixture has older history", await page.evaluate(`!!document.querySelector('#messages .earlier-messages')`), {
+      project,
+      chat,
+    });
+    const count = await page.evaluate(`document.querySelectorAll('#messages [data-index]').length`);
+    await page.evaluate(`document.querySelector('#messages .earlier-messages').click()`);
+    await page.waitFor(`document.querySelectorAll('#messages [data-index]').length > ${count}`, "older page cached");
+    k.check("named fixture retains older history", await page.evaluate(`!!document.querySelector('#messages .earlier-messages')`), {
+      project,
+      chat,
+    });
+    await page.evaluate(`document.querySelector('#transcript').scrollTop = document.querySelector('#transcript').scrollHeight`);
+    await delay(300);
+  };
+  await openNamed(long, namedLong.id);
+  await openNamed(other, namedOther.id);
+  await page.cdp("Network.enable");
+  await page.cdp("Network.emulateNetworkConditions", { offline: false, latency: 250, downloadThroughput: -1, uploadThroughput: -1 });
+  const switchTab = async (title, chat, shot) => {
+    await click(`#tab-strip [data-action="tab-select"][title="${title}"]`);
+    await page.waitFor(
+      `document.querySelector('#chat-list .chat.on')?.dataset.chat === '${chat}' && document.querySelector('#messages').innerText.includes('MARK-NAMED ${chat} 79')`,
+      "top tab selected",
+    );
+    await delay(300);
+    const position = await anchored(page);
+    const visible = await page.evaluate(
+      `(() => { const t = document.querySelector('#transcript'), box = t.getBoundingClientRect(); const last = [...t.querySelectorAll('[data-index]')].at(-1), r = last.getBoundingClientRect(); return { lastIndex: last.dataset.index, lastTop: r.top, lastBottom: r.bottom, viewportTop: box.top, viewportBottom: box.bottom, text: last.innerText.slice(-120), markers: [...t.querySelectorAll('[data-index]')].filter(n => n.innerText.includes('MARK-NAMED')).slice(-15).map(n => ({ index: n.dataset.index, text: n.innerText.slice(-8) })), bodyScroll: document.scrollingElement.scrollTop }; })()`,
+    );
+    await page.evaluate(`new Promise(requestAnimationFrame)`);
+    const image = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    writeFileSync(join(k.artifacts, `${shot}.png`), Buffer.from(image.data, "base64"));
+    return { ...position, visible };
+  };
+  const tabBack = await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-long");
+  const tabOther = await switchTab("Other long project · iPad layout", namedOther.id, "named-tab-other");
+  result.measurements.namedTabs = { tabBack, tabOther };
+  k.check(
+    "R0T top-strip named chats in both projects follow newest",
+    tabBack.gap < 2 &&
+      tabOther.gap < 2 &&
+      Math.abs(tabBack.visible.lastBottom - tabBack.visible.viewportBottom) < 2 &&
+      Math.abs(tabOther.visible.lastBottom - tabOther.visible.viewportBottom) < 2,
+    result.measurements.namedTabs,
+  );
+  await page.evaluate(`(() => {
+    window.__namedHistoryRequests = [];
+    window.__namedScrollEvents = [];
+    const transcript = document.querySelector('#transcript');
+    transcript.addEventListener('scroll', () => window.__namedScrollEvents.push({ top: transcript.scrollTop, height: transcript.clientHeight, total: transcript.scrollHeight, chat: new URL(location.href).searchParams.get('chat'), count: transcript.querySelectorAll('[data-index]').length }));
+    const original = window.fetch;
+    window.fetch = function(input, init) {
+      try { const body = JSON.parse(init?.body); if (body.action === 'chat-history' && body.before != null) window.__namedHistoryRequests.push(body); } catch {}
+      return original.apply(this, arguments);
+    };
+  })()`);
+  const tracedBack = await switchTab("Long project · Bugs wave 1", namedLong.id, "named-tab-long-traced");
+  const tracedOther = await switchTab("Other long project · iPad layout", namedOther.id, "named-tab-other-traced");
+  const namedRequests = await page.evaluate(`window.__namedHistoryRequests`);
+  const namedScrollEvents = await page.evaluate(`window.__namedScrollEvents`);
+  result.measurements.namedTabsTraced = { tracedBack, tracedOther, namedRequests, namedScrollEvents };
+  k.check(
+    "R0TN named tab switches do not load older history",
+    tracedBack.gap < 2 && tracedOther.gap < 2 && namedRequests.length === 0,
+    result.measurements.namedTabsTraced,
+  );
+  await delay(1000);
+  const namedCount = await page.evaluate(`document.querySelectorAll('#messages [data-index]').length`);
+  const wheelTarget = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), r = t.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, deltaY: -t.scrollTop - 100 }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...wheelTarget, deltaX: 0 });
+  await page.waitFor(`window.__namedHistoryRequests.length === 1`, "intentional wheel requests older history");
+  const beforeNamedPage = await anchored(page);
+  await page.waitFor(`document.querySelectorAll('#messages [data-index]').length > ${namedCount}`, "wheel older page rendered");
+  await delay(150);
+  const afterNamedPage = await page.evaluate(
+    `(() => { const t = document.querySelector('#transcript'), row = t.querySelector('[data-index="${beforeNamedPage.index}"]'); return { index: row?.dataset.index, offset: row?.getBoundingClientRect().top - t.getBoundingClientRect().top, gap: t.scrollHeight - t.scrollTop - t.clientHeight }; })()`,
+  );
+  result.measurements.namedWheel = { beforeNamedPage, afterNamedPage, requests: await page.evaluate(`window.__namedHistoryRequests`) };
+  await page.shot("named-wheel-anchor", { force: true });
+  k.check(
+    "R0TW wheel pagination preserves the exact visible message and offset",
+    beforeNamedPage.index === afterNamedPage.index &&
+      Math.abs(beforeNamedPage.offset - afterNamedPage.offset) < 2 &&
+      afterNamedPage.gap > 100,
+    result.measurements.namedWheel,
+  );
+  await page.cdp("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  await click(`[data-select-project="${id}"]`);
+  await page.waitFor(`document.querySelector('#messages').innerText.includes('MARK-FILL 33')`, "original project selected");
   await page.evaluate(`(() => {
     window.__historyRequests = [];
     const fetchOriginal = window.fetch;
