@@ -14,7 +14,7 @@ Jobs replace the plan/work model. One Job is one delegated request with one work
 
 `JobsSnapshot = { paused, jobs[], agents[] }`
 
-- `jobs[]`: `id` (= worker agent id), `chat` (conversation id of the spawning chat), `title`, `request`, `acceptance[]`, `status` (`running | completed | ready | ready-with-gaps | failed | stopped | approved`), `workerConversation`, `scopeId`, `branch`, `pr`, `candidate` (sha), `plan[]` (`{title, status: todo|doing|done, estimateMin, startedAt, doneAt}`), `ready` (`{summary, proof[], review, notFixed[{text,reason}], gaps[], at}` once reported), `reason` (stop/failure text), `createdAt`, `endedAt`, `stalls`, `stalledAt` (non-null while a stall notice stands), plus live fields:
+- `jobs[]`: `id` (= worker agent id), `chat` (conversation id of the spawning chat), `title`, `request`, `acceptance[]`, `status` (`running | completed | checkpoint | ready | ready-with-gaps | failed | stopped | approved`), `workerConversation`, `scopeId`, `branch`, `pr`, `candidate` (sha), `plan[]` (`{title, status: todo|doing|done, estimateMin, startedAt, doneAt}`), `ready` (`{summary, proof[], review, notFixed[{text,reason}], gaps[], at}` once reported), `reason` (stop/failure text), `createdAt`, `endedAt`, `stalls`, `stalledAt` (non-null while a stall notice stands), plus live fields:
   - `workspace`, when present: `{kind: "shared"}` or `{kind: "isolated", baseCommit: "<full commit>"}` identifies a task helper. Omission, including old records, means independent Job delivery. Helper `completed` means an ordinary answer returned, not verified or approved delivery; helper PR and Ready report remain null.
   - `working`: the worker conversation is generating or running tools.
   - `leaf`: conversation id of the deepest working conversation (a verifier or reviewer the worker waits on); open its history for live progress.
@@ -40,11 +40,15 @@ Removed: `plan-snapshot`, `work-archive`, `legacy-thread-history`, the `workerCa
 
 The chat's `agents` tool selects task helpers with explicit `workspace`. Shared helpers borrow that chat's persistent workspace; isolated helpers allocate from the supplied full commit. Paths and owner identities are host-resolved. Shared handoff lasts until actual agent settlement, not merely the start of a closing answer. A follow-up reruns the same worker in its frozen binding.
 
-Helpers finish by returning their answer. They do not need a Ready report or worker PR, never offer Approve, and cannot be passed to result acceptance. The Coordinator receives the complete worker-reported answer and owns inspection, branch integration and combined verification.
+Helpers finish by returning their answer. They do not need a Ready report or worker PR, never offer Approve, and cannot be passed to result acceptance. The Coordinator receives a concise worker handback and owns inspection, branch integration and combined verification. `agents report {id, ref}` retrieves the exact full report named by a notification; omitting `ref` reads current facts and the latest answer. Full reports are immutable `projects.agent-report` entries in the worker conversation, outside model context. They remain readable in worker history and through `transcript-text` after later sends overwrite the current Job report. Transcripts and artifacts remain available through the existing reads.
+
+Independent workers may call `job checkpoint` to end an unfinished stage with a summary, proof references and remaining gaps. A checkpoint is not a Ready report, cannot be approved and stays out of stall detection until new instructions resume the same worker. The workspace is retained for continuation. It does not add a host-owned decision or retry loop.
+
+The main chat displays owner and Coordinator messages only. Worker details contain the internal reports and approval controls for Ready Jobs. Report time and cost describe cumulative Job totals, not the most recent checkpoint.
 
 ## Stall notices
 
-A running Job with no progress for `stallMinutes`, the same tool call five times, or a silent background process raises one notice in its chat per stall; `stalledAt` is set until progress resumes. A worker waiting on its active verifier is judged by the verifier. The detector never steers or stops.
+A running Job with no progress for `stallMinutes` or the same tool call five times raises one notice to its Coordinator per stall; `stalledAt` is set until progress resumes, not merely until another message is sent. Background-process silence does not wake the Coordinator while its agent is making progress. A worker waiting on its active verifier is judged by the verifier. On recovery or settlement, still-queued obsolete stall inputs are withdrawn; already placed inputs and actual results remain intact. The detector never steers or stops.
 
 ## Telegram
 

@@ -367,18 +367,20 @@ try {
       ownerLabel: html({ origin: 'owner', text: 'I wrote this' }).includes('>You '),
       workerLabel: chatMessageHtml({ ...base, text: 'Legacy worker input' }, 'Worker').includes('>You '),
       archiveLabel: chatMessageHtml({ ...base, text: 'Legacy archive input' }, 'Assistant').includes('>You '),
-      legacyEvent: html({ text: '[Owner-local event github.follow]\\n- Useful change' }).includes('event-card'),
+      legacyEvent: !html({ text: '[Owner-local event github.follow]\\n- Useful change' }),
       internal: !html(internal),
       origin: displayMessages([{ kind: 'message', entryId: 1, at: 1, role: 'user', origin: 'internal', text: 'metadata', images: [] }])[0].origin === 'internal',
       ownerReport: html({ origin: 'owner', text: '[worker 11111111-1111-1111-1111-111111111111 ready: I typed this]' }).includes('msg you'),
-      report: html({ origin: 'internal', text: '[scout 11111111-1111-1111-1111-111111111111 done: Completed scout] details' }).startsWith('<details'),
+      report: !html({ origin: 'internal', text: '[scout 11111111-1111-1111-1111-111111111111 done: Completed scout] details' }),
       thought: html(thought).includes('Public answer') && !html(thought).includes('PRIVATE-THOUGHT'),
       reset: !html(reset),
       tools: !html({ kind: 'tool', name: 'bash', argsPreview: 'PRIVATE-ARGS' }),
       owner: owner.includes('I actually typed this.') && owner.includes('msg you') && !owner.includes('event-card'),
       image: html({ origin: 'owner', images: [{ ref: '1.0.0', mime: 'image/png', bytes: 12 }] }).includes('data-ref="1.0.0"'),
-      ready: ready.includes('job-msg') && ready.includes('Summary:'),
-      event: html({ origin: 'internal', text: '[Owner-local event github.follow]\\n- Useful change' }).includes('event-card'),
+      ready: !ready,
+      checkpoint: !html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 checkpoint: Waiting] details' }),
+      stalled: !html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 stalled: Quiet] details' }),
+      event: !html({ origin: 'internal', text: '[Owner-local event github.follow]\\n- Useful change' }),
       compaction: html({ kind: 'compaction' }).includes('Context compacted'),
       workerThought: chatMessageHtml({ ...base, ...thought }, 'Worker').includes('PRIVATE-THOUGHT'),
       archiveReset: chatMessageHtml(reset, 'Assistant').includes('PRIVATE-HANDOFF'),
@@ -389,7 +391,7 @@ try {
   );
   if (Object.values(rendererChecks).some((ok) => !ok))
     throw Error("C10-C13 coordinator/diagnostic renderer regressions: " + JSON.stringify(rendererChecks));
-  result.checks.push("C10-C13 reset/internal filtering preserves owner images, events, Ready and worker/archive diagnostics");
+  result.checks.push("C10-C13 internal reports stay out of coordinator chat while owner images and worker/archive diagnostics remain");
   result.checks.push("C16 unknown coordinator inputs get a neutral label without losing text, links or attachments");
   await shot("01-clean-coordinator", s);
   const active = await rpc({ action: "jobs-snapshot", id: project.id });
@@ -439,10 +441,31 @@ try {
   }
   if (reportInput?.origin !== "internal") throw Error("C15 real agent report lacks internal origin: " + JSON.stringify(reportInput));
   result.apiOrigins = { owner: ownerInput.origin, report: reportInput.origin };
-  await waitFor(`!!document.querySelector('#messages [data-index="${reportInput.entryId}"]')`, s, "internal report rendered as event");
+  await delay(250);
+  if (await evaluate(`!!document.querySelector('#messages [data-index="${reportInput.entryId}"]')`, s))
+    throw Error("C17 internal report leaked into coordinator chat");
   if (await evaluate(`!!document.querySelector('#messages .msg.you[data-index="${reportInput.entryId}"]')`, s))
     throw Error("C15 real internal report rendered as owner speech");
   result.checks.push("C15 real agent report API carries internal origin and is not labeled You");
+  const checkpoint = await evaluate(
+    `(async () => {
+    const decisions = await import('/app/decisions.js');
+    const workers = await import('/app/workers.js');
+    const original = decisions.jobsSnap;
+    const jobs = original.jobs.map(job => job.id === ${JSON.stringify(threadId)} ? { ...job, status: 'checkpoint', checkpoint: { summary: 'Waiting for owner decision', proof: ['artifact:checkpoint-proof'], gaps: ['Decision needed'] }, ready: null } : job);
+    decisions.setJobsSnap({ ...original, jobs });
+    await workers.inspectThread(${JSON.stringify(threadId)});
+    const pane = document.querySelector('#inline-thread');
+    const answer = { intermediate: pane.innerText.includes('Intermediate checkpoint'), summary: pane.innerText.includes('Waiting for owner decision'), proof: pane.innerText.includes('checkpoint-proof'), noApprove: !pane.querySelector('[data-action="job-approve"]') };
+    decisions.setJobsSnap(original);
+    await workers.inspectThread(${JSON.stringify(threadId)});
+    return answer;
+  })()`,
+    s,
+  );
+  if (Object.values(checkpoint).some((value) => !value)) throw Error("C18 checkpoint details wrong: " + JSON.stringify(checkpoint));
+  result.checks.push("C18 checkpoint is intermediate with proof and no approval");
+
   await shot("02-worker-chat", s);
   await evaluate(`document.querySelector('[data-inline-thread-send] textarea').focus()`, s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, s);

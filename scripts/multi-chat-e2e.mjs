@@ -425,12 +425,16 @@ try {
   const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  await click(s, '#messages .event-card[data-kind="scout.answered"] > summary');
-  const card = await evaluate(`document.querySelector('#messages .event-card[data-kind="scout.answered"]')?.innerText`, s);
-  if (!card?.includes("SCOUT-RESULT-42")) throw Error("Report message missing in chat two: " + card);
+  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .job-msg')`, s))
+    throw Error("Internal scout report leaked into chat two");
+  await click(s, '#job-tree [data-action="thread"]');
+  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('SCOUT-RESULT-42')`, s, "scout evidence in thread details");
+  await click(s, '[data-action="thread-close"]');
   const mainText = await transcript(id, "main");
   if (/\[(worker|scout|reviewer) [0-9a-f-]{36} /.test(mainText) || mainText.includes("REPORT-ACK")) throw Error("Report also went to Main");
-  result.checks.push("F8 the worker report goes to the delegating chat only and renders as a regular message there");
+  result.checks.push(
+    "F8 the worker report goes to the delegating chat only while its details remain reachable outside the coordinator transcript",
+  );
   await shot("02-report-in-chat", s);
 
   // F6/F16: the shared pool of agents is one list for the project.

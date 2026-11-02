@@ -42,15 +42,7 @@ import { clip, esc, uuid } from "./format.js";
 import { renderCoordinatorAccess } from "./access.js";
 import { renderMarkdown } from "./markdown.js";
 import { answeredCard, jobChatId, jobsSnap, pendingItems, questionChat, questionPlacement, setJobsSnap } from "./decisions.js";
-import {
-  inspectThread,
-  loadWorkerContexts,
-  pendingWorker,
-  refreshWorkerChat,
-  approveLine,
-  setPendingWorker,
-  workerChat,
-} from "./workers.js";
+import { inspectThread, loadWorkerContexts, pendingWorker, refreshWorkerChat, setPendingWorker, workerChat } from "./workers.js";
 import { prChips, providerLabels } from "./prs.js";
 import { attachmentChips, knowledgePath, setKnowledgeDocs } from "./knowledge.js";
 import { autosize, closeSkillMenu, draftKey, drafts, refsSplit } from "./composer.js";
@@ -934,7 +926,6 @@ onRender(renderHeader);
 function renderChat() {
   syncSeen();
   renderChats();
-  trackReports();
   const readingAnchor = stickToBottom ? null : captureTranscriptAnchor();
   setHtml(
     "#messages",
@@ -1005,48 +996,33 @@ function renderChat() {
 onRender(renderChat);
 // Agent reports reach the chat as owner-role input in the form built by src/jobs.ts: "[worker <id> ready: <title>]" and its report lines.
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+): ([^\]\n]*)\]([\s\S]*)$/;
-const reportLabels = ["PR", "Candidate", "Summary", "Proof", "Review", "Not fixed", "Gaps", "Time"];
+const reportLabels = ["PR", "Candidate", "Summary", "Proof", "Review", "Not fixed", "Gaps", "Cumulative Job time", "Cumulative Job cost"];
 // The report is a regular message: label lines become bold run-ins and each section its own paragraph.
 function reportMarkdown(body) {
   return body
     .trim()
     .split("\n")
     .map((line) => {
+      line = line.replace(/^Time:/, "Cumulative Job time:").replace(/^Cost:/, "Cumulative Job cost:");
       const label = reportLabels.find((item) => line.startsWith(`${item}:`));
       return label ? `\n**${label}:**${line.slice(label.length + 1)}` : line;
     })
     .join("\n");
 }
-// The newest report of each Job carries the Approve button; older ones for the same Job stay plain.
-let latestReport = new Map();
-function trackReports() {
-  latestReport = new Map();
-  for (const message of getView().messages) {
-    const match = message.role === "user" && message.origin !== "owner" && reportPattern.exec(message.text ?? "");
-    if (match && Number.isInteger(message.index)) latestReport.set(match[2], message.index);
-  }
-}
-function reportActions(message, jobId) {
-  const job = jobsSnap?.jobs.find((item) => item.id === jobId);
-  if (!job || job.workspace || latestReport.get(jobId) !== message.index) return "";
-  const line = approveLine(jobId);
-  if (job.status === "approved") return `<p class="job-outcome" data-outcome="approved">${esc(line ?? "Approved.")}</p>`;
-  if (!["ready", "ready-with-gaps"].includes(job.status)) return "";
-  const mergeable = Boolean(job.pr && job.candidate);
-  return `<div class="job-actions">${mergeable ? `<button type="button" class="primary small" data-action="job-approve" data-project="${esc(getProjectId())}" data-job="${esc(jobId)}">Approve</button>` : `<small class="note">Nothing to merge: the Job has no PR and candidate.</small>`}${line ? `<p class="job-outcome" data-outcome="pending">${esc(line)}</p>` : ""}</div>`;
-}
 function reportHtml(message, match) {
   const [, role, jobId, status, title, body] = match;
   const label =
-    status === "completed"
-      ? "Worker returned"
-      : status === "ready"
-        ? "Ready"
-        : status === "ready-with-gaps"
-          ? "Ready with gaps"
-          : `${role[0].toUpperCase()}${role.slice(1)} ${status}`;
+    status === "checkpoint"
+      ? "Intermediate checkpoint"
+      : status === "completed"
+        ? "Worker returned"
+        : status === "ready"
+          ? "Ready"
+          : status === "ready-with-gaps"
+            ? "Ready with gaps"
+            : `${role[0].toUpperCase()}${role.slice(1)} ${status}`;
   const known = jobsSnap?.jobs.some((job) => job.id === jobId) || jobsSnap?.agents.some((agent) => agent.id === jobId);
-  return `<article class="msg them job-msg" data-job="${esc(jobId)}" data-status="${esc(status)}"${indexAttr(message)}><div class="who">${esc(label)} · ${esc(clip(title, 80))} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${renderMarkdown(reportMarkdown(body))}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(jobId)}">Open ${esc(role)} transcript ↗</button>` : ""}</div>${reportActions(message, jobId)}</article>`;
+  return `<article class="msg them job-msg" data-job="${esc(jobId)}" data-status="${esc(status)}"${indexAttr(message)}><div class="who">${esc(label)} · ${esc(clip(title, 80))} <small class="inline">${esc(when(message.at))}</small></div><div class="text">${renderMarkdown(reportMarkdown(body))}${known ? `<button class="ghost small" data-action="thread" data-project="${esc(getProjectId())}" data-thread="${esc(jobId)}">Open ${esc(role)} transcript ↗</button>` : ""}</div></article>`;
 }
 // Events from Follow PRs, the webhook or the event API arrive as owner input; show them as a card, not as the owner speaking.
 function eventHtml(message, kind, body) {
@@ -1075,12 +1051,10 @@ export function coordinatorMessageHtml(message) {
   if (message.role === "user" && message.origin !== "owner") {
     const report = reportPattern.exec(message.text ?? "");
     if (report) {
-      if (["ready", "ready-with-gaps"].includes(report[3])) return reportHtml(message, report);
-      return eventHtml(message, `${report[1]}.${report[3]}`, `${report[4]}\n${report[5].trim()}`);
+      return "";
     }
     const event = /^\[Owner-local event ([\w.-]+)\]\n([\s\S]*)$/.exec(message.text ?? "");
-    if (event) return eventHtml(message, event[1], event[2]);
-    if (message.origin === "internal") return "";
+    if (event || message.origin === "internal") return "";
   }
   return chatMessageHtml({ ...message, thinking: undefined }, "Coordinator", message.origin === "owner" ? "You" : "Earlier input");
 }

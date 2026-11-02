@@ -12,13 +12,14 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { createJobs, Jobs, planEta } from "../src/jobs.ts";
+import { createJobs, Jobs, liveAgentIds, planEta } from "../src/jobs.ts";
 import { guardedStream } from "../src/model-guard.ts";
 import { DEFAULT_ROLE_PROMPTS } from "../src/role-prompts.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
+const longAnswer = "Full exact retained evidence. ".repeat(300) + "END-OF-EXACT-ANSWER";
 assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
 
 // The ETA counts down inside the step in progress and keeps a minute for an overrun one.
@@ -55,6 +56,7 @@ function route(request) {
         acceptance: ["it works"],
         requestId: id,
       });
+    if (user === "Hold owner response") return call("gate", {});
     if (user.startsWith("Start ")) return spawn(user.slice(6), user.slice(6).toLowerCase());
     const lastInput = messages.findLast((message) => message.role === "user");
     const command = text(lastInput.content);
@@ -64,10 +66,48 @@ function route(request) {
         ? call("agents", { action: "send", id: command.slice("Send twice ".length), message: "Just a question", requestId: "tool-send-1" })
         : say("Sent once.");
     }
+    if (user.startsWith("Report ")) {
+      const [id, ref] = user.slice(7).split(" ");
+      return call("agents", { action: "report", id, ...(ref ? { ref: Number(ref) } : {}) });
+    }
     if (user.startsWith("Scout")) return call("agents", { action: "spawn", role: "scout", brief: "Look around", requestId: "scout-1" });
     return result ? say("OK.") : say("Noted.");
   }
   if (role === "worker") {
+    if (user === "Replace helper result") return say("New short helper result.");
+    if (user === "Replace Ready result")
+      return call("job", {
+        action: "ready",
+        summary: "New Ready summary",
+        pr: "12",
+        candidate: sha,
+        proof: ["new-proof"],
+        review: "REVIEW-OK",
+        gaps: [],
+      });
+    if (tag === "BRIEF-LONGHELPER" || tag === "BRIEF-LONGFAIL") return say(longAnswer);
+    if (tag === "BRIEF-LONGREADY" || tag === "BRIEF-LONGCHECKPOINT") {
+      if (result.startsWith("Ready recorded") || result.startsWith("Checkpoint recorded")) return say("Recorded.");
+      return call(
+        "job",
+        tag === "BRIEF-LONGREADY"
+          ? {
+              action: "ready",
+              summary: longAnswer,
+              pr: "12",
+              candidate: sha,
+              proof: ["long-proof"],
+              review: "REVIEW-OK",
+              gaps: ["Owner must choose the final storage location"],
+            }
+          : {
+              action: "checkpoint",
+              summary: "Stage held",
+              proof: ["long-proof"],
+              gaps: [longAnswer],
+            },
+      );
+    }
     if (/BRIEF-BATCH/.test(user) && !messages.some((message) => message.role === "toolResult")) return call("gate", {});
     if (tag?.startsWith("BRIEF-BATCHREADY") && messages.some((message) => message.role === "toolResult")) {
       if (result.startsWith("Ready recorded")) return say("Shared Ready answer.");
@@ -91,6 +131,24 @@ function route(request) {
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
     if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
+    if (tag === "BRIEF-CHECKPOINT" && (user.includes("BRIEF-CHECKPOINT") || result.startsWith("Checkpoint recorded"))) {
+      if (result.startsWith("Checkpoint recorded")) return say("Checkpoint details retained in my transcript.");
+      return call("job", {
+        action: "checkpoint",
+        summary: "Media fix held for the owner's storage decision",
+        proof: ["artifact:worker/media-fix/CHECKPOINT.md"],
+        gaps: ["Nine videos need approved reachable storage"],
+      });
+    }
+    if (user === "Continue checkpoint")
+      return call("job", {
+        action: "ready",
+        summary: "Storage decision applied",
+        pr: "12",
+        candidate: sha,
+        proof: ["final proof"],
+        review: "REVIEW-OK",
+      });
     if (user.startsWith("Just a question")) return say("Answer.");
     if (user.startsWith("Add a test"))
       return call("job", {
@@ -124,7 +182,7 @@ function route(request) {
     if (result.startsWith("Plan saved"))
       return call("subagent", {
         role: "verifier",
-        task: { SLOW: "SLOW-VERIFY", SILENT: "SILENT", BUSY: "BUSY" }[tag.slice(6)] ?? "VERIFY",
+        task: { SLOW: "SLOW-VERIFY", SILENT: "SILENT", QUEUEDSILENT: "SILENT", BUSY: "BUSY" }[tag.slice(6)] ?? "VERIFY",
       });
     if (result === "PASS") return call("subagent", { role: "reviewer", task: "REVIEW" });
     if (result === "REVIEW-OK")
@@ -135,10 +193,11 @@ function route(request) {
   if (role === "verifier") {
     if (user === "SLOW-VERIFY" || user === "SILENT") return call("slow", {});
     if (user === "BUSY") return call("step", { n: 1 });
+    if (result === "process advanced") return finishSlow ? say("PASS") : call("slow", {});
     if (result.startsWith("step ")) return Number(result.slice(5)) < 12 ? call("step", { n: Number(result.slice(5)) + 1 }) : say("PASS");
     return say("PASS");
   }
-  return say(role === "reviewer" ? "REVIEW-OK" : "Scouted.");
+  return say(user === "LONG-SCOUT" ? longAnswer : role === "reviewer" ? "REVIEW-OK" : "Scouted.");
 }
 
 // ── Host tools standing in for the project's: a gate, a silent blocking "process", and a chatty step.
@@ -150,7 +209,11 @@ const prepareHeld = new Set(),
   prepareRuns = [];
 let gateOpen = false,
   gateEntered = false,
-  bootId = "boot-A";
+  bootId = "boot-A",
+  backgroundSilenceMs = null,
+  slowCycle = 0,
+  releasedSlowCycle = 0,
+  finishSlow = false;
 const TestTools = defineExtension({
   name: "test-tools",
   tools: [
@@ -171,8 +234,9 @@ const TestTools = defineExtension({
       parameters: Type.Object({}),
       execute: async (_args, api, callContext) => {
         processes.add(api.conversationId);
-        while (!callContext.abortSignal?.aborted) await delay(20);
-        return { output: [{ type: "text", text: "aborted" }] };
+        const cycle = ++slowCycle;
+        while (!callContext.abortSignal?.aborted && releasedSlowCycle < cycle) await delay(20);
+        return { output: [{ type: "text", text: callContext.abortSignal?.aborted ? "aborted" : "process advanced" }] };
       },
     }),
     defineTool({
@@ -209,13 +273,14 @@ async function open() {
       for (const id of ids) processes.delete(id);
     },
     prepare: async ({ agent }) => {
+      if (agent.title === "LONGPREPFAIL") throw new Error(longAnswer);
       prepareEntered.add(agent.title);
       const first = !prepareRuns.includes(agent.id);
       prepareRuns.push(agent.id);
       while (prepareHeld.has(agent.title) || (first && prepareFirstHeld.has(agent.title))) await delay(20);
     },
     approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
-    backgroundSilence: () => null,
+    backgroundSilence: () => backgroundSilenceMs,
     stallMinutes: () => 20,
   });
   const registry = createRegistry();
@@ -228,7 +293,9 @@ async function open() {
   );
   jobs.attach(harness);
   harness.resume();
-  const root = await harness.root(context, { agent: { model, instructions: "ROLE:coordinator", extensions: [jobs.coordinator] } });
+  const root = await harness.root(context, {
+    agent: { model, instructions: "ROLE:coordinator", extensions: [jobs.coordinator, TestTools] },
+  });
   return { harness, root, jobs, killed };
 }
 const until = async (check, what, ms = 20_000) => {
@@ -273,18 +340,20 @@ assert.equal(
   "projects.internal-input",
   "Ready reports carry machine provenance",
 );
-for (const part of [
-  "Candidate: " + sha,
-  "PR: 12",
-  "Summary: Built it",
-  "- verifier PASS",
-  "Review: REVIEW-OK",
-  "Not fixed: none",
-  "Gaps: none",
-  "Done.",
-  "Cost: ",
-])
-  assert.ok(report[0].includes(part), `report carries ${part}`);
+for (const part of ["Candidate: " + sha, "PR: 12", "Summary: Built it", "Gaps: none", "agents report"])
+  assert.ok(report[0].includes(part), `concise handback carries ${part}`);
+for (const part of ["verifier PASS", "REVIEW-OK", "Done.", "Worker's closing message:"])
+  assert.ok(!report[0].includes(part), `wakeup does not repeat detailed evidence or closing text: ${part}`);
+const workerCallsBeforeReport = requests.filter((item) => item.role === "worker").length;
+await say_(root, `Report ${job.id}`);
+await quiet(harness);
+const fullReady = requests.findLast((item) => item.role === "coordinator" && item.result.includes("verifier PASS"))?.result;
+for (const part of ["verifier PASS", "Review: REVIEW-OK", "Done.", "Cumulative time:", "Cumulative cost:", "Answer ref:"])
+  assert.ok(
+    fullReady?.includes(part),
+    `on-demand report retains ${part}: ${requests.filter((item) => item.role === "coordinator").at(-1)?.result}`,
+  );
+assert.equal(requests.filter((item) => item.role === "worker").length, workerCallsBeforeReport, "reading a report never wakes the worker");
 const snapshot = await jobs.snapshot(harness);
 assert.equal(snapshot.jobs[0].working, false);
 assert.equal(requests.filter((item) => item.role === "verifier").length, 1);
@@ -340,9 +409,11 @@ const before = (await chatText(root)).length;
 await say_(root, "Start BUSY");
 await until(() => requests.some((item) => item.role === "verifier" && item.user === "BUSY"), "busy verifier started");
 const T = 1_000_000_000;
-assert.deepEqual(await jobs.stallTick(harness, T), []);
+backgroundSilenceMs = 30 * 60_000;
+assert.deepEqual(await jobs.stallTick(harness, T), [], "a quiet service alone does not wake the coordinator");
 await delay(300);
-assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [], "the verifier made progress, so the worker is not stalled");
+assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [], "verifier progress wins over an old quiet service");
+backgroundSilenceMs = null;
 await quiet(harness);
 await say_(root, "Start SILENT");
 await until(() => processes.size === 1, "silent process started");
@@ -360,6 +431,22 @@ assert.equal(
   "stall notices carry machine provenance",
 );
 assert.ok((await chatText(root)).slice(before).every((line) => !line.includes(`[worker ${silent.id} ready`)));
+const stalledCalls = requests.filter((item) => item.role === "coordinator" && item.user.includes(`[worker ${silent.id} stalled`)).length;
+for (const minute of [77, 83, 90, 94, 99]) {
+  await jobs.steer(harness, silent.id, `New diagnostic instruction ${minute}`);
+  assert.deepEqual(await jobs.stallTick(harness, T + minute * 60_000), [], "a steer does not rearm the unchanged blocked execution");
+}
+await delay(100);
+assert.equal(
+  requests.filter((item) => item.role === "coordinator" && item.user.includes(`[worker ${silent.id} stalled`)).length,
+  stalledCalls,
+  "unchanged stalls do not invoke the coordinator again",
+);
+const previousCycle = slowCycle;
+releasedSlowCycle = previousCycle;
+await until(() => slowCycle > previousCycle, "verifier makes real progress and starts another bounded operation");
+assert.deepEqual(await jobs.stallTick(harness, T + 100 * 60_000), [], "real progress clears the old episode");
+assert.deepEqual(await jobs.stallTick(harness, T + 121 * 60_000), [silent.id], "a genuinely new stall is reported after recovery");
 
 // 5. Stop drains the worker and its verifier, kills the process, and reports nothing.
 await assert.rejects(async () => jobs.stop(harness, silent.id, " "), /reason/);
@@ -478,8 +565,13 @@ for (const name of ["BATCHREADYOLD", "BATCHREADYNEW"]) {
   const reports = (await chatText(root)).filter((line) => line.startsWith(`[worker ${batch.id} `));
   assert.equal(reports.length, 1, `${name}: one shared Ready report`);
   assert.match(reports[0], new RegExp(`^\\[worker ${batch.id} ready:`), `${name}: the latest full Ready report wins`);
-  for (const part of ["Summary: Shared Ready", "PR: 12", `Candidate: ${sha}`, "batch proof", "Review: REVIEW-OK"])
-    assert.ok(reports[0].includes(part), `${name}: full report carries ${part}`);
+  for (const part of ["Summary: Shared Ready", "PR: 12", `Candidate: ${sha}`, "agents report"])
+    assert.ok(reports[0].includes(part), `${name}: concise report carries ${part}`);
+  await say_(root, `Report ${batch.id}`);
+  await quiet(harness);
+  const details = requests.findLast((item) => item.role === "coordinator" && item.result.includes("batch proof"))?.result;
+  for (const part of ["batch proof", "Review: REVIEW-OK", "Shared Ready answer."])
+    assert.ok(details?.includes(part), `${name}: detailed report retains ${part}`);
   assert.notEqual((await harness.snapshot(Jobs, root.id, context)).agents[batch.id].endedAt, null);
 }
 
@@ -572,7 +664,124 @@ assert.equal(helper.status, "completed");
 assert.deepEqual(helper.workspace, { kind: "shared" }, "follow-ups preserve the selected workspace");
 const helperReports = (await chatText(root)).filter((line) => line.startsWith(`[worker ${helper.id} completed`));
 assert.equal(helperReports.length, 2, "each settled helper answer reports once");
-for (const part of ["shared", "Candidate: none", "Time:", "Cost:", "Helper changed files"]) assert.ok(helperReports[0].includes(part));
+for (const part of ["shared", "Candidate: none", "Cumulative time:", "Cumulative cost:", "Helper changed files"])
+  assert.ok(helperReports[0].includes(part));
+
+// Long notifications remain bounded previews; the exact full handback is read on demand, never lost.
+for (const [name, role, workspace, status] of [
+  ["LONGHELPER", "worker", { kind: "shared" }, "completed"],
+  ["LONGSCOUT", "scout", undefined, "answered"],
+  ["LONGPREPFAIL", "scout", undefined, "failed to start"],
+  ["LONGFAIL", "worker", undefined, "failed"],
+  ["LONGREADY", "worker", undefined, "ready-with-gaps"],
+  ["LONGCHECKPOINT", "worker", undefined, "checkpoint"],
+]) {
+  const started = await jobs.spawn(root, root.id, {
+    role,
+    title: name,
+    brief: role === "scout" ? "LONG-SCOUT" : `BRIEF-${name}`,
+    acceptance: ["return findings"],
+    ...(workspace ? { workspace } : {}),
+    requestId: name,
+  });
+  await quiet(harness);
+  const notification = (await chatText(root)).find((line) => line.startsWith(`[${role} ${started.id} ${status}:`));
+  assert.ok(notification, `${name}: actionable status arrives`);
+  assert.ok(notification.length < 2400, `${name}: notification has a fixed size bound`);
+  assert.match(notification, /Notification preview.*omitted/s, `${name}: omission is explicit, not authoritative evidence`);
+  assert.ok(notification.includes(`agents report id=${started.id}`));
+  const ref = /Report ref: (\d+)/.exec(notification)?.[1];
+  assert.ok(ref, `${name}: notification carries an immutable report reference`);
+  if (name === "LONGHELPER" || name === "LONGREADY") {
+    await jobs.steer(harness, started.id, name === "LONGHELPER" ? "Replace helper result" : "Replace Ready result");
+    await quiet(harness);
+  }
+  await say_(root, `Report ${started.id} ${ref}`);
+  await quiet(harness);
+  const details = requests.findLast((item) => item.role === "coordinator" && item.result.includes("END-OF-EXACT-ANSWER"))?.result;
+  assert.ok(details?.includes(longAnswer), `${name}: full exact evidence remains retrievable after later reports`);
+  if (name === "LONGREADY") {
+    assert.ok(details?.includes("long-proof"), "the old Ready proof survives replacement");
+    assert.ok(details?.includes("Owner must choose the final storage location"), "the old Ready gap survives replacement");
+    assert.ok(!details?.includes("new-proof"), "historical Ready evidence is not mixed with the latest delivery");
+  }
+}
+
+// A checkpoint ends a stage without delivery, failure, approval or automatic restart.
+await say_(root, "Start CHECKPOINT");
+await quiet(harness);
+const checkpoint = (await jobsOf(harness)).find((item) => item.title === "Job CHECKPOINT");
+assert.equal(checkpoint.status, "checkpoint", "held work is a checkpoint, not Ready or failed");
+assert.equal(checkpoint.ready, null);
+assert.ok(
+  liveAgentIds(await harness.snapshot(Jobs, root.id, context)).includes(checkpoint.id),
+  "checkpoint workspace stays owned even when the worker has stopped generating",
+);
+assert.equal(checkpoint.checkpoint.summary, "Media fix held for the owner's storage decision");
+assert.match((await jobs.approve(harness, checkpoint.id)).refused, /checkpoint.*not ready/);
+assert.equal((await chatText(root)).filter((line) => line.startsWith(`[worker ${checkpoint.id} checkpoint:`)).length, 1);
+const checkpointCalls = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-CHECKPOINT").length;
+await harness.close(context);
+({ harness, root, jobs, killed } = await open());
+await jobs.recover(harness);
+await jobs.pause(harness);
+await jobs.resume(harness);
+await quiet(harness);
+assert.equal(
+  requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-CHECKPOINT").length,
+  checkpointCalls,
+  "restart and project resume do not resume a checkpoint",
+);
+assert.equal((await jobsOf(harness)).find((item) => item.id === checkpoint.id).status, "checkpoint");
+await say_(root, `Report ${checkpoint.id}`);
+await quiet(harness);
+const checkpointDetails = requests.findLast(
+  (item) => item.role === "coordinator" && item.result.includes("artifact:worker/media-fix/CHECKPOINT.md"),
+)?.result;
+assert.ok(
+  checkpointDetails?.includes("Checkpoint details retained in my transcript."),
+  "checkpoint evidence and closing answer remain readable",
+);
+await jobs.steer(harness, checkpoint.id, "Continue checkpoint");
+await quiet(harness);
+const deliveredCheckpoint = (await jobsOf(harness)).find((item) => item.id === checkpoint.id);
+assert.equal(deliveredCheckpoint.status, "ready", "an explicit instruction resumes the same worker to delivery");
+assert.equal(deliveredCheckpoint.checkpoint, undefined, "a Ready delivery replaces the prior checkpoint");
+
+// A queued stall is obsolete once the worker returns a result, even while the coordinator is busy.
+await say_(root, "Start QUEUEDSILENT");
+const queuedWorker = await until(
+  async () => (await jobsOf(harness)).find((item) => item.title === "Job QUEUEDSILENT" && item.children.length),
+  "queued-stall verifier started",
+);
+await until(() => processes.size === 1, "queued-stall process started");
+gateOpen = false;
+gateEntered = false;
+const heldOwner = await root.submit({ type: "input", content: "Hold owner response" }, context);
+await until(() => gateEntered, "coordinator busy awaiting owner response");
+assert.deepEqual(await jobs.stallTick(harness, T + 200 * 60_000), []);
+assert.deepEqual(await jobs.stallTick(harness, T + 221 * 60_000), [queuedWorker.id]);
+finishSlow = true;
+releasedSlowCycle = slowCycle;
+await until(
+  async () => (await jobsOf(harness)).find((item) => item.id === queuedWorker.id)?.status === "ready",
+  "worker produces an actionable result while the coordinator is busy",
+);
+await delay(100);
+const obsolete = await harness.commit((tx) => tx.submissionByRequest(root.id, `stall:${queuedWorker.id}:1`), context);
+assert.equal(obsolete.status, "unanswered", "completion retracts a still-queued obsolete stall");
+gateOpen = true;
+await heldOwner.wait(context);
+await quiet(harness);
+assert.ok(
+  !requests.some((item) => item.role === "coordinator" && item.user.includes(`[worker ${queuedWorker.id} stalled`)),
+  "obsolete stall never reaches a model request",
+);
+assert.equal(
+  (await chatText(root)).filter((line) => line.startsWith(`[worker ${queuedWorker.id} ready:`)).length,
+  1,
+  "the actual result still reaches the coordinator exactly once",
+);
 
 // 9. A running Job whose idle worker never reported is flagged once it has been quiet past the limit.
 const rootId = (await harness.root(context)).id;

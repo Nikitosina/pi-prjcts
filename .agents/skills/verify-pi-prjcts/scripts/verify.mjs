@@ -657,19 +657,23 @@ const journeys = {
     await page.click("#compose button[type=submit]");
     record("action", `pointer-clicked Send with ${JSON.stringify(prompt)}`);
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
-    // The Job appears in the sidebar tree and its Ready report arrives as a regular chat message.
     await page.waitFor(`document.querySelector('#job-tree .job')?.innerText.includes('VERIFY-JOB')`, "Job in the Workers card", 60000);
     await page.shot(dir, "01-job-in-tree");
-    await page.waitFor(`!!document.querySelector('#messages .job-msg[data-status="ready"]')`, "Ready message", 90000);
-    await page.waitFor(`!!document.querySelector('#messages [data-action="job-approve"]')`, "Approve button on the Ready message");
-    const ready = await page.evaluate(
-      `({ card: !!document.querySelector('#messages details.report'), message: document.querySelector('#messages .job-msg[data-status="ready"]').innerText, tree: document.querySelector('#job-tree').innerText })`,
+    await page.waitFor(`!!document.querySelector('#job-tree .job[data-status="ready"]')`, "Ready task", 90000);
+    if (await page.evaluate(`!!document.querySelector('#messages .job-msg, #messages .event-card')`))
+      throw Error("Internal report leaked into coordinator chat");
+    await page.click('#job-tree [data-action="thread"]');
+    await page.waitFor(
+      `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
+      "worker details",
     );
-    if (ready.card || !/2\/2/.test(ready.tree)) throw Error(`Ready message or tree wrong: ${JSON.stringify(ready)}`);
-    await page.evaluate(`document.querySelector('#messages [data-action="job-approve"]').scrollIntoView({ block: "end" })`);
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await page.waitFor(`!!document.querySelector('#inline-thread [data-action="job-approve"]')`, "Approve in Ready task details");
+    const ready = await page.evaluate(
+      `({ tree: document.querySelector('#job-tree').innerText, details: document.querySelector('#inline-thread').innerText })`,
+    );
+    if (!/2\/2/.test(ready.tree) || !ready.details.includes("Proof")) throw Error(`Ready details or tree wrong: ${JSON.stringify(ready)}`);
     await page.shot(dir, "02-ready-with-approve");
-    record("visible", "a regular Ready message with an Approve button; the Job row shows ready and plan progress 2/2");
+    record("visible", "coordinator conversation contains no internal report; Ready task details retain proof and Approve");
     const jobs = await rpc(run, { action: "jobs-snapshot", id: run.projectId });
     writeFileSync(join(dir, "host-jobs-snapshot.json"), JSON.stringify(jobs, null, 2));
     if (jobs.jobs.length !== 1 || jobs.jobs[0].status !== "ready" || jobs.jobs[0].pr !== "12")
@@ -677,10 +681,10 @@ const journeys = {
     record("side-effect", `jobs-snapshot lists one ${jobs.jobs[0].status} Job with PR ${jobs.jobs[0].pr}`);
     // Approve is a real host call; the private host has no GitHub, so the outcome line says why it did not merge.
     const seen = { errors: sinks.errors.length, http: sinks.httpErrors.length };
-    await page.click('#messages [data-action="job-approve"]');
-    await page.waitFor(`!!document.querySelector('#messages .job-outcome, #error:not([hidden])')`, "Approve outcome", 60000);
+    await page.click('#inline-thread [data-action="job-approve"]');
+    await page.waitFor(`!!document.querySelector('#inline-thread .job-outcome, #error:not([hidden])')`, "Approve outcome", 60000);
     const outcome = await page.evaluate(
-      `document.querySelector('#messages .job-outcome')?.innerText ?? document.querySelector('#error')?.innerText ?? ''`,
+      `document.querySelector('#inline-thread .job-outcome')?.innerText ?? document.querySelector('#error')?.innerText ?? ''`,
     );
     await page.shot(dir, "02b-approve-outcome");
     // The host answers the failed gh call with a 400; that is the expected result here, not a browser problem.
@@ -688,6 +692,8 @@ const journeys = {
     sinks.httpErrors.length = seen.http;
     writeFileSync(join(dir, "approve-outcome.txt"), outcome);
     record("visible", `after clicking Approve: ${JSON.stringify(outcome.slice(0, 160))}`);
+    await page.click('[data-action="thread-close"]');
+    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to chat");
     // Expand the Job: its worker node shows status, plan progress and ETA.
     await page.click("#job-tree .job-toggle");
     await page.waitFor(`!!document.querySelector('#job-tree .job-children [data-action="thread"]')`, "expanded Job");
@@ -703,6 +709,37 @@ const journeys = {
     record("visible", "opening the worker node shows its transcript");
     await page.click('[data-action="thread-close"]');
     await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to the chat");
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: "VERIFY-CHECKPOINT stop at the decision boundary" });
+    await page.click("#compose button[type=submit]");
+    await page.waitFor(`!!document.querySelector('#job-tree .job[data-status="checkpoint"]')`, "independent checkpoint", 12000);
+    await page.waitFor(
+      `document.querySelector('#messages').innerText.includes('The intermediate result needs your decision.')`,
+      "concise checkpoint reply",
+    );
+    if (
+      await page.evaluate(
+        `!!document.querySelector('#messages .job-msg, #messages .event-card') || document.querySelector('#messages').innerText.includes('VERIFY-FAKE-REPLY: [worker')`,
+      )
+    )
+      throw Error("Checkpoint internals leaked into owner conversation");
+    await page.shot(dir, "04e-clean-checkpoint-conversation");
+    await page.click('#job-tree .job[data-status="checkpoint"] [data-action="thread"]');
+    await page.waitFor(
+      `document.querySelector('#inline-thread').innerText.includes('Intermediate checkpoint') && document.querySelector('#inline-thread').innerText.includes('checkpoint-evidence')`,
+      "checkpoint evidence in details",
+    );
+    if (await page.evaluate(`!!document.querySelector('#inline-thread [data-action="job-approve"]')`))
+      throw Error("Checkpoint offers approval");
+    const held = await rpc(run, { action: "jobs-snapshot", id: run.projectId });
+    writeFileSync(join(dir, "host-checkpoint-snapshot.json"), JSON.stringify(held, null, 2));
+    const checkpoint = held.jobs.find((job) => job.status === "checkpoint");
+    if (checkpoint?.ready || !checkpoint?.checkpoint?.proof.includes("checkpoint-evidence"))
+      throw Error("Host checkpoint state differs from UI");
+    await page.shot(dir, "04f-checkpoint-evidence-no-approve");
+    record("verified", "real independent worker checkpoint retains evidence, has no Approve, and generates a concise coordinator reply");
+    await page.click('[data-action="thread-close"]');
+    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "checkpoint details closed");
     // A second chat opens a second tab; its Workers card is empty while the first chat keeps the Job.
     await page.click('[data-action="chat-new"]');
     await page.waitFor(

@@ -1,6 +1,7 @@
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, EntryId, Storage } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 
 /**
  * Reads a conversation's entries for display: newest page first, bounded text, images by reference.
@@ -19,6 +20,7 @@ export type RawEntry = {
   id: number;
   kind: string;
   origin?: "owner" | "internal";
+  data?: unknown;
   model?: readonly { role: string; content?: unknown; timestamp?: number; toolCallId?: string; toolName?: string; isError?: boolean }[];
   head?: number;
 };
@@ -162,8 +164,30 @@ function inputOrigin(entry: RawEntry): RawEntry["origin"] {
   return entry.origin;
 }
 
+const ReportData = Type.Object({ text: Type.String(), at: Type.Optional(Type.Number({ minimum: 0 })) });
+const reportData = (entry: RawEntry) =>
+  entry.kind === "projects.agent-report" && Value.Check(ReportData, entry.data) ? entry.data : undefined;
+
 /** Items of one entry in display order. Calls come out right after their assistant text. */
 function entryItems(entry: RawEntry, display?: PageOptions["display"]): TranscriptItem[] {
+  const report = reportData(entry);
+  if (report) {
+    const text = preview(report.text, TEXT_PREVIEW_CHARS);
+    return [
+      {
+        kind: "message",
+        entryId: entry.id,
+        role: "user",
+        origin: "internal",
+        at: report.at ?? 0,
+        text: text.text,
+        textChars: text.total,
+        truncated: text.truncated,
+        ref: `${entry.id}.0`,
+        images: [],
+      },
+    ];
+  }
   if (entry.kind === "pi.compaction")
     return [
       {
@@ -332,9 +356,10 @@ export async function readTranscriptText(
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > READ_TEXT_MAX)
     throw new Error("Invalid text range");
   const entry = await source.entry(conversationId, entryId),
-    target = entry?.model?.[message];
-  if (!entry || !target) throw new Error("Transcript entry not found");
-  const chars = [...joinText(parts(target.content))],
+    target = entry?.model?.[message],
+    report = entry && message === 0 ? reportData(entry) : undefined;
+  if (!entry || (!target && !report)) throw new Error("Transcript entry not found");
+  const chars = [...(report ? report.text : joinText(parts(target?.content)))],
     end = Math.min(chars.length, offset + limit);
   return { text: chars.slice(offset, end).join(""), offset, nextOffset: end < chars.length ? end : null, totalChars: chars.length };
 }

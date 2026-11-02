@@ -370,50 +370,11 @@ try {
   await shot("01-coordinator", s);
 
   // Conversation
-  const reports = await evaluate(
-    `[...document.querySelectorAll('#messages .job-msg')].map(n => ({ text: n.innerText, thread: n.dataset.job }))`,
-    s,
-  );
+  if (await evaluate(`!!document.querySelector('#messages .job-msg, #messages .event-card, #messages .tool-call')`, s))
+    throw Error("Internal reports or tools leaked into coordinator conversation");
   const youText = await evaluate(`[...document.querySelectorAll('#messages .msg.you')].map(n => n.innerText).join('\\n')`, s);
-  if (
-    reports.length !== 2 ||
-    /\\[(worker|scout) [0-9a-f-]{36}/.test(youText) ||
-    /Summarize the result for the user/.test(await evaluate(`document.querySelector('#messages').innerText`, s))
-  )
-    throw Error("Report not rendered as a card: " + JSON.stringify({ reports, youText: youText.slice(0, 400) }));
-  const scoutCard = reports.find((r) => r.text.includes("MARK-SCOUTTASK"));
-  if (
-    !/scout answered/i.test(scoutCard?.text) ||
-    scoutCard.thread !== scout.threadId ||
-    !reports.some((r) => /worker failed/i.test(r.text))
-  )
-    throw Error("Report card header/link wrong: " + JSON.stringify(reports));
-  result.checks.push("C1 agent report renders as a regular message linked to its thread, no raw UUID header or coordinator instructions");
-  await waitFor(
-    `document.querySelector('#messages .job-msg').innerText.includes('REPORT-BODY') && !!document.querySelector('#messages .job-msg strong')`,
-    s,
-    "report shows its markdown result",
-  );
-  result.checks.push("C2 the report message shows the markdown-rendered result");
   if (!/MARK-FAKE/.test(youText)) throw Error("Look-alike user message vanished");
-  result.checks.push("C3 a message that only looks like a report stays a plain user message");
-  const tools = await evaluate(
-    `[...document.querySelectorAll('#messages .tool-call')].map(n => ({ label: n.querySelector('summary').innerText, status: n.dataset.status }))`,
-    s,
-  );
-  const delegate = tools.find((t) => t.label.includes("MARK-SCOUTTASK"));
-  if (!delegate || !/started a scout/i.test(delegate.label) || /agents/.test(delegate.label))
-    throw Error("Delegate tool call not humanised: " + JSON.stringify(tools));
-  const bad = tools.find((t) => t.status === "error");
-  if (
-    !bad ||
-    (await evaluate(
-      `getComputedStyle(document.querySelector('#messages .tool-call[data-status="error"]')).color === getComputedStyle(document.querySelector('#messages .tool-call[data-status="ok"]')).color`,
-      s,
-    ))
-  )
-    throw Error("Errored tool call indistinguishable: " + JSON.stringify(tools));
-  result.checks.push('C4 tool calls are one-line human labels ("Started a scout: …"); errors look different');
+  result.checks.push("C1-C4 coordinator conversation keeps owner text and hides internal report/tool diagnostics");
   const stamps = await evaluate(`[...document.querySelectorAll('#messages .who small')].map(n => n.innerText)`, s);
   if (!stamps.length || stamps.some((t) => /[A-Z][a-z]{2} \\d/.test(t))) throw Error("Today timestamps still carry a date: " + stamps);
   result.checks.push("C5 messages from today show time only");
@@ -462,7 +423,7 @@ try {
   if (!rail.includes("MARK-FAILTASK") || !rail.includes("MARK-HOLDTASK") || /work items/.test(rail))
     throw Error("Jobs tree content wrong: " + JSON.stringify(rail));
   result.checks.push('R2 the Jobs tree lists the failed and the running Job; no "work items" grammar');
-  await evaluate(`document.querySelector('#messages .job-msg[data-status="answered"] [data-action="thread"]').click()`, s);
+  await evaluate(`document.querySelector('#job-tree [data-action="thread"][data-thread="${scout.threadId}"]').click()`, s);
   await waitFor(
     `!document.querySelector('#inline-thread').hidden && document.querySelector('#inline-thread').innerText.includes('REPORT-BODY')`,
     s,
@@ -474,8 +435,15 @@ try {
   );
   if (Object.values(opened).some((value) => value !== true)) throw Error("Worker view incomplete: " + JSON.stringify(opened));
   result.checks.push(
-    "R3 clicking a report's transcript link opens its agent view (deep link, Back, Steer, composer, artifacts) in place of the chat",
+    "R3 opening an agent from the Workers card opens its agent view (deep link, Back, Steer, composer, artifacts) in place of the chat",
   );
+  // Round 2
+  const list = await evaluate(
+    `(() => { const ol = [...document.querySelectorAll('#worker-messages .msg ol')]; return ol.map(n => n.children.length); })()`,
+    s,
+  );
+  if (!list.includes(3)) throw Error("Blank-line separated numbered list split: " + JSON.stringify(list));
+  result.checks.push("M1 numbered list with blank lines stays one list");
   await shot("02-worker-view", s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
@@ -485,13 +453,6 @@ try {
     "Escape returns to the chat",
   );
   result.checks.push("R3b Escape returns to the coordinator chat and drops ?worker");
-  // Round 2
-  const list = await evaluate(
-    `(() => { const ol = [...document.querySelectorAll('#messages .job-msg ol')]; return ol.map(n => n.children.length); })()`,
-    s,
-  );
-  if (!list.includes(3)) throw Error("Blank-line separated numbered list split: " + JSON.stringify(list));
-  result.checks.push("M1 numbered list with blank lines stays one list");
   await evaluate(`document.querySelector('#job-tree .job-open').click()`, s);
   await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, "worker view");
   const panes = await evaluate(

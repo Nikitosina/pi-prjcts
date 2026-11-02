@@ -45,6 +45,12 @@ export type PlanStep = {
   startedAt: number | null;
   doneAt: number | null;
 };
+export type CheckpointReport = {
+  summary: string;
+  proof: string[];
+  gaps: string[];
+  at: number;
+};
 export type ReadyReport = {
   summary: string;
   proof: string[];
@@ -85,13 +91,21 @@ export type Job = JobFacts &
   (
     | {
         workspace?: null;
-        status: "running" | "ready" | "ready-with-gaps" | "failed" | "stopped" | "approved";
+        status: "running" | "checkpoint" | "ready" | "ready-with-gaps" | "failed" | "stopped" | "approved";
+        checkpoint?: CheckpointReport;
         pr: string | null;
         ready: ReadyReport | null;
         /** The finished state a follow-up interrupted; restored when the worker answers without a new Ready report. */
         resume: { status: "ready" | "ready-with-gaps"; ready: ReadyReport; endedAt: number | null } | null;
       }
-    | { workspace: TaskWorkspace; status: "running" | "completed" | "failed" | "stopped"; pr: null; ready: null; resume: null }
+    | {
+        workspace: TaskWorkspace;
+        status: "running" | "completed" | "failed" | "stopped";
+        pr: null;
+        ready: null;
+        resume: null;
+        checkpoint?: null;
+      }
   );
 /** An agent the coordinator spawned: a Job's worker, or a scout or reviewer answering one brief. */
 export type Agent = {
@@ -153,10 +167,14 @@ const uuidOf = (seed: string): string => {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 };
 const minutes = (ms: number) => (ms < 90_000 ? `${Math.max(0, Math.round(ms / 1000))}s` : `${Math.round(ms / 60_000)}m`);
-/** Ids of agents still working or waiting on an answer; their worktrees, leases and processes are in use. */
+/** Agents whose workspaces stay owned, including undismissed checkpoints that are not generating. */
 export const liveAgentIds = (doc: Readonly<JobsState>, readOnly?: boolean): string[] =>
   Object.values(doc.agents)
-    .filter((agent) => agent.endedAt === null && (readOnly === undefined || (agent.role !== "worker") === readOnly))
+    .filter((agent) => {
+      const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+      const retained = job?.status === "checkpoint" && !job.dismissedAt;
+      return (agent.endedAt === null || retained) && (readOnly === undefined || (agent.role !== "worker") === readOnly);
+    })
     .map((agent) => agent.id);
 /** A chat lends its shared workspace until the borrowing agent actually settles. */
 export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, exceptAgentId?: string): Agent | undefined =>
@@ -196,22 +214,51 @@ export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: nu
   };
 }
 
-/** The Ready report the coordinator receives in full, followed by the worker's own closing message. */
-export function readyText(job: Job, answer: string, cost?: number | null): string {
+const reportList = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
+const notificationPreview = (report: string, agentId: string, ref: EntryId): string => {
+  const pointer = `Report ref: ${ref}; read agents report id=${agentId} ref=${ref}.`;
+  return report.length <= 2200
+    ? `${report}\n${pointer}`
+    : `${report.slice(0, 1800)}\n\n[Notification preview: ${report.length - 1800} characters omitted. Read the full report before acceptance.]\n${pointer}`;
+};
+
+const jobReportDetails = (job: Job, answer: string, cost: number | null, answerId?: EntryId): string => {
+  const ready = job.ready;
+  const checkpoint = job.checkpoint;
+  return [
+    `[worker ${job.id} ${job.status}: ${job.title}]`,
+    `PR: ${job.pr ?? "none"}${job.branch ? ` (branch ${job.branch})` : ""}`,
+    `Candidate: ${job.candidate ?? "none"}`,
+    ...(ready
+      ? [
+          `Summary: ${ready.summary}`,
+          `Proof:${reportList(ready.proof)}`,
+          `Review: ${ready.review || "none"}`,
+          `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
+          `Gaps:${reportList(ready.gaps)}`,
+        ]
+      : []),
+    ...(checkpoint
+      ? [`Checkpoint: ${checkpoint.summary}`, `Proof:${reportList(checkpoint.proof)}`, `Gaps:${reportList(checkpoint.gaps)}`]
+      : []),
+    `Cumulative time: ${minutes((job.endedAt ?? ready?.at ?? checkpoint?.at ?? job.createdAt) - job.createdAt)}`,
+    `Cumulative cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
+    `Answer ref: ${answerId === undefined ? "none" : `${job.workerConversation}/${answerId}.0`}`,
+    ...(answer ? ["", answer] : []),
+  ].join("\n");
+};
+
+/** Wake with decision-relevant facts; evidence and the closing answer are read on demand. */
+export function readyText(job: Job): string {
   const ready = job.ready!;
-  const list = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
   return [
     `[worker ${job.id} ${job.status}: ${job.title}]`,
     `PR: ${job.pr ?? "none"}${job.branch ? ` (branch ${job.branch})` : ""}`,
     `Candidate: ${job.candidate ?? "none"}`,
     `Summary: ${ready.summary}`,
-    `Proof:${list(ready.proof)}`,
-    `Review: ${ready.review || "none"}`,
-    `Not fixed:${ready.notFixed.length ? ready.notFixed.map((item) => `\n- ${item.text} (${item.reason})`).join("") : " none"}`,
-    `Gaps:${list(ready.gaps)}`,
-    `Time: ${minutes((job.endedAt ?? ready.at) - job.createdAt)}`,
-    `Cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
-    ...(answer.trim() ? ["", `Worker's closing message:`, answer.trim()] : []),
+    `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
+    `Gaps:${reportList(ready.gaps)}`,
+    `Details: agents report id=${job.id}; full evidence and closing answer remain in the worker transcript.`,
   ].join("\n");
 }
 
@@ -272,8 +319,8 @@ type Delivery = {
 type DeliveryState =
   | { phase: "prepare" }
   | { phase: "deliver"; attempt: number; checked?: boolean; boot?: string; note?: string }
-  | { phase: "settle"; report?: string }
-  | { phase: "report"; report?: string; waits?: number };
+  | { phase: "settle"; report?: string; details?: string; reportRef?: EntryId }
+  | { phase: "report"; report?: string; details?: string; reportRef?: EntryId; waits?: number };
 
 const textOfAnswer = (entry: { model?: readonly unknown[] } | undefined): string => {
   const message = entry?.model?.[0] as { content?: { type: string; text?: string }[] } | undefined;
@@ -309,8 +356,8 @@ async function treeCost(
   return total;
 }
 
-/** Prepares an agent, delivers one message to it and reports its answer to the chat in full, once. */
-const reporterTask = (host: JobsHost) =>
+/** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
+const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) => Promise<void>) =>
   defineTask<Delivery, DeliveryState, null>({
     name: "projects.agent-reporter",
     version: 1,
@@ -427,7 +474,8 @@ const reporterTask = (host: JobsHost) =>
         const cost =
           settled.status === "unanswered" ? null : await treeCost(runtime, [conversationId, ...tree.map((child) => child.id)], taskContext);
         await runtime.commit(async (tx) => {
-          const next = (report?: string) => ({ status: "running", checkpoint: { phase: "report", report } }) as const;
+          const next = (report?: string, details?: string) =>
+            ({ status: "running", checkpoint: { phase: "report", report, details } }) as const;
           const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
           const record = state.agents[agentId];
           if (!record) return next();
@@ -497,19 +545,29 @@ const reporterTask = (host: JobsHost) =>
                 `Cwd: ${configured.cwd ?? "unknown"}`,
                 `Branch: ${job.branch ?? "unknown"}`,
                 `Candidate: ${job.candidate ?? "none"}`,
-                `Time: ${minutes(now - job.createdAt)}`,
-                `Cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
+                `Cumulative time: ${minutes(now - job.createdAt)}`,
+                `Cumulative cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
                 "",
                 reason ?? answer.trim(),
               ].join("\n"),
             );
           }
+          if (job.status === "checkpoint" && job.checkpoint)
+            return next(
+              [
+                `[worker ${job.id} checkpoint: ${job.title}]`,
+                `Summary: ${job.checkpoint.summary}`,
+                `Gaps:${reportList(job.checkpoint.gaps)}`,
+                `Details: agents report id=${job.id}; this is not delivery or owner-testing readiness. Resume only with a new instruction.`,
+              ].join("\n"),
+              jobReportDetails(job, answer, cost, settled.answer),
+            );
           if (isLive(job.status)) {
             Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });
             return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
           }
           if (job.status === "failed") return next();
-          return next(readyText(job, answer, cost));
+          return next(readyText(job), jobReportDetails(job, answer, cost, settled.answer));
         }, taskContext);
       },
       settle: async (reporter, runtime, taskContext) => {
@@ -522,23 +580,38 @@ const reporterTask = (host: JobsHost) =>
           if (agent && job?.workspace && job.status !== "running" && job.status !== "stopped") agent.endedAt = Date.now();
           return {
             status: "running",
-            checkpoint: { phase: "report", report: job?.status === "stopped" ? undefined : reporter.state.checkpoint.report },
+            checkpoint: {
+              ...reporter.state.checkpoint,
+              phase: "report",
+              report: job?.status === "stopped" ? undefined : reporter.state.checkpoint.report,
+            },
           } as const;
         }, taskContext);
       },
       report: async (reporter, runtime, taskContext) => {
-        const { report, waits = 0 } = reporter.state.checkpoint;
+        const { report, details, reportRef, waits = 0 } = reporter.state.checkpoint;
         // A paused project runs no coordinator turns; the report waits for the resume.
         if (report !== undefined && (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.paused) {
-          await runtime.sleepUntil(runtime.now() + 2000, { phase: "report", report, waits: waits + 1 }, taskContext);
+          await runtime.sleepUntil(runtime.now() + 2000, { ...reporter.state.checkpoint, waits: waits + 1 }, taskContext);
           return;
         }
-        if (report !== undefined) {
+        if (report !== undefined && reportRef === undefined) {
+          await runtime.commit(async (tx) => {
+            const entry = await tx.appendEntry(reporter.input.conversationId, {
+              kind: "projects.agent-report",
+              data: { text: details ?? report, at: runtime.now() },
+            });
+            return { status: "running", checkpoint: { phase: "report", report, reportRef: entry.id } } as const;
+          }, taskContext);
+          return;
+        }
+        if (report !== undefined && reportRef !== undefined) {
+          await discardSettledStalls(reporter.input.agentId);
           const chat = await runtime.conversation(reporter.input.chat, taskContext);
           await chat?.submit(
             {
               type: "input",
-              content: report,
+              content: notificationPreview(report, reporter.input.agentId, reportRef),
               entry: { kind: "projects.internal-input" },
               whenBusy: "followUp",
               requestId: `report:${reporter.id}`,
@@ -588,7 +661,25 @@ export type SpawnArgs = {
 };
 
 export function createJobs(host: JobsHost) {
-  const Reporter = reporterTask(host);
+  const discardQueuedStalls = async (harness: Harness, job: Pick<Job, "id" | "chat" | "stalls">) => {
+    for (let end = job.stalls; end > 0; end -= 100) {
+      const pending = await harness.commit(async (tx) => {
+        const found = [];
+        for (let episode = Math.max(1, end - 99); episode <= end; episode++) {
+          const notice = await tx.submissionByRequest(job.chat, `stall:${job.id}:${episode}`);
+          if (notice?.status === "queued") found.push(notice.id);
+        }
+        return found;
+      }, context);
+      // A notice placed since the read belongs to the coordinator; abortSubmission leaves it intact.
+      for (const id of pending) await harness.abortSubmission(id, context, job.chat);
+    }
+  };
+  const Reporter = reporterTask(host, async (agentId) => {
+    if (!bound) return;
+    const job = (await bound.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.jobs[agentId];
+    if (job && !isLive(job.status)) await discardQueuedStalls(bound, job);
+  });
   const clock = () => host.now?.() ?? Date.now();
 
   const working = async (reader: Pick<Session, "snapshot">, id: ConversationId) =>
@@ -723,8 +814,8 @@ export function createJobs(host: JobsHost) {
     name: "agents",
     description:
       "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. " +
-      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
-      "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Every answer arrives in full in this chat as a message.",
+      "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
+      "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Ready reports arrive as concise handbacks; read report for detailed evidence.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("spawn"),
@@ -733,6 +824,7 @@ export function createJobs(host: JobsHost) {
         Type.Literal("status"),
         Type.Literal("wait"),
         Type.Literal("dismiss"),
+        Type.Literal("report"),
       ]),
       role: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")])),
       brief: Type.Optional(Type.String()),
@@ -742,6 +834,13 @@ export function createJobs(host: JobsHost) {
       branch: Type.Optional(Type.String()),
       scopeId: Type.Optional(Type.String()),
       readRef: Type.Optional(Type.String()),
+      ref: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: Number.MAX_SAFE_INTEGER,
+          description: "Immutable report entry ref from a notification; omit for latest facts and answer.",
+        }),
+      ),
       requestId: Type.Optional(Type.String()),
       id: Type.Optional(Type.String()),
       message: Type.Optional(Type.String()),
@@ -780,6 +879,61 @@ export function createJobs(host: JobsHost) {
       }
       const agent = id && Object.hasOwn(state.agents, id) ? state.agents[id] : undefined;
       if (action !== "spawn" && !agent) return reply(`No agent ${id ?? ""}.`);
+      if (action === "report") {
+        const record = agent!;
+        const job = record.jobId ? state.jobs[record.jobId] : undefined;
+        if (args.ref !== undefined) {
+          const conversation = await bound?.conversation(record.conversationId, callContext);
+          if (!conversation) return reply("Report storage is not attached to this host.");
+          const ref = args.ref as EntryId;
+          const entry = (await conversation.entries({ minEntryId: ref, maxEntryId: ref }, 1, undefined, callContext)).items[0];
+          const data = entry?.data;
+          if (
+            entry?.kind !== "projects.agent-report" ||
+            !data ||
+            typeof data !== "object" ||
+            Array.isArray(data) ||
+            typeof data.text !== "string"
+          )
+            return reply(`No report ${args.ref} for agent ${record.id}.`);
+          return reply(data.text);
+        }
+        const answerId = record.reported.at(-1);
+        const conversation = await bound?.conversation(record.conversationId, callContext);
+        const answer =
+          answerId === undefined || !conversation
+            ? ""
+            : textOfAnswer(
+                (await conversation.entries({ minEntryId: answerId, maxEntryId: answerId }, 1, undefined, callContext)).items[0],
+              );
+        const cost = await treeCost(api, [record.conversationId, ...(job?.children.map((child) => child.id) ?? [])], callContext);
+        const ready = job?.ready;
+        const checkpoint = job?.checkpoint;
+        return reply(
+          [
+            `[${record.role} ${record.id} ${job?.status ?? "answered"}: ${record.title}]`,
+            ...(job
+              ? [`PR: ${job.pr ?? "none"}`, `Candidate: ${job.candidate ?? "none"}`, ...(job.reason ? [`Reason: ${job.reason}`] : [])]
+              : []),
+            ...(ready
+              ? [
+                  `Summary: ${ready.summary}`,
+                  `Proof:${reportList(ready.proof)}`,
+                  `Review: ${ready.review || "none"}`,
+                  `Not fixed:${reportList(ready.notFixed.map((item) => `${item.text} (${item.reason})`))}`,
+                  `Gaps:${reportList(ready.gaps)}`,
+                ]
+              : []),
+            ...(checkpoint
+              ? [`Checkpoint: ${checkpoint.summary}`, `Proof:${reportList(checkpoint.proof)}`, `Gaps:${reportList(checkpoint.gaps)}`]
+              : []),
+            `Cumulative time: ${minutes((record.endedAt ?? clock()) - record.createdAt)}`,
+            `Cumulative cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
+            `Answer ref: ${answerId === undefined ? "none" : `${record.conversationId}/${answerId}.0`}`,
+            ...(answer ? ["", answer] : []),
+          ].join("\n"),
+        );
+      }
       if (action === "wait") {
         const until = clock() + Math.min(Math.max(args.timeoutSec ?? 60, 1), 900) * 1000;
         while (clock() < until && (await working(api, agent!.conversationId))) await sleep(100);
@@ -817,7 +971,7 @@ export function createJobs(host: JobsHost) {
     name: "job",
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
-      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps.",
+      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps. checkpoint: end an independent Job's current stage with a concise summary, proof and gaps when delivery is not ready; preserve its workspace and wait for a new instruction, without Ready or approval.",
     parameters: objectUnion([
       Type.Object({
         action: Type.Literal("plan"),
@@ -830,6 +984,12 @@ export function createJobs(host: JobsHost) {
         ),
       }),
       Type.Object({ action: Type.Literal("candidate"), sha, branch: Type.Optional(Type.String()), pr: Type.Optional(Type.String()) }),
+      Type.Object({
+        action: Type.Literal("checkpoint"),
+        summary: Type.String({ minLength: 1, maxLength: 2000 }),
+        proof: Type.Optional(Type.Array(Type.String())),
+        gaps: Type.Optional(Type.Array(Type.String())),
+      }),
       Type.Object({
         action: Type.Literal("ready"),
         summary: Type.String(),
@@ -859,8 +1019,20 @@ export function createJobs(host: JobsHost) {
           const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
           const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
           if (!job) return "This tool belongs to a worker's Job.";
-          if (!isLive(job.status) && job.status !== "ready" && job.status !== "ready-with-gaps") return `The Job is ${job.status}.`;
+          if (!isLive(job.status) && job.status !== "ready" && job.status !== "ready-with-gaps" && job.status !== "checkpoint")
+            return `The Job is ${job.status}.`;
           const now = clock();
+          if (args.action === "checkpoint") {
+            if (job.workspace) return "Task helpers return their answer normally; checkpoint is only for independent Jobs.";
+            if (!args.summary.trim()) return "checkpoint needs a summary.";
+            job.checkpoint = { summary: args.summary.trim(), proof: args.proof ?? [], gaps: args.gaps ?? [], at: now };
+            job.status = "checkpoint";
+            job.ready = null;
+            job.resume = null;
+            job.endedAt = now;
+            job.stalledAt = null;
+            return "Checkpoint recorded. End your turn with a short acknowledgment; details are retained for the Coordinator. This is not Ready.";
+          }
           if (args.action === "plan") {
             const before = new Map(job.plan.map((step) => [step.title, step]));
             job.plan = args.steps.map((step) => {
@@ -903,6 +1075,7 @@ export function createJobs(host: JobsHost) {
           job.branch = args.branch ?? job.branch;
           job.candidate = args.candidate ?? job.candidate;
           job.status = gaps.length ? "ready-with-gaps" : "ready";
+          delete job.checkpoint;
           job.resume = null;
           job.endedAt = now;
           job.stalledAt = null;
@@ -986,7 +1159,6 @@ export function createJobs(host: JobsHost) {
         job.ready = null;
         job.endedAt = null;
         job.reason = null;
-        job.stalledAt = null;
       }
       // An explicit retry adopts current role settings; steering a running agent keeps its model and frozen prompt.
       if (agent.endedAt !== null) {
@@ -1282,10 +1454,13 @@ export function createJobs(host: JobsHost) {
       else if (running && silent >= limit) problem = `no progress for ${minutes(silent)}`;
       else if (running && tail.length === REPEATS && tail.every((call) => call.key === tail[0]!.key))
         problem = `the same tool call returned the same result ${REPEATS} times`;
-      else if (background !== null && background >= limit) problem = `a background process printed nothing for ${minutes(background)}`;
+      else if (background !== null && background >= limit && silent >= limit)
+        problem = `no worker progress while a background process printed nothing for ${minutes(background)}`;
       if (!problem) {
-        if (job.stalledAt !== null)
+        if (job.stalledAt !== null) {
+          await discardQueuedStalls(harness, job);
           await harness.commit(async (tx) => void ((await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[job.id]!.stalledAt = null), context);
+        }
         continue;
       }
       if (job.stalledAt !== null) continue;

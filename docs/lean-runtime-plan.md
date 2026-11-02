@@ -93,3 +93,14 @@ After PR33 was opened, the owner clarified that one Coordinator chat owns a larg
 - Integrating worker branches into the task branch is ordinary task work. Final merge to main, deployment, destructive actions and new authority still require owner approval.
 - Missing grants, invalid ownership and unsupported isolated provider capabilities fail visibly. There is no fallback to the owner's checkout or provider trunk.
 - This decision does not authorize merging PR33, deploying it, restarting the live host or publishing the private Arc plugin.
+
+## Quiet coordinator chat (2026-11-02)
+
+The owner approved removing service chatter from the main conversation and reducing unnecessary Coordinator invocations.
+
+- Show owner and Coordinator messages in the main chat. Keep worker reports, evidence and actual Ready approval in separate worker details.
+- Send concise worker handbacks; retain full evidence for explicit reads. Do not append a repeated closing answer to a structured Ready report.
+- Suppress repeated notices for the same stall; a quiet background service is not proof that an agent making progress is stalled.
+- After asking for an owner decision, end the turn without sending acknowledgment-only wait messages. New actionable results and failures must still reach the Coordinator.
+- The owner explicitly chose a separate `job checkpoint` action for an independent worker's unfinished stage. It retains the branch and evidence, notifies the Coordinator once, offers no Approve action, and continues through new instructions to the same worker. It is not a host-owned blocked workflow.
+- Changes and verification run privately. This decision does not authorize deploying or restarting the running host.

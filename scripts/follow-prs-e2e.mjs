@@ -550,20 +550,18 @@ try {
   if (result.calls.filter((c) => c.coordinator && c.kind === "event").length !== 2) throw Error("Expected one coordinator turn per chat");
   result.checks.push("F16 the event reaches Alerts as one coordinator turn; Main sees neither the event nor the fix request");
 
-  // F11: the transcript renders an event card.
+  // F11: the coordinator response is visible; raw events remain in stored history.
   const chatUrl = new URL(launch);
   chatUrl.searchParams.set("tab", "coordinator");
   chatUrl.searchParams.set("chat", alerts.id);
   await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(`!!document.querySelector('#messages .event-card.github')`, s, "event card");
-  const card = await evaluate(
-    `(() => { const c = document.querySelector('#messages .event-card.github'); c.open = true; return { title: c.querySelector('summary b').innerText, summary: c.querySelector('.report-task').innerText, raw: document.querySelector('#messages').innerText.includes('[Owner-local event') }; })()`,
-    s,
-  );
-  if (card.title !== "GitHub activity" || !/changes/.test(card.summary) || card.raw)
-    throw Error("Event card wrong: " + JSON.stringify(card));
-  result.checks.push('F11 the event shows as a "GitHub activity" card, not as an owner message');
-  await shot("01-alerts-event-card", s);
+  await waitFor(`!!document.querySelector('#messages .msg.them')`, s, "coordinator event response");
+  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .msg.you')`, s))
+    throw Error("Internal Follow event appeared as a chat bubble");
+  if (!(await rpc({ action: "show", id, chatId: alerts.id })).messages.some((message) => message.text?.startsWith("[Owner-local event")))
+    throw Error("Follow event evidence missing from stored history");
+  result.checks.push("F11 only the coordinator response is shown; internal event evidence remains in stored history");
+  await shot("01-alerts-conversation", s);
 
   // F5/F7/F13: nothing new, no repeat.
   const again = await poll();
