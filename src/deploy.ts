@@ -3,13 +3,19 @@ import { existsSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSyn
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
+import { Type } from "typebox";
 import { ensureHost, health, request } from "./client.ts";
-import { errorText, home, listProjects, saveJson } from "./state.ts";
+import { errorText, home, listProjects, parse, saveJson } from "./state.ts";
 import { sendOwnerMessage } from "./telegram.ts";
 
 const exec = promisify(execFile);
 /** Host-level messages belong to no project; the label says so. */
 const HOST_LABEL = "Pi Projects host · Deploy";
+const DurableLock = Type.Object({
+  packages: Type.Object({
+    "node_modules/@earendil-works/pi-durable": Type.Object({ version: Type.String({ pattern: "^1\\.\\d+\\.\\d+$" }) }),
+  }),
+});
 
 /** Hours of the local day, end exclusive; a window that ends before it starts wraps midnight, equal hours mean always. */
 export type DeployWindow = { startHour: number; endHour: number };
@@ -118,6 +124,19 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
       await deps.tell(`${HOST_LABEL}\nDeploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
       return result;
     };
+    const schemaAt = async (revision: string) => {
+      const lock = parse(DurableLock, JSON.parse(await git("show", `${revision}:package-lock.json`)));
+      const version = lock.packages["node_modules/@earendil-works/pi-durable"].version;
+      return Number(version.split(".")[1]) >= 4 ? 2 : 1;
+    };
+    if ((await schemaAt(previous)) !== (await schemaAt(sha)))
+      return fail({
+        ok: false,
+        sha,
+        rolledBack: false,
+        reason:
+          "Pi Durable SQLite schema changes cannot use code-only rollback. Take a consistent project-home backup and perform a manual upgrade; restore that backup before downgrading.",
+      });
     const changed = await lockfileChanged(previous, sha);
     const checkDir = join(home(), "deploy-check");
     try {
