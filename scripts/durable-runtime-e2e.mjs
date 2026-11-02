@@ -14,6 +14,7 @@ process.env.PI_PROJECTS_HOME = join(base, "state");
 const { openDurableProject } = await import("../src/durable-runtime.ts");
 const { projectDir, saveProject, notes } = await import("../src/state.ts");
 const { readKnowledge, writeKnowledge } = await import("../src/knowledge.ts");
+const { durableHostActivity } = await import("../src/durable-host.ts");
 const id = randomUUID(),
   dir = projectDir(id),
   workspace = join(base, "workspace");
@@ -60,7 +61,7 @@ async function until(predicate, timeout = 180000) {
   while (Date.now() < deadline) {
     const view = await runtime.snapshot();
     writeFileSync(join(base, "latest.json"), JSON.stringify(view, null, 2));
-    if (predicate(view)) return view;
+    if (await predicate(view)) return view;
     await sleep(500);
   }
   throw new Error("Timed out waiting for runtime state");
@@ -116,6 +117,41 @@ try {
   assert.deepEqual((await runtime.snapshot()).identities, before.identities);
   assert.equal((await runtime.result(first.submissionId)).text, answer.text);
   pass("Restart preserves identity and completed answer");
+  assert.equal(await runtime.isBusy(), false, "a settled runtime is deployment idle");
+  fake.hold.ms = 300;
+  fake.hold.failNext = true;
+  const failing = await runtime.admit("Reply exactly FAIL_ONCE.", { requestId: "fail-once" });
+  while (!fake.requests.some((item) => item.user.includes("FAIL_ONCE"))) await sleep(10);
+  const queued = await runtime.admit("Reply exactly QUEUED_SURVIVED.", { requestId: "queued-after-failure" });
+  assert.equal((await runtime.result(queued.submissionId)).status, "queued");
+  assert.equal(await runtime.isBusy(), true, "queued input protects deployment");
+  await until(async () => (await runtime.result(failing.submissionId)).status === "unanswered");
+  assert.equal((await runtime.result(failing.submissionId)).reason, "model_error");
+  await until(async () => (await runtime.result(queued.submissionId)).status === "done", 10000);
+  assert.match((await runtime.result(queued.submissionId)).text, /QUEUED_SURVIVED/);
+  assert.equal(fake.requests.filter((item) => item.user.includes("FAIL_ONCE")).length, 1, "failed input is not retried");
+  fake.hold.ms = 0;
+  pass("A failed turn advances queued owner work without replay or withdrawal");
+  fake.hold.ms = 300;
+  const retainedId = await spawnWorker("Reply exactly PAUSED_WORKER.", "paused-worker");
+  while (!fake.requests.some((item) => item.user.includes("PAUSED_WORKER"))) await sleep(10);
+  assert.equal((await durableHostActivity(runtime, id)).working, true);
+  await runtime.pause();
+  const pausedPlan = await runtime.jobs();
+  assert.equal(pausedPlan.jobs.find((item) => item.id === retainedId).status, "running");
+  assert.equal(pausedPlan.agents.find((item) => item.id === retainedId).endedAt, null);
+  assert.equal(await runtime.isBusy(), false);
+  const idleActivity = await durableHostActivity(runtime, id);
+  assert.equal(idleActivity.working, false, "paused drained worker does not light the project working dot");
+  assert.equal(idleActivity.chats.main.working, false, "paused retained identity does not light the chat dot");
+  await runtime.close();
+  runtime = await open();
+  assert.equal(await runtime.isBusy(), false, "reopened paused identities are idle too");
+  assert.equal((await runtime.jobs()).jobs.find((item) => item.id === retainedId).status, "running");
+  fake.hold.ms = 0;
+  await runtime.resume();
+  await untilSettled(retainedId);
+  pass("Paused drained runtime and sidebar are idle across reopen while worker identity remains resumable");
   const secret = `TOPIC_${randomUUID()}`;
   secretForWorkerContext = secret;
   await writeKnowledge({ dir, path: "research/proof.md", text: secret, expectedRevision: null, author: "owner" });

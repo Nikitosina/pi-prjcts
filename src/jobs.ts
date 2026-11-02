@@ -1338,6 +1338,14 @@ export function createJobs(host: JobsHost) {
     return { paused: doc.paused, jobs, agents };
   }
 
+  async function busy(harness: Harness): Promise<boolean> {
+    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+    if (doc && !doc.paused && Object.values(doc.agents).some((agent) => agent.endedAt === null)) return true;
+    const active = await harness.inspect(context);
+    // Pause retains identities, but every owned task (including abort cleanup) must actually drain.
+    return active.tasks.length > 0 || active.submissions.length > 0;
+  }
+
   async function approve(harness: Harness, jobId: string): Promise<{ outcome: AcceptanceOutcome } | { refused: string }> {
     const job = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.jobs[jobId];
     if (!job) return { refused: `No Job ${jobId}.` };
@@ -1520,6 +1528,7 @@ export function createJobs(host: JobsHost) {
     stallTick,
     pause,
     resume,
+    busy,
     recover,
     /** Start an agent from the host (Follow PRs, schedules): same dedupe as the coordinator tool, keyed by `requestId`. */
     spawn: (root: Pick<Session, "commit">, chat: ConversationId, args: SpawnArgs & { requestId: string }) =>

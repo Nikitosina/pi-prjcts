@@ -302,6 +302,8 @@ export type DurableProjectRuntime = {
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Includes background approvals that may still pull after returning a pending answer. */
   approvalsBusy(): boolean;
+  /** Running, draining or queued work; paused identities alone are not execution. */
+  isBusy(): Promise<boolean>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
   /** A page of an agent's transcript with its tool names and recent generation state; text beyond a preview is read with `transcriptText`. */
@@ -1185,6 +1187,7 @@ export async function openDurableProject(input: {
           stream: { timeoutMs: 300_000 },
           retry: { maxRetries: 3 },
           followUpMode: "all",
+          afterFailedRun: "continue",
           get compaction() {
             return compactionPolicy(contextSettings, contextSettings?.contextWindow ?? catalogWindow());
           },
@@ -1855,6 +1858,7 @@ export async function openDurableProject(input: {
         return jobs.approve(openedHarness, id);
       },
       approvalsBusy: () => approver.busy(),
+      isBusy: async () => (await jobs.busy(openedHarness)) || approver.busy(),
       workerDiff: async (threadId, base, page) => {
         assertOpen();
         return workerChanges(await agentCwd(threadId), base, page);

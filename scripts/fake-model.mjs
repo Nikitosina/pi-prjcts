@@ -86,7 +86,14 @@ export async function startFakeModel(root, { models = [], delayMs = 0 } = {}) {
         tools: offered,
         called: frame ? calls[results.length][3] : null,
       });
+      const fail = hold.failNext === true;
+      hold.failNext = false;
       setTimeout(() => {
+        if (fail) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "scripted terminal failure", type: "invalid_request_error" } }));
+          return;
+        }
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(frame ?? chunk({ role: "assistant", content: answer }, null) + chunk({}, "stop") + "data: [DONE]\n\n");
       }, hold.ms);

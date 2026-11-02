@@ -56,10 +56,12 @@ function route(request) {
         acceptance: ["it works"],
         requestId: id,
       });
-    if (user === "Hold owner response") return call("gate", {});
+    if (user === "Hold owner response" || user === "Hold failed owner response") return call("gate", {});
     if (user.startsWith("Start ")) return spawn(user.slice(6), user.slice(6).toLowerCase());
     const lastInput = messages.findLast((message) => message.role === "user");
     const command = text(lastInput.content);
+    if (command === "Hold failed owner response" && result)
+      return fauxAssistantMessage([], { stopReason: "error", errorMessage: "scripted terminal failure" });
     if (command.startsWith("Send twice ")) {
       const sent = messages.slice(messages.lastIndexOf(lastInput) + 1).filter((message) => message.role === "toolResult").length;
       return sent < 2
@@ -130,6 +132,7 @@ function route(request) {
       return say("Recovered once.");
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
+    if (user === "Hold helper response") return call("gate", {});
     if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
     if (tag === "BRIEF-CHECKPOINT" && (user.includes("BRIEF-CHECKPOINT") || result.startsWith("Checkpoint recorded"))) {
       if (result.startsWith("Checkpoint recorded")) return say("Checkpoint details retained in my transcript.");
@@ -209,6 +212,8 @@ const prepareHeld = new Set(),
   prepareRuns = [];
 let gateOpen = false,
   gateEntered = false,
+  abortDrainHeld = false,
+  abortEntered = false,
   bootId = "boot-A",
   backgroundSilenceMs = null,
   slowCycle = 0,
@@ -225,6 +230,10 @@ const TestTools = defineExtension({
       execute: async (_args, _api, callContext) => {
         gateEntered = true;
         while (!gateOpen && !callContext.abortSignal?.aborted) await delay(20);
+        if (callContext.abortSignal?.aborted) {
+          abortEntered = true;
+          while (abortDrainHeld) await delay(20);
+        }
         return { output: [{ type: "text", text: "gate open" }] };
       },
     }),
@@ -321,6 +330,27 @@ const jobsOf = async (harness) => Object.values((await harness.snapshot(Jobs, (a
 const say_ = async (root, content) => (await root.submit({ type: "input", content }, context)).wait(context);
 
 let { harness, root, jobs, killed } = await open();
+
+// Old-host bootstrap: a new owner input advances a kept queue without withdrawing or replaying it.
+const failedOwner = await root.submit({ type: "input", content: "Hold failed owner response" }, context);
+await until(() => gateEntered, "failing owner turn inside gate");
+const parkedOwner = await root.submit(
+  { type: "input", content: "Parked owner message", whenBusy: "followUp", requestId: "parked-owner" },
+  context,
+);
+gateOpen = true;
+assert.equal((await failedOwner.wait(context)).reason, "model_error");
+assert.equal((await parkedOwner.status(context)).status, "queued", "the old default keeps failed-run follow-ups queued");
+assert.equal(await jobs.busy(harness), true, "parked real owner work protects deployment even with no placed input");
+const recoveryOwner = await root.submit({ type: "input", content: "Recover parked owner message", requestId: "recover-owner" }, context);
+const recovered = await parkedOwner.wait(context);
+assert.equal(recovered.status, "done");
+assert.equal((await recoveryOwner.wait(context)).answer, recovered.answer, "one answer settles both actual owner inputs");
+assert.equal((await failedOwner.status(context)).reason, "model_error", "recovery does not replay the failed input");
+assert.equal((await chatText(root)).filter((line) => line === "Parked owner message").length, 1);
+await quiet(harness);
+gateOpen = false;
+gateEntered = false;
 
 // 1. Spawn, plan, verifier + reviewer, full Ready report; a retried spawn returns the same agent.
 await say_(root, "Start A");
@@ -600,6 +630,7 @@ assert.ok(!requests.some((item) => item.tag === "BRIEF-PREP"), "a Job stopped du
 assert.equal((await jobsOf(harness)).find((item) => item.id === prep.id).status, "stopped");
 const paused = await holdPrepare("Job PAUSEPREP", "PAUSEPREP");
 await jobs.pause(harness);
+assert.equal(await jobs.busy(harness), true, "paused agent preparation still protects deployment until it drains");
 prepareHeld.delete("Job PAUSEPREP");
 await quiet(harness);
 assert.ok(!requests.some((item) => item.tag === "BRIEF-PAUSEPREP"), "a paused project does not start the agent");
@@ -666,6 +697,31 @@ const helperReports = (await chatText(root)).filter((line) => line.startsWith(`[
 assert.equal(helperReports.length, 2, "each settled helper answer reports once");
 for (const part of ["shared", "Candidate: none", "Cumulative time:", "Cumulative cost:", "Helper changed files"])
   assert.ok(helperReports[0].includes(part));
+
+// Pausing retains helper identity, but deployment waits for the actual abort drain.
+gateOpen = false;
+gateEntered = false;
+abortEntered = false;
+abortDrainHeld = true;
+await jobs.steer(harness, helper.id, "Hold helper response");
+await until(() => gateEntered, "helper inside abort gate");
+assert.equal(await jobs.busy(harness), true, "running helper protects deployment");
+const pausing = jobs.pause(harness);
+await until(() => abortEntered, "helper abort draining");
+assert.equal((await jobs.snapshot(harness)).paused, true);
+assert.equal(await jobs.busy(harness), true, "paused is not idle while abort drains");
+abortDrainHeld = false;
+await pausing;
+await root.abort(context, { background: true });
+await quiet(harness);
+const retained = (await jobs.snapshot(harness)).jobs.find((item) => item.id === helper.id);
+assert.equal(retained.status, "running", "pause preserves resumable helper status");
+assert.equal((await jobs.snapshot(harness)).agents.find((item) => item.id === helper.id).endedAt, null);
+assert.equal(await jobs.busy(harness), false, "fully drained paused helper is deployment idle");
+assert.deepEqual(retained.workspace, { kind: "shared" });
+await jobs.resume(harness);
+await quiet(harness);
+assert.equal((await jobsOf(harness)).find((item) => item.id === helper.id).status, "completed", "resume reuses helper identity");
 
 // Long notifications remain bounded previews; the exact full handback is read on demand, never lost.
 for (const [name, role, workspace, status] of [

@@ -126,8 +126,9 @@ const chatProblems = (all: JobLedger, chats: { id: string; title: string }[], vi
 // a failed newest turn or a blocked worker, and when anything last finished. Same rules the chat tabs use, so the dots agree.
 export async function durableHostActivity(owner: DurableProjectRuntime, projectId: string): Promise<ProjectActivity> {
   const chats = (await owner.chats()).filter((chat) => !chat.archived);
+  const plan = await owner.jobs();
   const all = jobs(projectId),
-    work = (await owner.jobs()).jobs.filter((job) => !job.dismissedAt),
+    work = plan.jobs.filter((job) => !job.dismissedAt),
     questions = inbox(projectDir(projectId)).filter((item) => item.kind === "question" && !item.result);
   const byChat: Record<string, ChatActivity> = {};
   for (const chat of chats) {
@@ -138,7 +139,11 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
     for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
     for (const item of mine) if (item.status !== "running") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
     byChat[chat.id] = {
-      working: chat.busy || mine.some((item) => item.status === "running"),
+      working:
+        chat.busy ||
+        plan.agents.some(
+          (agent) => Number(agent.chat) === chat.conversationId && (agent.working || (!plan.paused && agent.endedAt === null)),
+        ),
       needs:
         asked ||
         ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed" ||
@@ -148,7 +153,7 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
   }
   const states = Object.values(byChat);
   return {
-    working: states.some((item) => item.working),
+    working: await owner.isBusy(),
     needs: states.some((item) => item.needs),
     finishedAt: Math.max(0, ...states.map((item) => item.finishedAt)),
     chats: byChat,

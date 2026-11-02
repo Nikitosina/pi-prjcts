@@ -13,3 +13,6 @@
 - A shared quota failure must start one recovery path, not one per reporter.
 - Repeating `agents send` with the same request id must deliver one message.
 - Distinct follow-up answers, Ready reports, restart continuation and stop must retain their existing behavior.
+
+- Deployment mistakes a paused helper's retained running identity for execution, or ignores its still-draining owned tasks; resume must reuse the same helper and workspace intent.
+- The old host's `afterFailedRun: keep` queue cannot be recovered via a new public owner input without dropping or duplicating the parked message; verify that ordinary admission advances both inputs exactly once.

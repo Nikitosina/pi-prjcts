@@ -297,15 +297,7 @@ async function closeLifecycleOwner(id: string, owner: DurableProjectRuntime): Pr
 
 /** Work is running or queued: closing the owner now would interrupt it. */
 async function ownerBusy(owner: DurableProjectRuntime): Promise<boolean> {
-  const current = await owner.snapshot(),
-    plan = await owner.jobs();
-  return (
-    current.chats.some((chat) => chat.busy) ||
-    current.coordinator.busy ||
-    current.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-    workBusy(plan) ||
-    owner.approvalsBusy()
-  );
+  return owner.isBusy();
 }
 
 const settings = settingsApplication({
