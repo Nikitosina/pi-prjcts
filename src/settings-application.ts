@@ -21,6 +21,7 @@ const EFFECTS: Partial<Record<keyof Changes, Effect>> = {
   name: "prompts",
   objective: "prompts",
   prompts: "prompts",
+  promptBlocks: "prompts",
   skills: "prompts",
   knowledgeAccess: "prompts",
   libraryAccess: "prompts",

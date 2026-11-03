@@ -89,6 +89,8 @@ import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
+import { projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
+import { estimateTokens, promptSection } from "./prompt-sections.ts";
 import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 
@@ -580,12 +582,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         defaults = DEFAULT_ROLE_PROMPTS;
       return {
         scope: "project",
-        roles: PROMPT_ROLES.map((role) => ({
-          role,
-          default: defaults[role],
-          override: project.prompts?.[role] ?? null,
-          effective: project.prompts?.[role] ?? defaults[role],
-        })),
+        roles: PROMPT_ROLES.map((role) => {
+          const behavior = projectBehavior(project, role);
+          return { role, default: defaults[role], override: behavior.customized ? behavior.text : null, effective: behavior.text };
+        }),
       };
     }
     case "coordinator-skills":
@@ -650,8 +650,67 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "profile-tools":
       return (await durable(input.projectId)).profileTools(input.profile);
-    case "prompt-render":
-      return (await durable(input.projectId)).promptRender(input.profile);
+    case "prompt-render": {
+      const label = "Configured for next use";
+      if (input.profile === "host") {
+        if (input.projectId || input.chatId || input.workerMode)
+          throw new Error("The host profile takes no projectId, chatId or workerMode");
+        const prompt = await requireHostAgent().prompt();
+        const tokens = estimateTokens(prompt.configured);
+        return {
+          sections: [
+            { ...promptSection("role", "Host agent instructions", "Settings: Host agent prompt blocks", true, prompt.configured), tokens },
+          ],
+          totalTokens: tokens,
+          basis: "configured",
+          label,
+          active: { chatId: null, matchesConfigured: !prompt.pending, pending: prompt.pending },
+        };
+      }
+      if (!input.projectId) throw new Error("prompt-render needs projectId for a project profile");
+      if (input.workerMode && input.profile !== "worker") throw new Error("workerMode applies to the worker profile only");
+      const rendered = await (
+        await durable(input.projectId)
+      ).promptRender(input.profile, { chatId: input.chatId, workerMode: input.workerMode });
+      return { ...rendered, label };
+    }
+    case "prompt-blocks-get":
+    case "prompt-blocks-set": {
+      if (input.target === "host") {
+        if (input.projectId) throw new Error("Prompt blocks: the host target takes no projectId");
+        const agent = requireHostAgent();
+        const prompt =
+          input.action === "prompt-blocks-set" ? await agent.setPrompt(Number(input.revision), input.blocks) : await agent.prompt();
+        return promptBlocksView({
+          projectId: null,
+          revision: String(prompt.revision),
+          resolved: resolvePromptBlocks("host", prompt.saved),
+          application: { adopts: "next-turn", pending: prompt.pending },
+        });
+      }
+      if (!input.projectId) throw new Error(`Prompt blocks: the ${input.target} target needs projectId`);
+      const target = input.target,
+        id = input.projectId;
+      const revision =
+        input.action === "prompt-blocks-set"
+          ? (
+              await settings.update({
+                action: "settings-update",
+                id,
+                confirm: id,
+                expectedRevision: input.revision,
+                changes: { promptBlocks: { [target]: input.blocks } },
+              })
+            ).revision
+          : settings.snapshot(id).revision;
+      if (input.action === "prompt-blocks-set") feed.publish(id, { topic: "settings" });
+      return promptBlocksView({
+        projectId: id,
+        revision,
+        resolved: projectBehavior(loadProject(id), target),
+        application: { adopts: target === "coordinator" ? "next-message" : "next-turn-per-agent" },
+      });
+    }
     case "memory-index":
       return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
     case "memory-recent":

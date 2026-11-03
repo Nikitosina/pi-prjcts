@@ -120,7 +120,8 @@ import { catalog } from "./workspace-authorization.ts";
 import { providerFailure, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
-import { COORDINATOR_CONTEXT_RULES, rolePrompt, SHARED_ROLE_RULES, taskWorkerInstructions } from "./role-prompts.ts";
+import { COORDINATOR_CONTEXT_RULES, SHARED_ROLE_RULES, taskHelperFrame } from "./role-prompts.ts";
+import { composePrompt, projectBehavior, taskHelperBehavior } from "./prompt-blocks.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
@@ -367,7 +368,16 @@ export type DurableProjectRuntime = {
   /** A profile's tools, grouped, with what its disabled list leaves enabled; contacts no MCP server and allocates no workspace. */
   profileTools(profile: ProfileId): Promise<{ groups: ProfileToolGroup[] }>;
   /** The profile's assembled prompt as sections (docs/ui2-contract.md order), with token estimates. */
-  promptRender(profile: ProfileId): Promise<{ sections: (PromptSection & { tokens: number })[]; totalTokens: number }>;
+  /** The prompt a profile is configured with now; with `chatId`, whether that coordinator chat already runs it. */
+  promptRender(
+    profile: ProfileId,
+    options?: { chatId?: string; workerMode?: "job" | "task" },
+  ): Promise<{
+    sections: (PromptSection & { tokens: number })[];
+    totalTokens: number;
+    basis: "configured";
+    active?: { chatId: string; matchesConfigured: boolean; pending: boolean };
+  }>;
   /** Saved prompt, skill and grant changes for every chat: rebuilt now when idle, else before the chat's next message. `deferred` counts the busy chats. */
   applySettings(): Promise<{ deferred: number }>;
   /** Manual compaction of one chat ("Compact now"); refuses while paused or already compacting. */
@@ -1075,6 +1085,29 @@ export async function openDurableProject(input: {
         role === "worker" ? `Role profile: worker.${verifyLine()}` : `Role profile: ${role}.\n${READ_ONLY_CODE_NOTE}`,
         roleIndex(role),
       );
+    // A task helper's prompt as sections: the helper template's own parts, in prompt order (the template joins them).
+    const taskHelperSections = (current: Project): InstructionSections => {
+      const frame = taskHelperFrame(current, knowledgeAccess(), "", `\nRole profile: worker.`);
+      return {
+        host: promptSection("host", "Host contract", "pi-projects host: task helper head", false, frame.before),
+        repository: repositoryPromptSection(standing.text, "frozen for this thread"),
+        project: promptSection("project", "Project instructions", "Settings: project instructions (in the task helper head)", true, ""),
+        role: promptSection(
+          "role",
+          "Role instructions",
+          "Settings: worker and taskHelper prompt blocks",
+          true,
+          taskHelperBehavior(current),
+        ),
+        skills: promptSection(
+          "skills",
+          "Skills",
+          "authority rules and the worker skill index",
+          false,
+          `${frame.after.trimStart()}${roleIndex("worker")}`,
+        ),
+      };
+    };
     const instructionsFor = (role: AgentProfile, repositoryStanding = standing.text): string =>
       joinInstructions(roleSections(role, repositoryStanding));
     const verifyRun = proof.tools.find((tool) => tool.name === "projects_verify_run");
@@ -1191,10 +1224,19 @@ export async function openDurableProject(input: {
             current.branch = environment.branch;
           }, BACKGROUND_CONTEXT);
           registry.install(environment.extension);
-          const base = agentSetup({ role: "worker", jobId: job.id });
+          const base = agentSetup({ role: "worker", jobId: job.id }),
+            current = loadProject(project.id);
           return {
             cwd: environment.cwd,
-            instructions: `${taskWorkerInstructions(loadProject(project.id), knowledgeAccess(), standing.text)}\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
+            instructions: composePrompt(
+              taskHelperFrame(
+                current,
+                knowledgeAccess(),
+                standing.text,
+                `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
+              ),
+              taskHelperBehavior(current),
+            ),
             tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),
             extensions: [...(base.extensions as Extension[]), environment.extension],
           };
@@ -2345,7 +2387,7 @@ export async function openDurableProject(input: {
           });
         return { groups: [...groups.values()] };
       },
-      promptRender: async (profile) => {
+      promptRender: async (profile, options = {}) => {
         const current = loadProject(project.id);
         const built =
           profile === "coordinator"
@@ -2354,7 +2396,21 @@ export async function openDurableProject(input: {
                 loadDurableStanding(project.cwd).text,
                 skillIndex(rolesOf(knownLoader, current.skillProfiles).coordinator) + MCP_NOTE,
               )
-            : roleSections(profile);
+            : profile === "worker" && options.workerMode === "task"
+              ? taskHelperSections(current)
+              : roleSections(profile);
+        let active: { chatId: string; matchesConfigured: boolean; pending: boolean } | undefined;
+        if (options.chatId !== undefined) {
+          if (profile !== "coordinator") throw new Error("chatId applies to the coordinator profile only");
+          const { conversation, chat } = await resolveChat(options.chatId);
+          const running = (await conversation.agent(context)).instructions ?? "";
+          // A stale chat is rebuilt before its next message; another mismatch waits for a reload or a settings change.
+          active = {
+            chatId: chat.id,
+            matchesConfigured: running === joinInstructions(built),
+            pending: staleChats.has(Number(conversation.id)),
+          };
+        }
         const instance = loadInstanceInstructions();
         const sections: PromptSection[] = [
           built.host,
@@ -2379,7 +2435,12 @@ export async function openDurableProject(input: {
           built.skills,
         ];
         const measured = sections.map((item) => ({ ...item, tokens: estimateTextTokens(item.text) }));
-        return { sections: measured, totalTokens: measured.reduce((sum, item) => sum + item.tokens, 0) };
+        return {
+          sections: measured,
+          totalTokens: measured.reduce((sum, item) => sum + item.tokens, 0),
+          basis: "configured" as const,
+          ...(active ? { active } : {}),
+        };
       },
       applySettings: async () => {
         const loader = input.discoverSkills ? await input.discoverSkills() : input.configuredSkillLoader;
@@ -3326,14 +3387,20 @@ const repositoryPromptSection = (standing: string, origin: string) =>
   );
 const projectPromptSection = (project: Project) =>
   promptSection("project", "Project instructions", "Settings: project instructions", true, `Project instructions: ${project.objective}`);
-const rolePromptSection = (project: Project, role: ProfileId) =>
-  promptSection(
+const rolePromptSection = (project: Project, role: ProfileId) => {
+  const behavior = projectBehavior(project, role);
+  return promptSection(
     "role",
     "Role instructions",
-    project.prompts?.[role] ? `Settings: ${role} prompt (owner override)` : `built-in ${role} prompt`,
+    behavior.legacy
+      ? `Settings: ${role} prompt (owner override)`
+      : behavior.customized
+        ? `Settings: ${role} prompt blocks`
+        : `built-in ${role} prompt blocks`,
     true,
-    rolePrompt(project, role),
+    behavior.text,
   );
+};
 const workRules = () =>
   `${plugins
     .workerRules()

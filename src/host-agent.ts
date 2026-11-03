@@ -10,7 +10,8 @@ import { liveModelRuntime } from "./live-models.ts";
 import { durableGuardedStream } from "./model-guard.ts";
 import { liveFrame, type DurableLiveFrame } from "./durable-runtime.ts";
 import { readTranscriptPage, storageSource, type TranscriptPage } from "./transcript-reader.ts";
-import { HOST_AGENT_PROMPT } from "./role-prompts.ts";
+import { normalizePromptBlocks, PromptBlockList, resolvePromptBlocks, type PromptBlock } from "./prompt-blocks.ts";
+import { configureWhenIdle } from "./durable-idle-configure.ts";
 import { agentActions, hostAgentTools, type HostToolDeps } from "./host-agent-tools.ts";
 import { HostAgentSettingsPatch, ThinkingLevel, errorText, home, listProjects, parse, saveJson } from "./state.ts";
 import type { FeedEvent } from "./change-feed.ts";
@@ -25,6 +26,8 @@ const Settings = Type.Object({
   tier: Type.Optional(Type.String()),
   thinking: ThinkingLevel,
   disabledTools: Type.Array(Type.String()),
+  /** The Host agent's own behavior blocks; absent = the built-in prompt. */
+  promptBlocks: Type.Optional(PromptBlockList),
 });
 type Settings = Static<typeof Settings>;
 export type HostAgentSettingsView = {
@@ -40,12 +43,25 @@ export type HostAgentSettingsView = {
   actions: { name: string; description: string; dangerous: boolean }[];
 };
 
+export type HostAgentPrompt = {
+  revision: number;
+  saved: PromptBlock[] | undefined;
+  configured: string;
+  active: string;
+  /** Saved instructions the conversation has not adopted yet: it was working when they were saved. */
+  pending: boolean;
+};
+
 export type HostAgent = {
   send(requestId: string, text: string): Promise<{ accepted: true }>;
   stop(): Promise<{ stopped: boolean }>;
   reset(): Promise<{ ok: true }>;
   history(before?: number): Promise<TranscriptPage>;
   settings(revision?: number, patch?: Static<typeof HostAgentSettingsPatch>): Promise<HostAgentSettingsView>;
+  /** Its saved behavior blocks, the settings revision they share, and whether the running conversation still has other instructions. */
+  prompt(): Promise<HostAgentPrompt>;
+  /** Replaces its behavior blocks (null: the built-in prompt). A running turn keeps its instructions; the next one gets these. */
+  setPrompt(revision: number, blocks: PromptBlock[] | null): Promise<HostAgentPrompt>;
   /** Internal input after the current turn (approval outcomes); `requestId` keeps it once across retries and restarts. */
   followUp(text: string, requestId: string): Promise<void>;
   watchLive(onFrame: (frame: DurableLiveFrame) => void, onEnd: () => void): Promise<() => void>;
@@ -127,7 +143,7 @@ export async function openHostAgent(input: {
         model: model ? modelRef(model) : null,
         thinkingLevel: current.thinking,
         cwd: dir,
-        instructions: HOST_AGENT_PROMPT,
+        instructions: resolvePromptBlocks("host", current.promptBlocks).text,
         extensions: [extension],
         tools: tools.filter((tool) => !current.disabledTools.includes(tool.name)),
       };
@@ -162,7 +178,20 @@ export async function openHostAgent(input: {
         (change.tools as typeof tools).map((tool) => tool.name).sort(),
         [EXTENSION],
       ]);
-      if (agentKey(await root.agent(context)) !== expected) await root.configure(change, context);
+      const agent = await root.agent(context);
+      if (agentKey(agent) !== expected) await root.configure({ ...change, instructions: undefined }, context);
+      // Instructions change only between turns, so a self-edit through host_call never rewrites the turn that made it.
+      if ((agent.instructions ?? "") === change.instructions) return;
+      try {
+        await configureWhenIdle(root, root, { instructions: change.instructions }, context, "changing its prompt");
+      } catch (error) {
+        if (!(error instanceof Error && error.message.includes("wait for it to finish"))) throw error;
+      }
+    };
+    const prompt = async (): Promise<HostAgentPrompt> => {
+      const configured = desired(settings).instructions as string,
+        active = (await root.agent(context)).instructions ?? "";
+      return { revision: settings.revision, saved: settings.promptBlocks, configured, active, pending: active !== configured };
     };
     await apply(settings);
 
@@ -174,6 +203,8 @@ export async function openHostAgent(input: {
         key = `${frame.entries}:${frame.running}`;
       if (key === seen) return;
       seen = key;
+      if (!frame.running)
+        void apply(settings).catch((error) => input.report(`The Host agent could not adopt its saved prompt: ${errorText(error)}`));
       input.publish({ topic: "host-agent" });
     });
     const liveWatchers = new Set<() => void>();
@@ -251,6 +282,23 @@ export async function openHostAgent(input: {
         settings = next;
         input.publish({ topic: "host-agent" });
         return settingsView();
+      },
+      async prompt() {
+        assertOpen();
+        return prompt();
+      },
+      async setPrompt(revision, blocks) {
+        assertOpen();
+        if (revision !== settings.revision) throw new Error("Host agent settings changed (stale revision); reload and retry");
+        const next: Settings = { ...settings, revision: settings.revision + 1 };
+        const list = blocks === null ? undefined : normalizePromptBlocks("host", blocks);
+        if (list) next.promptBlocks = list;
+        else delete next.promptBlocks;
+        await apply(next);
+        saveJson(settingsPath, next);
+        settings = next;
+        input.publish({ topic: "host-agent" });
+        return prompt();
       },
       async followUp(text, requestId) {
         assertOpen();

@@ -179,7 +179,15 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "profiles-get": allow("A project's profiles (coordinator, worker, scout, reviewer): tier, thinking, disabled tools, effective model."),
   "profiles-set": allow("Change one profile of a project (revision from profiles-get)."),
   "profile-tools": allow("The tools a project's profile is offered, grouped, with enabled flags."),
-  "prompt-render": allow("The assembled prompt of a project's profile, as sections with token estimates."),
+  "prompt-render": allow(
+    "The assembled prompt of a project's profile (or profile host: yours), as sections with token estimates, and whether a chat runs it yet.",
+  ),
+  "prompt-blocks-get": allow(
+    "Ordered behavior blocks of a prompt target (coordinator, worker, taskHelper, scout, reviewer of a project; host: your own), with the revision.",
+  ),
+  "prompt-blocks-set": allow(
+    "Replace a target's whole ordered block list (revision from prompt-blocks-get; null restores the built-ins). Your own changes apply from your next turn.",
+  ),
   "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),

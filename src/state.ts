@@ -10,6 +10,7 @@ import { McpSettings } from "./mcp-profiles.ts";
 import { ProfileIdSchema, ProfileSettings, Profiles, Tier } from "./profiles.ts";
 import { UiPatch } from "./ui-settings.ts";
 import { ThreadReference } from "./transcript-reader.ts";
+import { PROJECT_PROMPT_TARGETS, ProjectPromptBlocks, PromptBlockList } from "./prompt-blocks.ts";
 export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
 export const PromptOverrides = Type.Object(
@@ -54,6 +55,14 @@ export type ContextSettings = Static<typeof ContextSettings>;
 const knowledgePath = Type.String({ minLength: 1, maxLength: 1024 });
 const revision = Type.String({ minLength: 1, maxLength: 128 });
 const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const PromptTargetSchema = Type.Union([
+  Type.Literal("coordinator"),
+  Type.Literal("worker"),
+  Type.Literal("taskHelper"),
+  Type.Literal("scout"),
+  Type.Literal("reviewer"),
+  Type.Literal("host"),
+]);
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
@@ -183,6 +192,8 @@ export const Project = Type.Object(
     mcp: Type.Optional(McpSettings),
     /** Owner overrides of the editable role instructions, per role (this project only). Absent = the built-in text. */
     prompts: Type.Optional(PromptOverrides),
+    /** Ordered behavior blocks per prompt target (prompt-blocks.ts); a target saved here replaces its legacy `prompts` override. */
+    promptBlocks: Type.Optional(ProjectPromptBlocks),
     /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     contextSettings: Type.Optional(ContextSettings),
@@ -594,7 +605,30 @@ export const Request = Type.Union([
   ),
   Type.Object({ action: Type.Literal("profile-tools"), projectId: Id, profile: ProfileIdSchema }, { additionalProperties: false }),
   Type.Object(
-    { action: Type.Literal("prompt-render"), projectId: Id, profile: ProfileIdSchema, chatId: Type.Optional(ChatId) },
+    {
+      action: Type.Literal("prompt-render"),
+      /** Absent only for the Host agent's own prompt (`profile: "host"`). */
+      projectId: Type.Optional(Id),
+      profile: Type.Union([ProfileIdSchema, Type.Literal("host")]),
+      chatId: Type.Optional(ChatId),
+      /** A worker as a task helper of a chat instead of an independent Job worker. */
+      workerMode: Type.Optional(Type.Union([Type.Literal("job"), Type.Literal("task")])),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("prompt-blocks-get"), projectId: Type.Optional(Id), target: PromptTargetSchema },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("prompt-blocks-set"),
+      projectId: Type.Optional(Id),
+      target: PromptTargetSchema,
+      revision,
+      /** The whole ordered list; null returns the target to its built-in blocks. */
+      blocks: Type.Union([PromptBlockList, Type.Null()]),
+    },
     { additionalProperties: false },
   ),
   Type.Object(
@@ -748,6 +782,15 @@ export const Request = Type.Union([
                 reviewer: Type.Optional(Type.Union([promptText, Type.Null()])),
                 verifier: Type.Optional(Type.Union([promptText, Type.Null()])),
               },
+              { additionalProperties: false },
+            ),
+          ),
+          /** A whole ordered list per target; null returns the target to its built-in blocks and drops its legacy override. */
+          promptBlocks: Type.Optional(
+            Type.Object(
+              Object.fromEntries(
+                PROJECT_PROMPT_TARGETS.map((target) => [target, Type.Optional(Type.Union([PromptBlockList, Type.Null()]))]),
+              ),
               { additionalProperties: false },
             ),
           ),
