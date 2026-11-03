@@ -1,6 +1,6 @@
 // UI 2.0 entry: selection, center focus, streams, status pill and line, hotkeys and the command palette.
 // Three areas on every screen: list (left), focus (center), context (right); the Host agent drawer opens over them.
-import { call, contract, isUnavailable, setToken, stream, token } from "./api.js";
+import { call, setToken, stream, token } from "./api.js";
 import { clip, esc, shortModel, tokens, usd } from "./format.js";
 import { register, paintHints, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
@@ -15,6 +15,7 @@ import {
   loadApprovals,
   loadHostAgent,
   onHostTopic,
+  onTiersChanged,
   pendingApprovals,
   resetHostAgent,
   stopHostAgent,
@@ -80,7 +81,10 @@ let listTimer = 0;
 function onTopic(change) {
   if (change.topic === "chat" && (change.chat === "*" || change.chat === state.chatId || !change.chat)) void loadChat();
   if (change.topic === "jobs") void loadJobs();
-  if (change.topic === "settings") void loadChat();
+  if (change.topic === "settings") {
+    void loadChat();
+    void loadUsage();
+  }
   if (change.topic === "knowledge" && state.focus.kind === "memory" && !state.focus.path) renderFocus();
   clearTimeout(listTimer);
   listTimer = setTimeout(() => void loadProjects(), 400);
@@ -201,7 +205,7 @@ function paintStatusLine() {
   const view = state.view,
     live = state.live,
     ctx = view?.context;
-  const modelRef = view?.project?.model ?? "";
+  const modelRef = state.profiles?.coordinator?.effectiveModel ?? view?.project?.model ?? "";
   const pct = ctx?.window ? Math.round((100 * (ctx.tokens ?? 0)) / ctx.window) : null;
   const cost = state.usage?.coordinator?.total?.cost?.total;
   const status = live?.running
@@ -222,11 +226,12 @@ async function loadUsage() {
   const gen = state.generation;
   const [usage, profiles] = await Promise.all([
     call("usage-snapshot", { id: state.projectId, limit: 1 }).catch(() => null),
-    contract("profiles-get", { projectId: state.projectId }).catch(() => null),
+    call("profiles-get", { projectId: state.projectId }).catch(() => null),
   ]);
   if (stale(gen)) return;
   state.usage = usage;
-  state.thinking = profiles && !isUnavailable(profiles) ? (profiles.profiles.coordinator?.thinking ?? "medium") : "medium";
+  state.profiles = profiles?.profiles ?? null;
+  state.thinking = state.profiles?.coordinator?.thinking ?? "medium";
   paintStatusLine();
 }
 async function loadLimits() {
@@ -297,6 +302,7 @@ document.addEventListener("click", (event) => {
 });
 onBindingsChange(() => paintHints());
 on("open-settings", (id) => openSettings(id));
+on("profiles", () => void loadUsage());
 // ui_focus to a project or chat: straight to the chat, not one step back.
 on("leave-focus", () => {
   if (state.focus.kind === "chat") return;
@@ -426,7 +432,10 @@ async function start() {
     }
     if (change.t !== "topic") return;
     if (change.topic === "ui") void loadUi();
-    else if (change.topic === "projects") void loadProjects();
+    else if (change.topic === "tiers") {
+      emit("tiers");
+      onTiersChanged();
+    } else if (change.topic === "projects") void loadProjects();
     else onHostTopic(change);
   });
   setInterval(() => void loadProjects(), 15000);

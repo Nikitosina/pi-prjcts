@@ -1,9 +1,9 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
-import { call, contract, isUnavailable, stream, uuid, UNAVAILABLE_TEXT } from "./api.js";
+import { call, contract, isUnavailable, stream, uuid } from "./api.js";
 import { clip, clock, dur, esc, markdown, oneLine } from "./format.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
-import { memoryTitle } from "./memory.js";
+import { memoryEntry, memoryKind, memoryTitle } from "./memory.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
@@ -116,7 +116,7 @@ export function renderFeed() {
   if (stick || atBottom) feed.scrollTop = feed.scrollHeight;
 }
 /** Replaces children while keeping nodes whose key and html did not change, so rows only animate in when they are new. */
-function morph(parent, html) {
+export function morph(parent, html) {
   const next = document.createElement("div");
   next.innerHTML = html;
   const old = new Map([...parent.children].filter((node) => node.dataset.key).map((node) => [node.dataset.key, node]));
@@ -240,6 +240,8 @@ function summary(name, args, preview) {
   return first ?? "";
 }
 const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
+/** Writes undone from this page (path@revision), so their row says so instead of offering Undo again. */
+const undone = new Set();
 export function toolRowHtml({ call: item, result }, liveStatus) {
   const status = liveStatus ?? (result ? (result.isError ? "error" : "ok") : state.live?.running ? "running" : "ok");
   const args = parseArgs(item.argsPreview);
@@ -272,18 +274,16 @@ function groupHtml(run) {
 }
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
-    title = path ? memoryTitle(path) : "memory index";
+    title = path ? (memoryEntry(path)?.title ?? memoryTitle(path)) : "memory index";
   const revision = /"revision":\s*"([^"]+)"/.exec(result?.preview ?? "")?.[1] ?? "";
   if (item.name === "projects_knowledge_write")
-    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>` : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? (undone.has(`${path}@${revision}`) ? `<span class="muted small">Undone</span>` : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`) : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
   const kind = path ? memoryKindLabel(path) : "";
   return `<div class="memory-row used" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◇</span><span class="mem-text">Used memory: ${kind ? `${esc(kind)} · ` : ""}${path ? `<button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button>` : esc(item.name === "projects_knowledge_list" ? "index" : title)}</span></div>`;
 }
 function memoryKindLabel(path) {
-  if (path === "preferences.md" || path.startsWith("preferences/")) return "Preference";
-  if (path.startsWith("decisions/")) return "Decision";
-  if (path.startsWith("runbooks/") || path.startsWith("procedures/")) return "Procedure";
-  return "";
+  const kind = memoryEntry(path)?.kind ?? memoryKind(path);
+  return { preference: "Preference", decision: "Decision", procedure: "Procedure", archive: "Archive" }[kind] ?? "";
 }
 
 // ---------------------------------------------------------------------------------------------------------------- live
@@ -403,7 +403,8 @@ form.addEventListener("submit", async (event) => {
 export async function stopTurn() {
   if (!state.live?.running) return;
   const result = await contract("chat-stop", { id: state.projectId, ...chatArgs() }).catch(fail);
-  if (isUnavailable(result)) toast(`Stop: ${UNAVAILABLE_TEXT.toLowerCase()}`);
+  // chat-stop is the one request the backend has not added yet (docs/ui2-contract.md); say so plainly.
+  if (isUnavailable(result)) toast("This host cannot stop a coordinator turn yet.");
   else if (result) toast(result.stopped ? "Stopped. History kept." : "Nothing was running.");
 }
 export function toggleSteer() {
@@ -436,14 +437,21 @@ export async function transcriptClick(event, root, rerender) {
   const undo = event.target.closest("[data-memory-undo]");
   if (undo) {
     const gen = state.generation;
-    const result = await contract("memory-undo", {
+    undo.disabled = true;
+    const result = await call("memory-undo", {
       projectId: state.projectId,
       path: undo.dataset.memoryUndo,
       revision: undo.dataset.revision,
-    }).catch(fail);
+    }).catch((error) => {
+      undo.disabled = false;
+      // A later write makes this revision stale; say so instead of the raw refusal.
+      fail(/revision/i.test(error.message) ? new Error("This memory changed after that write; open it to edit instead.") : error);
+      return null;
+    });
     if (stale(gen) || !result) return true;
-    if (isUnavailable(result)) toast(`Undo: ${UNAVAILABLE_TEXT.toLowerCase()}. Edit the entry instead.`);
-    else toast(result.entry ? "Memory restored to the previous revision." : "Memory entry removed.");
+    undone.add(`${undo.dataset.memoryUndo}@${undo.dataset.revision}`);
+    toast(result.entry ? "Memory restored to the previous revision." : "Memory entry removed.");
+    rerender();
     return true;
   }
   const memory = event.target.closest("[data-memory]");

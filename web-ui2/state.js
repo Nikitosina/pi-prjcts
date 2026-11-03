@@ -13,7 +13,6 @@ export const state = {
   focus: { kind: "chat" }, // center: chat | worker | memory | report
   ui: null, // UiSettings, or null while unknown
   uiRevision: null,
-  uiAvailable: true,
   steer: false, // composer mode while busy: false = queue, true = steer
   limits: null,
   usage: null,
@@ -55,6 +54,9 @@ export function toast(text, { action, onAction, error = false, ms = 5000 } = {})
     });
     node.append(button);
   }
+  // At most three at once (two on a phone); the oldest goes first, so a burst never covers the page.
+  const keep = matchMedia("(max-width: 600px)").matches ? 2 : 3;
+  [...box.children].slice(0, Math.max(0, box.children.length - keep + 1)).forEach((old) => old.remove());
   box.append(node);
   setTimeout(() => node.remove(), ms);
 }

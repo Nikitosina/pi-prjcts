@@ -1,7 +1,7 @@
 // Settings overlay (⌘,): left nav with a letter hotkey and a Project/Host scope label per item; the core four (Context, Model,
-// Prompt, Tools) per profile; Automations as cards; Host sections. Contract requests that the host lacks show a quiet state.
-import { call, contract, isUnavailable, UNAVAILABLE_TEXT } from "./api.js";
-import { ago, clip, esc, shortModel, tokens, usd } from "./format.js";
+// Prompt, Tools) per profile; Automations as cards; Host sections. Every section reads and writes the host directly.
+import { call } from "./api.js";
+import { ago, clip, esc, oneLine, shortModel, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
@@ -88,8 +88,6 @@ function paint() {
     if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
   });
 }
-const quiet = (what) =>
-  `<div class="quiet"><span class="quiet-dot" aria-hidden="true"></span><span><b>${esc(what)}</b> · ${esc(UNAVAILABLE_TEXT.toLowerCase())}</span></div>`;
 const info = (text) => `<button type="button" class="info" data-info="${esc(text)}" aria-label="More information">ⓘ</button>`;
 const line = (text, more) => `<p class="desc">${esc(text)}${more ? ` ${info(more)}` : ""}</p>`;
 
@@ -218,102 +216,76 @@ async function context(body, alive) {
 
 // ---------------------------------------------------------------------------------------------------------------- Model
 
+/** profiles-set with the revision it read; a refusal (stale revision, unknown tier, locked tool) is shown and the section re-reads. */
+async function setProfile(revision, patch, label) {
+  try {
+    await call("profiles-set", { projectId: state.projectId, revision, profile, patch });
+    toast(label);
+    emit("profiles");
+  } catch (error) {
+    fail(error);
+  }
+  paint();
+}
+
 async function model(body, alive) {
-  const [profiles, tiers, snap] = await Promise.all([
-    contract("profiles-get", { projectId: state.projectId }),
-    contract("tiers-get"),
-    projectSettings(),
-  ]);
+  const [profiles, tiers] = await Promise.all([call("profiles-get", { projectId: state.projectId }), call("tiers-get")]);
   if (!alive()) return;
-  const legacy = profile === "coordinator" ? snap.values.model : (snap.values.models?.[profile] ?? snap.values.model);
-  const current = isUnavailable(profiles) ? null : profiles.profiles[profile];
-  const thinking = current?.thinking ?? "medium";
-  const tierHtml = isUnavailable(tiers)
-    ? quiet("Model tiers")
-    : `<div class="tier-list" role="radiogroup" aria-label="Tier">${tiers.tiers
-        .map((tier) => {
-          const models = tier.models.map((ref) => tiers.catalog.find((item) => item.ref === ref) ?? { ref, name: ref });
-          return `<button type="button" role="radio" class="tier${current?.tier === tier.id ? " on" : ""}" data-tier="${esc(tier.id)}" aria-checked="${current?.tier === tier.id}" ${isUnavailable(profiles) ? "disabled" : ""}><span class="tier-letter">${esc(tier.letter)}</span><span class="tier-name">${esc(tier.name)}</span><span class="tier-models">${models.map((item, index) => `<span class="mono small${item.available === false ? " off" : ""}">${index ? "→ " : ""}${esc(shortModel(item.ref))} <span class="muted">${tokens(item.contextWindow)}${Number.isFinite(item.inputCost) ? ` · ${usd(item.inputCost)}/${usd(item.outputCost)}` : ""}</span></span>`).join("")}</span></button>`;
+  const current = profiles.profiles[profile];
+  const thinking = current.thinking ?? "medium";
+  const catalog = new Map(tiers.catalog.map((item) => [item.ref, item]));
+  const tierHtml = `<div class="tier-list" role="radiogroup" aria-label="Tier">${tiers.tiers
+    .map((tier) => {
+      const on = current.tier === tier.id;
+      return `<button type="button" role="radio" class="tier${on ? " on" : ""}" data-tier="${esc(tier.id)}" aria-checked="${on}"><span class="tier-letter">${esc(tier.letter)}</span><span class="tier-name">${esc(tier.name)}</span><span class="tier-models">${tier.models
+        .map((ref, index) => {
+          const item = catalog.get(ref) ?? { ref };
+          return `<span class="mono small${item.available === false ? " off" : ""}">${index ? "→ " : ""}${esc(shortModel(ref))} <span class="muted">${tokens(item.contextWindow)}${Number.isFinite(item.inputCost) ? ` · ${usd(item.inputCost)}/${usd(item.outputCost)}` : ""}</span></span>`;
         })
-        .join("")}</div>`;
-  body.innerHTML = `${line("Tier and thinking level for this profile.", "A tier is an ordered list of models. When a model's quota runs out or its provider fails, work continues on the next one.")}<div class="field-row"><span class="label">Effective</span><code>${esc(current?.effectiveModel ?? legacy ?? "")}</code></div>${tierHtml}<div class="field-row"><span class="label">Thinking</span><div class="seg" role="radiogroup" aria-label="Thinking level">${THINKING.map((level) => `<button type="button" role="radio" data-thinking="${level}" aria-checked="${level === thinking}" ${current ? "" : "disabled"}>${level}</button>`).join("")}</div></div>${current ? "" : quiet("Thinking level and tiers per profile")}${isUnavailable(profiles) ? `<details class="small-field"><summary>Model (legacy, per role) ${info("Until tiers land, each role has one model.")}</summary><div id="legacy-picker" class="muted small">Loading models…</div></details>` : ""}`;
-  body.addEventListener("click", async (event) => {
+        .join("")}</span></button>`;
+    })
+    .join("")}</div>`;
+  body.innerHTML = `${line("Tier and thinking level for this profile.", "A tier is an ordered list of models. On a quota or rate limit, work moves to the next model of the tier, never back. Edit tiers under Model tiers (I).")}<div class="field-row"><span class="label">Effective</span><code>${esc(current.effectiveModel ?? "none")}</code>${current.tier ? "" : `<span class="muted small">no tier · project model</span>`}</div>${tierHtml}<div class="field-row"><span class="label">Thinking</span><div class="seg" role="radiogroup" aria-label="Thinking level">${THINKING.map((level) => `<button type="button" role="radio" data-thinking="${level}" aria-checked="${level === thinking}">${level}</button>`).join("")}</div></div>`;
+  body.addEventListener("click", (event) => {
     const tier = event.target.closest("[data-tier]"),
       level = event.target.closest("[data-thinking]");
-    if (!tier && !level) return;
-    const result = await contract("profiles-set", {
-      projectId: state.projectId,
-      revision: profiles.revision,
-      profile,
-      patch: tier ? { tier: tier.dataset.tier } : { thinking: level.dataset.thinking },
-    }).catch(fail);
-    if (result && !isUnavailable(result) && alive()) {
-      toast("Profile updated.");
-      paint();
-    }
+    if (tier && tier.dataset.tier !== current.tier)
+      void setProfile(
+        profiles.revision,
+        { tier: tier.dataset.tier },
+        `${label(profile)} on tier ${tier.querySelector(".tier-name").textContent}`,
+      );
+    else if (level && level.dataset.thinking !== thinking)
+      void setProfile(profiles.revision, { thinking: level.dataset.thinking }, `${label(profile)} thinking: ${level.dataset.thinking}`);
   });
-  const legacyBox = body.querySelector("#legacy-picker");
-  if (legacyBox) {
-    const picker = await call("model-picker-snapshot", { id: state.projectId }).catch(() => null);
-    if (!alive() || !picker) return;
-    const items = picker.items.filter((item) => item.configured || item.reference === legacy);
-    legacyBox.innerHTML = `<select id="legacy-model" aria-label="Model for ${esc(profile)}">${items.map((item) => `<option value="${esc(item.reference)}" ${item.reference === legacy ? "selected" : ""}>${esc(item.name)} · ${tokens(item.contextWindow)}</option>`).join("")}</select>`;
-    legacyBox.querySelector("select").addEventListener("change", async (event) => {
-      const value = event.target.value;
-      await update(
-        profile === "coordinator" ? { model: value } : { models: { [profile]: value } },
-        `Model for ${profile}: ${shortModel(value)}`,
-      ).catch(fail);
-    });
-  }
 }
+const label = (id) => id[0].toUpperCase() + id.slice(1);
 
 // ---------------------------------------------------------------------------------------------------------------- Prompt
 
 async function prompt(body, alive) {
-  const rendered = await contract("prompt-render", {
+  const rendered = await call("prompt-render", {
     projectId: state.projectId,
     profile,
     ...(state.chatId !== "main" ? { chatId: state.chatId } : {}),
   });
   if (!alive()) return;
-  let sections,
-    total,
-    fallback = false;
-  if (isUnavailable(rendered)) {
-    fallback = true;
-    const [prompts, snap] = await Promise.all([call("prompts-snapshot", { id: state.projectId }), projectSettings()]);
-    if (!alive()) return;
-    const role = prompts.roles.find((item) => item.role === profile);
-    sections = [
-      {
-        id: "project",
-        label: "Project instructions",
-        source: "project settings · objective",
-        editable: true,
-        text: snap.values.objective ?? "",
-      },
-      {
-        id: "role",
-        label: "Role instructions",
-        source: role?.override ? "project override" : "built-in",
-        editable: true,
-        text: role?.effective ?? "",
-      },
-    ].map((item) => ({ ...item, tokens: Math.ceil(item.text.length / 4) }));
-    total = sections.reduce((sum, item) => sum + item.tokens, 0);
-  } else {
-    sections = rendered.sections;
-    total = rendered.totalTokens;
-  }
+  const { sections, totalTokens: total } = rendered;
   let mode = "rendered";
+  const head = (item) =>
+    `<b>${esc(item.label)}</b><span class="muted small one-line">${esc(item.source.replace(/; tokens are an estimate \(chars\/4\)$/, ""))}</span><span class="grow"></span><span class="mono small muted">${tokens(item.tokens)}</span>${item.editable ? "" : `<span class="lock" aria-label="locked">🔒</span>`}`;
+  const section = (item) => {
+    if (mode === "edit")
+      return `<section class="prompt-sec" data-sec="${esc(item.id)}"><header>${head(item)}</header><textarea aria-label="${esc(item.label)}" maxlength="32000">${esc(item.text)}</textarea></section>`;
+    if (!item.text.trim())
+      return `<section class="prompt-sec empty" data-sec="${esc(item.id)}"><header>${head(item)}<span class="muted small">empty</span></header></section>`;
+    // Editable sections open; long locked ones (host contract, skills, memory) start folded.
+    return `<details class="prompt-sec${item.editable ? "" : " locked"}" data-sec="${esc(item.id)}" ${item.editable || item.text.length < 400 ? "open" : ""}><summary>${head(item)}</summary><pre class="prompt-text">${esc(item.text)}</pre></details>`;
+  };
   const draw = () => {
-    body.innerHTML = `${line("The assembled prompt by section, with source and size.", "Locked sections come from the host and the repository. Edit changes only the editable ones.")}<div class="field-row"><div class="seg" role="tablist"><button type="button" role="tab" data-mode="rendered" aria-selected="${mode === "rendered"}">Rendered</button><button type="button" role="tab" data-mode="edit" aria-selected="${mode === "edit"}">Edit</button></div><span class="grow"></span><span class="mono small muted">≈${tokens(total)} tokens${fallback ? " (chars/4)" : ""}</span></div>${fallback ? quiet("Full rendered prompt (host contract, AGENTS.md, skills)") : ""}${sections
+    body.innerHTML = `${line("The assembled prompt by section, with source and size.", "Tokens are an estimate (characters / 4). Locked sections come from the host, the repository, Memory and skills; Edit changes only project and role instructions.")}<div class="field-row"><div class="seg" role="tablist"><button type="button" role="tab" data-mode="rendered" aria-selected="${mode === "rendered"}">Rendered</button><button type="button" role="tab" data-mode="edit" aria-selected="${mode === "edit"}">Edit</button></div><span class="grow"></span><span class="mono small muted">≈${tokens(total)} tokens</span></div>${sections
       .filter((item) => mode === "rendered" || item.editable)
-      .map(
-        (item) =>
-          `<section class="prompt-sec${item.editable ? "" : " locked"}" data-sec="${esc(item.id)}"><header><b>${esc(item.label)}</b><span class="muted small">${esc(item.source)}</span><span class="grow"></span><span class="mono small muted">${tokens(item.tokens)}</span>${item.editable ? "" : `<span class="lock" aria-label="locked">🔒</span>`}</header>${mode === "edit" ? `<textarea aria-label="${esc(item.label)}" maxlength="32000">${esc(item.text)}</textarea>` : `<pre class="prompt-text">${esc(item.text)}</pre>`}</section>`,
-      )
+      .map(section)
       .join(
         "",
       )}${mode === "edit" ? `<div class="row"><button type="button" class="primary small" id="prompt-save">Save</button></div>` : ""}`;
@@ -337,46 +309,22 @@ async function prompt(body, alive) {
 // ---------------------------------------------------------------------------------------------------------------- Tools
 
 async function tools(body, alive) {
-  const result = await contract("profile-tools", { projectId: state.projectId, profile });
+  const result = await call("profile-tools", { projectId: state.projectId, profile });
   if (!alive()) return;
-  let groups,
-    fallback = false;
-  if (isUnavailable(result)) {
-    fallback = true;
-    const names = profile === "coordinator" ? (state.view?.coordinatorAccess?.toolNames ?? []) : [];
-    const groupOf = (name) =>
-      /^(read|write|edit|bash|grep|find|ls)$/.test(name)
-        ? "Coding"
-        : name === "agents"
-          ? "Delegation"
-          : /knowledge/.test(name)
-            ? "Memory"
-            : /gh|github/.test(name)
-              ? "GitHub"
-              : /archive/.test(name)
-                ? "Archive"
-                : "Project";
-    const map = new Map();
-    for (const name of names) {
-      const id = groupOf(name);
-      if (!map.has(id)) map.set(id, { id, label: id, source: "core", locked: true, tools: [] });
-      map.get(id).tools.push({ name, description: "", parameters: null, enabled: true });
-    }
-    groups = [...map.values()];
-  } else groups = result.groups;
+  const { groups } = result;
   let q = "",
     view = "title";
   const draw = () => {
     const match = (tool) => !q || `${tool.name} ${tool.description}`.toLowerCase().includes(q);
-    body.innerHTML = `${line("What this profile is offered, grouped by source.", "Switching a tool off removes it from new turns of this profile. MCP servers have an extra switch for write tools.")}<div class="field-row"><input type="search" id="tool-search" placeholder="Search tools" aria-label="Search tools" value="${esc(q)}" /><div class="seg" role="tablist" aria-label="View">${["title", "description", "params"].map((item) => `<button type="button" role="tab" data-view="${item}" aria-selected="${view === item}">${item[0].toUpperCase() + item.slice(1)}</button>`).join("")}</div></div>${fallback ? quiet(profile === "coordinator" ? "Toggles per profile (read-only list from this chat)" : `Tools for ${profile}`) : ""}${
+    body.innerHTML = `${line("What this profile is offered, grouped by source.", "Switching a tool off removes it from new turns of this profile. Locked groups hold the tools the role cannot work without.")}<div class="field-row"><input type="search" id="tool-search" placeholder="Search tools" aria-label="Search tools" value="${esc(q)}" /><div class="seg" role="tablist" aria-label="View">${["title", "description", "params"].map((item) => `<button type="button" role="tab" data-view="${item}" aria-selected="${view === item}">${item[0].toUpperCase() + item.slice(1)}</button>`).join("")}</div></div>${
       groups
         .map((group) => {
           const list = group.tools.filter(match);
           if (!list.length) return "";
-          return `<section class="tool-group-card"><header><b>${esc(group.label)}</b><span class="badge">${esc(group.source)}</span><span class="muted small">${list.filter((tool) => tool.enabled).length}/${list.length}</span></header><div class="tool-grid${view === "title" ? "" : " wide"}">${list
+          return `<section class="tool-group-card"><header><b>${esc(group.label)}</b><span class="badge">${esc(group.source)}</span>${group.locked ? `<span class="lock" aria-label="locked">🔒</span>` : ""}<span class="muted small">${list.filter((tool) => tool.enabled).length}/${list.length}</span></header><div class="tool-grid${view === "title" ? "" : " wide"}">${list
             .map(
               (tool) =>
-                `<label class="tool-toggle"><input type="checkbox" data-tool-name="${esc(tool.name)}" ${tool.enabled ? "checked" : ""} ${fallback || group.locked ? "disabled" : ""} /><span class="mono">${esc(tool.name)}</span>${view === "description" ? `<span class="muted small">${esc(clip(tool.description, 160))}</span>` : ""}${view === "params" ? `<pre class="small">${esc(clip(JSON.stringify(tool.parameters ?? {}, null, 1), 600))}</pre>` : ""}</label>`,
+                `<label class="tool-toggle" title="${esc(oneLine(tool.description))}"><input type="checkbox" data-tool-name="${esc(tool.name)}" ${tool.enabled ? "checked" : ""} ${group.locked ? "disabled" : ""} /><span class="mono">${esc(tool.name)}</span>${view === "description" ? `<span class="muted small">${esc(clip(tool.description, 160))}</span>` : ""}${view === "params" ? `<pre class="small">${esc(clip(JSON.stringify(tool.parameters ?? {}, null, 1), 600))}</pre>` : ""}</label>`,
             )
             .join("")}</div></section>`;
         })
@@ -401,17 +349,16 @@ async function tools(body, alive) {
   });
   body.addEventListener("change", async (event) => {
     const box = event.target.closest("[data-tool-name]");
-    if (!box || fallback) return;
-    const profiles = await contract("profiles-get", { projectId: state.projectId });
-    if (isUnavailable(profiles) || !alive()) return;
+    if (!box) return;
+    const profiles = await call("profiles-get", { projectId: state.projectId }).catch(fail);
+    if (!profiles || !alive()) return;
     const disabled = new Set(profiles.profiles[profile].tools?.disabled ?? []);
     box.checked ? disabled.delete(box.dataset.toolName) : disabled.add(box.dataset.toolName);
-    await contract("profiles-set", {
-      projectId: state.projectId,
-      revision: profiles.revision,
-      profile,
-      patch: { tools: { disabled: [...disabled] } },
-    }).catch(fail);
+    await setProfile(
+      profiles.revision,
+      { tools: { disabled: [...disabled] } },
+      `${box.dataset.toolName} ${box.checked ? "on" : "off"} for ${profile}`,
+    );
   });
 }
 
@@ -453,7 +400,7 @@ async function automations(body, alive) {
   ]);
   if (!alive()) return;
   const card = ({ kind, id, name, when, cron, text, on: enabled, last, target }) =>
-    `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span><button type="button" class="link-btn" disabled title="${esc(UNAVAILABLE_TEXT)}">Run now</button><button type="button" class="link-btn" data-history>History</button><button type="button" class="link-btn" disabled title="${esc(UNAVAILABLE_TEXT)}">Edit</button><button type="button" class="link-btn" disabled title="${esc(UNAVAILABLE_TEXT)}">Delete</button></footer></article>`;
+    `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span><button type="button" class="link-btn" data-history>History</button></footer></article>`;
   const chatName = (id) => (state.view?.chats ?? []).find((chat) => chat.id === id)?.title ?? id;
   const cards = [
     ...schedules.schedules.map((record) =>
@@ -491,7 +438,7 @@ async function automations(body, alive) {
       target: `→ ${chatName(auto.eventChat)}`,
     }),
   ];
-  body.innerHTML = `${line("Schedules, PR following and webhooks for this project.", "Switching applies at once; use Undo in the toast to switch back. New schedules are created by the coordinator or the CLI.")}<div class="auto-grid">${cards.join("")}</div>`;
+  body.innerHTML = `${line("Schedules, PR following and webhooks for this project.", "Switching applies at once; use Undo in the toast to switch back. Ask the coordinator to create, change or delete a schedule.")}<div class="auto-grid">${cards.join("")}</div>`;
   const apply = async (kind, id, enabled) => {
     if (kind === "schedule") await call("schedule-enable", { id: state.projectId, scheduleId: id, enabled });
     else
@@ -530,31 +477,45 @@ async function automations(body, alive) {
 // ---------------------------------------------------------------------------------------------------------------- Host
 
 async function tiersSection(body, alive) {
-  const data = await contract("tiers-get");
+  const data = await call("tiers-get");
   if (!alive()) return;
-  if (isUnavailable(data))
-    return void (body.innerHTML = `${line("Named, ordered model lists that profiles pick from.")}${quiet("Model tiers editor")}`);
-  let tiers = structuredClone(data.tiers);
+  const catalog = new Map(data.catalog.map((item) => [item.ref, item]));
+  let tiers = structuredClone(data.tiers),
+    search = { t: -1, q: "" };
+  const dirty = () => JSON.stringify(tiers) !== JSON.stringify(data.tiers);
+  const price = (item) =>
+    `${tokens(item.contextWindow)}${Number.isFinite(item.inputCost) ? ` · ${usd(item.inputCost)}/${usd(item.outputCost)} per M` : ""}`;
+  const matches = (tier) => {
+    const q = search.q.toLowerCase().trim();
+    if (!q) return [];
+    return data.catalog
+      .filter((item) => item.available && !tier.models.includes(item.ref) && `${item.ref} ${item.name}`.toLowerCase().includes(q))
+      .slice(0, 8);
+  };
   const draw = () => {
-    body.innerHTML = `${line("Ordered models per tier; the first is preferred, the rest are the fallback order.", "Drag a model or use the arrows to reorder. A model that is not signed in shows struck through.")}${tiers
-      .map(
-        (tier, t) =>
-          `<section class="tier-edit" data-t="${t}"><header><span class="tier-letter">${esc(tier.letter)}</span><b>${esc(tier.name)}</b><span class="muted small mono">${esc(tier.id)}</span></header><ol>${tier.models
-            .map((ref, m) => {
-              const item = data.catalog.find((entry) => entry.ref === ref) ?? {};
-              return `<li draggable="true" data-m="${m}" class="${item.available === false ? "off" : ""}"><span class="grip" aria-hidden="true">⋮⋮</span><span class="mono">${esc(ref)}</span><span class="muted small">${tokens(item.contextWindow)}${Number.isFinite(item.inputCost) ? ` · ${usd(item.inputCost)}/${usd(item.outputCost)} per M` : ""}</span><span class="grow"></span><button type="button" class="icon-btn small" data-move="-1" aria-label="Move up">↑</button><button type="button" class="icon-btn small" data-move="1" aria-label="Move down">↓</button><button type="button" class="icon-btn small" data-remove aria-label="Remove">✕</button></li>`;
-            })
-            .join("")}</ol><select data-add aria-label="Add model to ${esc(tier.name)}"><option value="">Add model…</option>${data.catalog
-            .filter((entry) => !tier.models.includes(entry.ref))
-            .map(
-              (entry) =>
-                `<option value="${esc(entry.ref)}">${esc(entry.name ?? entry.ref)}${entry.available ? "" : " (not signed in)"}</option>`,
-            )
-            .join("")}</select></section>`,
-      )
-      .join("")}<div class="row"><button type="button" class="primary small" id="tiers-save">Save tiers</button></div>`;
+    const changed = dirty();
+    body.innerHTML = `${line("Ordered models per tier; the first is preferred, the rest are the fallback order.", "Drag a model or use the arrows. On a quota or rate limit, work moves down the list and never back. A model without credentials shows struck through. A tier a project uses cannot be removed.")}${tiers
+      .map((tier, t) => {
+        const found = search.t === t ? matches(tier) : [];
+        return `<section class="tier-edit" data-t="${t}"><header><input class="tier-letter-input mono" data-field="letter" value="${esc(tier.letter)}" maxlength="2" aria-label="Letter of ${esc(tier.name)}" /><input class="tier-name-input" data-field="name" value="${esc(tier.name)}" maxlength="40" aria-label="Name of tier ${esc(tier.id)}" /><span class="muted small mono">${esc(tier.id)}</span><span class="grow"></span><button type="button" class="link-btn small" data-remove-tier aria-label="Remove tier ${esc(tier.name)}">Remove tier</button></header><ol>${tier.models
+          .map((ref, m) => {
+            const item = catalog.get(ref) ?? { ref };
+            return `<li draggable="true" data-m="${m}" class="${item.available === false ? "off" : ""}"><span class="grip" aria-hidden="true">⋮⋮</span><span class="mono">${esc(ref)}</span>${m ? "" : `<span class="badge">preferred</span>`}<span class="muted small">${price(item)}</span><span class="grow"></span><button type="button" class="icon-btn small" data-move="-1" aria-label="Move ${esc(ref)} up" ${m ? "" : "disabled"}>↑</button><button type="button" class="icon-btn small" data-move="1" aria-label="Move ${esc(ref)} down" ${m < tier.models.length - 1 ? "" : "disabled"}>↓</button><button type="button" class="icon-btn small" data-remove aria-label="Remove ${esc(ref)}">✕</button></li>`;
+          })
+          .join(
+            "",
+          )}</ol>${tier.models.length ? "" : `<p class="muted small">Add at least one model before saving.</p>`}<div class="tier-add"><input type="search" data-add-search placeholder="Add model: search ${data.catalog.filter((item) => item.available).length} with credentials" aria-label="Add model to ${esc(tier.name)}" value="${search.t === t ? esc(search.q) : ""}" />${found.length ? `<ul class="tier-results" role="listbox">${found.map((item) => `<li><button type="button" role="option" data-add="${esc(item.ref)}"><span class="mono">${esc(item.ref)}</span><span class="muted small">${price(item)}</span></button></li>`).join("")}</ul>` : search.t === t && search.q.trim() ? `<p class="muted small">No model with credentials matches.</p>` : ""}</div></section>`;
+      })
+      .join(
+        "",
+      )}<div class="row tier-actions"><button type="button" class="ghost-btn small" id="tier-new">+ New tier</button><span class="grow"></span>${changed ? `<span class="muted small">Unsaved changes</span><button type="button" class="ghost-btn small" id="tiers-revert">Revert</button><button type="button" class="primary small" id="tiers-save">Save tiers</button>` : ""}</div>`;
   };
   draw();
+  const focusSearch = (t) => {
+    const input = body.querySelector(`[data-t="${t}"] [data-add-search]`);
+    input?.focus();
+    input?.setSelectionRange(input.value.length, input.value.length);
+  };
   let dragging = null;
   body.addEventListener("dragstart", (event) => {
     const item = event.target.closest("li[data-m]");
@@ -572,9 +533,20 @@ async function tiersSection(body, alive) {
     dragging = null;
     draw();
   });
+  body.addEventListener("input", (event) => {
+    const t = Number(event.target.closest("[data-t]")?.dataset.t ?? -1);
+    if (event.target.matches("[data-add-search]")) {
+      search = { t, q: event.target.value };
+      draw();
+      focusSearch(t);
+    } else if (event.target.dataset.field) tiers[t][event.target.dataset.field] = event.target.value;
+  });
+  // Name and letter edits redraw on blur so the Save row appears without stealing focus while typing.
+  body.addEventListener("change", (event) => event.target.dataset.field && draw());
   body.addEventListener("click", async (event) => {
-    const row = event.target.closest("li[data-m]");
-    const t = row ? Number(row.closest("[data-t]").dataset.t) : -1,
+    const section = event.target.closest("[data-t]"),
+      t = section ? Number(section.dataset.t) : -1;
+    const row = event.target.closest("li[data-m]"),
       m = row ? Number(row.dataset.m) : -1;
     const move = event.target.closest("[data-move]");
     if (move) {
@@ -583,27 +555,54 @@ async function tiersSection(body, alive) {
       if (to < 0 || to >= list.length) return;
       [list[m], list[to]] = [list[to], list[m]];
       draw();
-      body.querySelector(`[data-t="${t}"] li[data-m="${to}"] [data-move="${move.dataset.move}"]`)?.focus();
+      (
+        body.querySelector(`[data-t="${t}"] li[data-m="${to}"] [data-move="${move.dataset.move}"]:not([disabled])`) ??
+        body.querySelector(`[data-t="${t}"] li[data-m="${to}"] [data-move]:not([disabled])`)
+      )?.focus();
       return;
     }
     if (event.target.closest("[data-remove]")) {
       tiers[t].models.splice(m, 1);
       return draw();
     }
+    const add = event.target.closest("[data-add]");
+    if (add) {
+      tiers[t].models.push(add.dataset.add);
+      search = { t, q: "" };
+      draw();
+      return focusSearch(t);
+    }
+    if (event.target.closest("[data-remove-tier]")) {
+      tiers.splice(t, 1);
+      return draw();
+    }
+    if (event.target.closest("#tier-new")) {
+      const taken = new Set(tiers.map((tier) => tier.id));
+      let n = tiers.length + 1;
+      while (taken.has(`tier-${n}`)) n++;
+      tiers.push({ id: `tier-${n}`, name: `Tier ${n}`, letter: String.fromCharCode(64 + Math.min(n, 26)), models: [] });
+      draw();
+      return focusSearch(tiers.length - 1);
+    }
+    if (event.target.closest("#tiers-revert")) {
+      tiers = structuredClone(data.tiers);
+      return draw();
+    }
     if (event.target.closest("#tiers-save")) {
-      const result = await contract("tiers-set", { revision: data.revision, tiers }).catch(fail);
-      if (result && !isUnavailable(result)) {
+      try {
+        const result = await call("tiers-set", { revision: data.revision, tiers });
+        if (!alive()) return;
         data.revision = result.revision;
+        data.tiers = structuredClone(result.tiers);
         tiers = structuredClone(result.tiers);
         toast("Tiers saved.");
+        emit("tiers");
+        draw();
+      } catch (error) {
+        // Refusals (stale revision, empty tier, a tier in use, unknown model) keep the edits on screen.
+        fail(error);
       }
     }
-  });
-  body.addEventListener("change", (event) => {
-    const add = event.target.closest("[data-add]");
-    if (!add || !add.value) return;
-    tiers[Number(add.closest("[data-t]").dataset.t)].models.push(add.value);
-    draw();
   });
 }
 const THEMES = [
@@ -614,7 +613,7 @@ const THEMES = [
 ];
 function theme(body) {
   const current = state.ui?.theme ?? "claude";
-  body.innerHTML = `${line(state.uiAvailable ? "Same in every browser; the Host agent can change it too." : "Kept in this browser until the host ui document lands.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div>${state.uiAvailable ? "" : quiet("Host-wide theme")}`;
+  body.innerHTML = `${line("Same in every browser; the Host agent can change it too.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div>`;
   body.addEventListener("click", (event) => {
     const pick = event.target.closest("[data-theme-option]");
     if (!pick) return;

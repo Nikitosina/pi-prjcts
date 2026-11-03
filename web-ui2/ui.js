@@ -1,6 +1,6 @@
 // The host `ui` document (theme, animations, hotkeys, panels, status line) through `ui-get` / `ui-set`, followed on host topic `ui`.
-// Before the backend merge the requests are unknown: the same document is kept in this browser instead, and the settings say so.
-import { contract, isUnavailable } from "./api.js";
+// localStorage keeps the last copy only as the pre-paint cache (boot.js) and for a page that cannot reach the host.
+import { call } from "./api.js";
 import { setOverrides } from "./hotkeys.js";
 import { emit, fail, state } from "./state.js";
 
@@ -38,40 +38,33 @@ function apply(ui) {
 }
 
 export async function loadUi() {
-  const result = await contract("ui-get").catch((error) => {
+  const result = await call("ui-get").catch((error) => {
     fail(error);
     return null;
   });
-  if (result && !isUnavailable(result)) {
-    state.uiAvailable = true;
+  if (result) {
     state.uiRevision = result.revision;
     apply(normalize(result.ui));
-  } else {
-    state.uiAvailable = !result ? state.uiAvailable : false;
-    apply(normalize(local()));
-  }
+  } else if (!state.ui) apply(normalize(local()));
 }
 let writing = Promise.resolve();
 /** Applies the patch at once, then writes it to the host; a stale revision re-reads and retries once. */
 export function setUi(patch) {
   const next = normalize({ ...state.ui, ...patch, panels: { ...state.ui.panels, ...(patch.panels ?? {}) } });
   apply(next);
-  if (!state.uiAvailable) return Promise.resolve();
   writing = writing.then(async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const result = await contract("ui-set", { revision: state.uiRevision, patch });
-        if (isUnavailable(result)) {
-          state.uiAvailable = false;
-          return;
-        }
+        const result = await call("ui-set", { revision: state.uiRevision, patch });
         state.uiRevision = result.revision;
         apply(normalize(result.ui));
         return;
       } catch (error) {
-        if (attempt || !/revision/i.test(error.message)) return fail(error);
-        const fresh = await contract("ui-get");
-        if (!isUnavailable(fresh)) state.uiRevision = fresh.revision;
+        if (attempt || !/revision/i.test(error.message)) {
+          fail(error);
+          return void (await loadUi()); // show what the host kept, not the refused change
+        }
+        state.uiRevision = (await call("ui-get")).revision;
       }
     }
   });

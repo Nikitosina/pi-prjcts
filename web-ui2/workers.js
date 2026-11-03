@@ -1,12 +1,12 @@
 // Right context panel: the selected chat's workers (2–3 lines each), PRs and plugin cards; and the worker transcript in the center.
-import { call, contract, isUnavailable, uuid } from "./api.js";
+import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel } from "./format.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
 import { transcriptClick, transcriptHtml } from "./chat.js";
 
 const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
-let tiers = null; // tiers-get result, or Unavailable
+let tiers = null; // tiers-get result, re-read when the host publishes `tiers`
 let armed = null; // job id whose Approve was clicked once
 
 const ROLE_ICON = { worker: "⚒", scout: "⌕", reviewer: "◎" };
@@ -24,7 +24,10 @@ const STATE = {
 export async function loadJobs() {
   const gen = state.generation;
   try {
-    const [jobs, tierData] = await Promise.all([call("jobs-snapshot", { id: state.projectId }), tiers ? tiers : contract("tiers-get")]);
+    const [jobs, tierData] = await Promise.all([
+      call("jobs-snapshot", { id: state.projectId }),
+      tiers ? tiers : call("tiers-get").catch(() => null),
+    ]);
     if (stale(gen)) return;
     tiers = tierData;
     state.jobs = jobs;
@@ -62,7 +65,7 @@ function modelFor(role) {
   return role === "worker" ? (project.models?.worker ?? project.model) : (project.models?.[role] ?? project.model);
 }
 function tierLetter(model) {
-  if (!tiers || isUnavailable(tiers)) return "";
+  if (!tiers) return "";
   return (
     tiers.tiers.find((tier) => tier.models[0] === model)?.letter ?? tiers.tiers.find((tier) => tier.models.includes(model))?.letter ?? ""
   );
@@ -254,3 +257,8 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     }
   });
 }
+// A tier edit can change the letter on every model chip.
+on("tiers", () => {
+  tiers = null;
+  if (state.projectId) void loadJobs();
+});

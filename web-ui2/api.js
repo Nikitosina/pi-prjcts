@@ -1,5 +1,5 @@
-// The only module that talks to the host. Existing requests go through `call`; requests from docs/ui2-contract.md that the
-// host may not know yet go through `contract`, which turns an unknown-action rejection into a quiet `Unavailable` value.
+// The only module that talks to the host. Requests go through `call`; `contract` is for the one contract request the backend has
+// not added yet (chat-stop), and turns an unknown-action rejection into an `Unavailable` value.
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -40,7 +40,6 @@ export class Unavailable {
   }
 }
 export const isUnavailable = (value) => value instanceof Unavailable;
-export const UNAVAILABLE_TEXT = "Available after backend merge";
 
 // A pre-merge host validates /api input against a union of the actions it knows, so an unknown action shows up as
 // "/action: must be equal to constant" somewhere in the joined branch errors. Only contract() uses this, and logs the raw text.

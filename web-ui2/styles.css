@@ -1346,6 +1346,16 @@ select {
 .mem-tools input {
   flex: 0 1 320px;
 }
+.mem-archive {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.mem-group.broken h2 {
+  color: var(--needs);
+}
 .mem-group h2 {
   font: 600 11px var(--font);
   letter-spacing: 0.07em;
@@ -1573,27 +1583,6 @@ dialog:focus-visible {
   flex-basis: 100%;
   margin: 0 0 4px;
 }
-.quiet {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 12px;
-  margin: 10px 0;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--r-m);
-  color: var(--muted);
-  font-size: 12.5px;
-}
-.quiet b {
-  color: var(--text);
-  font-weight: 550;
-}
-.quiet-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--faint);
-}
 .seg {
   display: inline-flex;
   border: 1px solid var(--line-strong);
@@ -1809,6 +1798,45 @@ details.small-field select {
   font: 11px var(--mono);
   color: var(--faint);
   width: 12px;
+}
+.tier-edit .tier-letter-input {
+  width: 40px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--accent-ink);
+}
+.tier-edit .tier-name-input {
+  flex: 0 1 220px;
+  font-weight: 600;
+}
+.tier-add input {
+  width: min(100%, 420px);
+}
+.tier-results {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  max-width: 560px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--raised);
+}
+.tier-results button {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--r-s);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.tier-results button:hover,
+.tier-results button:focus-visible {
+  background: var(--accent-soft);
 }
 .tier-edit li:hover {
   background: var(--raised);

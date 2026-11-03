@@ -1,10 +1,10 @@
 // Host agent drawer: the owner's agent over the whole host (docs/ui2-contract.md "Host agent requests"), with pending approvals
 // as Approve / Deny cards and its own model, thinking and tools. Follows `ui_focus` frames from the host change feed (routed in
-// by app.js through onHostTopic). On a host without the Host agent it shows a quiet unavailable state.
-import { call, contract, isUnavailable, stream, uuid, UNAVAILABLE_TEXT } from "./api.js";
+// by app.js through onHostTopic). When the host could not open its Host agent, the drawer shows the host's reason.
+import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, state, toast } from "./state.js";
-import { transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
 const drawer = document.querySelector("#host-agent"),
@@ -56,25 +56,25 @@ export function onHostTopic(change) {
 
 export async function loadHostAgent() {
   const load = ++loads;
+  let problem = "";
   const [history, next] = await Promise.all([
-    contract("host-agent-history").catch((reason) => (fail(reason), null)),
-    contract("host-agent-settings").catch(() => null),
+    call("host-agent-history").catch((reason) => ((problem = reason.message), null)),
+    call("host-agent-settings").catch(() => null),
     loadApprovals(),
   ]);
-  if (load !== loads || !history) return;
-  available = !isUnavailable(history);
+  if (load !== loads) return;
+  available = !!history;
   drawer.dataset.available = available ? "1" : "0";
   if (!available) {
-    body.innerHTML = `<div class="ha-empty"><p class="ha-empty-title">${esc(UNAVAILABLE_TEXT)}</p><p class="muted small">The Host agent runs over the whole host: it can create projects, change settings, tiers, theme and hotkeys for you. Dangerous actions wait for your approval here.</p><ul class="ha-examples small"><li>“Switch to the midnight theme”</li><li>“Put workers on the Workhorse tier”</li><li>“What is running right now?”</li></ul></div>`;
+    body.innerHTML = `<div class="ha-empty"><p class="ha-empty-title">The Host agent is not running</p><p class="error-line small">${esc(problem)}</p><button type="button" class="ghost-btn small" data-ha-retry>Try again</button></div>`;
     input.disabled = true;
-    input.placeholder = UNAVAILABLE_TEXT;
     drawer.querySelector("[data-ha-settings]").hidden = true;
     return;
   }
   input.disabled = false;
   input.placeholder = "Ask the host agent…";
   drawer.querySelector("[data-ha-settings]").hidden = false;
-  if (next && !isUnavailable(next)) settings = next;
+  if (next) settings = next;
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
@@ -128,11 +128,13 @@ export function followFocus(focus) {
 
 function paint() {
   const transcript = transcriptHtml(items, false, "Host agent", { fold: false });
-  body.innerHTML =
+  morph(
+    body,
     (before ? `<button type="button" class="earlier" data-ha-earlier>Show earlier</button>` : "") +
-    (transcript || `<p class="muted small ha-hint">Ask anything about this host. Try “what is running?”.</p>`) +
-    `<div id="ha-live"></div>` +
-    (error ? `<p class="error-line ha-error" role="alert">${esc(error)}</p>` : "");
+      (transcript || `<p class="muted small ha-hint">Ask anything about this host. Try “what is running?”.</p>`) +
+      `<div id="ha-live"></div>` +
+      (error ? `<p class="error-line ha-error" role="alert">${esc(error)}</p>` : ""),
+  );
   paintLive();
   body.scrollTop = body.scrollHeight;
 }
@@ -154,8 +156,8 @@ function paintLive() {
 body.addEventListener("click", async (event) => {
   if (event.target.closest("[data-ha-earlier]")) {
     const load = loads;
-    const page = await contract("host-agent-history", { before }).catch(fail);
-    if (load !== loads || !page || isUnavailable(page)) return;
+    const page = await call("host-agent-history", { before }).catch(fail);
+    if (load !== loads || !page) return;
     items = [...page.items, ...items];
     before = page.before;
     const top = body.scrollHeight - body.scrollTop;
@@ -164,14 +166,15 @@ body.addEventListener("click", async (event) => {
     return;
   }
   if (event.target.closest("[data-ha-open-settings]")) return toggleSettings(true);
+  if (event.target.closest("[data-ha-retry]")) return void loadHostAgent();
   void transcriptClick(event, body, paint);
 });
 
 // ---------------------------------------------------------------------------------------------------------------- approvals
 
 export async function loadApprovals() {
-  const result = await contract("approvals-list").catch(() => null);
-  if (!result || isUnavailable(result)) return null;
+  const result = await call("approvals-list").catch(() => null);
+  if (!result) return null;
   approvals = result.approvals;
   paintApprovals();
   emit("approvals", approvals);
@@ -203,8 +206,7 @@ approvalsBox.addEventListener("click", async (event) => {
   buttons.forEach((node) => (node.disabled = true));
   card.dataset.deciding = button.dataset.decide;
   try {
-    const result = await contract("approval-decide", { id: card.dataset.approval, decision: button.dataset.decide });
-    if (isUnavailable(result)) return toast(UNAVAILABLE_TEXT);
+    const result = await call("approval-decide", { id: card.dataset.approval, decision: button.dataset.decide });
     const { approval } = result;
     toast(
       approval.state === "denied"
@@ -240,13 +242,27 @@ function toggleSettings(force) {
   }
 }
 drawer.querySelector("[data-ha-settings]").addEventListener("click", () => toggleSettings());
-let models = null;
+let models = null,
+  tierList = [];
 async function loadModels() {
-  if (models || !state.projectId) return;
-  const picker = await call("model-picker-snapshot", { id: state.projectId }).catch(() => null);
-  if (!picker) return;
-  models = picker.items.filter((item) => item.configured);
+  if (models) return;
+  const data = await call("tiers-get").catch(() => null);
+  if (!data) return;
+  tierList = data.tiers;
+  models = data.catalog.filter((item) => item.available);
   if (!settingsBox.hidden) paintSettings();
+}
+/** Tier edits change what "Automatic" resolves to and which tiers exist. */
+export function onTiersChanged() {
+  models = null;
+  if (!settingsBox.hidden) void loadModels();
+  void call("host-agent-settings")
+    .then((next) => {
+      settings = next;
+      paintModel();
+      if (!settingsBox.hidden) paintSettings();
+    })
+    .catch(() => {});
 }
 function paintSettings() {
   if (!settings) {
@@ -255,14 +271,22 @@ function paintSettings() {
   }
   const current = settings.model ?? "";
   const options = (models ?? []).map(
-    (item) =>
-      `<option value="${esc(item.reference)}" ${item.reference === current ? "selected" : ""}>${esc(item.name ?? item.reference)}</option>`,
+    (item) => `<option value="${esc(item.ref)}" ${item.ref === current ? "selected" : ""}>${esc(item.ref)}</option>`,
   );
-  if (current && !(models ?? []).some((item) => item.reference === current))
-    options.unshift(`<option value="${esc(current)}" selected>${esc(shortModel(current))}</option>`);
-  const auto = `<option value="" ${current ? "" : "selected"} disabled>Automatic · ${esc(settings.effectiveModel ? shortModel(settings.effectiveModel) : "none")}</option>`;
+  if (current && !(models ?? []).some((item) => item.ref === current))
+    options.unshift(`<option value="${esc(current)}" selected>${esc(current)}</option>`);
+  const auto = `<option value="" ${current ? "" : "selected"} disabled>From tier · ${esc(settings.effectiveModel ? shortModel(settings.effectiveModel) : "none")}</option>`;
+  const tierOptions = [`<option value="" ${settings.tier ? "" : "selected"}>No tier · newest project's model</option>`]
+    .concat(
+      tierList.map(
+        (tier) =>
+          `<option value="${esc(tier.id)}" ${tier.id === settings.tier ? "selected" : ""}>${esc(tier.letter)} · ${esc(tier.name)}</option>`,
+      ),
+    )
+    .join("");
   const dangerous = settings.actions.filter((action) => action.dangerous);
-  settingsBox.innerHTML = `<div class="ha-row"><label for="ha-model-select">Model</label><select id="ha-model-select">${auto}${options.join("")}</select></div>
+  settingsBox.innerHTML = `<div class="ha-row"><label for="ha-tier-select">Tier</label><select id="ha-tier-select">${tierOptions}</select></div>
+<div class="ha-row"><label for="ha-model-select">Pinned</label><select id="ha-model-select">${auto}${options.join("")}</select>${current ? `<button type="button" class="info" data-info="A pinned model wins over the tier." aria-label="About the pinned model">ⓘ</button>` : ""}</div>
 <div class="ha-row"><span id="ha-thinking-label">Thinking</span><div class="seg" role="radiogroup" aria-labelledby="ha-thinking-label">${THINKING.map((level) => `<button type="button" role="radio" aria-checked="${level === settings.thinking}" data-thinking="${level}">${level}</button>`).join("")}</div></div>
 <div class="ha-row top"><span>Tools</span><ul class="ha-tools">${settings.tools
     .map(
@@ -275,21 +299,24 @@ function paintSettings() {
 async function saveSettings(patch, label) {
   if (!settings) return;
   try {
-    const next = await contract("host-agent-settings", { revision: settings.revision, patch });
-    if (isUnavailable(next)) return toast(UNAVAILABLE_TEXT);
+    const next = await call("host-agent-settings", { revision: settings.revision, patch });
     settings = next;
     error = "";
     toast(label);
   } catch (reason) {
     fail(reason);
     // A stale revision or a refused model: show what the host has now.
-    const fresh = await contract("host-agent-settings").catch(() => null);
-    if (fresh && !isUnavailable(fresh)) settings = fresh;
+    const fresh = await call("host-agent-settings").catch(() => null);
+    if (fresh) settings = fresh;
   }
   paintModel();
   paintSettings();
 }
 settingsBox.addEventListener("change", (event) => {
+  if (event.target.id === "ha-tier-select") {
+    const tier = event.target.value || null;
+    void saveSettings({ tier }, tier ? `Host agent tier: ${event.target.selectedOptions[0].textContent}` : "Host agent tier cleared");
+  }
   if (event.target.id === "ha-model-select" && event.target.value)
     void saveSettings({ model: event.target.value }, `Host agent model: ${shortModel(event.target.value)}`);
   const toggle = event.target.closest("[data-tool-toggle]");
@@ -321,8 +348,7 @@ form.addEventListener("submit", async (event) => {
   form.dataset.sending = "1";
   input.value = "";
   try {
-    const result = await contract("host-agent-send", { requestId: uuid(), text });
-    if (isUnavailable(result)) return toast(UNAVAILABLE_TEXT);
+    await call("host-agent-send", { requestId: uuid(), text });
     error = "";
     await loadHostAgent();
   } catch (reason) {
@@ -338,15 +364,14 @@ form.addEventListener("submit", async (event) => {
   }
 });
 export async function resetHostAgent() {
-  const result = await contract("host-agent-reset").catch(fail);
-  if (isUnavailable(result)) toast(UNAVAILABLE_TEXT);
-  else if (result) {
+  const result = await call("host-agent-reset").catch(fail);
+  if (result) {
     toast("New Host agent session. History kept.");
     void loadHostAgent();
   }
 }
 export async function stopHostAgent() {
   if (!frame?.running) return false;
-  await contract("host-agent-stop").catch(fail);
+  await call("host-agent-stop").catch(fail);
   return true;
 }

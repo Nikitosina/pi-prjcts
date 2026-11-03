@@ -891,6 +891,21 @@ const journeys = {
     await page.press("Escape", { keyCode: 27 });
     await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc back from the memory view");
     record("visible", "memory entry opens in the center; the Memory node groups it under Decisions; search filters");
+    const projectId = (await rpc(run, { action: "list" })).find((item) => item.name === PROJECT_NAME).id;
+    const indexed = (await rpc(run, { action: "memory-index", projectId })).entries.find(
+      (entry) => entry.path === "decisions/greeting-style.md",
+    );
+    if (indexed?.kind !== "decision" || indexed.status !== "current" || indexed.title !== "Greeting style")
+      throw Error(`memory-index entry: ${JSON.stringify(indexed)}`);
+    // Undo on the Remembered row goes through memory-undo; the entry was new, so the host removes it.
+    await page.click('#feed .memory-row[data-tool="projects_knowledge_write"] [data-memory-undo]');
+    await page.waitFor(
+      `/Undone/.test(document.querySelector('#feed .memory-row[data-tool="projects_knowledge_write"]')?.innerText ?? '')`,
+      "Remembered row says Undone",
+    );
+    const undone = (await rpc(run, { action: "memory-index", projectId })).entries.some((entry) => entry.path === indexed.path);
+    if (undone) throw Error("memory-undo left decisions/greeting-style.md in memory-index");
+    record("side-effect", `memory-index listed ${indexed.path} as a current decision; Undo removed it through memory-undo`);
     // Settings by hotkey (⌘,), theme section by its letter, switch to Midnight.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings overlay open");
@@ -905,34 +920,36 @@ const journeys = {
     await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "midnight applied");
     await delay(300); // let the open transition finish before the screenshot
     await page.shot(dir, "06-settings-midnight");
-    const ui = await rpc(run, { action: "ui-get" }).catch((error) => ({ unavailable: error.message }));
+    const ui = await rpc(run, { action: "ui-get" });
     writeFileSync(join(dir, "host-ui-get.json"), JSON.stringify(ui, null, 2));
-    if (!ui.unavailable && ui.ui?.theme !== "midnight") throw Error(`host ui document not updated: ${JSON.stringify(ui)}`);
-    record(
-      "side-effect",
-      ui.unavailable ? `ui-get not available on this host (${ui.unavailable}); theme kept locally` : "host ui-get reports theme midnight",
-    );
+    if (ui.ui?.theme !== "midnight") throw Error(`host ui document not updated: ${JSON.stringify(ui)}`);
+    record("side-effect", `ui-set stored theme midnight on the host (ui revision ${String(ui.revision).slice(0, 8)})`);
     await page.press("Escape", { keyCode: 27 });
     await page.waitFor(`!document.querySelector('#settings').open`, "settings closed");
+    // Poison the browser's pre-paint cache: after reload the theme must come from the host's ui document, not localStorage.
+    await page.evaluate(
+      `localStorage.setItem('pi-ui2-ui', JSON.stringify({ ...JSON.parse(localStorage.getItem('pi-ui2-ui') || '{}'), theme: 'light' }))`,
+    );
     await page.reload();
     await page.waitFor(
       `document.body.dataset.ready === "1" && document.documentElement.dataset.theme === 'midnight'`,
-      "midnight survives reload",
+      "midnight from the host survives reload over a stale local cache",
     );
+    record("verified", "after reload with a stale local cache (light), the page shows midnight from ui-get");
     await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "worker after reload", 30000);
     await page.shot(dir, "07-chat-midnight");
     // Host agent drawer from anywhere with \.
     await page.press("\\", { code: "Backslash", keyCode: 220 });
     await page.waitFor(`document.querySelector('#host-agent')?.dataset.open === '1'`, "host agent drawer open");
-    await page.waitFor(`!!document.querySelector('#host-agent .ha-body')?.innerText.trim()`, "drawer content or quiet fallback");
+    await page.waitFor(`!!document.querySelector('#host-agent .ha-body')?.innerText.trim()`, "drawer content");
     await delay(300); // let the open transition finish before the screenshot
     await page.shot(dir, "08-host-agent-midnight");
     record(
       "visible",
       `host agent drawer: ${JSON.stringify((await page.evaluate(`document.querySelector('#host-agent .ha-body').innerText`)).slice(0, 160))}`,
     );
-    const hostAgent = await rpc(run, { action: "host-agent-settings" }).catch((error) => ({ unavailable: error.message }));
-    if (!hostAgent.unavailable) {
+    const hostAgent = await rpc(run, { action: "host-agent-settings" });
+    {
       // A real exchange: host_call rows in the drawer, a ui_focus that opens Memory, a gated archive shown as an approval card
       // and counted in the status pill, Deny, and the outcome posted back without archiving anything.
       record(
@@ -1000,8 +1017,95 @@ const journeys = {
         "thinking back to medium",
       );
       record("side-effect", `host-agent-settings thinking low at revision ${tuned.revision}, then back to medium`);
-    } else record("blocked", `Host agent requests not on this host (${hostAgent.unavailable.slice(0, 80)}); quiet fallback shown`);
+      // Approve: a spare project, archived by the Host agent only after the owner presses Approve in the drawer.
+      const spare = await rpc(run, {
+        action: "create",
+        requestId: randomUUID(),
+        name: "Verify spare",
+        cwd: run.workspace,
+        objective: "Archived through an approval",
+        model: "fake/fake-model",
+      });
+      await page.click("#ha-composer textarea");
+      await page.cdp("Input.insertText", { text: `VERIFY-HOST-APPROVE ${spare.id}` });
+      await page.press("Enter", { code: "Enter", keyCode: 13 });
+      await page.waitFor(
+        `[...document.querySelectorAll('#ha-approvals .approval[data-approval]')].some(n => /Archive the spare project/.test(n.innerText))`,
+        "second approval card",
+        60000,
+      );
+      await page.click('#ha-approvals .approval[data-approval] [data-decide="approve"]');
+      await page.waitFor(
+        `/Done as approved/.test(document.querySelector('#host-agent .ha-body').innerText)`,
+        "approved outcome reply",
+        60000,
+      );
+      const approvedRows = await page.evaluate(
+        `[...document.querySelectorAll('#host-agent .ha-body .approval-row[data-status="done"]')].map(n => n.innerText.replace(/\\s+/g, ' '))`,
+      );
+      const approved = (await rpc(run, { action: "approvals-list" })).approvals.find(
+        (item) => item.summary === "Archive the spare project",
+      );
+      const spareNow = (await rpc(run, { action: "list" })).find((item) => item.id === spare.id);
+      if (approved?.state !== "done" || !spareNow?.archived || !approvedRows.length)
+        throw Error(`after Approve: approval ${approved?.state}, archived ${spareNow?.archived}, rows ${JSON.stringify(approvedRows)}`);
+      record("side-effect", `approval ${approved.id} approved and done; "Verify spare" archived; outcome row "${approvedRows.at(-1)}"`);
+      await delay(300);
+      await page.shot(dir, "08e-host-agent-approved");
+    }
     await page.press("\\", { code: "Backslash", keyCode: 220 });
+    await page.press("Escape", { keyCode: 27 });
+    // Profile thinking: Model section, coordinator profile, high; profiles-set stores it and the status line follows.
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings for the model");
+    await page.click('#settings nav [data-section="model"]');
+    await page.waitFor(`!!document.querySelector('#settings .settings-body [data-thinking="high"]')`, "model section");
+    await page.click('#settings .profiles [data-profile="coordinator"]');
+    await page.waitFor(`!!document.querySelector('#settings .settings-body [data-thinking="high"]')`, "coordinator model section");
+    await page.click('#settings .settings-body [data-thinking="high"]');
+    await page.waitFor(
+      `document.querySelector('#settings .settings-body [data-thinking="high"]')?.getAttribute('aria-checked') === 'true'`,
+      "thinking high checked",
+    );
+    const profiles = await rpc(run, { action: "profiles-get", projectId });
+    if (profiles.profiles.coordinator.thinking !== "high")
+      throw Error(`profiles-get coordinator: ${JSON.stringify(profiles.profiles.coordinator)}`);
+    await page.waitFor(`/think high/.test(document.querySelector('#statusline').innerText)`, "status line shows think high");
+    record("side-effect", "profiles-set coordinator thinking high; profiles-get agrees; status line shows think high");
+    await delay(300);
+    await page.shot(dir, "11-settings-model");
+    // Tier reorder: add the fallback model to the tier, move it first, save; tiers-get keeps the new order.
+    await page.click('#settings nav [data-section="tiers"]');
+    await page.waitFor(`!!document.querySelector('#settings .tier-edit [data-add-search]')`, "tiers editor");
+    const tierBefore = (await rpc(run, { action: "tiers-get" })).tiers[0];
+    await page.click("#settings .tier-edit [data-add-search]");
+    await page.cdp("Input.insertText", { text: "fallback-model" });
+    await page.waitFor(`!!document.querySelector('#settings [data-add="fake/fallback-model"]')`, "model search result");
+    await page.click('#settings [data-add="fake/fallback-model"]');
+    await page.click('#settings .tier-edit li[data-m="1"] [data-move="-1"]');
+    await page.waitFor(
+      `/fallback-model/.test(document.querySelector('#settings .tier-edit li[data-m="0"]')?.innerText ?? '')`,
+      "fallback model moved first",
+    );
+    await delay(300);
+    await page.shot(dir, "12-settings-tiers-reordered");
+    await page.click("#settings #tiers-save");
+    await page.waitFor(`!document.querySelector('#settings #tiers-save')`, "tiers saved");
+    const tierAfter = (await rpc(run, { action: "tiers-get" })).tiers.find((tier) => tier.id === tierBefore.id);
+    if (JSON.stringify(tierAfter.models) !== JSON.stringify(["fake/fallback-model", ...tierBefore.models]))
+      throw Error(`tiers-get after reorder: ${JSON.stringify(tierAfter.models)}`);
+    record("side-effect", `tiers-set: tier ${tierBefore.id} is now ${tierAfter.models.join(" → ")}`);
+    // Back to the seed order so the model the rest of the run uses is unchanged.
+    await page.click('#settings .tier-edit li[data-m="0"] [data-remove]');
+    await page.click("#settings #tiers-save");
+    await page.waitFor(`!document.querySelector('#settings #tiers-save')`, "tiers restored");
+    await page.click('#settings nav [data-section="model"]');
+    await page.waitFor(`!!document.querySelector('#settings .settings-body [data-thinking="medium"]')`, "model section again");
+    await page.click('#settings .settings-body [data-thinking="medium"]');
+    await page.waitFor(
+      `document.querySelector('#settings .settings-body [data-thinking="medium"]')?.getAttribute('aria-checked') === 'true'`,
+      "thinking back to medium",
+    );
     await page.press("Escape", { keyCode: 27 });
     // Light theme through the settings overlay, then the narrow layout.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
@@ -1026,21 +1130,6 @@ const journeys = {
     await page.waitFor(`document.documentElement.dataset.theme === 'claude'`, "claude restored");
     record("verified", "no horizontal overflow at 390 px; themes claude, midnight and light applied through the settings overlay");
     writeFileSync(join(dir, "feed-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
-    // Before the backend merge each contract request is refused once with HTTP 400 (unknown action); the client shows a quiet
-    // state. Only on such a host are 400s from /api taken out of the sinks, and they are counted in the record.
-    if (ui.unavailable) {
-      const before = sinks.httpErrors.length;
-      sinks.httpErrors.splice(
-        0,
-        Infinity,
-        ...sinks.httpErrors.filter((item) => !(item.status === 400 && new URL(item.url).pathname === "/api")),
-      );
-      sinks.errors.splice(0, Infinity, ...sinks.errors.filter((item) => !/status of 400/.test(item)));
-      record(
-        "verified",
-        `pre-merge host: ${before - sinks.httpErrors.length} contract requests refused as unknown and shown as unavailable`,
-      );
-    }
     if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },
   // Feature: features/message-coordinator.md

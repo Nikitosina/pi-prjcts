@@ -1,7 +1,8 @@
 // Fake OpenAI-completions provider for verification runs. Usage: node fake-provider.mjs <port-file> <request-log>
 // Ordinary messages receive `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
-// VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive).
+// VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive);
+// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -52,6 +53,15 @@ const server = createServer((req, res) => {
         .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
     if (names.includes("host_call") && user.startsWith("[approval ")) {
       reply = say(/denied/i.test(user) ? "Understood, nothing was archived." : "Done as approved.");
+    } else if (names.includes("host_call") && user.includes("VERIFY-HOST-APPROVE")) {
+      reply =
+        stage === 0
+          ? call("host_call", {
+              action: "archive",
+              input: { id: user.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0] },
+              summary: "Archive the spare project",
+            })
+          : say("Archiving the spare project waits for your approval.");
     } else if (names.includes("host_call") && user.includes("VERIFY-HOST")) {
       // Host agent: list projects, point the browser at Memory, then ask to archive the first project (gated by an approval).
       reply =

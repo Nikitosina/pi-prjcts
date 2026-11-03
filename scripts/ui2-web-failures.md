@@ -53,7 +53,7 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 ## Theme, hotkeys, motion
 
 - Switching theme does not change the CSS variables on the root, or flashes the default theme on reload.
-- The theme choice is kept only in this browser when `ui-set` is available (it must go through the host), or is lost on reload when `ui-set` is not available yet (local fallback).
+- The theme choice is kept only in this browser (it must go through `ui-set`), or after a reload the stale localStorage pre-paint copy wins over `ui-get`.
 - A hotkey fires while typing in the composer or a text field (except Esc and ⌘ combos).
 - A rebound hotkey still triggers on the old key; two commands share one binding without a visible conflict.
 - `prefers-reduced-motion` or Animations "off" still animates rows and panels.
@@ -61,10 +61,10 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 ## Host agent
 
 - `\` does not open the drawer from the chat or from settings.
-- The drawer crashes when `host-agent-*` is unknown; it must show the quiet fallback and keep the rest of the page working.
+- When the host could not open its Host agent, the drawer is blank or crashes instead of showing the host's reason with Try again.
 - A pending approval is shown without the exact action and its input, or Approve/Deny fire without a visible result.
 - A `ui_focus` frame for another project opens it without changing the selection consistently (tree, center, URL).
-- After the merge the drawer still shows the fallback, or a send renders twice (optimistic bubble plus history) or not at all until reopen.
+- A send renders twice (optimistic bubble plus history) or not at all until reopen.
 - The Host agent's tool calls render as raw JSON instead of the same compact mono tool rows as the coordinator chat.
 - `ui_focus` frames are read from `/live` instead of the host change feed (`/changes?project=host`, `topic: "host-agent", type: "focus"`), so the page never moves; or an unknown view crashes instead of showing a short note.
 - The host change feed opens only when the drawer is open, so approvals filed by a coordinator never reach the status pill.
@@ -78,3 +78,16 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - A control is a `div` with a click handler instead of a button; focus ring invisible on dark themes.
 - Icon-only buttons have no accessible name.
 - Contrast of muted text below 4.5:1 on any theme (manual, screenshots).
+
+## Real data after the backend merge
+
+- A placeholder ("Available after backend merge", disabled buttons with that tooltip) survives anywhere for a request the host now answers.
+- A verifier profile shows up in the Profile tabs or anywhere else.
+- `profiles-set` is sent without the `settings-snapshot` revision, or a refusal is swallowed and the section keeps showing the unsaved value.
+- Thinking changes in Settings but the status line keeps the old level, or shows the project model instead of the coordinator's effective model.
+- The tier editor offers all 1,600 catalog models in one select, lets a model without credentials be added, or saves on every keystroke; a refused `tiers-set` (stale revision, empty tier, tier in use) discards the owner's edits.
+- After a tier edit, worker chips keep the old tier letter until reload.
+- Memory Undo on a write that a later write superseded shows the raw revision error, or a second click undoes twice; after Undo the row still offers Undo.
+- The Memory view still classifies by folder in the browser instead of using `memory-index` kinds, hides archived entries without a way to see them, or drops broken links.
+- The drawer repaints its whole history on every turn end, so every row animates in again.
+- A burst of toasts stacks until it covers the chat on a phone.
