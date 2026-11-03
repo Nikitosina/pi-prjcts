@@ -6,6 +6,7 @@ import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from 
 import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
+import { promptSection } from "./prompts.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -34,7 +35,8 @@ export const SECTIONS = [
 ];
 let section = "general",
   profile = "coordinator",
-  paintGen = 0;
+  paintGen = 0,
+  prompts = null; // the open Prompt section: back() for Esc, refresh() for writes from elsewhere
 
 export const settingsOpen = () => dialog.open;
 export function openSettings(id) {
@@ -45,6 +47,10 @@ export function openSettings(id) {
 export function closeSettings() {
   if (dialog.open) dialog.close();
 }
+/** Esc inside Settings: a section with its own inner view (the Prompt editor) steps back first; true when it did. */
+export const settingsBack = () => !!prompts?.back();
+/** Prompt blocks changed elsewhere (another tab, the Host agent): an open Prompt section re-reads; nothing opens. */
+on("prompts-changed", () => void prompts?.refresh().catch(() => {}));
 export function showSection(id) {
   if (!dialog.open || !SECTIONS.some((item) => item.id === id)) return false;
   section = id;
@@ -68,6 +74,10 @@ dialog.addEventListener("click", (event) => {
 function paint() {
   const current = SECTIONS.find((item) => item.id === section);
   dialog.dataset.section = section;
+  if (profile === "host" && section !== "prompt") profile = "coordinator";
+  prompts = null;
+  const scope = current.profile && profile === "host" ? "host" : current.scope;
+  const tabs = section === "prompt" ? [...PROFILES, { id: "host", label: "Host agent" }] : PROFILES;
   const groups = [...new Set(SECTIONS.map((item) => item.group))];
   const nav = groups
     .map(
@@ -81,7 +91,7 @@ function paint() {
     )
     .join("");
   const projectName = state.projects.find((item) => item.id === state.projectId)?.name ?? "";
-  dialog.innerHTML = `<div class="settings-shell"><nav aria-label="Settings sections">${nav}<p class="nav-foot muted small"><kbd>Esc</kbd> close · letters jump</p></nav><section class="settings-main"><header class="settings-head"><h1>${esc(current.label)}</h1><span class="scope ${current.scope}">${current.scope === "project" ? `Project · ${esc(clip(projectName, 30))}` : "Host"}</span><span class="settings-status inline-status" role="status" aria-live="polite"></span><span class="grow"></span><button type="button" class="icon-btn" data-cmd="leave-focus" aria-label="Close settings">✕</button></header>${current.profile ? `<div class="profiles" role="tablist" aria-label="Profile">${PROFILES.map((item) => `<button type="button" role="tab" data-profile="${item.id}" aria-selected="${item.id === profile}">${item.label}</button>`).join("")}</div>` : ""}<div class="settings-body"><p class="loading-line">Loading…</p></div></section></div>`;
+  dialog.innerHTML = `<div class="settings-shell"><nav aria-label="Settings sections">${nav}<p class="nav-foot muted small"><kbd>Esc</kbd> close · letters jump</p></nav><section class="settings-main"><header class="settings-head"><h1>${esc(current.label)}</h1>${scope === "project" ? `<span class="scope project">Project · ${esc(clip(projectName, 30))}</span>` : `<span class="scope host">Host</span>`}<span class="settings-status inline-status" role="status" aria-live="polite"></span><span class="grow"></span><button type="button" class="icon-btn" data-cmd="settings" aria-label="Close settings">✕</button></header>${current.profile ? `<div class="profiles" role="tablist" aria-label="Profile">${tabs.map((item) => `<button type="button" role="tab" data-profile="${item.id}" aria-selected="${item.id === profile}">${item.label}</button>`).join("")}</div>` : ""}<div class="settings-body"><p class="loading-line">Loading…</p></div></section></div>`;
   paintHints(dialog);
   // A status said just before a repaint (a save redraws the section) stays visible in the new header.
   if (said && said.section === section && Date.now() - said.at < 3000) inline(dialog.querySelector(".settings-status"), said.text, said);
@@ -332,47 +342,10 @@ const label = (id) => id[0].toUpperCase() + id.slice(1);
 
 // ---------------------------------------------------------------------------------------------------------------- Prompt
 
+/** Blocks, editor and preview live in prompts.js; the profile tabs add the Host agent here only. */
 async function prompt(body, alive) {
-  const rendered = await call("prompt-render", {
-    projectId: state.projectId,
-    profile,
-    ...(state.chatId !== "main" ? { chatId: state.chatId } : {}),
-  });
-  if (!alive()) return;
-  const { sections, totalTokens: total } = rendered;
-  let mode = "rendered";
-  const head = (item) =>
-    `<b>${esc(item.label)}</b><span class="muted small one-line">${esc(item.source.replace(/; tokens are an estimate \(chars\/4\)$/, ""))}</span><span class="grow"></span><span class="mono small muted">${tokens(item.tokens)}</span>${item.editable ? "" : `<span class="lock" aria-label="locked">🔒</span>`}`;
-  const section = (item) => {
-    if (mode === "edit")
-      return `<section class="prompt-sec" data-sec="${esc(item.id)}"><header>${head(item)}</header><textarea aria-label="${esc(item.label)}" maxlength="32000">${esc(item.text)}</textarea></section>`;
-    if (!item.text.trim())
-      return `<section class="prompt-sec empty" data-sec="${esc(item.id)}"><header>${head(item)}<span class="muted small">empty</span></header></section>`;
-    // Editable sections open; long locked ones (host contract, skills, memory) start folded.
-    return `<details class="prompt-sec${item.editable ? "" : " locked"}" data-sec="${esc(item.id)}" ${item.editable || item.text.length < 400 ? "open" : ""}><summary>${head(item)}</summary><pre class="prompt-text">${esc(item.text)}</pre></details>`;
-  };
-  const draw = () => {
-    body.innerHTML = `${line("The assembled prompt by section, with source and size.", "Tokens are an estimate (characters / 4). Locked sections come from the host, the repository, Memory and skills; Edit changes only project and role instructions.")}<div class="field-row"><div class="seg" role="tablist"><button type="button" role="tab" data-mode="rendered" aria-selected="${mode === "rendered"}">Rendered</button><button type="button" role="tab" data-mode="edit" aria-selected="${mode === "edit"}">Edit</button></div><span class="grow"></span><span class="mono small muted">≈${tokens(total)} tokens</span></div>${sections
-      .filter((item) => mode === "rendered" || item.editable)
-      .map(section)
-      .join(
-        "",
-      )}${mode === "edit" ? `<div class="row"><button type="button" class="primary small" id="prompt-save">Save</button></div>` : ""}`;
-  };
-  draw();
-  body.addEventListener("click", async (event) => {
-    const tab = event.target.closest("[data-mode]");
-    if (tab) {
-      mode = tab.dataset.mode;
-      return draw();
-    }
-    if (!event.target.closest("#prompt-save")) return;
-    const value = (id) => body.querySelector(`[data-sec="${id}"] textarea`)?.value;
-    const changes = {};
-    if (value("project") !== undefined) changes.objective = value("project");
-    if (value("role") !== undefined) changes.prompts = { [profile]: value("role").trim() ? value("role") : null };
-    await update(changes, "Prompt saved.").catch(sayFail);
-  });
+  const view = await promptSection(body, alive, { profile, say, sayFail });
+  if (alive()) prompts = view;
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Tools

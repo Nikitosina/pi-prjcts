@@ -10,7 +10,7 @@ import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from 
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
 import { renderMemoryEntry, renderMemoryList } from "./memory.js";
-import { closeSettings, openSettings, SECTIONS, settingsOpen, showSection } from "./settings.js";
+import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
 import {
   isOpen as drawerOpen,
   loadApprovals,
@@ -84,6 +84,7 @@ function onTopic(change) {
   if (change.topic === "chat" && (change.chat === "*" || change.chat === state.chatId || !change.chat)) void loadChat();
   if (change.topic === "jobs") void loadJobs();
   if (change.topic === "settings") {
+    emit("prompts-changed");
     void loadChat();
     void loadUsage();
   }
@@ -254,7 +255,7 @@ function leaveTop() {
   if (slashMenuOpen()) return closeSlashMenu();
   if (paletteOpen()) return closePalette();
   if (app.dataset.sheet) return void (app.dataset.sheet = "");
-  if (settingsOpen()) return closeSettings();
+  if (settingsOpen()) return void (settingsBack() || closeSettings());
   if (drawerOpen()) return toggleHostAgent(false);
   if (leaveFocus()) return;
   if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
@@ -409,6 +410,7 @@ async function start() {
       return;
     }
     if (change.t !== "topic") return;
+    if (change.topic === "host-agent") emit("prompts-changed"); // Host agent prompt blocks, among its other changes
     if (change.topic === "ui") void loadUi();
     else if (change.topic === "tiers") {
       emit("tiers");

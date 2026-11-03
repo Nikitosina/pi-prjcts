@@ -36,3 +36,4 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Jobs, Approve and Deploy](./jobs.md) — Job tree, Ready proof and Approve in worker details, intermediate checkpoint without Approve, Deploy settings. Scripted.
 - [Quota fallback settings](./quota-settings.md) — worker fallback selection, review, save and reload. Scripted.
 - [UI 2.0 client](./ui2.md) — /ui2/ tree, tool rows, worker focus, Memory, settings overlay with host themes, profiles, tiers, Context bar, prompt and tools, Host agent drawer with Approve/Deny, coordinator approvals and focus, toasts, narrow layout. Scripted.
+- [UI 2.0 Prompt blocks](./ui2-prompts.md) — Settings → Prompt: block list with switches, badges and tokens, one editor, custom blocks, reorder, restore default, drafts, stale-write conflicts, preview, Host agent, 390 px. Scripted.

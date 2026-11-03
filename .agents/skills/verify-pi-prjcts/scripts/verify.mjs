@@ -781,7 +781,324 @@ function dropMissingArtifact(sinks, loads) {
   }
 }
 
+/** Settings → Prompt: blocks per target, one selected editor, preview, drafts and conflicts (features/ui2-prompts.md). Check ids are
+ * the failure list in scripts/ui2-prompt-editor-failures.md. */
+async function ui2Prompts(run, page, record, dir, sinks) {
+  const origin = new URL(run.webUrl).origin,
+    hash = new URL(run.webUrl).hash,
+    projectId = run.projectId;
+  // Host second view: the stored blocks of a target (docs/ui2-contract.md, prompt blocks). The Host agent target has no project.
+  const where = (target) => (target === "host" ? {} : { projectId });
+  const blocks = (target) => rpc(run, { action: "prompt-blocks-get", ...where(target), target });
+  /** Another writer (a second tab, the Host agent) changes blocks with the revision it just read; `patch` is per block id. */
+  const otherWriter = async (target, patch) => {
+    const now = await blocks(target);
+    await rpc(run, {
+      action: "prompt-blocks-set",
+      ...where(target),
+      target,
+      revision: now.revision,
+      blocks: now.blocks.map((b) => {
+        const next = { ...b, ...patch[b.id] };
+        const edited = next.text !== b.text || b.edited;
+        return b.kind === "custom"
+          ? { id: b.id, name: b.name, text: next.text, enabled: next.enabled }
+          : { id: b.id, enabled: next.enabled, ...(edited ? { text: next.text } : {}) };
+      }),
+    });
+  };
+  const q = (selector) => JSON.stringify(selector);
+  const text = (selector) => page.evaluate(`document.querySelector(${q(selector)})?.innerText ?? ''`);
+  const status = () => text("#settings .settings-status");
+  const row = (id) => `#settings .pb-row[data-block="${id}"]`;
+  const open = async (target = "coordinator") => {
+    if (!(await page.evaluate(`document.querySelector('#settings')?.open === true`)))
+      await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings open");
+    if ((await page.evaluate(`document.querySelector('#settings').dataset.section`)) !== "prompt")
+      await page.click('#settings nav [data-section="prompt"]');
+    await page.click(`#settings .profiles [data-profile="${target === "taskHelper" ? "worker" : target}"]`);
+    if (target === "taskHelper" || target === "worker") {
+      await page.waitFor(`!!document.querySelector('#settings .pb-bar [data-kind]')`, "worker kind switch");
+      await page.click(`#settings .pb-bar [data-kind="${target === "worker" ? "job" : "task"}"]`);
+    }
+    await page.waitFor(
+      `document.querySelector('#settings .pb')?.dataset.target === ${q(target)} && document.querySelectorAll('#settings .pb-row').length > 0`,
+      `prompt blocks of ${target}`,
+    );
+  };
+  const select = async (id) => {
+    await page.click(`${row(id)} .pb-name`);
+    await page.waitFor(`document.querySelector('#settings .pb-editor')?.dataset.block === ${q(id)}`, `editor shows ${id}`);
+  };
+  /** Replaces the editor text through the browser input pipeline. */
+  const type = async (value, selector = "#settings .pb-editor textarea") => {
+    await page.evaluate(`(() => { const t = document.querySelector(${q(selector)}); t.focus(); t.select(); })()`);
+    await page.cdp("Input.insertText", { text: value });
+  };
+  /** The header status says `expect` (each step's own words, so an earlier "saved" never passes for a later one). */
+  const saved = async (what, expect) => {
+    await page.waitFor(
+      `(document.querySelector('#settings .settings-status')?.innerText ?? '').includes(${q(expect)})`,
+      `${what}: "${expect}" inline`,
+      15000,
+    );
+    record("visible", `${what}: "${await status()}"`);
+  };
+  const noOverflow = () =>
+    page.evaluate(
+      `document.documentElement.scrollWidth <= innerWidth && document.querySelector('#settings').scrollWidth <= document.querySelector('#settings').clientWidth`,
+    );
+
+  await page.navigate(`${origin}/ui2/${hash}`);
+  await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "ui2 ready");
+  record("entry", `opened ${origin}/ui2/; ⌘, → Prompt`);
+  await open("coordinator");
+
+  // E2/E3: compact rows; generated sections are read-only rows in their own folded group.
+  const shape = await page.evaluate(`(() => {
+    const rows = [...document.querySelectorAll('#settings .pb-row')];
+    const own = rows.filter(r => !r.matches('[data-generated]')), gen = rows.filter(r => r.matches('[data-generated]'));
+    return {
+      own: own.map(r => ({ id: r.dataset.block, project: r.dataset.block === 'objective', toggle: !!r.querySelector('input.pb-toggle[type=checkbox]'), name: r.querySelector('.pb-name')?.innerText.trim(),
+        src: r.querySelector('.pb-src')?.innerText.trim(), tok: r.querySelector('.pb-tok')?.innerText.trim(), h: r.getBoundingClientRect().height })),
+      gen: gen.map(r => ({ id: r.dataset.block, toggle: !!r.querySelector('input'), name: r.querySelector('.pb-name')?.innerText.trim() })),
+      textareas: document.querySelectorAll('#settings textarea').length,
+      editor: !!document.querySelector('#settings .pb-editor'),
+    };
+  })()`);
+  if (
+    !shape.own.length ||
+    shape.own.some(
+      (r) => (!r.toggle && !r.project) || !r.name || !/^(Built-in|Edited|Custom|Project)$/.test(r.src) || !/\d/.test(r.tok) || r.h > 48,
+    )
+  )
+    throw Error(`E2 block rows: ${JSON.stringify(shape.own)}`);
+  if (!shape.gen.length || shape.gen.some((r) => r.toggle) || shape.textareas > 1 || !shape.editor)
+    throw Error(`E3 generated rows or stacked forms: ${JSON.stringify(shape)}`);
+  record(
+    "visible",
+    `E2/E3 ${shape.own.length} block rows (switch, name, badge, tokens); ${shape.gen.length} generated read-only rows; one editor`,
+  );
+  await page.shot(dir, "01-blocks");
+  if (shape.own[0]?.id !== "objective" || shape.own[0].toggle || shape.own[0].src !== "Project")
+    throw Error(`E19 Project instructions row: ${JSON.stringify(shape.own[0])}`);
+  const first = shape.own.find((r) => r.src === "Built-in").id;
+
+  // E5: Space on a focused row switches the block off; the host stores it and the preview leaves it out.
+  await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await until(async () => (await blocks("coordinator")).blocks.find((b) => b.id === first)?.enabled === false, `E5 ${first} stored off`);
+  const firstName = shape.own.find((r) => r.id === first).name;
+  await saved("E5 switch", `${firstName} off · saved`);
+  if (
+    !(await page.evaluate(
+      `document.querySelector(${q(row(first))}).matches('[data-enabled="false"]') && /off/i.test(document.querySelector(${q(row(first))}).innerText)`,
+    ))
+  )
+    throw Error("E5/E17 an off block is not marked in text");
+  record("side-effect", `E5 ${first} off by Space; host config enabled:false`);
+  await page.shot(dir, "02-block-off");
+  await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await until(async () => (await blocks("coordinator")).blocks.find((b) => b.id === first)?.enabled === true, `E5 ${first} stored on`);
+
+  // E6: editing a built-in stores an override on that block (badge Edited); Restore default removes it (badge Built-in).
+  await select(first);
+  const original = await page.evaluate(`document.querySelector('#settings .pb-editor textarea').value`);
+  await type("VERIFY edited built-in: answer in one line.");
+  await page.press("Enter", { keyCode: 13, modifiers: 4 }); // ⌘↵ saves
+  await saved("E6 override", `${firstName} saved`);
+  const edited = (await blocks("coordinator")).blocks.find((b) => b.id === first);
+  if (edited?.kind !== "builtin" || !JSON.stringify(edited).includes("VERIFY edited built-in"))
+    throw Error(`E6 override: ${JSON.stringify(edited)}`);
+  await page.waitFor(`document.querySelector(${q(row(first) + " .pb-src")})?.innerText.trim() === 'Edited'`, "E6 Edited badge");
+  await page.shot(dir, "03-edited");
+  await page.click("#settings #pb-restore");
+  await saved("E6 restore default", `${firstName} restored to default`);
+  const restored = (await blocks("coordinator")).blocks.find((b) => b.id === first);
+  if (JSON.stringify(restored).includes("VERIFY edited built-in")) throw Error(`E6 override survived restore: ${JSON.stringify(restored)}`);
+  await page.waitFor(
+    `document.querySelector(${q(row(first) + " .pb-src")})?.innerText.trim() === 'Built-in' && document.querySelector('#settings .pb-editor textarea').value === ${q(original)}`,
+    "E6 Built-in badge and default text back",
+  );
+  record("side-effect", `E6 ${first} edited (override stored, badge Edited), then restored (override removed, default text back)`);
+
+  // E7/E16: a new custom block for the coordinator; text with markup stays text.
+  const marked = 'VERIFY custom: <b>bold?</b><img src=x onerror="window.__pwned=1">';
+  await page.click("#settings #pb-new");
+  await page.waitFor(`!!document.querySelector('#settings .pb-editor input.pb-title')`, "E7 new block editor");
+  await type("Verify aliases", "#settings .pb-editor input.pb-title");
+  await type(marked);
+  await page.click("#settings #pb-save");
+  await saved("E7 custom block", "Verify aliases added · saved");
+  const custom = (await blocks("coordinator")).blocks.find((b) => b.kind === "custom" && b.name === "Verify aliases");
+  if (!custom || custom.id !== "custom:verify-aliases" || custom.text !== marked || !custom.enabled)
+    throw Error(`E7 custom block: ${JSON.stringify(custom)}`);
+  const customRow = row(custom.id);
+  await page.waitFor(`document.querySelector(${q(customRow + " .pb-src")})?.innerText.trim() === 'Custom'`, "E7 Custom badge");
+  if (await page.evaluate(`!!window.__pwned || !!document.querySelector('#settings .pb b, #settings .pb img')`))
+    throw Error("E16 block text rendered as HTML");
+  await page.shot(dir, "04-custom");
+  await open("worker");
+  if (await page.evaluate(`!!document.querySelector(${q(customRow)})`)) throw Error("E7 a coordinator block shows for the worker");
+  if ((await blocks("worker")).blocks.some((b) => b.id === custom.id)) throw Error("E7 a coordinator block was stored for the worker");
+  record("side-effect", `E7 custom block ${custom.id} stored for the coordinator only, with its name and text; markup inert`);
+
+  // E8: Alt+↑ moves the focused row up; the saved order follows and focus stays on the moved row.
+  await open("coordinator");
+  const before = (await blocks("coordinator")).blocks.map((b) => b.id);
+  await page.evaluate(`document.querySelector(${q(customRow)}).focus()`);
+  await page.press("ArrowUp", { keyCode: 38, modifiers: 1 });
+  await until(async () => {
+    const after = (await blocks("coordinator")).blocks.map((b) => b.id);
+    return after.indexOf(custom.id) === before.indexOf(custom.id) - 1;
+  }, "E8 stored order moved up");
+  await page.waitFor(`document.activeElement?.closest('.pb-row')?.dataset.block === ${q(custom.id)}`, "E8 focus stays on the moved row");
+  record("side-effect", `E8 Alt+↑ moved ${custom.id} up one place in the stored order; focus kept`);
+  await page.shot(dir, "05-reordered");
+
+  // E10: an unsaved draft survives a reload; saving clears it.
+  await select(first);
+  await type("VERIFY draft kept across reload");
+  await page.waitFor(`/draft/i.test(document.querySelector(${q(row(first))})?.innerText ?? '')`, "E10 row marked draft");
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "ui2 ready after reload");
+  await open("coordinator");
+  await select(first);
+  if ((await page.evaluate(`document.querySelector('#settings .pb-editor textarea').value`)) !== "VERIFY draft kept across reload")
+    throw Error("E10 draft lost on reload");
+  record("visible", "E10 unsaved draft restored after a reload, row marked draft");
+  await page.shot(dir, "06-draft-restored");
+
+  // E11: another writer edits the same block and switches the custom block off. Whether the change feed or the refused stale
+  // write notices it first, the draft is kept and Load latest offers to save it over the newer text; the other change survives.
+  await otherWriter("coordinator", { [first]: { text: "VERIFY other tab text" }, [custom.id]: { enabled: false } });
+  await page.click("#settings #pb-save");
+  await page.waitFor(`!!document.querySelector('#settings .pb-conflict')`, "E11 conflict banner");
+  if ((await page.evaluate(`document.querySelector('#settings .pb-editor textarea').value`)) !== "VERIFY draft kept across reload")
+    throw Error("E11 draft discarded on conflict");
+  if (!JSON.stringify((await blocks("coordinator")).blocks.find((b) => b.id === first)).includes("VERIFY other tab text"))
+    throw Error("E11 the draft overwrote the other write without asking");
+  await page.shot(dir, "07-conflict");
+  await page.click("#settings .pb-conflict [data-conflict='reload']");
+  await page.waitFor(`!document.querySelector('#settings .pb-conflict')`, "E11 conflict resolved");
+  await page.click("#settings #pb-save");
+  await saved("E11 save after Load latest", `${firstName} saved`);
+  const merged = await blocks("coordinator");
+  if (
+    merged.blocks.find((b) => b.id === first)?.text !== "VERIFY draft kept across reload" ||
+    merged.blocks.find((b) => b.id === custom.id)?.enabled !== false
+  )
+    throw Error(`E11 draft stored and other change kept: ${JSON.stringify(merged.blocks)}`);
+  record(
+    "side-effect",
+    "E11 conflicting edit: draft kept, banner shown; after Load latest the draft is stored and the other tab's switch kept",
+  );
+  await page.reload();
+  await page.waitFor(`document.body.dataset.ready === "1"`, "ui2 ready after reload");
+  await open("coordinator");
+  if (/draft/i.test(await text(row(first)))) throw Error("E10 a saved draft came back after reload");
+
+  // E12: a change from elsewhere shows up without a reload, and a closed Settings stays closed.
+  await otherWriter("coordinator", { [custom.id]: { enabled: true } });
+  await page.waitFor(`document.querySelector(${q(customRow)})?.dataset.enabled === 'true'`, "E12 open editor follows a host write");
+  await page.press("Escape", { keyCode: 27 });
+  await page.press("Escape", { keyCode: 27 });
+  await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed");
+  await otherWriter("coordinator", { [custom.id]: { enabled: false } });
+  await delay(800);
+  if (await page.evaluate(`[...document.querySelectorAll('dialog')].some(d => d.open)`)) throw Error("E12 a host write opened a dialog");
+  record("verified", "E12 host writes update the open editor and never open Settings or a dialog");
+
+  // E13/E14/E15: preview in order, generated sections folded, Job worker vs task helper, configured-for-next-use label.
+  await open("worker");
+  await page.click('#settings [data-pane="preview"]');
+  await page.waitFor(`document.querySelectorAll('#settings .pv-sec').length > 0`, "E13 preview sections");
+  const pv = await page.evaluate(`(() => ({
+    secs: [...document.querySelectorAll('#settings .pv-sec')].map(s => ({ gen: s.matches('[data-generated]'), open: s.matches('details') ? s.open : true,
+      src: s.querySelector('.pv-src')?.innerText.trim(), tok: s.querySelector('.pv-tok')?.innerText.trim(), name: s.querySelector('.pv-name')?.innerText.trim() })),
+    state: document.querySelector('#settings .pv-state')?.innerText ?? '',
+    text: document.querySelector('#settings .pv-body')?.innerText ?? '',
+  }))()`);
+  if (
+    pv.secs.some((s) => !s.name || !/\d/.test(s.tok ?? "")) ||
+    pv.secs.filter((s) => s.gen).some((s) => s.open) ||
+    !pv.secs.some((s) => !s.gen && s.open)
+  )
+    throw Error(`E13 preview sections: ${JSON.stringify(pv.secs)}`);
+  if (!/next use/i.test(pv.state)) throw Error(`E15 preview state label: ${pv.state}`);
+  await page.shot(dir, "08-preview-job");
+  await page.click('#settings .pb-bar [data-kind="task"]');
+  await page.waitFor(
+    `/next use/i.test(document.querySelector('#settings .pv-state')?.innerText ?? '') && (document.querySelector('#settings .pv-body')?.innerText ?? '') !== ${q(pv.text)}`,
+    "E14 task helper preview differs",
+  );
+  await page.shot(dir, "09-preview-helper");
+  record(
+    "visible",
+    `E13-E15 preview: ${pv.secs.length} sections, generated folded, "${pv.state.trim()}"; task helper preview differs from the Job worker`,
+  );
+
+  // E1: the Host agent is a target with its own blocks.
+  await page.click('#settings [data-pane="blocks"]');
+  await open("host");
+  const hostRows = await page.evaluate(
+    `[...document.querySelectorAll('#settings .pb-row:not([data-generated])')].map(r => r.dataset.block)`,
+  );
+  if (!hostRows.length || hostRows.includes(custom.id) || hostRows.includes("objective"))
+    throw Error(`E1 Host agent blocks: ${JSON.stringify(hostRows)}`);
+  const hostFirst = hostRows[0];
+  await page.evaluate(`document.querySelector(${q(row(hostFirst))}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await until(async () => (await blocks("host")).blocks.find((b) => b.id === hostFirst)?.enabled === false, "E1 host block stored off");
+  await page.evaluate(`document.querySelector(${q(row(hostFirst))}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await until(async () => (await blocks("host")).blocks.find((b) => b.id === hostFirst)?.enabled === true, "E1 host block stored on");
+  record("side-effect", `E1 Host agent target lists its own blocks; ${hostFirst} switched off and on through the host config`);
+  await page.shot(dir, "10-host-agent");
+  for (const theme of ["light", "midnight"]) {
+    await page.evaluate(`document.documentElement.dataset.theme = ${q(theme)}`);
+    await delay(150);
+    await page.shot(dir, `11-${theme}`);
+  }
+  await page.evaluate(`document.documentElement.dataset.theme = 'claude'`);
+
+  // E4: at 390 px the list and the editor are separate views with a way back.
+  await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await open("coordinator");
+  const narrowList = await page.evaluate(
+    `({ list: !!document.querySelector('#settings .pb-list')?.offsetParent, editor: !!document.querySelector('#settings .pb-editor')?.offsetParent })`,
+  );
+  if (!narrowList.list || narrowList.editor || !(await noOverflow())) throw Error(`E4 narrow list view: ${JSON.stringify(narrowList)}`);
+  await page.shot(dir, "12-narrow-list");
+  await page.click(`${row(first)} .pb-name`);
+  await page.waitFor(
+    `!!document.querySelector('#settings .pb-editor')?.offsetParent && !document.querySelector('#settings .pb-list')?.offsetParent`,
+    "E4 narrow editor view",
+  );
+  if (!(await noOverflow())) throw Error("E4 narrow editor overflows");
+  await page.shot(dir, "13-narrow-editor");
+  await page.click("#settings .pb-back");
+  await page.waitFor(`!!document.querySelector('#settings .pb-list')?.offsetParent`, "E4 back to the list");
+  record("visible", "E4 at 390 px: list, then the editor alone with Back, no sideways overflow");
+  await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  // E11: which side noticed the conflict first is a race by nature. A refused stale write is the one HTTP 400 this journey expects
+  // (its console line too); any other error still fails the drive.
+  const refused = sinks.httpErrors.findIndex((item) => item.status === 400);
+  if (refused >= 0) {
+    sinks.httpErrors.splice(refused, 1);
+    const line = sinks.errors.findIndex((item) => /status of 400/.test(item));
+    if (line >= 0) sinks.errors.splice(line, 1);
+  }
+  record("verified", `E11 the conflict was noticed by ${refused >= 0 ? "the refused stale write" : "the change feed"}`);
+}
+
 const journeys = {
+  // Feature: features/ui2-prompts.md; failure list: scripts/ui2-prompt-editor-failures.md (E1-E18).
+  async "ui2-prompts"(run, page, record, dir, sinks) {
+    await ui2Prompts(run, page, record, dir, sinks);
+  },
   // Feature: features/verification-settings.md
   async "verification-settings"(run, page, record, dir, sinks) {
     const origin = new URL(run.webUrl).origin,
@@ -1613,25 +1930,48 @@ const journeys = {
     record("side-effect", `context bar: auto-compaction ${ctxBefore}% -> ${ctxAfter}% by keyboard, saved; use "${ctxBar.window}"`);
     await delay(300);
     await page.shot(dir, "13-settings-context");
-    // Prompt editor: Edit, change the project instructions, Save; prompt-render returns the new text.
+    // Prompt editor: the Project instructions row saves the objective (prompt-render's project section follows); then the first
+    // coordinator block saves with ⌘↵ (role section follows) and Restore default undoes it.
     await page.click('#settings nav [data-section="prompt"]');
-    await page.waitFor(`!!document.querySelector('#settings [data-mode="edit"]')`, "prompt section");
-    await page.click('#settings [data-mode="edit"]');
-    await page.waitFor(`!!document.querySelector('#settings [data-sec="project"] textarea')`, "prompt editor");
-    await page.evaluate(
-      `(() => { const t = document.querySelector('#settings [data-sec="project"] textarea'); t.focus(); t.select(); })()`,
-    );
+    await page.waitFor(`!!document.querySelector('#settings .pb-row[data-block="objective"]')`, "prompt blocks");
+    await page.click('#settings .pb-row[data-block="objective"] .pb-name');
+    await page.waitFor(`document.querySelector('#settings .pb-editor')?.dataset.block === 'objective'`, "project instructions editor");
+    await page.evaluate(`(() => { const t = document.querySelector('#settings .pb-text'); t.focus(); t.select(); })()`);
     await page.cdp("Input.insertText", { text: "VERIFY project instructions: greet briefly." });
-    await page.click("#settings #prompt-save");
-    await page.waitFor(
-      `/saved/i.test(document.querySelector('#settings .settings-status')?.innerText ?? '')`,
-      "prompt saved inline",
-      15000,
+    await page.click("#settings #pb-save");
+    // Each wait names its own status words, so an earlier "saved" never passes for a later step.
+    const status = (words, what) =>
+      page.waitFor(
+        `(document.querySelector('#settings .settings-status')?.innerText ?? '').includes(${JSON.stringify(words)})`,
+        what,
+        15000,
+      );
+    await status("Project instructions saved", "project instructions saved inline");
+    const objective = (await rpc(run, { action: "prompt-render", projectId, profile: "coordinator" })).sections.find(
+      (item) => item.id === "project",
     );
+    if (objective?.text !== "Project instructions: VERIFY project instructions: greet briefly.")
+      throw Error(`prompt-render project section: ${JSON.stringify(objective?.text)}`);
+    record("side-effect", "prompt editor saved the project instructions; prompt-render shows them once, without a doubled prefix");
+    const [blockId, blockName] = await page.evaluate(
+      `(() => { const r = document.querySelector('#settings .pb-row:not([data-generated]):not([data-block="objective"])'); return [r.dataset.block, r.querySelector('.pb-name').innerText.trim()]; })()`,
+    );
+    await page.click(`#settings .pb-row[data-block="${blockId}"] .pb-name`);
+    await page.waitFor(`document.querySelector('#settings .pb-editor')?.dataset.block === ${JSON.stringify(blockId)}`, "prompt editor");
+    await page.evaluate(`(() => { const t = document.querySelector('#settings .pb-text'); t.focus(); t.select(); })()`);
+    await page.cdp("Input.insertText", { text: "VERIFY coordinator block: greet briefly." });
+    await page.press("Enter", { keyCode: 13, modifiers: 4 });
+    await status(`${blockName} saved`, "prompt saved inline");
     const rendered = await rpc(run, { action: "prompt-render", projectId, profile: "coordinator" });
-    if (!rendered.sections.find((item) => item.id === "project")?.text.includes("VERIFY project instructions"))
-      throw Error("prompt-render project section does not hold the saved text");
-    record("side-effect", "prompt editor saved the project instructions; prompt-render shows them");
+    if (!rendered.sections.find((item) => item.id === "role")?.text.includes("VERIFY coordinator block"))
+      throw Error("prompt-render role section does not hold the saved block text");
+    await page.click("#settings #pb-restore");
+    await until(
+      async () =>
+        !(await rpc(run, { action: "prompt-blocks-get", projectId, target: "coordinator" })).blocks.find((b) => b.id === blockId)?.edited,
+      "block restored to default",
+    );
+    record("side-effect", `prompt editor saved coordinator block ${blockId}; prompt-render shows it; Restore default removed the override`);
     // Tools: switch one unlocked coordinator tool off; profile-tools reports it disabled; switch it back on.
     await page.click('#settings nav [data-section="tools"]');
     await page.waitFor(`!!document.querySelector('#settings [data-tool-name]:not([disabled])')`, "tools grid");

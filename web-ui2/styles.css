@@ -2155,40 +2155,395 @@ details.small-field select {
   cursor: grab;
   color: var(--faint);
 }
-.prompt-sec {
-  border: 1px solid var(--line);
-  border-radius: var(--r-m);
-  margin: 10px 0;
-  overflow: hidden;
-}
-.prompt-sec header {
+/* Settings → Prompt: a compact block list beside one editor; the preview shows the assembled prompt by section. */
+#settings[data-section="prompt"] .settings-body {
   display: flex;
+  flex-direction: column;
+  padding-bottom: 14px;
+}
+.pb {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-items: baseline;
-  padding: 7px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  font-size: 13px;
+  flex: 1;
+  min-height: 0;
 }
-.prompt-sec.locked header b {
-  color: var(--muted);
+.pb-bar,
+.pv-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
-.prompt-text {
-  margin: 0;
-  padding: 10px 12px;
-  font-size: 12px;
-  white-space: pre-wrap;
-  max-height: 220px;
+.pb-split {
+  display: grid;
+  grid-template-columns: minmax(270px, 330px) minmax(0, 1fr);
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+.pb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
   overflow: auto;
 }
-.prompt-sec textarea {
+.pb-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: var(--r-s);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.pb-row:hover {
+  background: var(--raised);
+}
+.pb-row[aria-selected="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 var(--accent);
+}
+.pb-row:focus-visible {
+  outline-offset: -2px;
+}
+.pb-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pb-row[data-enabled="false"] .pb-name {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+.pb-switch {
+  display: inline-flex;
+  cursor: pointer;
+}
+.pb-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.pb-switch .track {
+  width: 26px;
+  height: 15px;
+}
+.pb-switch .track::after {
+  width: 11px;
+  height: 11px;
+}
+.pb-switch input:checked + .track {
+  background: var(--accent);
+}
+.pb-switch input:checked + .track::after {
+  transform: translateX(11px);
+  background: #fff;
+}
+.pb-src,
+.pv-src {
+  flex: none;
+  font: 600 10px/16px var(--mono);
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+/* The default source stays quiet, so the badges that matter (Edited, Custom, Project) stand out. */
+.pb-src.built-in,
+.pv-src.built-in {
+  border-color: transparent;
+  color: var(--faint);
+}
+.pb-src.edited,
+.pv-src.edited {
+  color: var(--needs);
+  border-color: color-mix(in srgb, var(--needs) 45%, transparent);
+}
+.pb-src.custom,
+.pv-src.custom {
+  color: var(--accent-ink);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-soft);
+}
+.pb-src.generated,
+.pv-src.generated {
+  border-style: dashed;
+  color: var(--faint);
+}
+.pb-off,
+.pb-draft {
+  flex: none;
+  font: 10.5px var(--mono);
+  color: var(--faint);
+}
+.pb-draft {
+  color: var(--needs);
+}
+.pb-tok,
+.pv-tok {
+  flex: none;
+  min-width: 34px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--faint);
+}
+.pb-lead {
+  flex: none;
+  width: 26px;
+}
+.pb-group {
+  margin: 8px 8px 2px;
+  font: 600 10.5px var(--font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.pb-src.project,
+.pv-src.project {
+  color: var(--ready);
+  border-color: color-mix(in srgb, var(--ready) 45%, transparent);
+}
+.pb-src.legacy {
+  color: var(--work);
+  border-color: color-mix(in srgb, var(--work) 45%, transparent);
+}
+.pb-legacy,
+.pv-active {
+  color: var(--needs);
+}
+.pb-legacy {
+  margin: 0;
+}
+.pb-row[data-generated] {
+  cursor: default;
+  color: var(--muted);
+}
+.pb-row[data-generated]:hover {
+  background: none;
+}
+.pb-new {
+  align-self: flex-start;
+  margin: 2px 0 0 4px;
+}
+.pb-generated {
+  margin-top: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.pb-generated summary,
+.pv-sec summary {
+  cursor: pointer;
+  list-style: none;
+}
+.pb-generated summary {
+  padding: 4px 8px;
+  font: 600 10.5px var(--font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.pb-generated summary::before,
+.pv-sec summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 12px;
+  transition: transform var(--t-fast);
+}
+.pb-generated[open] summary::before,
+.pv-sec[open] summary::before {
+  transform: rotate(90deg);
+}
+.pb-keys {
+  margin: auto 8px 0;
+  padding-top: 10px;
+  line-height: 2;
+}
+.pb-keys kbd {
+  margin-right: 2px;
+}
+.pb-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+  padding: 10px 12px;
+}
+.pb-editor.empty {
+  align-items: center;
+  justify-content: center;
+}
+.pb-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.pb-title {
+  margin: 0;
+  font: 600 14px var(--font);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+input.pb-title {
+  flex: 1 1 160px;
+  max-width: 340px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--bg);
+}
+.pb-back {
+  display: none;
+}
+.pb-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pb-roles .chip {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pb-roles .chip[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.pb-roles .chip[aria-pressed="true"]::before {
+  content: "✓";
+  color: var(--accent-ink);
+}
+.pb-text {
+  flex: 1;
+  min-height: 180px;
   width: 100%;
-  min-height: 160px;
-  border: 0;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
   background: var(--bg);
   padding: 10px 12px;
-  font: 12.5px/1.5 var(--mono);
-  resize: vertical;
+  font: 12.5px/1.6 var(--mono);
+}
+.pb-text:focus-visible {
+  outline-offset: -1px;
+}
+.pb-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pb-actions .primary kbd {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--on-accent) 45%, transparent);
+  color: var(--on-accent);
+}
+.pb-note {
+  flex-basis: 100%;
+}
+.pb-conflict {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--r-s);
+  border: 1px solid color-mix(in srgb, var(--needs) 45%, transparent);
+  background: color-mix(in srgb, var(--needs) 12%, transparent);
+  font-size: 12.5px;
+}
+.pb-conflict span {
+  flex: 1;
+}
+.pv-state {
+  font-family: var(--mono);
+}
+.pv-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pv-sec {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  overflow: hidden;
+  flex: none;
+}
+.pv-sec > header,
+.pv-sec > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  font-size: 12.5px;
+}
+.pv-sec[data-generated] > summary {
+  color: var(--muted);
+}
+.pv-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pv-path {
+  font: 11px var(--mono);
+  min-width: 0;
+}
+.pv-text {
+  margin: 0;
+  padding: 10px 12px;
+  font: 12px/1.6 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--line);
+}
+@media (max-width: 760px) {
+  #settings .profiles {
+    overflow-x: auto;
+    margin: 0 10px;
+  }
+  #settings .profiles button {
+    flex: none;
+  }
+  .pb-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pb[data-view="list"] .pb-editor,
+  .pb[data-view="editor"] .pb-list {
+    display: none;
+  }
+  .pb-back {
+    display: inline-flex;
+  }
+  .pb-keys {
+    display: none;
+  }
+  .pv-path {
+    display: none;
+  }
 }
 .tool-group-card {
   border: 1px solid var(--line);
