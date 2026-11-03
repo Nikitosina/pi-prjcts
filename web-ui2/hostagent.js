@@ -5,6 +5,7 @@ import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
+import { hydrateMedia } from "./media.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
 const drawer = document.querySelector("#host-agent"),
@@ -155,6 +156,7 @@ function paint() {
       `<div id="ha-live"></div>` +
       (error ? `<p class="error-line ha-error" role="alert">${esc(error)}</p>` : ""),
   );
+  hydrateMedia(body, null); // no image route for the Host agent: slots say so instead of waiting
   paintLive();
   body.scrollTop = body.scrollHeight;
 }

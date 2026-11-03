@@ -23,6 +23,7 @@ import {
   toggleHostAgent,
 } from "./hostagent.js";
 import { closePalette, openPalette, paletteOpen, setPaletteSource } from "./palette.js";
+import { closeSlashMenu, slashMenuOpen } from "./slash.js";
 
 const app = document.querySelector("#app"),
   center = document.querySelector("#center"),
@@ -248,8 +249,9 @@ const COMMANDS = {
   "host-agent-reset": () => void resetHostAgent(),
   "leave-focus": leaveTop,
 };
-/** Esc closes the topmost layer: palette, settings, drawer, center focus; then leaves the text field. */
+/** Esc closes the topmost layer: the "/" menu, palette, settings, drawer, center focus; then leaves the text field. */
 function leaveTop() {
+  if (slashMenuOpen()) return closeSlashMenu();
   if (paletteOpen()) return closePalette();
   if (app.dataset.sheet) return void (app.dataset.sheet = "");
   if (settingsOpen()) return closeSettings();

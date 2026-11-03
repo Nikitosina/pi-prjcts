@@ -8,6 +8,7 @@
 // Features: message-coordinator
 import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, openSync } from "node:fs";
 import { request } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -230,6 +231,7 @@ async function launch() {
       );
     git("init", "-q", "-b", "main");
     writeFileSync(join(run.workspace, "README.md"), "verification workspace\n");
+    writeFileSync(join(run.workspace, "screen.png"), fakeScreenshot());
     // The project's own verification skill is part of the seed, so Settings can name an installed skill.
     cpSync(join(here, ".."), join(run.workspace, ".agents/skills/verify-pi-prjcts"), {
       recursive: true,
@@ -513,6 +515,193 @@ async function openBrowser(run, sinks) {
 }
 
 const ITEM_ORDER = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
+
+/** A 64×40 PNG with a solid accent bar: the "screenshot" a VERIFY-IMAGE read returns. */
+function fakeScreenshot(width = 64, height = 40) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (bytes) => {
+    let c = 0xffffffff;
+    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]),
+      out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  const rows = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) rows.set(y < 10 ? [217, 119, 87] : [40 + x, 60, 90 + y], y * (width * 3 + 1) + 1 + x * 3);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(rows)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** Page expression: the newest `.prose` under `selector` holds the VERIFY-TABLE reply rendered safely. Returns { problems, summary }. */
+function proseCheck(selector) {
+  return `(() => {
+    const all = [...document.querySelectorAll(${JSON.stringify(selector)})].filter(n => n.querySelector('table'));
+    const p = all.at(-1), problems = [];
+    if (!p) return { problems: ['no prose with a table'], summary: '' };
+    const th = [...p.querySelectorAll('table thead th')], rows = p.querySelectorAll('table tbody tr');
+    if (th.map(n => n.textContent.trim()).join('|') !== 'Role|Model|Cost') problems.push('header ' + th.map(n => n.textContent).join('|'));
+    if (rows.length !== 2) problems.push(rows.length + ' body rows');
+    if (!th[1]?.classList.contains('align-center') || !th[2]?.classList.contains('align-right')) problems.push('column alignment lost');
+    const wrap = p.querySelector('table')?.parentElement;
+    if (!wrap?.classList.contains('table-wrap') || !/auto|scroll/.test(getComputedStyle(wrap).overflowX)) problems.push('table does not scroll in its own box');
+    if (p.querySelector('img, script, [onerror]') || window.__xss) problems.push('hostile HTML became live');
+    if ([...p.querySelectorAll('a')].some(a => !/^https?:/.test(a.getAttribute('href') ?? ''))) problems.push('non-web link is clickable');
+    if (p.querySelector('code')?.textContent !== '**sol**') problems.push('code span formatted: ' + p.querySelector('code')?.innerHTML);
+    if (p.querySelector('del')?.textContent !== 'old') problems.push('no strikethrough');
+    if (p.querySelector('ul > li > ul > li')?.textContent !== 'nested') problems.push('nested list flattened');
+    if (p.querySelector('ol')?.getAttribute('start') !== '3' || p.querySelectorAll('ol > li').length !== 2) problems.push('numbered list start lost');
+    if (!p.querySelector('blockquote strong')) problems.push('no quote');
+    const docs = [...p.querySelectorAll('a')].find(a => a.getAttribute('href') === 'https://example.com/docs');
+    if (!docs || docs.textContent !== 'https://example.com/docs') problems.push('autolink swallowed punctuation');
+    if (![...p.querySelectorAll('a')].some(a => a.getAttribute('href') === 'https://example.com/p.png' && a.rel.includes('noopener'))) problems.push('image is not a plain link');
+    if (!/<img src=x onerror/.test(p.textContent)) problems.push('escaped HTML text missing');
+    return { problems, summary: th.length + ' columns, ' + rows.length + ' rows, nested list, ol start 3, quote, inert HTML and links' };
+  })()`;
+}
+
+/** UI 2.0 composer "/" completion: commands at the start, skills anywhere, keyboard and pointer picking, Esc, a command that runs. */
+async function ui2SlashMenu(run, page, record, dir) {
+  const composer = "#composer textarea";
+  const menu = `(() => { const m = document.querySelector('#slash-menu'), t = document.querySelector('#composer textarea');
+    const opts = [...(m?.querySelectorAll('[role=option]') ?? [])];
+    return { open: !!m && !m.hidden, role: m?.getAttribute('role'), expanded: t.getAttribute('aria-expanded'), controls: t.getAttribute('aria-controls'),
+      active: t.getAttribute('aria-activedescendant'), selected: opts.findIndex(o => o.getAttribute('aria-selected') === 'true'),
+      ids: opts.map(o => o.id), items: opts.map(o => o.dataset.source + ':' + o.dataset.name), value: t.value, focused: document.activeElement === t }; })()`;
+  const owners = `document.querySelectorAll('#feed .msg.owner').length`,
+    ownersBefore = await page.evaluate(owners);
+  const clear = `(() => { const t = document.querySelector('#composer textarea'); t.value = ''; t.dispatchEvent(new Event('input')); })()`;
+  const skills = (await rpc(run, { action: "coordinator-skills", id: run.projectId })).skills.map((skill) => skill.name);
+  if (!skills.includes("verify-pi-prjcts")) throw Error(`seed skill missing from coordinator-skills: ${skills}`);
+  await page.click(composer);
+  await page.cdp("Input.insertText", { text: "/" });
+  await page.waitFor(`${menu}.open`, "slash menu opens on /");
+  let state = await page.evaluate(menu);
+  if (state.role !== "listbox" || state.expanded !== "true" || state.controls !== "slash-menu" || state.active !== state.ids[0])
+    throw Error(`slash menu a11y: ${JSON.stringify(state)}`);
+  if (!state.items.includes("command:reload") || !state.items.includes("skill:verify-pi-prjcts"))
+    throw Error(`slash menu items at the start: ${state.items}`);
+  await page.press("ArrowDown", { keyCode: 40 });
+  state = await page.evaluate(menu);
+  if (state.selected !== 1 || state.active !== state.ids[1]) throw Error(`ArrowDown: ${JSON.stringify(state)}`);
+  await delay(200);
+  await page.shot(dir, "01b-slash-menu");
+  await page.cdp("Input.insertText", { text: "verif" });
+  await page.waitFor(`${menu}.items.join() === 'skill:verify-pi-prjcts'`, "filtered to the matching skill");
+  await page.press("Tab", { keyCode: 9 });
+  state = await page.evaluate(menu);
+  if (state.value !== "/skill:verify-pi-prjcts " || state.open || state.expanded !== "false" || !state.focused)
+    throw Error(`Tab pick: ${JSON.stringify(state)}`);
+  record(
+    "visible",
+    `"/" lists ${state.items.length || "commands and"} skills from coordinator-skills; ArrowDown moves; Tab inserts /skill:verify-pi-prjcts`,
+  );
+  // Mid-message: skills only; Esc closes just the menu; a non-matching slash stays text; a click picks and keeps focus.
+  await page.cdp("Input.insertText", { text: "and /" });
+  await page.waitFor(`${menu}.open`, "mid-message slash menu");
+  state = await page.evaluate(menu);
+  if (state.items.some((item) => item.startsWith("command:"))) throw Error(`commands offered mid-message: ${state.items}`);
+  await page.press("Escape", { keyCode: 27 });
+  state = await page.evaluate(menu);
+  if (state.open || !state.focused || state.value !== "/skill:verify-pi-prjcts and /") throw Error(`Esc: ${JSON.stringify(state)}`);
+  await page.cdp("Input.insertText", { text: "zzzq" });
+  await delay(300);
+  if ((await page.evaluate(menu)).open) throw Error("a mid-message slash with no match opened the menu");
+  await page.cdp("Input.insertText", { text: " /verif" });
+  await page.waitFor(`${menu}.items.join() === 'skill:verify-pi-prjcts'`, "mid-message skill match");
+  await page.click('#slash-menu [data-name="verify-pi-prjcts"]');
+  state = await page.evaluate(menu);
+  if (!state.value.endsWith(" /skill:verify-pi-prjcts ") || state.open || !state.focused)
+    throw Error(`click pick: ${JSON.stringify(state)}`);
+  record("visible", "mid-message: skills only, Esc closes only the menu, no menu for an unmatched slash, a click inserts and keeps focus");
+  // A command that takes an argument fills the composer; one without runs on Enter instead of being sent.
+  await page.evaluate(clear);
+  await page.cdp("Input.insertText", { text: "/na" });
+  await page.waitFor(`${menu}.items[0] === 'command:name'`, "name command first");
+  await page.press("Enter", { code: "Enter", keyCode: 13 });
+  state = await page.evaluate(menu);
+  if (state.value !== "/name " || state.open) throw Error(`argument command: ${JSON.stringify(state)}`);
+  await page.evaluate(clear);
+  await page.cdp("Input.insertText", { text: "/rel" });
+  await page.waitFor(`${menu}.items[0] === 'command:reload'`, "reload command first");
+  await page.press("Enter", { code: "Enter", keyCode: 13 });
+  await page.waitFor(`/Reloaded|Already up to date/.test(document.querySelector('#toasts')?.innerText ?? '')`, "/reload ran", 30000);
+  state = await page.evaluate(menu);
+  const sent = (await rpc(run, { action: "show", id: run.projectId })).messages.filter((item) => item.text?.includes("/reload"));
+  if (state.value || sent.length || (await page.evaluate(owners)) !== ownersBefore)
+    throw Error(`/reload was sent as a message: ${JSON.stringify({ state, sent: sent.length })}`);
+  record("side-effect", "/name fills the composer for its argument; /reload ran chat-reload (toast) and nothing reached the coordinator");
+}
+
+/** Transcript images: a tool-result screenshot and a cited artifact load lazily as blob: images; a missing one degrades to text. */
+async function ui2Images(run, page, record, dir, sinks) {
+  await page.click("#composer textarea");
+  await page.cdp("Input.insertText", { text: "VERIFY-IMAGE look at the screen" });
+  await page.press("Enter", { code: "Enter", keyCode: 13 });
+  await page.waitFor(`document.querySelector('#feed').innerText.includes('Screenshot:')`, "image reply", 60000);
+  const view = await rpc(run, { action: "show", id: run.projectId });
+  const result = view.messages.findLast((item) => item.kind === "tool-result" && item.name === "read");
+  if (!result?.images?.length) throw Error(`the read result carries no image reference: ${JSON.stringify(result).slice(0, 300)}`);
+  const loaded = (selector) =>
+    `(() => { const img = document.querySelector(${JSON.stringify(selector)}); return !!img && img.complete && img.naturalWidth === 64 && img.src.startsWith('blob:'); })()`;
+  await page.waitFor(loaded('#feed .tool-row[data-tool="read"] img.media-img'), "tool-result screenshot shown under the collapsed row");
+  await page.waitFor(loaded("#feed .msg.agent .prose img.media-img"), "cited artifact image inline in the reply");
+  await page.waitFor(
+    `/gone/.test(document.querySelector('#feed .msg.agent .prose [data-media][data-state="missing"]')?.innerText ?? '')`,
+    "missing artifact degrades to a labelled note",
+  );
+  const facts = await page.evaluate(`(async () => {
+    const { transcriptHtml } = await import('/ui2/chat.js');
+    const only = transcriptHtml([{ kind: 'message', role: 'assistant', entryId: 9e9, at: 0, text: '', ref: '1.0', truncated: false, images: [{ ref: '1.0.0', mime: 'image/png', bytes: 2048 }] },
+      { kind: 'message', role: 'user', origin: 'owner', entryId: 9e9 + 1, at: 0, text: '', ref: '2.0', truncated: false, images: [{ ref: '2.0.1', mime: 'image/"png', bytes: 10 }] }], false);
+    const box = document.createElement('div');
+    box.innerHTML = only;
+    const shown = document.querySelector('#feed .msg.agent .prose img.media-img');
+    return { slots: box.querySelectorAll('[data-media][data-image-ref]').length, raw: box.querySelectorAll('img:not([src])').length, alt: shown.alt, external: performance.getEntriesByType('resource').filter(e => !e.name.startsWith(location.origin) && !e.name.startsWith('blob:')).map(e => e.name) };
+  })()`);
+  if (facts.slots !== 2) throw Error(`image-only messages render no image slot: ${JSON.stringify(facts)}`);
+  if (facts.raw) throw Error("an image slot is a broken <img> without src");
+  if (facts.alt !== "screen") throw Error(`artifact alt text: ${facts.alt}`);
+  if (facts.external.length) throw Error(`the page fetched outside the host: ${facts.external}`);
+  record(
+    "visible",
+    `read result screenshot (${result.images[0].mime}) and cited artifact load as blob: images; missing artifact shows a note; image-only messages render slots; nothing fetched off-host`,
+  );
+  await delay(300);
+  await page.shot(dir, "01d-images");
+  // The missing artifact is the one expected 404: requested once per page load, not again per re-render.
+  const missing = sinks.httpErrors.filter((item) => item.status === 404 && item.url.endsWith("/binary/missing.png"));
+  if (missing.length !== 1) throw Error(`missing artifact requested ${missing.length} times`);
+}
+/** Drops the expected missing-artifact 404s (one per page load of the ui2 journey: the first and two reloads) and their console lines. */
+function dropMissingArtifact(sinks, loads) {
+  const missing = sinks.httpErrors.filter((item) => item.status === 404 && item.url.endsWith("/binary/missing.png"));
+  if (missing.length > loads) throw Error(`missing artifact requested ${missing.length} times in ${loads} page loads`);
+  for (const item of missing) {
+    sinks.httpErrors.splice(sinks.httpErrors.indexOf(item), 1);
+    const log = sinks.errors.findIndex((text) => /status of 404/.test(text));
+    if (log >= 0) sinks.errors.splice(log, 1);
+  }
+}
+
 const journeys = {
   // Feature: features/verification-settings.md
   async "verification-settings"(run, page, record, dir, sinks) {
@@ -850,6 +1039,18 @@ const journeys = {
     );
     await delay(300);
     await page.shot(dir, "01-empty-claude");
+    await ui2Images(run, page, record, dir, sinks);
+    await ui2SlashMenu(run, page, record, dir);
+    // Markdown: a table reply renders as a table with alignment, lists nest, and hostile HTML or links stay inert.
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "VERIFY-TABLE show the roles" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(`!!document.querySelector('#feed .msg.agent .prose table')`, "table in the coordinator reply", 60000);
+    const feedMd = await page.evaluate(proseCheck("#feed .msg.agent .prose"));
+    if (feedMd.problems.length) throw Error(`coordinator Markdown: ${feedMd.problems.join("; ")}`);
+    record("visible", `coordinator reply Markdown: ${feedMd.summary}`);
+    await delay(300);
+    await page.shot(dir, "01c-markdown-table");
     // Send through the composer: one owner bubble, the spawn as a tool row, the worker in the context panel, the reply.
     const prompt = "VERIFY-JOB please greet the world",
       composer = "#composer textarea";
@@ -1215,6 +1416,25 @@ const journeys = {
       );
       await page.press("Escape", { keyCode: 27 });
       await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed after status line");
+      // The drawer renders replies through the same Markdown as the chat.
+      await page.click("#ha-composer textarea");
+      await page.cdp("Input.insertText", { text: "VERIFY-TABLE show the roles" });
+      await page.press("Enter", { code: "Enter", keyCode: 13 });
+      await page.waitFor(`!!document.querySelector('#host-agent .ha-body .prose table')`, "table in the Host agent reply", 60000);
+      const drawerMd = await page.evaluate(proseCheck("#host-agent .ha-body .msg.agent .prose"));
+      if (drawerMd.problems.length) throw Error(`Host agent Markdown: ${drawerMd.problems.join("; ")}`);
+      const hostImage = await page.evaluate(
+        `[...document.querySelectorAll('#host-agent .ha-body .prose [data-media]')].map(n => n.dataset.state + ':' + n.innerText).at(-1) ?? ''`,
+      );
+      if (!/^failed:[\s\S]*chart[\s\S]*not viewable here/.test(hostImage))
+        throw Error(`Host agent artifact image: ${JSON.stringify(hostImage)}`);
+      record(
+        "visible",
+        `Host agent reply Markdown: ${drawerMd.summary}; its artifact image says "${hostImage.replace(/^\w+:/, "").replace(/\s+/g, " ")}"`,
+      );
+      await delay(300);
+      await page.shot(dir, "08h-host-agent-table");
+      await page.evaluate(`document.activeElement.blur()`); // the drawer's own keys below run outside the text field
     }
     await page.press("\\", { code: "Backslash", keyCode: 220 });
     await page.press("Escape", { keyCode: 27 });
@@ -1672,6 +1892,7 @@ const journeys = {
     await page.waitFor(`document.documentElement.dataset.font === 'jetbrains-mono'`, "JetBrains Mono restored");
     record("verified", "no horizontal overflow at 390 px; themes and host-persisted fonts applied through the settings overlay");
     writeFileSync(join(dir, "feed-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
+    dropMissingArtifact(sinks, 3);
     if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },
   // Feature: features/message-coordinator.md

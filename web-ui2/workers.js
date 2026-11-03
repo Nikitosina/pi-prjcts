@@ -3,6 +3,7 @@ import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel } from "./format.js";
 import { emit, fail, on, stale, state, toast } from "./state.js";
 import { transcriptClick, transcriptHtml } from "./chat.js";
+import { hydrateMedia } from "./media.js";
 
 const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
@@ -207,6 +208,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
         !!worker?.working,
         worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
       ) || `<p class="muted">No transcript yet.</p>`;
+    hydrateMedia(node, { project: state.projectId, threadId: id });
     node.scrollTop = node.scrollHeight;
   };
   const load = async () => {

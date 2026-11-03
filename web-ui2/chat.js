@@ -1,7 +1,9 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
 import { call, stream, uuid } from "./api.js";
-import { clip, clock, dur, esc, markdown, oneLine } from "./format.js";
+import { clip, clock, dur, esc, imagesHtml, markdown, oneLine } from "./format.js";
+import { hydrateMedia } from "./media.js";
+import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
 
@@ -122,6 +124,8 @@ export function renderFeed() {
   renderLive();
   if (stick || atBottom) feed.scrollTop = feed.scrollHeight;
 }
+/** Where this chat's images come from (see media.js). */
+const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
 /** Replaces children while keeping nodes whose key and html did not change, so rows only animate in when they are new. */
 export function morph(parent, html) {
   const next = document.createElement("div");
@@ -144,7 +148,8 @@ export function transcriptHtml(items, busy, who = "Coordinator", { fold = true }
 function turnHtml(turn, liveTurn, who, fold = true) {
   const { start } = turn,
     key = `t${start.entryId ?? start.at}`;
-  const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : itemHtml(start, who);
+  // A turn that does not open with an input (a page starting mid-turn) has its first item in `items` too.
+  const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : "";
   const body = [];
   let run = [];
   const flush = () => {
@@ -160,7 +165,7 @@ function turnHtml(turn, liveTurn, who, fold = true) {
       body.push(toolRowHtml({ call: item, result: results.get(item.callId) }));
     } else if (item.kind === "tool-call") run.push({ call: item, result: results.get(item.callId) });
     else if (item.kind === "tool-result") continue;
-    else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking) continue;
+    else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking && !item.images?.length) continue;
     else {
       flush();
       body.push(itemHtml(item, who));
@@ -181,16 +186,16 @@ function inputHtml(message, who = "Coordinator") {
   const approval = message.origin !== "owner" ? approvalPattern.exec(text) : null;
   if (approval) return approvalRowHtml(approval);
   if (who !== "Coordinator" && message.origin !== "owner")
-    return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}</div></article>`;
+    return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
   if (message.origin === "owner")
-    return `<article class="msg owner"><div class="msg-meta"><span class="who">You</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}</div></article>`;
+    return `<article class="msg owner"><div class="msg-meta"><span class="who">You</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
   const report = reportPattern.exec(text);
   if (report) return reportRowHtml(message, report);
   const event = /^\[Owner-local event ([\w.-]+)\]\n/.exec(text);
   if (event) return `<div class="sys-row"><span class="sys-icon" aria-hidden="true">⚑</span>Event <code>${esc(event[1])}</code></div>`;
   if (message.origin === "internal")
     return `<div class="sys-row muted"><span class="sys-icon" aria-hidden="true">↻</span>${esc(clip(oneLine(text), 120))}</div>`;
-  return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}</div></article>`;
+  return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}${imagesHtml(message.images)}</div></article>`;
 }
 /** The outcome the host posts back after an owner decision (`[approval <id>] The owner …`), as one row instead of a bubble. */
 function approvalRowHtml([, id, decision, summary, action, failed]) {
@@ -217,7 +222,8 @@ function itemHtml(item, who = "Coordinator") {
   if (item.kind === "tool-call") return toolRowHtml({ call: item });
   if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
   if (item.kind !== "message") return "";
-  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${item.text?.trim() ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div><div class="prose">${markdown(item.text)}</div>${item.truncated ? `<p class="muted small">Message shortened in this view.</p>` : ""}</article>` : ""}`;
+  const text = item.text?.trim() ? `<div class="prose">${markdown(item.text)}</div>` : "";
+  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}${item.truncated ? `<p class="muted small">Message shortened in this view.</p>` : ""}</article>` : ""}`;
 }
 function thinkingHtml(text, key, running = false) {
   const open = expanded.has(key);
@@ -263,7 +269,7 @@ export function toolRowHtml({ call: item, result }, liveStatus) {
       : status === "error"
         ? `<span class="st err" aria-label="failed">✕</span>`
         : `<span class="st ok" aria-label="done">✓</span>`;
-  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}${approval ? `<button type="button" class="link-btn" data-review-approval="${esc(approval)}">Review approval ↗</button>` : ""}</div>${open ? toolDetailHtml(item, result, args) : ""}</div>`;
+  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}${approval ? `<button type="button" class="link-btn" data-review-approval="${esc(approval)}">Review approval ↗</button>` : ""}</div>${imagesHtml(result?.images)}${open ? toolDetailHtml(item, result, args) : ""}</div>`;
 }
 function toolDetailHtml(item, result, args) {
   const params = args ? JSON.stringify(args, null, 2) : item.argsPreview;
@@ -278,7 +284,7 @@ function groupHtml(run) {
     last = run.at(-1).result?.at ?? run.at(-1).call.at;
   const failed = run.filter(({ result }) => result?.isError).length;
   const label = [...counts].map(([name, count]) => `${name} ×${count}`).join(", ");
-  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry)).join("")}</div>` : ""}</div>`;
+  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry)).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
@@ -322,6 +328,7 @@ function renderLive() {
   document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
   if (!frame?.running) {
     node.replaceChildren();
+    hydrateMedia(feed, mediaSource());
     return;
   }
   const nested = nestedStatus(frame.nested);
@@ -344,6 +351,7 @@ function renderLive() {
             ? "Using tools"
             : "Working";
   node.innerHTML = `${frame.thinking && frame.thinkingText ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
+  hydrateMedia(feed, mediaSource());
   if (stick) feed.scrollTop = feed.scrollHeight;
 }
 
@@ -403,6 +411,7 @@ function grow() {
 }
 input.addEventListener("input", grow);
 input.addEventListener("keydown", (event) => {
+  if (slashKey(event)) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     form.requestSubmit();
@@ -416,6 +425,17 @@ form.addEventListener("submit", async (event) => {
   input.value = "";
   grow();
   stick = true;
+  const slash = slashCommand(text);
+  if (slash) {
+    try {
+      await slash.command.run(slash.argument);
+      if (!stale(gen)) void loadChat();
+    } catch (error) {
+      if (!stale(gen) && !input.value) input.value = text;
+      fail(error);
+    }
+    return;
+  }
   try {
     await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
     if (stale(gen)) return;

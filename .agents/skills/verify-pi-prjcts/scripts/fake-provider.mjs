@@ -3,8 +3,10 @@
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
 // VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive);
 // VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-HOST-STATUS reorders the status line
-// through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the
-// coordinator file the same request through owner_approval_request.
+// through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the coordinator file the same request through
+// owner_approval_request. VERIFY-TABLE answers (any agent) with Markdown that mixes a table, nested and numbered lists, a quote and
+// hostile HTML and links, for the chat renderers. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
+// image) and cite its artifact reference plus a missing one.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,6 +20,24 @@ const text = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part.text ?? "").join("") : "";
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const TABLE_REPLY = [
+  "Role summary:",
+  "",
+  "| Role | Model | Cost |",
+  "|:-----|:-----:|-----:|",
+  "| Coordinator | `**sol**` | $0.10 |",
+  '| Worker <img src=x onerror="window.__xss=1"> | [bad](javascript:window.__xss=2) | ~~old~~ new |',
+  "",
+  "- outer",
+  "  - nested",
+  "",
+  "3. three",
+  "4. four",
+  "",
+  "> quoted **text**",
+  "",
+  "See https://example.com/docs. and ![pic](https://example.com/p.png)",
+].join("\n");
 let failNextSummary = false;
 const server = createServer((req, res) => {
   if (req.method === "POST" && (req.url === "/fail-next-summary" || req.url === "/allow-summary")) {
@@ -60,7 +80,28 @@ const server = createServer((req, res) => {
         .map((m) => text(m.content))
         .join(" ")
         .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
-    if (names.includes("host_call") && user.startsWith("[approval ")) {
+    if (user.includes("VERIFY-TABLE")) {
+      // The Host agent also cites an artifact, which its drawer cannot show (no project image route).
+      reply = say(
+        names.includes("host_call")
+          ? `${TABLE_REPLY}\n\n![chart](artifact:00000000-0000-4000-8000-000000000000/binary/chart.png)`
+          : TABLE_REPLY,
+      );
+    } else if (user.includes("VERIFY-IMAGE") && names.includes("read")) {
+      const ref = messages
+        .filter((m) => m.role === "tool")
+        .map((m) => text(m.content))
+        .join(" ")
+        .match(/artifact:([a-f0-9-]{36})\/binary\/[\w.]+/);
+      reply =
+        stage === 0
+          ? call("read", { path: "screen.png" })
+          : say(
+              ref
+                ? `Screenshot:\n\n![screen](${ref[0]})\n\n![gone](artifact:${ref[1]}/binary/missing.png)`
+                : "No artifact reference came back.",
+            );
+    } else if (names.includes("host_call") && user.startsWith("[approval ")) {
       reply = say(/denied/i.test(user) ? "Understood, nothing was archived." : "Done as approved.");
     } else if (names.includes("owner_approval_request") && user.includes("VERIFY-COORD-APPROVAL")) {
       reply =

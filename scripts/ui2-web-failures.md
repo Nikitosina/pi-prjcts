@@ -128,3 +128,33 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - At 390 px the bar overflows the viewport or cuts off items without a way to reach them.
 - A Host agent `ui_focus` at Settings (or a settings section such as `theme` or `statusline`) opens the Settings overlay by itself after it changes a setting; the owner must get a quiet notice with a button, and owner-opened Settings (⌘,, palette, the button) must still work.
 - At 390 px an enabled status line item (thinking, cost, limits, key hints) is hidden by the narrow layout, so its Settings switch does nothing there and the item cannot be reached; enabled items must stay in the bar, reachable by scrolling it sideways.
+
+## Chat Markdown and slash completion
+
+- A GFM table in a Coordinator or Host agent reply renders as pipe text instead of a table; a wide table pushes the chat sideways instead of scrolling inside its own box; column alignment (`:---:`, `---:`) is lost.
+- A table cell, heading, list item or quote is inserted without escaping, so `<img onerror>` or `<script>` from a reply becomes live HTML.
+- A link with a `javascript:`, `data:` or other non-web scheme becomes a clickable anchor; an image (`![x](https://…)`) is fetched instead of shown as a link; an autolink swallows the trailing period or bracket.
+- Markdown inside a code span (`` `**x**` ``) or a fenced block is formatted instead of shown literally.
+- A nested bullet list flattens into one level, or an ordered list that starts at 3 restarts at 1; a blank line between items splits one list into several.
+- Blockquotes, strikethrough and horizontal rules show their raw markers.
+- The Host agent drawer and the Coordinator chat render the same reply differently (two renderers drift).
+- Typing `/` in the Coordinator composer shows nothing; the skill list is not the project's `coordinator-skills` catalog.
+- Commands are offered mid-message (only skills are, after a space or bracket); a mid-message `/` that matches no skill still opens a menu.
+- Up/Down do not move the selection, Enter or Tab sends the message instead of picking, or a click on an option loses the composer focus.
+- Picking a skill does not insert `/skill:<name> ` at the trigger, or clobbers text after the caret.
+- A command typed or picked at the start (`/reload`) is sent to the Coordinator as a message instead of running; a command with an argument (`/name <title>`) runs before the argument is typed.
+- Esc with the menu open leaves the composer (blurs it) or closes another layer instead of only closing the menu.
+- The menu has no listbox role, the textarea has no `aria-expanded`/`aria-controls`/`aria-activedescendant`, so a screen reader hears nothing.
+- A catalog answer for the previous project, or for a query the owner has since changed, repaints the menu (stale selection); switching chat leaves the menu open.
+
+## Images in transcripts
+
+- A tool result that returned a screenshot (`read` of a png, a simulator or MCP image) shows only its text; the image reference in `images` is ignored, or appears only after the row is expanded.
+- A message with images and no text (a captionless photo, an image-only tool result) disappears instead of showing its images.
+- A reply citing `![caption](artifact:<thread>/<path>)` shows the raw Markdown or a link to nowhere instead of the image from the host's token-authenticated `/artifacts/` route.
+- An image is fetched by URL without the token (401), embedded as `data:` (CSP blocks it), or every image of a long transcript is fetched at once instead of as it nears the viewport.
+- A missing, refused or oversized image leaves a broken-image icon or a spinner forever instead of a short labelled note.
+- A remote `![x](https://…)` image is fetched (a prompt-injected URL leaks that the chat was read); it must stay a plain link.
+- Blob URLs accumulate without `revokeObjectURL`, or a re-render (new live frame) refetches every image.
+- Alt text or the label from a reply is inserted unescaped.
+- A worker transcript in the center shows the same placeholders but never loads them (wrong `threadId` source).
