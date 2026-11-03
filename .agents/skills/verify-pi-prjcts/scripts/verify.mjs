@@ -516,8 +516,8 @@ async function openBrowser(run, sinks) {
 
 const ITEM_ORDER = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
 
-/** A 64×40 PNG with a solid accent bar: the "screenshot" a VERIFY-IMAGE read returns. */
-function fakeScreenshot(width = 64, height = 40) {
+/** A 1000×640 PNG (a realistic screenshot size) with a solid accent bar: what a VERIFY-IMAGE read returns. */
+function fakeScreenshot(width = 1000, height = 640) {
   const crcTable = Array.from({ length: 256 }, (_, n) => {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -542,7 +542,8 @@ function fakeScreenshot(width = 64, height = 40) {
   header.set([8, 2, 0, 0, 0], 8);
   const rows = Buffer.alloc((width * 3 + 1) * height);
   for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) rows.set(y < 10 ? [217, 119, 87] : [40 + x, 60, 90 + y], y * (width * 3 + 1) + 1 + x * 3);
+    for (let x = 0; x < width; x++)
+      rows.set(y < 80 ? [217, 119, 87] : [(x * 200) / width + 40, 60, (y * 160) / height + 90], y * (width * 3 + 1) + 1 + x * 3);
   return Buffer.concat([
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
     chunk("IHDR", header),
@@ -651,6 +652,17 @@ async function ui2SlashMenu(run, page, record, dir) {
   record("side-effect", "/name fills the composer for its argument; /reload ran chat-reload (toast) and nothing reached the coordinator");
 }
 
+/** Page expression: the image under `selector` is the full 1000 px screenshot, loaded from a blob: URL. */
+const screenshotLoaded = (selector) =>
+  `(() => { const img = document.querySelector(${JSON.stringify(selector)}); return !!img && img.complete && img.naturalWidth === 1000 && img.src.startsWith('blob:'); })()`;
+/** Page expression: every loaded image under `root` shows bounded (≤ 520×360) yet readable (≥ 120 px wide), inside its column. */
+const screenshotsBounded = (root) => `(() => {
+  const column = document.querySelector(${JSON.stringify(root)}).getBoundingClientRect();
+  return [...document.querySelectorAll(${JSON.stringify(`${root} img.media-img`)})].map(img => img.getBoundingClientRect())
+    .map(r => ({ w: Math.round(r.width), h: Math.round(r.height), inside: r.left >= column.left - 1 && r.right <= column.right + 1 }));
+})()`;
+const badBox = (boxes) => !boxes.length || boxes.some((box) => box.w > 520 || box.h > 360 || box.w < 120 || !box.inside);
+
 /** Transcript images: a tool-result screenshot and a cited artifact load lazily as blob: images; a missing one degrades to text. */
 async function ui2Images(run, page, record, dir, sinks) {
   await page.click("#composer textarea");
@@ -660,10 +672,13 @@ async function ui2Images(run, page, record, dir, sinks) {
   const view = await rpc(run, { action: "show", id: run.projectId });
   const result = view.messages.findLast((item) => item.kind === "tool-result" && item.name === "read");
   if (!result?.images?.length) throw Error(`the read result carries no image reference: ${JSON.stringify(result).slice(0, 300)}`);
-  const loaded = (selector) =>
-    `(() => { const img = document.querySelector(${JSON.stringify(selector)}); return !!img && img.complete && img.naturalWidth === 64 && img.src.startsWith('blob:'); })()`;
-  await page.waitFor(loaded('#feed .tool-row[data-tool="read"] img.media-img'), "tool-result screenshot shown under the collapsed row");
-  await page.waitFor(loaded("#feed .msg.agent .prose img.media-img"), "cited artifact image inline in the reply");
+  await page.waitFor(
+    screenshotLoaded('#feed .tool-row[data-tool="read"] img.media-img'),
+    "tool-result screenshot shown under the collapsed row",
+  );
+  await page.waitFor(screenshotLoaded("#feed .msg.agent .prose img.media-img"), "cited artifact image inline in the reply");
+  const boxes = await page.evaluate(screenshotsBounded("#feed"));
+  if (badBox(boxes)) throw Error(`1000 px screenshots are not shown bounded in the chat column: ${JSON.stringify(boxes)}`);
   await page.waitFor(
     `/gone/.test(document.querySelector('#feed .msg.agent .prose [data-media][data-state="missing"]')?.innerText ?? '')`,
     "missing artifact degrades to a labelled note",
@@ -691,7 +706,71 @@ async function ui2Images(run, page, record, dir, sinks) {
   const missing = sinks.httpErrors.filter((item) => item.status === 404 && item.url.endsWith("/binary/missing.png"));
   if (missing.length !== 1) throw Error(`missing artifact requested ${missing.length} times`);
 }
-/** Drops the expected missing-artifact 404s (one per page load of the ui2 journey: the first and two reloads) and their console lines. */
+/** A worker transcript in the center loads its own images through its thread: tool result and cited artifact. */
+async function ui2WorkerImages(run, page, record, dir) {
+  await page.click("#composer textarea");
+  await page.cdp("Input.insertText", { text: "VERIFY-WORKER-IMAGE ask a worker" });
+  await page.press("Enter", { code: "Enter", keyCode: 13 });
+  await page.waitFor(
+    `[...document.querySelectorAll('#feed .tool-row[data-tool="agents"]')].some(n => /Look at the screen/.test(n.innerText) && n.querySelector('[data-open-worker]'))`,
+    "worker spawn row",
+    60000,
+  );
+  const worker = await page.evaluate(
+    `[...document.querySelectorAll('#feed .tool-row[data-tool="agents"]')].findLast(n => /Look at the screen/.test(n.innerText)).querySelector('[data-open-worker]').dataset.openWorker`,
+  );
+  await until(
+    async () => {
+      const history = await rpc(run, { action: "thread-history", id: run.projectId, threadId: worker, limit: 50 });
+      return history.items.some((item) => item.kind === "message" && item.role === "assistant" && /Screenshot:/.test(item.text));
+    },
+    "worker reply with its screenshot",
+    90000,
+  );
+  // Click only once the coordinator's turn about this worker has painted; a repaint under the click would swallow it.
+  await page.waitFor(
+    `document.querySelectorAll('#feed [data-open-worker="${worker}"]').length >= 2 && [...document.querySelectorAll('#feed .msg.agent')].at(-1)?.innerText.includes('Proof is available')`,
+    "coordinator turn about the worker settled",
+    60000,
+  );
+  await delay(500);
+  await page.click(`#feed [data-open-worker="${worker}"]`);
+  await page.waitFor(`document.querySelector('#center').dataset.focus === 'worker'`, "worker transcript in the center");
+  // Lazy: the view opens at the bottom, where the reply's images are; the read row's image loads once it is scrolled near.
+  const missingNote = `#worker-feed .prose [data-media][data-state="missing"]`;
+  await page.waitFor(`!!document.querySelector('${missingNote}')`, "worker missing artifact note");
+  await page.evaluate(`document.querySelector('${missingNote}').scrollIntoView({ block: 'end' })`);
+  await page.waitFor(screenshotLoaded("#worker-feed .msg.agent .prose img.media-img"), "worker cited artifact image");
+  await page.waitFor(`!!document.querySelector('#worker-feed .tool-row[data-tool="read"] [data-media]')`, "worker read row image slot");
+  await page.evaluate(`document.querySelector('#worker-feed .tool-row[data-tool="read"]').scrollIntoView({ block: 'center' })`);
+  await page.waitFor(screenshotLoaded('#worker-feed .tool-row[data-tool="read"] img.media-img'), "worker tool-result screenshot");
+  // The earlier worker view (VERIFY-JOB) is gone: a jobs change re-reads only the open worker's thread.
+  const reread = await page.evaluate(`(async () => {
+    const seen = [], real = window.fetch;
+    window.fetch = (url, init) => {
+      try { const body = JSON.parse(init?.body ?? 'null'); if (body?.action === 'thread-history') seen.push(body.threadId); } catch {}
+      return real(url, init);
+    };
+    (await import('/ui2/state.js')).emit('jobs');
+    await new Promise(done => setTimeout(done, 1500));
+    window.fetch = real;
+    return { seen, head: document.querySelector('#focus-view .focus-head h1')?.textContent };
+  })()`);
+  if (reread.head !== "Look at the screen" || reread.seen.some((thread) => thread !== worker))
+    throw Error(`a closed worker view still reloads: ${JSON.stringify(reread)}`);
+  const boxes = await page.evaluate(screenshotsBounded("#worker-feed"));
+  if (badBox(boxes)) throw Error(`worker screenshots are not shown bounded: ${JSON.stringify(boxes)}`);
+  record(
+    "visible",
+    `worker ${worker} transcript in the center: tool-result and cited 1000 px screenshots load through its thread; missing one is a note`,
+  );
+  await delay(300);
+  await page.shot(dir, "04d-worker-images");
+  await page.press("Escape", { keyCode: 27 });
+  await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc returns to chat after the worker");
+}
+/** Drops the expected missing-artifact 404s and their console lines: the coordinator's once per page load of the ui2 journey (the
+ *  first and two reloads) plus the worker's once. */
 function dropMissingArtifact(sinks, loads) {
   const missing = sinks.httpErrors.filter((item) => item.status === 404 && item.url.endsWith("/binary/missing.png"));
   if (missing.length > loads) throw Error(`missing artifact requested ${missing.length} times in ${loads} page loads`);
@@ -1102,6 +1181,7 @@ const journeys = {
     await page.press("Escape", { keyCode: 27 });
     await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc returns to chat");
     record("visible", "spawn row opens the worker transcript in the center; Esc returns to the chat");
+    await ui2WorkerImages(run, page, record, dir);
     // Memory: a knowledge read and write render as memory rows; the entry opens in the center; the tree node lists it by kind.
     await page.click(composer);
     await page.cdp("Input.insertText", { text: "VERIFY-MEMORY greet in one short line from now on" });
@@ -1414,6 +1494,21 @@ const journeys = {
         "side-effect",
         `ui-get after keyboard move, show, hide, bar off/on and Restore: ${restored.statusItems.map((item) => item.id).join(" ")}`,
       );
+      // Two quick changes: the host's answer to the first must not undo the second while it is still being written.
+      const race = await page.evaluate(`(async () => {
+        const { setUi } = await import('/ui2/ui.js'), { state } = await import('/ui2/state.js');
+        const first = setUi({ statusLine: true });
+        const second = setUi({ statusItems: state.ui.statusItems.map(item => item.id === 'model' ? { ...item, enabled: false } : item) });
+        await first;
+        const between = state.ui.statusItems.find(item => item.id === 'model').enabled;
+        await second;
+        const after = state.ui.statusItems.find(item => item.id === 'model').enabled;
+        await setUi({ statusItems: state.ui.statusItems.map(item => ({ ...item, enabled: true })) });
+        return { between, after };
+      })()`);
+      if (race.between !== false || race.after !== false)
+        throw Error(`an earlier ui-set answer undid a queued change: ${JSON.stringify(race)}`);
+      record("verified", "a ui-set answer keeps a later queued change (Model stayed hidden between the two writes)");
       await page.press("Escape", { keyCode: 27 });
       await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed after status line");
       // The drawer renders replies through the same Markdown as the chat.
@@ -1781,6 +1876,56 @@ const journeys = {
     const overflow = await page.evaluate(`document.documentElement.scrollWidth - innerWidth`);
     await page.shot(dir, "10-narrow-390-light");
     if (overflow > 0) throw Error(`narrow layout overflows by ${overflow}px`);
+    // The "/" menu at 390 px: inside the viewport, above the composer, its active option fully visible; screenshots fit the column.
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "/" });
+    await page.waitFor(`!document.querySelector('#slash-menu').hidden`, "slash menu at 390 px");
+    await page.press("ArrowDown", { keyCode: 40 });
+    const slashBox = await page.evaluate(`(() => {
+      const m = document.querySelector('#slash-menu').getBoundingClientRect(), c = document.querySelector('#composer').getBoundingClientRect();
+      const a = document.querySelector('#slash-menu [aria-selected="true"]').getBoundingClientRect();
+      const name = document.querySelector('#slash-menu [aria-selected="true"] .slash-name').getBoundingClientRect();
+      return { left: m.left, right: m.right, top: m.top, bottom: m.bottom, composerTop: c.top, width: innerWidth,
+        activeInside: a.top >= m.top && a.bottom <= m.bottom + 1, nameInside: name.left >= m.left && name.right <= m.right,
+        overflow: document.documentElement.scrollWidth - innerWidth };
+    })()`);
+    if (
+      slashBox.left < 0 ||
+      slashBox.right > slashBox.width ||
+      slashBox.top < 0 ||
+      slashBox.bottom > slashBox.composerTop + 8 ||
+      !slashBox.activeInside ||
+      !slashBox.nameInside ||
+      slashBox.overflow > 0
+    )
+      throw Error(`slash menu at 390 px: ${JSON.stringify(slashBox)}`);
+    await delay(200);
+    await page.shot(dir, "10-narrow-390-slash");
+    await page.press("Escape", { keyCode: 27 });
+    await page.evaluate(
+      `(() => { const t = document.querySelector('#composer textarea'); t.value = ''; t.dispatchEvent(new Event('input')); t.blur(); })()`,
+    );
+    // The first screenshot sits far up the chat, possibly on an older page: load earlier pages, then scroll it near so it loads.
+    const readRow = `!!document.querySelector('#feed .tool-row[data-tool="read"] [data-media]')`;
+    for (
+      let n = 0;
+      n < 6 && !(await page.evaluate(readRow)) && (await page.evaluate(`!!document.querySelector('#feed [data-earlier]')`));
+      n++
+    ) {
+      await page.click("#feed [data-earlier]");
+      await delay(500);
+    }
+    await page.waitFor(readRow, "the read screenshot is in the chat");
+    await page.evaluate(`document.querySelector('#feed .tool-row[data-tool="read"]').scrollIntoView({ block: 'center' })`);
+    await page.waitFor(screenshotLoaded('#feed .tool-row[data-tool="read"] img.media-img'), "screenshot loaded at 390 px");
+    await delay(200);
+    await page.shot(dir, "10-narrow-390-screenshot");
+    const narrowShots = await page.evaluate(screenshotsBounded("#feed"));
+    if (badBox(narrowShots)) throw Error(`screenshots at 390 px: ${JSON.stringify(narrowShots)}`);
+    record(
+      "verified",
+      `390 px: "/" menu inside the viewport above the composer with the active option visible; ${narrowShots.length} screenshots fit the column`,
+    );
     // Toasts: one identical message shows once, at most two show, and none covers the composer.
     await page.click("#status-pill");
     await page.waitFor(`document.querySelectorAll('#toasts .toast').length >= 1`, "pill toast");
@@ -1836,6 +1981,13 @@ const journeys = {
       `document.querySelector('#settings [data-sl-item="thinking"] .sl-state').textContent === 'hidden'`,
       "row says hidden",
     );
+    // An unchanged settings event (the host's echo of this page's own write) leaves the rows in place, so a click is not lost.
+    const kept = await page.evaluate(`(async () => {
+      const { emit, state } = await import('/ui2/state.js'), row = document.querySelector('#settings [data-sl-item="thinking"]');
+      emit('ui', state.ui);
+      return row.isConnected;
+    })()`);
+    if (!kept) throw Error("an unchanged settings event redrew the status line rows");
     await page.click('#settings [data-sl-toggle="thinking"]');
     await until(
       async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.find((item) => item.id === "thinking")?.enabled === true,
@@ -1892,7 +2044,7 @@ const journeys = {
     await page.waitFor(`document.documentElement.dataset.font === 'jetbrains-mono'`, "JetBrains Mono restored");
     record("verified", "no horizontal overflow at 390 px; themes and host-persisted fonts applied through the settings overlay");
     writeFileSync(join(dir, "feed-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
-    dropMissingArtifact(sinks, 3);
+    dropMissingArtifact(sinks, 4);
     if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },
   // Feature: features/message-coordinator.md

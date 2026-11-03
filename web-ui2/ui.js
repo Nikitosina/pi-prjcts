@@ -49,7 +49,13 @@ function apply(ui) {
   emit("ui", ui);
 }
 
+/** Reads the host's settings. A change notice that arrives while this page still has writes queued is left to the last write's
+ * answer, which carries the host's full settings. */
 export async function loadUi() {
+  if (queued) return;
+  await readUi();
+}
+async function readUi() {
   const result = await call("ui-get").catch((error) => {
     fail(error);
     return null;
@@ -59,30 +65,32 @@ export async function loadUi() {
     apply(normalize(result.ui));
   } else if (!state.ui) apply(normalize(local()));
 }
-let writing = Promise.resolve();
+let writing = Promise.resolve(),
+  queued = 0;
 /** Applies the patch at once, then writes it to the host; a stale revision re-reads and retries once. Resolves true when the
- * host kept it. */
+ * host kept it. While later writes wait, the page keeps its own copy: the host's answer predates them and would undo them. */
 export function setUi(patch) {
   const next = normalize({ ...state.ui, ...patch, panels: { ...state.ui.panels, ...(patch.panels ?? {}) } });
   apply(next);
+  queued++;
   const done = writing.then(async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const result = await call("ui-set", { revision: state.uiRevision, patch });
         state.uiRevision = result.revision;
-        apply(normalize(result.ui));
+        if (queued === 1) apply(normalize(result.ui));
         return true;
       } catch (error) {
         if (attempt || !/revision/i.test(error.message)) {
           fail(error);
-          await loadUi(); // show what the host kept, not the refused change
+          await readUi(); // show what the host kept, not the refused change
           return false;
         }
         state.uiRevision = (await call("ui-get")).revision;
       }
     }
   });
-  writing = done.catch(() => false);
+  writing = done.catch(() => false).finally(() => queued--);
   return done;
 }
 // System theme follows the OS while the page is open.

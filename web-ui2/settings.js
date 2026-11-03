@@ -822,8 +822,11 @@ function animations(body) {
 function statusLine(body, alive) {
   const label = (id) => STATUS_ITEMS.find((item) => item.id === id)?.label ?? id;
   const current = () => state.ui.statusItems;
+  const shape = () => JSON.stringify([state.ui.statusLine, current()]);
+  let drawn = "";
   const draw = (focus) => {
     const items = current();
+    drawn = shape();
     body.innerHTML = `${line("Order the items of the bottom status line and choose which ones show.", "Same in every browser; the Host agent can change it too. On a narrow screen the bar scrolls sideways when the shown items do not fit.")}<div class="field-row"><label class="switch"><input type="checkbox" id="statusline-toggle" ${state.ui.statusLine ? "checked" : ""}/> Show the status line</label></div><ol class="sl-order" aria-label="Status line items" data-bar="${state.ui.statusLine ? "on" : "off"}">${items
       .map((item, index) => {
         const meta = STATUS_ITEMS.find((entry) => entry.id === item.id) ?? { label: item.id, hint: "" };
@@ -844,9 +847,11 @@ function statusLine(body, alive) {
     void done.then((ok) => (ok ? say(message) : alive() && draw(focus)));
   };
   draw();
-  // A change from another browser or the Host agent redraws this section while it is open.
+  // A change from another browser or the Host agent redraws this section while it is open. The host's echo of this page's own
+  // change does not: a redraw under a click in progress would drop that click.
   const off = on("ui", () => {
     if (!alive()) return off();
+    if (shape() === drawn) return;
     const active = document.activeElement?.closest?.("[data-sl-item]");
     const selector = document.activeElement?.matches?.("[data-sl-move]")
       ? `[data-sl-move="${document.activeElement.dataset.slMove}"]`

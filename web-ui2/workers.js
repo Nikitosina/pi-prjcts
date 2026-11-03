@@ -198,9 +198,11 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
   let items = [];
+  // The focus view is reused: this render lives only while its own feed is on the page.
+  const node = root.querySelector("#worker-feed"),
+    alive = () => node.isConnected && !stale(gen);
   const paint = () => {
-    const node = root.querySelector("#worker-feed");
-    if (!node) return;
+    if (!alive()) return;
     const worker = find();
     node.innerHTML =
       transcriptHtml(
@@ -213,23 +215,23 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   };
   const load = async () => {
     const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200 }).catch((error) => {
-      if (!stale(gen)) root.querySelector("#worker-feed").innerHTML = `<p class="muted">${esc(error.message)}</p>`;
+      if (alive()) node.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
       return null;
     });
-    if (stale(gen) || !page || !root.isConnected) return;
+    if (!page || !alive()) return;
     items = page.items;
     root.querySelector(".focus-head").outerHTML = head().replace(/<div class="report-card">[\s\S]*$/, "");
     paint();
   };
   await load();
-  if (stale(gen)) return;
-  root.querySelector("#worker-feed")?.addEventListener("click", (event) => void transcriptClick(event, root, paint));
+  if (!alive()) return;
+  node.addEventListener("click", (event) => void transcriptClick(event, root, paint));
   const unsub = on("jobs", () => {
-    if (!root.isConnected || stale(gen)) return unsub();
+    if (!alive()) return unsub();
     void load();
   });
   root.addEventListener("click", async (event) => {
-    if (!event.target.closest("[data-stop-worker]")) return;
+    if (!alive() || !event.target.closest("[data-stop-worker]")) return;
     try {
       await call("thread-stop", { id: state.projectId, threadId: id });
       toast("Stopped. History and files kept.");

@@ -127,6 +127,8 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - The Spacer stops pushing the items after it to the right, or with the Spacer hidden the bar overflows instead of packing left.
 - At 390 px the bar overflows the viewport or cuts off items without a way to reach them.
 - A Host agent `ui_focus` at Settings (or a settings section such as `theme` or `statusline`) opens the Settings overlay by itself after it changes a setting; the owner must get a quiet notice with a button, and owner-opened Settings (⌘,, palette, the button) must still work.
+- The host's echo of the page's own status line change redraws the section, so a click landing during the redraw (the next toggle) is lost.
+- Two quick UI changes (a status line toggle, then Restore): the host's answer to the first overwrites the page's copy while the second is still queued, so Restore builds on stale items and hides an item the owner just showed.
 - At 390 px an enabled status line item (thinking, cost, limits, key hints) is hidden by the narrow layout, so its Settings switch does nothing there and the item cannot be reached; enabled items must stay in the bar, reachable by scrolling it sideways.
 
 ## Chat Markdown and slash completion
@@ -158,3 +160,10 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - Blob URLs accumulate without `revokeObjectURL`, or a re-render (new live frame) refetches every image.
 - Alt text or the label from a reply is inserted unescaped.
 - A worker transcript in the center shows the same placeholders but never loads them (wrong `threadId` source).
+- After a second worker is opened (or the chat is back), the first worker view still reloads on every jobs change: it throws on a missing header or paints the old worker's transcript into the new view.
+- A full-size screenshot (1000 px wide) overflows the chat column or the 390 px layout instead of showing bounded and readable.
+- The Host agent drawer shows an image slot as if it were loading; it has no image route, so the slot must say it is not viewable here.
+
+## Narrow "/" menu
+
+- At 390 px the "/" menu spills past the viewport, covers the composer, or scrolls its active option or a command name out of view.

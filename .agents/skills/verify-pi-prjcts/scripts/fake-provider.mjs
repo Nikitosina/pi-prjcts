@@ -6,7 +6,8 @@
 // through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the coordinator file the same request through
 // owner_approval_request. VERIFY-TABLE answers (any agent) with Markdown that mixes a table, nested and numbered lists, a quote and
 // hostile HTML and links, for the chat renderers. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
-// image) and cite its artifact reference plus a missing one.
+// image) and cite its artifact reference plus a missing one; VERIFY-WORKER-IMAGE has the coordinator hand that to a worker
+// (scouts read code through code_read, which returns no images).
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
@@ -87,6 +88,18 @@ const server = createServer((req, res) => {
           ? `${TABLE_REPLY}\n\n![chart](artifact:00000000-0000-4000-8000-000000000000/binary/chart.png)`
           : TABLE_REPLY,
       );
+    } else if (user.includes("VERIFY-WORKER-IMAGE") && names.includes("agents") && !user.startsWith("[")) {
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "worker",
+              title: "Look at the screen",
+              brief: "VERIFY-IMAGE read screen.png and show it.",
+              acceptance: ["Shows the screenshot."],
+              requestId: "verify-worker-image",
+            })
+          : say("Asked a worker to look at the screen.");
     } else if (user.includes("VERIFY-IMAGE") && names.includes("read")) {
       const ref = messages
         .filter((m) => m.role === "tool")
