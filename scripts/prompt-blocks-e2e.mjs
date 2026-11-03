@@ -179,6 +179,24 @@ await kit.run(async () => {
   const idle = await rpc({ action: "prompt-render", projectId: id, profile: "coordinator", chatId: "main" });
   check("P13 an adopted chat matches its configured prompt", idle.active.matchesConfigured && !idle.active.pending, idle.active);
 
+  // P15: the coordinator's context habits are editable behavior; the generated fact and guard stay in the host contract.
+  const habitText = "CUSTOM-HABIT: read reports first, then at most two evidence refs.";
+  await set(
+    "coordinator",
+    inputs(await get("coordinator")).map((block) => (block.id === "context" ? { ...block, text: habitText } : block)),
+  );
+  await kit.ask(id, "plain question three");
+  const habitSystem = kit.result.calls.findLast((c) => c.role === "coordinator" && c.user.includes("plain question three")).system;
+  check(
+    "P15 an edited context habit reaches the next coordinator request",
+    habitSystem.includes(habitText) && !habitSystem.includes("Read files and diffs by path and line range"),
+  );
+  check(
+    "P15 the generated context fact and guard stay",
+    habitSystem.includes("Every tool answer stays in this chat until compaction") &&
+      habitSystem.includes("a required skill read, proof or evidence check"),
+  );
+
   // P4: new agents start with the saved blocks.
   const worker = await get("worker");
   const workerCustom = { id: "custom:style", name: "Style", enabled: true, text: "CUSTOM-WORKER: prefer small commits." };

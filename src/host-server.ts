@@ -88,8 +88,7 @@ import { createModelRuntime, loadProviderExtensions } from "./provider-extension
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
-import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
-import { projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
+import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
 import { estimateTokens, promptSection } from "./prompt-sections.ts";
 import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
@@ -578,13 +577,18 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "settings-snapshot":
       return settings.snapshot(input.id);
     case "prompts-snapshot": {
-      const project = loadProject(input.id),
-        defaults = DEFAULT_ROLE_PROMPTS;
+      const project = loadProject(input.id);
       return {
         scope: "project",
         roles: PROMPT_ROLES.map((role) => {
-          const behavior = projectBehavior(project, role);
-          return { role, default: defaults[role], override: behavior.customized ? behavior.text : null, effective: behavior.text };
+          // The per-role editor shows and saves role text without the blocks a legacy override leaves on (the coordinator's context habits).
+          const text = legacyEditorText(project, role);
+          return {
+            role,
+            default: legacyEditorText({}, role),
+            override: projectBehavior(project, role).customized ? text : null,
+            effective: text,
+          };
         }),
       };
     }

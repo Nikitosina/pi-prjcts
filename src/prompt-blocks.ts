@@ -24,6 +24,8 @@ export const PROMPT_BLOCK_LIMITS = {
 } as const;
 const CUSTOM_ID = /^custom:[a-z0-9][a-z0-9-]{0,47}$/;
 const LEGACY_ID = "custom:legacy";
+/** Built-ins that were not part of the role prompt a legacy override replaced (the coordinator's context habits were host text). */
+const OUTSIDE_LEGACY: Partial<Record<PromptTarget, readonly string[]>> = { coordinator: ["context"] };
 
 export const PromptBlock = Type.Object(
   {
@@ -61,6 +63,7 @@ export const BUILTIN_PROMPT_BLOCKS: Record<PromptTarget, readonly Builtin[]> = {
     ["task-helpers", "Task helper results"],
     ["reporting", "Reports to the owner"],
     ["memory", "Memory and agent lifecycle"],
+    ["context", "Context habits"],
   ]),
   worker: named(DEFAULT_ROLE_PROMPTS.worker, [
     ["job", "Plan and build"],
@@ -200,7 +203,11 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
       seen.add(block.id);
     });
   } else if (legacy !== undefined) {
-    blocks = [custom(LEGACY_ID, "Earlier owner instructions", true, legacy), ...defaults.map((block) => builtin(block, false))];
+    // An override replaced the role prompt only; blocks that were generated text when it was written stay on.
+    blocks = [
+      custom(LEGACY_ID, "Earlier owner instructions", true, legacy),
+      ...defaults.map((block) => builtin(block, OUTSIDE_LEGACY[target]?.includes(block.id) ?? false)),
+    ];
   } else blocks = defaults.map((block) => builtin(block, true));
   return {
     target,
@@ -217,6 +224,13 @@ const legacyOverride = (project: PromptConfig, target: ProjectPromptTarget) =>
 /** A project's behavior for one target: its saved blocks, else its legacy override, else the built-ins. */
 export const projectBehavior = (project: PromptConfig, target: ProjectPromptTarget): ResolvedPromptBlocks =>
   resolvePromptBlocks(target, project.promptBlocks?.[target], legacyOverride(project, target));
+
+/**
+ * The text the older per-role prompt editor (`prompts-snapshot`, `settings-update` `prompts`) shows and saves: the behavior
+ * without the blocks a legacy override leaves on, so saving it back as an override gives the same behavior.
+ */
+export const legacyEditorText = (project: PromptConfig, target: Exclude<ProjectPromptTarget, "taskHelper">): string =>
+  joinBlocks(projectBehavior(project, target).blocks.filter((block) => !OUTSIDE_LEGACY[target]?.includes(block.id)));
 
 /** A task helper's behavior: the owner's own worker blocks, then the helper contract blocks (the helper replaces the Job workflow). */
 export function taskHelperBehavior(project: PromptConfig): string {

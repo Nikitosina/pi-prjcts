@@ -5,8 +5,8 @@
 ## What is editable
 
 - Targets: `coordinator`, `worker` (independent Job worker), `taskHelper` (a worker in a chat's shared or isolated workspace), `scout`, `reviewer` per project, and `host` (the Host agent's own prompt).
-- Built-in blocks are the lines of the built-in prompts in `role-prompts.ts`, each with a stable id and name. Every built-in can be edited, turned off and moved. Custom blocks have ids `custom:<slug>` (lowercase letters, digits and dashes, 1–48 characters), a name and text.
-- Not blocks, and not editable here: the host contract (`SHARED_ROLE_RULES`, the coordinator context rules, grants and plugin rules), instance and repository instructions, project instructions (Settings → objective), the preferences brief, the memory index, skill indexes and workspace bindings. Prose never grants or removes a tool: tools, the `host_call` policy and owner approvals are enforced in code.
+- Built-in blocks are the lines of the built-in prompts in `role-prompts.ts`, each with a stable id and name. Every built-in can be edited, turned off and moved. The coordinator's context habits (read reports first, read by path and range, brief with refs, when to reread) are its `context` block; they were host text before, so a legacy coordinator override keeps that block on, and the older per-role editor (`prompts-snapshot` `default`, `override`, `effective`) shows and saves the role text without it. Custom blocks have ids `custom:<slug>` (lowercase letters, digits and dashes, 1–48 characters), a name and text.
+- Not blocks, and not editable here: the host contract (`SHARED_ROLE_RULES`, the coordinator context fact and guard in `COORDINATOR_CONTEXT_RULES`, grants and plugin rules), instance and repository instructions, project instructions (Settings → objective), the preferences brief, the memory index, skill indexes and workspace bindings. Prose never grants or removes a tool: tools, the `host_call` policy and owner approvals are enforced in code.
 - Limits: 32 blocks, 16 custom blocks, 12,000 characters per block, 24,000 characters of enabled text per target, 80-character names.
 
 ## Resolution
