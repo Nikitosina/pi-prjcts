@@ -32,6 +32,7 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - F2 When the last tier model is exhausted, the Job waits for the bounded quota retries and then fails, as today.
 - F3 Without a tier the legacy single `fallbackModels` move is unchanged.
 - F4 A rate limit (after Durable's own retries) moves on only when the profile has a tier.
+- F5 `jobs-snapshot` names each Job's and agent's own current model (its conversation's agent model), so a tier move or a tier that differs from the legacy `models.worker` is not hidden behind the project setting.
 
 ## Profile tools (`profile-tools`)
 

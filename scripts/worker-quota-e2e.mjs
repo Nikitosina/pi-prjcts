@@ -155,6 +155,31 @@ await kit.run(async () => {
     rate.modelMoves.length === 1 && callsFor("RATE").at(-1).model === "fallback-model",
     { rate, calls: callsFor("RATE").map((call) => call.model) },
   );
+  // F5: the snapshot names the model each agent runs on, not the project's legacy role model.
+  const snapshot = await kit.rpc({ action: "jobs-snapshot", id });
+  const agentModel = (jobId) => snapshot.agents.find((agent) => agent.id === jobId)?.model;
+  kit.check(
+    "F5 a moved worker's snapshot model is the model it moved to",
+    snapshot.jobs.find((job) => job.id === chain.id)?.model === "fake/third-model" &&
+      agentModel(chain.id) === "fake/third-model" &&
+      snapshot.jobs.find((job) => job.id === rate.id)?.model === "fake/fallback-model",
+    snapshot.jobs.map(({ id: jobId, model }) => ({ jobId, model })),
+  );
+  const withSecond = await kit.rpc({ action: "tiers-get" });
+  await kit.rpc({
+    action: "tiers-set",
+    revision: withSecond.revision,
+    tiers: [...withSecond.tiers, { id: "second", name: "Second", letter: "S", models: ["fake/fallback-model"] }],
+  });
+  const workerProfile = await kit.rpc({ action: "profiles-get", projectId: id });
+  await kit.rpc({ action: "profiles-set", projectId: id, revision: workerProfile.revision, profile: "worker", patch: { tier: "second" } });
+  const tiered = await settled(await submit("FALLBACK tier first model"));
+  const legacy = (await kit.rpc({ action: "show", id })).project.models?.worker;
+  kit.check(
+    "F5 a worker on a tier whose first model differs from the legacy worker model reports the tier's model",
+    tiered.modelMoves.length === 0 && tiered.model === "fake/fallback-model" && legacy !== "fake/fallback-model",
+    { tiered, legacy },
+  );
 
   const { check } = kit;
   // G5: the Coordinator's tier advances on quota, once per failed turn, only in the chat that failed.

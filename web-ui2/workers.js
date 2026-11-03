@@ -59,16 +59,22 @@ export function chatWorkers() {
     .map((agent) => ({ kind: "agent", ...agent, status: agent.working ? "running" : agent.endedAt ? "completed" : "running", plan: [] }));
   return [...jobs, ...agents].sort((a, b) => b.createdAt - a.createdAt);
 }
-function modelFor(role) {
-  const project = state.view?.project;
-  if (!project) return null;
-  return role === "worker" ? (project.models?.worker ?? project.model) : (project.models?.[role] ?? project.model);
-}
-function tierLetter(model) {
-  if (!tiers) return "";
-  return (
-    tiers.tiers.find((tier) => tier.models[0] === model)?.letter ?? tiers.tiers.find((tier) => tier.models.includes(model))?.letter ?? ""
-  );
+/** The model the agent runs on (from jobs-snapshot), lettered with its profile's tier only when the model is in that tier. */
+function modelChip(worker) {
+  const model = worker.model;
+  if (!model) return "";
+  const tierId = state.view?.project?.profiles?.[worker.role]?.tier,
+    tier = tierId ? tiers?.tiers.find((item) => item.id === tierId) : null,
+    place = tier ? tier.models.indexOf(model) : -1;
+  const where = !tier
+    ? "no tier"
+    : place < 0
+      ? `outside its tier ${tier.name}`
+      : place === 0
+        ? tier.name
+        : `${tier.name}, fallback ${place + 1} of ${tier.models.length}`;
+  const moved = worker.modelMoves?.length ? ` · moved from ${worker.modelMoves[0].from}` : "";
+  return `<span class="chip mono" data-model="${esc(model)}" title="${esc(`${model} · ${where}${moved}`)}">${place >= 0 ? `<b>${esc(tier.letter)}</b>` : ""}${esc(shortModel(model))}</span>`;
 }
 function renderWorkers() {
   const list = chatWorkers();
@@ -82,8 +88,6 @@ function renderWorkers() {
 function workerHtml(worker) {
   const stalled = worker.status === "running" && worker.stalledAt;
   const look = stalled ? { label: "Stalled", tone: "needs" } : (STATE[worker.status] ?? { label: worker.status, tone: "muted" });
-  const model = modelFor(worker.role),
-    letter = tierLetter(model);
   const plan = worker.plan ?? [],
     done = plan.filter((step) => step.status === "done").length,
     doing = plan.find((step) => step.status === "doing") ?? plan.find((step) => step.status === "todo");
@@ -107,7 +111,7 @@ function workerHtml(worker) {
         : worker.status === "failed" || worker.status === "checkpoint"
           ? `<button type="button" class="ghost-btn small" data-open-worker="${esc(worker.id)}">Open</button>`
           : "";
-  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}" data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${model ? `<span class="chip mono" title="${esc(model)}">${letter ? `<b>${esc(letter)}</b>` : ""}${esc(shortModel(model))}</span>` : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
+  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}" data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
 }
 async function loadLastTools(gen) {
   const running = chatWorkers()

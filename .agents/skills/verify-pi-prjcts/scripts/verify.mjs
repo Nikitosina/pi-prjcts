@@ -873,6 +873,12 @@ const journeys = {
     // The spawn links to the worker; the Ready worker card has one primary action (Approve) and plan progress.
     const card = await page.evaluate(`document.querySelector('#workers .worker[data-status="ready"]').innerText`);
     if (!/2\/2/.test(card) || !/Approve/.test(card)) throw Error(`worker card lacks plan progress or Approve: ${JSON.stringify(card)}`);
+    // The model chip names the model the worker runs on, as the host's Jobs snapshot reports it.
+    const chipModel = await page.evaluate(`document.querySelector('#workers .worker[data-status="ready"] .chip')?.dataset.model ?? null`);
+    const readyJob = (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.find((job) => job.status === "ready");
+    if (!readyJob?.model || chipModel !== readyJob.model)
+      throw Error(`worker chip model ${chipModel} is not the snapshot model ${readyJob?.model}`);
+    record("side-effect", `worker chip shows ${chipModel}, the model jobs-snapshot reports for the Ready Job`);
     await page.shot(dir, "02-chat-tool-rows-claude");
     // Expand the spawn row: parameters and a bounded result preview, escaped.
     await page.click('#feed .tool-row[data-tool="agents"] .tool-head');

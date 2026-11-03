@@ -661,8 +661,10 @@ export type JobsSnapshot = {
     children: (Job["children"][number] & { working: boolean })[];
     quota: Agent["quota"];
     modelMoves: Agent["modelMoves"];
+    /** The model the worker's conversation runs on now (`provider/model`): its tier's model or where a quota move left it. */
+    model: string | null;
   })[];
-  agents: (Agent & { working: boolean })[];
+  agents: (Agent & { working: boolean; model: string | null })[];
 };
 
 export type SpawnArgs = {
@@ -699,6 +701,10 @@ export function createJobs(host: JobsHost) {
   });
   const clock = () => host.now?.() ?? Date.now();
 
+  const agentModel = async (reader: Pick<Session, "snapshot">, id: ConversationId) => {
+    const model = (await reader.snapshot(AgentDoc, id, context))?.model;
+    return model ? `${model.provider}/${model.modelId}` : null;
+  };
   const working = async (reader: Pick<Session, "snapshot">, id: ConversationId) =>
     (await reader.snapshot(LiveDoc, id, context))?.run !== undefined;
 
@@ -1346,11 +1352,16 @@ export function createJobs(host: JobsHost) {
           children: await Promise.all(job.children.map(async (child) => ({ ...child, working: await working(harness, child.id) }))),
           quota: doc.agents[job.id]?.quota ?? null,
           modelMoves: doc.agents[job.id]?.modelMoves ?? [],
+          model: await agentModel(harness, job.workerConversation),
         };
       }),
     );
     const agents = await Promise.all(
-      Object.values(doc.agents).map(async (agent) => ({ ...agent, working: await working(harness, agent.conversationId) })),
+      Object.values(doc.agents).map(async (agent) => ({
+        ...agent,
+        working: await working(harness, agent.conversationId),
+        model: await agentModel(harness, agent.conversationId),
+      })),
     );
     return { paused: doc.paused, jobs, agents };
   }

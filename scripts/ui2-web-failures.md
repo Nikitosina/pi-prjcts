@@ -38,6 +38,7 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 ## Workers card
 
 - A Job does not appear in the context panel, or appears as a one-line header without plan step, progress and model.
+- The worker's model chip shows the project's legacy role model instead of the model that agent runs on (its tier's model or the model a quota move left it on).
 - A Ready Job has no single primary action (Approve) and badge; Approve is offered for a checkpoint.
 - Opening a worker does not show its transcript in the center; Esc does not return to the chat.
 
