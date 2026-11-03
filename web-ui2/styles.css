@@ -1737,6 +1737,9 @@ dialog:focus-visible {
 .settings-head h1 {
   margin: 0;
   font: 600 18px var(--font);
+  /* One line: a confirmation arriving in the header shrinks (ellipsis), so the rows below never shift under a pointer. */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .settings-head .scope.host {
   color: var(--accent-ink);

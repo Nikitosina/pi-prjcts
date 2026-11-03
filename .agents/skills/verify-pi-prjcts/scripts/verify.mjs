@@ -1969,10 +1969,56 @@ const journeys = {
     if (rows.bad.length || rows.overflow > 0 || rows.rows !== ITEM_ORDER.length)
       throw Error(`status line settings at 390 px: ${JSON.stringify(rows)}`);
     await page.shot(dir, "10c-narrow-390-status-line-settings");
+    // The move's confirmation lands in the header after the host saved it. Hold that answer, measure the Thinking checkbox,
+    // release it: the confirmation must not shift the rows, so a pointer aimed before it arrived still toggles Thinking.
+    await page.evaluate(`(() => {
+      const real = window.fetch;
+      let release;
+      const hold = new Promise((done) => (release = done));
+      window.__releaseUiSet = () => { window.fetch = real; release(); };
+      window.fetch = async (url, init) => {
+        let action = null;
+        try { action = JSON.parse(init?.body ?? 'null')?.action; } catch {}
+        const held = action === 'ui-set' && !window.__heldUiSet;
+        if (held) window.__heldUiSet = true;
+        const response = await real(url, init);
+        if (held) await hold;
+        return response;
+      };
+    })()`);
     await page.click('#settings [data-sl-item="connection"] [data-sl-move="up"]');
     await until(async () => (await rpc(run, { action: "ui-get" })).ui.statusItems[6]?.id === "connection", "Connection moved up at 390 px");
+    const thinkingAt = `(() => { const r = document.querySelector('#settings [data-sl-toggle="thinking"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`;
+    if (!(await page.evaluate(`window.__heldUiSet === true`))) throw Error("the move's ui-set answer was not held");
+    const aimed = await page.evaluate(thinkingAt);
+    await page.evaluate(`window.__releaseUiSet()`);
+    await page.waitFor(
+      `document.querySelector('#settings .settings-status')?.textContent.includes('Connection moved up')`,
+      "move confirmed in the header",
+    );
     await page.waitFor(`document.activeElement?.matches('[data-sl-item="connection"] [data-sl-move="up"]')`, "focus kept on ↑ at 390 px");
-    await page.click('#settings [data-sl-toggle="thinking"]');
+    const landed = await page.evaluate(thinkingAt);
+    if (Math.abs(landed.x - aimed.x) > 0.5 || Math.abs(landed.y - aimed.y) > 0.5)
+      throw Error(`the move's confirmation shifted the Thinking checkbox: ${JSON.stringify({ aimed, landed })}`);
+    const head = await page.evaluate(`(() => {
+      const h = document.querySelector('#settings .settings-head'), title = h.querySelector('h1'), status = h.querySelector('.settings-status');
+      const fits = () => ({ overflow: h.scrollWidth - h.clientWidth, right: h.getBoundingClientRect().right, height: h.getBoundingClientRect().height });
+      const real = fits(), saved = [title.textContent, status.textContent];
+      // The longest section title with a long confirmation still fits on one line.
+      title.textContent = [...document.querySelectorAll('#settings nav button')].map(b => b.childNodes[0]?.textContent?.trim() ?? '').sort((a, b) => b.length - a.length)[0];
+      status.textContent = 'Subscription limits moved down to 9 and the bar scrolls sideways';
+      const long = fits();
+      [title.textContent, status.textContent] = saved;
+      return { real, long, width: innerWidth };
+    })()`);
+    if ([head.real, head.long].some((box) => box.overflow > 0 || box.right > head.width) || head.long.height > head.real.height + 0.5)
+      throw Error(`settings header at 390 px overflows or wraps: ${JSON.stringify(head)}`);
+    for (const [type, extra] of [
+      ["mouseMoved", {}],
+      ["mousePressed", { button: "left", clickCount: 1 }],
+      ["mouseReleased", { button: "left", clickCount: 1 }],
+    ])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: aimed.x, y: aimed.y, ...extra });
     await until(
       async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.find((item) => item.id === "thinking")?.enabled === false,
       "thinking hidden at 390 px",

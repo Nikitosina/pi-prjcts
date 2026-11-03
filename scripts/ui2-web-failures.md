@@ -127,6 +127,7 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - The Spacer stops pushing the items after it to the right, or with the Spacer hidden the bar overflows instead of packing left.
 - At 390 px the bar overflows the viewport or cuts off items without a way to reach them.
 - A Host agent `ui_focus` at Settings (or a settings section such as `theme` or `statusline`) opens the Settings overlay by itself after it changes a setting; the owner must get a quiet notice with a button, and owner-opened Settings (⌘,, palette, the button) must still work.
+- At 390 px a move's confirmation ("Connection moved up to 7") arrives in the settings header, the title wraps and the rows shift down, so a click aimed just before lands on the row, not the Thinking checkbox.
 - The host's echo of the page's own status line change redraws the section, so a click landing during the redraw (the next toggle) is lost.
 - Two quick UI changes (a status line toggle, then Restore): the host's answer to the first overwrites the page's copy while the second is still queued, so Restore builds on stale items and hides an item the owner just showed.
 - At 390 px an enabled status line item (thinking, cost, limits, key hints) is hidden by the narrow layout, so its Settings switch does nothing there and the item cannot be reached; enabled items must stay in the bar, reachable by scrolling it sideways.
