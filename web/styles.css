@@ -1624,6 +1624,27 @@ details.advanced > summary {
   visibility: visible;
   pointer-events: auto;
 }
+.context-meter[data-failed] .context-pct {
+  color: var(--k-c4553f);
+  font-weight: 600;
+}
+.context-meter[data-failed] .context-popup {
+  white-space: normal;
+  width: min(420px, 85vw);
+}
+/* On a phone the meter sits mid-row, so the popup anchors to the composer instead and wraps within it. */
+@media (max-width: 600px) {
+  .context-meter {
+    position: static;
+  }
+  .context-popup,
+  .context-meter[data-failed] .context-popup {
+    right: 8px;
+    width: auto;
+    max-width: calc(100% - 16px);
+    white-space: normal;
+  }
+}
 .context-popup {
   display: inline-flex;
   align-items: center;

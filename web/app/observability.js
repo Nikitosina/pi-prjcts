@@ -307,6 +307,7 @@ export function toolLabel(call) {
     code_ls: () => `Listed ${path || "."}`,
     ls: () => `Listed ${path || "."}`,
     bash: () => `Ran ${a.command ?? "a command"}`,
+    codemode: () => "Ran a script",
     edit: () => `Edited ${path}`,
     write: () => `Wrote ${path}`,
   };

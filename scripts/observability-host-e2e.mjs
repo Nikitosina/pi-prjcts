@@ -22,6 +22,8 @@ try {
     throw new Error("host-health runtime values are inconsistent");
   if (health.macAwake !== null || typeof health.macAwakeReason !== "string" || !health.macAwakeReason)
     throw new Error("unknown awake status lacks reason");
+  if (!Array.isArray(health.durable?.tasks) || !Array.isArray(health.durable.reports) || typeof health.durable.totalTasks !== "number")
+    throw new Error(`R3 host-health lacks the Durable task graph: ${JSON.stringify(health.durable ?? null)}`);
   actions.push("host-health");
   const page = await request({ action: "event-log", id: project.id, offset: 0, limit: 10 });
   if (!Array.isArray(page.events) || page.offset !== 0 || page.limit !== 10 || page.total !== 0)

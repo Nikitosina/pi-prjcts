@@ -132,14 +132,17 @@ function renderContextMeter(context) {
   const meter = document.querySelector("#compose .context-meter");
   const known = context && context.window;
   const percent = known ? Math.min(100, Math.round((context.tokens / context.window) * 100)) : 0;
-  const label = known
-    ? `Context ${percent}% used · ${context.tokens.toLocaleString()} / ${context.window.toLocaleString()} tokens`
-    : "Context use unknown";
+  const failure = context?.compactionFailure && !context.compacting ? `Last compaction failed: ${context.compactionFailure.error}` : "";
+  const label =
+    (known
+      ? `Context ${percent}% used · ${context.tokens.toLocaleString()} / ${context.window.toLocaleString()} tokens`
+      : "Context use unknown") + (failure ? ` · ${failure}` : "");
   const circumference = 2 * Math.PI * 8;
   meter
     .querySelector(".fill")
     .setAttribute("stroke-dasharray", `${((circumference * percent) / 100).toFixed(2)} ${circumference.toFixed(2)}`);
   meter.dataset.level = percent >= 90 ? "high" : percent >= 70 ? "mid" : "low";
+  meter.toggleAttribute("data-failed", !!failure);
   meter.setAttribute("aria-label", label);
   const popup = meter.querySelector(".context-popup"),
     compacting = !!context?.compacting;
@@ -148,7 +151,7 @@ function renderContextMeter(context) {
     popup.innerHTML = popupHtml;
     popup.dataset.html = popupHtml;
   }
-  meter.querySelector(".context-pct").textContent = known ? `${percent}%` : "";
+  meter.querySelector(".context-pct").textContent = (known ? `${percent}%` : "") + (failure ? "!" : "");
 }
 
 // Skills (Settings): "All profiles" plus per-role additions. Prompts carry only names and descriptions; bodies are read on demand.

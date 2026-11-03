@@ -10,6 +10,21 @@ import { Value } from "typebox/value";
 /** A worker/Job id, optionally followed by its durable child conversation id. */
 export const ThreadReference = Type.String({ pattern: "^[a-f0-9-]{36}(/[0-9]+)?$" });
 export const PAGE_ENTRIES = 40;
+/** What a transcript read tool gives programs: a page of entries or one entry's text range. */
+export const TranscriptReadOutput = Type.Union([
+  Type.Object({
+    conversationId: Type.Integer(),
+    items: Type.Array(Type.Object({ kind: Type.String(), entryId: Type.Integer() })),
+    before: Type.Union([Type.Integer(), Type.Null()]),
+    entries: Type.Integer(),
+  }),
+  Type.Object({
+    text: Type.String(),
+    offset: Type.Integer(),
+    nextOffset: Type.Union([Type.Integer(), Type.Null()]),
+    totalChars: Type.Integer(),
+  }),
+]);
 export const TEXT_PREVIEW_CHARS = 4000;
 const THINKING_PREVIEW_CHARS = 600,
   ARGS_PREVIEW_CHARS = 500,

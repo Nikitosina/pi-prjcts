@@ -283,7 +283,10 @@ async function applyLive(frame) {
   const settled = previous && (previous.entries !== frame.entries || previous.running !== frame.running);
   const selection = settled ? captureLiveSelection() : null;
   const reading = settled && !stickToBottom ? captureLiveReading() : null;
-  if (settled) await settledRefresh();
+  // A compaction that starts, ends or fails without an entry changes only the context meter.
+  const compaction =
+    previous && (previous.compacting !== frame.compacting || previous.compactionFailure?.error !== frame.compactionFailure?.error);
+  if (settled || compaction) await settledRefresh();
   if (settled) {
     renderLive(true);
     restoreLiveSelection(selection);
@@ -403,12 +406,21 @@ function thoughtText(text) {
     .filter(Boolean)
     .join(" · ");
 }
+// A script's nested calls in words: what runs now and how many finished.
+function nestedStatus(nested) {
+  if (!nested) return "";
+  const parts = [];
+  if (nested.running.length) parts.push(`now ${nested.running.map((name) => toolLabel({ name })).join(", ")}`);
+  if (nested.done)
+    parts.push(`${nested.done} ${nested.done === 1 ? "call" : "calls"} done${nested.failed ? `, ${nested.failed} failed` : ""}`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
 function liveStatus(frame) {
   const tools = frame.tools.filter((tool) => tool.status !== "done");
   if (frame.retry)
     return `Model error: ${frame.retry.error}. Retrying (attempt ${frame.attempt ?? 1}) at ${new Date(frame.retry.at).toLocaleTimeString()}…`;
   if (frame.compacting) return "Compacting context…";
-  if (tools.length) return `${tools.map((tool) => toolLabel({ name: tool.name })).join(", ")}…`;
+  if (tools.length) return `${tools.map((tool) => toolLabel({ name: tool.name })).join(", ")}…${nestedStatus(frame.nested)}`;
   if (frame.text) return "Writing…";
   return "Thinking…";
 }

@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/chord";
+import type { Context, JsonValue } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { mcpCatalog, isWriteTool, type McpPool } from "./mcp-servers.ts";
@@ -98,6 +98,13 @@ export function mcpGatewayTools(input: {
       { additionalProperties: false },
     ),
     replay: "unsafe",
+    // Programs get the model's text plus the server's structuredContent, under the same 64 KiB bound; a thrown error rejects.
+    structuredOutputSchema: Type.Object({
+      text: Type.String(),
+      structuredContent: Type.Optional(Type.Unknown()),
+      structuredContentBytes: Type.Optional(Type.Integer({ description: "Size of a structuredContent too large to include" })),
+      isError: Type.Optional(Type.Literal(true)),
+    }),
     async execute(args, api: ToolExecutionApi, context) {
       const { caller, saved, servers } = await enabled(api, context);
       need(servers, args.server);
@@ -115,7 +122,10 @@ export function mcpGatewayTools(input: {
       }
       const content: Block[] = [];
       let used = 0;
-      for (const block of result.content as unknown as Array<Record<string, unknown>>) {
+      const structured = result.structuredContent === undefined ? undefined : JSON.stringify(result.structuredContent);
+      // Servers should mirror structured results as text but do not always.
+      const blocks = result.content.length || structured === undefined ? result.content : [{ type: "text", text: structured }];
+      for (const block of blocks as unknown as Array<Record<string, unknown>>) {
         if (block.type === "image" && typeof block.data === "string") {
           try {
             if (!caller.binaries) throw new Error("no artifact folder for this caller");
@@ -135,7 +145,18 @@ export function mcpGatewayTools(input: {
           used += Math.min(raw.length, room);
         }
       }
-      return { output: content.length ? content : text("(no output)"), ...(result.isError ? { isError: true } : {}) };
+      const output = content.length ? content : text("(no output)"),
+        fits = structured !== undefined && structured.length <= TEXT_LIMIT;
+      return {
+        output,
+        structuredOutput: {
+          text: output.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"),
+          ...(fits ? { structuredContent: result.structuredContent as JsonValue } : {}),
+          ...(structured !== undefined && !fits ? { structuredContentBytes: Buffer.byteLength(structured) } : {}),
+          ...(result.isError ? { isError: true as const } : {}),
+        },
+        ...(result.isError ? { isError: true } : {}),
+      };
     },
   });
   return { tools: [list, callTool], extension: defineExtension({ name: "projects.mcp", tools: [list, callTool] }) };

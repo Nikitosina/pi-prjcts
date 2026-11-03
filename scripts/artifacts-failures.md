@@ -18,6 +18,7 @@ Verified by `scripts/artifacts-e2e.mjs` unless marked (inspection).
 - A11 An unknown or other project's thread ID reads another project's files.
 - A12 Artifacts are served without the web token, or with a guessable URL.
 - A13 Large folders: listing walks unbounded trees (thousands of files) or reads whole files to size them.
+- A23 A thread listing returns every file (up to 300) in one answer, tens of KiB, so one call fills the coordinator's context. It must fit 8 KiB by default with a `nextOffset`, report counts by kind and folder so nothing is hidden, accept `path` and `kind` filters, and keep each file's ref. An explicit `limit` stays within 16 KiB.
 - A14 No size cap: a runaway worker fills the disk; or the cap silently deletes evidence. (Decision: 500 MB/thread soft cap, reported to worker/coordinator/owner, no deletion.)
 
 ## Report and chat

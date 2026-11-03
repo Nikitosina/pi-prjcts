@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
-import { createCodingTools, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import type { ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { coordinatorExecutionTools } from "./coordinator-execution.ts";
 import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-types.ts";
 import { loadProject, projectDir, type Project } from "./state.ts";
 import { archiveHome } from "./archive-host.ts";
@@ -354,31 +355,15 @@ export function durableWorkspaceBinding(input: {
         publication,
         attachmentGuard: attachment?.guard,
       });
-      const codingTools = createCodingTools(workDir, {
-        bash: {
-          spawnHook: ({ command, env, ...context }) => ({
-            ...context,
-            env: { ...env, PI_ARTIFACTS_DIR: artifacts! },
-            command: guard(command),
-          }),
-        },
-      });
-      const builtins: ToolRegistration[] = codingTools.map((tool) =>
-        defineTool({
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-          replay: "unsafe",
-          async execute(args, api, context) {
-            if (tool.name === "write" || tool.name === "edit")
-              assertOutsideOwner(String((args as { path?: unknown }).path ?? ""), workDir, owners);
-            const { content, ...result } = await tool.execute(api.callId, args, context.abortSignal, (update) =>
-              api.output(update.content.map((item) => (item.type === "text" ? item.text : "")).join("")),
-            );
-            return { ...result, output: content };
-          },
+      const builtins = coordinatorExecutionTools({
+        controlRoot: input.controlRoot,
+        target: async () => ({
+          cwd: workDir,
+          scope: request.threadId,
+          guard,
+          assertWritable: (path) => assertOutsideOwner(path, workDir, owners),
         }),
-      );
+      }).tools;
       const builtinNames = new Set(builtins.map((tool) => tool.name));
       tools.splice(
         0,

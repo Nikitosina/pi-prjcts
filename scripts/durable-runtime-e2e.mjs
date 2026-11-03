@@ -11,7 +11,7 @@ const base = resolve("artifacts", `durable-runtime-${new Date().toISOString().re
 mkdirSync(base, { recursive: true });
 const fake = await startFakeModel(base); // offline: private SDK home with only the fake model
 process.env.PI_PROJECTS_HOME = join(base, "state");
-const { openDurableProject } = await import("../src/durable-runtime.ts");
+const { openDurableProject, durableReport } = await import("../src/durable-runtime.ts");
 const { projectDir, saveProject, notes } = await import("../src/state.ts");
 const { readKnowledge, writeKnowledge } = await import("../src/knowledge.ts");
 const { durableHostActivity } = await import("../src/durable-host.ts");
@@ -122,6 +122,15 @@ try {
   fake.hold.failNext = true;
   const failing = await runtime.admit("Reply exactly FAIL_ONCE.", { requestId: "fail-once" });
   while (!fake.requests.some((item) => item.user.includes("FAIL_ONCE"))) await sleep(10);
+  const graph = await runtime.taskDiagnostics();
+  assert.ok(
+    graph.tasks.some((task) => typeof task.kind === "string" && ["pending", "running", "waiting", "sleeping"].includes(task.status)) &&
+      graph.totalTasks >= graph.tasks.length &&
+      Array.isArray(graph.reports) &&
+      !/FAIL_ONCE/.test(JSON.stringify(graph)),
+    JSON.stringify(graph).slice(0, 600),
+  );
+  pass("R3 the live task graph is readable, bounded and content-free");
   const queued = await runtime.admit("Reply exactly QUEUED_SURVIVED.", { requestId: "queued-after-failure" });
   assert.equal((await runtime.result(queued.submissionId)).status, "queued");
   assert.equal(await runtime.isBusy(), true, "queued input protects deployment");
@@ -181,6 +190,19 @@ try {
   await runtime.say('Record a note. FAKE-CALL projects_note {"text":"COORDINATOR_NOTE"} FAKE-SAY noted', { requestId: "coordinator-note" });
   assert.ok(notes(dir).some((note) => note.text === "COORDINATOR_NOTE"));
   pass("Coordinator may record notes");
+  const telemetry = runtime.telemetrySnapshot();
+  const phases = telemetry.metrics.filter((metric) => metric.name === "pi.durable.phase.duration");
+  assert.ok(
+    phases.some((metric) => metric.attributes.task && metric.count > 0 && metric.sum >= 0 && metric.max >= metric.min),
+    JSON.stringify(telemetry).slice(0, 800),
+  );
+  assert.ok(!/COORDINATOR_NOTE|Record a note/.test(JSON.stringify(telemetry)), "telemetry holds no prompt or argument text");
+  const { localTelemetry } = await import("../src/local-telemetry.ts");
+  const bounded = localTelemetry({ maxSeries: 8 });
+  for (let n = 0; n < 50; n++) bounded.context.metrics.histogram("x").record(n, { task: `t${n}` });
+  assert.equal(bounded.snapshot().metrics.length, 8);
+  assert.equal(bounded.snapshot().droppedSeries, 42);
+  pass("R2 Durable phase timing is kept locally, bounded and content-free");
   await untilSettled(
     await spawnWorker(
       'Attempt projects_note once, observe the denial, do not retry. FAKE-CALL projects_note {"text":"FORBIDDEN_NOTE"} FAKE-SAY denied',
@@ -205,6 +227,25 @@ try {
   symlinkSync(join(workspace, "outside"), ownerPath);
   await assert.rejects(open(), /symlink/);
   pass("Dangling storage symlink rejected");
+  assert.deepEqual(
+    durableReport("p1", new Error("boom"), {
+      type: "task_faulted",
+      reason: "threw",
+      extension: "projects.jobs",
+      task: { id: 7, kind: "pi.tool", conversationId: 3 },
+    }),
+    {
+      kind: "durable-report",
+      projectId: "p1",
+      message: "boom",
+      type: "task_faulted",
+      reason: "threw",
+      extension: "projects.jobs",
+      task: { id: 7, kind: "pi.tool", conversationId: 3 },
+    },
+  );
+  assert.deepEqual(durableReport("p1", "plain").type, undefined);
+  pass("R1 a Durable report names its type, extension and task");
   writeFileSync(join(base, "report.json"), JSON.stringify({ ok: true, checks, diagnostics }, null, 2));
 } catch (error) {
   writeFileSync(join(base, "report.json"), JSON.stringify({ ok: false, checks, diagnostics, error: String(error) }, null, 2));
