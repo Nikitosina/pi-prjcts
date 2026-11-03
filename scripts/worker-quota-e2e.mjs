@@ -1,8 +1,13 @@
-// E2E: quota fallback and bounded retries of a Job's worker. Two local fake models, a private host and a disposable worktree.
+// E2E: quota fallback and bounded retries of a Job's worker. Three local fake models, a private host and a disposable worktree.
+// The tier chain cases are F1-F4 in scripts/ui2-backend-failures.md.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
 
+const RATE = {
+  status: 429,
+  body: { error: { message: "Rate limit reached: Too many requests", type: "rate_limit_exceeded", code: "rate_limit_exceeded" } },
+};
 const QUOTA = {
   status: 429,
   body: { error: { message: "Quota exceeded: session limit reached", type: "insufficient_quota", code: "insufficient_quota" } },
@@ -12,9 +17,11 @@ const kit = await createKit("worker-quota", {
   env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60" },
   handler: ({ role, model, user }) => {
     if (role !== "worker") return say("Noted.");
-    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN"].find((value) => user.includes(value));
+    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE"].find((value) => user.includes(value));
     requests.push({ marker, model, at: Date.now() });
     if (marker === "FALLBACK" && model === "fallback-model") return say("Finished on the fallback model.");
+    if (marker === "CHAIN" && model === "third-model") return say("Finished on the third model.");
+    if (marker === "RATE") return model === "fake-model" ? RATE : say("Finished after the rate limit.");
     return QUOTA;
   },
 });
@@ -22,6 +29,7 @@ await kit.run(async () => {
   const modelPath = join(kit.agentDir, "models.json");
   const config = JSON.parse(readFileSync(modelPath, "utf8"));
   config.providers.fake.models.push({ ...config.providers.fake.models[0], id: "fallback-model", name: "Fallback fake" });
+  config.providers.fake.models.push({ ...config.providers.fake.models[0], id: "third-model", name: "Third fake" });
   writeFileSync(modelPath, JSON.stringify(config));
   kit.initRepo();
   const id = await kit.createProject("Worker quota");
@@ -50,7 +58,7 @@ await kit.run(async () => {
   await kit.updateSettings(id, { fallbackModels: { worker: "fake/fallback-model" } });
   const fallback = await settled(await submit("FALLBACK finish after quota"));
   kit.check(
-    "quota moves the worker once to the configured fallback and it finishes there",
+    "F3 without a tier, quota moves the worker once to the configured fallback and it finishes there",
     fallback.modelMoves.length === 1 &&
       fallback.modelMoves[0].to === "fake/fallback-model" &&
       callsFor("FALLBACK").at(-1).model === "fallback-model",
@@ -101,5 +109,42 @@ await kit.run(async () => {
       providerFailure("model_error: 429 Too many requests") === "rate_limited" &&
       providerFailure("model_error: authentication failed") === undefined &&
       providerFailure("model_error: 503 quota service unavailable") === undefined,
+  );
+
+  // A tier replaces the single fallback: quota and rate limits walk its models in order.
+  const tiers = await kit.rpc({ action: "tiers-get" });
+  await kit.rpc({
+    action: "tiers-set",
+    revision: tiers.revision,
+    tiers: [
+      ...tiers.tiers,
+      { id: "chain", name: "Chain", letter: "C", models: ["fake/fake-model", "fake/fallback-model", "fake/third-model"] },
+    ],
+  });
+  const profiles = await kit.rpc({ action: "profiles-get", projectId: id });
+  await kit.rpc({ action: "profiles-set", projectId: id, revision: profiles.revision, profile: "worker", patch: { tier: "chain" } });
+  const chain = await settled(await submit("CHAIN quota twice"));
+  kit.check(
+    "F1 quota walks the tier in order and finishes on the third model",
+    JSON.stringify(chain.modelMoves.map((move) => move.to)) === JSON.stringify(["fake/fallback-model", "fake/third-model"]) &&
+      JSON.stringify(callsFor("CHAIN").map((call) => call.model)) === JSON.stringify(["fake-model", "fallback-model", "third-model"]),
+    { chain, calls: callsFor("CHAIN") },
+  );
+  const chainEnd = await settled(await submit("CHAINEND every model"));
+  kit.check(
+    "F2 the exhausted last tier model retries a bounded number of times, never earlier models, then fails",
+    chainEnd.status === "failed" &&
+      chainEnd.modelMoves.length === 2 &&
+      callsFor("CHAINEND")
+        .slice(2)
+        .every((call) => call.model === "third-model") &&
+      callsFor("CHAINEND").length <= 12,
+    { chainEnd, calls: callsFor("CHAINEND").map((call) => call.model) },
+  );
+  const rate = await settled(await submit("RATE limited once"));
+  kit.check(
+    "F4 a rate limit moves a tiered worker to the next model",
+    rate.modelMoves.length === 1 && callsFor("RATE").at(-1).model === "fallback-model",
+    { rate, calls: callsFor("RATE").map((call) => call.model) },
   );
 });

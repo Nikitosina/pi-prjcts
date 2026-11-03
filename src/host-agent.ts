@@ -14,6 +14,7 @@ import { HOST_AGENT_PROMPT } from "./role-prompts.ts";
 import { agentActions, hostAgentTools, type HostToolDeps } from "./host-agent-tools.ts";
 import { HostAgentSettingsPatch, ThinkingLevel, errorText, home, listProjects, parse, saveJson } from "./state.ts";
 import type { FeedEvent } from "./change-feed.ts";
+import { readTiers } from "./host-documents.ts";
 
 const context = BACKGROUND_CONTEXT;
 const EXTENSION = "projects.host-agent";
@@ -55,16 +56,6 @@ function modelRef(value: string): { provider: string; modelId: string } {
   const slash = value.indexOf("/");
   if (slash <= 0 || slash === value.length - 1) throw new Error(`Invalid model: ${value}`);
   return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
-}
-
-/** The preferred model of a tier in `<home>/tiers.json` (the tiers workstream owns that file); undefined when absent. */
-function tierModel(tier: string): string | undefined {
-  try {
-    const saved = JSON.parse(readFileSync(join(home(), "tiers.json"), "utf8")) as { tiers?: { id: string; models: string[] }[] };
-    return saved.tiers?.find((item) => item.id === tier)?.models[0];
-  } catch {
-    return undefined;
-  }
 }
 
 /**
@@ -110,6 +101,11 @@ export async function openHostAgent(input: {
       const { provider, modelId } = modelRef(ref);
       return models.getModel(provider, modelId) !== undefined;
     };
+    // Same rule as project profiles: a tier resolves to its first model that is installed and has credentials.
+    const tierModel = (tier: string): string | undefined =>
+      readTiers()
+        .tiers.find((item) => item.id === tier)
+        ?.models.find((ref) => known(ref) && models.getProviderAuthStatus(modelRef(ref).provider).configured);
     // A set model wins; then the tier's first model; then the newest active project's model, so a fresh host can talk at once.
     const effectiveModel = (current: Settings): string | null => {
       const fromTier = current.tier ? tierModel(current.tier) : undefined;
@@ -235,7 +231,8 @@ export async function openHostAgent(input: {
         }
         if (patch.tier === null) delete next.tier;
         else if (patch.tier !== undefined) {
-          if (!tierModel(patch.tier)) throw new Error(`Unknown tier ${patch.tier}`);
+          if (!readTiers().tiers.some((item) => item.id === patch.tier)) throw new Error(`Unknown tier ${patch.tier}`);
+          if (!tierModel(patch.tier)) throw new Error(`Tier ${patch.tier} has no model with configured credentials`);
           next.tier = patch.tier;
         }
         if (patch.thinking) next.thinking = patch.thinking;

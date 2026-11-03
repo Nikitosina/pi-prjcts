@@ -56,8 +56,8 @@ mkdirSync(join(kit.artifacts, "shots"), { recursive: true });
 
 await kit.run(async () => {
   const id = await kit.createProject("Mari");
-  const snap = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: snap.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const bare2 = await kit.createProject("Fresh", { grant: false });
   // Projects get a whole-repository scope automatically; the owner revokes it here to exercise the re-grant dialog.
   {

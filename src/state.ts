@@ -7,8 +7,10 @@ import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
+import { ProfileIdSchema, ProfileSettings, Profiles, Tier } from "./profiles.ts";
+import { UiPatch } from "./ui-settings.ts";
 import { ThreadReference } from "./transcript-reader.ts";
-export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
+export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
 export const PromptOverrides = Type.Object(
   {
@@ -16,6 +18,7 @@ export const PromptOverrides = Type.Object(
     worker: Type.Optional(promptText),
     scout: Type.Optional(promptText),
     reviewer: Type.Optional(promptText),
+    /** Retired with the verifier role; kept so older project files still load. */
     verifier: Type.Optional(promptText),
   },
   { additionalProperties: false },
@@ -50,6 +53,7 @@ export const ContextSettings = Type.Object(
 export type ContextSettings = Static<typeof ContextSettings>;
 const knowledgePath = Type.String({ minLength: 1, maxLength: 1024 });
 const revision = Type.String({ minLength: 1, maxLength: 128 });
+const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
@@ -172,6 +176,8 @@ export const Project = Type.Object(
     commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
     /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
     skillProfiles: Type.Optional(SkillProfiles),
+    /** Per-profile tier, thinking level and switched-off tools; an absent profile keeps the legacy model fields and medium thinking. */
+    profiles: Type.Optional(Profiles),
     /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
     mcp: Type.Optional(McpSettings),
     /** Owner overrides of the editable role instructions, per role (this project only). Absent = the built-in text. */
@@ -186,9 +192,10 @@ export const Project = Type.Object(
       worker: Type.Optional(text),
       scout: Type.Optional(text),
       reviewer: Type.Optional(text),
+      /** Retired with the verifier role; kept so older project files still load. */
       verifier: Type.Optional(text),
     }),
-    /** Opt-in verification loop: a fresh verifier runs this skill against each finished worker task. Needs models.verifier; neither has a default. */
+    /** Opt-in verification: the worker runs this skill itself and records each run with projects_verify_run. */
     verification: Type.Optional(VerificationSettings),
     /** Explicit quota fallback per role; absent means wait for the selected model's quota to reset. */
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
@@ -543,6 +550,28 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("web") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ui-get") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ui-set"), revision: sha256, patch: UiPatch }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("tiers-get") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("tiers-set"), revision: sha256, tiers: Type.Array(Tier, { maxItems: 64 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("profiles-get"), projectId: Id }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("profiles-set"), projectId: Id, revision: sha256, profile: ProfileIdSchema, patch: ProfileSettings },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("profile-tools"), projectId: Id, profile: ProfileIdSchema }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("prompt-render"), projectId: Id, profile: ProfileIdSchema, chatId: Type.Optional(ChatId) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("memory-index"), projectId: Id, includeArchive: Type.Optional(Type.Boolean()) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("memory-undo"), projectId: Id, path: knowledgePath, revision }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object(
@@ -677,6 +706,18 @@ export const Request = Type.Union([
                 scout: Type.Optional(Type.Union([promptText, Type.Null()])),
                 reviewer: Type.Optional(Type.Union([promptText, Type.Null()])),
                 verifier: Type.Optional(Type.Union([promptText, Type.Null()])),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+          /** A profile set to null returns to the legacy model fields and medium thinking. */
+          profiles: Type.Optional(
+            Type.Object(
+              {
+                coordinator: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                worker: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                scout: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                reviewer: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
               },
               { additionalProperties: false },
             ),

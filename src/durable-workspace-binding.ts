@@ -465,8 +465,8 @@ export function workerShellGuard(input: {
     );
 }
 /**
- * The shell policy a verifier's commands pass through: the one of the worker whose scope it verifies. Plugin workspace providers keep that policy
- * inside the plugin, which verifiers cannot reach, so those scopes are refused rather than run under a weaker one.
+ * The shell policy projects_verify_run commands pass through: the one of the worker whose scope they verify. Plugin workspace providers keep that
+ * policy inside the plugin, which these runs cannot reach, so those scopes are refused rather than run under a weaker one.
  */
 export function verifierShell(
   project: Project,

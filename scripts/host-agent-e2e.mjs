@@ -118,6 +118,20 @@ await kit.run(async () => {
     /revision/i.test((await rejects({ action: "host-agent-settings", revision: initial.revision, patch: { thinking: "low" } })) ?? ""),
   );
 
+  // Tiers come from the tiers module (tiers.json, generated once from project models).
+  check(
+    "an unknown tier is refused",
+    /Unknown tier/.test((await rejects({ action: "host-agent-settings", revision: saved.revision, patch: { tier: "ghost" } })) ?? ""),
+  );
+  const tiers = await rpc({ action: "tiers-get" });
+  await rpc({
+    action: "tiers-set",
+    revision: tiers.revision,
+    tiers: [...tiers.tiers, { id: "host", name: "Host", letter: "H", models: ["fake/fake-model"] }],
+  });
+  const tiered = await rpc({ action: "host-agent-settings", revision: saved.revision, patch: { tier: "host" } });
+  check("a tier from tiers-set is accepted", tiered.tier === "host" && tiered.effectiveModel === "fake/fake-model", tiered);
+
   const history = async () => (await rpc({ action: "host-agent-history" })).items;
   const messages = async () => (await history()).filter((item) => item.kind === "message");
   const send = async (text) => {
@@ -135,6 +149,10 @@ await kit.run(async () => {
   const ponged = await send("Reply exactly PONG");
   check("reply", ponged.at(-1).text === "PONG", ponged.slice(-2));
   check("owner origin", ponged.at(-2).origin === "owner", ponged.at(-2));
+
+  // ui_set is the host's real ui-set.
+  await send(`HA-CALL ui_set {"patch":{"theme":"light"}}`);
+  check("ui_set changes the host ui document", (await rpc({ action: "ui-get" })).ui.theme === "light");
 
   // An allowed call runs through dispatch.
   const listed = await send(`HA-CALL host_call {"action":"list","input":{}}`);

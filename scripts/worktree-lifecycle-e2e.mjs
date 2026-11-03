@@ -461,8 +461,8 @@ try {
   });
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const second = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: second.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const scopeId = (await rpc({ action: "owner-setup-snapshot", id })).workspace.scopes[0].id;
   // Fetches go to the local bare remote too (set after the grants, which read the GitHub origin URL).
   git(workspace, "config", `url.${bare}.insteadOf`, "https://github.com/acme/mari.git");
