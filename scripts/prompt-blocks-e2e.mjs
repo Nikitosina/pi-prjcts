@@ -1,6 +1,6 @@
 // E2E: prompt blocks (scripts/prompt-blocks-failures.md P1–P14) on a private host with the fake provider: the requests,
 // what coordinators, new and existing agents and the Host agent run with, and when a saved change reaches them.
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
@@ -32,6 +32,7 @@ const kit = await createKit("prompt-blocks", {
       if (wanted) return say(`HA-RESULT ${results.at(-1)}`);
       return say("ok");
     }
+    if (role === "worker" && user.includes("TASK-WORKER gamma")) return held("gamma", "Gamma done.");
     if (role === "coordinator") {
       if (user.startsWith("[Durable work")) return say("Noted report.");
       if (user.includes("HOLD-COORD")) return held("coordinator", "Held reply.");
@@ -75,6 +76,12 @@ async function topics(project, during) {
 await kit.run(async () => {
   const { rpc, check, rejects } = kit;
   kit.initRepo();
+  const agentsFile = (rule) => {
+    writeFileSync(join(kit.workspace, "AGENTS.md"), `${rule}\n`);
+    kit.git(kit.workspace, "add", "AGENTS.md");
+    kit.git(kit.workspace, "commit", "-qm", rule);
+  };
+  agentsFile("REPO-RULE-ONE: keep functions short.");
   const id = await kit.createProject("Blocks");
   const stored = () => JSON.parse(readFileSync(join(kit.home, id, "project.json"), "utf8"));
   const get = (target, projectId = id) => rpc({ action: "prompt-blocks-get", ...(target === "host" ? {} : { projectId }), target });
@@ -195,6 +202,65 @@ await kit.run(async () => {
     "P4 an edited built-in is stored as an edit, not a custom block",
     stored().promptBlocks.scout[0].text.startsWith("CUSTOM-SCOUT") && !stored().promptBlocks.scout[0].name,
   );
+
+  // P5 + P6 + P7: agents that already ran adopt saved behavior on their next idle turn, inside their frozen frame.
+  const agentOf = async (marker) => {
+    const job = (await kit.jobs(id)).find((item) => item.request.includes(marker));
+    const agent = (await rpc({ action: "jobs-snapshot", id })).agents.find((item) => item.id === job.id);
+    return { job, agent };
+  };
+  const alpha = await agentOf("TASK-WORKER alpha");
+  check("P5 a worker that runs the saved blocks is current", alpha.agent.prompt?.state === "current", alpha.agent.prompt);
+  const firstAlpha = kit.lastCall("worker", "TASK-WORKER alpha").system;
+  check("P6 the worker started with the repository instructions of its time", firstAlpha.includes("REPO-RULE-ONE"));
+  const v1 = await get("worker");
+  const v2 = { id: "custom:v2", name: "V2", enabled: true, text: "CUSTOM-WORKER-V2: write the test first." };
+  await set("worker", [...inputs(v1), v2]);
+  check("P5 after a save the worker is pending", (await agentOf("TASK-WORKER alpha")).agent.prompt?.state === "pending");
+  agentsFile("REPO-RULE-TWO: prefer long functions.");
+  await kit.stopHost();
+  kit.startHost();
+  await kit.waitHost();
+  await rpc({ action: "thread-send", id, threadId: alpha.job.id, text: "FOLLOW-ALPHA", requestId: randomUUID() });
+  await kit.delay(300);
+  await kit.settle(id);
+  const followed = kit.lastCall("worker", "FOLLOW-ALPHA")?.system ?? "";
+  const v2Text = (await get("worker")).text;
+  check("P5 a follow-up adopts the saved behavior", followed.includes(v2.text));
+  check("P6 the frozen frame is kept exactly", followed === firstAlpha.replace(v1.text, v2Text), {
+    before: firstAlpha.length,
+    after: followed.length,
+  });
+  check(
+    "P6 the repository instructions stay frozen across a restart",
+    followed.includes("REPO-RULE-ONE") && !followed.includes("REPO-RULE-TWO"),
+  );
+  check("P5 the adopted worker is current again", (await agentOf("TASK-WORKER alpha")).agent.prompt?.state === "current");
+  await kit.ask(id, "MARK-WORKER beta");
+  const beta = kit.lastCall("worker", "TASK-WORKER beta").system;
+  check("P6 a new worker gets the current repository instructions and blocks", beta.includes("REPO-RULE-TWO") && beta.includes(v2.text));
+  hold("gamma");
+  await rpc({ action: "message", id, text: "MARK-WORKER gamma" });
+  await kit.eventually(() => holds.get("gamma").started, "held gamma turn");
+  const gamma = await agentOf("TASK-WORKER gamma");
+  const v3 = { id: "custom:v3", name: "V3", enabled: true, text: "CUSTOM-WORKER-V3: never skip a check." };
+  await set("worker", [...inputs(await get("worker")), v3]);
+  await rpc({ action: "thread-send", id, threadId: gamma.job.id, text: "STEER-GAMMA", requestId: randomUUID() });
+  await kit.delay(500);
+  check("P7 a running worker is pending, not current", (await agentOf("TASK-WORKER gamma")).agent.prompt?.state === "pending");
+  holds.get("gamma").release();
+  await kit.delay(300);
+  await kit.settle(id);
+  const steered = kit.result.calls.filter((c) => c.role === "worker" && c.user.includes("STEER-GAMMA"));
+  check(
+    "P7 a message sent during a running turn does not change its instructions",
+    steered.length > 0 && steered.every((c) => c.system.includes(v2.text) && !c.system.includes(v3.text)),
+    steered.length,
+  );
+  await rpc({ action: "thread-send", id, threadId: gamma.job.id, text: "AFTER-GAMMA", requestId: randomUUID() });
+  await kit.delay(300);
+  await kit.settle(id);
+  check("P7 the next idle turn adopts it", kit.lastCall("worker", "AFTER-GAMMA")?.system.includes(v3.text));
 
   // P9 + P10: one source per target.
   await set("scout", null);

@@ -101,6 +101,7 @@ import {
   estimateTokens as estimateTextTokens,
   joinInstructions,
   promptSection,
+  sectionsFrame,
   type InstructionSections,
   type PromptSection,
 } from "./prompt-sections.ts";
@@ -121,7 +122,7 @@ import { providerFailure, unansweredReason, type ProviderFailure } from "./provi
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { COORDINATOR_CONTEXT_RULES, SHARED_ROLE_RULES, taskHelperFrame } from "./role-prompts.ts";
-import { composePrompt, projectBehavior, taskHelperBehavior } from "./prompt-blocks.ts";
+import { composePrompt, projectBehavior, taskHelperBehavior, type PromptFrame } from "./prompt-blocks.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
@@ -1110,6 +1111,14 @@ export async function openDurableProject(input: {
     };
     const instructionsFor = (role: AgentProfile, repositoryStanding = standing.text): string =>
       joinInstructions(roleSections(role, repositoryStanding));
+    // An agent's instructions are its frame (kept from its first preparation) around the saved behavior of its role.
+    const framed = (frame: PromptFrame, behavior: string) => ({
+      instructions: composePrompt(frame, behavior),
+      prompt: { frame, behavior },
+    });
+    const roleFrame = (role: AgentProfile, repositoryStanding = standing.text, suffix = ""): PromptFrame =>
+      sectionsFrame(roleSections(role, repositoryStanding), suffix);
+    const behaviorOf = (role: AgentProfile) => projectBehavior(loadProject(project.id), role).text;
     const verifyRun = proof.tools.find((tool) => tool.name === "projects_verify_run");
     if (!verifyRun) throw new Error("projects_verify_run is unavailable");
     // What each agent profile can be offered before its disabled list; workspace tools join a worker when its worktree is bound.
@@ -1177,14 +1186,17 @@ export async function openDurableProject(input: {
         return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
       },
       refuseSend: (agent) => unscopedRefusal(agent),
-      prepare: async ({ agent, job }) => {
+      promptBehavior: (agent, job) =>
+        agent.role === "worker" && job?.workspace ? taskHelperBehavior(loadProject(project.id)) : behaviorOf(agent.role),
+      prepare: async ({ agent, job, frame }) => {
         await refreshDelegatedSkills();
         const conversation = Number(agent.conversationId);
         if (!threadSkills.has(conversation))
           threadSkills.set(conversation, new Set(delegatedSkills[agent.role].map((skill) => skill.name)));
         if (agent.role !== "worker") {
+          const reader = framed(frame ?? roleFrame(agent.role), behaviorOf(agent.role));
           // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
-          if (!agent.readRef) return { instructions: instructionsFor(agent.role) };
+          if (!agent.readRef) return reader;
           const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
           const target = state?.agents[agent.readRef];
           if (target) {
@@ -1195,16 +1207,16 @@ export async function openDurableProject(input: {
             const cwd = (await (await harness!.conversation(target.conversationId, context))?.agent(context))?.cwd;
             if (!cwd || !existsSync(cwd))
               throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
-            return { cwd, instructions: instructionsFor(agent.role) };
+            return { cwd, ...reader };
           }
           if (/^[a-f0-9]{40,64}$/.test(agent.readRef)) {
             try {
-              return { cwd: await heads.restore(agent.readRef), instructions: instructionsFor(agent.role) };
+              return { cwd: await heads.restore(agent.readRef), ...reader };
             } catch {
               /* A missing local commit may still be available from the provider. */
             }
           }
-          return { cwd: (await heads.ensure(agent.readRef)).root, instructions: instructionsFor(agent.role) };
+          return { cwd: (await heads.ensure(agent.readRef)).root, ...reader };
         }
         if (job?.workspace) {
           const environment = await taskWorkspaces.prepare({
@@ -1228,13 +1240,14 @@ export async function openDurableProject(input: {
             current = loadProject(project.id);
           return {
             cwd: environment.cwd,
-            instructions: composePrompt(
-              taskHelperFrame(
-                current,
-                knowledgeAccess(),
-                standing.text,
-                `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
-              ),
+            ...framed(
+              frame ??
+                taskHelperFrame(
+                  current,
+                  knowledgeAccess(),
+                  standing.text,
+                  `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
+                ),
               taskHelperBehavior(current),
             ),
             tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),
@@ -1242,7 +1255,7 @@ export async function openDurableProject(input: {
           };
         }
         // A worker without a scope reads and writes knowledge only; a scoped one gets its own worktree and publication tools.
-        if (!job?.scopeId) return { instructions: instructionsFor("worker") };
+        if (!job?.scopeId) return framed(frame ?? roleFrame("worker"), behaviorOf("worker"));
         if (!binder) throw new Error("Workspace preparation is unavailable");
         const continued =
           job.branch && !agent.prepared ? await resolveContinuationBranch(loadProject(project.id), job.branch, job.scopeId) : undefined;
@@ -1258,10 +1271,12 @@ export async function openDurableProject(input: {
         });
         registry.install(environment.extension);
         const base = agentSetup({ role: "worker", jobId: job.id });
-        const text = `${instructionsFor("worker", environment.repositoryStanding?.text ?? standing.text)}${environment.workerInstructions ?? ""}`;
         return {
           cwd: environment.cwd,
-          instructions: text,
+          ...framed(
+            frame ?? roleFrame("worker", environment.repositoryStanding?.text ?? standing.text, environment.workerInstructions ?? ""),
+            behaviorOf("worker"),
+          ),
           tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),
           extensions: [...(base.extensions as Extension[]), environment.extension],
         };

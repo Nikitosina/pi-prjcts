@@ -376,15 +376,14 @@ await kit.run(async () => {
   await delay(300);
   await kit.settle(id);
   const old = kit.lastCall("worker", "FOLLOW-AFTER-OVERRIDE");
+  const started = kit.lastCall("worker", "W-TASK after-migration");
+  const workerDefault = snapshot.roles.find((item) => item.role === "worker").default;
+  // Owner decision (docs/prompt-blocks.md): an existing worker adopts saved behavior on its next idle turn inside its frozen frame.
   check(
-    "P8 a thread that started before the override keeps its prompt",
-    old && !old.system.includes("CUSTOM-WORKER") && old.system === kit.lastCall("worker", "W-TASK after-migration").system,
+    "P8 a thread that started before the override adopts it on its next turn, keeping the rest of its prompt",
+    old && started.system.includes(workerDefault) && old.system === started.system.replace(workerDefault, OVERRIDE_W),
     old
-      ? {
-          custom: old.system.includes("CUSTOM-WORKER"),
-          same: old.system === kit.lastCall("worker", "W-TASK after-migration").system,
-          a: old.system.slice(0, 300),
-        }
+      ? { custom: old.system.includes("CUSTOM-WORKER"), a: old.system.slice(0, 300) }
       : { none: true, jobs: (await kit.jobs(id)).map((job) => [job.request.slice(0, 30), job.status, job.reason]) },
   );
   const click = async (selector) => {
