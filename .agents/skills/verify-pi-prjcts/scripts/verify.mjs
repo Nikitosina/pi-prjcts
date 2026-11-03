@@ -931,7 +931,78 @@ const journeys = {
       "visible",
       `host agent drawer: ${JSON.stringify((await page.evaluate(`document.querySelector('#host-agent .ha-body').innerText`)).slice(0, 160))}`,
     );
+    const hostAgent = await rpc(run, { action: "host-agent-settings" }).catch((error) => ({ unavailable: error.message }));
+    if (!hostAgent.unavailable) {
+      // A real exchange: host_call rows in the drawer, a ui_focus that opens Memory, a gated archive shown as an approval card
+      // and counted in the status pill, Deny, and the outcome posted back without archiving anything.
+      record(
+        "entry",
+        `host agent model ${hostAgent.effectiveModel}, ${hostAgent.tools.length} tools, ${hostAgent.actions.length} host actions`,
+      );
+      await page.waitFor(`document.querySelector('#host-agent').dataset.available === '1'`, "drawer wired to the Host agent");
+      await page.click("#ha-composer textarea");
+      await page.cdp("Input.insertText", { text: "VERIFY-HOST tidy up the host" });
+      await page.press("Enter", { code: "Enter", keyCode: 13 });
+      await page.waitFor(`document.querySelector('#center').dataset.focus === 'memory'`, "ui_focus opened Memory in the center", 60000);
+      record("visible", "ui_focus { view: memory } from the Host agent opened Memory in the center");
+      await page.waitFor(`!!document.querySelector('#ha-approvals .approval[data-approval]')`, "pending approval card", 60000);
+      await page.waitFor(
+        `/Archiving Verify seed waits/.test(document.querySelector('#host-agent .ha-body').innerText)`,
+        "host agent reply",
+        60000,
+      );
+      const drawer = await page.evaluate(`({
+        rows: [...document.querySelectorAll('#host-agent .ha-body .tool-row')].map(n => n.dataset.tool),
+        owner: [...document.querySelectorAll('#host-agent .ha-body .msg.owner')].filter(n => n.innerText.includes('VERIFY-HOST')).length,
+        card: document.querySelector('#ha-approvals .approval').innerText.replace(/\\s+/g, ' '),
+        pill: document.querySelector('#status-pill').innerText,
+      })`);
+      if (drawer.owner !== 1) throw Error(`expected one owner bubble in the drawer, saw ${drawer.owner}`);
+      if (!drawer.rows.includes("host_call") || !drawer.rows.includes("ui_focus")) throw Error(`drawer tool rows: ${drawer.rows}`);
+      if (!/Archive the Verify seed project/.test(drawer.card) || !/archive/.test(drawer.card))
+        throw Error(`approval card: ${drawer.card}`);
+      if (!/needs you/.test(drawer.pill)) throw Error(`status pill does not count the approval: ${drawer.pill}`);
+      record("visible", `drawer rows ${drawer.rows.join(", ")}; approval card "${drawer.card.slice(0, 120)}"; pill "${drawer.pill}"`);
+      await page.shot(dir, "08b-host-agent-approval");
+      await page.click('#ha-approvals [data-decide="deny"]');
+      await page.waitFor(`!document.querySelector('#ha-approvals .approval[data-approval]')`, "card leaves after Deny");
+      await page.waitFor(`/nothing was archived/.test(document.querySelector('#host-agent .ha-body').innerText)`, "outcome reply", 60000);
+      const after = await page.evaluate(`({
+        outcome: [...document.querySelectorAll('#host-agent .ha-body .approval-row')].map(n => n.innerText.replace(/\\s+/g, ' ')),
+        owners: [...document.querySelectorAll('#host-agent .ha-body .msg.owner')].map(n => n.innerText).filter(t => t.includes('[approval')).length,
+      })`);
+      if (!after.outcome.some((text) => /denied/i.test(text)) || after.owners)
+        throw Error(`approval outcome row: ${JSON.stringify(after)}`);
+      const decided = (await rpc(run, { action: "approvals-list" })).approvals.find((item) => item.action === "archive");
+      const seed = (await rpc(run, { action: "list" })).find((item) => item.name === PROJECT_NAME);
+      if (decided?.state !== "denied" || seed?.archived) throw Error(`after Deny: approval ${decided?.state}, archived ${seed?.archived}`);
+      record("side-effect", `approval ${decided.id} denied; ${PROJECT_NAME} not archived; outcome row "${after.outcome.at(-1)}"`);
+      await page.shot(dir, "08c-host-agent-denied");
+      // Host agent settings from the model chip: thinking goes through host-agent-settings with the current revision.
+      await page.click("#ha-model");
+      await page.waitFor(
+        `!document.querySelector('#ha-settings').hidden && !!document.querySelector('#ha-settings [data-thinking="low"]')`,
+        "drawer settings",
+      );
+      await page.click('#ha-settings [data-thinking="low"]');
+      await page.waitFor(
+        `document.querySelector('#ha-settings [data-thinking="low"]')?.getAttribute('aria-checked') === 'true'`,
+        "thinking low checked",
+      );
+      const tuned = await rpc(run, { action: "host-agent-settings" });
+      if (tuned.thinking !== "low" || tuned.revision !== hostAgent.revision + 1)
+        throw Error(`host agent settings after change: ${JSON.stringify(tuned).slice(0, 200)}`);
+      await delay(300);
+      await page.shot(dir, "08d-host-agent-settings");
+      await page.click('#ha-settings [data-thinking="medium"]');
+      await page.waitFor(
+        `document.querySelector('#ha-settings [data-thinking="medium"]')?.getAttribute('aria-checked') === 'true'`,
+        "thinking back to medium",
+      );
+      record("side-effect", `host-agent-settings thinking low at revision ${tuned.revision}, then back to medium`);
+    } else record("blocked", `Host agent requests not on this host (${hostAgent.unavailable.slice(0, 80)}); quiet fallback shown`);
     await page.press("\\", { code: "Backslash", keyCode: 220 });
+    await page.press("Escape", { keyCode: 27 });
     // Light theme through the settings overlay, then the narrow layout.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings again");

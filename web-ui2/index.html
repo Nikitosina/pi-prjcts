@@ -87,13 +87,23 @@
     <aside id="host-agent" data-open="0" aria-label="Host agent" aria-hidden="true">
       <header class="ha-head">
         <span class="ha-title"><span aria-hidden="true">✦</span> Host agent</span>
-        <span class="ha-model" id="ha-model"></span>
+        <button
+          type="button"
+          class="ha-model"
+          id="ha-model"
+          data-ha-settings
+          aria-expanded="false"
+          aria-controls="ha-settings"
+          aria-label="Host agent model, thinking and tools"
+          hidden
+        ></button>
         <button type="button" class="ghost-btn small" data-cmd="host-agent-reset">New session</button>
         <button type="button" class="icon-btn" data-cmd="host-agent" aria-label="Close host agent">
           <span aria-hidden="true">✕</span><kbd data-hint="host-agent"></kbd>
         </button>
       </header>
-      <div class="ha-approvals" id="ha-approvals" aria-label="Pending approvals"></div>
+      <section class="ha-settings" id="ha-settings" aria-label="Host agent settings" hidden></section>
+      <section class="ha-approvals" id="ha-approvals" aria-label="Pending approvals"></section>
       <div class="ha-body" role="log" aria-live="polite"></div>
       <form class="ha-composer" id="ha-composer" autocomplete="off">
         <span class="glyph" aria-hidden="true">❯</span>

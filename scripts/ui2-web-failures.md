@@ -64,6 +64,14 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - The drawer crashes when `host-agent-*` is unknown; it must show the quiet fallback and keep the rest of the page working.
 - A pending approval is shown without the exact action and its input, or Approve/Deny fire without a visible result.
 - A `ui_focus` frame for another project opens it without changing the selection consistently (tree, center, URL).
+- After the merge the drawer still shows the fallback, or a send renders twice (optimistic bubble plus history) or not at all until reopen.
+- The Host agent's tool calls render as raw JSON instead of the same compact mono tool rows as the coordinator chat.
+- `ui_focus` frames are read from `/live` instead of the host change feed (`/changes?project=host`, `topic: "host-agent", type: "focus"`), so the page never moves; or an unknown view crashes instead of showing a short note.
+- The host change feed opens only when the drawer is open, so approvals filed by a coordinator never reach the status pill.
+- A pending approval does not count in the status pill, or the pill click does not open the drawer at the approval.
+- Deny or Approve leaves the card in place, or a second click sends a second decision; the outcome posted back (`[approval <id>] …`) renders as an owner bubble.
+- Changing the Host agent model, thinking or tools ignores `revision`; a stale revision overwrites a newer change, or the error is swallowed.
+- With no model available, send fails silently instead of naming the problem and opening the drawer settings.
 
 ## Accessibility (manual, plus checks in the journey)
 

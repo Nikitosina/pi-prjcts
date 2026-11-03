@@ -130,11 +130,11 @@ function morph(parent, html) {
 }
 
 /** Turn sections for a list of transcript items (also used for worker transcripts in the center). */
-export function transcriptHtml(items, busy, who = "Coordinator") {
+export function transcriptHtml(items, busy, who = "Coordinator", { fold = true } = {}) {
   const all = Array.isArray(items[0]?.items) ? items : turns(items);
-  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who)).join("");
+  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold)).join("");
 }
-function turnHtml(turn, liveTurn, who) {
+function turnHtml(turn, liveTurn, who, fold = true) {
   const { start } = turn,
     key = `t${start.entryId ?? start.at}`;
   const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : itemHtml(start, who);
@@ -142,7 +142,7 @@ function turnHtml(turn, liveTurn, who) {
   let run = [];
   const flush = () => {
     if (!run.length) return;
-    body.push(run.length >= 2 && !liveTurn ? groupHtml(run) : run.map(toolRowHtml).join(""));
+    body.push(run.length >= 2 && !liveTurn && fold ? groupHtml(run) : run.map((entry) => toolRowHtml(entry)).join(""));
     run = [];
   };
   const results = new Map(turn.items.filter((item) => item.kind === "tool-result").map((item) => [item.callId, item]));
@@ -168,8 +168,11 @@ function hash(text) {
   for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
   return String(h);
 }
+const approvalPattern = /^\[approval ([0-9a-f-]{36})\] The owner (approved|denied) "([^"]*)" \(([\w-]+)\)(, and it failed)?/;
 function inputHtml(message, who = "Coordinator") {
   const text = message.text ?? "";
+  const approval = message.origin !== "owner" ? approvalPattern.exec(text) : null;
+  if (approval) return approvalRowHtml(approval);
   if (who !== "Coordinator" && message.origin !== "owner")
     return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}</div></article>`;
   if (message.origin === "owner")
@@ -181,6 +184,12 @@ function inputHtml(message, who = "Coordinator") {
   if (message.origin === "internal")
     return `<div class="sys-row muted"><span class="sys-icon" aria-hidden="true">↻</span>${esc(clip(oneLine(text), 120))}</div>`;
   return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}</div></article>`;
+}
+/** The outcome the host posts back after an owner decision (`[approval <id>] The owner …`), as one row instead of a bubble. */
+function approvalRowHtml([, id, decision, summary, action, failed]) {
+  const status = decision === "denied" ? "denied" : failed ? "failed" : "done";
+  const label = { denied: "Denied", failed: "Approved · failed", done: "Approved · ran" }[status];
+  return `<div class="approval-row" data-approval-outcome="${esc(id)}" data-status="${status}"><span class="report-icon" aria-hidden="true">⚖</span><span class="report-text"><span class="badge ap-${status}">${esc(label)}</span> ${esc(clip(summary, 100))} <span class="muted mono small">${esc(action)}</span></span></div>`;
 }
 function reportRowHtml(message, match) {
   const [, role, id, status, title, body] = match;
@@ -223,6 +232,9 @@ function summary(name, args, preview) {
   if (name === "agents") return [args.action, args.role, args.title ? `“${args.title}”` : (args.id ?? "")].filter(Boolean).join(" ");
   if (name === "job") return [args.action, args.steps ? `${args.steps.length} steps` : (args.summary ?? "")].filter(Boolean).join(" · ");
   if (name === "bash") return args.command ?? "";
+  if (name === "host_call") return [args.action, args.summary ? `“${args.summary}”` : ""].filter(Boolean).join(" ");
+  if (name === "ui_focus") return ["→", args.view, args.section ?? ""].filter(Boolean).join(" ");
+  if (name === "owner_approval_request") return [args.action, args.summary ? `“${args.summary}”` : ""].filter(Boolean).join(" ");
   if (/^(read|write|edit)$/.test(name)) return args.path ?? args.file_path ?? "";
   const first = Object.values(args).find((value) => typeof value === "string");
   return first ?? "";

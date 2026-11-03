@@ -678,6 +678,7 @@ pre.code,
 .no-enter .tool-group,
 .no-enter .memory-row,
 .no-enter .report-row,
+.no-enter .approval-row,
 .no-enter .msg {
   animation: none;
 }
@@ -2119,14 +2120,132 @@ table.hotkeys tr.clash td {
 }
 .ha-title {
   font-weight: 600;
+  white-space: nowrap;
+}
+.ha-head > button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ha-head > .ha-model {
+  flex-shrink: 1;
 }
 .ha-title span {
   color: var(--accent);
 }
 .ha-model {
-  flex: 1;
+  margin-right: auto;
+  max-width: 190px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
   font: 11px var(--mono);
+  color: var(--muted);
+}
+.ha-model:hover,
+.ha-model[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.ha-model::after {
+  content: " ▾";
   color: var(--faint);
+}
+.ha-settings {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 55%;
+  overflow: auto;
+  font-size: 12.5px;
+  animation: row-in var(--t-med) var(--ease) both;
+}
+.ha-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.ha-row.top {
+  align-items: start;
+}
+.ha-row > :first-child {
+  color: var(--muted);
+}
+.ha-row select {
+  min-width: 0;
+}
+.ha-tools {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ha-tools label {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.one-line {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.ha-actions-line {
+  margin: 0;
+}
+.ha-label {
+  margin: 0;
+  font: 600 10.5px var(--font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--needs);
+}
+.approval[data-deciding] {
+  opacity: 0.6;
+}
+.approval details summary {
+  cursor: pointer;
+}
+.ha-error {
+  margin: 8px 0 0;
+}
+.approval-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 10px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel);
+  animation: row-in var(--t-med) var(--ease) both;
+}
+.approval-row .report-icon {
+  color: var(--muted);
+}
+.ap-done {
+  background: color-mix(in srgb, var(--ready) 18%, transparent);
+  color: var(--ready);
+}
+.ap-denied {
+  background: var(--raised);
+  color: var(--muted);
+}
+.ap-failed {
+  background: color-mix(in srgb, var(--bad) 18%, transparent);
+  color: var(--bad);
 }
 .ha-approvals:not(:empty) {
   padding: 10px;

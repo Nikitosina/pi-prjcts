@@ -14,7 +14,7 @@ import {
   isOpen as drawerOpen,
   loadApprovals,
   loadHostAgent,
-  followFocus,
+  onHostTopic,
   pendingApprovals,
   resetHostAgent,
   stopHostAgent,
@@ -69,7 +69,7 @@ async function select(projectId, chatId = "main", { keepFocus = false } = {}) {
   }
   await refreshAll();
 }
-on("select-request", ({ projectId, chatId }) => void select(projectId, chatId));
+on("select-request", ({ projectId, chatId, keepFocus }) => void select(projectId, chatId, { keepFocus }));
 async function refreshAll() {
   const gen = state.generation;
   await Promise.all([loadChat(), loadJobs(), loadSide(), loadUsage()]);
@@ -188,7 +188,7 @@ function paintPill() {
 on("live", paintPill);
 on("approvals", paintPill);
 function jumpToStatus() {
-  if (pendingApprovals().length) return toggleHostAgent(true);
+  if (pendingApprovals().length) return toggleHostAgent(true, { at: "approvals" });
   const needs = state.projects.find((item) => item.notice?.questions);
   if (needs) return void select(needs.id, "main").then(() => document.querySelector("#questions textarea")?.focus());
   for (const item of state.projects) {
@@ -297,6 +297,12 @@ document.addEventListener("click", (event) => {
 });
 onBindingsChange(() => paintHints());
 on("open-settings", (id) => openSettings(id));
+// ui_focus to a project or chat: straight to the chat, not one step back.
+on("leave-focus", () => {
+  if (state.focus.kind === "chat") return;
+  showChat();
+  paintCrumbs();
+});
 
 setPaletteSource(() => [
   ...state.projects.flatMap((item) => [
@@ -411,17 +417,18 @@ async function start() {
   else document.body.dataset.ready = "1";
   void loadLimits();
   void loadApprovals();
-  // Host-level streams exist only on hosts that know the host `ui` document (after the backend merge).
-  if (state.uiAvailable) {
-    hostChanges = stream("/changes?project=host", (change) => {
-      if (change.type === "focus") return followFocus(change);
-      if (change.t !== "topic") return;
-      if (change.topic === "ui") void loadUi();
-      if (change.topic === "approvals") void loadApprovals();
-      if (change.topic === "host-agent" && drawerOpen()) void loadHostAgent();
-      if (change.topic === "projects") void loadProjects();
-    });
-  }
+  // Host topics: approvals reach the status pill and ui_focus moves the page even while the drawer is closed.
+  hostChanges = stream("/changes?project=host", (change) => {
+    if (change.t === "sync") {
+      void loadApprovals();
+      if (drawerOpen()) void loadHostAgent();
+      return;
+    }
+    if (change.t !== "topic") return;
+    if (change.topic === "ui") void loadUi();
+    else if (change.topic === "projects") void loadProjects();
+    else onHostTopic(change);
+  });
   setInterval(() => void loadProjects(), 15000);
   setInterval(() => void loadLimits(), 120000);
 }
