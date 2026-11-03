@@ -73,7 +73,7 @@ Notes:
 | `host-agent-send` | `{ requestId, text }` | `{ accepted: true }`; queues as a steer when busy |
 | `host-agent-stop` | `{}` | `{ stopped: boolean }` |
 | `host-agent-reset` | `{}` | `{ ok: true }` (new context, history kept, like the reference "New session") |
-| `host-agent-settings` | `{ revision?, patch?: { tier?, thinking?, disabledTools?: string[] } }` | `{ revision, tier, thinking, disabledTools, effectiveModel, tools: { name, description, dangerous: boolean }[] }` |
+| `host-agent-settings` | `{ revision?, patch?: { model?, tier?: string \| null, thinking?, disabledTools?: string[] } }` | `{ revision: number, model, tier, thinking, disabledTools, effectiveModel, tools: { name, description, dangerous: boolean }[], actions: { name, description, dangerous: boolean }[] }` |
 | `approvals-list` | `{}` | `{ approvals: Approval[] }` |
 | `approval-decide` | `{ id, decision: "approve" \| "deny", note? }` | `{ approval: Approval }` |
 
@@ -90,10 +90,13 @@ type Approval = {
 };
 ```
 
+- Settings: `model` is a plain `"provider/model"` ref checked against the live catalog. Until tiers land, `effectiveModel` is the set model, else the tier's first model, else the newest active project's model (null when there is none, and send refuses). `tier: null` clears the tier. `tools` are the Host agent's own tools (what `disabledTools` names); `actions` are the host actions behind `host_call`. A patch needs the current `revision`.
 - Live streaming: `GET /live?project=host` streams the same frame shape as a coordinator chat's live stream (text, thinking, tools with status and duration).
 - Tools for the Host agent are generated from an allow-list over `Request` actions (`src/host-agent-tools.ts`): one `host_call { action, input }` tool validated with `Request`, one `host_actions` tool that lists allowed actions with their input schema and a one-line description, plus `ui_focus { view, projectId?, chatId?, section? }` and `ui_set` (wraps `ui-set`). A script asserts every `Request` action is either allowed, marked dangerous, or explicitly excluded with a reason.
 - Dangerous actions (at least: `delete`, `archive`, `remove`, `job-approve`, `deploy-start`, `workspace-revoke`, `github-revoke`, `telegram-unpair`, `upload-delete`, `worktrees-cleanup`, `remote-revoke`) create a pending `Approval` instead of running. The tool returns at once with the approval id. When the owner decides, the host runs the stored request (on approve) and posts the outcome to the Host agent as a follow-up.
-- `ui_focus` publishes a host `host-agent` frame `{ type: "focus", ... }`; the browser follows it.
+- `ui_focus` publishes a host `host-agent` frame `{ t: "topic", topic: "host-agent", type: "focus", view, projectId?, chatId?, section? }`; the browser follows it. Other `host-agent` frames (no `type`) mean history or settings changed: refetch.
+- Also dangerous: `webhook-rotate`, `telegram-remove`. Excluded with reasons in `ACTION_POLICY`: `web`, `telegram-token`, `telegram-pair`, `remote-pair-start`, `cursor-connect`, `transcript-image`, `archive-image`, `work-submit`, `shutdown`, `deploy-shutdown`, the `host-agent-*` controls except settings, and `approval-decide`. `remove` has no request yet.
+- Coordinators get the same gate through the tool `owner_approval_request { action, input, summary }`. It accepts only dangerous actions, files an `Approval` with `requestedBy: { kind: "coordinator", projectId, chatId }` and returns at once. The outcome is posted to that chat as an internal follow-up (Main when the chat is gone). Outcome messages start with `[approval <id>]`.
 - Storage: `<home>/host-agent/` with its own pi-durable storage, opened only by the host.
 
 ## Web client (`web-ui2/`)

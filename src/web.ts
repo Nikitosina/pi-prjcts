@@ -11,9 +11,10 @@ import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
-import { feed, type FeedEvent } from "./change-feed.ts";
+import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
 
+/** `projectId` is a project UUID or `HOST_FEED` for the Host agent. */
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
 
 const liveStreams = new Set<() => void>();
@@ -89,11 +90,11 @@ export async function startWeb(
       end();
       return () => {};
     }
-    await openProject(id);
+    if (id !== HOST_FEED) await openProject(id);
     const pending = new Map<string, FeedEvent>();
     let timer: NodeJS.Timeout | undefined;
     const stopFeed = feed.subscribe(id, (event) => {
-      pending.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
+      pending.set(JSON.stringify(event), event);
       timer ??= setTimeout(() => {
         timer = undefined;
         for (const item of pending.values()) frame({ t: "topic", ...item });
@@ -231,10 +232,10 @@ export async function startWeb(
       }
       if (request.method === "GET" && (url.pathname === "/live" || url.pathname === "/changes")) {
         const id = url.searchParams.get("project") ?? "";
-        if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
+        if (id !== HOST_FEED && !/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid project ID");
         const chat = url.searchParams.get("chat") ?? "main";
         if (!/^(main|[a-f0-9-]{36})$/.test(chat)) throw new Error("Invalid chat ID");
-        loadProject(id);
+        if (id !== HOST_FEED) loadProject(id);
         await serveLive(response, headers, (onFrame, onEnd) =>
           url.pathname === "/changes" ? watchChanges(id, onFrame, onEnd) : watchLive(id, onFrame, onEnd, chat),
         );

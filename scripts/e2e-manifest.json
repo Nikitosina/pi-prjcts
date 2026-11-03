@@ -36,6 +36,8 @@
     "docs/**": [],
     "*.md": [],
     "src/machine-status.ts": ["machine-status-unit", "status-dots-e2e"],
+    "src/host-agent*.ts": ["host-agent-e2e"],
+    "src/approvals.ts": ["host-agent-e2e"],
     "src/role-prompts.ts": ["settings-prompts-refresh", "workspace-defaults"],
     ".agents/skills/pr-review/**": ["repo-skill-overrides-unit"],
     ".agents/skills/code-review/**": ["repo-skill-overrides-unit"],

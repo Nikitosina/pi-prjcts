@@ -53,6 +53,25 @@ const revision = Type.String({ minLength: 1, maxLength: 128 });
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
+/** UI 2.0 thinking levels; "max" is the provider's highest. */
+export const ThinkingLevel = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("max"),
+]);
+export type ThinkingLevel = Static<typeof ThinkingLevel>;
+/** A change to the Host agent's settings; `model` is a plain "provider/model" ref until tiers decide it. */
+export const HostAgentSettingsPatch = Type.Object(
+  {
+    model: Type.Optional(Type.String({ pattern: "^[^/\\s]+/\\S+$", maxLength: 200 })),
+    tier: Type.Optional(Type.Union([Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }), Type.Null()])),
+    thinking: Type.Optional(ThinkingLevel),
+    disabledTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
+  },
+  { additionalProperties: false },
+);
 /** "github" or the id of a provider plugin. */
 export const Provider = Type.String({ minLength: 1, maxLength: 64 });
 export const WorkspaceRepositoryAuthorization = Type.Object(
@@ -1156,6 +1175,31 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("telegram-pair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-unpair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-remove"), confirm: Type.Literal("remove") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("host-agent-send"), requestId: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("host-agent-stop") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("host-agent-reset") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("host-agent-settings"),
+      revision: Type.Optional(Type.Integer({ minimum: 0 })),
+      patch: Type.Optional(HostAgentSettingsPatch),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("approvals-list") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("approval-decide"),
+      id: Id,
+      decision: Type.Union([Type.Literal("approve"), Type.Literal("deny")]),
+      note: Type.Optional(Type.String({ maxLength: 2000 })),
+    },
+    { additionalProperties: false },
+  ),
 ]);
 export type Request = Static<typeof Request>;
 export const Reply = Type.Union([
