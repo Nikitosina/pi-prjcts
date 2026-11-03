@@ -3,7 +3,7 @@
 // by app.js through onHostTopic). When the host could not open its Host agent, the drawer shows the host's reason.
 import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
-import { emit, fail, state, toast } from "./state.js";
+import { emit, fail, inline, on, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
@@ -46,6 +46,16 @@ export function toggleHostAgent(force, { at } = {}) {
   emit("drawer", next);
 }
 drawer.inert = true;
+// "Review approval" on a coordinator's tool row: open the drawer at that card.
+on("review-approval", async (id) => {
+  toggleHostAgent(true);
+  await loadApprovals();
+  const card = approvalsBox.querySelector(`[data-approval="${CSS.escape(id)}"]`);
+  if (!card) return toast("That approval was already decided.");
+  card.scrollIntoView({ block: "nearest" });
+  card.classList.add("flash");
+  card.querySelector("[data-decide]")?.focus();
+});
 
 /** Host change feed frames for the Host agent and approvals; other host topics belong to app.js. */
 export function onHostTopic(change) {
@@ -206,15 +216,12 @@ approvalsBox.addEventListener("click", async (event) => {
   buttons.forEach((node) => (node.disabled = true));
   card.dataset.deciding = button.dataset.decide;
   try {
-    const result = await call("approval-decide", { id: card.dataset.approval, decision: button.dataset.decide });
-    const { approval } = result;
-    toast(
-      approval.state === "denied"
-        ? `Denied: ${clip(approval.summary, 60)}`
-        : approval.state === "failed"
-          ? `Approved, but it failed: ${clip(approval.summary, 60)}`
-          : `Approved and ran: ${clip(approval.summary, 60)}`,
-    );
+    const { approval } = await call("approval-decide", { id: card.dataset.approval, decision: button.dataset.decide });
+    // The Host agent's own outcome row lands in this drawer; a coordinator's lands in its chat, so say it here.
+    if (approval.requestedBy.kind === "coordinator")
+      toast(
+        `${approval.state === "denied" ? "Denied" : approval.state === "failed" ? "Approved, but it failed" : "Approved and ran"}: ${clip(approval.summary, 60)}`,
+      );
     await loadApprovals();
   } catch (reason) {
     fail(reason);
@@ -294,23 +301,26 @@ function paintSettings() {
         `<li><label title="${esc(tool.description)}"><input type="checkbox" data-tool-toggle="${esc(tool.name)}" ${settings.disabledTools.includes(tool.name) ? "" : "checked"} /><span class="mono">${esc(tool.name)}</span><span class="muted small one-line">${esc(oneLine(tool.description))}</span></label></li>`,
     )
     .join("")}</ul></div>
-<p class="muted small ha-actions-line">${settings.actions.length} host actions through <code>host_call</code> · ${dangerous.length} wait for your approval <button type="button" class="info" data-info="${esc(`Need approval: ${dangerous.map((action) => action.name).join(", ")}`)}" aria-label="Which actions need approval">ⓘ</button></p>`;
+<p class="muted small ha-actions-line">${settings.actions.length} host actions through <code>host_call</code> · ${dangerous.length} wait for your approval <button type="button" class="info" data-info="${esc(`Need approval: ${dangerous.map((action) => action.name).join(", ")}`)}" aria-label="Which actions need approval">ⓘ</button></p>
+<p class="ha-status inline-status" role="status" aria-live="polite"></p>`;
 }
 async function saveSettings(patch, label) {
   if (!settings) return;
+  let problem = null;
   try {
     const next = await call("host-agent-settings", { revision: settings.revision, patch });
     settings = next;
     error = "";
-    toast(label);
   } catch (reason) {
-    fail(reason);
+    problem = reason;
     // A stale revision or a refused model: show what the host has now.
     const fresh = await call("host-agent-settings").catch(() => null);
     if (fresh) settings = fresh;
   }
   paintModel();
   paintSettings();
+  const slot = settingsBox.querySelector(".ha-status");
+  problem ? inline(slot, problem.message, { error: true }) : inline(slot, label);
 }
 settingsBox.addEventListener("change", (event) => {
   if (event.target.id === "ha-tier-select") {

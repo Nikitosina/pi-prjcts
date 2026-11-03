@@ -3,7 +3,7 @@
 import { call } from "./api.js";
 import { ago, clip, esc, oneLine, shortModel, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
-import { emit, fail, on, stale, state, toast } from "./state.js";
+import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
 
 const dialog = document.querySelector("#settings");
@@ -79,14 +79,26 @@ function paint() {
     )
     .join("");
   const projectName = state.projects.find((item) => item.id === state.projectId)?.name ?? "";
-  dialog.innerHTML = `<div class="settings-shell"><nav aria-label="Settings sections">${nav}<p class="nav-foot muted small"><kbd>Esc</kbd> close · letters jump</p></nav><section class="settings-main" aria-live="polite"><header class="settings-head"><h1>${esc(current.label)}</h1><span class="scope ${current.scope}">${current.scope === "project" ? `Project · ${esc(clip(projectName, 30))}` : "Host"}</span><span class="grow"></span><button type="button" class="icon-btn" data-cmd="leave-focus" aria-label="Close settings">✕</button></header>${current.profile ? `<div class="profiles" role="tablist" aria-label="Profile">${PROFILES.map((item) => `<button type="button" role="tab" data-profile="${item.id}" aria-selected="${item.id === profile}">${item.label}</button>`).join("")}</div>` : ""}<div class="settings-body"><p class="loading-line">Loading…</p></div></section></div>`;
+  dialog.innerHTML = `<div class="settings-shell"><nav aria-label="Settings sections">${nav}<p class="nav-foot muted small"><kbd>Esc</kbd> close · letters jump</p></nav><section class="settings-main"><header class="settings-head"><h1>${esc(current.label)}</h1><span class="scope ${current.scope}">${current.scope === "project" ? `Project · ${esc(clip(projectName, 30))}` : "Host"}</span><span class="settings-status inline-status" role="status" aria-live="polite"></span><span class="grow"></span><button type="button" class="icon-btn" data-cmd="leave-focus" aria-label="Close settings">✕</button></header>${current.profile ? `<div class="profiles" role="tablist" aria-label="Profile">${PROFILES.map((item) => `<button type="button" role="tab" data-profile="${item.id}" aria-selected="${item.id === profile}">${item.label}</button>`).join("")}</div>` : ""}<div class="settings-body"><p class="loading-line">Loading…</p></div></section></div>`;
   paintHints(dialog);
+  // A status said just before a repaint (a save redraws the section) stays visible in the new header.
+  if (said && said.section === section && Date.now() - said.at < 3000) inline(dialog.querySelector(".settings-status"), said.text, said);
   const gen = ++paintGen,
     body = dialog.querySelector(".settings-body");
   const alive = () => gen === paintGen && dialog.open && body.isConnected;
   Promise.resolve(current.render(body, alive)).catch((error) => {
     if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
   });
+}
+/** Confirms a change next to the section header: the control that changed is in this section. */
+let said = null;
+function say(text, { error = false } = {}) {
+  said = { text, error, section, at: Date.now() };
+  inline(dialog.querySelector(".settings-status"), text, { error });
+}
+function sayFail(error) {
+  console.warn(error);
+  say(error?.message ?? String(error), { error: true });
 }
 const info = (text) => `<button type="button" class="info" data-info="${esc(text)}" aria-label="More information">ⓘ</button>`;
 const line = (text, more) => `<p class="desc">${esc(text)}${more ? ` ${info(more)}` : ""}</p>`;
@@ -100,7 +112,7 @@ async function update(changes, message) {
   const snap = await projectSettings();
   if (stale(gen)) return null;
   const result = await call("settings-update", { id, confirm: id, expectedRevision: snap.revision, changes });
-  if (message) toast(message);
+  if (message) say(message);
   emit("settings-changed");
   return result;
 }
@@ -114,7 +126,7 @@ async function general(body, alive) {
   body.innerHTML = `${line("Name, workspace and lifecycle of this project.")}<form class="field-row" id="name-form"><label for="project-name">Name</label><input id="project-name" value="${esc(projectInfo.name)}" maxlength="200" /><button type="submit" class="ghost-btn small">Save</button></form><div class="field-row"><span class="label">Workspace</span><code class="path">${esc(projectInfo.cwd)}</code></div><div class="field-row"><span class="label">State</span><span class="badge ${view.paused ? "t-needs" : "t-ready"}">${view.paused ? "Paused" : "Running"}</span><button type="button" class="ghost-btn small" data-life="${view.paused ? "resume" : "pause"}">${view.paused ? "Resume" : "Pause"}</button></div><div class="danger-zone"><p class="desc">Archive hides the project; delete removes it. Both ask once more. ${info("Archived projects can be restored. Delete keeps nothing.")}</p><button type="button" class="ghost-btn small" data-life="archive">Archive…</button><button type="button" class="ghost-btn small danger" data-life="delete">Delete…</button></div>`;
   body.querySelector("#name-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await update({ name: body.querySelector("#project-name").value.trim() }, "Renamed.").catch(fail);
+    await update({ name: body.querySelector("#project-name").value.trim() }, "Renamed.").catch(sayFail);
     emit("projects-changed");
   });
   body.addEventListener("click", async (event) => {
@@ -129,17 +141,21 @@ async function general(body, alive) {
     }
     try {
       await call(action, { id: state.projectId, ...(action === "delete" || action === "resume" ? { confirm: state.projectId } : {}) });
-      toast({ pause: "Paused. State kept.", resume: "Resumed.", archive: "Archived.", delete: "Deleted." }[action]);
+      say({ pause: "Paused. State kept.", resume: "Resumed.", archive: "Archived.", delete: "Deleted." }[action]);
       emit("projects-changed");
       if (action === "archive" || action === "delete") closeSettings();
       else if (alive()) paint();
     } catch (error) {
-      fail(error);
+      sayFail(error);
     }
   });
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Context
+
+/** Mirrors compactionPolicy in src/durable-runtime.ts: compaction starts at the threshold, and generation blocks (forced compaction)
+ * once only the answer reserve is left: reserve = clamp(window − start, 1024, 16384). */
+const reserveFor = (window, threshold) => Math.max(1024, Math.min(16384, window - Math.floor((window * threshold) / 100)));
 
 async function context(body, alive) {
   const snap = await projectSettings();
@@ -147,28 +163,43 @@ async function context(body, alive) {
   const live = state.view?.context ?? {};
   const settings = snap.values.context ?? { autoCompact: true };
   const window = settings.contextWindow ?? live.window ?? live.catalogWindow ?? 128000;
-  let threshold = settings.thresholdPercent ?? 80,
-    keep = settings.keepRecentTokens ?? 20000;
+  let threshold = settings.thresholdPercent ?? 80;
+  const keep = settings.keepRecentTokens ?? 20000;
   const used = profile === "coordinator" ? (live.tokens ?? 0) : null;
+  let saving = null;
   const draw = () => {
-    const keepPct = Math.min(95, (100 * keep) / window);
-    body.innerHTML = `${line(profile === "coordinator" ? "Current use, where auto-compaction starts and what it keeps." : "Context policy is shared by all profiles of this project.", "Drag a mark or focus it and use ←/→ (Shift for 5%). Compaction summarizes older turns and keeps the most recent tokens.")}<div class="ctx-bar" role="group" aria-label="Context window"><div class="ctx-used" style="width:${used === null ? 0 : Math.min(100, (100 * used) / window)}%"></div><div class="ctx-keep" style="width:${keepPct}%"></div><button type="button" class="mark auto" data-mark="auto" style="left:${threshold}%" role="slider" aria-label="Auto-compaction threshold" aria-valuemin="10" aria-valuemax="95" aria-valuenow="${threshold}" aria-valuetext="${threshold}% (${tokens((window * threshold) / 100)})"><span>auto ${threshold}%</span></button><button type="button" class="mark force" data-mark="keep" style="left:${keepPct}%" role="slider" aria-label="Tokens kept after compaction" aria-valuemin="1000" aria-valuemax="${window}" aria-valuenow="${keep}"><span>keep ${tokens(keep)}</span></button></div><div class="ctx-legend mono small"><span>${used === null ? "per-chat use shown for the coordinator" : `${tokens(used)} used`}</span><span>${tokens(window)} window</span></div><div class="field-row"><label class="switch"><input type="checkbox" id="auto-compact" ${settings.autoCompact ? "checked" : ""}/> Auto-compact</label><span class="grow"></span><button type="button" class="ghost-btn small" id="compact-now">Compact now</button></div><details class="small-field"><summary>Window override ${info("Use when the provider's real window is smaller than the catalog says.")}</summary><input id="ctx-window" type="number" min="4096" step="1024" value="${settings.contextWindow ?? ""}" placeholder="${tokens(live.catalogWindow ?? window)} from catalog" /></details><div class="row"><button type="button" class="primary small" id="ctx-save">Save</button></div>`;
-    for (const mark of body.querySelectorAll(".mark")) bindMark(mark);
-    body.querySelector("#ctx-save").addEventListener("click", save);
+    const reserve = reserveFor(window, threshold),
+      forcePct = (100 * (window - reserve)) / window,
+      usedPct = used === null ? 0 : Math.min(100, (100 * used) / window);
+    body.innerHTML = `${line(profile === "coordinator" ? "How full this chat is, and where compaction starts." : "Context policy is shared by all profiles of this project.", "Drag the auto mark, or focus it and use ←/→ (Shift for 5%). Auto-compaction summarizes older turns in the background. At the force mark only the answer reserve is left, so the next turn waits for compaction. The reserve follows the auto mark.")}
+<div class="ctx-head mono"><span class="ctx-total">${used === null ? "per-chat use shown for the coordinator" : `${tokens(used)} / ${tokens(window)}`}</span><span class="muted">${used === null ? `${tokens(window)} window` : `${Math.round(usedPct)}% used`}</span></div>
+<div class="ctx-bar" role="group" aria-label="Context window">${used === null ? "" : `<div class="ctx-used" style="width:${usedPct}%"></div><span class="ctx-now" style="left:${usedPct}%" title="Current use: ${tokens(used)}"></span>`}<div class="ctx-reserve" style="left:${forcePct}%" title="Answer reserve: ${tokens(reserve)}"></div><button type="button" class="mark auto" data-mark="auto" style="left:${threshold}%" role="slider" aria-label="Auto-compaction threshold" aria-valuemin="10" aria-valuemax="95" aria-valuenow="${threshold}" aria-valuetext="${threshold}% (${tokens((window * threshold) / 100)})"><span>auto ${threshold}%</span></button><span class="mark force" style="left:${forcePct}%" title="Forced compaction at ${tokens(window - reserve)}"><span>force ${Math.round(forcePct)}%</span></span></div>
+<div class="ctx-legend mono small"><span>0</span><span>${tokens((window * threshold) / 100)} auto · ${tokens(window - reserve)} force</span><span>${tokens(window)} window</span></div>
+<div class="field-row"><label class="switch"><input type="checkbox" id="auto-compact" ${settings.autoCompact ? "checked" : ""}/> Auto-compact</label><span class="muted small">keeps the last ${tokens(keep)}</span><span class="grow"></span><button type="button" class="ghost-btn small" id="compact-now">Compact now</button></div>
+<details class="small-field"><summary>Advanced ${info("Keep: recent tokens left verbatim after a compaction. Window override: use when the provider's real window is smaller than the catalog says.")}</summary><div class="field-row"><label for="ctx-keep">Keep recent</label><input id="ctx-keep" type="number" min="1000" step="500" value="${keep}" /></div><div class="field-row"><label for="ctx-window">Window</label><input id="ctx-window" type="number" min="4096" step="1024" value="${settings.contextWindow ?? ""}" placeholder="${tokens(live.catalogWindow ?? window)} from catalog" /><button type="button" class="ghost-btn small" id="ctx-save">Save</button></div></details>`;
+    bindMark(body.querySelector(".mark.auto"));
+    body.querySelector("#ctx-save").addEventListener("click", () => save("Context policy saved"));
+    body
+      .querySelector("#auto-compact")
+      .addEventListener("change", (event) => save(`Auto-compact ${event.target.checked ? "on" : "off"} · saved`));
     body.querySelector("#compact-now").addEventListener("click", async () => {
       await call("compact", { id: state.projectId, ...(state.chatId !== "main" ? { chatId: state.chatId } : {}) }).then(
-        () => toast("Compacting this chat…"),
-        fail,
+        () => say("Compacting this chat…"),
+        sayFail,
       );
     });
   };
+  // The mark moves at once; the save waits for the owner to stop (pointer up, or a pause between keys).
   const bindMark = (mark) => {
     const bar = body.querySelector(".ctx-bar");
     const set = (pct) => {
-      if (mark.dataset.mark === "auto") threshold = Math.round(Math.max(10, Math.min(95, pct)));
-      else keep = Math.round(Math.max(1000, Math.min(window * 0.95, (pct / 100) * window)) / 500) * 500;
+      const next = Math.round(Math.max(10, Math.min(95, pct)));
+      if (next === threshold) return;
+      threshold = next;
       draw();
-      body.querySelector(`[data-mark="${mark.dataset.mark}"]`).focus();
+      body.querySelector(".mark.auto").focus();
+      clearTimeout(saving);
+      saving = setTimeout(() => save(`Auto-compaction at ${threshold}% · saved`), 450);
     };
     mark.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -176,7 +207,8 @@ async function context(body, alive) {
       const rect = bar.getBoundingClientRect();
       const move = (next) => {
         const pct = ((next.clientX - rect.left) / rect.width) * 100;
-        mark.style.left = `${Math.max(0, Math.min(100, pct))}%`;
+        mark.style.left = `${Math.max(10, Math.min(95, pct))}%`;
+        mark.querySelector("span").textContent = `auto ${Math.round(Math.max(10, Math.min(95, pct)))}%`;
         mark.dataset.pct = String(pct);
       };
       mark.addEventListener("pointermove", move);
@@ -193,23 +225,24 @@ async function context(body, alive) {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
       event.stopPropagation();
-      const step = (event.shiftKey ? 5 : 1) * (event.key === "ArrowLeft" ? -1 : 1);
-      set(mark.dataset.mark === "auto" ? threshold + step : (100 * keep) / window + step);
+      set(threshold + (event.shiftKey ? 5 : 1) * (event.key === "ArrowLeft" ? -1 : 1));
     });
   };
-  const save = async () => {
-    const override = Number(body.querySelector("#ctx-window").value);
+  const save = async (message) => {
+    if (!alive()) return;
+    const override = Number(body.querySelector("#ctx-window").value),
+      keepNext = Number(body.querySelector("#ctx-keep").value);
     await update(
       {
         context: {
           autoCompact: body.querySelector("#auto-compact").checked,
           thresholdPercent: threshold,
-          keepRecentTokens: keep,
+          keepRecentTokens: keepNext >= 1000 ? keepNext : keep,
           ...(override >= 4096 ? { contextWindow: override } : {}),
         },
       },
-      "Context policy saved.",
-    ).catch(fail);
+      message,
+    ).catch(sayFail);
   };
   draw();
 }
@@ -220,13 +253,17 @@ async function context(body, alive) {
 async function setProfile(revision, patch, label) {
   try {
     await call("profiles-set", { projectId: state.projectId, revision, profile, patch });
-    toast(label);
+    say(label);
     emit("profiles");
   } catch (error) {
-    fail(error);
+    sayFail(error);
   }
   paint();
 }
+/** Per-million price, like the reference: "$4 in $20 out". */
+const perM = (n) => (!Number.isFinite(n) ? "" : n === 0 ? "$0" : `$${n < 0.1 ? n.toFixed(3) : String(+n.toFixed(2))}`);
+const priceLine = (item) =>
+  Number.isFinite(item?.inputCost) ? `${perM(item.inputCost)} in ${perM(item.outputCost)} out` : "price unknown";
 
 async function model(body, alive) {
   const [profiles, tiers] = await Promise.all([call("profiles-get", { projectId: state.projectId }), call("tiers-get")]);
@@ -234,29 +271,58 @@ async function model(body, alive) {
   const current = profiles.profiles[profile];
   const thinking = current.thinking ?? "medium";
   const catalog = new Map(tiers.catalog.map((item) => [item.ref, item]));
-  const tierHtml = `<div class="tier-list" role="radiogroup" aria-label="Tier">${tiers.tiers
-    .map((tier) => {
-      const on = current.tier === tier.id;
-      return `<button type="button" role="radio" class="tier${on ? " on" : ""}" data-tier="${esc(tier.id)}" aria-checked="${on}"><span class="tier-letter">${esc(tier.letter)}</span><span class="tier-name">${esc(tier.name)}</span><span class="tier-models">${tier.models
+  const projectInfo = state.view?.project;
+  const projectModel = (profile === "coordinator" ? null : projectInfo?.models?.[profile]) ?? projectInfo?.model ?? "";
+  // A row: badge, NAME + letter, the models in fallback order; right: context and price of the model that would run, and a check.
+  const row = ({ id, letter, name, models, on }) => {
+    const lead = catalog.get(models.find((ref) => catalog.get(ref)?.available) ?? models[0]) ?? { ref: models[0] };
+    return `<button type="button" role="radio" class="tier-row${on ? " on" : ""}" data-tier="${esc(id)}" aria-checked="${on}"><span class="tier-badge" aria-hidden="true">${esc(letter || "—")}</span><span class="tier-main"><span class="tier-title">${esc(name)}</span><span class="tier-chain mono">${
+      models
         .map((ref, index) => {
-          const item = catalog.get(ref) ?? { ref };
-          return `<span class="mono small${item.available === false ? " off" : ""}">${index ? "→ " : ""}${esc(shortModel(ref))} <span class="muted">${tokens(item.contextWindow)}${Number.isFinite(item.inputCost) ? ` · ${usd(item.inputCost)}/${usd(item.outputCost)}` : ""}</span></span>`;
+          const item = catalog.get(ref);
+          return `<span class="${item?.available === false ? "off" : ""}" title="${esc(ref)}${item?.available === false ? " (no credentials)" : ""}">${index ? "→ " : ""}${esc(shortModel(ref))}</span>`;
         })
-        .join("")}</span></button>`;
-    })
-    .join("")}</div>`;
-  body.innerHTML = `${line("Tier and thinking level for this profile.", "A tier is an ordered list of models. On a quota or rate limit, work moves to the next model of the tier, never back. Edit tiers under Model tiers (I).")}<div class="field-row"><span class="label">Effective</span><code>${esc(current.effectiveModel ?? "none")}</code>${current.tier ? "" : `<span class="muted small">no tier · project model</span>`}</div>${tierHtml}<div class="field-row"><span class="label">Thinking</span><div class="seg" role="radiogroup" aria-label="Thinking level">${THINKING.map((level) => `<button type="button" role="radio" data-thinking="${level}" aria-checked="${level === thinking}">${level}</button>`).join("")}</div></div>`;
-  body.addEventListener("click", (event) => {
+        .join("") || `<span class="muted">no model</span>`
+    }</span></span><span class="tier-cost mono"><span>${tokens(lead.contextWindow)} context</span><span>${esc(priceLine(lead))}</span></span><span class="tier-check" aria-hidden="true">${on ? "✓" : ""}</span></button>`;
+  };
+  const rows = [
+    ...tiers.tiers.map((tier) =>
+      row({ id: tier.id, letter: tier.letter, name: tier.name, models: tier.models, on: current.tier === tier.id }),
+    ),
+    row({ id: "", letter: "", name: "Project model (no tier)", models: projectModel ? [projectModel] : [], on: !current.tier }),
+  ];
+  body.innerHTML = `${line("Pick a tier and a thinking level for this profile.", "A tier is an ordered list of models. On a quota or rate limit, work moves to the next model of the tier, never back. Edit tiers under Model tiers (I).")}<div class="field-row"><span class="label">Thinking</span><div class="seg" role="radiogroup" aria-label="Thinking level">${THINKING.map((level) => `<button type="button" role="radio" data-thinking="${level}" aria-checked="${level === thinking}">${level}</button>`).join("")}</div><span class="grow"></span><span class="muted small">runs <code>${esc(current.effectiveModel ?? "no model")}</code></span></div><div class="tier-rows" role="radiogroup" aria-label="Tier">${rows.join("")}</div>`;
+  body.addEventListener("click", async (event) => {
     const tier = event.target.closest("[data-tier]"),
       level = event.target.closest("[data-thinking]");
-    if (tier && tier.dataset.tier !== current.tier)
-      void setProfile(
+    if (level && level.dataset.thinking !== thinking)
+      return void setProfile(
+        profiles.revision,
+        { thinking: level.dataset.thinking },
+        `${label(profile)} thinking: ${level.dataset.thinking}`,
+      );
+    if (!tier || tier.getAttribute("aria-checked") === "true") return;
+    if (tier.dataset.tier)
+      return void setProfile(
         profiles.revision,
         { tier: tier.dataset.tier },
-        `${label(profile)} on tier ${tier.querySelector(".tier-name").textContent}`,
+        `${label(profile)} on ${tier.querySelector(".tier-title").textContent.trim()}`,
       );
-    else if (level && level.dataset.thinking !== thinking)
-      void setProfile(profiles.revision, { thinking: level.dataset.thinking }, `${label(profile)} thinking: ${level.dataset.thinking}`);
+    // profiles-set merges its patch, so leaving a tier writes the whole profile without one through settings-update.
+    const { effectiveModel: _, tier: __, ...rest } = current;
+    try {
+      await call("settings-update", {
+        id: state.projectId,
+        confirm: state.projectId,
+        expectedRevision: profiles.revision,
+        changes: { profiles: { [profile]: rest } },
+      });
+      say(`${label(profile)} on the project model`);
+      emit("profiles");
+    } catch (error) {
+      sayFail(error);
+    }
+    paint();
   });
 }
 const label = (id) => id[0].toUpperCase() + id.slice(1);
@@ -302,7 +368,7 @@ async function prompt(body, alive) {
     const changes = {};
     if (value("project") !== undefined) changes.objective = value("project");
     if (value("role") !== undefined) changes.prompts = { [profile]: value("role").trim() ? value("role") : null };
-    await update(changes, "Prompt saved.").catch(fail);
+    await update(changes, "Prompt saved.").catch(sayFail);
   });
 }
 
@@ -350,7 +416,7 @@ async function tools(body, alive) {
   body.addEventListener("change", async (event) => {
     const box = event.target.closest("[data-tool-name]");
     if (!box) return;
-    const profiles = await call("profiles-get", { projectId: state.projectId }).catch(fail);
+    const profiles = await call("profiles-get", { projectId: state.projectId }).catch(sayFail);
     if (!profiles || !alive()) return;
     const disabled = new Set(profiles.profiles[profile].tools?.disabled ?? []);
     box.checked ? disabled.delete(box.dataset.toolName) : disabled.add(box.dataset.toolName);
@@ -457,20 +523,20 @@ async function automations(body, alive) {
       toast(`${node.querySelector("b").textContent} ${enabled ? "on" : "off"}.`, {
         action: "Undo",
         onAction: async () => {
-          await apply(node.dataset.kind, node.dataset.id, !enabled).catch(fail);
+          await apply(node.dataset.kind, node.dataset.id, !enabled).catch(sayFail);
           if (alive()) paint();
         },
       });
     } catch (error) {
       toggle.checked = !enabled;
-      fail(error);
+      sayFail(error);
     }
   });
   body.addEventListener("click", async (event) => {
     if (!event.target.closest("[data-history]")) return;
-    const history = await call("schedule-history", { id: state.projectId, kind: "intents", limit: 10 }).catch(fail);
+    const history = await call("schedule-history", { id: state.projectId, kind: "intents", limit: 10 }).catch(sayFail);
     if (!history || !alive()) return;
-    toast(`${history.items?.length ?? history.total ?? 0} recent runs. Full history in the CLI for now.`);
+    say(`${history.items?.length ?? history.total ?? 0} recent runs. Full history in the CLI for now.`);
   });
 }
 
@@ -595,12 +661,12 @@ async function tiersSection(body, alive) {
         data.revision = result.revision;
         data.tiers = structuredClone(result.tiers);
         tiers = structuredClone(result.tiers);
-        toast("Tiers saved.");
+        say("Tiers saved.");
         emit("tiers");
         draw();
       } catch (error) {
         // Refusals (stale revision, empty tier, a tier in use, unknown model) keep the edits on screen.
-        fail(error);
+        sayFail(error);
       }
     }
   });
@@ -617,7 +683,7 @@ function theme(body) {
   body.addEventListener("click", (event) => {
     const pick = event.target.closest("[data-theme-option]");
     if (!pick) return;
-    void setUi({ theme: pick.dataset.themeOption });
+    void setUi({ theme: pick.dataset.themeOption }).then((ok) => ok && say(`Theme: ${pick.querySelector("b").textContent}`));
     body.querySelectorAll("[data-theme-option]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
   });
 }
@@ -628,10 +694,16 @@ function animations(body) {
   body.addEventListener("click", (event) => {
     const pick = event.target.closest("[data-motion]");
     if (!pick) return;
-    void setUi({ animations: pick.dataset.motion });
+    void setUi({ animations: pick.dataset.motion }).then((ok) => ok && say(`Animations: ${pick.dataset.motion}`));
     body.querySelectorAll("[data-motion]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
   });
-  body.querySelector("#statusline-toggle").addEventListener("change", (event) => void setUi({ statusLine: event.target.checked }));
+  body
+    .querySelector("#statusline-toggle")
+    .addEventListener(
+      "change",
+      (event) =>
+        void setUi({ statusLine: event.target.checked }).then((ok) => ok && say(`Status line ${event.target.checked ? "on" : "off"}`)),
+    );
 }
 function hotkeys(body) {
   const draw = () => {
@@ -657,9 +729,9 @@ function hotkeys(body) {
     if (!edit) return;
     edit.textContent = "Press a key…";
     const pressed = await captureNext();
-    if (pressed && pressed !== DEFAULTS[edit.dataset.rebind])
-      await setUi({ hotkeys: { ...(state.ui?.hotkeys ?? {}), [edit.dataset.rebind]: pressed } });
-    else if (pressed) {
+    if (pressed && pressed !== DEFAULTS[edit.dataset.rebind]) {
+      if (await setUi({ hotkeys: { ...(state.ui?.hotkeys ?? {}), [edit.dataset.rebind]: pressed } })) say(`Bound to ${display(pressed)}`);
+    } else if (pressed) {
       const next = { ...(state.ui?.hotkeys ?? {}) };
       delete next[edit.dataset.rebind];
       await setUi({ hotkeys: next });

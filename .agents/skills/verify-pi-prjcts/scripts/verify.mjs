@@ -808,6 +808,21 @@ const journeys = {
     if (await page.evaluate(`location.hash.includes("token")`)) throw Error("token left in the URL");
     await page.waitFor(`!!document.querySelector('#tree [data-chat="main"]')`, "Main chat nested under the project");
     record("entry", `opened ${origin}/ui2/ with the launch token; tree shows ${PROJECT_NAME} with Main nested`);
+    // An empty chat offers three starter prompts; one click puts the text in the focused composer without sending it.
+    await page.waitFor(`document.querySelectorAll('#feed .starters [data-starter]').length === 3`, "three starter prompts");
+    await page.click("#feed .starters [data-starter]");
+    const starter = await page.evaluate(
+      `({ value: document.querySelector('#composer textarea').value, focused: document.activeElement === document.querySelector('#composer textarea'), owners: document.querySelectorAll('#feed .msg.owner').length })`,
+    );
+    if (!starter.value || !starter.focused || starter.owners) throw Error(`starter prompt: ${JSON.stringify(starter)}`);
+    await page.evaluate(
+      `(() => { const t = document.querySelector('#composer textarea'); t.value = ''; t.dispatchEvent(new Event('input')); })()`,
+    );
+    record(
+      "visible",
+      `empty chat: three starter prompts; one fills the focused composer ("${starter.value.slice(0, 50)}") without sending`,
+    );
+    await delay(300);
     await page.shot(dir, "01-empty-claude");
     // Send through the composer: one owner bubble, the spawn as a tool row, the worker in the context panel, the reply.
     const prompt = "VERIFY-JOB please greet the world",
@@ -1106,7 +1121,155 @@ const journeys = {
       `document.querySelector('#settings .settings-body [data-thinking="medium"]')?.getAttribute('aria-checked') === 'true'`,
       "thinking back to medium",
     );
+    // Inline status: a change in Settings is confirmed next to it, not by a toast.
+    const inline = await page.evaluate(
+      `({ status: document.querySelector('#settings .settings-status')?.innerText ?? '', toasts: document.querySelectorAll('#toasts .toast').length })`,
+    );
+    if (!/thinking/i.test(inline.status)) throw Error(`no inline status after the thinking change: ${JSON.stringify(inline)}`);
+    record("visible", `inline status "${inline.status}"; ${inline.toasts} toasts`);
+    // Context: current use, a draggable auto-compaction mark (keyboard here), the derived force mark, the window, Compact now.
+    await page.click('#settings nav [data-section="context"]');
+    await page.waitFor(
+      `!!document.querySelector('#settings .ctx-bar .mark.auto') && !!document.querySelector('#settings .ctx-bar .mark.force')`,
+      "context bar",
+    );
+    const ctxBefore = (await rpc(run, { action: "settings-snapshot", id: projectId })).values.context?.thresholdPercent ?? 80;
+    await page.evaluate(`document.querySelector('#settings .ctx-bar .mark.auto').focus()`);
+    await page.press("ArrowRight", { code: "ArrowRight", keyCode: 39 });
+    await page.waitFor(
+      `/saved/i.test(document.querySelector('#settings .settings-status')?.innerText ?? '')`,
+      "context saved inline",
+      15000,
+    );
+    const ctxAfter = (await rpc(run, { action: "settings-snapshot", id: projectId })).values.context?.thresholdPercent;
+    if (ctxAfter !== ctxBefore + 1) throw Error(`auto-compaction ${ctxBefore} -> ${ctxAfter}`);
+    const ctxBar = await page.evaluate(
+      `({ used: !!document.querySelector('#settings .ctx-bar .ctx-now'), window: document.querySelector('#settings .ctx-total')?.innerText ?? '', compact: !!document.querySelector('#settings #compact-now') })`,
+    );
+    if (!ctxBar.used || !/\//.test(ctxBar.window) || !ctxBar.compact) throw Error(`context bar parts: ${JSON.stringify(ctxBar)}`);
+    record("side-effect", `context bar: auto-compaction ${ctxBefore}% -> ${ctxAfter}% by keyboard, saved; use "${ctxBar.window}"`);
+    await delay(300);
+    await page.shot(dir, "13-settings-context");
+    // Prompt editor: Edit, change the project instructions, Save; prompt-render returns the new text.
+    await page.click('#settings nav [data-section="prompt"]');
+    await page.waitFor(`!!document.querySelector('#settings [data-mode="edit"]')`, "prompt section");
+    await page.click('#settings [data-mode="edit"]');
+    await page.waitFor(`!!document.querySelector('#settings [data-sec="project"] textarea')`, "prompt editor");
+    await page.evaluate(
+      `(() => { const t = document.querySelector('#settings [data-sec="project"] textarea'); t.focus(); t.select(); })()`,
+    );
+    await page.cdp("Input.insertText", { text: "VERIFY project instructions: greet briefly." });
+    await page.click("#settings #prompt-save");
+    await page.waitFor(
+      `/saved/i.test(document.querySelector('#settings .settings-status')?.innerText ?? '')`,
+      "prompt saved inline",
+      15000,
+    );
+    const rendered = await rpc(run, { action: "prompt-render", projectId, profile: "coordinator" });
+    if (!rendered.sections.find((item) => item.id === "project")?.text.includes("VERIFY project instructions"))
+      throw Error("prompt-render project section does not hold the saved text");
+    record("side-effect", "prompt editor saved the project instructions; prompt-render shows them");
+    // Tools: switch one unlocked coordinator tool off; profile-tools reports it disabled; switch it back on.
+    await page.click('#settings nav [data-section="tools"]');
+    await page.waitFor(`!!document.querySelector('#settings [data-tool-name]:not([disabled])')`, "tools grid");
+    const toolName = await page.evaluate(`document.querySelector('#settings [data-tool-name]:not([disabled])').dataset.toolName`);
+    const toolBox = `#settings [data-tool-name="${toolName}"]`;
+    await page.click(toolBox);
+    const toolOff = async () =>
+      (await rpc(run, { action: "profile-tools", projectId, profile: "coordinator" })).groups
+        .flatMap((group) => group.tools)
+        .find((tool) => tool.name === toolName)?.enabled === false;
+    await until(toolOff, `profile-tools reports ${toolName} off`);
+    await page.waitFor(`document.querySelector(${JSON.stringify(toolBox)})?.checked === false`, "tool box unchecked after reload");
+    await page.shot(dir, "14-settings-tools-off");
+    await page.click(toolBox);
+    await until(async () => !(await toolOff()), `profile-tools reports ${toolName} on again`);
+    record("side-effect", `Tools: ${toolName} off for the coordinator (profile-tools enabled false), then on again`);
+    // Tier editor: rename the tier and add a tier with the fallback model; tiers-get keeps both.
+    await page.click('#settings nav [data-section="tiers"]');
+    await page.waitFor(`!!document.querySelector('#settings .tier-edit .tier-name-input')`, "tiers editor again");
+    await page.evaluate(`(() => { const t = document.querySelector('#settings .tier-edit .tier-name-input'); t.focus(); t.select(); })()`);
+    await page.cdp("Input.insertText", { text: "Verify tier" });
+    await page.evaluate(
+      `document.querySelector('#settings .tier-edit .tier-name-input').dispatchEvent(new Event('change', { bubbles: true }))`,
+    );
+    await page.click("#settings #tier-new");
+    await page.waitFor(`document.querySelectorAll('#settings .tier-edit').length === 2`, "new tier row");
+    await page.cdp("Input.insertText", { text: "fallback-model" });
+    await page.waitFor(
+      `!!document.querySelector('#settings .tier-edit[data-t="1"] [data-add="fake/fallback-model"]')`,
+      "model search in the new tier",
+    );
+    await page.click('#settings .tier-edit[data-t="1"] [data-add="fake/fallback-model"]');
+    await page.click("#settings #tiers-save");
+    await page.waitFor(`!document.querySelector('#settings #tiers-save')`, "tiers saved again");
+    const named = (await rpc(run, { action: "tiers-get" })).tiers;
+    if (named.length !== 2 || named[0].name !== "Verify tier" || named[1].models.join() !== "fake/fallback-model")
+      throw Error(`tiers-get after rename/add: ${JSON.stringify(named)}`);
+    record("side-effect", `tiers-set: renamed to "Verify tier", added ${named[1].id} (${named[1].letter}) with fake/fallback-model`);
+    // Model page: every tier as a row plus Project model; pick the new tier, then back to the project model.
+    await page.click('#settings nav [data-section="model"]');
+    await page.waitFor(`document.querySelectorAll('#settings .tier-row').length === 3`, "two tier rows and the project model row");
+    await page.click(`#settings .tier-row[data-tier="${named[1].id}"]`);
+    await page.waitFor(
+      `document.querySelector('#settings .tier-row[data-tier="${named[1].id}"]')?.getAttribute('aria-checked') === 'true'`,
+      "new tier selected",
+    );
+    const onTier = (await rpc(run, { action: "profiles-get", projectId })).profiles.coordinator;
+    if (onTier.tier !== named[1].id || onTier.effectiveModel !== "fake/fallback-model")
+      throw Error(`coordinator on tier: ${JSON.stringify(onTier)}`);
+    await delay(300);
+    await page.shot(dir, "15-settings-model-tiers");
+    await page.click('#settings .tier-row[data-tier=""]');
+    await page.waitFor(
+      `document.querySelector('#settings .tier-row[data-tier=""]')?.getAttribute('aria-checked') === 'true'`,
+      "project model selected",
+    );
+    const offTier = (await rpc(run, { action: "profiles-get", projectId })).profiles.coordinator;
+    if (offTier.tier || offTier.effectiveModel !== "fake/fake-model")
+      throw Error(`coordinator back on the project model: ${JSON.stringify(offTier)}`);
+    record("side-effect", `Model rows: coordinator on ${named[1].id} (effective fake/fallback-model), then Project model (no tier)`);
     await page.press("Escape", { keyCode: 27 });
+    // A coordinator files a dangerous request through owner_approval_request: the chat row links to the card, the pill counts it.
+    const spare2 = await rpc(run, {
+      action: "create",
+      requestId: randomUUID(),
+      name: "Verify spare two",
+      cwd: run.workspace,
+      objective: "Archive request from a coordinator",
+      model: "fake/fake-model",
+    });
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: `VERIFY-COORD-APPROVAL ${spare2.id}` });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(
+      `!!document.querySelector('#feed .tool-row[data-tool="owner_approval_request"] [data-review-approval]')`,
+      "approval row in the chat",
+      60000,
+    );
+    await page.waitFor(`/needs you/.test(document.querySelector('#status-pill').innerText)`, "pill counts the coordinator approval");
+    await page.shot(dir, "16-coordinator-approval-row");
+    await page.click('#feed .tool-row[data-tool="owner_approval_request"] [data-review-approval]');
+    await page.waitFor(
+      `[...document.querySelectorAll('#ha-approvals .approval[data-approval]')].some(n => /Archive the second spare project/.test(n.innerText) && /Coordinator/.test(n.innerText))`,
+      "coordinator approval card in the drawer",
+    );
+    await delay(300);
+    await page.shot(dir, "16b-coordinator-approval-card");
+    await page.click('#ha-approvals .approval[data-approval] [data-decide="deny"]');
+    await page.waitFor(`!document.querySelector('#ha-approvals .approval[data-approval]')`, "coordinator card gone after Deny");
+    await page.press("\\", { code: "Backslash", keyCode: 220 });
+    await page.waitFor(
+      `[...document.querySelectorAll('#feed .approval-row')].some(n => /Denied/i.test(n.innerText))`,
+      "denied outcome row in the coordinator chat",
+      60000,
+    );
+    const spare2Now = (await rpc(run, { action: "list" })).find((item) => item.id === spare2.id);
+    if (spare2Now?.archived) throw Error("denied coordinator approval still archived the project");
+    record(
+      "side-effect",
+      "coordinator owner_approval_request: chat row → drawer card (Coordinator) → Deny; outcome row in the chat; project kept",
+    );
     // Light theme through the settings overlay, then the narrow layout.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings again");
@@ -1121,6 +1284,36 @@ const journeys = {
     const overflow = await page.evaluate(`document.documentElement.scrollWidth - innerWidth`);
     await page.shot(dir, "10-narrow-390-light");
     if (overflow > 0) throw Error(`narrow layout overflows by ${overflow}px`);
+    // Toasts: one identical message shows once, at most two show, and none covers the composer.
+    for (let i = 0; i < 3; i++) await page.click("#status-pill");
+    await page.waitFor(`document.querySelectorAll('#toasts .toast').length >= 1`, "pill toast");
+    const toastBox = await page.evaluate(`(() => {
+      const c = document.querySelector('#composer').getBoundingClientRect();
+      const nodes = [...document.querySelectorAll('#toasts .toast:not(.leaving)')], t = nodes.map(n => n.getBoundingClientRect());
+      const texts = nodes.map(n => n.dataset.text);
+      return { count: t.length, unique: new Set(texts).size === texts.length, texts, covers: t.some(r => r.bottom > c.top && r.top < c.bottom && r.right > c.left && r.left < c.right) };
+    })()`);
+    if (toastBox.count > 2 || !toastBox.unique || toastBox.covers) throw Error(`toasts at 390 px: ${JSON.stringify(toastBox)}`);
+    await delay(300);
+    await page.shot(dir, "10a-narrow-toast");
+    // The Host agent drawer at 390 px: full width, composer visible, closes by keyboard.
+    await page.press("\\", { code: "Backslash", keyCode: 220 });
+    await page.waitFor(`document.querySelector('#host-agent')?.dataset.open === '1'`, "drawer at 390 px");
+    await delay(400);
+    const drawerBox = await page.evaluate(`(() => {
+      const d = document.querySelector('#host-agent').getBoundingClientRect(), c = document.querySelector('#ha-composer').getBoundingClientRect();
+      return { left: d.left, right: d.right, width: innerWidth, composer: c.bottom <= innerHeight && c.top >= d.top && c.height > 0, overflow: document.documentElement.scrollWidth - innerWidth };
+    })()`);
+    if (drawerBox.left < 0 || drawerBox.right > drawerBox.width + 0.5 || !drawerBox.composer || drawerBox.overflow > 0)
+      throw Error(`drawer at 390 px: ${JSON.stringify(drawerBox)}`);
+    await page.shot(dir, "10b-narrow-390-drawer");
+    // Focus is in the drawer's composer, where \\ is a character; Esc closes the drawer.
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#host-agent')?.dataset.open !== '1'`, "drawer closed at 390 px");
+    record(
+      "verified",
+      `390 px: three identical events show once (${toastBox.count} toasts in all), clear of the composer; drawer ${Math.round(drawerBox.right - drawerBox.left)} px wide with its composer visible`,
+    );
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     // Back to the default theme so a rerun starts from Claude.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });

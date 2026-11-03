@@ -2,7 +2,8 @@
 // Ordinary messages receive `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
 // VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive);
-// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve.
+// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-COORD-APPROVAL <id> has the
+// coordinator file the same request through owner_approval_request.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -53,6 +54,15 @@ const server = createServer((req, res) => {
         .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
     if (names.includes("host_call") && user.startsWith("[approval ")) {
       reply = say(/denied/i.test(user) ? "Understood, nothing was archived." : "Done as approved.");
+    } else if (names.includes("owner_approval_request") && user.includes("VERIFY-COORD-APPROVAL")) {
+      reply =
+        stage === 0
+          ? call("owner_approval_request", {
+              action: "archive",
+              input: { id: user.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0] },
+              summary: "Archive the second spare project",
+            })
+          : say("I asked you to approve archiving the second spare project.");
     } else if (names.includes("host_call") && user.includes("VERIFY-HOST-APPROVE")) {
       reply =
         stage === 0

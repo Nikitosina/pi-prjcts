@@ -48,27 +48,30 @@ export async function loadUi() {
   } else if (!state.ui) apply(normalize(local()));
 }
 let writing = Promise.resolve();
-/** Applies the patch at once, then writes it to the host; a stale revision re-reads and retries once. */
+/** Applies the patch at once, then writes it to the host; a stale revision re-reads and retries once. Resolves true when the
+ * host kept it. */
 export function setUi(patch) {
   const next = normalize({ ...state.ui, ...patch, panels: { ...state.ui.panels, ...(patch.panels ?? {}) } });
   apply(next);
-  writing = writing.then(async () => {
+  const done = writing.then(async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const result = await call("ui-set", { revision: state.uiRevision, patch });
         state.uiRevision = result.revision;
         apply(normalize(result.ui));
-        return;
+        return true;
       } catch (error) {
         if (attempt || !/revision/i.test(error.message)) {
           fail(error);
-          return void (await loadUi()); // show what the host kept, not the refused change
+          await loadUi(); // show what the host kept, not the refused change
+          return false;
         }
         state.uiRevision = (await call("ui-get")).revision;
       }
     }
   });
-  return writing;
+  writing = done.catch(() => false);
+  return done;
 }
 // System theme follows the OS while the page is open.
 window.piUi2Boot.dark.addEventListener("change", () => state.ui && window.piUi2Boot.apply(state.ui));

@@ -220,7 +220,7 @@ function paintStatusLine() {
             : "working"
     : "idle";
   document.querySelector("#statusline").innerHTML =
-    `<span class="sl-item"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span><span class="sl-item mono" title="${esc(modelRef)}">${esc(shortModel(modelRef) || "–")}</span><span class="sl-item mono sl-think">think ${esc(state.thinking ?? "medium")}</span><span class="sl-item mono" title="Context">${pct === null ? "ctx –" : `ctx ${tokens(ctx.tokens)}/${tokens(ctx.window)} <span class="sl-bar"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`}</span><span class="sl-item mono">${esc(Number.isFinite(cost) ? usd(cost) : "$–")}</span><span class="grow"></span><span class="sl-item mono ${state.connected ? "ok" : "off"}">${state.connected ? "● connected" : "○ reconnecting"}</span><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
+    `<span class="sl-item"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span><span class="sl-item mono" title="${esc(modelRef)}">${esc(shortModel(modelRef) || "–")}</span><span class="sl-item mono sl-think">think ${esc(state.thinking ?? "medium")}</span><span class="sl-item mono" title="Context">${pct === null ? "ctx –" : `ctx ${tokens(ctx.tokens)}/${tokens(ctx.window)} <span class="sl-bar"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`}</span><span class="sl-item sl-cost mono" title="Coordinator cost of this chat">${esc(Number.isFinite(cost) ? usd(cost) : "$–")} chat</span>${limitItems()}<span class="grow"></span><span class="sl-item mono ${state.connected ? "ok" : "off"}">${state.connected ? "● connected" : "○ reconnecting"}</span><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
 }
 async function loadUsage() {
   const gen = state.generation;
@@ -237,12 +237,26 @@ async function loadUsage() {
 async function loadLimits() {
   const limits = await call("limits-snapshot").catch(() => null);
   if (!limits) return;
-  const shown = limits.providers.filter((item) => item.status === "ok");
-  document.querySelector("#limits").innerHTML = shown
+  state.limits = limits.providers.filter((item) => item.status === "ok");
+  paintStatusLine();
+}
+const WINDOW_WORDS = { "5h": "5-hour window", "7d": "7-day window", mo: "month" };
+/** Subscription usage as status-line items: what it is, the period, and where it comes from, in words and a tooltip. */
+function limitItems() {
+  return (state.limits ?? [])
     .map((item) => {
-      const sample = item.samples?.[0];
-      const pct = sample ? Math.round(sample.usedPercent ?? 0) : null;
-      return `<div class="limit"><span>${esc(item.label)}</span>${pct !== null ? `<span class="sl-bar"><span style="width:${pct}%"></span></span><span class="mono small">${pct}%</span>` : item.usage ? `<span class="mono small">${usd(item.usage.amountUsd)}</span>` : ""}</div>`;
+      if (item.usage) {
+        const { amountUsd, periodStartAt, periodEndAt, account } = item.usage;
+        const days = (periodEndAt - periodStartAt) / 86400000;
+        const period = days > 26 && days < 33 ? "this month" : "this period";
+        const tip = `${item.label} subscription: ${usd(amountUsd)} spent ${period} (${new Date(periodStartAt).toLocaleDateString()}–${new Date(periodEndAt).toLocaleDateString()}${account ? `, ${account}` : ""}), read from ${item.label}'s usage endpoint. Not the cost of this chat.`;
+        return `<span class="sl-item sl-limit mono" title="${esc(tip)}">${esc(item.label)} · ${esc(usd(amountUsd))} ${period}</span>`;
+      }
+      const sample = [...(item.samples ?? [])].sort((a, b) => b.usedPercent - a.usedPercent)[0];
+      if (!sample) return "";
+      const pct = Math.round(sample.usedPercent ?? 0);
+      const tip = `${item.label} subscription: ${pct}% of the ${WINDOW_WORDS[sample.window] ?? sample.window} used${sample.resetsAt ? `, resets ${new Date(sample.resetsAt).toLocaleString()}` : ""}.`;
+      return `<span class="sl-item sl-limit mono" title="${esc(tip)}">${esc(item.label)} ${esc(sample.window)} <span class="sl-bar ${pct >= 90 ? "hot" : ""}"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%</span>`;
     })
     .join("");
 }

@@ -35,4 +35,4 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [Verification settings](./verification-settings.md) — opt in to the automatic verifier loop in Project settings. Scripted.
 - [Jobs, Approve and Deploy](./jobs.md) — Job tree, Ready proof and Approve in worker details, intermediate checkpoint without Approve, Deploy settings. Scripted.
 - [Quota fallback settings](./quota-settings.md) — worker fallback selection, review, save and reload. Scripted.
-- [UI 2.0 client](./ui2.md) — /ui2/ tree, tool rows, worker focus, Memory, settings overlay with host themes, profiles and tiers, Host agent drawer with Approve/Deny and focus, narrow layout. Scripted.
+- [UI 2.0 client](./ui2.md) — /ui2/ tree, tool rows, worker focus, Memory, settings overlay with host themes, profiles, tiers, Context bar, prompt and tools, Host agent drawer with Approve/Deny, coordinator approvals and focus, toasts, narrow layout. Scripted.

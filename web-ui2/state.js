@@ -37,10 +37,20 @@ export const stale = (generation) => generation !== state.generation;
 export const project = () => state.projects.find((item) => item.id === state.projectId) ?? null;
 export const chatArgs = () => (state.chatId && state.chatId !== "main" ? { chatId: state.chatId } : {});
 
+/** Toasts are for background events and errors. An identical message already showing restarts its timer instead of stacking;
+ * at most two show; each leaves on its own. A change the owner just made reports next to its control (`inline`) instead. */
 export function toast(text, { action, onAction, error = false, ms = 5000 } = {}) {
-  const box = document.querySelector("#toasts"),
-    node = document.createElement("div");
+  const box = document.querySelector("#toasts");
+  const same = [...box.children].find((item) => item.dataset.text === text && !item.dataset.leaving);
+  if (same) {
+    clearTimeout(Number(same.dataset.timer));
+    same.dataset.timer = String(setTimeout(() => dismiss(same), ms));
+    return;
+  }
+  const node = document.createElement("div");
   node.className = `toast${error ? " error" : ""}`;
+  node.dataset.text = text;
+  if (error) node.setAttribute("role", "alert");
   const span = document.createElement("span");
   span.textContent = text;
   node.append(span);
@@ -49,17 +59,54 @@ export function toast(text, { action, onAction, error = false, ms = 5000 } = {})
     button.type = "button";
     button.textContent = action;
     button.addEventListener("click", () => {
-      node.remove();
+      dismiss(node);
       onAction?.();
     });
     node.append(button);
   }
-  // At most three at once (two on a phone); the oldest goes first, so a burst never covers the page.
-  const keep = matchMedia("(max-width: 600px)").matches ? 2 : 3;
-  [...box.children].slice(0, Math.max(0, box.children.length - keep + 1)).forEach((old) => old.remove());
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-x";
+  close.setAttribute("aria-label", "Dismiss");
+  close.textContent = "✕";
+  close.addEventListener("click", () => dismiss(node));
+  node.append(close);
+  [...box.children]
+    .filter((item) => !item.dataset.leaving)
+    .slice(0, -1)
+    .forEach(dismiss);
   box.append(node);
-  setTimeout(() => node.remove(), ms);
+  node.dataset.timer = String(setTimeout(() => dismiss(node), ms));
 }
+function dismiss(node) {
+  if (node.dataset.leaving) return;
+  node.dataset.leaving = "1";
+  clearTimeout(Number(node.dataset.timer));
+  node.classList.add("leaving");
+  setTimeout(() => node.remove(), 160);
+}
+
+/** One short status next to the control that changed ("Saved · Coordinator thinking: high"). `slot` is the element that shows it;
+ * it clears itself after a few seconds, and a newer status replaces an older one. */
+export function inline(slot, text, { error = false } = {}) {
+  if (!slot) return toast(text, { error });
+  clearTimeout(Number(slot.dataset.timer));
+  slot.textContent = `${error ? "⚠ " : "✓ "}${text}`;
+  slot.classList.toggle("error", error);
+  slot.classList.remove("fade");
+  void slot.offsetWidth; // restart the entry animation
+  slot.classList.add("show");
+  slot.dataset.timer = String(
+    setTimeout(
+      () => {
+        slot.classList.remove("show");
+        slot.classList.add("fade");
+      },
+      error ? 8000 : 3500,
+    ),
+  );
+}
+
 export function fail(error) {
   console.warn(error);
   toast(error?.message ?? String(error), { error: true, ms: 8000 });

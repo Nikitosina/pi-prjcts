@@ -98,6 +98,11 @@ function turns(items) {
   }
   return out;
 }
+const STARTERS = [
+  "Read this workspace and tell me what it does and how it is built.",
+  "Find the riskiest open problem here and propose the smallest fix.",
+  "Plan the next small change, then hand it to a worker.",
+];
 export function renderFeed() {
   if (!state.view) return;
   const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
@@ -107,7 +112,7 @@ export function renderFeed() {
   if (older.length ? olderBefore : state.view.before) html.push(`<button type="button" class="earlier" data-earlier>Show earlier</button>`);
   if (!all.length)
     html.push(
-      `<div class="empty-chat"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p></div>`,
+      `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
   html.push(transcriptHtml(all, busy));
   html.push(`<div id="live-turn"></div>`);
@@ -249,13 +254,16 @@ export function toolRowHtml({ call: item, result }, liveStatus) {
   const open = expanded.has(item.callId);
   const took = result && Number.isFinite(item.at) && Number.isFinite(result.at) ? dur(result.at - item.at) : "";
   const worker = item.name === "agents" && result ? UUID.exec(result.preview ?? "")?.[0] : null;
+  // A coordinator's approval request links to its card in the Host agent drawer.
+  const approval =
+    item.name === "owner_approval_request" && result && !result.isError ? /Approval (\S+) is/.exec(result.preview ?? "")?.[1] : null;
   const icon =
     status === "running"
       ? `<span class="spin" aria-label="running"></span>`
       : status === "error"
         ? `<span class="st err" aria-label="failed">✕</span>`
         : `<span class="st ok" aria-label="done">✓</span>`;
-  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}</div>${open ? toolDetailHtml(item, result, args) : ""}</div>`;
+  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}${approval ? `<button type="button" class="link-btn" data-review-approval="${esc(approval)}">Review approval ↗</button>` : ""}</div>${open ? toolDetailHtml(item, result, args) : ""}</div>`;
 }
 function toolDetailHtml(item, result, args) {
   const params = args ? JSON.stringify(args, null, 2) : item.argsPreview;
@@ -434,6 +442,11 @@ export async function transcriptClick(event, root, rerender) {
     emit("open", { kind: "worker", id: worker.dataset.openWorker });
     return true;
   }
+  const review = event.target.closest("[data-review-approval]");
+  if (review) {
+    emit("review-approval", review.dataset.reviewApproval);
+    return true;
+  }
   const undo = event.target.closest("[data-memory-undo]");
   if (undo) {
     const gen = state.generation;
@@ -462,6 +475,15 @@ export async function transcriptClick(event, root, rerender) {
   return false;
 }
 feed.addEventListener("click", async (event) => {
+  const starter = event.target.closest("[data-starter]");
+  if (starter) {
+    const box = document.querySelector("#composer textarea");
+    box.value = STARTERS[Number(starter.dataset.starter)];
+    box.dispatchEvent(new Event("input"));
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+    return;
+  }
   if (await transcriptClick(event, feed, renderFeed)) return;
   if (event.target.closest("[data-earlier]")) {
     const gen = state.generation,

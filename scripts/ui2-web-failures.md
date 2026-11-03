@@ -91,3 +91,18 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - The Memory view still classifies by folder in the browser instead of using `memory-index` kinds, hides archived entries without a way to see them, or drops broken links.
 - The drawer repaints its whole history on every turn end, so every row animates in again.
 - A burst of toasts stacks until it covers the chat on a phone.
+
+## Round 2: feedback, usage, Model and Context pages, polish
+
+- Toasts: the same message stacks once per event; more than two show at once; one never goes away; on 390 px a toast covers the composer or the drawer's composer.
+- A change made in Settings or the drawer is confirmed only by a toast far from the control, or not at all; the inline status stays forever or survives into another section.
+- The left-bar "Eliza $1.42" (or any subscription line) has no label saying what it is, which period it covers, or where it comes from; the status line's session cost and the subscription cost read as the same number.
+- Model page: a tier missing from the list, a tier without its models in order, context size or price; the selected row is not marked (check and aria-checked); no way back to "Project model (no tier)", or choosing it leaves the tier saved.
+- Context page: no current-use marker; the auto-compaction mark does not drag or move with ←/→, or moves without saving; the force mark disagrees with where the runtime forces compaction (window − reserve); the window size is missing; Compact now is hidden.
+- A new chat shows an empty page with no next step; a starter prompt sends without the owner seeing it, or fills a composer that is not focused.
+- Tool rows and message headers start at different left edges; spacing between turns is uneven.
+- Prompt editor: Save sends nothing, or the saved project instructions do not appear in `prompt-render`.
+- Tools: switching a tool off does not reach `profile-tools` (enabled stays true), or a locked tool can be switched off.
+- Tier editor: a rename or a new tier is lost on Save, or a new tier saves with no model.
+- A coordinator's `owner_approval_request` shows only as a raw tool row: no card in the drawer, no needs-you in the pill, no way from the chat row to the decision; the outcome posted back to the chat renders as an owner bubble.
+- At 390 px the Host agent drawer overflows the screen, hides its composer, or cannot be closed by keyboard.
