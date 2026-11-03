@@ -176,6 +176,22 @@ await kit.run(async () => {
   // ui_set is the host's real ui-set.
   await send(`HA-CALL ui_set {"patch":{"theme":"light"}}`);
   check("ui_set changes the host ui document", (await rpc({ action: "ui-get" })).ui.theme === "light");
+  const statusItems = ["hints", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection"].map((item) => ({
+    id: item,
+    enabled: item !== "hints",
+  }));
+  await send(`HA-CALL ui_set ${JSON.stringify({ patch: { statusItems } })}`);
+  check(
+    "U9 ui_set reorders and hides status line items",
+    JSON.stringify((await rpc({ action: "ui-get" })).ui.statusItems) === JSON.stringify(statusItems),
+  );
+  const refusedItems = await send(`HA-CALL ui_set ${JSON.stringify({ patch: { statusItems: [...statusItems, statusItems[0]] } })}`);
+  check(
+    "U9 ui_set refuses a duplicate status item with the reason",
+    /twice/i.test(refusedItems.at(-1).text) &&
+      JSON.stringify((await rpc({ action: "ui-get" })).ui.statusItems) === JSON.stringify(statusItems),
+    refusedItems.at(-1).text.slice(0, 400),
+  );
 
   // An allowed call runs through dispatch.
   const listed = await send(`HA-CALL host_call {"action":"list","input":{}}`);

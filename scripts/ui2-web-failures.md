@@ -118,3 +118,12 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - A nested codemode call has no compact running/done/failed detail, or a failed compaction disappears instead of remaining inspectable in Context without adding noise to the primary chat.
 - The status pill says All quiet from per-chat state but its click follows a stale project-level working flag; displayed state and click behavior must agree.
 - Rendering a diagnostic expands or stringifies an unbounded result instead of using the transcript's bounded preview.
+
+## Composable status line
+
+- The status line ignores `statusItems`: a hidden item still renders, or items keep the built-in order after a reorder.
+- Settings → Status line cannot reorder by keyboard (Up/Down buttons), loses focus after a move, or shows hidden items the same as shown ones (no "hidden" state in words, not only color).
+- A change from another tab or from the Host agent's `ui_set` reaches the bar only after a reload.
+- The Spacer stops pushing the items after it to the right, or with the Spacer hidden the bar overflows instead of packing left.
+- At 390 px the bar overflows the viewport or cuts off items without a way to reach them.
+- A Host agent `ui_focus` at Settings (or a settings section such as `theme` or `statusline`) opens the Settings overlay by itself after it changes a setting; the owner must get a quiet notice with a button, and owner-opened Settings (⌘,, palette, the button) must still work.

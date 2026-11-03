@@ -1,10 +1,11 @@
 // UI 2.0 entry: selection, center focus, streams, status pill and line, hotkeys and the command palette.
 // Three areas on every screen: list (left), focus (center), context (right); the Host agent drawer opens over them.
 import { call, setToken, stream, token } from "./api.js";
-import { clip, esc, shortModel, tokens, usd } from "./format.js";
+import { clip, esc } from "./format.js";
 import { register, paintHints, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { loadUi, setUi } from "./ui.js";
+import { paintStatusLine } from "./statusline.js";
 import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
@@ -203,28 +204,6 @@ function jumpToStatus() {
   }
   toast("Nothing is running and nothing needs you.");
 }
-function paintStatusLine() {
-  const view = state.view,
-    live = state.live,
-    ctx = view?.context;
-  const modelRef = state.profiles?.coordinator?.effectiveModel ?? view?.project?.model ?? "";
-  const pct = ctx?.window ? Math.round((100 * (ctx.tokens ?? 0)) / ctx.window) : null;
-  const cost = state.usage?.coordinator?.total?.cost?.total,
-    compactionFailed = ctx?.compactionFailure && !ctx?.compacting;
-  const status = live?.running
-    ? live.compacting
-      ? "compacting"
-      : live.retry
-        ? "retrying"
-        : live.text
-          ? "writing"
-          : live.thinking
-            ? "thinking"
-            : "working"
-    : "idle";
-  document.querySelector("#statusline").innerHTML =
-    `<span class="sl-item"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span><span class="sl-item mono" title="${esc(modelRef)}">${esc(shortModel(modelRef) || "–")}</span><span class="sl-item mono sl-think">think ${esc(state.thinking ?? "medium")}</span><span class="sl-item mono" title="Context">${pct === null ? "ctx –" : `ctx ${tokens(ctx.tokens)}/${tokens(ctx.window)} <span class="sl-bar"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`}</span>${compactionFailed ? `<span class="sl-item mono t-needs" title="${esc(ctx.compactionFailure.error)}">compaction failed</span>` : ""}<span class="sl-item sl-cost mono" title="Coordinator cost of this chat">${esc(Number.isFinite(cost) ? usd(cost) : "$–")} chat</span>${limitItems()}<span class="grow"></span><span class="sl-item mono ${state.connected ? "ok" : "off"}">${state.connected ? "● connected" : "○ reconnecting"}</span><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
-}
 async function loadUsage() {
   const gen = state.generation;
   const [usage, profiles] = await Promise.all([
@@ -242,26 +221,6 @@ async function loadLimits() {
   if (!limits) return;
   state.limits = limits.providers.filter((item) => item.status === "ok");
   paintStatusLine();
-}
-const WINDOW_WORDS = { "5h": "5-hour window", "7d": "7-day window", mo: "month" };
-/** Subscription usage as status-line items: what it is, the period, and where it comes from, in words and a tooltip. */
-function limitItems() {
-  return (state.limits ?? [])
-    .map((item) => {
-      if (item.usage) {
-        const { amountUsd, periodStartAt, periodEndAt, account } = item.usage;
-        const days = (periodEndAt - periodStartAt) / 86400000;
-        const period = days > 26 && days < 33 ? "this month" : "this period";
-        const tip = `${item.label} subscription: ${usd(amountUsd)} spent ${period} (${new Date(periodStartAt).toLocaleDateString()}–${new Date(periodEndAt).toLocaleDateString()}${account ? `, ${account}` : ""}), read from ${item.label}'s usage endpoint. Not the cost of this chat.`;
-        return `<span class="sl-item sl-limit mono" title="${esc(tip)}">${esc(item.label)} · ${esc(usd(amountUsd))} ${period}</span>`;
-      }
-      const sample = [...(item.samples ?? [])].sort((a, b) => b.usedPercent - a.usedPercent)[0];
-      if (!sample) return "";
-      const pct = Math.round(sample.usedPercent ?? 0);
-      const tip = `${item.label} subscription: ${pct}% of the ${WINDOW_WORDS[sample.window] ?? sample.window} used${sample.resetsAt ? `, resets ${new Date(sample.resetsAt).toLocaleString()}` : ""}.`;
-      return `<span class="sl-item sl-limit mono" title="${esc(tip)}">${esc(item.label)} ${esc(sample.window)} <span class="sl-bar ${pct >= 90 ? "hot" : ""}"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%</span>`;
-    })
-    .join("");
 }
 
 // ---------------------------------------------------------------------------------------------------------------- commands and hotkeys

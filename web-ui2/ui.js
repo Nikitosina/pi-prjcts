@@ -1,4 +1,4 @@
-// The host `ui` document (theme, font, animations, hotkeys, panels, status line) through `ui-get` / `ui-set`, followed on host topic `ui`.
+// The host `ui` document (theme, font, animations, hotkeys, panels, status line and its items) through `ui-get` / `ui-set`, followed on host topic `ui`.
 // localStorage keeps the last copy only as the pre-paint cache (boot.js) and for a page that cannot reach the host.
 import { call } from "./api.js";
 import { setOverrides } from "./hotkeys.js";
@@ -11,6 +11,10 @@ export const DEFAULT_UI = {
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },
   statusLine: true,
+  statusItems: ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"].map((id) => ({
+    id,
+    enabled: true,
+  })),
 };
 const LOCAL = "pi-ui2-ui";
 
@@ -22,7 +26,14 @@ function local() {
   }
 }
 function normalize(ui) {
-  return { ...DEFAULT_UI, ...(ui ?? {}), panels: { ...DEFAULT_UI.panels, ...(ui?.panels ?? {}) }, hotkeys: { ...(ui?.hotkeys ?? {}) } };
+  return {
+    ...DEFAULT_UI,
+    ...(ui ?? {}),
+    panels: { ...DEFAULT_UI.panels, ...(ui?.panels ?? {}) },
+    hotkeys: { ...(ui?.hotkeys ?? {}) },
+    // A cache from before the field, or from an older host, draws today's bar.
+    statusItems: Array.isArray(ui?.statusItems) ? ui.statusItems : DEFAULT_UI.statusItems,
+  };
 }
 function apply(ui) {
   state.ui = ui;

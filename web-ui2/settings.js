@@ -5,6 +5,7 @@ import { ago, clip, esc, oneLine, shortModel, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
+import { STATUS_ITEMS } from "./statusline.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -24,6 +25,7 @@ export const SECTIONS = [
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
   { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
   { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
+  { id: "statusline", label: "Status line", scope: "host", group: "Host", render: statusLine },
   { id: "hotkeys", label: "Hotkeys", scope: "host", group: "Host", render: hotkeys },
   { id: "notifications", label: "Notifications", scope: "host", group: "Advanced", render: notifications },
   { id: "remote", label: "Remote access", scope: "host", group: "Advanced", render: remote },
@@ -808,20 +810,84 @@ function theme(body) {
 function animations(body) {
   const current = state.ui?.animations ?? "subtle",
     reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  body.innerHTML = `${line("Rows slide in, working agents shimmer, panels glide.", "Off removes all motion. Your system's reduced-motion setting always wins.")}<div class="seg big" role="radiogroup" aria-label="Animations">${["off", "subtle", "full"].map((level) => `<button type="button" role="radio" data-motion="${level}" aria-checked="${level === current}">${level}</button>`).join("")}</div>${reduced ? `<p class="muted small">Reduced motion is on in your system settings, so motion stays off.</p>` : ""}<div class="field-row"><label class="switch"><input type="checkbox" id="statusline-toggle" ${state.ui?.statusLine !== false ? "checked" : ""}/> Status line at the bottom</label></div>`;
+  body.innerHTML = `${line("Rows slide in, working agents shimmer, panels glide.", "Off removes all motion. Your system's reduced-motion setting always wins.")}<div class="seg big" role="radiogroup" aria-label="Animations">${["off", "subtle", "full"].map((level) => `<button type="button" role="radio" data-motion="${level}" aria-checked="${level === current}">${level}</button>`).join("")}</div>${reduced ? `<p class="muted small">Reduced motion is on in your system settings, so motion stays off.</p>` : ""}`;
   body.addEventListener("click", (event) => {
     const pick = event.target.closest("[data-motion]");
     if (!pick) return;
     void setUi({ animations: pick.dataset.motion }).then((ok) => ok && say(`Animations: ${pick.dataset.motion}`));
     body.querySelectorAll("[data-motion]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
   });
-  body
-    .querySelector("#statusline-toggle")
-    .addEventListener(
-      "change",
-      (event) =>
-        void setUi({ statusLine: event.target.checked }).then((ok) => ok && say(`Status line ${event.target.checked ? "on" : "off"}`)),
-    );
+}
+/** Status line: show the bar, and order and show its built-in items. Keyboard: Tab to an item's ↑/↓ or its checkbox. */
+function statusLine(body, alive) {
+  const label = (id) => STATUS_ITEMS.find((item) => item.id === id)?.label ?? id;
+  const current = () => state.ui.statusItems;
+  const draw = (focus) => {
+    const items = current();
+    body.innerHTML = `${line("Order the items of the bottom status line and choose which ones show.", "Same in every browser; the Host agent can change it too. On narrow screens thinking, cost, limits and key hints are left out to fit.")}<div class="field-row"><label class="switch"><input type="checkbox" id="statusline-toggle" ${state.ui.statusLine ? "checked" : ""}/> Show the status line</label></div><ol class="sl-order" aria-label="Status line items" data-bar="${state.ui.statusLine ? "on" : "off"}">${items
+      .map((item, index) => {
+        const meta = STATUS_ITEMS.find((entry) => entry.id === item.id) ?? { label: item.id, hint: "" };
+        return `<li data-sl-item="${esc(item.id)}" data-enabled="${item.enabled ? "1" : "0"}"><span class="sl-pos mono" aria-hidden="true">${index + 1}</span><label class="switch"><input type="checkbox" data-sl-toggle="${esc(item.id)}" ${item.enabled ? "checked" : ""} aria-describedby="sl-hint-${esc(item.id)}"/><b>${esc(meta.label)}</b></label><span class="muted small one-line" id="sl-hint-${esc(item.id)}">${esc(meta.hint)}</span><span class="sl-state small">${item.enabled ? "" : "hidden"}</span><span class="sl-moves"><button type="button" class="icon-btn small" data-sl-move="up" data-id="${esc(item.id)}" aria-label="Move ${esc(meta.label)} up" ${index === 0 ? "disabled" : ""}>↑</button><button type="button" class="icon-btn small" data-sl-move="down" data-id="${esc(item.id)}" aria-label="Move ${esc(meta.label)} down" ${index === items.length - 1 ? "disabled" : ""}>↓</button></span></li>`;
+      })
+      .join(
+        "",
+      )}</ol><p class="muted small"><button type="button" class="ghost-btn small" data-sl-reset>Restore the default order</button></p>`;
+    if (!focus) return;
+    // Keep the keyboard on the item that moved; at an end the other arrow takes focus.
+    const row = body.querySelector(`[data-sl-item="${CSS.escape(focus.id)}"]`);
+    const target = row?.querySelector(focus.selector);
+    (target && !target.disabled ? target : row?.querySelector("[data-sl-move]:not([disabled])"))?.focus();
+  };
+  const save = (statusItems, message, focus) => {
+    const done = setUi({ statusItems });
+    draw(focus);
+    void done.then((ok) => (ok ? say(message) : alive() && draw(focus)));
+  };
+  draw();
+  // A change from another browser or the Host agent redraws this section while it is open.
+  const off = on("ui", () => {
+    if (!alive()) return off();
+    const active = document.activeElement?.closest?.("[data-sl-item]");
+    const selector = document.activeElement?.matches?.("[data-sl-move]")
+      ? `[data-sl-move="${document.activeElement.dataset.slMove}"]`
+      : document.activeElement?.matches?.("[data-sl-toggle]")
+        ? "[data-sl-toggle]"
+        : null;
+    draw(active && selector ? { id: active.dataset.slItem, selector } : null);
+  });
+  body.addEventListener("change", (event) => {
+    if (event.target.id === "statusline-toggle") {
+      const shown = event.target.checked;
+      void setUi({ statusLine: shown }).then((ok) => ok && say(`Status line ${shown ? "shown" : "hidden"}`));
+      return;
+    }
+    const toggle = event.target.closest("[data-sl-toggle]");
+    if (!toggle) return;
+    const id = toggle.dataset.slToggle;
+    const next = current().map((item) => (item.id === id ? { ...item, enabled: toggle.checked } : item));
+    save(next, `${label(id)} ${toggle.checked ? "shown" : "hidden"}`, { id, selector: "[data-sl-toggle]" });
+  });
+  body.addEventListener("click", (event) => {
+    if (event.target.closest("[data-sl-reset]")) {
+      const enabled = new Map(current().map((item) => [item.id, item.enabled]));
+      save(
+        STATUS_ITEMS.map(({ id }) => ({ id, enabled: enabled.get(id) ?? true })),
+        "Default order restored",
+      );
+      return;
+    }
+    const move = event.target.closest("[data-sl-move]");
+    if (!move || move.disabled) return;
+    const items = [...current()],
+      from = items.findIndex((item) => item.id === move.dataset.id),
+      to = from + (move.dataset.slMove === "up" ? -1 : 1);
+    if (from < 0 || to < 0 || to >= items.length) return;
+    [items[from], items[to]] = [items[to], items[from]];
+    save(items, `${label(move.dataset.id)} moved ${move.dataset.slMove} to ${to + 1}`, {
+      id: move.dataset.id,
+      selector: `[data-sl-move="${move.dataset.slMove}"]`,
+    });
+  });
 }
 function hotkeys(body) {
   const draw = () => {

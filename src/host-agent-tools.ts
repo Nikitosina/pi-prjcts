@@ -6,6 +6,7 @@ import { fitJson } from "./response-limit.ts";
 import type { FocusTarget } from "./change-feed.ts";
 import { plugins } from "./plugins.ts";
 import { redactForAgent } from "./agent-redaction.ts";
+import { STATUS_ITEM_IDS } from "./ui-settings.ts";
 
 type Action = RequestData["action"];
 /** What the Host agent may do with one host action: run it, ask the owner first, or never (with the reason). */
@@ -298,7 +299,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
   const focus = defineTool({
     name: "ui_focus",
     description:
-      "Point the owner's open browser at a view: { view: 'project' | 'chat' | 'settings' | 'approvals' | ..., projectId?, chatId?, section? }. Use it when you change something they will want to see.",
+      "Point the owner's open browser at a view: { view: 'project' | 'chat' | 'memory' | 'approvals' | 'settings' | ..., projectId?, chatId?, section? }. Use it only when the owner asks to see a view, not after changing a setting. Settings views do not open by themselves: the owner gets a button to open them.",
     parameters: Type.Object({
       view: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
       projectId: Type.Optional(Type.String({ pattern: "^[a-f0-9-]{36}$" })),
@@ -313,7 +314,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
   });
   const uiSet = defineTool({
     name: "ui_set",
-    description: "Change the owner's UI settings (theme, animations, hotkeys, panels, status line) with a partial patch.",
+    description: `Change the owner's UI settings (theme, font, animations, hotkeys, panels, status line) with a partial patch. statusLine: false hides the whole status line; statusItems orders it and hides items: list every one of ${STATUS_ITEM_IDS.join(", ")} exactly once as { id, enabled }. Read the current list with host_call ui-get first.`,
     parameters: Type.Object({ patch: Type.Record(Type.String(), Type.Unknown()) }),
     replay: "unsafe",
     async execute(args) {

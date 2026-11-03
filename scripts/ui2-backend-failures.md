@@ -54,6 +54,10 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - U2 Stale revision refused; unknown keys, unknown theme, unknown animation level and malformed hotkeys refused.
 - U3 A patch merges (setting `theme` keeps `hotkeys`); `panels` merges per key.
 - U4 Saving publishes host topic `ui`; a subscriber to `/changes?project=host` receives it.
+- U6 A document saved before `statusItems` existed reads as today's status line: every built-in item, in today's order, all shown.
+- U7 `statusItems` accepts only the fixed item ids, each exactly once: an unknown id, a duplicate or a missing id is refused and nothing is saved.
+- U8 A `statusItems` patch replaces the whole list (order and shown/hidden) and keeps every other field; `statusLine` still hides the whole bar on its own.
+- U9 The Host agent's `ui_set` changes `statusItems` through the same validation; a refused list answers with the reason and leaves the document unchanged.
 
 ## Host change topics
 

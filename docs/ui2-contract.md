@@ -41,6 +41,10 @@ type UiSettings = {
   hotkeys: Record<string, string>;      // command id -> binding, only overrides of the defaults
   panels: { list: boolean; context: boolean; hostAgent: boolean };
   statusLine: boolean;                  // terminal-style bottom status line, default true
+  statusItems: { id: StatusItemId; enabled: boolean }[]; // bar order: every id exactly once; default all shown in this order
+  // StatusItemId: "activity" | "model" | "thinking" | "context" | "cost" | "limits" (all provider usage, one item)
+  //             | "spacer" (pushes later items right) | "connection" | "hints". A missing field reads as the default;
+  //             ui-set refuses an unknown, duplicate or missing id.
 };
 ```
 
@@ -106,7 +110,7 @@ type Approval = {
 - Live streaming: `GET /live?project=host` streams the same frame shape as a coordinator chat's live stream (text, thinking, tools with status and duration).
 - Tools for the Host agent are generated from an allow-list over `Request` actions (`src/host-agent-tools.ts`): one `host_call { action, input }` tool validated with `Request`, one `host_actions` tool that lists allowed actions with their input schema and a one-line description, plus `ui_focus { view, projectId?, chatId?, section? }` and `ui_set` (wraps `ui-set`). A script asserts every `Request` action is either allowed, marked dangerous, or explicitly excluded with a reason.
 - Dangerous actions (at least: `delete`, `archive`, `remove`, `job-approve`, `deploy-start`, `workspace-revoke`, `github-revoke`, `telegram-unpair`, `upload-delete`, `worktrees-cleanup`, `remote-revoke`) create a pending `Approval` instead of running. The tool returns at once with the approval id. When the owner decides, the host runs the stored request (on approve) and posts the outcome to the Host agent as a follow-up.
-- `ui_focus` publishes a host `host-agent` frame `{ t: "topic", topic: "host-agent", type: "focus", view, projectId?, chatId?, section? }`; the browser follows it. Other `host-agent` frames (no `type`) mean history or settings changed: refetch.
+- `ui_focus` publishes a host `host-agent` frame `{ t: "topic", topic: "host-agent", type: "focus", view, projectId?, chatId?, section? }`; the browser follows it, except that Settings views (`settings` or a section name) never open by themselves: the owner gets a toast with Open settings. Other `host-agent` frames (no `type`) mean history or settings changed: refetch.
 - Also dangerous: `webhook-rotate`, `telegram-remove`. Excluded with reasons in `ACTION_POLICY`: `web`, `telegram-token`, `telegram-pair`, `remote-pair-start`, `cursor-connect`, `transcript-image`, `archive-image`, `work-submit`, `shutdown`, `deploy-shutdown`, the `host-agent-*` controls except settings, and `approval-decide`. `remove` has no request yet.
 - Coordinators get the same gate through the tool `owner_approval_request { action, input, summary }`. It accepts only dangerous actions, files an `Approval` with `requestedBy: { kind: "coordinator", projectId, chatId }` and returns at once. The outcome is posted to that chat as an internal follow-up (Main when the chat is gone). Outcome messages start with `[approval <id>]`.
 - Storage: `<home>/host-agent/` with its own pi-durable storage, opened only by the host.

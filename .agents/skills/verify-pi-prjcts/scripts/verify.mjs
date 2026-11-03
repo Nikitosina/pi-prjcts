@@ -479,9 +479,10 @@ async function openBrowser(run, sinks) {
         writeFileSync(join(dir, `${name}.png`), Buffer.from(image.data, "base64"));
       },
       waitFor: (expression, what, ms = 30000) => until(() => page.evaluate(expression), what, ms),
-      /** A real key press through the browser input pipeline; modifiers: 1 Alt, 2 Ctrl, 4 Meta, 8 Shift. */
-      press: async (key, { code = key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode = 0, modifiers = 0 } = {}) => {
-        const text = key.length === 1 && !(modifiers & 6) ? key : undefined;
+      /** A real key press through the browser input pipeline; modifiers: 1 Alt, 2 Ctrl, 4 Meta, 8 Shift. `text: "\r"` makes Enter
+       * activate a focused button. */
+      press: async (key, { code = key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode = 0, modifiers = 0, text: typed } = {}) => {
+        const text = typed ?? (key.length === 1 && !(modifiers & 6) ? key : undefined);
         await send(
           "Input.dispatchKeyEvent",
           { type: text ? "keyDown" : "rawKeyDown", key, code, windowsVirtualKeyCode: keyCode, modifiers, ...(text ? { text } : {}) },
@@ -511,6 +512,7 @@ async function openBrowser(run, sinks) {
   return page;
 }
 
+const ITEM_ORDER = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
 const journeys = {
   // Feature: features/verification-settings.md
   async "verification-settings"(run, page, record, dir, sinks) {
@@ -1136,6 +1138,83 @@ const journeys = {
       record("side-effect", `approval ${approved.id} approved and done; "Verify spare" archived; outcome row "${approvedRows.at(-1)}"`);
       await delay(300);
       await page.shot(dir, "08e-host-agent-approved");
+      // Status line from the Host agent: ui_set reorders and hides items without a reload; its ui_focus at Settings only offers them.
+      await page.click("#ha-composer textarea");
+      await page.cdp("Input.insertText", { text: "VERIFY-HOST-STATUS" });
+      await page.press("Enter", { code: "Enter", keyCode: 13 });
+      await page.waitFor(
+        `/Status line updated/.test(document.querySelector('#host-agent .ha-body').innerText)`,
+        "status line reply",
+        60000,
+      );
+      await page.waitFor(
+        `document.querySelector('#statusline [data-item]')?.dataset.item === 'connection' && !document.querySelector('#statusline [data-item="cost"]')`,
+        "the Host agent's status line order shows without a reload",
+      );
+      await page.waitFor(
+        `[...document.querySelectorAll('#toasts .toast')].some(n => /changed your settings/.test(n.innerText) && /Open settings/.test(n.innerText))`,
+        "a toast offers Open settings",
+      );
+      if (await page.evaluate(`document.querySelector('#settings').open`))
+        throw Error("the Host agent's ui_focus opened Settings by itself");
+      const barOrder = await page.evaluate(`[...document.querySelectorAll('#statusline [data-item]')].map(n => n.dataset.item).join(' ')`);
+      record(
+        "visible",
+        `Host agent ui_set: status line now "${barOrder}", no chat cost; Settings stayed closed and a toast offers Open settings`,
+      );
+      await page.shot(dir, "08f-host-agent-status-line");
+      await page.evaluate(
+        `[...document.querySelectorAll('#toasts .toast')].find(n => /Open settings/.test(n.innerText)).querySelector('button').dataset.verify = 'open-settings'`,
+      );
+      await page.click('[data-verify="open-settings"]');
+      await page.waitFor(
+        `document.querySelector('#settings')?.open === true && document.querySelector('#settings').dataset.section === 'statusline' && !!document.querySelector('#settings .sl-order')`,
+        "the owner's click opens Settings at Status line",
+      );
+      record("visible", "the toast's Open settings opened Settings → Status line");
+      // Keyboard: move Connection down with Enter on its ↓ button; focus stays on that button.
+      await page.evaluate(`document.querySelector('#settings [data-sl-item="connection"] [data-sl-move="down"]').focus()`);
+      await page.press("Enter", { code: "Enter", keyCode: 13, text: "\r" });
+      await until(
+        async () => (await rpc(run, { action: "ui-get" })).ui.statusItems[1]?.id === "connection",
+        "Connection moved to 2 in ui-get",
+      );
+      await page.waitFor(
+        `document.activeElement?.matches('[data-sl-item="connection"] [data-sl-move="down"]') && document.querySelector('#statusline [data-item]').dataset.item === 'activity'`,
+        "focus stays on the moved item and the bar follows",
+      );
+      // Space on Chat cost's checkbox shows it again.
+      await page.evaluate(`document.querySelector('#settings [data-sl-toggle="cost"]').focus()`);
+      await page.press(" ", { code: "Space", keyCode: 32 });
+      await page.waitFor(`!!document.querySelector('#statusline [data-item="cost"]')`, "chat cost shown again in the bar");
+      await until(
+        async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.find((item) => item.id === "cost")?.enabled === true,
+        "cost enabled in ui-get",
+      );
+      const hiddenLabel = await page.evaluate(
+        `(() => { const box = document.querySelector('#settings [data-sl-toggle="model"]'); box.click(); return document.querySelector('#settings [data-sl-item="model"] .sl-state').textContent; })()`,
+      );
+      if (hiddenLabel !== "hidden") throw Error(`a hidden item is not labelled hidden: ${JSON.stringify(hiddenLabel)}`);
+      await page.waitFor(`!document.querySelector('#statusline [data-item="model"]')`, "model hidden in the bar");
+      await page.shot(dir, "08g-settings-status-line");
+      // The whole bar off and on again.
+      await page.click("#statusline-toggle");
+      await page.waitFor(`document.querySelector('#app').dataset.statusline === '0'`, "status line hidden");
+      await until(async () => (await rpc(run, { action: "ui-get" })).ui.statusLine === false, "statusLine false in ui-get");
+      await page.click("#statusline-toggle");
+      await page.waitFor(`document.querySelector('#app').dataset.statusline === '1'`, "status line shown again");
+      await page.click('#settings [data-sl-toggle="model"]');
+      await page.click("#settings [data-sl-reset]");
+      const restored = await until(async () => {
+        const { ui } = await rpc(run, { action: "ui-get" });
+        return ui.statusLine && ui.statusItems.every((item, index) => item.enabled && item.id === ITEM_ORDER[index]) ? ui : null;
+      }, "default order with every item shown");
+      record(
+        "side-effect",
+        `ui-get after keyboard move, show, hide, bar off/on and Restore: ${restored.statusItems.map((item) => item.id).join(" ")}`,
+      );
+      await page.press("Escape", { keyCode: 27 });
+      await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed after status line");
     }
     await page.press("\\", { code: "Backslash", keyCode: 220 });
     await page.press("Escape", { keyCode: 27 });

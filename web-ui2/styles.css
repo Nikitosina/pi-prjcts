@@ -2822,3 +2822,59 @@ table.hotkeys tr.clash td {
     align-items: baseline;
   }
 }
+
+/* ------------------------------------------------------------------------------------------------ status line items (Settings) */
+.sl-order {
+  list-style: none;
+  margin: 10px 0 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.sl-order[data-bar="off"] {
+  opacity: 0.6;
+}
+.sl-order li {
+  display: grid;
+  grid-template-columns: 22px max-content minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+}
+.sl-order li:first-child {
+  border-top: 0;
+}
+.sl-order li[data-enabled="0"] b,
+.sl-order li[data-enabled="0"] .one-line {
+  color: var(--faint);
+}
+.sl-order .sl-pos {
+  color: var(--faint);
+  text-align: right;
+}
+.sl-order .sl-state {
+  color: var(--faint);
+  font-style: italic;
+}
+.sl-moves {
+  display: inline-flex;
+  gap: 2px;
+}
+.sl-moves button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+@media (max-width: 760px) {
+  /* The bar keeps one line; anything that still does not fit scrolls sideways instead of widening the page. */
+  #statusline {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .sl-order li {
+    grid-template-columns: 22px minmax(0, 1fr) auto auto;
+  }
+  .sl-order .one-line {
+    display: none;
+  }
+}

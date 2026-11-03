@@ -102,8 +102,9 @@ export async function loadHostAgent() {
 
 // ---------------------------------------------------------------------------------------------------------------- focus
 
-const FOCUS_SECTIONS = new Set(["theme", "tiers", "hotkeys", "animations", "notifications", "remote", "deploy", "providers"]);
-/** `ui_focus { view, projectId?, chatId?, section? }` from the agent: move the page, say where in one line. */
+const FOCUS_SECTIONS = new Set(["theme", "tiers", "hotkeys", "animations", "statusline", "notifications", "remote", "deploy", "providers"]);
+/** `ui_focus { view, projectId?, chatId?, section? }` from the agent: move the page, say where in one line. Settings never open on
+ * their own: the owner gets a toast and opens them with its button. */
 export function followFocus(focus) {
   const projectId = focus.projectId ?? state.projectId;
   const known = !focus.projectId || state.projects.some((project) => project.id === focus.projectId);
@@ -122,16 +123,25 @@ export function followFocus(focus) {
       emit("open", { kind: "memory" });
       break;
     case "settings":
-      select(focus.chatId ?? (projectId === state.projectId ? state.chatId : "main"));
-      emit("open-settings", focus.section);
+      offerSettings(focus.section, () => select(focus.chatId ?? (projectId === state.projectId ? state.chatId : "main")));
       break;
     case "approvals":
       toggleHostAgent(true, { at: "approvals" });
       break;
     default:
-      if (FOCUS_SECTIONS.has(focus.view)) emit("open-settings", focus.view);
+      if (FOCUS_SECTIONS.has(focus.view)) offerSettings(focus.view);
       else toast(`Host agent pointed at “${focus.view}”, which this page has no view for.`);
   }
+}
+
+function offerSettings(section, before = () => {}) {
+  toast("The Host agent changed your settings.", {
+    action: "Open settings",
+    onAction: () => {
+      before();
+      emit("open-settings", section);
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------------------------------------------- transcript

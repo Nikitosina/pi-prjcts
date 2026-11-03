@@ -2,7 +2,8 @@
 // Ordinary messages receive `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
 // VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive);
-// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-COORD-APPROVAL <id> has the
+// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-HOST-STATUS reorders the status line
+// through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the
 // coordinator file the same request through owner_approval_request.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -79,6 +80,15 @@ const server = createServer((req, res) => {
               summary: "Archive the spare project",
             })
           : say("Archiving the spare project waits for your approval.");
+    } else if (names.includes("ui_set") && user.includes("VERIFY-HOST-STATUS")) {
+      // Host agent: reorder the status line (Connection first, Chat cost hidden), then point the browser at its settings.
+      const order = ["connection", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "hints"];
+      reply =
+        stage === 0
+          ? call("ui_set", { patch: { statusItems: order.map((id) => ({ id, enabled: id !== "cost" })) } })
+          : stage === 1
+            ? call("ui_focus", { view: "settings", section: "statusline" })
+            : say("Status line updated.");
     } else if (names.includes("host_call") && user.includes("VERIFY-HOST")) {
       // Host agent: list projects, point the browser at Memory, then ask to archive the first project (gated by an approval).
       reply =

@@ -14,7 +14,7 @@ import {
   type ProfileSettings,
   type Tier,
 } from "./profiles.ts";
-import { DEFAULT_UI, UiSettings, type UiPatch } from "./ui-settings.ts";
+import { DEFAULT_UI, UiSettings, checkStatusItems, type UiPatch } from "./ui-settings.ts";
 import { home, listProjects, parse, saveJson, type Project, type Request } from "./state.ts";
 
 /** Host-level documents shared by every project and browser: model tiers and the UI settings (docs/ui2-contract.md). */
@@ -51,15 +51,24 @@ const serial = <T>(operation: () => Promise<T> | T): Promise<T> => {
 
 export function readUi(): { revision: string; ui: UiSettings } {
   const ui =
-    readDocument(uiPath(), (value) =>
-      parse(UiSettings, typeof value === "object" && value !== null && !Array.isArray(value) ? { font: DEFAULT_UI.font, ...value } : value),
-    ) ?? DEFAULT_UI;
+    readDocument(uiPath(), (value) => {
+      // Documents saved before `font` or `statusItems` existed read with today's defaults for them.
+      const ui = parse(
+        UiSettings,
+        typeof value === "object" && value !== null && !Array.isArray(value)
+          ? { font: DEFAULT_UI.font, statusItems: DEFAULT_UI.statusItems, ...value }
+          : value,
+      );
+      checkStatusItems(ui.statusItems);
+      return ui;
+    }) ?? DEFAULT_UI;
   return { revision: revisionOf(ui), ui };
 }
 export const setUi = (revision: string, patch: Static<typeof UiPatch>) =>
   serial(() => {
     const current = readUi();
     if (current.revision !== revision) throw new Error("UI settings revision conflict; reread before updating");
+    if (patch.statusItems) checkStatusItems(patch.statusItems);
     const ui = parse(UiSettings, {
       ...current.ui,
       ...patch,

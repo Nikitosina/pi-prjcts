@@ -352,6 +352,49 @@ await kit.run(async () => {
   await topic("ui");
   check("U4 saving the ui document publishes the host ui topic", true);
 
+  // Status line items: fixed ids, each once; an old document reads as today's bar.
+  const ITEMS = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
+  check(
+    "U6 a document without statusItems reads as today's bar",
+    JSON.stringify(ui.ui.statusItems) === JSON.stringify(ITEMS.map((id) => ({ id, enabled: true }))),
+    ui.ui.statusItems,
+  );
+  const reordered = [...ITEMS].reverse().map((id) => ({ id, enabled: id !== "limits" }));
+  const items = await rpc({ action: "ui-set", revision: themed.revision, patch: { statusItems: reordered } });
+  const rereadItems = await rpc({ action: "ui-get" });
+  check(
+    "U8 a statusItems patch replaces order and visibility and keeps the rest",
+    JSON.stringify(rereadItems.ui.statusItems) === JSON.stringify(reordered) &&
+      rereadItems.ui.theme === "midnight" &&
+      rereadItems.ui.statusLine === true &&
+      rereadItems.ui.hotkeys["panel.list"] === "[",
+    rereadItems.ui,
+  );
+  const unchanged = readFileSync(join(kit.home, "ui.json"), "utf8");
+  const dup = reordered.map((item, index) => (index === 1 ? { ...reordered[0] } : item));
+  check(
+    "U7 an unknown status item id is refused",
+    await fails(
+      { action: "ui-set", revision: items.revision, patch: { statusItems: [...reordered, { id: "clock", enabled: true }] } },
+      /clock|must|expected/i,
+    ),
+  );
+  check(
+    "U7 a duplicate status item is refused",
+    await fails({ action: "ui-set", revision: items.revision, patch: { statusItems: dup } }, /twice/i),
+  );
+  check(
+    "U7 a missing status item is refused",
+    await fails({ action: "ui-set", revision: items.revision, patch: { statusItems: reordered.slice(1) } }, /missing/i),
+  );
+  check("U7 a refused list leaves the document unchanged", readFileSync(join(kit.home, "ui.json"), "utf8") === unchanged);
+  const hidden = await rpc({ action: "ui-set", revision: items.revision, patch: { statusLine: false } });
+  check(
+    "U8 statusLine hides the whole bar on its own",
+    hidden.ui.statusLine === false && JSON.stringify(hidden.ui.statusItems) === JSON.stringify(reordered),
+    hidden.ui,
+  );
+
   // Create grants the workspace and one-click GitHub in one step.
   const gitRepo = join(kit.root, "Demo");
   mkdirSync(gitRepo);
