@@ -30,6 +30,10 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
         ["projects_artifact_read", { threadId: thread, path: "leak.txt" }],
         ["projects_artifact_read", { threadId: thread, path: "shot.png" }],
         ["projects_artifact_read", { threadId: randomUUID(), path: "shot.png" }],
+        ["projects_artifacts_list", { threadId: thread, path: "logs" }],
+        ["projects_artifacts_list", { threadId: thread, kind: "image" }],
+        ["projects_artifacts_list", { threadId: thread, offset: JSON.parse(results[0] ?? "{}").nextOffset ?? 0 }],
+        ["projects_artifacts_list", { threadId: thread, limit: 200 }],
       ];
       if (results.length < steps.length) return call(...steps[results.length]);
       brain.final = `ART-FINAL Verified.\n\n![Screenshot](artifact:${thread}/shot.png)\n\n![Demo video](artifact:${thread}/demo.webm)\n\nLog: [run log](artifact:${thread}/logs/run.log)\n\n![Gone](artifact:${thread}/nope.png)\n\n[bad](javascript:alert(1))`;
@@ -54,6 +58,7 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
           `ln -s ${root} linkdir`,
           'printf x > "<img src=x onerror=window.__xss=1>.txt"',
           "dd if=/dev/zero of=big.bin bs=1 count=0 seek=600m 2>/dev/null",
+          "mkdir -p zz-many && for i in $(seq 100 499); do printf x > zz-many/f$i.txt; done",
           "ls -la",
         ].join(" && "),
       });
@@ -143,7 +148,7 @@ try {
     "A5/A6 no dangling projects_evidence instruction; workers told to list each saved file as a ref",
     !/projects_evidence/.test(system) && /list each file in your answer as a ref/i.test(system),
   );
-  const [list, overview, log, traversal, leak, image, foreign] = brain.coordResults;
+  const [list, overview, log, traversal, leak, image, foreign, logsOnly, imagesOnly, nextPage, expanded] = brain.coordResults;
   result.coordResults = brain.coordResults.map((r) => r.slice(0, 1500));
   check(
     "A8 coordinator lists the thread's files with sizes",
@@ -167,6 +172,34 @@ try {
     "A14 the listing reports the 500 MB soft cap as exceeded; nothing is deleted",
     /"overCap":true/.test(list) && existsSync(join(workerDir, "big.bin")),
   );
+  {
+    const first = JSON.parse(list),
+      next = JSON.parse(nextPage),
+      wide = JSON.parse(expanded);
+    check(
+      "A23 a thread listing is at most 8 KiB, counts every file by kind and folder, and nextOffset continues it",
+      Buffer.byteLength(list) <= 8192 &&
+        first.matched === first.totalFiles &&
+        first.totalFiles >= 405 &&
+        first.folders["zz-many"] === 400 &&
+        first.kinds.image >= 1 &&
+        first.nextOffset === first.files.length &&
+        next.files[0].path !== first.files.at(-1).path &&
+        next.offset === first.nextOffset,
+      { bytes: Buffer.byteLength(list), first: list.slice(0, 600), next: nextPage.slice(0, 300) },
+    );
+    check(
+      "A23 path and kind filter the listing; an explicit limit stays within 16 KiB",
+      JSON.parse(logsOnly)
+        .files.map((f) => f.path)
+        .join() === "logs/run.log" &&
+        JSON.parse(imagesOnly).files.every((f) => f.kind === "image") &&
+        JSON.parse(imagesOnly).files.some((f) => f.ref === `artifact:${thread}/shot.png`) &&
+        Buffer.byteLength(expanded) <= 16384 &&
+        wide.files.length > first.files.length,
+      { logsOnly, imagesOnly: imagesOnly.slice(0, 600), expanded: Buffer.byteLength(expanded) },
+    );
+  }
   check("A8 coordinator reads a text artifact", /RUN-LOG-OK/.test(log), log);
   check("A10 traversal is refused", /refused|outside|invalid|not allowed/i.test(traversal) && !/"id"/.test(traversal), traversal);
   check("A9 reading the symlink is refused", /symlink|refused|not a regular/i.test(leak) && !/TOP-SECRET/.test(leak), leak);

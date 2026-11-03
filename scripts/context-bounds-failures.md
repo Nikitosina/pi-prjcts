@@ -1,8 +1,8 @@
 # Context bounds (default tool responses of at most 8 KiB, paged expansion): failure modes
 
-Written before code. Covered by `scripts/context-bounds-check.mjs` (direct tool calls, no host) and the budget checks E17 to E24 in `scripts/coordinator-efficiency-e2e.mjs`.
+Historical failure plan, written before code. Its original coverage scripts, `scripts/context-bounds-check.mjs` and `scripts/coordinator-efficiency-e2e.mjs`, are absent from this tree; the cases below are not a claim of current coverage. Current transcript and artifact pagination coverage is identified in the limit paragraph below.
 
-Limit: a default response, including its next-page metadata, is at most 8192 bytes. An explicit `limit`, `textLimit`, `offset` or `path` argument reaches everything the tool could reach before.
+Limit: a default response, including its next-page metadata, is at most 8192 bytes. An explicit `limit`, `textLimit`, `offset` or `path` argument reaches everything the tool could reach before. For `projects_worker_read`, `projects_archive_read` and `projects_artifacts_list`, an explicit `limit` page is at most 16 KiB; its cursor and refs still reach everything (verified by `transcript-archive-unit.mjs` and `artifacts-e2e.mjs` A23).
 
 1. `code_grep` with 3000 matching lines returns about 50 KB by default. It must return at most 8192 bytes and say how to continue (a larger `limit`, or a narrower `path`/`glob`).
 2. `code_read` of a 5000-line file returns about 50 KB by default. It must return at most 8192 bytes and the continuation offset, and paging with that offset must visit every line once, with no gap and no overlap.

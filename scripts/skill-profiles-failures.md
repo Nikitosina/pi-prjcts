@@ -34,3 +34,4 @@ Covers C6. Verified by `scripts/skill-profiles-e2e.mjs` unless marked (inspectio
 
 ## Old grant model
 - S21 The old worker-skill grant path (`projects_skill_read`, grant dialog, grant RPCs) still runs alongside profiles, so there are two competing models.
+- S23 The coordinator rereads a whole skill, transcript or diff it already has in context, or pastes full sources into briefs, which fills its context and forces early compaction. Its prompt must say: read a report first and then only the evidence it points to, read files and diffs by path and range, hand off by refs, and skip rereading a skill or file it read fully and that is unchanged, while still rereading after a compaction or /reload, after a change, after a partial read, or when an instruction or the task requires it. That guidance must not weaken a required skill read, proof or evidence check.

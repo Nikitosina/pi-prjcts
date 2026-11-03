@@ -43,7 +43,8 @@ import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
 import { profilesSnapshot, readUi, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
-import { memoryIndex, undoMemory } from "./memory.ts";
+import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
+import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
@@ -548,6 +549,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return projectModelPicker(input.id ? loadProject(input.id) : undefined);
     case "usage-snapshot":
       return (await durable(input.id)).usageSnapshot(input);
+    case "telemetry-snapshot":
+      return (await durable(input.id)).telemetrySnapshot();
     case "library-import":
       return withProjectLock(input.id, async () => {
         const project = loadProject(input.id);
@@ -632,12 +635,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const project = loadProject(input.projectId);
       // The patch replaces the fields it names; the others keep their saved values.
       const merged = { ...project.profiles?.[input.profile], ...input.patch };
+      // Skill rows are the skill profile; saved once there so prompts, skill reads and both lists agree.
+      const split = input.patch.tools ? splitSkillToggles(project, input.profile, input.patch.tools.disabled) : undefined;
+      if (split) merged.tools = { disabled: split.tools };
       const saved = await settings.update({
         action: "settings-update",
         id: input.projectId,
         confirm: input.projectId,
         expectedRevision: input.revision,
-        changes: { profiles: { [input.profile]: merged } },
+        changes: { profiles: { [input.profile]: merged }, ...(split?.skills ? { skills: split.skills } : {}) },
       });
       feed.publish(input.projectId, { topic: "settings" });
       return profilesSnapshot(loadProject(input.projectId), saved.revision);
@@ -648,6 +654,19 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return (await durable(input.projectId)).promptRender(input.profile);
     case "memory-index":
       return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
+    case "memory-recent":
+      return memoryRecent(await knowledgeDir(input.projectId));
+    case "chat-stop": {
+      const project = loadProject(input.projectId);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no running turn to stop");
+      const result = await (await durable(input.projectId)).chatStop(input.chatId);
+      if (result.stopped)
+        process.stderr.write(
+          JSON.stringify({ event: "chat-stopped", projectId: input.projectId, chatId: result.chatId, reason: input.reason ?? null }) + "\n",
+        );
+      feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
+      return result;
+    }
     case "memory-undo":
       return withProjectLock(input.projectId, async () => {
         const project = loadProject(input.projectId);
@@ -842,7 +861,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         operation: async (owner) => {
-          const [plan, view] = await Promise.all([owner.jobs(), owner.snapshot()]);
+          const [plan, view, durable] = await Promise.all([owner.jobs(), owner.snapshot(), owner.taskDiagnostics()]);
           const projectJobs = jobs(input.id);
           let leases = 0;
           try {
@@ -866,6 +885,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             failedJobs: projectJobs.filter((job) => job.state === "failed").length,
             macAwake: null,
             macAwakeReason: "No bounded platform-specific awake probe is configured",
+            durable,
           };
         },
       });
@@ -1254,8 +1274,23 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             text: input.text,
             everyMs: input.everyMs,
             calendar: input.calendar,
+            name: input.name,
           }),
       });
+    case "schedule-run":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleRun(input.scheduleId) });
+    case "schedule-update":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleUpdate(input.scheduleId, input.revision, { name: input.name, text: input.text, schedule: input.schedule }),
+      });
+    case "schedule-delete":
+      return {
+        schedule: await withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleDelete(input.scheduleId, input.revision) }),
+      };
+    case "schedule-restore":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleRestore(input.scheduleId) });
     case "schedule-enable":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleSetEnabled(input.scheduleId, input.enabled) });
     case "schedule-snapshot":

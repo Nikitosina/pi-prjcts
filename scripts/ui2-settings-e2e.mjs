@@ -171,6 +171,20 @@ await kit.run(async () => {
       /agents|locked/i,
     ),
   );
+  for (const name of ["owner_approval_request", "group:core"])
+    check(
+      `L5 the coordinator cannot switch off owner approvals (${name})`,
+      await fails(
+        {
+          action: "profiles-set",
+          projectId: id,
+          revision: (await profiles()).revision,
+          profile: "coordinator",
+          patch: { tools: { disabled: [name] } },
+        },
+        /locked/i,
+      ),
+    );
   const coordinator = await setProfile("coordinator", { tier: "top", thinking: "high", tools: { disabled: ["bash"] } });
   check(
     "P4 the coordinator's effective model is the tier's first",
@@ -242,6 +256,10 @@ await kit.run(async () => {
     "L2 the agents tool is locked",
     tools.groups.some((item) => item.locked && item.tools.some((tool) => tool.name === "agents")),
   );
+  check(
+    "L5 owner_approval_request shows locked",
+    tools.groups.some((item) => item.locked && item.tools.some((tool) => tool.name === "owner_approval_request")),
+  );
   const workerTools = await rpc({ action: "profile-tools", projectId: id, profile: "worker" });
   check(
     "L2 the worker's knowledge group is disabled as a whole",
@@ -278,11 +296,25 @@ await kit.run(async () => {
     { ids },
   );
 
-  // UI document.
+  // UI document. Existing documents predate the font field and must read as JetBrains Mono.
+  writeFileSync(
+    join(kit.home, "ui.json"),
+    JSON.stringify({
+      theme: "claude",
+      animations: "subtle",
+      hotkeys: {},
+      panels: { list: true, context: true, hostAgent: true },
+      statusLine: true,
+    }),
+  );
   const ui = await rpc({ action: "ui-get" });
   check(
-    "U1 defaults come from the contract",
-    ui.ui.theme === "claude" && ui.ui.animations === "subtle" && ui.ui.statusLine === true && ui.ui.panels.list === true,
+    "U1 defaults come from the contract and an old document gains the default font",
+    ui.ui.theme === "claude" &&
+      ui.ui.animations === "subtle" &&
+      ui.ui.font === "jetbrains-mono" &&
+      ui.ui.statusLine === true &&
+      ui.ui.panels.list === true,
     ui,
   );
   check(
@@ -293,7 +325,21 @@ await kit.run(async () => {
     "U2 an unknown theme is refused",
     await fails({ action: "ui-set", revision: ui.revision, patch: { theme: "neon" } }, /theme|must|expected/i),
   );
-  const hot = await rpc({ action: "ui-set", revision: ui.revision, patch: { hotkeys: { "panel.list": "[" } } });
+  check(
+    "U2 an unknown font is refused",
+    await fails({ action: "ui-set", revision: ui.revision, patch: { font: "comic-sans" } }, /font|must|expected/i),
+  );
+  const font = await rpc({ action: "ui-set", revision: ui.revision, patch: { font: "system-sans" } });
+  const rereadFont = await rpc({ action: "ui-get" });
+  check(
+    "U5 font changes advance the revision and persist",
+    font.ui.font === "system-sans" &&
+      font.revision !== ui.revision &&
+      rereadFont.revision === font.revision &&
+      rereadFont.ui.font === "system-sans",
+    { font, rereadFont },
+  );
+  const hot = await rpc({ action: "ui-set", revision: font.revision, patch: { hotkeys: { "panel.list": "[" } } });
   const themed = await rpc({ action: "ui-set", revision: hot.revision, patch: { theme: "midnight", panels: { context: false } } });
   check(
     "U3 a patch merges",
@@ -348,6 +394,38 @@ await kit.run(async () => {
   );
   const verification = await kit.updateSettings(id, { verification: { enabled: true, skill: "verify-demo" } });
   check("V3 verification turns on without a verifier model", verification.values.verification.enabled === true, verification);
+
+  // Skill toggles in a profile's tools are the skill profile: one source of truth for prompt, skill reads and the lists.
+  await rpc({ action: "chat-reload", id });
+  const skillOff = await setProfile("worker", { tools: { disabled: ["group:knowledge", "skill:verify-demo"] } });
+  const savedSkills = (await rpc({ action: "settings-snapshot", id })).values.skills;
+  check("G6 a skill toggle is saved as the skill profile", savedSkills?.off?.worker?.includes("verify-demo"), savedSkills);
+  check(
+    "G6 profiles-get lists the skill back and keeps other tools",
+    JSON.stringify(skillOff.profiles.worker.tools.disabled.sort()) === JSON.stringify(["group:knowledge", "skill:verify-demo"]),
+    skillOff.profiles.worker,
+  );
+  const skillRow = async (profile) =>
+    (await rpc({ action: "profile-tools", projectId: id, profile })).groups
+      .flatMap((item) => item.tools)
+      .find((tool) => tool.name === "skill:verify-demo");
+  check("G6 profile-tools shows the skill off for the worker", (await skillRow("worker"))?.enabled === false);
+  check("G6 the coordinator keeps the skill", (await skillRow("coordinator"))?.enabled === true);
+  const skillsSection = async (profile) =>
+    (await rpc({ action: "prompt-render", projectId: id, profile })).sections.find((section) => section.id === "skills")?.text ?? "";
+  check("G6 the worker prompt's skill index leaves it out", !(await skillsSection("worker")).includes("verify-demo"));
+  check("G6 the coordinator prompt's skill index keeps it", (await skillsSection("coordinator")).includes("verify-demo"));
+  await kit.updateSettings(id, { skills: { off: { all: ["verify-demo"] } } });
+  await setProfile("scout", { tools: { disabled: [] } });
+  const split = (await rpc({ action: "settings-snapshot", id })).values.skills.off;
+  check(
+    "G6 turning a skill on for one profile leaves the others off",
+    !split.all?.includes("verify-demo") &&
+      ["coordinator", "worker", "reviewer"].every((role) => split[role]?.includes("verify-demo")) &&
+      !split.scout?.includes("verify-demo"),
+    split,
+  );
+  await kit.updateSettings(id, { skills: null });
 
   // A project whose runtime was never used answers both reads; missing instruction files are empty sections, not errors.
   const closedTools = await rpc({ action: "profile-tools", projectId: second.id, profile: "worker" });

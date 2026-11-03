@@ -1,5 +1,14 @@
+import type { JsonValue } from "@earendil-works/chord";
+
 /** A default tool response is at most this many bytes, its continuation metadata included. An explicit limit, offset or path argument reaches past it. */
 export const RESPONSE_LIMIT = 8 * 1024;
+/** An explicit page size reaches more rows per call, still within this many bytes; long rows stay previews with a ref to their full text. */
+export const EXPANDED_RESPONSE_LIMIT = 16 * 1024;
+
+/** A tool result whose program value is the JSON text the model reads, so both carry the same bounds. */
+export function jsonResult(text: string): { output: { type: "text"; text: string }[]; structuredOutput: JsonValue } {
+  return { output: [{ type: "text", text }], structuredOutput: JSON.parse(text) as JsonValue };
+}
 
 export const bytes = (text: string): number => Buffer.byteLength(text);
 

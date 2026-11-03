@@ -225,7 +225,8 @@ export async function openHostAgent(input: {
         if (!patch) return settingsView();
         if (revision !== settings.revision) throw new Error("Host agent settings changed (stale revision); reload and retry");
         const next: Settings = { ...settings, revision: settings.revision + 1 };
-        if (patch.model !== undefined) {
+        if (patch.model === null) delete next.model;
+        else if (patch.model !== undefined) {
           if (!known(patch.model)) throw new Error(`Unknown model ${patch.model}: it is not in the model catalog`);
           next.model = patch.model;
         }
@@ -234,6 +235,8 @@ export async function openHostAgent(input: {
           if (!readTiers().tiers.some((item) => item.id === patch.tier)) throw new Error(`Unknown tier ${patch.tier}`);
           if (!tierModel(patch.tier)) throw new Error(`Tier ${patch.tier} has no model with configured credentials`);
           next.tier = patch.tier;
+          // Choosing a tier means "use the tier": a pin left over would silently win over it.
+          if (patch.model === undefined) delete next.model;
         }
         if (patch.thinking) next.thinking = patch.thinking;
         if (patch.disabledTools) {

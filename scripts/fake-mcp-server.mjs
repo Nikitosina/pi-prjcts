@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Fake MCP server (stdio, newline-delimited JSON-RPC) for offline E2Es. Logs connections and tool calls to FAKE_MCP_CALLS.
 // Tools: whoami (cwd/tag/pid), launch_status, get_settings, slow, crash, big (reads); ChangeIssueStatus (no annotations, name heuristic);
-// start_launch (readOnlyHint:false) and purge (destructiveHint:true) are writes by annotation; list_hints (readOnlyHint:true named like a write) is a read by annotation.
+// launches and launch_failed return structuredContent; start_launch (readOnlyHint:false) and purge (destructiveHint:true) are writes by annotation; list_hints (readOnlyHint:true named like a write) is a read by annotation.
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const tag = process.env.FAKE_MCP_TAG ?? "none",
@@ -27,6 +27,8 @@ const tools = [
   { name: "slow", description: "Sleeps for ms.", inputSchema: object({ ms: { type: "number" } }), annotations: { readOnlyHint: true } },
   { name: "crash", description: "Exits mid-call.", inputSchema: object(), annotations: { readOnlyHint: true } },
   { name: "big", description: "Returns 200 KB of text.", inputSchema: object(), annotations: { readOnlyHint: true } },
+  { name: "launch_failed", description: "Fails with structuredContent.", inputSchema: object(), annotations: { readOnlyHint: true } },
+  { name: "launches", description: "Launches as structuredContent only.", inputSchema: object(), annotations: { readOnlyHint: true } },
   {
     name: "ChangeIssueStatus",
     description: "Moves a ticket to a new status.",
@@ -70,6 +72,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (name === "crash") process.exit(1);
   if (name === "slow") await new Promise((done) => setTimeout(done, args.ms ?? 10000));
   if (name === "big") return reply(id, text("x".repeat(200_000)));
+  if (name === "launches") return reply(id, { content: [], structuredContent: { launches: [{ id: "L9", status: "PASSED" }] } });
+  if (name === "launch_failed") return reply(id, { ...text("launch broke"), structuredContent: { code: "E1" }, isError: true });
   if (name === "launch_status") return reply(id, text(`launch ${args.id}: PASSED`));
   if (name === "whoami") return reply(id, text(`cwd=${process.cwd()} tag=${tag} pid=${process.pid}`));
   if (tools.some((tool) => tool.name === name)) return reply(id, text(`${name} ok`));

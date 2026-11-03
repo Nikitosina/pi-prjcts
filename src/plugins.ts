@@ -18,6 +18,7 @@ import type {
   PluginModule,
   PluginRoute,
   PluginRpcHandler,
+  PluginRpcKind,
   PluginStatus,
   PrProvider,
   VcsProvider,
@@ -111,6 +112,16 @@ export const plugins = {
   },
   rpc: (plugin: string, method: string): PluginRpcHandler | undefined =>
     loaded.find((item) => item.plugin === plugin)?.capabilities.rpc?.[method],
+  /** The declared agent policy of one call; undefined when the plugin does not classify the method (or its policy throws). */
+  rpcKind: (plugin: string, method: string, params: unknown): PluginRpcKind | undefined => {
+    const policy = loaded.find((item) => item.plugin === plugin)?.capabilities.rpcPolicy?.[method];
+    try {
+      const kind = typeof policy === "function" ? policy(params) : policy;
+      return kind === "read" || kind === "write" || kind === "dangerous" ? kind : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   /** True when any plugin reports a write whose outcome is unknown (blocks automatic admission). */
   anyUncertainWrites: async (tx: Tx, root: Conversation["id"]): Promise<boolean> => {
     for (const check of each((caps) => caps.uncertainWrites)) if (await check(tx, root)) return true;
@@ -233,6 +244,9 @@ function validate(caps: PluginCapabilities): void {
   for (const [method, handler] of Object.entries(caps.rpc ?? {}))
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(method) || typeof handler !== "function")
       throw new Error(`rpc.${method} must be a function with a kebab-case name`);
+  for (const [method, policy] of Object.entries(caps.rpcPolicy ?? {}))
+    if (!caps.rpc?.[method] || !(typeof policy === "function" || policy === "read" || policy === "write" || policy === "dangerous"))
+      throw new Error(`rpcPolicy.${method} must name an rpc method and be "read", "write", "dangerous" or a function of params`);
 }
 function conflict(name: string, caps: PluginCapabilities): string | undefined {
   if (name === "github" || loaded.some((item) => item.plugin === name)) return `a plugin named "${name}" is already loaded`;
