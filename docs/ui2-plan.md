@@ -109,6 +109,18 @@ Settings becomes an overlay (⌘,) with a left nav and a hotkey letter beside ea
 - **Observability tab**, for now. Per-chat tokens and cost move into a popover on the context bar. Subscription limits stay in the footer. A traces view comes back later only if it answers a specific question.
 - **Knowledge tab, as it is now.** Knowledge documents become a "Notes" node under each project in the left tree and open in the center. Uploads become composer attachments. Evidence moves to Job details. The workspace path moves to Settings → General. Before deciding whether knowledge stays at all, count how often agents read knowledge documents in recent transcripts. If they almost never do, remove knowledge and rely on repo AGENTS.md.
 
+### Knowledge → Memory
+Trace of the live project (4 chats, 106 agent transcripts, 7,766 tool calls, Oct 30 – Nov 2): agents made 104 document reads (102 succeeded; `preferences.md` alone 50), and knowledge unblocked real work: a stored permission let a worker inspect the database, a stored UX decision recovered the accepted prototype, a runbook pointed a worker at existing fixtures. But it is turning into a second transcript: 66 documents and 214 KB, 24 legacy copies, review packets and statuses filed as runbooks, 13 of 27 written documents never read, a wrong memory entry fixed by a separate correction document, and the auto-injected `MEMORY.md` is a generic 432-byte directory guide. The owner once had to remind the Coordinator of a decision that was already stored.
+
+So knowledge stays, renamed **Memory**, with these changes:
+- **Three kinds only:** Preferences, Decisions, Procedures. Review packets, approvals, checkpoints and statuses go to the Job's artifacts. Legacy copies move to an Archive folder that is not searched by default.
+- **Status on decisions:** current, superseded (linked to its replacement) or historical. A correction edits the entry and keeps revision history instead of adding a new document.
+- **Generated index:** real titles and one-line summaries per entry, with broken-link checks, instead of the hand-written `MEMORY.md`.
+- **Preference brief injected:** current Preferences (bounded, with revision) go into every role prompt, so 50 reads of the same file become zero. Decisions and Procedures stay on demand.
+- **Auto-remember with Undo:** when the owner corrects or states a preference, the Coordinator saves it and the chat shows one row "Remembered: … · Undo · Edit". YOLO by default. A memory entry never grants execution authority.
+- **Visible use:** a memory read shows in chat as a tool row "Used memory: Decision · Dataset UX", linking to the entry. The owner sees what the agent relied on and can correct it in place.
+- **Memory view:** a node under each project in the left tree, grouped Preferences / Decisions / Procedures, searchable, each entry with its source conversation, last confirmed date and "used by" count. The raw files are an advanced view.
+
 ### Hotkeys, motion, noise
 - One `web/app/hotkeys.js` registry replaces the 8 `keydown` listeners. Features register named commands; bindings come from the host `ui` document. Default set: `[` list, `]` context panel, `\` Host agent, `/` focus composer, `Esc` leave focus, `1`–`9` chat N, `⌘K` palette, `⌘,` settings, `⌘.` stop the current turn, the settings letters above, and `B` to toggle queue/steer while busy.
 - Motion: rows slide in as tool calls arrive, a shimmer marks agents that are working, panels open and close with short transitions, status dots pulse while a model streams.

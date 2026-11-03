@@ -101,3 +101,35 @@ type Approval = {
 - Plain ES modules, no build step, same as `web/`. Shares nothing at runtime with `web/` except copied helpers (escaping, markdown); escape everything from providers, transcripts and plugins.
 - Uses existing reads for projects, chats, jobs, settings, knowledge, automations, limits, PRs and live frames. Uses the requests above for the new parts.
 - Hotkeys come from one registry (`web-ui2/hotkeys.js`) whose bindings are merged from defaults and `UiSettings.hotkeys`.
+
+## Memory (knowledge reimagined)
+
+Owned by the backend workstream (requests, prompt brief, coordinator prompt) and the web workstream (Memory view, chat rows). See "Knowledge → Memory" in `docs/ui2-plan.md`.
+
+```ts
+type MemoryKind = "preference" | "decision" | "procedure" | "archive";
+type MemoryStatus = "current" | "superseded" | "historical";
+type MemoryEntry = {
+  path: string;            // relative to knowledge/
+  kind: MemoryKind;
+  title: string;
+  summary: string;         // one line
+  status: MemoryStatus;
+  supersededBy?: string;   // path
+  revision: string;
+  updatedAt: string;
+  source?: { chatId?: string; conversationId?: string; entryId?: number };
+  lastConfirmedAt?: string;
+};
+```
+
+| action | input | result |
+| --- | --- | --- |
+| `memory-index` | `{ projectId, includeArchive?: boolean }` | `{ entries: MemoryEntry[], brokenLinks: { from: string, to: string }[] }` |
+| `memory-undo` | `{ projectId, path, revision }` | `{ entry: MemoryEntry \| null }` restores the previous revision (or removes a just-created entry) |
+
+- Kind, status, summary, supersededBy and source live in optional YAML front matter. Without it, classify by folder on read (`preferences.md` → preference, `decisions/` → decision, `runbooks/` → procedure, `research/legacy/`, `plans/` and UUID-named notes → archive). Never move or rewrite the owner's existing files during a read.
+- The index replaces the hand-written `MEMORY.md` injection: titles plus summaries, archive excluded.
+- Current preferences (bounded, e.g. 4,000 chars, with revision) are injected into every role prompt as their own `prompt-render` section "Preferences (memory)".
+- Coordinator prompt: when the owner corrects something or states a lasting preference, save it as a preference without asking (YOLO), keep review packets and statuses out of memory, mark replaced decisions superseded instead of adding correction documents. Memory never grants execution authority.
+- Chat rendering: knowledge tool calls render as memory rows: a write as "Remembered: <title> · Undo · Edit", a read as "Used memory: <kind> · <title>", linking to the entry in the Memory view.
