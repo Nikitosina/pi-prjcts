@@ -1485,6 +1485,23 @@ pre.code,
   padding: 6px 2px;
   min-height: 0;
 }
+/* Not color alone: the bold label names the state. */
+.w-prompt {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.w-prompt b {
+  color: var(--text);
+  font-weight: 600;
+}
+.w-prompt[data-prompt-state="frozen"] {
+  border-left-color: var(--needs);
+}
 .report-card {
   border: 1px solid color-mix(in srgb, var(--ready) 40%, var(--line));
   border-radius: var(--r-m);

@@ -32,6 +32,12 @@ Written before the code. The scripted proof is the `ui2-prompts` journey in `.ag
 - E15 The preview does not say it shows the configuration for the next use, presents configured text as what a running conversation has, or hides that an edit applies only on the next safe turn.
 - E16 Rendered prompt text is inserted as HTML (block text with `<b>` renders bold or runs a script).
 
+## Running agents (worker details, `jobs-snapshot` `agents[].prompt`; scripts/ui2-worker-prompt-e2e.mjs)
+
+- E20 A worker started before prompt blocks whose stored prompt could not be rebuilt exactly (`frozen`) looks like any other worker: its details do not say its prompt is frozen, or hide the backend's reason. The owner approved keeping such workers on their original prompt, visibly, with the reason; there is no rebuild or restart control.
+- E21 A worker that still has to be checked (`legacy-unchecked`) or that adopts saved behavior on its next turn (`pending`) is not told apart from one that already runs it, or a `current` worker (or one with `prompt: null`) gets a prompt line it does not need.
+- E22 The prompt line goes stale: after the worker's next turn changes the state (checked and adopted, or frozen), the open details keep the old state.
+
 ## Fit (manual)
 
 - E17 Claude, midnight and light themes keep contrast for badges, the selected row and the disabled (off) state; off is not shown by color alone.

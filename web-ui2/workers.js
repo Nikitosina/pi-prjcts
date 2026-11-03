@@ -185,6 +185,20 @@ export async function loadSide() {
 // ---------------------------------------------------------------------------------------------------------------- worker in the center
 
 // Worker live frames are not exposed per thread; the transcript re-reads on the jobs topic.
+/** Which prompt a running agent has, when it is not simply the saved one (jobs-snapshot `agents[].prompt`). */
+const PROMPT = {
+  pending: "Prompt update pending",
+  "legacy-unchecked": "Prompt check pending",
+  frozen: "Prompt frozen",
+};
+function promptLine(worker) {
+  // A Job's details show its worker agent.
+  const agent =
+    worker && "prompt" in worker ? worker : state.jobs?.agents.find((item) => item.jobId === worker?.id && item.role === "worker");
+  const prompt = agent?.prompt;
+  if (!prompt || !PROMPT[prompt.state]) return "";
+  return `<p class="w-prompt" data-prompt-state="${esc(prompt.state)}"><b>${PROMPT[prompt.state]}</b>${prompt.reason ? ` <span>${esc(prompt.reason)}</span>` : ""}</p>`;
+}
 export async function renderWorker(root, id, { steer = false } = {}) {
   const gen = state.generation;
   const find = () =>
@@ -194,7 +208,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   const head = () => {
     const worker = find();
     const look = worker ? (STATE[worker.status] ?? { label: worker.status ?? "", tone: "muted" }) : null;
-    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
+    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
   let items = [];
@@ -220,7 +234,11 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     });
     if (!page || !alive()) return;
     items = page.items;
-    root.querySelector(".focus-head").outerHTML = head().replace(/<div class="report-card">[\s\S]*$/, "");
+    root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card">[\s\S]*$/, "");
+    const line = promptLine(find()),
+      old = root.querySelector(".w-prompt");
+    if (old) old.outerHTML = line;
+    else if (line) root.querySelector(".focus-head").insertAdjacentHTML("afterend", line);
     paint();
   };
   await load();

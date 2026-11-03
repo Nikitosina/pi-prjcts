@@ -27,10 +27,13 @@ Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <
 
 The `ui2` journey's Prompt step saves the project instructions (checks the project section of `prompt-render`, without a doubled prefix), then one coordinator block with ⌘↵ (checks the role section) and restores its default.
 
-Ids used: `#settings .profiles [data-profile]`, `[data-kind]`, `[data-pane]`, `.pb[data-target]`, `.pb-row[data-block]` with `.pb-toggle`, `.pb-name`, `.pb-src`, `.pb-tok`, `[data-generated]`, `[data-block="objective"]`, `.pb-editor[data-block]`, `.pb-text`, `input.pb-title`, `#pb-new`, `#pb-save`, `#pb-revert`, `#pb-restore`, `#pb-delete`, `.pb-conflict [data-conflict="reload"]`, `.pb-back`, `.pv-sec`, `.pv-state`, `.pv-body`.
+Worker details (agents prepared before prompt blocks): `node scripts/ui2-worker-prompt-e2e.mjs` runs two workers on a 9f4ee13 host, upgrades the same home to this branch and checks the `.w-prompt[data-prompt-state]` line under the worker header: "Prompt check pending" with the backend's reason, then "Prompt frozen" with its reason after a turn that cannot rebuild the stored prompt (no reload, no rebuild or restart control), and no line for a worker that rebuilt exactly and is current. Screenshots `01-legacy-unchecked`, `02-frozen`, `03-frozen-390` in its artifact directory.
+
+Ids used: `#settings .profiles [data-profile]`, `[data-kind]`, `[data-pane]`, `.pb[data-target]`, `.pb-row[data-block]` with `.pb-toggle`, `.pb-name`, `.pb-src`, `.pb-tok`, `[data-generated]`, `[data-block="objective"]`, `.pb-editor[data-block]`, `.pb-text`, `input.pb-title`, `#pb-new`, `#pb-save`, `#pb-revert`, `#pb-restore`, `#pb-delete`, `.pb-conflict [data-conflict="reload"]`, `.pb-back`, `.pv-sec`, `.pv-state`, `.pv-body`, `#center .w-prompt[data-prompt-state]`.
 
 ## Gotchas
 
 - Needs the prompt blocks backend (`prompt-blocks-get`, `prompt-blocks-set`, `prompt-render` with `workerMode`, `label` and `active`).
 - The fake provider never runs a turn here, so `active` and pending application are not exercised; the preview's active line is checked only by reading the code.
+- Open the 390 px worker details by loading the page at that width: resizing a live desktop page keeps its side panels open (an existing UI2 layout behavior, not the prompt line).
 - Theme screenshots set `data-theme` directly; the theme setting itself is covered by the `ui2` journey.
