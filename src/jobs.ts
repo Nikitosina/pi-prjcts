@@ -161,7 +161,7 @@ export type JobsState = {
  * An agent's prompt as built: the frozen frame (repository, workspace, skills, host contract) and the key of the behavior
  * it runs. Written when the agent is first prepared; a later idle turn recomposes the frame with the saved behavior.
  */
-export type AgentPromptState = { frame: PromptFrame | null; behavior: string | null };
+export type AgentPromptState = { frame: PromptFrame | null; behavior: string | null; unproven?: string };
 export const AgentPrompt = defineDoc<AgentPromptState>({
   kind: "projects.agent-prompt",
   version: 1,
@@ -177,7 +177,14 @@ export type AgentPromptStatus = {
   reason: string | null;
 };
 /** What `prepare` built an agent's instructions from: the frame (stored on first preparation, given back after) and the behavior text. */
-export type PreparedPrompt = { frame: PromptFrame; behavior: string };
+export type PreparedPrompt = {
+  frame: PromptFrame;
+  behavior: string;
+  /** For an agent prepared before frames: the whole instructions `frame` gives with each behavior it could have started with. */
+  proofs?: { instructions: string; behavior: string }[];
+};
+const UNPROVEN =
+  "Started before prompt blocks, and its stored prompt does not match one rebuilt from the current host contract, repository instructions, project settings, skills and workspace, so it keeps the prompt it started with.";
 
 /** The project's Jobs, on the root conversation. */
 export const Jobs = defineDoc<JobsState>({
@@ -429,6 +436,16 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             if (change) {
               const { prompt, ...setup } = change;
               const saved = await tx.doc(AgentPrompt, conversationId);
+              // An agent prepared before frames gets one only when a rebuilt prompt equals its stored one exactly; nothing is parsed out of it.
+              if (agent.prepared && !saved.frame && prompt?.proofs) {
+                const stored = (await tx.doc(AgentDoc, conversationId)).instructions;
+                const proof = prompt.proofs.find((item) => item.instructions === stored);
+                if (proof) {
+                  saved.frame = prompt.frame;
+                  saved.behavior = behaviorKey(proof.behavior);
+                  delete saved.unproven;
+                } else saved.unproven = UNPROVEN;
+              }
               // A prepared agent keeps its frame; it adopts the saved behavior only between turns, never inside a running one.
               const adopt =
                 !agent.prepared || (prompt !== undefined && saved.frame !== null && (await busyIn(tx, conversationId)) === null);
@@ -1415,10 +1432,13 @@ export function createJobs(host: JobsHost) {
     if (!agent.prepared) return { state: "current", reason: null };
     const saved = await harness.snapshot(AgentPrompt, agent.conversationId, context);
     if (!saved?.frame)
-      return {
-        state: "legacy-unchecked",
-        reason: "Started before prompt blocks: its stored prompt has no recorded frame, so it keeps the prompt it started with.",
-      };
+      return saved?.unproven
+        ? { state: "frozen", reason: saved.unproven }
+        : {
+            state: "legacy-unchecked",
+            reason:
+              "Started before prompt blocks: its next continued or retried turn checks whether its stored prompt can be rebuilt exactly.",
+          };
     return saved.behavior === behaviorKey(behavior)
       ? { state: "current", reason: null }
       : { state: "pending", reason: "Adopts the saved behavior on its next continued or retried turn while it is idle." };

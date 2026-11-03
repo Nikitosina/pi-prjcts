@@ -23,7 +23,7 @@ Written before `src/prompt-blocks.ts`. `scripts/prompt-blocks-unit.mjs` covers B
 - P5 A follow-up to a worker that already ran keeps its old behavior, instead of adopting the saved blocks on that turn.
 - P6 Adopting behavior changes the worker's frozen repository instructions (AGENTS.md changed and the host restarted), its workspace instructions, or its skills.
 - P7 A message sent while a worker's turn is running changes that turn's instructions.
-- P8 A worker prepared by a host without frames (an older version) never adopts behavior even though its stored prompt is exactly reconstructable, or adopts it with a guessed frame when it is not.
+- P8 A worker prepared by a host without frames (an older version) never adopts behavior even though its stored prompt is exactly reconstructable, or adopts it with a guessed frame when it is not, or is not reported `frozen` with a reason (scripts/prompt-blocks-legacy-e2e.mjs, a home prepared by base 9f4ee13).
 - P9 `prompt-blocks-set` with `blocks: null` leaves a saved list or a legacy override behind.
 - P10 A legacy override set through `settings-update` and a saved block list both apply, instead of the later write replacing the other.
 - P11 The Host agent's own blocks do not reach its next turn, or a self-edit through `host_call` changes the instructions of the turn that made it.

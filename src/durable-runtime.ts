@@ -122,7 +122,14 @@ import { providerFailure, unansweredReason, type ProviderFailure } from "./provi
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { COORDINATOR_CONTEXT_RULES, SHARED_ROLE_RULES, taskHelperFrame } from "./role-prompts.ts";
-import { composePrompt, projectBehavior, taskHelperBehavior, type PromptFrame } from "./prompt-blocks.ts";
+import {
+  composePrompt,
+  legacyBehaviors,
+  projectBehavior,
+  taskHelperBehavior,
+  type PromptFrame,
+  type ProjectPromptTarget,
+} from "./prompt-blocks.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
@@ -1116,6 +1123,16 @@ export async function openDurableProject(input: {
       instructions: composePrompt(frame, behavior),
       prompt: { frame, behavior },
     });
+    // An agent prepared before frames gets its rebuilt frame with every behavior it could have started with, for an exact-match proof.
+    const reframed = (stored: PromptFrame | null, rebuilt: PromptFrame, target: ProjectPromptTarget, behavior: string) => {
+      if (stored) return framed(stored, behavior);
+      const built = framed(rebuilt, behavior);
+      const proofs = legacyBehaviors(loadProject(project.id), target).map((text) => ({
+        instructions: composePrompt(rebuilt, text),
+        behavior: text,
+      }));
+      return { ...built, prompt: { ...built.prompt, proofs } };
+    };
     const roleFrame = (role: AgentProfile, repositoryStanding = standing.text, suffix = ""): PromptFrame =>
       sectionsFrame(roleSections(role, repositoryStanding), suffix);
     const behaviorOf = (role: AgentProfile) => projectBehavior(loadProject(project.id), role).text;
@@ -1194,7 +1211,7 @@ export async function openDurableProject(input: {
         if (!threadSkills.has(conversation))
           threadSkills.set(conversation, new Set(delegatedSkills[agent.role].map((skill) => skill.name)));
         if (agent.role !== "worker") {
-          const reader = framed(frame ?? roleFrame(agent.role), behaviorOf(agent.role));
+          const reader = reframed(frame, roleFrame(agent.role), agent.role, behaviorOf(agent.role));
           // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
           if (!agent.readRef) return reader;
           const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
@@ -1240,14 +1257,15 @@ export async function openDurableProject(input: {
             current = loadProject(project.id);
           return {
             cwd: environment.cwd,
-            ...framed(
-              frame ??
-                taskHelperFrame(
-                  current,
-                  knowledgeAccess(),
-                  standing.text,
-                  `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
-                ),
+            ...reframed(
+              frame,
+              taskHelperFrame(
+                current,
+                knowledgeAccess(),
+                standing.text,
+                `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
+              ),
+              "taskHelper",
               taskHelperBehavior(current),
             ),
             tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),
@@ -1255,7 +1273,7 @@ export async function openDurableProject(input: {
           };
         }
         // A worker without a scope reads and writes knowledge only; a scoped one gets its own worktree and publication tools.
-        if (!job?.scopeId) return framed(frame ?? roleFrame("worker"), behaviorOf("worker"));
+        if (!job?.scopeId) return reframed(frame, roleFrame("worker"), "worker", behaviorOf("worker"));
         if (!binder) throw new Error("Workspace preparation is unavailable");
         const continued =
           job.branch && !agent.prepared ? await resolveContinuationBranch(loadProject(project.id), job.branch, job.scopeId) : undefined;
@@ -1273,8 +1291,10 @@ export async function openDurableProject(input: {
         const base = agentSetup({ role: "worker", jobId: job.id });
         return {
           cwd: environment.cwd,
-          ...framed(
-            frame ?? roleFrame("worker", environment.repositoryStanding?.text ?? standing.text, environment.workerInstructions ?? ""),
+          ...reframed(
+            frame,
+            roleFrame("worker", environment.repositoryStanding?.text ?? standing.text, environment.workerInstructions ?? ""),
+            "worker",
             behaviorOf("worker"),
           ),
           tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),

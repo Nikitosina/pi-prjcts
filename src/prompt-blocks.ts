@@ -228,6 +228,29 @@ export function taskHelperBehavior(project: PromptConfig): string {
 }
 
 /**
+ * Behavior texts an agent prepared before frames existed could have started with: the built-ins, the legacy override, the
+ * text of a kept `custom:legacy` block, or the current behavior. Used only to prove a rebuilt frame by exact equality.
+ */
+export function legacyBehaviors(project: PromptConfig, target: ProjectPromptTarget): string[] {
+  const earlier = (role: LegacyRole) => [
+    project.prompts?.[role],
+    project.promptBlocks?.[role]?.find((block) => block.id === LEGACY_ID)?.text,
+  ];
+  const texts =
+    target === "taskHelper"
+      ? [
+          taskHelperBehavior(project),
+          ...["", ...earlier("worker")].flatMap((owner) =>
+            [projectBehavior(project, "taskHelper").text, resolvePromptBlocks("taskHelper").text].map((helper) =>
+              owner === undefined ? undefined : [owner ? `Owner worker instructions:\n${owner}` : "", helper].filter(Boolean).join("\n\n"),
+            ),
+          ),
+        ]
+      : [projectBehavior(project, target).text, resolvePromptBlocks(target).text, ...earlier(target)];
+  return [...new Set(texts.filter((text): text is string => text !== undefined))];
+}
+
+/**
  * The frozen part of an agent's prompt around its behavior: generated context before (host contract, repository and project
  * instructions), `lead` between, then skills, authority rules and workspace bindings after. Stored per agent conversation,
  * so behavior can change on a later turn while the frame stays as the agent first got it.
