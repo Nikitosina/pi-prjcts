@@ -2,8 +2,9 @@
 // Isolated host, local fake model, headless Chrome; no provider calls. Failure cases: scripts/transcript-compaction-failures.md.
 import { kit, delay } from "./notify-kit.mjs";
 
-const brain = { summaries: [] };
+const brain = { summaries: [], failSummary: false };
 const respond = async ({ coordinator, marker, userText, say }) => {
+  if (/conversation to summarize/.test(userText) && brain.failSummary) return { error: "SUMMARY-FAIL scripted" };
   if (/conversation to summarize/.test(userText)) {
     brain.summaries.push(userText);
     return say(`SUMMARY-${brain.summaries.length} of the earlier conversation.`);
@@ -172,6 +173,44 @@ try {
     context: view.context,
   });
 
+  // A failed compaction shows on the context meter in words, survives a restart and clears on the next summary.
+  brain.failSummary = true;
+  await rpc({ action: "compact", id });
+  await eventually(async () => (await show()).context.compactionFailure, "compaction failure in the snapshot");
+  const failure = (await show()).context.compactionFailure;
+  await waitFor(
+    `/Last compaction failed/.test(document.querySelector('#compose .context-meter').getAttribute('aria-label'))`,
+    s,
+    "meter label",
+  );
+  const meter = await evaluate(
+    `(() => { const m = document.querySelector('#compose .context-meter'); return { label: m.getAttribute('aria-label'), popup: m.querySelector('.context-popup').textContent, pct: m.querySelector('.context-pct').textContent }; })()`,
+    s,
+  );
+  check(
+    "T12 a failed compaction is in the snapshot and the meter says so in text, with its error",
+    /SUMMARY-FAIL/.test(failure.error) &&
+      /Last compaction failed: .*SUMMARY-FAIL/.test(meter.label) &&
+      /Last compaction failed/.test(meter.popup) &&
+      /!/.test(meter.pct) &&
+      brain.summaries.length === 2,
+    { failure, meter },
+  );
+  // The popup opens on hover; show it for the screenshot only.
+  await evaluate(`document.querySelector('#compose .context-popup').style.visibility = 'visible'`, s);
+  await shot("02-compaction-failed", s);
+  // The same popup on a phone: it must stay on screen.
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  const narrow = await evaluate(
+    `(() => { const r = document.querySelector('#compose .context-popup').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: innerWidth }; })()`,
+    s,
+  );
+  check("T12 at 390px the failure popup stays on screen", narrow.left >= 0 && narrow.right <= narrow.width && narrow.top >= 0, narrow);
+  await shot("03-compaction-failed-390", s);
+  await send("Emulation.clearDeviceMetricsOverride", {}, s);
+  await evaluate(`document.querySelector('#compose .context-popup').style.visibility = ''`, s);
+  brain.failSummary = false;
+
   // A restart keeps the stored history.
   await k.stopHost();
   await k.startHost();
@@ -186,6 +225,9 @@ try {
     items.filter((m) => m.kind === "compaction").length === 2 && sequence(items).filter((x) => x !== "C").length === 40,
     sequence(items),
   );
+  check("T12 the compaction failure survives a restart", /SUMMARY-FAIL/.test((await show()).context.compactionFailure?.error ?? ""));
+  await compact(undefined, 3);
+  check("T12 a compaction that produces a summary clears the failure", !(await show()).context.compactionFailure, (await show()).context);
   result.status = "passed";
 } catch (error) {
   result.status = "failed";

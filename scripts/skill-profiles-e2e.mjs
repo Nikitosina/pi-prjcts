@@ -356,6 +356,16 @@ try {
     );
   }
   check(
+    "S23 the coordinator is told to keep reads focused and reuse skills it read, and skill reads stay mandatory",
+    /report first, then only the evidence it points to/.test(coord0.system) &&
+      /you need not reread it\. Read it again after a compaction or \/reload, when it or your instructions changed, when your earlier read was partial, or when a skill, instruction or task requires it/.test(
+        coord0.system,
+      ) &&
+      /never replace a required skill read/.test(coord0.system) &&
+      /read its SKILL\.md with projects_skill_file before acting/.test(coord0.system),
+    coord0.system.slice(0, 4000),
+  );
+  check(
     'S10 no worker prompt carries the old "Configured Pi skills" list',
     !result.calls.some((c) => /Configured Pi skills/.test(c.system)),
   );

@@ -28,12 +28,16 @@ import {
   type Submission,
   type ToolExecutionApi,
   type SubmissionId,
+  type ReportInfo,
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import { observeProviderPrompt } from "./provider-extensions.ts";
 import { liveModelRuntime } from "./live-models.ts";
 import { guardedStream } from "./model-guard.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
@@ -98,13 +102,15 @@ import {
 import { catalog } from "./workspace-authorization.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
-import { rolePrompt, SHARED_ROLE_RULES, taskWorkerInstructions } from "./role-prompts.ts";
+import { COORDINATOR_CONTEXT_RULES, rolePrompt, SHARED_ROLE_RULES, taskWorkerInstructions } from "./role-prompts.ts";
 import { loadAutomations } from "./project-automations.ts";
 import type { CalendarRule } from "./schedule-calendar.ts";
 import { durableUsageSnapshot } from "./durable-usage.ts";
 import { coordinatorLibraryTools } from "./durable-library.ts";
 import { searchKnowledge } from "./knowledge-search.ts";
-import { fitJson } from "./response-limit.ts";
+import { fitJson, jsonResult } from "./response-limit.ts";
+import { localTelemetry, type LocalTelemetry } from "./local-telemetry.ts";
+import { KnowledgeMetadata } from "./knowledge-types.ts";
 import { listUploads, uploadImageResult, uploadText } from "./uploads.ts";
 import { CHATS_KIND, JOBS_KIND, topicsOfCommit, type FeedEvent, type TopicMap } from "./change-feed.ts";
 import {
@@ -203,10 +209,17 @@ const AdmittedInputs = defineDoc<{ ids: number[]; telegramRequests?: string[] }>
   initial: () => ({ ids: [] }),
 });
 
+/** An error Durable or the runtime reported, with what Durable's ReportInfo says it is about; metadata only. */
 export type DurableRuntimeReport = {
   kind: "durable-report";
   projectId: string;
   message: string;
+  type?: ReportInfo["type"];
+  reason?: string;
+  extension?: string;
+  callback?: string;
+  task?: { id: number; kind: string; conversationId: number };
+  conversationId?: number;
 };
 
 export type DurableSubmissionState = {
@@ -246,7 +259,13 @@ export type DurableProjectSnapshot = {
     /** The newest page of the chat's transcript; older pages come from `chatHistory`. */
     history: TranscriptPage;
     /** Estimated size of the next coordinator request against its model's context window (the project override when set; `catalogWindow` without it). */
-    context: { tokens: number; window: number | null; catalogWindow: number | null; compacting: boolean };
+    context: {
+      tokens: number;
+      window: number | null;
+      catalogWindow: number | null;
+      compacting: boolean;
+      compactionFailure: DurableLiveFrame["compactionFailure"];
+    };
     access?: CoordinatorAccess;
   };
 };
@@ -396,6 +415,10 @@ export type DurableProjectRuntime = {
     payload: string;
   }): ReturnType<ReturnType<typeof scheduleRuntime>["ingest"]>;
   usageSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof durableUsageSnapshot>;
+  /** Durable's phase timing, report and active-task metrics since this host started; metadata only. */
+  telemetrySnapshot(): ReturnType<LocalTelemetry["snapshot"]>;
+  /** Durable's live task graph (at most 200 tasks, oldest first) and the last 20 reports' metadata; read-only, no content. */
+  taskDiagnostics(): Promise<DurableTaskDiagnostics>;
   commandIntentInspect(key: string, confirm: string): ReturnType<typeof commandIntentInspect>;
   commandIntentsSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof commandIntentsSnapshot>;
   githubReadSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof githubReadSnapshot>;
@@ -404,6 +427,24 @@ export type DurableProjectRuntime = {
   /** Coordinator's in-flight generation, pushed on every Durable commit (partials land at most every 100 ms). */
   watchLive(onFrame: (frame: DurableLiveFrame) => void, onEnd: () => void, chatId?: string): Promise<() => void>;
   close(): Promise<void>;
+};
+
+export type DurableTaskDiagnostics = {
+  tasks: {
+    id: number;
+    kind: string;
+    conversationId: number;
+    owner?: number;
+    status: string;
+    phase?: string;
+    on?: number[];
+    until?: number;
+    blocked?: string;
+    background: boolean;
+    abortRequested: boolean;
+  }[];
+  totalTasks: number;
+  reports: Omit<DurableRuntimeReport, "message">[];
 };
 
 export type DurableLiveFrame = {
@@ -418,8 +459,12 @@ export type DurableLiveFrame = {
   /** Tail of the streamed reasoning summary; empty when the model shares none. */
   thinkingText: string;
   tools: { name: string; status: string }[];
+  /** Nested calls of the running tools (code mode scripts): up to 3 running names, and how many finished. */
+  nested: { running: string[]; done: number; failed: number } | null;
   retry: { at: number; error: string } | null;
   compacting: boolean;
+  /** The newest compaction failure until a compaction produces a summary. */
+  compactionFailure: { reason: string; error: string } | null;
 };
 
 const LIVE_TEXT_LIMIT = 32_768;
@@ -451,9 +496,13 @@ function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<st
       retry?: { at: number; error: string };
     };
     tools?: { name: string; status: string }[];
+    nestedTools?: { name: string; status: string; summary?: { isError: boolean } }[];
     compactions?: unknown[];
+    compactionFailure?: { reason: string; error: string };
   };
-  const content = live.generation?.message?.content ?? [];
+  const content = live.generation?.message?.content ?? [],
+    nested = live.nestedTools ?? [],
+    finished = nested.filter((slot) => slot.summary);
   const text = content
     .filter((part) => part.type === "text")
     .map((part) => part.text ?? "")
@@ -467,8 +516,21 @@ function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<st
     thinking: content.some((part) => part.type === "thinking"),
     thinkingText: thinkingText(content).slice(-THINKING_LIMIT),
     tools: (live.tools ?? []).slice(-8).map((tool) => ({ name: String(tool.name).slice(0, 100), status: String(tool.status) })),
+    nested: nested.length
+      ? {
+          running: nested
+            .filter((slot) => !slot.summary)
+            .slice(-3)
+            .map((slot) => String(slot.name).slice(0, 100)),
+          done: finished.length,
+          failed: finished.filter((slot) => slot.summary!.isError).length,
+        }
+      : null,
     retry: live.generation?.retry ? { at: live.generation.retry.at, error: String(live.generation.retry.error).slice(0, 500) } : null,
     compacting: (live.compactions?.length ?? 0) > 0,
+    compactionFailure: live.compactionFailure
+      ? { reason: String(live.compactionFailure.reason), error: String(live.compactionFailure.error).slice(0, 500) }
+      : null,
   };
 }
 
@@ -492,6 +554,8 @@ export async function openDurableProject(input: {
 }): Promise<DurableProjectRuntime> {
   const project = parse(ProjectSchema, input.project);
   const dir = resolve(input.dir);
+  const telemetry = localTelemetry(),
+    recentReports: DurableTaskDiagnostics["reports"] = [];
   // Read from the saved project each time, so a settings change reaches the next worker without reopening.
   const knowledgeAccess = (): KnowledgeAccess => input.knowledgeAccess ?? loadProject(project.id).knowledgeAccess ?? "read-only";
   if (dir !== resolve(projectDir(project.id))) throw new Error("Durable directory must be this project's state directory");
@@ -862,6 +926,11 @@ export async function openDurableProject(input: {
       ],
     });
     const registry = createRegistry();
+    // Scripts call only the tools their conversation already has; models.* (classifier and image calls) stays off.
+    // No inline declarations: the model already has every tool's schema, and inlining them adds about 3k tokens to each request; scripts use describeTool().
+    const sandbox = new CodemodeSandbox();
+    const codemode = createCodemodeExtension({ sandbox, models: false, inlineBudget: 0 });
+    const codemodeTool = codemode.tools!.find((tool) => tool.name === "codemode")!;
     const commands = commandExecution();
     // Worker leases (host-wide) and background commands (this project's threads): freed with the work, the thread or the runtime.
     const background = createBackgroundCommands({ controlRoot: dir });
@@ -980,8 +1049,8 @@ export async function openDurableProject(input: {
           thinkingLevel: "medium",
           cwd: project.cwd,
           instructions,
-          tools: [...workerKnowledge(), skillFiles.tool, ...mcp.tools, ...jobs.tools.worker],
-          extensions: [policy, skillFiles.extension, mcp.extension, jobs.worker],
+          tools: [...workerKnowledge(), skillFiles.tool, ...mcp.tools, ...jobs.tools.worker, codemodeTool],
+          extensions: [policy, skillFiles.extension, mcp.extension, jobs.worker, codemode],
         };
       if (spec.role === "verifier")
         return {
@@ -989,16 +1058,16 @@ export async function openDurableProject(input: {
           thinkingLevel: "medium",
           cwd: spec.cwd ?? project.cwd,
           instructions,
-          tools: [...readOnlyCode.tools, ...proof.tools, skillFiles.tool],
-          extensions: [policy, readOnlyCode.extension, proof.extension, skillFiles.extension],
+          tools: [...readOnlyCode.tools, ...proof.tools, skillFiles.tool, codemodeTool],
+          extensions: [policy, readOnlyCode.extension, proof.extension, skillFiles.extension, codemode],
         };
       return {
         model,
         thinkingLevel: "medium",
         cwd: spec.cwd ?? project.cwd,
         instructions,
-        tools: [...workerKnowledge(), ...readOnlyCode.tools, skillFiles.tool, ...mcp.tools],
-        extensions: [policy, readOnlyCode.extension, skillFiles.extension, mcp.extension],
+        tools: [...workerKnowledge(), ...readOnlyCode.tools, skillFiles.tool, ...mcp.tools, codemodeTool],
+        extensions: [policy, readOnlyCode.extension, skillFiles.extension, mcp.extension, codemode],
       };
     };
     /** Threads the host knows these conversations by (agent and Job ids): background commands and leases are keyed by them. */
@@ -1173,6 +1242,7 @@ export async function openDurableProject(input: {
     registry.install(skillFiles.extension);
     registry.install(mcp.extension);
     registry.install(artifacts.extension);
+    registry.install(codemode);
     storage = await openNodeSqliteStorage(databasePath);
     harness = await Harness.open(
       storage,
@@ -1192,7 +1262,15 @@ export async function openDurableProject(input: {
             return compactionPolicy(contextSettings, contextSettings?.contextWindow ?? catalogWindow());
           },
         },
-        onReport: (error) => report(input.onReport, project.id, error),
+        onReport: (error, info) => {
+          // Diagnostics keep metadata only: the message can carry tool or model text.
+          const { message: _message, ...about } = report(input.onReport, project.id, error, info);
+          recentReports.push(about);
+          recentReports.splice(0, recentReports.length - 20);
+        },
+        telemetry: telemetry.context,
+        // Only code mode uses this, to save a script's full output; read, write, edit and bash replace it with their authorized worktree.
+        env: () => new NodeExecutionEnv({ cwd: dir }),
       },
       context,
     );
@@ -1213,6 +1291,7 @@ export async function openDurableProject(input: {
           skillFiles.extension,
           mcp.extension,
           artifacts.extension,
+          codemode,
         ],
         tools: [
           ...tools,
@@ -1222,6 +1301,7 @@ export async function openDurableProject(input: {
           skillFiles.tool,
           ...mcp.tools,
           ...artifacts.tools,
+          codemodeTool,
           ...jobs.tools.coordinator,
         ],
         cwd: dir,
@@ -1452,7 +1532,9 @@ export async function openDurableProject(input: {
             await schedules.reconcile();
             await armWake();
           })
-          .catch((error) => report(input.onReport, project.id, error))
+          .catch((error) => {
+            report(input.onReport, project.id, error);
+          })
           .finally(() => {
             wakeOperations.delete(operation);
           });
@@ -1488,6 +1570,7 @@ export async function openDurableProject(input: {
       skillFiles.tool.name,
       ...mcp.tools.map((tool) => tool.name),
       ...artifacts.tools.map((tool) => tool.name),
+      codemodeTool.name,
     ]);
     type AgentNow = Awaited<ReturnType<Conversation["agent"]>>;
     const coordinatorToolsFor = (agent: AgentNow, current: Project) => [
@@ -1502,6 +1585,7 @@ export async function openDurableProject(input: {
       skillFiles.tool,
       ...mcp.tools,
       ...artifacts.tools,
+      codemodeTool,
     ];
     const coordinatorTools = coordinatorToolsFor(recoveredAgent, project);
     const ownedExtensions = new Set([
@@ -1515,6 +1599,7 @@ export async function openDurableProject(input: {
       skillFiles.extension.name,
       mcp.extension.name,
       artifacts.extension.name,
+      codemode.name,
     ]);
     const coordinatorExtensionsFor = (agent: AgentNow) => [
       ...agent.extensions.filter((extension) => !ownedExtensions.has(extension.name)),
@@ -1527,6 +1612,7 @@ export async function openDurableProject(input: {
       skillFiles.extension,
       mcp.extension,
       artifacts.extension,
+      codemode,
     ];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
     if (
@@ -1536,6 +1622,7 @@ export async function openDurableProject(input: {
       !recoveredAgent.extensions.some((extension) => extension.name === github.extension.name) ||
       pluginExtensions.some((plugin) => !recoveredAgent.extensions.some((extension) => extension.name === plugin.name)) ||
       !recoveredAgent.extensions.some((extension) => extension.name === artifacts.extension.name) ||
+      !recoveredAgent.extensions.some((extension) => extension.name === codemode.name) ||
       recoveredAgent.model?.provider !== coordinatorModel.provider ||
       recoveredAgent.model?.modelId !== coordinatorModel.modelId ||
       recoveredAgent.instructions !== instructions ||
@@ -2054,6 +2141,30 @@ export async function openDurableProject(input: {
           return { deferred };
         });
       },
+      telemetrySnapshot: () => telemetry.snapshot(),
+      taskDiagnostics: async () => {
+        assertOpen();
+        const graph = await harness!.taskGraph(context);
+        const nodes = Object.values(graph.value.tasks).sort((a, b) => Number(a.id) - Number(b.id));
+        graph.dispose();
+        return {
+          tasks: nodes.slice(0, 200).map((node) => ({
+            id: Number(node.id),
+            kind: node.kind,
+            conversationId: Number(node.conversationId),
+            ...(node.owner === undefined ? {} : { owner: Number(node.owner) }),
+            status: node.state.status,
+            ...("phase" in node.state ? { phase: node.state.phase } : {}),
+            ...("on" in node.state ? { on: node.state.on.map(Number) } : {}),
+            ...("until" in node.state ? { until: node.state.until } : {}),
+            ...(node.blocked ? { blocked: node.blocked } : {}),
+            background: node.background,
+            abortRequested: node.abortRequested,
+          })),
+          totalTasks: nodes.length,
+          reports: [...recentReports],
+        };
+      },
       usageSnapshot: async (options = {}) => {
         const view = await jobs.snapshot(openedHarness);
         // A subagent's conversation costs tokens too: counted as its own thread.
@@ -2229,6 +2340,7 @@ export async function openDurableProject(input: {
           } catch (error) {
             errors.push(error);
           }
+          await sandbox.close().catch((error: unknown) => errors.push(error));
           try {
             const detached = await Promise.allSettled([taskWorkspaces.close(), workspaces.close()]);
             for (const result of detached) if (result.status === "rejected") errors.push(result.reason);
@@ -2345,8 +2457,11 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
       expectedRevision: Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()]),
     }),
     replay: "unsafe",
+    structuredOutputSchema: KnowledgeMetadata,
     async execute(args) {
-      return textResult(await writeKnowledge({ dir, author: "durable-agent", ...args }));
+      // A receipt: the caller sent the text, so echoing it only fills the context; projects_knowledge_read returns it.
+      const { text: _text, ...receipt } = await writeKnowledge({ dir, author: "durable-agent", ...args });
+      return jsonResult(JSON.stringify(receipt));
     },
   });
   const note = defineTool({
@@ -2354,8 +2469,10 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
     description: "Create an immutable project note.",
     parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 4000 }) }),
     replay: "unsafe",
+    structuredOutputSchema: Type.Object({ id: Type.String(), at: Type.String(), author: Type.String(), size: Type.Integer() }),
     async execute(args) {
-      return textResult(addNote(dir, "durable-agent", args.text));
+      const { text, ...receipt } = addNote(dir, "durable-agent", args.text);
+      return jsonResult(JSON.stringify({ ...receipt, size: Buffer.byteLength(text) }));
     },
   });
   const search = defineTool({
@@ -2565,7 +2682,8 @@ async function snapshot(
   try {
     // Unsettled inputs of this chat come from the live inspection; nothing here visits another conversation or scans a history.
     const active = (await harness.inspect(context)).submissions.filter((item) => item.type === "input" && item.conversationId === chat.id);
-    const submissions = await Promise.all(active.map((item) => projectSubmission(harness, chat, Number(item.id))));
+    const submissions = await Promise.all(active.map((item) => projectSubmission(harness, chat, Number(item.id)))),
+      frame = liveFrame(view.value);
     return {
       project,
       identities: { projectId: identity.projectId, coordinatorConversationId: identity.coordinatorConversationId },
@@ -2582,7 +2700,8 @@ async function snapshot(
         context: {
           tokens: contextTokens((await chat.context(context)).messages),
           ...windows,
-          compacting: liveFrame(view.value).compacting,
+          compacting: frame.compacting,
+          compactionFailure: frame.compactionFailure,
         },
       },
     };
@@ -2843,20 +2962,39 @@ function observeGeneration(
     report(input.onReport, projectId, new Error("Durable generation stream result failed", { cause: completionError }));
 }
 
-function report(callback: ((report: DurableRuntimeReport) => void) | undefined, projectId: string, error: unknown): void {
+export function durableReport(projectId: string, error: unknown, info?: ReportInfo): DurableRuntimeReport {
   const value: DurableRuntimeReport = { kind: "durable-report", projectId, message: errorChain(error) };
-  if (callback) {
+  if (!info) return value;
+  return {
+    ...value,
+    type: info.type,
+    ...("reason" in info ? { reason: info.reason } : {}),
+    ...("extension" in info && info.extension ? { extension: info.extension } : {}),
+    ...("callback" in info ? { callback: info.callback } : {}),
+    ...("task" in info && info.task
+      ? { task: { id: Number(info.task.id), kind: info.task.kind, conversationId: Number(info.task.conversationId) } }
+      : {}),
+    ...("conversationId" in info && info.conversationId !== undefined ? { conversationId: Number(info.conversationId) } : {}),
+  };
+}
+
+function report(
+  callback: ((report: DurableRuntimeReport) => void) | undefined,
+  projectId: string,
+  error: unknown,
+  info?: ReportInfo,
+): DurableRuntimeReport {
+  const value = durableReport(projectId, error, info);
+  if (!callback) process.stderr.write(JSON.stringify(value) + "\n");
+  else
     try {
       callback(value);
-      return;
     } catch (callbackError) {
       process.stderr.write(
         JSON.stringify({ ...value, callbackError: callbackError instanceof Error ? callbackError.message : String(callbackError) }) + "\n",
       );
-      return;
     }
-  }
-  process.stderr.write(JSON.stringify(value) + "\n");
+  return value;
 }
 
 function errorChain(error: unknown): string {
@@ -2908,7 +3046,8 @@ function coordinatorInstructions(project: Project, repositoryStanding: string, s
     .map((provider) => provider.instructions?.(project) ?? "")
     .join("");
   return `You are the persistent coordinator for ${project.name}. ${rolePrompt(project, "coordinator")}
-${SHARED_ROLE_RULES} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
+${SHARED_ROLE_RULES}
+${COORDINATOR_CONTEXT_RULES} Project ${project.id}. Objective: ${project.objective}.${standing}${github}${ghNote}${decisions}${library}${plugin}${skills}`;
 }
 function verifierInstructions(project: Project, repositoryStanding: string): string {
   return `You are a verifier for ${project.name}. Project instructions: ${project.objective}

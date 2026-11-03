@@ -333,6 +333,22 @@ try {
     "distinct maintain scope permits revision-checked update",
     (await readKnowledge(maintainedProject.dir, maintainedSeed.path)).text.includes("MAINTAINED"),
   );
+  // Without FAKE-SAY the reply repeats the tool result, so it shows what the model got back.
+  const body = `RECEIPT_BODY ${"z".repeat(3000)}`;
+  await runtime.say(`FAKE-CALL projects_knowledge_write {"path":"research/receipt.md","text":"${body}","expectedRevision":null}`, {
+    requestId: "write-receipt",
+  });
+  await runtime.say(`FAKE-CALL projects_note {"text":"${body}"}`, { requestId: "note-receipt" });
+  const replies = (await runtime.snapshot()).coordinator.history.items
+    .map((message) => message.text ?? "")
+    .filter((text) => text.startsWith("{"))
+    .slice(-2);
+  pass(
+    "knowledge write and note return a metadata receipt without the body",
+    (await readKnowledge(maintainedProject.dir, "research/receipt.md")).text === body &&
+      replies.every((reply) => /"size"/.test(reply) && !reply.includes("RECEIPT_BODY")) &&
+      /"revision":"[a-f0-9]{64}"/.test(replies[0]),
+  );
   await boundedClose(runtime);
   runtime = undefined;
 

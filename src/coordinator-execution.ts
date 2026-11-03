@@ -1,49 +1,66 @@
 import type { Context } from "@earendil-works/chord";
-import { createCodingTools } from "@earendil-works/pi-coding-agent";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
+import { createBashTool, createEditTool, createReadTool, createWriteTool, type ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { ensureArtifactDir } from "./artifacts.ts";
 import { binaryResult, decodeBase64, type ResultBlock } from "./binary-results.ts";
 
-/** Trusted local tools. The resolver must authorize the chat's persisted worktree on every call, with no fallback. */
+/** Where one call runs: the authorized worktree, the artifacts scope, and for whole-repository workers the shell guard and owner-checkout check. */
+export type ExecutionTarget = {
+  cwd: string;
+  scope: string;
+  guard?: (command: string) => string;
+  assertWritable?: (path: string) => void;
+};
+
+let photon: Promise<ImageProcessor> | undefined;
+/** Photon starts on the first image read, not at import. */
+const images: ImageProcessor = { prepare: async (...args) => (await (photon ??= createNodePhotonImages())).prepare(...args) };
+
+/**
+ * Durable's own read, write, edit and bash. The resolver must authorize the worktree on every call, with no fallback; the native tool then
+ * sees only an environment rooted there. Nested calls from code mode run through the same tools, so the same checks apply.
+ */
 export function coordinatorExecutionTools(input: {
   controlRoot: string;
   name?: string;
-  target: (api: ToolExecutionApi, context: Context) => Promise<{ cwd: string; scope: string }>;
+  target: (api: ToolExecutionApi, context: Context) => Promise<ExecutionTarget>;
 }): { tools: ToolRegistration[]; extension: ReturnType<typeof defineExtension> } {
-  // These instances supply schemas only; execution always builds tools for the resolved chat.
-  const tools: ToolRegistration[] = createCodingTools(input.controlRoot).map((definition) =>
+  const native = [createReadTool({ images }), createWriteTool(), createEditTool(), createBashTool()] as ToolRegistration[];
+  const tools = native.map((tool) =>
     defineTool({
-      name: definition.name,
-      description: definition.description,
-      parameters: definition.parameters,
-      prepareArguments: definition.prepareArguments,
+      ...tool,
       replay: "unsafe",
       async execute(args, api, context) {
         const target = await input.target(api, context);
+        if (tool.name === "write" || tool.name === "edit") target.assertWritable?.(String((args as { path?: unknown }).path ?? ""));
         const artifacts = ensureArtifactDir(input.controlRoot, target.scope);
-        const tool = createCodingTools(target.cwd, {
-          bash: {
-            spawnHook: ({ env, ...spawn }) => ({ ...spawn, env: { ...env, PI_ARTIFACTS_DIR: artifacts } }),
-          },
-        }).find((tool) => tool.name === definition.name);
-        if (!tool) throw new Error(`Missing standard tool: ${definition.name}`);
-        const result = await tool.execute(api.callId, args, context.abortSignal, (update) =>
-          api.output(update.content.map((block) => (block.type === "text" ? block.text : "")).join("")),
-        );
+        const run =
+          tool.name === "bash"
+            ? createBashTool({
+                prepare: (execution) => {
+                  execution.env.PI_ARTIFACTS_DIR = artifacts;
+                  if (target.guard) execution.command = target.guard(execution.command);
+                },
+              })
+            : tool;
+        const scoped: ToolExecutionApi = Object.create(api, { env: { value: new NodeExecutionEnv({ cwd: target.cwd }) } });
+        const result = await run.execute(args as never, scoped, context);
+        if (!result.output?.some((block) => block.type === "image")) return result;
         const output: ResultBlock[] = [];
-        for (const block of result.content) {
-          if (block.type === "image") {
-            // The SDK may resize reads before returning them; this retains that returned image, not the original file.
+        for (const block of result.output) {
+          // The processor may have resized the read; this retains the image the model gets, not the original file.
+          if (block.type === "image")
             output.push(
               ...(await binaryResult(
                 { controlRoot: input.controlRoot, scope: target.scope },
-                { bytes: decodeBase64(block.data), label: `${definition.name} returned image` },
+                { bytes: decodeBase64(block.data), label: `${tool.name} returned image` },
               )),
             );
-          } else output.push(block);
+          else if (block.type === "text") output.push(block);
         }
-        // SDK structuredContent repeats read-image bytes; programs receive the converted output instead.
-        return { output, details: result.details, isError: result.isError };
+        return { ...result, output };
       },
     }),
   );
