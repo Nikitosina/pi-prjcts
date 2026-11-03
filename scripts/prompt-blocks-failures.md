@@ -1,6 +1,6 @@
 # Prompt blocks: failure cases
 
-Written before `src/prompt-blocks.ts`. `scripts/prompt-blocks-unit.mjs` covers B1–B9; `scripts/prompt-blocks-e2e.mjs` covers P1–P14 against a private host with the fake provider.
+Written before `src/prompt-blocks.ts`. `scripts/prompt-blocks-unit.mjs` covers B1–B10; `scripts/prompt-blocks-e2e.mjs` covers P1–P15 against a private host with the fake provider.
 
 ## Resolver (unit)
 
@@ -13,6 +13,7 @@ Written before `src/prompt-blocks.ts`. `scripts/prompt-blocks-unit.mjs` covers B
 - B7 A worker's frozen frame (repository, workspace, skills, host contract) changes when only behavior blocks change, or composing a frame gives different text from the configured sections.
 - B8 Built-in authority text (`SHARED_ROLE_RULES`, the coordinator context rules) becomes an editable block, so turning blocks off removes authority rules.
 - B9 A built-in behavior block cannot be edited or turned off (the owner chose editable built-in behavior; only generated authority and capability text stays fixed, outside blocks).
+- B10 The coordinator's context-management habits (read reports first, read by path and range, brief with refs, when to reread) are fixed in the host contract instead of an editable coordinator block; or moving them loses or duplicates a sentence of today's prompt; or the generated fact (tool answers stay until compaction) and the guard (habits never replace a required skill read, proof or evidence check) leave the host contract; or a legacy coordinator override loses the habits it ran with before, or the older per-role editor saves the habits into an override so they appear twice.
 
 ## Runtime and requests (e2e)
 
@@ -30,3 +31,4 @@ Written before `src/prompt-blocks.ts`. `scripts/prompt-blocks-unit.mjs` covers B
 - P12 Editing the Host agent's prompt (by the owner or by itself) changes its tools or lets `host_call` run an action the policy excludes or gates.
 - P13 `prompt-render` drops `chatId`, or calls a configured prompt active when the chat still runs an older one.
 - P14 Owner and Host agent saves do not publish a change topic, so open views go stale.
+- P15 An edited coordinator context-habits block does not reach the next coordinator request, or editing it removes the generated context fact and guard from the host contract.

@@ -1,10 +1,11 @@
-// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering and frames (scripts/prompt-blocks-failures.md B1–B9).
+// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering and frames (scripts/prompt-blocks-failures.md B1–B10).
 import assert from "node:assert/strict";
 import {
   BUILTIN_PROMPT_BLOCKS,
   PROMPT_BLOCK_LIMITS,
   PROMPT_TARGETS,
   composePrompt,
+  legacyEditorText,
   normalizePromptBlocks,
   projectBehavior,
   resolvePromptBlocks,
@@ -156,5 +157,38 @@ assert.equal(
     .join("\n"),
   "B9 host block off",
 );
+
+// B10: the coordinator's context habits are an editable block; the generated contract keeps only the fact and the guard.
+const OLD_CONTEXT_RULES = `Every tool answer stays in this chat until compaction. Read an agent's report first, then only the evidence it points to: one diff path, one artifact, one transcript ref. Read files and diffs by path and line range, not whole trees. Brief agents with refs they can open (branch, commit, file paths, artifact and report refs) instead of pasting source or logs. A skill or file you read fully in this chat stays in context while it is unchanged: you need not reread it. Read it again after a compaction or /reload, when it or your instructions changed, when your earlier read was partial, or when a skill, instruction or task requires it. These habits never replace a required skill read, proof or evidence check.`;
+const habits = BUILTIN_PROMPT_BLOCKS.coordinator.find((block) => block.id === "context");
+assert.ok(habits && !("locked" in habits), "B10 context habits are an editable coordinator block");
+const generated = `${COORDINATOR_CONTEXT_RULES}\n${DEFAULT_ROLE_PROMPTS.coordinator}`;
+for (const sentence of OLD_CONTEXT_RULES.split(/(?<=\.) /)) {
+  const where = [COORDINATOR_CONTEXT_RULES.includes(sentence), habits.text.includes(sentence)];
+  assert.ok(generated.split(sentence).length === 2 || sentence.startsWith("These habits"), `B10 "${sentence.slice(0, 40)}" appears once`);
+  assert.ok(where.filter(Boolean).length <= 1, `B10 "${sentence.slice(0, 40)}" is in one place`);
+}
+assert.ok(
+  habits.text.startsWith("Read an agent's report first") && habits.text.includes("when a skill, instruction or task requires it."),
+  "B10 habits moved",
+);
+assert.ok(
+  COORDINATOR_CONTEXT_RULES.includes("Every tool answer stays in this chat until compaction") &&
+    /never replaces? a required skill read, proof or evidence check/.test(COORDINATOR_CONTEXT_RULES) &&
+    !COORDINATOR_CONTEXT_RULES.includes("Read an agent's report first"),
+  "B10 the contract keeps the fact and the guard only",
+);
+const legacyCoordinator = projectBehavior(project({ prompts: { coordinator: "OLD COORD" } }), "coordinator");
+assert.equal(legacyCoordinator.text, `OLD COORD\n${habits.text}`, "B10 a legacy coordinator override keeps the habits it ran with");
+assert.equal(
+  projectBehavior(project({ prompts: { coordinator: legacyEditorText(project(), "coordinator") } }), "coordinator").text,
+  DEFAULT_ROLE_PROMPTS.coordinator,
+  "B10 saving the older editor's default text back as an override keeps the default behavior, without doubled habits",
+);
+const habitsOff = normalizePromptBlocks(
+  "coordinator",
+  defaults("coordinator").map((block) => ({ ...block, enabled: block.id !== "context" })),
+);
+assert.ok(!resolvePromptBlocks("coordinator", habitsOff).text.includes(habits.text), "B10 habits can be turned off");
 
 console.log("prompt-blocks-unit: ok");
