@@ -17,7 +17,7 @@ Rules:
 
 ## Instance instructions
 
-`src/durable-standing.ts` reads the optional `$PI_PROJECTS_HOME/AGENTS.md` (using `state.home()`, default `~/.pi/agent/projects/AGENTS.md`). It applies across projects to coordinators, workers, scouts, reviewers and verifiers, in a distinct prompt section before repository standing instructions. Repository instructions can specialize shared guidance; neither changes immutable role, tool or security contracts. Projects does not read or copy personal `~/.pi/agent/AGENTS.md`.
+`src/durable-standing.ts` reads the optional `$PI_PROJECTS_HOME/AGENTS.md` (using `state.home()`, default `~/.pi/agent/projects/AGENTS.md`). It applies across projects to coordinators, workers, scouts and reviewers, in a distinct prompt section before repository standing instructions. Repository instructions can specialize shared guidance; neither changes immutable role, tool or security contracts. Projects does not read or copy personal `~/.pi/agent/AGENTS.md`.
 
 The file must be regular, valid UTF-8, at most 64,000 bytes and 16,000 UTF-16 code units. Missing means no extra instructions. Unreadable, invalid, oversized, symlinked or changing files fail loading with a source-path error; content is never silently truncated. The reader keeps existing home/realpath semantics.
 
@@ -63,7 +63,7 @@ Rules:
 
 ## Independent Job verification and review (worker-owned)
 
-The worker commits, pushes a draft PR, records the candidate with `job candidate`, then spawns a fresh verifier on that sha. It repairs and repeats up to `verification.rounds` (project setting, default 3). It runs one review before `ready`, and at most one re-check. Without a verify skill the worker self-verifies and says so in the Ready report. Prompts are in `src/role-prompts.ts` (see `docs/role-prompts.md`); the workflow lives in tool descriptions and these prompts once.
+The worker commits, pushes a draft PR, records the candidate with `job candidate`, then follows the project's verify skill and runs each check with `projects_verify_run` on that sha. It repairs and repeats up to `verification.rounds` (project setting, default 3). There is no verifier subagent (retired 2026-11-03). It runs one review before `ready`, and at most one re-check. Without a verify skill the worker self-verifies and says so in the Ready report. Prompts are in `src/role-prompts.ts` (see `docs/role-prompts.md`); the workflow lives in tool descriptions and these prompts once.
 
 - `src/proof.ts` runs a command for a Job and saves its log under the Job's artifacts, tied to the commit it ran on (`projects_verify_run`). `checkProofRefs` rejects a Ready report whose `r<n>` or `run:r<n>` references name missing runs, runs on another commit, or runs that did not exit 0.
 
@@ -116,7 +116,7 @@ Rules:
 
 ## Change feed
 
-`src/change-feed.ts` is an in-process pub/sub keyed by project. `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.
+`src/change-feed.ts` is an in-process pub/sub keyed by project, plus the reserved key `host` for host-level topics (`ui`, `tiers`, `projects`, `host-agent`, `approvals`; `GET /changes?project=host`). `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.
 
 Rules: reads (`show`, snapshots, history) have no side effects. Anything that changes a read model publishes its topic.
 
@@ -151,6 +151,8 @@ Rules:
 
 - Workspaces: `workspace-types.ts`, `workspace-isolation.ts`, `workspace-capabilities.ts`, `durable-workspace-binding.ts` (per-agent worktree, tools and shell guard), `worktree-maintenance.ts`, `resource-leases.ts`. Only the workspace grant gives a worker repository access. A grant whose approved root is the old host's worktree folder allocates under this host's project folder instead (the stored grant is unchanged, since the root is part of its fingerprint). A continued branch held by an old-host worktree is taken over only if that worktree is under the archive home, idle, clean and fully pushed; otherwise the block names the path and reason.
 - Knowledge: `knowledge.ts`, `knowledge-search.ts`, `knowledge-types.ts`. Markdown under `knowledge/` is the source of truth; a revision is required to write. Preferences, runbooks and decisions only.
+- Memory: `memory.ts` reads `knowledge/` as Memory without moving or rewriting files: kind and status from optional front matter or the folder, a generated index with broken-link checks (`memory-index`), undo of one write (`memory-undo`). Every role prompt gets two Durable sections, current preferences (bounded, with revisions) and the generated index; `MEMORY.md` is no longer injected.
+- Profiles and tiers: `profiles.ts` (profile types, tool groups, locked tools, model selection from tiers), `host-documents.ts` (host-level `<home>/tiers.json` and `<home>/ui.json`, both revision-checked), `prompt-sections.ts` (the instruction sections `prompt-render` shows). A profile's switched-off tools are removed at every agent-setup site; `fallbackModel` in `jobs.ts` walks a tier on quota and rate limits.
 - MCP: `mcp-servers.ts` owns lazy connections and `mcp-profiles.ts` gates servers/writes by role. HTTP connections without an Authorization header reuse Pi's named-server OAuth credentials and refresh locks. `mcp-sign-in.ts` pins private credential/refresh helpers to the locally installed Pi SDK 1.4.0; an SDK upgrade must check this adapter. Projects never launches browser sign-in; missing/rejected grants direct the owner to `pi mcp login <server>`. Static Authorization and stdio behavior are unchanged, and OAuth/server error bodies never reach callers.
 - Skills: `skill-profiles.ts`, `coordinator-skills.ts` (`projects_skill_file` reads a skill body on demand for the roles that have it). Skills are discovered fresh from disk on each catalog request.
 - GitHub and Follow PRs: `github-*.ts`, `pr-monitor.ts`, `durable-follow.ts`, `coordinator-gh.ts`. Approve is the independent Job PR merge path. Coordinator task-branch integration is ordinary work; final direct PR merge still requires owner approval.

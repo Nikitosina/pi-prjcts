@@ -7,7 +7,8 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
-// Failure cases recorded before execution: Unicode index admission; prompt leakage;
+// Failure cases recorded before execution: Unicode index admission; prompt leakage (the generated memory index and the preferences
+// brief replaced the injected MEMORY.md, docs/ui2-contract.md "Memory");
 // unsafe path/symlink traversal; read-only coordinator write; stale/concurrent CAS; history
 // byte loss; migration overwrite; restart loss; and SQLite contention/SIGKILL release.
 const root = resolve("artifacts", `durable-knowledge-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
@@ -27,7 +28,8 @@ const checks = [],
 const topic = `TOPIC_${randomUUID()}`,
   preference = `PREFERENCE_${randomUUID()}`,
   legacyText = `LEGACY_${randomUUID()}`,
-  marker = `INDEX_${randomUUID()}`;
+  marker = `INDEX_${randomUUID()}`,
+  indexMarker = `GENERATED_${randomUUID()}`;
 const credentialPattern = /(authorization|api[-_ ]?key|bearer|token|secret|password)/i;
 function save(name, value) {
   writeFileSync(join(root, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
@@ -169,6 +171,13 @@ try {
     expectedRevision: (await readKnowledge(primary.dir, "preferences.md")).revision,
     author: "fixture",
   });
+  await writeKnowledge({
+    dir: primary.dir,
+    path: "runbooks/index-marker.md",
+    text: `# ${indexMarker}\n\nA procedure the generated index lists.\n`,
+    expectedRevision: null,
+    author: "fixture",
+  });
   let document = await writeKnowledge({
     dir: primary.dir,
     path: "research/topic.md",
@@ -214,24 +223,13 @@ try {
   await rejects("one durable owner per project is enforced", () =>
     openDurableProject({ project: primary.project, dir: primary.dir, ...options("read-only") }),
   );
-  // beforeRequest observation is not provider-dispatch proof: guard evidence is the
-  // unanswered result/report and absence of the prohibited completed assistant reply.
+  // MEMORY.md is an archive entry now, never injected, so a damaged one no longer blocks a turn.
   writeFileSync(join(primary.dir, "knowledge", "MEMORY.md"), "😀".repeat(3001));
-  let invalid;
-  try {
-    invalid = await runtime.say("Reply INVALID_SHOULD_NOT_RUN.", { requestId: "invalid-index" });
-  } catch (error) {
-    invalid = { status: "unanswered", reason: error instanceof Error ? error.message : String(error) };
-  }
-  const invalidView = await runtime.snapshot();
-  const guardEvidence = [invalid.reason, invalid.text, ...reports.map((report) => report.message)].filter(Boolean).join("\n");
+  const oversizedAt = requests.length;
+  const oversized = await runtime.say("Reply exactly OVERSIZED_STILL_RUNS.", { requestId: "oversized-index" });
   pass(
-    "oversized Unicode MEMORY.md records memory guard failure before unsafe reply",
-    invalid.status === "unanswered" &&
-      /3000|MEMORY\.md/i.test(guardEvidence) &&
-      !invalidView.coordinator.history.items.some(
-        (message) => message.role === "assistant" && message.text?.includes("INVALID_SHOULD_NOT_RUN"),
-      ),
+    "oversized Unicode MEMORY.md is not injected and does not block a reply",
+    oversized.status === "done" && !requests.slice(oversizedAt).some((request) => has(request.messages, "😀".repeat(50))),
   );
   const damaged = await readKnowledge(primary.dir, "MEMORY.md");
   memory = await writeKnowledge({
@@ -247,8 +245,8 @@ try {
   const masterId = (await runtime.snapshot()).identities.coordinatorConversationId;
   const firstMaster = requests.slice(initialRequestOffset).find((request) => request.conversationId === masterId)?.messages ?? [];
   pass(
-    "coordinator initial prepared request is index-only",
-    has(firstMaster, marker) && ![topic, preference, legacyText].some((value) => has(firstMaster, value)),
+    "coordinator initial prepared request carries the generated index and preferences, not topics or MEMORY.md",
+    has(firstMaster, indexMarker) && has(firstMaster, preference) && ![topic, legacyText, marker].some((value) => has(firstMaster, value)),
   );
   await runtime.say(
     'Use projects_knowledge_read on research/topic.md and reply with its exact contents. FAKE-CALL projects_knowledge_read {"path":"research/topic.md"}',
@@ -263,8 +261,8 @@ try {
     { requestId: "preferences" },
   );
   pass(
-    "preferences are absent until demanded",
-    !has(firstMaster, preference) &&
+    "preferences are in the prompt and still readable on demand",
+    has(firstMaster, preference) &&
       (await runtime.snapshot()).coordinator.history.items.some((message) => message.text?.includes(preference)),
   );
   const workerRequestAt = requests.length;
@@ -283,9 +281,10 @@ try {
   const workerRequests = requests.slice(workerRequestAt).filter((request) => request.conversationId !== masterId),
     firstWorker = workerRequests[0]?.messages ?? [];
   pass(
-    "UUID worker retrieves topic and its first prepared prompt is index-only",
-    has(firstWorker, marker) &&
-      ![topic, preference, legacyText].some((value) => has(firstWorker, value)) &&
+    "UUID worker retrieves topic and its first prepared prompt carries only the index and preferences",
+    has(firstWorker, indexMarker) &&
+      has(firstWorker, preference) &&
+      ![topic, legacyText, marker].some((value) => has(firstWorker, value)) &&
       workerRequests.some((request) => has(request.messages, topic)),
   );
   document = await writeKnowledge({

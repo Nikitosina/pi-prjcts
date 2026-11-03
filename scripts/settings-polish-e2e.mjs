@@ -84,8 +84,8 @@ kit.git(kit.workspace, "push", "-q", "origin", "main");
 
 await kit.run(async () => {
   const gh = await kit.createProject("Mari (GitHub)");
-  const second = await rpc({ action: "owner-setup-snapshot", id: gh });
-  await rpc({ action: "github-quick-authorize", id: gh, confirm: gh, expectedRevision: second.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id: gh })).github?.length) throw Error("create did not connect GitHub");
   // Some skills and MCP servers already switched off so the pickers show real state (everything else is on by default).
   await kit.updateSettings(gh, {
     skills: {

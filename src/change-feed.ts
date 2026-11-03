@@ -2,7 +2,12 @@ import type { CommitPublication } from "@earendil-works/pi-durable";
 
 /** What a browser refetches: one topic per read model. `chat` and `jobs` carry the chat id or agent id they concern so a view can ignore the rest. */
 export type Topic = "chat" | "jobs" | "knowledge" | "settings";
-export type FeedEvent = { topic: Topic; chat?: string; thread?: string };
+/** Host-level read models, published under HOST_FEED (docs/ui2-contract.md). */
+export type HostTopic = "ui" | "tiers" | "projects" | "host-agent" | "approvals";
+export type FeedEvent = { topic: Topic | HostTopic; chat?: string; thread?: string };
+/** The reserved feed key of host topics; never a project id (those are UUIDs). */
+export const HOST_FEED = "host";
+export const publishHost = (topic: HostTopic): void => feed.publish(HOST_FEED, { topic });
 type Listener = (event: FeedEvent) => void;
 
 const listeners = new Map<string, Set<Listener>>();

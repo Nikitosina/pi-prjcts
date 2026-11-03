@@ -1,5 +1,5 @@
 // Browser E2E: a Settings tab left open across a host restart shows and uses the new host's built-in role prompts.
-// The host first runs from a private core copy whose five defaults carry a LEGACY marker, then restarts on the real defaults while the page stays open.
+// The host first runs from a private core copy whose four defaults carry a LEGACY marker, then restarts on the real defaults while the page stays open.
 // Fakes only (fake model, private HOME, temp repo). Covers: no override is persisted for defaults, a genuine override and an unsaved edit survive,
 // Reset removes the override, new threads use the current text and a thread started before the restart keeps its frozen prompt.
 // A page-level fetch gate then fails or holds one prompts-snapshot response: a failed refresh keeps the editors and drafts (F7), and a snapshot read
@@ -19,7 +19,7 @@ for (const entry of ["src", "web", "relay", "package.json", "tsconfig.json"])
 symlinkSync(join(repo, "node_modules"), join(core, "node_modules"));
 const promptsFile = join(core, "src/role-prompts.ts"),
   current = readFileSync(promptsFile, "utf8");
-const ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"];
+const ROLES = ["coordinator", "worker", "scout", "reviewer"];
 const legacy = ROLES.reduce((text, role) => text.replace(`  ${role}: \``, `  ${role}: \`LEGACY-DEFAULT ${role}. `), current);
 if (ROLES.some((role) => !legacy.includes(`LEGACY-DEFAULT ${role}.`))) throw Error("could not mark every legacy default");
 writeFileSync(promptsFile, legacy);
@@ -64,7 +64,7 @@ try {
     );
 
     const page = await kit.openPage(await kit.webUrl(id));
-    await page.waitFor(`document.querySelectorAll('#prompts [data-prompt]').length === 5`, "prompt editors");
+    await page.waitFor(`document.querySelectorAll('#prompts [data-prompt]').length === 4`, "prompt editors");
     const editor = (role) => page.evaluate(`document.querySelector('[data-prompt="${role}"]').value`);
     check(
       "S2 Settings shows the running host's built-in coordinator text",
@@ -104,7 +104,7 @@ try {
     const shown = await page.evaluate(
       `Object.fromEntries([...document.querySelectorAll('#prompts fieldset')].map(f => [f.dataset.role, { text: f.querySelector('textarea').value, custom: !!f.querySelector('.prompt-custom') }]))`,
     );
-    for (const role of ["coordinator", "worker", "verifier"])
+    for (const role of ["coordinator", "worker"])
       check(
         `S4 ${role} shows the current default, labelled Default`,
         shown[role].text === expected[role] && !shown[role].custom,
@@ -155,7 +155,7 @@ try {
         `(document.querySelector('#prompts .note.bad') ?? document.querySelector('#prompts')).scrollIntoView({ block: 'center' })`,
       );
       await page.shot("03-refresh-failed", { force: true });
-      check("F7 a failed refresh keeps all five editors", Object.keys(failed).length === 5, {
+      check("F7 a failed refresh keeps all four editors", Object.keys(failed).length === 4, {
         roles: Object.keys(failed),
         html: await page.evaluate(`document.querySelector('#prompts').innerText.slice(0, 200)`),
       });
@@ -170,7 +170,7 @@ try {
       );
       await reopen();
       await page.waitFor(
-        `!document.querySelector('#prompts .note.bad') && document.querySelectorAll('#prompts [data-prompt]').length === 5`,
+        `!document.querySelector('#prompts .note.bad') && document.querySelectorAll('#prompts [data-prompt]').length === 4`,
         "retried refresh",
       );
       const retried = await editors();
@@ -203,7 +203,7 @@ try {
       await delay(300);
       const after = await editors();
       check(
-        `F11 a failed ${action} during ${button} keeps all five editors and every draft`,
+        `F11 a failed ${action} during ${button} keeps all four editors and every draft`,
         JSON.stringify(after) === JSON.stringify(drafted),
         { drafted, after },
       );

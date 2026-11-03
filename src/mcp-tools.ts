@@ -17,13 +17,15 @@ const json = (value: unknown) => ({ output: text(JSON.stringify(value)) });
 /** Two stable tools instead of one tool per server tool: durable freezes tool names per conversation, and servers come and go. */
 export function mcpGatewayTools(input: {
   pool: McpPool;
-  settings: () => McpSettings | undefined;
+  /** The saved settings as one profile sees them (its switched-off servers and writes applied). */
+  settings: (role: SkillRole) => McpSettings | undefined;
   caller: (api: ToolExecutionApi, context: Context) => Promise<McpCaller | null>;
 }) {
   const enabled = async (api: ToolExecutionApi, context: Context) => {
     const caller = await input.caller(api, context);
     if (!caller) throw new Error("MCP is unavailable to this conversation");
-    return { caller, saved: input.settings(), servers: mcpServersFor(input.settings(), caller.role, mcpCatalog().servers) };
+    const saved = input.settings(caller.role);
+    return { caller, saved, servers: mcpServersFor(saved, caller.role, mcpCatalog().servers) };
   };
   const need = (servers: ReadonlySet<string>, server: string) => {
     if (!servers.has(server))

@@ -236,7 +236,17 @@ try {
   });
   result.projectId = project.id;
   const first = await rpc({ action: "owner-setup-snapshot", id: project.id });
-  await rpc({ action: "workspace-quick-grant", id: project.id, confirm: project.id, expectedRevision: first.workspaceRevision });
+  if (first.github?.length !== 1 || first.github[0].oneClick !== true || first.github[0].repositoryId !== "acme/quick")
+    throw new Error("create did not connect GitHub one-click: " + JSON.stringify(first.github));
+  result.checks.push("U0 create connects GitHub one-click by itself");
+  // Revoke the automatic grant so the stepper's manual Connect path below still runs.
+  await rpc({
+    action: "github-revoke",
+    id: project.id,
+    repositoryId: "acme/quick",
+    confirm: project.id,
+    expectedRevision: first.githubRevision,
+  });
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", project.id);

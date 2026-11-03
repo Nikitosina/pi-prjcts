@@ -23,11 +23,19 @@ import {
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
-import { providerFailure, QUOTA_RETRY_BASE_MS, QUOTA_RETRY_LIMIT, quotaRetryDelay, unansweredReason } from "./provider-failure.ts";
+import {
+  providerFailure,
+  type ProviderFailure,
+  QUOTA_RETRY_BASE_MS,
+  QUOTA_RETRY_LIMIT,
+  quotaRetryDelay,
+  unansweredReason,
+} from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 
 const context = BACKGROUND_CONTEXT;
 
+// "verifier" remains only so recorded verifier subagents still read; new turns cannot start one.
 export type AgentRole = "worker" | "scout" | "reviewer" | "verifier";
 export const TaskWorkspaceSchema = Type.Union([
   Type.Object({ kind: Type.Literal("shared") }, { additionalProperties: false }),
@@ -284,8 +292,13 @@ export type JobsHost = {
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
   backgroundSilence?(conversationIds: readonly ConversationId[]): Promise<number | null> | number | null;
-  /** The owner-configured quota fallback model for a role, if any. */
-  fallbackModel?(role: AgentRole): { label: string; change: AgentChange } | null;
+  /** The next owner-configured fallback model after `from` (`moves` already made), if any; a rate limit only moves along a tier. */
+  fallbackModel?(at: {
+    role: AgentRole;
+    from: string;
+    moves: number;
+    failure: ProviderFailure;
+  }): { label: string; change: AgentChange } | null;
   /** Cached provider reset time for a model label, if known. */
   quotaResetAt?(model: string, now: number): number | undefined;
   /** Why these proof references cannot back a Ready report, or null. */
@@ -443,15 +456,19 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         );
         const settled = await submission.wait(taskContext);
         const failure = settled.status === "unanswered" && settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
-        // Quota: switch once to the owner's fallback model, otherwise wait for the allowance to recover and resend.
-        if (failure && providerFailure(failure) === "quota_exceeded") {
+        // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
+        const kind = failure ? providerFailure(failure) : undefined;
+        if (failure && kind) {
           const record = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId];
-          const switched = record && record.modelMoves.length === 0 ? host.fallbackModel?.(record.role) : null;
+          const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
+          const from = current ? `${current.provider}/${current.modelId}` : "";
+          const offered = record ? host.fallbackModel?.({ role: record.role, from, moves: record.modelMoves.length, failure: kind }) : null;
+          // Never back to a model this agent already left, so a chain ends instead of cycling.
+          const switched =
+            offered && offered.label !== from && !record?.modelMoves.some((move) => move.from === offered.label) ? offered : null;
           const previous = record?.quota?.attempts ?? 0;
-          if (record && (switched || previous < QUOTA_RETRY_LIMIT)) {
+          if (record && (switched || (kind === "quota_exceeded" && previous < QUOTA_RETRY_LIMIT))) {
             const now = runtime.now();
-            const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
-            const from = current ? `${current.provider}/${current.modelId}` : "";
             const retryAt = switched
               ? now
               : (host.quotaResetAt?.(from, now) ?? now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
@@ -971,7 +988,7 @@ export function createJobs(host: JobsHost) {
     name: "job",
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
-      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps. checkpoint: end an independent Job's current stage with a concise summary, proof and gaps when delivery is not ready; preserve its workspace and wait for a new instruction, without Ready or approval.",
+      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that your projects_verify_run runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps. checkpoint: end an independent Job's current stage with a concise summary, proof and gaps when delivery is not ready; preserve its workspace and wait for a new instruction, without Ready or approval.",
     parameters: objectUnion([
       Type.Object({
         action: Type.Literal("plan"),
@@ -1087,9 +1104,9 @@ export function createJobs(host: JobsHost) {
 
   const subagentTool = defineTool({
     name: "subagent",
-    description: "Run a fresh verifier, reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers.",
+    description: "Run a fresh reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers.",
     parameters: Type.Object({
-      role: Type.Union([Type.Literal("verifier"), Type.Literal("reviewer"), Type.Literal("scout")]),
+      role: Type.Union([Type.Literal("reviewer"), Type.Literal("scout")]),
       task: Type.String(),
     }),
     replay: "safe",

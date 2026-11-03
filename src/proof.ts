@@ -83,8 +83,8 @@ export type ProofDeps = {
 };
 
 /**
- * The verifier's tools: shell commands on the candidate in the Job's worktree with their logs kept, plus the lease and background tools workers have.
- * A verifier is trusted like its worker; nothing confines its commands, and the run record only ties each result to one commit.
+ * The worker's verification tools: shell commands on the candidate in the Job's worktree with their logs kept, plus the lease and background tools.
+ * Nothing confines these commands beyond the worker's own shell policy; the run record only ties each result to one commit.
  */
 export function proofTools(deps: ProofDeps) {
   async function jobOf(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<Job> {

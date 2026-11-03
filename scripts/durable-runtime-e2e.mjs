@@ -191,9 +191,10 @@ try {
   pass("Read-only worker note mutation denied");
   const memory = await readKnowledge(dir, "MEMORY.md");
   writeFileSync(join(dir, "knowledge", "MEMORY.md"), "x".repeat(3001));
-  const invalid = await runtime.say("Reply INVALID_SHOULD_NOT_RUN.", { requestId: "invalid" });
-  assert.ok(invalid.status === "unanswered" || invalid.text?.includes("3000"));
-  pass("Oversized memory blocks actual model request");
+  // The generated memory index replaced MEMORY.md in the prompt (docs/ui2-contract.md "Memory"), so a damaged file no longer blocks a turn.
+  const oversized = await runtime.say("Reply exactly OVERSIZED_STILL_RUNS.", { requestId: "oversized" });
+  assert.match(oversized.text ?? "", /OVERSIZED_STILL_RUNS/);
+  pass("Oversized MEMORY.md is not injected and does not block a request");
   const damaged = await readKnowledge(dir, "MEMORY.md");
   await writeKnowledge({ dir, path: "MEMORY.md", text: memory.text, expectedRevision: damaged.revision, author: "owner" });
   assert.match((await runtime.say("Reply exactly REPAIRED.", { requestId: "repair" })).text, /REPAIRED/);

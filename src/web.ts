@@ -11,7 +11,7 @@ import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
-import { feed, type FeedEvent } from "./change-feed.ts";
+import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
 
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
@@ -89,7 +89,7 @@ export async function startWeb(
       end();
       return () => {};
     }
-    await openProject(id);
+    if (id !== HOST_FEED) await openProject(id);
     const pending = new Map<string, FeedEvent>();
     let timer: NodeJS.Timeout | undefined;
     const stopFeed = feed.subscribe(id, (event) => {
@@ -227,6 +227,10 @@ export async function startWeb(
         const result = await route({ projectId: id, query: url.searchParams });
         if (!/^[a-z]+\/[a-z0-9.+-]+$/.test(result.mime)) throw new Error("Plugin returned an invalid content type");
         response.writeHead(200, { ...headers, "content-type": result.mime, "content-length": result.bytes.length }).end(result.bytes);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/changes" && url.searchParams.get("project") === HOST_FEED) {
+        await serveLive(response, headers, (onFrame, onEnd) => watchChanges(HOST_FEED, onFrame, onEnd));
         return;
       }
       if (request.method === "GET" && (url.pathname === "/live" || url.pathname === "/changes")) {
