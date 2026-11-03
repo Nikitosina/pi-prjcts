@@ -47,7 +47,7 @@ The tooltip calls the value month to date, names USD and the account, and shows 
 
 ## Polling and failures
 
-Eliza shares the existing limits cache: one automatic poll per provider per five minutes, a 15-second manual-refresh cooldown, exponential failure backoff, and visibility-triggered recovery. Both delta-seconds and HTTP-date `Retry-After` values hold every polling mode, including manual refresh; the 15-minute backoff cap never shortens that hold. Eliza documents no lower request limit for this endpoint. Only the read-only usage route is called; no model request is needed or made.
+Eliza shares the existing limits cache: it is polled only by the refresh button, with a 15-second per-provider cooldown; reads and page loads never poll. Both delta-seconds and HTTP-date `Retry-After` values hold the refresh button. Eliza documents no lower request limit for this endpoint. Only the read-only usage route is called; no model request is needed or made.
 
 The request-start time selects the UTC month. If the response arrives in a different UTC month, the host discards it and schedules a retry instead of labeling old-period usage with new-period bounds.
 

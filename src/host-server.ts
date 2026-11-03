@@ -1440,7 +1440,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "worker-contexts":
       return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot":
-      return limitsSnapshot(Date.now(), input.visit === true ? "visit" : false);
+      return limitsSnapshot();
     case "limits-refresh":
       return limitsSnapshot(Date.now(), true);
     case "limits-visibility":

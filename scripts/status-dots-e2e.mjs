@@ -928,7 +928,7 @@ try {
   writeFileSync(join(root, "limits.json"), JSON.stringify({ ...fixtureNow, claudeFail: "unreachable" }));
   await click("#limits-bar .lim-refresh", s);
   await waitFor(
-    `/Couldn.t reach Claude, will retry/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`,
+    `/Couldn.t reach Claude/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`,
     s,
     "unreachable message",
   );
@@ -946,7 +946,7 @@ try {
     "outage details",
   );
   await shot("10-limits-unreachable", s);
-  result.checks.push('B5 a network failure reads "Couldn\'t reach Claude, will retry" (not sign-in expired) and keeps the last numbers');
+  result.checks.push('B5 a network failure reads "Couldn\'t reach Claude" (not sign-in expired) and keeps the last numbers');
   await delay(16000);
   writeFileSync(join(root, "limits.json"), JSON.stringify(fixtureNow));
   await click("#limits-bar .lim-refresh", s);

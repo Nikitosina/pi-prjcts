@@ -352,6 +352,10 @@ a {
   color: #fff;
   border-color: transparent;
 }
+.ghost-btn[aria-disabled="true"] {
+  cursor: progress;
+  opacity: 0.6;
+}
 .ghost-btn.danger {
   background: transparent;
   color: var(--bad);
@@ -3097,6 +3101,26 @@ table.hotkeys tr.clash td {
   padding-left: 10px;
   border-left: 1px solid var(--line);
   cursor: help;
+}
+.sl-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-s);
+  color: var(--muted);
+  font: inherit;
+}
+.sl-refresh:hover:not([aria-disabled="true"]) {
+  background: var(--raised);
+  color: var(--text);
+}
+.sl-refresh[aria-disabled="true"] {
+  cursor: progress;
+}
+.sl-refresh.busy svg {
+  animation: spin 0.8s linear infinite;
 }
 /* Top centre, under the top bar: clear of both composers and the drawer header on every width. */
 #toasts {

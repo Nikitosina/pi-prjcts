@@ -7,6 +7,7 @@ import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
+import { loadLimits, refreshLimits } from "./limits.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -922,13 +923,30 @@ async function deploy(body, alive) {
   if (!alive()) return;
   body.innerHTML = `${line("Self-deploys of pi-prjcts in a quiet window.", "Deploy is an owner-only action: the Host agent may prepare it, never press it.")}<div class="field-row"><span class="label">Window</span><span class="mono">${esc(snap.settings ? `${snap.settings.startHour}:00–${snap.settings.endHour}:00${snap.settings.idle ? " · when idle" : ""}` : (snap.error ?? ""))}</span><span class="badge ${snap.running ? "t-work" : ""}">${snap.running ? "deploying" : "idle"}</span></div>`;
 }
+/** Same readings and refresh as the status line (web-ui2/limits.js): opening this section reads, only Refresh asks the providers. */
 async function providers(body, alive) {
-  const limits = await call("limits-snapshot").catch(() => null);
-  if (!alive() || !limits) return;
-  body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; Cursor connects from the classic inbox.")}<ul class="provider-list">${limits.providers
-    .map(
-      (item) =>
-        `<li><b>${esc(item.label)}</b><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span></li>`,
+  await loadLimits();
+  if (!alive()) return;
+  const draw = () => {
+    const busy = state.limitsRefreshing;
+    body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; Cursor connects from the classic inbox. Limits update only when you refresh them.")}<div class="field-row"><button type="button" class="ghost-btn small" data-providers-refresh${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${busy ? "Refreshing…" : "Refresh limits"}</button>${state.limitsError ? `<span class="error-line small" data-limits-error>${esc(oneLine(state.limitsError))}</span>` : ""}</div><ul class="provider-list">${(
+      state.limits ?? []
     )
-    .join("")}</ul>`;
+      .map(
+        (item) =>
+          `<li><b>${esc(item.label)}</b><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span></li>`,
+      )
+      .join("")}</ul>`;
+  };
+  draw();
+  body.addEventListener("click", (event) => {
+    if (event.target.closest("[data-providers-refresh]")) void refreshLimits();
+  });
+  // The button stays focusable while busy (aria-disabled, not disabled), so the redraw keeps the keyboard on it.
+  const off = on("limits", () => {
+    if (!alive()) return off();
+    const focused = document.activeElement?.matches?.("[data-providers-refresh]");
+    draw();
+    if (focused) body.querySelector("[data-providers-refresh]")?.focus();
+  });
 }

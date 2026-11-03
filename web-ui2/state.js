@@ -14,7 +14,9 @@ export const state = {
   ui: null, // UiSettings, or null while unknown
   uiRevision: null,
   steer: false, // composer mode while busy: false = queue, true = steer
-  limits: null,
+  limits: null, // `limits-snapshot` providers
+  limitsRefreshing: false,
+  limitsError: null,
   usage: null,
 };
 

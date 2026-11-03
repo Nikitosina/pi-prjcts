@@ -6,6 +6,7 @@ import { register, paintHints, onBindingsChange } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { loadUi, setUi } from "./ui.js";
 import { paintStatusLine } from "./statusline.js";
+import { loadLimits } from "./limits.js";
 import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
@@ -218,12 +219,6 @@ async function loadUsage() {
   state.thinking = state.profiles?.coordinator?.thinking ?? "medium";
   paintStatusLine();
 }
-async function loadLimits() {
-  const limits = await call("limits-snapshot").catch(() => null);
-  if (!limits) return;
-  state.limits = limits.providers.filter((item) => item.status === "ok");
-  paintStatusLine();
-}
 
 // ---------------------------------------------------------------------------------------------------------------- commands and hotkeys
 
@@ -400,7 +395,7 @@ async function start() {
     first = state.projects.find((item) => item.id === wanted) ?? state.projects[0];
   if (first) await select(first.id, first.id === wanted ? (url.searchParams.get("chat") ?? "main") : "main");
   else document.body.dataset.ready = "1";
-  void loadLimits();
+  void loadLimits(); // the host's last readings; providers are asked only by the refresh button
   void loadApprovals();
   // Host topics: approvals reach the status pill and ui_focus moves the page even while the drawer is closed.
   hostChanges = stream("/changes?project=host", (change) => {
@@ -419,7 +414,6 @@ async function start() {
     else onHostTopic(change);
   });
   setInterval(() => void loadProjects(), 15000);
-  setInterval(() => void loadLimits(), 120000);
 }
 addEventListener("pagehide", () => {
   changes?.stop();

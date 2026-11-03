@@ -1124,6 +1124,7 @@ export const Request = Type.Union([
     { action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) },
     { additionalProperties: false },
   ),
+  // `visit` is still accepted from older pages; a read never polls either way.
   Type.Object({ action: Type.Literal("limits-snapshot"), visit: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("limits-refresh") }, { additionalProperties: false }),
   Type.Object(
