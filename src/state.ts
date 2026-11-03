@@ -636,6 +636,7 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("model-picker-snapshot"), id: Type.Optional(Id) }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("telemetry-snapshot"), id: Id }, { additionalProperties: false }),
   Type.Object(
     {
       action: Type.Literal("usage-snapshot"),

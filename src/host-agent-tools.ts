@@ -62,6 +62,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "model-picker-snapshot": allow("Models offered by the model picker."),
   "usage-snapshot": allow("Token and cost usage of a project."),
   "event-log": allow("Recent host events."),
+  "telemetry-snapshot": allow("Local diagnostic telemetry for a project."),
   "host-health": allow("Host process health."),
   "library-import": allow("Import files into a project's library."),
   "library-list": allow("A project's library files."),

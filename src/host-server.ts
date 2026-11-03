@@ -549,6 +549,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return projectModelPicker(input.id ? loadProject(input.id) : undefined);
     case "usage-snapshot":
       return (await durable(input.id)).usageSnapshot(input);
+    case "telemetry-snapshot":
+      return (await durable(input.id)).telemetrySnapshot();
     case "library-import":
       return withProjectLock(input.id, async () => {
         const project = loadProject(input.id);
@@ -859,7 +861,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         operation: async (owner) => {
-          const [plan, view] = await Promise.all([owner.jobs(), owner.snapshot()]);
+          const [plan, view, durable] = await Promise.all([owner.jobs(), owner.snapshot(), owner.taskDiagnostics()]);
           const projectJobs = jobs(input.id);
           let leases = 0;
           try {
@@ -883,6 +885,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             failedJobs: projectJobs.filter((job) => job.state === "failed").length,
             macAwake: null,
             macAwakeReason: "No bounded platform-specific awake probe is configured",
+            durable,
           };
         },
       });

@@ -10,6 +10,14 @@ The existing cumulative response fields are unchanged. The coordinator and each 
 
 Buckets use timestamps and usage attached to assistant and tool-result model messages. Entries outside the time windows, future timestamps, messages without valid usage or timestamps, and other entry kinds are ignored. Transcript data may omit usage for older SDK entries. This is a read-only scan and is not atomic with the cumulative UsageDoc snapshot.
 
+## `telemetry-snapshot`
+
+`{ action: "telemetry-snapshot", id }` returns Durable's own metrics for one project since the host started: `{ since, maxSeries, droppedSeries, metrics }`. Each metric series has `name`, `kind`, `unit`, `attributes`, `count`, `sum`, `min` and `max`. The series are `pi.durable.phase.duration` (milliseconds, by task, phase and outcome; a `sleeping` outcome is a durable wait such as a retry backoff), `pi.durable.reports` (by report type) and `pi.durable.tasks.active` (by task; `sum` is the current count). It is kept in memory only, at most 256 series, and is lost on restart. Spans and error text are not recorded, so it holds no prompts, tool arguments, outputs or secrets. Nothing is exported.
+
+## `host-health`: `durable`
+
+`host-health` also returns `durable: { tasks, totalTasks, reports }`. `tasks` is Durable's live task graph, oldest first, at most 200 entries: `id`, `kind`, `conversationId`, `owner` (the owning task), `status` (`pending`, `running`, `waiting`, `sleeping` or `completing`), `phase`, `on` (tasks it waits on), `until` (wake time), `blocked` (`missing_task`, `task_too_old`, `migration_failed` or `restart_limit`), `background` and `abortRequested`. `reports` holds the last 20 Durable reports since the host started, as metadata only (`type`, `reason`, `extension`, `callback`, `task`, `conversationId`), without the error text. It is read-only: no retry or abort.
+
 ## `schedule-history` with `kind: "intents"`
 
 The existing page and intent items remain unchanged. The response adds `routines`, grouped by stable routine ID. Each group has up to 20 most recent recognized schedule-intent runs with `at` (recorded time), `outcome` (`ok`, `failed`, `skipped`, or `paused`), and `durationMs` (currently `null`, because schedule intents do not persist a completion time).

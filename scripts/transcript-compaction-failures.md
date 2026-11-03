@@ -23,3 +23,7 @@ Verified by `scripts/transcript-compaction-e2e.mjs`. The transcript is display h
 - P5 Unknown legacy entries are hidden or assigned internal origin without a matching submission; archives and worker transcripts lose diagnostics.
 
 Legacy origin lookup reads at most the newest 200 submissions of this conversation. Older or unmatched legacy entries retain unknown origin and stay visible. New owner/internal input kinds carry their source in the entry and need no submission lookup. Cursors are backend-owned and are never synthesized from entry IDs.
+
+## Compaction failure
+
+- T12 A failed compaction leaves no trace: the context meter looks normal, so the owner does not learn that the context was not reduced and that a later turn may stop at the limit. The chat snapshot must carry the failure, and the meter must say "Last compaction failed" with the error in its label and popup, marked by text and not by color alone. It stays after a host restart and clears once a compaction produces a summary.
