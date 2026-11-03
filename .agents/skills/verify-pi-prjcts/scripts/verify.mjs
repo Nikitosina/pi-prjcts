@@ -1588,6 +1588,75 @@ const journeys = {
     // Focus is in the drawer's composer, where \\ is a character; Esc closes the drawer.
     await page.press("Escape", { keyCode: 27 });
     await page.waitFor(`document.querySelector('#host-agent')?.dataset.open !== '1'`, "drawer closed at 390 px");
+    // Settings → Status line at 390 px: every row's controls fit, pointer reorder and toggle save, and every enabled item
+    // stays in the bar, reachable by scrolling it sideways (an enabled item must not vanish because the screen is narrow).
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings at 390 px");
+    await page.press("s", { keyCode: 83 });
+    await page.waitFor(`!!document.querySelector('#settings .sl-order')`, "status line section at 390 px");
+    await delay(300);
+    const rows = await page.evaluate(`(() => {
+      const bad = [...document.querySelectorAll('#settings .sl-order li')].flatMap(li => [...li.querySelectorAll('input, button')].filter(n => {
+        const r = n.getBoundingClientRect(); return r.width < 10 || r.left < 0 || r.right > innerWidth;
+      }).map(n => li.dataset.slItem + ':' + (n.dataset.slMove ?? 'toggle')));
+      return { bad, overflow: document.documentElement.scrollWidth - innerWidth, rows: document.querySelectorAll('#settings .sl-order li').length };
+    })()`);
+    if (rows.bad.length || rows.overflow > 0 || rows.rows !== ITEM_ORDER.length)
+      throw Error(`status line settings at 390 px: ${JSON.stringify(rows)}`);
+    await page.shot(dir, "10c-narrow-390-status-line-settings");
+    await page.click('#settings [data-sl-item="connection"] [data-sl-move="up"]');
+    await until(async () => (await rpc(run, { action: "ui-get" })).ui.statusItems[6]?.id === "connection", "Connection moved up at 390 px");
+    await page.waitFor(`document.activeElement?.matches('[data-sl-item="connection"] [data-sl-move="up"]')`, "focus kept on ↑ at 390 px");
+    await page.click('#settings [data-sl-toggle="thinking"]');
+    await until(
+      async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.find((item) => item.id === "thinking")?.enabled === false,
+      "thinking hidden at 390 px",
+    );
+    await page.waitFor(
+      `document.querySelector('#settings [data-sl-item="thinking"] .sl-state').textContent === 'hidden'`,
+      "row says hidden",
+    );
+    await page.click('#settings [data-sl-toggle="thinking"]');
+    await until(
+      async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.find((item) => item.id === "thinking")?.enabled === true,
+      "thinking shown again at 390 px",
+    );
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed at 390 px");
+    const reach = await page.evaluate(`(() => {
+      const bar = document.querySelector('#statusline'), b = bar.getBoundingClientRect();
+      const enabled = JSON.parse(localStorage.getItem('pi-ui2-ui') ?? 'null')?.statusItems?.filter(i => i.enabled && i.id !== 'spacer').map(i => i.id) ?? [];
+      const missing = [];
+      for (const id of enabled) {
+        const node = [...bar.querySelectorAll('[data-item="' + id + '"]')].find(n => n.getClientRects().length);
+        if (!node && id === 'limits') continue; // no provider reports usage in this run
+        if (!node) { missing.push(id + ':not drawn'); continue; }
+        node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        const r = node.getBoundingClientRect();
+        if (r.width < 1 || r.left < b.left - 0.5 || r.right > Math.min(b.right, innerWidth) + 0.5) missing.push(id + ':out of view');
+      }
+      const order = [...bar.querySelectorAll('[data-item]')].filter(n => n.getClientRects().length || n.dataset.item === 'spacer').map(n => n.dataset.item);
+      bar.scrollLeft = bar.scrollWidth;
+      return { enabled, missing, order, scrollable: bar.scrollWidth > bar.clientWidth, overflowX: getComputedStyle(bar).overflowX, overflow: document.documentElement.scrollWidth - innerWidth };
+    })()`);
+    if (!reach.enabled.length || reach.missing.length || reach.overflow > 0) throw Error(`status line at 390 px: ${JSON.stringify(reach)}`);
+    await page.shot(dir, "10d-narrow-390-status-line-scrolled");
+    record(
+      "verified",
+      `390 px Settings → Status line: ${rows.rows} rows with controls in view; pointer ↑ moved Connection (focus kept), Thinking hidden ("hidden") and shown; bar "${[...new Set(reach.order)].join(" ")}", every enabled item reachable${reach.scrollable ? " by scrolling the bar sideways" : ""}`,
+    );
+    await page.evaluate(`document.querySelector('#statusline').scrollLeft = 0`);
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings to restore the status line");
+    await page.press("s", { keyCode: 83 });
+    await page.waitFor(`!!document.querySelector('#settings [data-sl-reset]')`, "status line section to restore");
+    await page.click("#settings [data-sl-reset]");
+    await until(
+      async () => (await rpc(run, { action: "ui-get" })).ui.statusItems.every((item, index) => item.id === ITEM_ORDER[index]),
+      "default status line order restored at 390 px",
+    );
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#settings')?.open === false`, "settings closed after the restore");
     record(
       "verified",
       `390 px: three identical events show once (${toastBox.count} toasts in all), clear of the composer; drawer ${Math.round(drawerBox.right - drawerBox.left)} px wide with its composer visible`,

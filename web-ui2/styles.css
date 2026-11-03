@@ -2742,11 +2742,7 @@ table.hotkeys tr.clash td {
   .top-actions kbd,
   #topbar > .icon-btn kbd,
   .composer-hints,
-  .sl-item.hint,
-  .sl-item .sl-bar,
-  .sl-think,
-  .sl-limit,
-  .sl-cost {
+  .sl-item .sl-bar {
     display: none;
   }
   #toasts {
@@ -2866,10 +2862,10 @@ table.hotkeys tr.clash td {
   cursor: default;
 }
 @media (max-width: 760px) {
-  /* The bar keeps one line; anything that still does not fit scrolls sideways instead of widening the page. */
+  /* The bar keeps one line and every enabled item (Settings → Status line); what does not fit scrolls sideways. */
   #statusline {
     overflow-x: auto;
-    scrollbar-width: none;
+    scrollbar-width: thin;
   }
   .sl-order li {
     grid-template-columns: 22px minmax(0, 1fr) auto auto;
