@@ -196,8 +196,10 @@ function jumpToStatus() {
   const needs = state.projects.find((item) => item.notice?.questions);
   if (needs) return void select(needs.id, "main").then(() => document.querySelector("#questions textarea")?.focus());
   for (const item of state.projects) {
-    const chat = Object.entries(item.activity?.chats ?? {}).find(([, value]) => value.working)?.[0];
-    if (chat || item.activity?.working) return void select(item.id, chat ?? "main");
+    const chats = Object.entries(item.activity?.chats ?? {});
+    const chat = chats.find(([, value]) => value.working)?.[0];
+    // Match totals(): known chat state is authoritative; the aggregate flag can lag behind a just-finished turn.
+    if (chat || (!chats.length && item.activity?.working)) return void select(item.id, chat ?? "main");
   }
   toast("Nothing is running and nothing needs you.");
 }

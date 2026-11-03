@@ -1321,6 +1321,7 @@ const journeys = {
       const item = (await rpc(run, { action: "schedule-snapshot", id: projectId })).schedules.find((entry) => entry.id === scheduled.id);
       return item?.name === "UI2 edited check" && item.text === "Edited automation prompt" && item.everyMs === 7200000;
     }, "edited schedule saved");
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(`${autoCard} [data-auto-delete]`)})`, "saved schedule controls");
     await page.click(`${autoCard} [data-auto-delete]`);
     await page.waitFor(
       `/Confirm delete/.test(document.querySelector('${autoCard} [data-auto-delete]')?.innerText ?? '')`,
@@ -1413,19 +1414,39 @@ const journeys = {
       "coordinator owner_approval_request: chat row → drawer card (Coordinator) → Deny; outcome row in the chat; project kept",
     );
     // PR36 compaction failures stay visible but quiet: a status-line warning and an expandable, bounded error in Context.
+    // Build enough new history to require a summary; the fake provider then refuses every summary attempt until re-enabled.
+    const compactionRevision = (await rpc(run, { action: "settings-snapshot", id: projectId })).revision;
+    await rpc(run, {
+      action: "settings-update",
+      id: projectId,
+      confirm: projectId,
+      expectedRevision: compactionRevision,
+      changes: { context: { autoCompact: false, keepRecentTokens: 1000 } },
+    });
     await page.click("#composer textarea");
-    await page.cdp("Input.insertText", { text: "VERIFY-COMPACTION-FAIL retain this diagnostic marker" });
+    await page.cdp("Input.insertText", { text: `VERIFY-COMPACTION-FAIL retain this diagnostic marker ${"context ".repeat(2000)}` });
     await page.press("Enter", { code: "Enter", keyCode: 13 });
     await page.waitFor(
       `/VERIFY-FAKE-REPLY: VERIFY-COMPACTION-FAIL/.test(document.querySelector('#feed').innerText)`,
       "compaction fixture reply",
       60000,
     );
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "Ordinary follow-up after the compaction marker" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(
+      `/VERIFY-FAKE-REPLY: Ordinary follow-up/.test(document.querySelector('#feed').innerText)`,
+      "post-marker reply",
+      60000,
+    );
+    const failSummary = await fetch(`http://127.0.0.1:${run.fakePort}/fail-next-summary`, { method: "POST" });
+    if (!failSummary.ok) throw Error(`failed to arm the fake summary failure: ${failSummary.status}`);
     await rpc(run, { action: "compact", id: projectId });
     await until(
       async () => /UI2-SUMMARY-FAIL/.test((await rpc(run, { action: "show", id: projectId })).context.compactionFailure?.error ?? ""),
       "compaction failure stored",
     );
+    await fetch(`http://127.0.0.1:${run.fakePort}/allow-summary`, { method: "POST" });
     await page.waitFor(
       `/compaction failed/i.test(document.querySelector('#statusline').innerText)`,
       "status line names the failed compaction",
@@ -1456,8 +1477,9 @@ const journeys = {
     await page.shot(dir, "10-narrow-390-light");
     if (overflow > 0) throw Error(`narrow layout overflows by ${overflow}px`);
     // Toasts: one identical message shows once, at most two show, and none covers the composer.
-    for (let i = 0; i < 3; i++) await page.click("#status-pill");
+    await page.click("#status-pill");
     await page.waitFor(`document.querySelectorAll('#toasts .toast').length >= 1`, "pill toast");
+    for (let i = 0; i < 2; i++) await page.click("#status-pill");
     const toastBox = await page.evaluate(`(() => {
       const c = document.querySelector('#composer').getBoundingClientRect();
       const nodes = [...document.querySelectorAll('#toasts .toast:not(.leaving)')], t = nodes.map(n => n.getBoundingClientRect());

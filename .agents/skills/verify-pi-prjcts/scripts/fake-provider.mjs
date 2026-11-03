@@ -17,7 +17,13 @@ const text = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part.text ?? "").join("") : "";
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+let failNextSummary = false;
 const server = createServer((req, res) => {
+  if (req.method === "POST" && (req.url === "/fail-next-summary" || req.url === "/allow-summary")) {
+    failNextSummary = req.url === "/fail-next-summary";
+    res.writeHead(204).end();
+    return;
+  }
   let body = "";
   req.setEncoding("utf8");
   req.on("data", (part) => {
@@ -162,7 +168,7 @@ const server = createServer((req, res) => {
                 })
               : say("Done.");
     }
-    if (/conversation to summarize/.test(user) && user.includes("VERIFY-COMPACTION-FAIL")) {
+    if (/conversation to summarize/.test(user) && failNextSummary) {
       res.writeHead(500, { "content-type": "text/plain" }).end("UI2-SUMMARY-FAIL scripted");
       return;
     }

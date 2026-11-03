@@ -594,8 +594,9 @@ async function automations(body, alive) {
       run.disabled = true;
       try {
         await call("schedule-run", { id: state.projectId, scheduleId: record.id });
+        record.lastRunAt = new Date().toISOString();
         say("Schedule ran. History updated.");
-        if (alive()) paint();
+        if (alive()) draw();
       } catch (error) {
         run.disabled = false;
         sayFail(error);

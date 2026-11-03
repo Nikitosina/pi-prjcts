@@ -304,7 +304,14 @@ function paintSettings() {
 <p class="muted small ha-actions-line">${settings.actions.length} host actions through <code>host_call</code> · ${dangerous.length} wait for your approval <button type="button" class="info" data-info="${esc(`Need approval: ${dangerous.map((action) => action.name).join(", ")}`)}" aria-label="Which actions need approval">ⓘ</button></p>
 <p class="ha-status inline-status" role="status" aria-live="polite"></p>`;
 }
-async function saveSettings(patch, label) {
+let settingsWrites = Promise.resolve();
+/** Keep rapid tier/model/tool changes on the revision returned by the preceding write. */
+function saveSettings(patch, label) {
+  const done = settingsWrites.then(() => writeSettings(patch, label));
+  settingsWrites = done.catch(() => {});
+  return done;
+}
+async function writeSettings(patch, label) {
   if (!settings) return;
   let problem = null;
   try {

@@ -110,9 +110,10 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 ## Final wiring, local font and PR36 transcript diagnostics
 
 - Stop sends the removed `id` shape or only reports the contract as unavailable; the running chat does not actually become idle.
-- Host agent settings cannot clear a pinned model, or choosing a tier leaves the old pin in force.
-- Automation cards lack working Run now, Edit or Delete; Delete has no owner confirmation; Undo does not restore the deleted schedule through its tombstone.
+- Host agent settings cannot clear a pinned model, or choosing a tier leaves the old pin in force. Rapid tier/model/tool changes must not send a pre-change revision and lose the newer request.
+- Automation cards lack working Run now, Edit or Delete; Delete has no owner confirmation; Undo does not restore the deleted schedule through its tombstone. Run now must not asynchronously replace the section and remove the controls the owner is about to use.
 - Memory Undo is only page-local: after a reload the same write offers Undo again instead of reading `memory-recent` and saying Undone.
 - JetBrains Mono is not bundled and actually loaded by default, its license is missing, or a font choice is only local and does not survive reload through the host `ui` document.
 - A nested codemode call has no compact running/done/failed detail, or a failed compaction disappears instead of remaining inspectable in Context without adding noise to the primary chat.
+- The status pill says All quiet from per-chat state but its click follows a stale project-level working flag; displayed state and click behavior must agree.
 - Rendering a diagnostic expands or stringifies an unbounded result instead of using the transcript's bounded preview.
