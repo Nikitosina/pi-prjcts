@@ -7,6 +7,8 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Owner**: the single human who owns the host and its projects.
 - **Project**: a repository checkout (Git or Arc) with its settings, models, knowledge and automations.
 - **Host**: the one process that owns every project's durable storage and serves the web UI, CLI and Telegram.
+- **Host agent**: the owner's agent over the whole host. It does through tools what the owner does in the browser: projects, chats, settings, automations, UI. It is not a Coordinator, owns no delivery and has no project or workspace.
+- **Owner approval**: a dangerous host action (delete or archive a project, Approve, Deploy, revoking grants and devices, deleting files) requested by the Host agent or a Coordinator. It runs only after the owner approves it, exactly as stored, and the outcome goes back to whoever asked.
 - **Chat**: a coordinator conversation in a project. A project has a main chat and may have more.
 - **Coordinator**: the trusted agent in a chat that owns delivery. It investigates and makes changes directly in its own persistent workspace, or delegates work and judges the results.
 - **Job**: one delegated request with its worker, plan and result. An independent Job delivers a PR for owner approval; a task helper returns its work to the Coordinator. A Job is not a pi-durable task.

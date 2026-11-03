@@ -32,7 +32,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { observeProviderPrompt } from "./provider-extensions.ts";
 import { liveModelRuntime } from "./live-models.ts";
-import { guardedStream } from "./model-guard.ts";
+import { durableGuardedStream } from "./model-guard.ts";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
@@ -45,6 +45,8 @@ import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
 import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
 import { coordinatorArtifactTools } from "./artifacts.ts";
+import { approvals } from "./approvals.ts";
+import { ownerApprovalTool } from "./host-agent-tools.ts";
 import { createBackgroundCommands } from "./background-commands.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
@@ -288,6 +290,8 @@ export type DurableProjectRuntime = {
   result(submissionId: number): Promise<DurableSubmissionState>;
   wait(submissionId: number): Promise<DurableSubmissionState>;
   say(text: string, options?: { requestId?: string; steer?: boolean }): Promise<DurableSubmissionState>;
+  /** Internal input to a chat after its current turn (Main when the chat is gone or archived); `requestId` keeps it once. */
+  followUp(chatId: string, text: string, requestId: string): Promise<void>;
   /** Jobs and their agents with live status: what the UI and Telegram render. */
   jobs(): Promise<JobsSnapshot>;
   /** Start a worker, scout or reviewer for a chat (Main when omitted). The same `requestId` returns the same agent. */
@@ -442,7 +446,7 @@ function thinkingText(content: unknown): string {
     .join("\n\n");
 }
 
-function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<string, unknown>> }): DurableLiveFrame {
+export function liveFrame(view: { entries: readonly unknown[]; docs: Readonly<Record<string, unknown>> }): DurableLiveFrame {
   const live = (view.docs["pi.live"] ?? {}) as {
     run?: unknown;
     generation?: {
@@ -540,26 +544,6 @@ export async function openDurableProject(input: {
               .slice(0, 32)}`
           : undefined);
       observeProviderPrompt(model.provider, request);
-      // Durable aborts every invocation's signal when the invocation ends, even after a normal response. A provider that keeps
-      // a query open across tool rounds (claude-bridge parks its Claude Code query at the tool boundary) would be killed by
-      // that routine end, so once the stream has settled only real aborts (stop/abort, no "invocation has ended") pass through.
-      let settled = false,
-        signal = options?.signal;
-      if (signal) {
-        const outer = signal,
-          controller = new AbortController();
-        const routineEnd = () => settled && outer.reason instanceof Error && /^Task \S+ invocation has ended$/.test(outer.reason.message);
-        if (outer.aborted) controller.abort(outer.reason);
-        else
-          outer.addEventListener(
-            "abort",
-            () => {
-              if (!routineEnd()) controller.abort(outer.reason);
-            },
-            { once: true },
-          );
-        signal = controller.signal;
-      }
       // Passive subscription-limit headers; a throwing observer must never fail the request.
       const onResponse: NonNullable<typeof options>["onResponse"] = async (response, responseModel) => {
         try {
@@ -567,11 +551,7 @@ export async function openDurableProject(input: {
         } catch {}
         await options?.onResponse?.(response, responseModel);
       };
-      const stream = guardedStream(dispatch, model, request, { ...options, onResponse, ...(sessionId ? { sessionId } : {}) }, signal);
-      const settle = () => {
-        settled = true;
-      };
-      void stream.result().then(settle, settle);
+      const stream = durableGuardedStream(dispatch, model, request, { ...options, onResponse, ...(sessionId ? { sessionId } : {}) });
       if (input.onGenerationLifecycle) {
         // Durable 1.0 does not expose its IDs here. This trace is intentionally aggregate-only.
         const traceId = crypto.randomUUID();
@@ -803,6 +783,21 @@ export async function openDurableProject(input: {
         return (await jobs.snapshot(harness)).agents.map((agent) => ({ threadId: agent.id, role: agent.role, task: agent.title }));
       },
     });
+    // Dangerous host actions go to the owner (approvals.ts); the host posts the outcome back to the asking chat.
+    const ownerApprovalTools = [
+      ownerApprovalTool({
+        requestApproval: async ({ key, conversationId, request, summary }) => {
+          const chat = (await chatList()).find((item) => item.conversationId === conversationId);
+          return approvals.request({
+            key: `coordinator:${project.id}:${key}`,
+            requestedBy: { kind: "coordinator", projectId: project.id, chatId: chat?.id ?? MAIN_CHAT },
+            request,
+            summary,
+          });
+        },
+      }),
+    ];
+    const ownerApproval = defineExtension({ name: "projects.owner-approval", tools: ownerApprovalTools });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
     const tools = maintainedKnowledgeTools(dir);
     const workerKnowledge = () => (knowledgeAccess() === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name)));
@@ -1173,6 +1168,7 @@ export async function openDurableProject(input: {
     registry.install(skillFiles.extension);
     registry.install(mcp.extension);
     registry.install(artifacts.extension);
+    registry.install(ownerApproval);
     storage = await openNodeSqliteStorage(databasePath);
     harness = await Harness.open(
       storage,
@@ -1213,6 +1209,7 @@ export async function openDurableProject(input: {
           skillFiles.extension,
           mcp.extension,
           artifacts.extension,
+          ownerApproval,
         ],
         tools: [
           ...tools,
@@ -1222,6 +1219,7 @@ export async function openDurableProject(input: {
           skillFiles.tool,
           ...mcp.tools,
           ...artifacts.tools,
+          ...ownerApprovalTools,
           ...jobs.tools.coordinator,
         ],
         cwd: dir,
@@ -1488,6 +1486,7 @@ export async function openDurableProject(input: {
       skillFiles.tool.name,
       ...mcp.tools.map((tool) => tool.name),
       ...artifacts.tools.map((tool) => tool.name),
+      ...ownerApprovalTools.map((tool) => tool.name),
     ]);
     type AgentNow = Awaited<ReturnType<Conversation["agent"]>>;
     const coordinatorToolsFor = (agent: AgentNow, current: Project) => [
@@ -1502,6 +1501,7 @@ export async function openDurableProject(input: {
       skillFiles.tool,
       ...mcp.tools,
       ...artifacts.tools,
+      ...ownerApprovalTools,
     ];
     const coordinatorTools = coordinatorToolsFor(recoveredAgent, project);
     const ownedExtensions = new Set([
@@ -1515,6 +1515,7 @@ export async function openDurableProject(input: {
       skillFiles.extension.name,
       mcp.extension.name,
       artifacts.extension.name,
+      ownerApproval.name,
     ]);
     const coordinatorExtensionsFor = (agent: AgentNow) => [
       ...agent.extensions.filter((extension) => !ownedExtensions.has(extension.name)),
@@ -1527,6 +1528,7 @@ export async function openDurableProject(input: {
       skillFiles.extension,
       mcp.extension,
       artifacts.extension,
+      ownerApproval,
     ];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
     if (
@@ -1536,6 +1538,7 @@ export async function openDurableProject(input: {
       !recoveredAgent.extensions.some((extension) => extension.name === github.extension.name) ||
       pluginExtensions.some((plugin) => !recoveredAgent.extensions.some((extension) => extension.name === plugin.name)) ||
       !recoveredAgent.extensions.some((extension) => extension.name === artifacts.extension.name) ||
+      !recoveredAgent.extensions.some((extension) => extension.name === ownerApproval.name) ||
       recoveredAgent.model?.provider !== coordinatorModel.provider ||
       recoveredAgent.model?.modelId !== coordinatorModel.modelId ||
       recoveredAgent.instructions !== instructions ||
@@ -1826,6 +1829,15 @@ export async function openDurableProject(input: {
           admit(root, text, { requestId: options.requestId ?? crypto.randomUUID(), steer: options.steer }),
         );
         return wait(openedHarness, root, admitted.submissionId);
+      },
+      followUp: async (id, text, requestId) => {
+        assertOpen();
+        const target = (await chatList()).find((chat) => chat.id === id && !chat.archived)?.id ?? MAIN_CHAT;
+        const { conversation } = await resolveChat(target);
+        await conversation.submit(
+          { type: "input", content: text, entry: { kind: "projects.internal-input" }, whenBusy: "followUp", requestId },
+          context,
+        );
       },
       jobs: async () => {
         assertOpen();

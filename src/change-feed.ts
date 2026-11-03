@@ -2,7 +2,18 @@ import type { CommitPublication } from "@earendil-works/pi-durable";
 
 /** What a browser refetches: one topic per read model. `chat` and `jobs` carry the chat id or agent id they concern so a view can ignore the rest. */
 export type Topic = "chat" | "jobs" | "knowledge" | "settings";
-export type FeedEvent = { topic: Topic; chat?: string; thread?: string };
+/** Topics published under the reserved key `HOST_FEED`: host-wide read models, not one project's. */
+export type HostTopic = "ui" | "tiers" | "host-agent" | "approvals" | "projects";
+/** Where the Host agent asks the browser to look (`ui_focus`). */
+export type FocusTarget = { view: string; projectId?: string; chatId?: string; section?: string };
+export type ProjectEvent = { topic: Topic; chat?: string; thread?: string };
+export type FeedEvent =
+  | ProjectEvent
+  | { topic: Exclude<HostTopic, "host-agent"> }
+  | { topic: "host-agent"; type?: "changed" }
+  | ({ topic: "host-agent"; type: "focus" } & FocusTarget);
+/** Feed key of host topics; project ids are UUIDs, so it never collides. */
+export const HOST_FEED = "host";
 type Listener = (event: FeedEvent) => void;
 
 const listeners = new Map<string, Set<Listener>>();
@@ -35,9 +46,9 @@ export const JOBS_KIND = "projects.jobs";
  * The feed events of one Pi Durable commit. Committed entries and submission changes of a chat conversation are `chat`; of an agent (or a subagent it started) `jobs`.
  * The chat list and the Jobs document are `chat` and `jobs` too. Streaming deltas live in `pi.live`, which is ignored, so a token stream costs nothing here.
  */
-export function topicsOfCommit(publication: CommitPublication, map: TopicMap): FeedEvent[] {
-  const seen = new Map<string, FeedEvent>();
-  const add = (event: FeedEvent) => seen.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
+export function topicsOfCommit(publication: CommitPublication, map: TopicMap): ProjectEvent[] {
+  const seen = new Map<string, ProjectEvent>();
+  const add = (event: ProjectEvent) => seen.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
   const conversation = (id: number) => {
     const chat = id === map.rootId ? "main" : map.chats.get(id),
       agent = map.agents.get(id);

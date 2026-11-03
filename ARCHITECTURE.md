@@ -116,9 +116,21 @@ Rules:
 
 ## Change feed
 
-`src/change-feed.ts` is an in-process pub/sub keyed by project. `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.
+`src/change-feed.ts` is an in-process pub/sub keyed by project, plus the reserved key `host` for host topics (`host-agent`, `approvals`, and later `ui`, `tiers`, `projects`). `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.
 
 Rules: reads (`show`, snapshots, history) have no side effects. Anything that changes a read model publishes its topic.
+
+## Host agent and owner approvals
+
+`src/host-agent.ts` opens the Host agent: one pi-durable root conversation in `<home>/host-agent/`, owned by the host like a project's storage (an exclusive `durable-owner.sqlite` lock). It runs through the same model stack as coordinators (`liveModelRuntime`, `durableGuardedStream`). Its settings (`settings.json`: model, tier, thinking, disabled tools, revision) choose the model: a set model, else the tier's first model in `<home>/tiers.json`, else the newest active project's model. Owner input is `projects.owner-input` and steers a busy turn; approval outcomes are `projects.internal-input` follow-ups. `GET /live?project=host` streams the same frames as a chat, and host topics go on the change feed under the key `host` (`HOST_FEED`).
+
+`src/host-agent-tools.ts` generates the tools from the closed `Request` union. `ACTION_POLICY` gives every action exactly one entry, so TypeScript refuses a new action without one: allowed, dangerous, or excluded with a reason (secrets such as the web token and the Telegram token, pairing codes, the Host agent's own controls, `approval-decide`). `host_call` validates `{ action, ...input }` against the action's schema before anything runs, then calls the same `dispatch` as the browser. `ui_focus` publishes a `host-agent` focus frame; `ui_set` wraps `ui-set` when the host has it.
+
+`src/approvals.ts` keeps owner approvals in `<home>/approvals.json`. A dangerous `host_call`, or a Coordinator's `owner_approval_request`, files the exact validated request keyed by its tool task, so a replayed call finds the same approval. `approval-decide` marks it approved before running it once through `dispatch`. An approval found approved after a restart is failed with an unknown outcome and never rerun. The outcome is posted once (stable request id) to the Host agent or to the Coordinator chat that asked (Main when that chat is gone). A new approval sends a best-effort Telegram notice.
+
+Rules:
+- A new `Request` action needs an `ACTION_POLICY` entry. `scripts/host-agent-e2e.mjs` also checks the map against the live union and the contract's minimum dangerous list.
+- Agents never decide approvals, and an approval never runs anything other than its stored request.
 
 ## Telegram
 

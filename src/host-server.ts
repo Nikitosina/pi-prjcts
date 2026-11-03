@@ -38,13 +38,15 @@ import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
-import { feed } from "./change-feed.ts";
+import { feed, HOST_FEED } from "./change-feed.ts";
+import { approvals } from "./approvals.ts";
+import { openHostAgent, type HostAgent } from "./host-agent.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
 import { clearQueuedDeploy, deployPending, idleDeployTick, queueDeploy, readDeployState, recordHostSha, forgetHostSha } from "./deploy.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
-import { startTelegram } from "./telegram.ts";
+import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
@@ -124,6 +126,12 @@ const githubInspection = createGithubInspection();
 let closing = false;
 let shutdownOperation: Promise<void> | undefined;
 const activeRequests = new Set<Promise<unknown>>();
+// Opened after the notifier; requests before that, or after a failed open, are refused.
+let hostAgent: HostAgent | null = null;
+const requireHostAgent = (): HostAgent => {
+  if (!hostAgent) throw new Error("The Host agent is not available on this host; see the event log");
+  return hostAgent;
+};
 const hostStartedAt = Date.now();
 const hostEvents: Array<{ at: number; kind: string; detail: string }> = [];
 function recordHostEvent(kind: string, detail: string): void {
@@ -1441,6 +1449,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { settings: loadDeploySettings(), state: readDeployState(), running: true, queued: false };
     case "deploy-shutdown":
       return stopForDeploy(input.sha);
+    case "host-agent-history":
+      return requireHostAgent().history(input.before);
+    case "host-agent-send":
+      return requireHostAgent().send(input.requestId, input.text);
+    case "host-agent-stop":
+      return requireHostAgent().stop();
+    case "host-agent-reset":
+      return requireHostAgent().reset();
+    case "host-agent-settings":
+      return requireHostAgent().settings(input.revision, input.patch);
+    case "approvals-list":
+      return { approvals: approvals.list() };
+    case "approval-decide":
+      return { approval: await approvals.decide(input.id, input.decision, input.note) };
     case "shutdown":
       closing = true;
       setTimeout(() => {
@@ -1467,7 +1489,8 @@ setLimitsTokenResolver(async (providerId) => {
 });
 const web = await startWeb(
   dispatch,
-  async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId),
+  async (id, onFrame, onEnd, chatId) =>
+    id === HOST_FEED ? requireHostAgent().watchLive(onFrame, onEnd) : (await durable(id)).watchLive(onFrame, onEnd, chatId),
   (id, filename, bytes) =>
     withProjectLock(id, async () => {
       const project = loadProject(id);
@@ -1626,6 +1649,31 @@ const idleDeployTimer = setInterval(
   Number(process.env.PI_PROJECTS_DEPLOY_TICK_MS ?? 5 * 60_000),
 );
 idleDeployTimer.unref();
+hostAgent = await openHostAgent({
+  tools: {
+    dispatch: (request) => dispatch(request),
+    requestApproval: ({ key, request, summary }) => approvals.request({ key, requestedBy: { kind: "host-agent" }, request, summary }),
+    focus: (target) => feed.publish(HOST_FEED, { topic: "host-agent", type: "focus", ...target }),
+  },
+  publish: (event) => feed.publish(HOST_FEED, event),
+  report: (detail) => recordHostEvent("host-agent", detail),
+}).catch((error: unknown) => {
+  recordHostEvent("host-agent", `The Host agent could not open: ${errorText(error)}`);
+  return null;
+});
+// Outcomes go back to whoever asked; a project that is gone has no chat to post to, so its outcome stays in the list only.
+await approvals.attach({
+  run: (request) => dispatch(request),
+  deliver: async (approval, text, requestId) => {
+    if (approval.requestedBy.kind === "host-agent") return requireHostAgent().followUp(text, requestId);
+    const target = loadProject(approval.requestedBy.projectId);
+    if (target.deleted || target.archived) return;
+    await (await durable(target.id)).followUp(approval.requestedBy.chatId, text, requestId);
+  },
+  changed: () => feed.publish(HOST_FEED, { topic: "approvals" }),
+  notify: sendOwnerMessage,
+  report: (detail) => recordHostEvent("approvals", detail),
+});
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
@@ -1741,6 +1789,12 @@ function shutdown(): Promise<void> {
     }
     try {
       await mcpPool.close();
+    } catch (error) {
+      report(error);
+    }
+    approvals.detach();
+    try {
+      await hostAgent?.close();
     } catch (error) {
       report(error);
     }
