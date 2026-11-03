@@ -1,7 +1,7 @@
 // Browser E2E: a Settings tab left open across a host restart shows and uses the new host's built-in role prompts.
 // The host first runs from a private core copy whose four defaults carry a LEGACY marker, then restarts on the real defaults while the page stays open.
 // Fakes only (fake model, private HOME, temp repo). Covers: no override is persisted for defaults, a genuine override and an unsaved edit survive,
-// Reset removes the override, new threads use the current text and a thread started before the restart keeps its frozen prompt.
+// Reset removes the override, new threads use the current text and a thread started before the restart adopts the current behavior inside its frozen prompt.
 // A page-level fetch gate then fails or holds one prompts-snapshot response: a failed refresh keeps the editors and drafts (F7), and a snapshot read
 // before Save (F9) or Reset (F8) cannot bring the old text back. It also fails one Save and one Reset request: the drafts survive (F11).
 // Cases are listed in settings-prompts-refresh-failures.md.
@@ -266,7 +266,12 @@ try {
     await delay(300);
     await kit.settle(id);
     const followUp = kit.result.calls.findLast((c) => c.role === "worker" && c.user.includes("FROZEN-FOLLOW-UP"));
-    check("S7 a follow-up on the pre-upgrade worker keeps its frozen legacy prompt", followUp?.system.includes("LEGACY-DEFAULT worker."));
+    const legacyWorker = kit.lastCall("worker", "TASK-WORKER frozen").system;
+    // Owner decision (docs/prompt-blocks.md): behavior follows the saved blocks on the next idle turn; the rest of the prompt stays frozen.
+    check(
+      "S7 a follow-up on the pre-upgrade worker adopts the current behavior inside its frozen prompt",
+      followUp?.system === legacyWorker.replace(before.roles.find((item) => item.role === "worker").default, expected.worker),
+    );
 
     // F9: a snapshot read before a Save arrives after it.
     if (!skipped.has("F9")) {

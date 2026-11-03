@@ -1,6 +1,6 @@
 # Role prompts
 
-`src/role-prompts.ts` owns the four editable defaults (coordinator, worker, scout, reviewer; the verifier was retired on 2026-11-03) and `SHARED_ROLE_RULES` (authority, evidence, decisions), which stay outside overrides. `durable-runtime.ts` assembles the effective text as the sections `prompt-render` shows (host contract, instance and repository instructions, project instructions, role prompt, the preferences brief, the generated memory index, skill indexes), plugin rules and workspace bindings. Overrides are per project and merged by key; changing role prose grants no tools or authority. Existing agents keep their frozen prompts.
+`src/role-prompts.ts` owns the four editable defaults (coordinator, worker, scout, reviewer; the verifier was retired on 2026-11-03) and `SHARED_ROLE_RULES` (authority, evidence, decisions), which stay outside overrides. `durable-runtime.ts` assembles the effective text as the sections `prompt-render` shows (host contract, instance and repository instructions, project instructions, role prompt, the preferences brief, the generated memory index, skill indexes), plugin rules and workspace bindings. Role prose is edited as prompt blocks (`docs/prompt-blocks.md`, `src/prompt-blocks.ts`); a legacy per-role override still resolves through the same module. Changing prose grants no tools or authority.
 
 Each prompt states the outcome the role owns, not a procedure:
 

@@ -32,6 +32,8 @@ import {
   unansweredReason,
 } from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
+import { behaviorKey, type PromptFrame } from "./prompt-blocks.ts";
+import { busyIn } from "./durable-idle-configure.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -154,6 +156,35 @@ export type JobsState = {
   /** Spawn request id -> agent id, so a retried spawn returns the same agent. */
   requests: Record<string, string>;
 };
+
+/**
+ * An agent's prompt as built: the frozen frame (repository, workspace, skills, host contract) and the key of the behavior
+ * it runs. Written when the agent is first prepared; a later idle turn recomposes the frame with the saved behavior.
+ */
+export type AgentPromptState = { frame: PromptFrame | null; behavior: string | null; unproven?: string };
+export const AgentPrompt = defineDoc<AgentPromptState>({
+  kind: "projects.agent-prompt",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  checkpointWhen: () => false,
+  initial: () => ({ frame: null, behavior: null }),
+});
+/** Whether an agent runs the saved behavior: `pending` adopts on its next idle continued or retried turn. */
+export type AgentPromptStatus = {
+  state: "current" | "pending" | "legacy-unchecked" | "frozen";
+  reason: string | null;
+};
+/** What `prepare` built an agent's instructions from: the frame (stored on first preparation, given back after) and the behavior text. */
+export type PreparedPrompt = {
+  frame: PromptFrame;
+  behavior: string;
+  /** For an agent prepared before frames: the whole instructions `frame` gives with each behavior it could have started with. */
+  proofs?: { instructions: string; behavior: string }[];
+};
+const UNPROVEN =
+  "Started before prompt blocks, and its stored prompt does not match one rebuilt from the current host contract, repository instructions, project settings, skills and workspace, so it keeps the prompt it started with.";
 
 /** The project's Jobs, on the root conversation. */
 export const Jobs = defineDoc<JobsState>({
@@ -287,7 +318,9 @@ export type JobsHost = {
    * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
    * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
    */
-  prepare?(spec: { agent: Agent; job: Job | null }): Promise<AgentChange | void>;
+  prepare?(spec: { agent: Agent; job: Job | null; frame: PromptFrame | null }): Promise<(AgentChange & { prompt?: PreparedPrompt }) | void>;
+  /** The behavior text this agent would get now, or null when its prompt is not built from blocks. */
+  promptBehavior?(agent: Agent, job: Job | null): string | null;
   /** Stops the background processes and releases the leases of these conversations. */
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
@@ -378,7 +411,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
     phases: {
       prepare: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId } = reporter.input;
-        let change: AgentChange | void = undefined;
+        let change: (AgentChange & { prompt?: PreparedPrompt }) | void = undefined;
         let failure: string | null = null;
         try {
           const state = await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext);
@@ -387,6 +420,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             change = await host.prepare?.({
               agent: agent as Agent,
               job: agent.jobId ? ((state!.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+              frame: agent.prepared ? ((await runtime.snapshot(AgentPrompt, conversationId, taskContext))?.frame ?? null) : null,
             });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
@@ -399,8 +433,28 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
             return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
-            // A prepared agent keeps its frozen prompt; preparing again only restores its workspace, tools and extensions.
-            if (change) await configure(tx, conversationId, agent.prepared ? { ...change, instructions: undefined } : change);
+            if (change) {
+              const { prompt, ...setup } = change;
+              const saved = await tx.doc(AgentPrompt, conversationId);
+              // An agent prepared before frames gets one only when a rebuilt prompt equals its stored one exactly; nothing is parsed out of it.
+              if (agent.prepared && !saved.frame && prompt?.proofs) {
+                const stored = (await tx.doc(AgentDoc, conversationId)).instructions;
+                const proof = prompt.proofs.find((item) => item.instructions === stored);
+                if (proof) {
+                  saved.frame = prompt.frame;
+                  saved.behavior = behaviorKey(proof.behavior);
+                  delete saved.unproven;
+                } else saved.unproven = UNPROVEN;
+              }
+              // A prepared agent keeps its frame; it adopts the saved behavior only between turns, never inside a running one.
+              const adopt =
+                !agent.prepared || (prompt !== undefined && saved.frame !== null && (await busyIn(tx, conversationId)) === null);
+              await configure(tx, conversationId, adopt ? setup : { ...setup, instructions: undefined });
+              if (adopt && prompt) {
+                if (!agent.prepared) saved.frame = prompt.frame;
+                saved.behavior = behaviorKey(prompt.behavior);
+              }
+            }
             agent.prepared = true;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
@@ -664,7 +718,7 @@ export type JobsSnapshot = {
     /** The model the worker's conversation runs on now (`provider/model`): its tier's model or where a quota move left it. */
     model: string | null;
   })[];
-  agents: (Agent & { working: boolean; model: string | null })[];
+  agents: (Agent & { working: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
 };
 
 export type SpawnArgs = {
@@ -1329,7 +1383,11 @@ export function createJobs(host: JobsHost) {
     if (!doc) return;
     for (const agent of liveAgents(doc))
       if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
-        await host.prepare?.({ agent: agent as Agent, job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null });
+        await host.prepare?.({
+          agent: agent as Agent,
+          job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+          frame: (await harness.snapshot(AgentPrompt, agent.conversationId, context))?.frame ?? null,
+        });
   }
 
   async function snapshot(harness: Harness): Promise<JobsSnapshot> {
@@ -1361,9 +1419,29 @@ export function createJobs(host: JobsHost) {
         ...agent,
         working: await working(harness, agent.conversationId),
         model: await agentModel(harness, agent.conversationId),
+        prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
       })),
     );
     return { paused: doc.paused, jobs, agents };
+  }
+
+  async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {
+    const behavior = host.promptBehavior?.(agent, job);
+    if (behavior == null) return null;
+    // An agent not prepared yet starts with the saved behavior.
+    if (!agent.prepared) return { state: "current", reason: null };
+    const saved = await harness.snapshot(AgentPrompt, agent.conversationId, context);
+    if (!saved?.frame)
+      return saved?.unproven
+        ? { state: "frozen", reason: saved.unproven }
+        : {
+            state: "legacy-unchecked",
+            reason:
+              "Started before prompt blocks: its next continued or retried turn checks whether its stored prompt can be rebuilt exactly.",
+          };
+    return saved.behavior === behaviorKey(behavior)
+      ? { state: "current", reason: null }
+      : { state: "pending", reason: "Adopts the saved behavior on its next continued or retried turn while it is idle." };
   }
 
   async function busy(harness: Harness): Promise<boolean> {

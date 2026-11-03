@@ -8,7 +8,7 @@ This list was written after commit 1575f20, which shipped without it. It records
 - F2 Refreshing loses a genuine override (shows Default) or an unsaved edit in another editor.
 - F3 Saving the shown default stores it as an override.
 - F4 New coordinator, worker or reviewer requests use the old built-in text, or a new scout ignores its override.
-- F5 A follow-up on a worker started before the restart loses its frozen prompt.
+- F5 A follow-up on a worker started before the restart loses its frozen prompt. Since prompt blocks (owner decision, docs/prompt-blocks.md) only its behavior follows the current text; the rest stays frozen.
 - F6 Reset leaves an override (or a snapshot of the default) in `project.json`.
 
 ## Review findings (written before their fix)

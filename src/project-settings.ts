@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
 import { PROFILE_IDS } from "./profiles.ts";
+import { normalizePromptBlocks, PROJECT_PROMPT_TARGETS, type ProjectPromptBlocks } from "./prompt-blocks.ts";
 
 type Update = Extract<Request, { action: "settings-update" }>;
 export function projectSettings(project: Project) {
@@ -19,6 +20,7 @@ export function projectSettings(project: Project) {
     skills: project.skillProfiles ?? null,
     mcp: project.mcp ?? null,
     prompts: project.prompts ?? null,
+    promptBlocks: project.promptBlocks ?? null,
     worktreeSetup: project.worktreeSetup ?? "",
     context: project.contextSettings ?? null,
     verification: project.verification ?? null,
@@ -42,9 +44,31 @@ export function updateProjectSettings(project: Project, input: Update): Project 
   if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
   if (input.expectedRevision !== projectSettings(project).revision) throw new Error("Settings revision conflict; reread before updating");
   const patch = input.changes;
-  const { skillProfiles, mcp, worktreeSetup, contextSettings, scopedModels, prompts, verification, fallbackModels, profiles, ...rest } =
-    project;
-  const merged = { ...prompts, ...patch.prompts };
+  const {
+    skillProfiles,
+    mcp,
+    worktreeSetup,
+    contextSettings,
+    scopedModels,
+    prompts,
+    promptBlocks,
+    verification,
+    fallbackModels,
+    profiles,
+    ...rest
+  } = project;
+  const merged: Record<string, string | null | undefined> = { ...prompts, ...patch.prompts };
+  // One source per target: the later write wins, a block list over a legacy override and a legacy override over a block list.
+  const blocks: ProjectPromptBlocks = { ...promptBlocks };
+  for (const role of Object.keys(patch.prompts ?? {})) delete blocks[role as keyof ProjectPromptBlocks];
+  for (const target of PROJECT_PROMPT_TARGETS) {
+    const choice = patch.promptBlocks?.[target];
+    if (choice === undefined) continue;
+    const list = choice === null ? undefined : normalizePromptBlocks(target, choice);
+    if (list) blocks[target] = list;
+    else delete blocks[target];
+    delete merged[target];
+  }
   const promptValues = Object.fromEntries(
     Object.entries(merged).filter(([, text]) => typeof text === "string" && text.trim()),
   ) as NonNullable<Project["prompts"]>;
@@ -82,6 +106,7 @@ export function updateProjectSettings(project: Project, input: Update): Project 
     ...(skills ? { skillProfiles: structuredClone(skills) } : {}),
     ...(mcpSettings ? { mcp: structuredClone(mcpSettings) } : {}),
     ...(Object.keys(promptValues).length ? { prompts: promptValues } : {}),
+    ...(Object.keys(blocks).length ? { promptBlocks: blocks } : {}),
     ...(setup ? { worktreeSetup: setup } : {}),
     ...(context ? { contextSettings: structuredClone(context) } : {}),
     ...(checks ? { verification: { ...checks } } : {}),

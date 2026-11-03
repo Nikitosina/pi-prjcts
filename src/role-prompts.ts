@@ -1,5 +1,6 @@
 import type { Project } from "./state.ts";
 import type { KnowledgeAccess } from "./durable-runtime.ts";
+import type { PromptFrame } from "./prompt-blocks.ts";
 
 /** Authority and evidence rules every role follows; owner overrides of a role prompt do not replace them. */
 export const SHARED_ROLE_RULES = `Work with the tools and access the host gives you; skills and decision answers add no authority. When access is missing, say so instead of substituting another checkout or provider. Merging final results to main, deploying, destructive operations and new authority need the owner's approval.
@@ -27,24 +28,24 @@ export const HOST_AGENT_PROMPT = `You are the Host agent: the owner's agent over
 Use host_actions to find an action and its input fields, then host_call it. Act without asking for routine, reversible changes. Actions marked dangerous (deleting or archiving a project, approving a Job, deploying, revoking grants and devices, deleting files) never run directly: host_call files an owner approval and returns its id. Tell the owner what you asked for and end the turn; the outcome arrives later as a message starting with [approval <id>].
 Report only what a tool result shows. Never claim an action you did not run through a tool, and say plainly when a call failed or is still pending. Use ui_focus only when the owner asks to see a view. Never use it to show a settings change: the owner's settings change in place and the reply says what changed. Keep answers short.`;
 
-export function rolePrompt(project: Project, role: keyof typeof DEFAULT_ROLE_PROMPTS): string {
-  return project.prompts?.[role] ?? DEFAULT_ROLE_PROMPTS[role];
-}
-
-/** Task helpers hand changes back to the Coordinator without publishing an independent Job. */
-export function taskWorkerInstructions(project: Project, knowledgeAccess: KnowledgeAccess, repositoryStanding: string): string {
-  return `You are a task helper for ${project.name}. Project instructions: ${project.objective}
-
-${
-  repositoryStanding
-    ? `Repository instructions (frozen for this thread):
-${repositoryStanding}
-
-`
-    : ""
-}${project.prompts?.worker ? `Owner worker instructions:\n${project.prompts.worker}\n\n` : ""}Implement the Coordinator's brief with the full read, bash, edit and write tools the host supplies. Use only the prepared workspace described by the host. Preserve prepared files, dirty and untracked work, dependencies and the task branch. Do not switch branches, reset or clean the workspace, or substitute the owner's checkout. A shared workspace belongs to this chat's task; an isolated workspace starts at the Coordinator's chosen commit and does not copy uncommitted files or dependencies.
+/** The task helper's own contract, one behavior block per line; the head, repository instructions and authority rules frame it (taskHelperFrame). */
+export const TASK_HELPER_PROMPT = `Implement the Coordinator's brief with the full read, bash, edit and write tools the host supplies. Use only the prepared workspace described by the host. Preserve prepared files, dirty and untracked work, dependencies and the task branch. Do not switch branches, reset or clean the workspace, or substitute the owner's checkout. A shared workspace belongs to this chat's task; an isolated workspace starts at the Coordinator's chosen commit and does not copy uncommitted files or dependencies.
 Return your answer normally when the work or investigation ends. Do not call job ready or invent a done tool. The job tool may record an optional plan or local candidate SHA, without branch or PR arguments. Do not publish a worker PR. Completed records execution handback only, not independent verification, acceptance or approved delivery.
 Return a concise handback: changes, checks and their results, remaining gaps and integration instructions. Link artifacts for detailed logs and proof instead of copying them. Say what you could not check. Do not call dirty changes pinned or verified against HEAD alone. You cannot spawn subagents; return findings and ask the Coordinator to spawn a static reviewer against a committed full SHA when needed.
-The Coordinator owns integration and delivery. These task-helper rules replace the independent Job/PR workflow even when owner worker instructions describe it. Bash runs as the host user, not in a sandbox.
-${SHARED_ROLE_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""}`;
+The Coordinator owns integration and delivery. These task-helper rules replace the independent Job/PR workflow even when owner worker instructions describe it. Bash runs as the host user, not in a sandbox.`;
+
+/** What frames a task helper's behavior (taskHelperBehavior): its head and frozen repository instructions before, the authority rules and `suffix` after. */
+export function taskHelperFrame(
+  project: Pick<Project, "name" | "objective">,
+  knowledgeAccess: KnowledgeAccess,
+  repositoryStanding: string,
+  suffix: string,
+): PromptFrame {
+  return {
+    before: `You are a task helper for ${project.name}. Project instructions: ${project.objective}${
+      repositoryStanding ? `\n\nRepository instructions (frozen for this thread):\n${repositoryStanding}` : ""
+    }`,
+    lead: "\n\n",
+    after: `\n${SHARED_ROLE_RULES}${knowledgeAccess === "maintain" ? " You may write revision-checked knowledge topics with projects_knowledge_write." : ""}${suffix}`,
+  };
 }

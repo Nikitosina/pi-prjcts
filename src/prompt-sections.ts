@@ -1,3 +1,5 @@
+import type { PromptFrame } from "./prompt-blocks.ts";
+
 /** One part of an agent's assembled prompt, as `prompt-render` shows it (docs/ui2-contract.md). */
 export type PromptSectionId = "host" | "instance" | "repository" | "project" | "role" | "preferences" | "memory" | "skills";
 export type PromptSection = { id: PromptSectionId; label: string; source: string; editable: boolean; text: string };
@@ -19,3 +21,12 @@ export const joinInstructions = (sections: InstructionSections): string =>
     .filter(Boolean)
     .join("\n\n");
 export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+/** The frame around the role section: what joinInstructions puts before and after it, so composePrompt gives the same text. */
+export const sectionsFrame = (sections: InstructionSections, suffix: string): PromptFrame => {
+  const skills = sections.skills.text.trim();
+  return {
+    before: joinInstructions({ ...sections, role: { ...sections.role, text: "" }, skills: { ...sections.skills, text: "" } }),
+    lead: "\n\n",
+    after: `${skills ? `\n\n${skills}` : ""}${suffix}`,
+  };
+};

@@ -15,11 +15,17 @@ export function configureWhenIdle(
   update?: (tx: Tx) => Promise<void>,
 ) {
   return owner.commit(async (tx) => {
-    const live = await tx.doc(LiveDoc, target.id),
-      inbox = await tx.doc(InboxDoc, target.id);
-    if (live.run !== undefined || inbox.items.length > 0) throw new Error(`This chat is working; wait for it to finish before ${verb}`);
-    if ((live.compactions?.length ?? 0) > 0) throw new Error(`This chat is compacting; wait for it to finish before ${verb}`);
+    const busy = await busyIn(tx, target.id);
+    if (busy) throw new Error(`This chat is ${busy}; wait for it to finish before ${verb}`);
     await update?.(tx);
     await configure(tx, target.id, change);
   }, context);
+}
+
+/** Why a conversation cannot take a new prompt in this commit (a run, queued input or a compaction), or null when it is idle. */
+export async function busyIn(tx: Tx, id: Conversation["id"]): Promise<"working" | "compacting" | null> {
+  const live = await tx.doc(LiveDoc, id),
+    inbox = await tx.doc(InboxDoc, id);
+  if (live.run !== undefined || inbox.items.length > 0) return "working";
+  return (live.compactions?.length ?? 0) > 0 ? "compacting" : null;
 }
