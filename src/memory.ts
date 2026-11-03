@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { deleteKnowledge, historyKnowledge, readAllKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
+import { deleteKnowledge, historyKnowledge, readAllKnowledge, readKnowledge, recentKnowledgeHistory, writeKnowledge } from "./knowledge.ts";
 
 /** Knowledge as Memory (docs/ui2-contract.md): a classified view over the knowledge files, read without moving or rewriting them. */
 export type MemoryKind = "preference" | "decision" | "procedure" | "archive";
@@ -163,4 +163,41 @@ export async function undoMemory(dir: string, path: string, revision: string): P
   }
   const restored = await writeKnowledge({ dir, path, text: record.priorText, expectedRevision: revision, author: "memory-undo" });
   return { entry: publicEntry(describe(path, restored.text, restored)) };
+}
+
+export type MemoryWrite = {
+  path: string;
+  revision: string;
+  author: string;
+  updatedAt: string;
+  created: boolean;
+  undone: boolean;
+  current: boolean;
+};
+export const RECENT_LIMIT = 50;
+/**
+ * Recent writes, newest first, with whether `memory-undo` reverted each and whether it is still the entry's current revision,
+ * so a client reloaded after an undo shows "Undone" instead of offering Undo again.
+ */
+export async function memoryRecent(dir: string): Promise<{ writes: MemoryWrite[] }> {
+  // Undos and later writes come after the write they concern, so a window larger than the answer sees them.
+  const records = await recentKnowledgeHistory(dir, RECENT_LIMIT * 4);
+  const newest = new Map<string, string>();
+  for (const record of records) if (!newest.has(record.path)) newest.set(record.path, record.revision);
+  const undone = new Set(
+    records.filter((record) => record.author === "memory-undo").map((record) => `${record.path}\0${record.priorRevision}`),
+  );
+  const writes = records
+    .filter((record) => record.author !== "memory-undo")
+    .slice(0, RECENT_LIMIT)
+    .map((record) => ({
+      path: record.path,
+      revision: record.revision,
+      author: record.author,
+      updatedAt: record.updatedAt,
+      created: record.priorText === null,
+      undone: undone.has(`${record.path}\0${record.revision}`),
+      current: newest.get(record.path) === record.revision,
+    }));
+  return { writes };
 }

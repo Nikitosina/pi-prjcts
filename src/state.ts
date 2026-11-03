@@ -69,7 +69,8 @@ export type ThinkingLevel = Static<typeof ThinkingLevel>;
 /** A change to the Host agent's settings; `model` is a plain "provider/model" ref until tiers decide it. */
 export const HostAgentSettingsPatch = Type.Object(
   {
-    model: Type.Optional(Type.String({ pattern: "^[^/\\s]+/\\S+$", maxLength: 200 })),
+    /** null clears the pin so the tier (or the newest project's model) applies. */
+    model: Type.Optional(Type.Union([Type.String({ pattern: "^[^/\\s]+/\\S+$", maxLength: 200 }), Type.Null()])),
     tier: Type.Optional(Type.Union([Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }), Type.Null()])),
     thinking: Type.Optional(ThinkingLevel),
     disabledTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
@@ -485,6 +486,35 @@ export const Snapshot = Type.Object({
   ),
 });
 export type Snapshot = Static<typeof Snapshot>;
+const scheduleId = Type.Optional(Type.String({ minLength: 1, maxLength: 256 }));
+const scheduleName = Type.String({ minLength: 1, maxLength: 120 });
+const scheduleRevision = Type.Integer({ minimum: 0 });
+/** When a schedule runs: once at `atMs`, every `everyMs` from it, or on a calendar rule. */
+const scheduleTiming = {
+  atMs: Type.Integer({ minimum: 0 }),
+  everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })),
+  calendar: Type.Optional(
+    Type.Union([
+      Type.Object(
+        {
+          kind: Type.Literal("daily"),
+          timezone: Type.String({ minLength: 1, maxLength: 256 }),
+          time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          kind: Type.Literal("weekly"),
+          timezone: Type.String({ minLength: 1, maxLength: 256 }),
+          time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
+          days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }),
+        },
+        { additionalProperties: false },
+      ),
+    ]),
+  ),
+};
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
@@ -572,6 +602,16 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("memory-undo"), projectId: Id, path: knowledgePath, revision }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("memory-recent"), projectId: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("chat-stop"),
+      projectId: Id,
+      chatId: Type.Optional(ChatId),
+      reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object(
@@ -1086,36 +1126,44 @@ export const Request = Type.Union([
     {
       action: Type.Literal("schedule-create"),
       id: Id,
-      scheduleId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-      atMs: Type.Integer({ minimum: 0 }),
-      everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })),
-      calendar: Type.Optional(
-        Type.Union([
-          Type.Object(
-            {
-              kind: Type.Literal("daily"),
-              timezone: Type.String({ minLength: 1, maxLength: 256 }),
-              time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
-            },
-            { additionalProperties: false },
-          ),
-          Type.Object(
-            {
-              kind: Type.Literal("weekly"),
-              timezone: Type.String({ minLength: 1, maxLength: 256 }),
-              time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
-              days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }),
-            },
-            { additionalProperties: false },
-          ),
-        ]),
-      ),
+      scheduleId,
+      ...scheduleTiming,
+      name: Type.Optional(scheduleName),
       text,
     },
     { additionalProperties: false },
   ),
   Type.Object(
     { action: Type.Literal("schedule-enable"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("schedule-run"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-update"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+      name: Type.Optional(Type.Union([scheduleName, Type.Null()])),
+      text: Type.Optional(text),
+      schedule: Type.Optional(Type.Object(scheduleTiming, { additionalProperties: false })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-delete"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("schedule-restore"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }) },
     { additionalProperties: false },
   ),
   Type.Object(

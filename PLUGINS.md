@@ -27,6 +27,7 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it; without it a Job of this kind cannot be approved |
 | `coordinatorTools` | tools and an instruction snippet for matching projects |
 | `rpc` | namespaced host RPCs: `{ action: "plugin", plugin, method, id?, params? }`; context offers `withRoot`, `mutateIdle` |
+| `rpcPolicy` | per `rpc` method, what it does when an agent calls it: `"read"`, `"write"`, `"dangerous"` or `(params) => kind`. Reads and writes run; dangerous and unclassified methods need the owner's approval |
 | `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
 | `workerTools` | tools and an instruction snippet for whole-repository workers; offered to new threads, frozen with each thread's tool set |
 | `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |

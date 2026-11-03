@@ -25,6 +25,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - merge      result acceptance for the checkout kind: inspect a PR, merge at the approved head, auto-merge, pull the main checkout.
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.
+ *  - rpcPolicy  per rpc method: "read" | "write" | "dangerous" or a function of params; agents need approval for unclassified methods.
  *  - uncertainWrites  durable "an outcome is unknown" check that blocks automatic admission.
  *  - workerTools  tools (and an instruction snippet) for whole-repository workers; frozen per thread like every worker tool.
  *  - leaseName  canonical name for host lease resources the plugin owns (aliases share one lease).
@@ -435,6 +436,10 @@ export type PluginRpcContext = {
   mutateIdle(projectId: string, change: { validate(project: Project): void; apply(project: Project): Project }): Promise<void>;
 };
 export type PluginRpcHandler = (context: PluginRpcContext) => Promise<unknown>;
+/** What an RPC call does, for agents: reads and safe writes run; `dangerous` calls need the owner's approval. */
+export type PluginRpcKind = "read" | "write" | "dangerous";
+/** Per method, or per call from its params; a method without one is treated as dangerous when an agent calls it. */
+export type PluginRpcPolicy = PluginRpcKind | ((params: unknown) => PluginRpcKind);
 
 export type WorkerToolsProvider = {
   /** Whether a new thread of this project gets the tools. Threads keep the tool set they were first bound with. */
@@ -466,6 +471,8 @@ export type PluginCapabilities = {
   merge?: MergeProvider;
   coordinatorTools?: CoordinatorToolsProvider;
   rpc?: Record<string, PluginRpcHandler>;
+  /** Agent policy of the `rpc` methods (Host agent `host_call`); unclassified methods need the owner's approval. */
+  rpcPolicy?: Record<string, PluginRpcPolicy>;
   uncertainWrites?: (tx: Tx, root: Conversation["id"]) => Promise<boolean>;
   workerTools?: WorkerToolsProvider;
   /** Canonical lease name for a resource the plugin owns, or undefined to leave it to others. */

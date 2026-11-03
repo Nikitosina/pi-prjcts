@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { McpSettings } from "./mcp-profiles.ts";
+import type { OffLists, SkillProfiles } from "./skill-profiles.ts";
 import type { Project } from "./state.ts";
 
 /** The four agent profiles of a project (docs/ui2-contract.md); the verifier is gone. */
@@ -58,7 +59,8 @@ export type Tier = Static<typeof Tier>;
 
 /** Tools a profile needs to finish its contract; never switched off. */
 export const LOCKED_TOOLS: Record<ProfileId, readonly string[]> = {
-  coordinator: ["agents"],
+  // Owner approvals are the coordinator's only way to a dangerous action; switching them off would leave it nothing to ask with.
+  coordinator: ["agents", "owner_approval_request"],
   worker: ["job"],
   scout: [],
   reviewer: [],
@@ -106,6 +108,37 @@ export function toolDisabled(project: Pick<Project, "profiles">, profile: Profil
   if (LOCKED_TOOLS[profile].includes(name)) return false;
   const disabled = project.profiles?.[profile]?.tools?.disabled ?? [];
   return disabled.includes(name) || disabled.includes(group);
+}
+/** `skill:<name>` rows of `profile-tools`: switching one off is a skill profile change, stored once in `skillProfiles.off`. */
+const SKILL_TOOL = "skill:";
+/** A profile's disabled list as the owner sees it: its saved tools plus the skills switched off for it (own list and "all"). */
+export function disabledWithSkills(project: Pick<Project, "profiles" | "skillProfiles">, profile: ProfileId): string[] {
+  const off = project.skillProfiles?.off;
+  const skills = [...(off?.all ?? []), ...(off?.[profile] ?? [])].map((name) => `${SKILL_TOOL}${name}`);
+  return [...new Set([...(project.profiles?.[profile]?.tools?.disabled ?? []).filter((name) => !name.startsWith(SKILL_TOOL)), ...skills])];
+}
+/**
+ * Splits a profile's disabled list into tools and the skill profile it implies. A skill on the "all" list that the owner turned on
+ * for this profile moves to the other profiles' own lists, so they stay as they were.
+ */
+export function splitSkillToggles(
+  project: Pick<Project, "skillProfiles">,
+  profile: ProfileId,
+  disabled: readonly string[],
+): { tools: string[]; skills: SkillProfiles | undefined } {
+  const tools = disabled.filter((name) => !name.startsWith(SKILL_TOOL));
+  const names = new Set(disabled.filter((name) => name.startsWith(SKILL_TOOL)).map((name) => name.slice(SKILL_TOOL.length)));
+  const saved = project.skillProfiles?.off ?? {};
+  const all = (saved.all ?? []).filter((name) => names.has(name)),
+    released = (saved.all ?? []).filter((name) => !names.has(name));
+  const off: OffLists = {};
+  if (all.length) off.all = all;
+  for (const role of PROFILE_IDS) {
+    const list = role === profile ? [...names].filter((name) => !all.includes(name)) : [...new Set([...(saved[role] ?? []), ...released])];
+    if (list.length) off[role] = list;
+  }
+  const unchanged = JSON.stringify(off) === JSON.stringify(saved);
+  return { tools, skills: unchanged ? undefined : { ...project.skillProfiles, off } };
 }
 /** The tools a profile is offered after its disabled list. */
 export const offeredFor = <T extends { name: string }>(

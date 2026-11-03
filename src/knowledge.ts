@@ -145,6 +145,23 @@ export async function historyKnowledge(dir: string, path: string): Promise<Revis
     .map((name) => parse(KnowledgeRevision, readJson(controlPath(root, `history/${digest(valid)}/${name}`))));
 }
 
+/** The newest `limit` revisions across every document, newest first; history file names start with the write time. */
+export async function recentKnowledgeHistory(dir: string, limit: number): Promise<Revision[]> {
+  await ensureKnowledge(dir);
+  const root = knowledgeRoot(dir);
+  const folder = controlPath(root, "history");
+  if (!existsSync(folder)) return [];
+  const files = readdirSync(folder).flatMap((digestName) =>
+    readdirSync(controlPath(root, `history/${digestName}`))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => ({ digestName, name })),
+  );
+  return files
+    .sort((a, b) => b.name.localeCompare(a.name))
+    .slice(0, limit)
+    .map(({ digestName, name }) => parse(KnowledgeRevision, readJson(controlPath(root, `history/${digestName}/${name}`))));
+}
+
 function knowledgeRoot(dir: string): string {
   const root = join(resolve(dir), "knowledge");
   rejectSymlink(root);

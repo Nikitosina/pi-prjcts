@@ -4,6 +4,8 @@ import { Value } from "typebox/value";
 import { Request, errorText, type Request as RequestData } from "./state.ts";
 import { fitJson } from "./response-limit.ts";
 import type { FocusTarget } from "./change-feed.ts";
+import { plugins } from "./plugins.ts";
+import { redactForAgent } from "./agent-redaction.ts";
 
 type Action = RequestData["action"];
 /** What the Host agent may do with one host action: run it, ask the owner first, or never (with the reason). */
@@ -26,6 +28,7 @@ export const DANGEROUS_MINIMUM = [
   "upload-delete",
   "worktrees-cleanup",
   "remote-revoke",
+  "schedule-delete",
 ] as const;
 
 /**
@@ -126,6 +129,10 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "upload-delete": dangerous("Delete an upload."),
   "schedule-create": allow("Schedule a message for a project."),
   "schedule-enable": allow("Enable or disable a schedule."),
+  "schedule-run": allow("Run a schedule's prompt now, enabled or not."),
+  "schedule-update": allow("Change a schedule's name, prompt or timing (revision from schedule-snapshot)."),
+  "schedule-delete": dangerous("Delete a schedule (restorable with schedule-restore for ten minutes)."),
+  "schedule-restore": allow("Bring back a schedule deleted in the last ten minutes."),
   "schedule-snapshot": allow("A project's schedules."),
   "schedule-history": allow("Runs of a project's schedules."),
   "event-opt-in": allow("Opt a project in or out of local events."),
@@ -138,7 +145,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "pr-watch": allow("Watch or unwatch a pull request."),
   "pr-hide": allow("Hide or show a pull request."),
   plugins: allow("Loaded plugins."),
-  plugin: allow("Call a plugin method."),
+  plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),
   "knowledge-list": allow("A project's knowledge files."),
@@ -148,7 +155,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   shutdown: exclude("Stops the host the Host agent runs in; the owner stops it."),
   "deploy-shutdown": exclude("Internal step of a deploy."),
   "deploy-snapshot": allow("Deploy settings and state."),
-  "deploy-settings": allow("Change deploy settings."),
+  "deploy-settings": allow("Change deploy settings; turning on automatic idle deploys needs the owner's approval."),
   "deploy-start": dangerous("Deploy a new host version."),
   "notify-feed": allow("Recent notices."),
   "telegram-snapshot": allow("Telegram connection status."),
@@ -173,13 +180,27 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "prompt-render": allow("The assembled prompt of a project's profile, as sections with token estimates."),
   "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
+  "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
+  "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
+};
+
+/** Allowed actions that are dangerous for some inputs: unattended deploys, and plugin calls the plugin does not declare safe. */
+const REQUEST_GATES: { [A in Action]?: (request: Extract<RequestData, { action: A }>) => boolean } = {
+  "deploy-settings": (request) => request.settings.idle,
+  plugin: (request) => {
+    const kind = plugins.rpcKind(request.plugin, request.method, request.params);
+    return kind !== "read" && kind !== "write";
+  },
 };
 
 const members = new Map<string, TSchema>(
   Request.anyOf.map((member) => [String((member as { properties: { action: { const: string } } }).properties.action.const), member]),
 );
 export const hasAction = (action: string): boolean => members.has(action);
-export const isDangerous = (action: string): boolean => ACTION_POLICY[action as Action]?.kind === "dangerous";
+const gated = <A extends Action>(request: Extract<RequestData, { action: A }>): boolean =>
+  (REQUEST_GATES[request.action as A] as ((value: typeof request) => boolean) | undefined)?.(request) ?? false;
+/** Whether this exact request needs the owner's approval when an agent asks for it. */
+export const isDangerous = (request: RequestData): boolean => ACTION_POLICY[request.action]?.kind === "dangerous" || gated(request);
 
 /** The exact request `{ action, ...input }` if the agent may call it; throws a short refusal otherwise. */
 export function validateCall(action: string, input: unknown): RequestData {
@@ -258,7 +279,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
     replay: "unsafe",
     async execute(args, api) {
       const request = validateCall(args.action, args.input ?? {});
-      if (isDangerous(request.action)) {
+      if (isDangerous(request)) {
         const approval = await deps.requestApproval({
           key: `host-agent:${api.conversationId}:${api.taskId}`,
           request,
@@ -267,7 +288,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
         return text(pendingText(approval));
       }
       try {
-        return text({ ok: true, result: (await deps.dispatch(request)) ?? null });
+        return text({ ok: true, result: redactForAgent(request.action, (await deps.dispatch(request)) ?? null) });
       } catch (error) {
         return text({ ok: false, error: errorText(error) });
       }
@@ -326,7 +347,7 @@ export function ownerApprovalTool(input: {
     replay: "safe",
     async execute(args, api) {
       const request = validateCall(args.action, args.input);
-      if (!isDangerous(request.action))
+      if (!isDangerous(request))
         throw new Error(
           `"${request.action}" needs no approval; it is not a dangerous host action, so do it with your own tools or ask the owner.`,
         );

@@ -113,6 +113,7 @@ import {
   type Project,
 } from "./state.ts";
 import { catalog } from "./workspace-authorization.ts";
+import { providerFailure, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { rolePrompt, SHARED_ROLE_RULES, taskWorkerInstructions } from "./role-prompts.ts";
@@ -354,6 +355,8 @@ export type DurableProjectRuntime = {
   compact(chatId?: string): Promise<{ started: true; chatId: string }>;
   /** Starts a fresh context in one idle chat ("/new"); earlier entries stay stored but leave the transcript and the model context. */
   reset(chatId?: string): Promise<{ chatId: string }>;
+  /** Aborts the chat's running Coordinator turn like the other Stops: queued inputs withdrawn, history kept, background work left running. */
+  chatStop(chatId?: string): Promise<{ stopped: boolean; chatId: string }>;
   /**
    * "/reload" for one idle chat: rebuilds the skill catalog from disk and applies it, with the system prompt and tool bindings, to this chat's next turn.
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
@@ -376,8 +379,19 @@ export type DurableProjectRuntime = {
   transcriptImage(target: TranscriptTarget, ref: string): ReturnType<typeof readTranscriptImage>;
   /** Submissions of a chat that answer these request ids (owner messages), one indexed lookup each. */
   ledgerSubmissions(chatId: string, requestIds: readonly string[]): Promise<DurableSubmissionState[]>;
-  scheduleCreate(input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule }): Promise<unknown>;
+  scheduleCreate(input: {
+    id?: string;
+    atMs: number;
+    text: string;
+    everyMs?: number;
+    calendar?: CalendarRule;
+    name?: string;
+  }): Promise<unknown>;
   scheduleSetEnabled(id: string, enabled: boolean): Promise<unknown>;
+  scheduleUpdate: ReturnType<typeof scheduleRuntime>["update"];
+  scheduleRun(id: string): Promise<unknown>;
+  scheduleDelete: ReturnType<typeof scheduleRuntime>["remove"];
+  scheduleRestore: ReturnType<typeof scheduleRuntime>["restore"];
   scheduleSetEventOptIn(enabled: boolean): Promise<boolean>;
   ingestLocalEvent(input: { eventId: string; kind: string; payload: string }): Promise<unknown>;
   scheduleSnapshot(options?: { includeHistory?: boolean }): Promise<DurableScheduleSnapshot>;
@@ -1308,6 +1322,41 @@ export async function openDurableProject(input: {
           for (const event of topicsOfCommit(publication, topicMap)) input.onChange!(event);
         })
       : () => {};
+    // A Coordinator turn that failed on quota or a rate limit moves its chat to the tier's next model and continues; the request id
+    // is the failed submission's, so a commit seen twice still continues once. Without a tier the failure stays as it is.
+    const advanceCoordinator = async (conversationId: Conversation["id"], submissionId: string, failure: ProviderFailure) => {
+      const chain = chains.coordinator;
+      const conversation = chain && !closed ? await openedHarness.conversation(conversationId, context) : undefined;
+      if (!chain || !conversation) return;
+      const current = (await conversation.agent(context)).model;
+      const from = current ? `${current.provider}/${current.modelId}` : "";
+      const next = chain[chain.indexOf(from) + 1];
+      if (!next) return;
+      await conversation.configure({ model: modelRef(next), thinkingLevel: coordinatorThinking }, context);
+      await conversation.submit(
+        {
+          type: "input",
+          content: `[${from} hit its ${failure === "quota_exceeded" ? "quota" : "rate limit"}; this chat moved to ${next}, the next model of its tier. Answer the last message.]`,
+          entry: { kind: "projects.internal-input" },
+          whenBusy: "followUp",
+          requestId: `tier-move:${submissionId}`,
+        },
+        context,
+      );
+      process.stderr.write(JSON.stringify({ event: "coordinator-tier-move", projectId: project.id, from, to: next, failure }) + "\n");
+    };
+    const stopTierRecovery = openedHarness.subscribeCommits((publication) => {
+      for (const change of publication.changes) {
+        if (change.type !== "submission") continue;
+        const record = change.value;
+        if (record.type !== "input" || record.status !== "unanswered" || !isCoordinator(record.conversationId)) continue;
+        const failure = providerFailure(unansweredReason(record));
+        if (failure && chains.coordinator)
+          void advanceCoordinator(record.conversationId, String(record.id), failure).catch((error) =>
+            report(input.onReport, project.id, error),
+          );
+      }
+    });
     const schedules = scheduleRuntime(root, project.id, () => closed, {
       afterScheduleIntentRecorded: input.afterScheduleIntentRecorded,
       beforeScheduleReceiptCommit: input.beforeScheduleReceiptCommit,
@@ -1972,6 +2021,28 @@ export async function openDurableProject(input: {
         await armWake();
         return value;
       },
+      scheduleUpdate: async (id, revision, change) => {
+        const value = await schedules.update(id, revision, change);
+        await armWake();
+        return value;
+      },
+      scheduleRun: async (id) => {
+        // A run that finished but is not reconciled yet must not count as in flight.
+        await schedules.reconcile();
+        const value = await schedules.runNow(id);
+        await armWake();
+        return value;
+      },
+      scheduleDelete: async (id, revision) => {
+        const value = await schedules.remove(id, revision);
+        await armWake();
+        return value;
+      },
+      scheduleRestore: async (id) => {
+        const value = await schedules.restore(id);
+        await armWake();
+        return value;
+      },
       scheduleSetEventOptIn: (enabled) => schedules.setEventOptIn(enabled),
       ingestLocalEvent: (input) => schedules.ingest(input),
       scheduleSnapshot: async (options) => {
@@ -2084,6 +2155,19 @@ export async function openDurableProject(input: {
           await conversation.compact(undefined, context);
           return { started: true as const, chatId: chat.id };
         }),
+      chatStop: async (id) => {
+        assertOpen();
+        const { conversation, chat } = await resolveChat(id);
+        const view = await conversation.viewState(context);
+        let running: boolean;
+        try {
+          running = liveFrame(view.value).running;
+        } finally {
+          view.dispose();
+        }
+        await conversation.abort(context);
+        return { stopped: running || chat.busy, chatId: chat.id };
+      },
       reset: (id) =>
         admitting(async () => {
           const { conversation, chat } = await resolveChat(id);
@@ -2145,7 +2229,8 @@ export async function openDurableProject(input: {
         }
         const skills = groups.get("skills");
         if (skills) {
-          const effective = new Set((profile === "coordinator" ? roleSkills : delegatedSkills)[profile].map((skill) => skill.name));
+          // The saved skill profile, not a chat's frozen set: this list is where the owner changes it.
+          const effective = new Set(rolesOf(knownLoader, current.skillProfiles)[profile].map((skill) => skill.name));
           for (const skill of knownLoader?.getSkills().skills ?? [])
             skills.tools.push({
               name: `skill:${skill.name}`,
@@ -2177,7 +2262,11 @@ export async function openDurableProject(input: {
         const current = loadProject(project.id);
         const built =
           profile === "coordinator"
-            ? coordinatorPromptSections(current, loadDurableStanding(project.cwd).text, roleIndex("coordinator"))
+            ? coordinatorPromptSections(
+                current,
+                loadDurableStanding(project.cwd).text,
+                skillIndex(rolesOf(knownLoader, current.skillProfiles).coordinator) + MCP_NOTE,
+              )
             : roleSections(profile);
         const instance = loadInstanceInstructions();
         const sections: PromptSection[] = [
@@ -2215,6 +2304,8 @@ export async function openDurableProject(input: {
             if (!(await tryRebuildCoordinator(conversation, loader))) deferred++;
           }
           knownLoader = loader;
+          // Skill profile changes reach the next delegation at once, not only after a catalog refresh.
+          delegatedSkills = rolesOf(loader, loadProject(project.id).skillProfiles);
           return { deferred };
         });
       },
@@ -2373,6 +2464,7 @@ export async function openDurableProject(input: {
         closed = true;
         mergeFlows.abort();
         stopFeed();
+        stopTierRecovery();
         for (const stop of [...liveWatchers]) stop();
         dispatchReady = false;
         if (wake !== undefined) clearTimeout(wake);

@@ -12,10 +12,18 @@ const QUOTA = {
   status: 429,
   body: { error: { message: "Quota exceeded: session limit reached", type: "insufficient_quota", code: "insufficient_quota" } },
 };
-const requests = [];
+const requests = [],
+  coordinator = [];
 const kit = await createKit("worker-quota", {
   env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60" },
-  handler: ({ role, model, user }) => {
+  handler: ({ role, model, user, msgs }) => {
+    if (role === "coordinator") {
+      // Each case runs in its own chat, so the whole conversation names it.
+      const marker = ["COEND", "COQUOTA", "COPLAIN"].find((value) => JSON.stringify(msgs ?? user).includes(value));
+      if (marker) coordinator.push({ marker, model });
+      if (marker === "COEND" || (marker === "COQUOTA" && model === "fake-model")) return QUOTA;
+      return say(marker === "COQUOTA" ? "Coordinator recovered." : "Noted.");
+    }
     if (role !== "worker") return say("Noted.");
     const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE"].find((value) => user.includes(value));
     requests.push({ marker, model, at: Date.now() });
@@ -146,5 +154,42 @@ await kit.run(async () => {
     "F4 a rate limit moves a tiered worker to the next model",
     rate.modelMoves.length === 1 && callsFor("RATE").at(-1).model === "fallback-model",
     { rate, calls: callsFor("RATE").map((call) => call.model) },
+  );
+
+  const { check } = kit;
+  // G5: the Coordinator's tier advances on quota, once per failed turn, only in the chat that failed.
+  const coordinatorProfiles = await kit.rpc({ action: "profiles-get", projectId: id });
+  await kit.rpc({
+    action: "profiles-set",
+    projectId: id,
+    revision: coordinatorProfiles.revision,
+    profile: "coordinator",
+    patch: { tier: "chain" },
+  });
+  const chat = async (title) => (await kit.rpc({ action: "chat-create", id, title })).id;
+  const quotaChat = await chat("Quota"),
+    plainChat = await chat("Plain"),
+    endChat = await chat("End");
+  const coCalls = (marker) => coordinator.filter((call) => call.marker === marker).map((call) => call.model);
+  await kit.rpc({ action: "message", id, chatId: quotaChat, text: "COQUOTA answer me" });
+  await kit.eventually(async () => coCalls("COQUOTA").includes("fallback-model"), "coordinator moved to the next tier model");
+  await kit.settle(id);
+  await delay(500);
+  check(
+    "G5 a quota failure moves the coordinator chat to the next tier model, once",
+    JSON.stringify(coCalls("COQUOTA")) === JSON.stringify(["fake-model", "fallback-model"]),
+    coCalls("COQUOTA"),
+  );
+  await kit.rpc({ action: "message", id, chatId: plainChat, text: "COPLAIN hello" });
+  await kit.eventually(async () => coCalls("COPLAIN").length > 0, "plain chat answered");
+  check("G5 another chat keeps the tier's first model", coCalls("COPLAIN")[0] === "fake-model", coCalls("COPLAIN"));
+  await kit.rpc({ action: "message", id, chatId: endChat, text: "COEND every model" });
+  await kit.eventually(async () => coCalls("COEND").includes("third-model"), "end chat reached the last model");
+  await kit.settle(id);
+  await delay(800);
+  check(
+    "G5 the end of the tier stops there instead of cycling",
+    JSON.stringify(coCalls("COEND")) === JSON.stringify(["fake-model", "fallback-model", "third-model"]),
+    coCalls("COEND"),
   );
 });

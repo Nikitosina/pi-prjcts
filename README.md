@@ -14,6 +14,11 @@ This opens the selected project, or lets you choose or create one. The inbox lis
 
 The listener binds to `127.0.0.1` on a random port. A private launch link authenticates the tab and then leaves the address bar. Do not share launch links or `web.json`. The host rejects foreign origins and Host headers. Closing the tab does not stop work. After a host restart, run `npm run inbox` again because the port and token change; `npm run projects -- ui-url <project-id>` prints the link.
 
+## UI 2.0 trial
+
+`npm run ui2` starts a host from this checkout on its own home `~/.pi/agent/projects-ui2` (created empty; nothing is copied from other homes) with your real providers, and prints the `/ui2/` link; it refuses while that home's host is running.
+`npm run ui2 -- stop` stops it.
+
 ## Remote access
 
 Remote mode is opt-in: `npm run projects -- remote enable https://relay.example.com --name "Home Mac"` installs the per-user macOS host service and prints its relay allowlist command. `remote status` inspects it; `remote disable` removes the service and keeps paired identities. A private relay behind your own nginx joins outbound WSS connections, and devices pair from the inbox's Remote access settings. Protocol and limits: `REMOTE_SPEC.md`. Operator setup: `relay/deploy/README.md`.

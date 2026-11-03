@@ -7,6 +7,7 @@ import {
   LOCKED_TOOLS,
   PROFILE_IDS,
   Tier as TierSchema,
+  disabledWithSkills,
   effectiveModel,
   resolveSelection,
   toolGroup,
@@ -49,7 +50,10 @@ const serial = <T>(operation: () => Promise<T> | T): Promise<T> => {
 };
 
 export function readUi(): { revision: string; ui: UiSettings } {
-  const ui = readDocument(uiPath(), (value) => parse(UiSettings, value)) ?? DEFAULT_UI;
+  const ui =
+    readDocument(uiPath(), (value) =>
+      parse(UiSettings, typeof value === "object" && value !== null && !Array.isArray(value) ? { font: DEFAULT_UI.font, ...value } : value),
+    ) ?? DEFAULT_UI;
   return { revision: revisionOf(ui), ui };
 }
 export const setUi = (revision: string, patch: Static<typeof UiPatch>) =>
@@ -190,7 +194,11 @@ export async function profilesSnapshot(project: Project, revision: string) {
   const profiles = Object.fromEntries(
     PROFILE_IDS.map((profile) => [
       profile,
-      { ...(project.profiles?.[profile] ?? {}), effectiveModel: selection ? effectiveModel(selection, profile) : null },
+      {
+        ...(project.profiles?.[profile] ?? {}),
+        ...(disabledWithSkills(project, profile).length ? { tools: { disabled: disabledWithSkills(project, profile) } } : {}),
+        effectiveModel: selection ? effectiveModel(selection, profile) : null,
+      },
     ]),
   ) as Record<(typeof PROFILE_IDS)[number], ProfileSettings & { effectiveModel: string | null }>;
   return { revision, profiles };

@@ -14,9 +14,18 @@ type Schedule = {
   text: string;
   createdAtMs: number;
   updatedAtMs: number;
+  /** Absent on records saved before names and revisions existed. */
+  name?: string;
+  revision?: number;
 } & (
   { kind: "once" } | { kind: "interval"; everyMs: number; nextAtMs: number } | { kind: "calendar"; rule: CalendarRule; nextAtMs: number }
 );
+/** A schedule as reads return it: name null when unnamed, revision 0 for records saved before revisions. */
+export type ScheduleView = (Schedule extends infer T ? (T extends unknown ? Omit<T, "name" | "revision"> : never) : never) & {
+  name: string | null;
+  revision: number;
+};
+export type ScheduleTiming = { atMs: number; everyMs?: number; calendar?: CalendarRule };
 type Event = { eventId: string; projectId: string; kind: string; payload: string; createdAtMs: number; requestId: string };
 export type ScheduleIntent = {
   requestId: string;
@@ -32,7 +41,7 @@ export type ScheduleIntent = {
 export type DurableScheduleSnapshot = {
   automaticAdmissionBlocker: "uncertain-provider-write" | "uncertain-command" | null;
   eventOptIn: boolean;
-  schedules: Schedule[];
+  schedules: ScheduleView[];
 } & (
   | { historyIncluded?: true; events: Event[]; intents: ScheduleIntent[] }
   | { historyIncluded: false; historyCounts: { events: number; intents: number }; events: []; intents: [] }
@@ -55,15 +64,47 @@ export type ScheduleHistoryPage = HistoryPage &
 type ScheduleState = {
   eventOptIn: boolean;
   schedules: Record<string, Schedule>;
+  /** Deleted schedules kept for `schedule-restore` until the restore window passes; absent in documents written before. */
+  deleted?: Record<string, { schedule: Schedule; deletedAtMs: number }>;
   events: Record<string, Event>;
   intents: Record<string, ScheduleIntent>;
 };
 function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
-function scheduleCopy(value: Schedule): Schedule {
+function scheduleCopy(value: Schedule): ScheduleView {
+  const copy = value.kind === "calendar" ? { ...value, rule: copyCalendarRule(value.rule) } : { ...value };
+  return { ...copy, name: value.name ?? null, revision: value.revision ?? 0 };
+}
+function storedCopy(value: Schedule): Schedule {
   return value.kind === "calendar" ? { ...value, rule: copyCalendarRule(value.rule) } : { ...value };
 }
+const RESTORE_MS = Number(process.env.PI_PROJECTS_SCHEDULE_RESTORE_MS) || 10 * 60_000;
+/** Checks a timing and returns the fields it sets; the first calendar occurrence is at or after `atMs`. */
+function timingFields(
+  timing: ScheduleTiming,
+): { kind: "once" } | { kind: "interval"; everyMs: number; nextAtMs: number } | { kind: "calendar"; rule: CalendarRule; nextAtMs: number } {
+  if (!Number.isSafeInteger(timing.atMs) || timing.atMs < 0) throw new Error("Invalid schedule");
+  if (timing.everyMs !== undefined && (!Number.isSafeInteger(timing.everyMs) || timing.everyMs < 60000 || timing.everyMs > 31536000000))
+    throw new Error("Schedule interval must be between one minute and one year");
+  if (timing.calendar !== undefined && timing.everyMs !== undefined) throw new Error("Choose a calendar rule or an interval, not both");
+  if (timing.calendar !== undefined) {
+    const first = nextCalendarOccurrence(timing.calendar, timing.atMs - 1);
+    if (first !== null) return { kind: "calendar", rule: copyCalendarRule(timing.calendar), nextAtMs: first };
+  }
+  return timing.everyMs === undefined ? { kind: "once" } : { kind: "interval", everyMs: timing.everyMs, nextAtMs: timing.atMs };
+}
+/** A run of this schedule that has not finished: recorded, uncertain, or submitted without an outcome yet. */
+function inFlight(state: ScheduleState, id: string): boolean {
+  return Object.values(state.intents).some(
+    (intent) =>
+      intent.kind === "schedule" &&
+      intent.stableId === id &&
+      (intent.status === "recorded" || intent.status === "uncertain" || (intent.status === "submitted" && intent.outcome === null)),
+  );
+}
+const consumed = (state: ScheduleState, id: string) =>
+  Object.values(state.intents).some((intent) => intent.kind === "schedule" && intent.stableId === id);
 function eventCopy(value: Event): Event {
   return { ...value };
 }
@@ -220,14 +261,10 @@ export function scheduleRuntime(
       };
     }, BACKGROUND_CONTEXT);
   };
-  const create = (input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule }) =>
+  const create = (input: { id?: string; atMs: number; text: string; everyMs?: number; calendar?: CalendarRule; name?: string }) =>
     mutex.run(async () => {
-      if (!Number.isSafeInteger(input.atMs) || input.atMs < 0 || !input.text || input.text.length > 32000)
-        throw new Error("Invalid schedule");
-      if (input.everyMs !== undefined && (!Number.isSafeInteger(input.everyMs) || input.everyMs < 60000 || input.everyMs > 31536000000))
-        throw new Error("Schedule interval must be between one minute and one year");
-      if (input.calendar !== undefined && input.everyMs !== undefined) throw new Error("Choose a calendar rule or an interval, not both");
-      const firstCalendarAt = input.calendar === undefined ? null : nextCalendarOccurrence(input.calendar, input.atMs - 1);
+      if (!input.text || input.text.length > 32000) throw new Error("Invalid schedule");
+      const timing = timingFields(input);
       if (isClosed()) throw new Error("Project is closed");
       const id = input.id ?? crypto.randomUUID(),
         now = Date.now();
@@ -238,19 +275,25 @@ export function scheduleRuntime(
           if (
             prior.atMs !== input.atMs ||
             prior.text !== input.text ||
+            prior.name !== input.name ||
             (prior.kind === "interval" ? prior.everyMs : undefined) !== input.everyMs ||
             JSON.stringify(prior.kind === "calendar" ? copyCalendarRule(prior.rule) : undefined) !== JSON.stringify(input.calendar)
           )
             throw new Error("Conflicting schedule ID");
           return scheduleCopy(prior);
         }
-        const base = { id, projectId, enabled: false, atMs: input.atMs, text: input.text, createdAtMs: now, updatedAtMs: now };
-        const value: Schedule =
-          input.calendar !== undefined && firstCalendarAt !== null
-            ? { ...base, kind: "calendar", rule: copyCalendarRule(input.calendar), nextAtMs: firstCalendarAt }
-            : input.everyMs === undefined
-              ? { ...base, kind: "once" }
-              : { ...base, kind: "interval", everyMs: input.everyMs, nextAtMs: input.atMs };
+        const value: Schedule = {
+          id,
+          projectId,
+          enabled: false,
+          atMs: input.atMs,
+          text: input.text,
+          createdAtMs: now,
+          updatedAtMs: now,
+          ...(input.name ? { name: input.name } : {}),
+          revision: 0,
+          ...timing,
+        };
         state.schedules = { ...state.schedules, [id]: value };
         return scheduleCopy(value);
       }, BACKGROUND_CONTEXT);
@@ -269,7 +312,106 @@ export function scheduleRuntime(
           throw new Error("Consumed one-shot schedules cannot be re-enabled");
         schedule.enabled = enabled;
         schedule.updatedAtMs = Date.now();
+        schedule.revision = (schedule.revision ?? 0) + 1;
         return scheduleCopy(schedule);
+      }, BACKGROUND_CONTEXT),
+    );
+  const withRevision = (schedule: Schedule | undefined, revision: number): Schedule => {
+    if (!schedule) throw new Error("Unknown schedule");
+    if ((schedule.revision ?? 0) !== revision) throw new Error("Schedule changed (stale revision); reread it and retry");
+    return schedule;
+  };
+  /** Name, prompt and timing, replaced as given; timing replaces kind and next run together. */
+  const update = (id: string, revision: number, change: { name?: string | null; text?: string; schedule?: ScheduleTiming }) =>
+    mutex.run(async () => {
+      if (change.text !== undefined && (!change.text || change.text.length > 32000)) throw new Error("Invalid schedule");
+      const timing = change.schedule ? timingFields(change.schedule) : undefined;
+      if (isClosed()) throw new Error("Project is closed");
+      return root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        const current = withRevision(own(state.schedules, id), revision);
+        if (change.schedule && current.kind === "once" && consumed(state, id))
+          throw new Error("This one-shot schedule already ran; create a new one instead of rescheduling it");
+        const { name: _name, ...kept } = current;
+        const named = change.name === undefined ? current.name : (change.name ?? undefined);
+        const base = {
+          ...kept,
+          ...(named ? { name: named } : {}),
+          text: change.text ?? current.text,
+          updatedAtMs: Date.now(),
+          revision: revision + 1,
+        };
+        const next: Schedule =
+          change.schedule && timing
+            ? (() => {
+                const {
+                  everyMs: _every,
+                  nextAtMs: _next,
+                  rule: _rule,
+                  kind: _kind,
+                  ...rest
+                } = base as Schedule & { everyMs?: number; nextAtMs?: number; rule?: CalendarRule };
+                return { ...rest, atMs: change.schedule.atMs, ...timing };
+              })()
+            : (base as Schedule);
+        state.schedules = { ...state.schedules, [id]: next };
+        return scheduleCopy(next);
+      }, BACKGROUND_CONTEXT);
+    });
+  /** Runs the prompt now, enabled or not; a one-shot counts as run. Refused while a run of it is still in flight. */
+  const runNow = (id: string) =>
+    mutex.run(async () => {
+      if (isClosed()) throw new Error("Project is closed");
+      const now = Date.now();
+      const due = await root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        const schedule = own(state.schedules, id);
+        if (!schedule) throw new Error("Unknown schedule");
+        if (inFlight(state, id)) throw new Error("A run of this schedule is already in flight");
+        const requestId = `schedule:${id}:run:${now}`;
+        if (own(state.intents, requestId)) throw new Error("Schedule run already recorded");
+        if (schedule.kind === "once") schedule.enabled = false;
+        state.intents[requestId] = {
+          requestId,
+          kind: "schedule",
+          stableId: id,
+          text: schedule.text,
+          status: "recorded",
+          submissionId: null,
+          recordedAtMs: now,
+          outcome: null,
+        };
+        return intentCopy(state.intents[requestId]);
+      }, BACKGROUND_CONTEXT);
+      await hooks.afterScheduleIntentRecorded?.({ requestId: due.requestId, stableId: due.stableId, kind: due.kind, submissionId: null });
+      return submitIntent(due);
+    });
+  /** Deletes a schedule and keeps it restorable for the restore window; returns the deleted record. */
+  const remove = (id: string, revision: number) =>
+    mutex.run(async () =>
+      root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        const schedule = withRevision(own(state.schedules, id), revision);
+        const now = Date.now();
+        const { [id]: _removed, ...rest } = state.schedules;
+        state.schedules = rest;
+        const kept = Object.fromEntries(Object.entries(state.deleted ?? {}).filter(([, item]) => now - item.deletedAtMs <= RESTORE_MS));
+        state.deleted = { ...kept, [id]: { schedule: storedCopy(schedule), deletedAtMs: now } };
+        return scheduleCopy(schedule);
+      }, BACKGROUND_CONTEXT),
+    );
+  const restore = (id: string) =>
+    mutex.run(async () =>
+      root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        if (own(state.schedules, id)) throw new Error("A schedule with this id exists; nothing to restore");
+        const entry = own(state.deleted ?? {}, id);
+        if (!entry) throw new Error("No deleted schedule with this id");
+        if (Date.now() - entry.deletedAtMs > RESTORE_MS) throw new Error("The restore window for this schedule has passed");
+        const { [id]: _restored, ...rest } = state.deleted ?? {};
+        state.deleted = rest;
+        state.schedules = { ...state.schedules, [id]: storedCopy(entry.schedule) };
+        return scheduleCopy(entry.schedule);
       }, BACKGROUND_CONTEXT),
     );
   const setEventOptIn = (enabled: boolean) =>
@@ -498,5 +640,20 @@ export function scheduleRuntime(
           }
         }, BACKGROUND_CONTEXT);
     });
-  return { snapshot, history, create, setEnabled, setEventOptIn, ingest, fireDue, nextDeadline, reconcile, mutex };
+  return {
+    snapshot,
+    history,
+    create,
+    setEnabled,
+    update,
+    runNow,
+    remove,
+    restore,
+    setEventOptIn,
+    ingest,
+    fireDue,
+    nextDeadline,
+    reconcile,
+    mutex,
+  };
 }
