@@ -120,6 +120,10 @@ add(11, 1, {
     },
   ],
 });
+// The side chat: 40 long messages, so an explicit limit of 100 entries is larger than one bounded page.
+const long = (i) => `long ${i} ${"y".repeat(3000)}`;
+for (let i = 100; i < 140; i++)
+  add(i, 2, { kind: "pi.user", model: [{ role: "user", content: [{ type: "text", text: long(i) }], timestamp: i }] });
 db.prepare("INSERT INTO documents VALUES (1, ?, 1)").run(JSON.stringify("projects.chats"));
 db.prepare("INSERT INTO document_revisions VALUES (1, 1, 'base', ?)").run(
   JSON.stringify({ mainTitle: "Start", chats: [{ id: "c", conversationId: 2, title: "Side" }] }),
@@ -182,4 +186,57 @@ assert.ok(read.items.length && read.before);
 await assert.rejects(call(mine, "projects_archive_read", { conversationId: 99 }), /Unknown archived conversation/);
 await assert.rejects(call(mine, "projects_archive_list", {}, 7), /coordinator-only/);
 assert.equal(await call(tools("22222222-2222-4222-8222-222222222222"), "projects_archive_list", {}), "No archive for this project.");
+// An explicit limit reads more entries per page, yet each answer stays within the expanded budget, and following `before` visits every entry once.
+const EXPANDED = 16 * 1024;
+const pagesOf = async (read) => {
+  const seen = [];
+  let before,
+    pages = 0;
+  do {
+    const text = await read(before);
+    assert.ok(Buffer.byteLength(text) <= EXPANDED, `explicit-limit page is ${Buffer.byteLength(text)} bytes`);
+    const page = JSON.parse(text);
+    seen.push(...new Set(page.items.map((item) => item.entryId)));
+    before = page.before;
+    pages++;
+  } while (before);
+  return { seen: seen.sort((a, b) => a - b), pages };
+};
+const all = Array.from({ length: 40 }, (_, i) => 100 + i);
+const archived = await pagesOf((before) =>
+  call(mine, "projects_archive_read", { conversationId: 2, limit: 100, ...(before ? { before } : {}) }),
+);
+assert.deepEqual(archived.seen, all);
+assert.ok(archived.pages > 1);
+const { coordinatorJobReadTools } = await import("../src/job-read-tools.ts");
+const rows = all.map((id) => ({ id, kind: "pi.user", model: [{ role: "user", content: [{ type: "text", text: long(id) }] }] })).reverse();
+const source = {
+  newest: (_c, before, limit) => rows.filter((row) => before === undefined || row.id < before).slice(0, limit),
+  entry: () => undefined,
+};
+const jobTools = coordinatorJobReadTools({
+  projectId: project,
+  root: () => ({}),
+  runtime: () => ({ workerRead: (_thread, options) => readTranscriptPage(source, 5, options) }),
+  isCoordinator: () => true,
+  catalog: () => [],
+}).tools;
+const thread = "33333333-3333-4333-8333-333333333333";
+const worker = await pagesOf((before) =>
+  call(jobTools, "projects_worker_read", { threadId: thread, limit: 100, ...(before ? { before } : {}) }),
+);
+assert.deepEqual(worker.seen, all);
+assert.ok(worker.pages > 1);
+// N11 Scripts get the value the model reads, and it matches the declared schema.
+const { Compile } = await import("typebox/compile");
+const typed = async (set, name, args) => {
+  const tool = set.find((item) => item.name === name),
+    result = await tool.execute(args, { conversationId: 1 });
+  assert.ok(tool.structuredOutputSchema, `${name} declares no structuredOutputSchema`);
+  assert.deepEqual(result.structuredOutput, JSON.parse(result.output[0].text), `${name} structuredOutput differs from its text`);
+  assert.ok(Compile(tool.structuredOutputSchema).Check(result.structuredOutput), `${name} structuredOutput breaks its schema`);
+};
+await typed(mine, "projects_archive_read", { conversationId: 2 });
+await typed(mine, "projects_archive_read", { conversationId: 1, ref: read.items.find((item) => item.ref).ref });
+await typed(jobTools, "projects_worker_read", { threadId: thread });
 console.log("transcript-archive-unit: ok");

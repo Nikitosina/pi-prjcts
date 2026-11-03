@@ -23,7 +23,10 @@ try {
   if (!Array.isArray(plan.jobs)) throw new Error("jobs-snapshot did not return jobs");
   if (!Array.isArray(usage.workers)) throw new Error("usage-snapshot did not return workers");
   if (!Array.isArray(owner.profiles)) throw new Error("owner setup profile status missing");
-  results.push("jobs-snapshot", "usage-snapshot", "owner-setup-snapshot");
+  const telemetry = await request({ action: "telemetry-snapshot", id: project.id });
+  if (!Array.isArray(telemetry.metrics) || telemetry.maxSeries !== 256 || typeof telemetry.droppedSeries !== "number")
+    throw new Error(`R2 telemetry-snapshot shape: ${JSON.stringify(telemetry).slice(0, 300)}`);
+  results.push("jobs-snapshot", "usage-snapshot", "owner-setup-snapshot", "telemetry-snapshot");
   await request({ action: "shutdown" }, false);
 } catch (error) {
   await (await import("../src/client.ts")).request({ action: "shutdown" }, false).catch(() => {}); // a failed run must not leave its host running

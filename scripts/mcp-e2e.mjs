@@ -15,6 +15,13 @@ const handler = ({ role, user, results }) => {
   }
   if (role === "coordinator" && results.length > 0 && /MARK-[WS]/.test(user)) return say("Noted.");
   if (results.length > 0) return undefined;
+  const script = /MCP-CODE (\S+) (\S+)/.exec(user);
+  if (script)
+    return call("codemode", {
+      code: `let value, error;
+try { value = await tools.projects_mcp_call(${JSON.stringify({ server: script[1], tool: script[2] })}); } catch (e) { error = String(e.message ?? e); }
+console.log(JSON.stringify({ type: typeof value, value, error }));`,
+    });
   const run = /MCP-CALL (\S+) (\S+)(?: (\{[^\n]*\}))?/.exec(user);
   if (run) return call("projects_mcp_call", { server: run[1], tool: run[2], arguments: run[3] ? JSON.parse(run[3]) : {} });
   const list = /MCP-TOOLS(?: ([A-Za-z][\w-]*))?(?: (\w+))?/.exec(user);
@@ -245,6 +252,28 @@ await kit.run(async () => {
     toolInfo.tools.every((item) => item.inputSchema === undefined) && schema.tool.inputSchema?.type === "object",
     schema,
   );
+  const scripted = async (tool, server = "fake-ci") =>
+    JSON.parse((await coord(`MCP-CODE ${server} ${tool}`)).split("\n").find((line) => line.startsWith("{")) ?? "null");
+  const structured = await scripted("launches"),
+    failed = await scripted("launch_failed"),
+    blockedScript = await scripted("purge", "fake-tracker"),
+    shown = await coord("MCP-CALL fake-ci launches");
+  check(
+    "N12 a script gets structuredContent as an object, the model sees its JSON instead of (no output)",
+    structured?.type === "object" &&
+      structured.value.structuredContent?.launches?.[0]?.id === "L9" &&
+      /"L9"/.test(shown) &&
+      !/no output/.test(shown),
+    { structured, shown },
+  );
+  check(
+    "N12 a server error resolves with isError and its structuredContent; a blocked write still rejects",
+    failed?.value?.isError === true &&
+      failed.value.structuredContent?.code === "E1" &&
+      /launch broke/.test(failed.value.text) &&
+      /Blocked/.test(blockedScript?.error ?? ""),
+    { failed, blockedScript },
+  );
   const ok = await coord('MCP-CALL fake-ci launch_status {"id":"L1"}');
   check("coordinator reads through fake-ci", /launch L1: PASSED/.test(ok), ok);
   const deniedX = await coord("MCP-CALL fake-xcode whoami");
@@ -402,7 +431,7 @@ await kit.run(async () => {
 
   // Probe action.
   const probe = await rpc({ action: "mcp-probe", id, server: "fake-ci" });
-  check("probe reports the tool count", probe.ok === true && probe.tools === 10, probe);
+  check("probe reports the tool count", probe.ok === true && probe.tools === 12, probe);
   check("probe refuses unavailable servers", (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok === false);
 
   await page.navigate("about:blank");

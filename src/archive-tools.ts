@@ -1,8 +1,8 @@
 import { defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { archiveHistory, archiveProject, archiveText } from "./archive-host.ts";
-import { fitJson } from "./response-limit.ts";
-import { transcriptEntryCount, trimTranscriptPage } from "./transcript-reader.ts";
+import { EXPANDED_RESPONSE_LIMIT, fitJson, jsonResult, RESPONSE_LIMIT } from "./response-limit.ts";
+import { transcriptEntryCount, TranscriptReadOutput, trimTranscriptPage } from "./transcript-reader.ts";
 
 const json = (value: unknown) => ({
   output: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value) }],
@@ -74,7 +74,7 @@ export function coordinatorArchiveTools(input: { projectId: string; isCoordinato
   });
   const read = defineTool({
     name: "projects_archive_read",
-    description: `Read one archived chat or agent transcript by conversationId from projects_archive_list. Newest entries first-page style: items are chronological within the page and \`before\` is the cursor for the next older page. Without limit the answer is at most 8 KiB; pass limit (up to 100) to read past that. A long message is cut to a preview: pass its \`ref\` (with textOffset and textLimit, up to 20000) for the full text. Images are not returned. ${NOTE}`,
+    description: `Read one archived chat or agent transcript by conversationId from projects_archive_list. Newest entries first-page style: items are chronological within the page and \`before\` is the cursor for the next older page. Without limit the answer is at most 8 KiB; with limit (up to 100 entries) at most 16 KiB, fewer entries when they do not fit, and \`before\` continues. A long message is cut to a preview: pass its \`ref\` (with textOffset and textLimit, up to 20000) for the full text. Images are not returned. ${NOTE}`,
     parameters: Type.Object(
       {
         conversationId: Type.Integer({ minimum: 1 }),
@@ -88,27 +88,28 @@ export function coordinatorArchiveTools(input: { projectId: string; isCoordinato
     ),
     replay: "safe",
     outputLimits: { maxBytes: 2 * 1024 * 1024 },
+    structuredOutputSchema: Type.Union([TranscriptReadOutput, Type.Object({ note: Type.Literal(NONE) })]),
     async execute(args, api) {
       authorize(api);
       const found = open();
-      if (!found) return json(NONE);
+      if (!found) return { ...json(NONE), structuredOutput: { note: NONE } };
       if (![...found.chats, ...found.workers].some((item) => item.conversationId === args.conversationId))
         throw new Error("Unknown archived conversation; list them with projects_archive_list");
       if (args.ref !== undefined)
-        return json({
-          note: NOTE,
-          ...(await archiveText(input.projectId, args.conversationId, args.ref, { offset: args.textOffset, limit: args.textLimit })),
-        });
+        return jsonResult(
+          JSON.stringify({
+            note: NOTE,
+            ...(await archiveText(input.projectId, args.conversationId, args.ref, { offset: args.textOffset, limit: args.textLimit })),
+          }),
+        );
       const page = await archiveHistory(input.projectId, args.conversationId, {
         before: args.before,
         limit: args.limit ?? HISTORY_ENTRIES,
       });
-      if (args.limit !== undefined) return json({ note: NOTE, ...page });
-      return json(
-        fitJson(transcriptEntryCount(page), (kept) => ({
-          note: NOTE,
-          ...trimTranscriptPage(page, kept),
-        })),
+      return jsonResult(
+        fitJson(transcriptEntryCount(page), (kept) => ({ note: NOTE, ...trimTranscriptPage(page, kept) }), {
+          limit: args.limit === undefined ? RESPONSE_LIMIT : EXPANDED_RESPONSE_LIMIT,
+        }),
       );
     },
   });

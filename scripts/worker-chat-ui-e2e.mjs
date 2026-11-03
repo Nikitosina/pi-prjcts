@@ -451,13 +451,30 @@ try {
     `(async () => {
     const decisions = await import('/app/decisions.js');
     const workers = await import('/app/workers.js');
-    const original = decisions.jobsSnap;
-    const jobs = original.jobs.map(job => job.id === ${JSON.stringify(threadId)} ? { ...job, status: 'checkpoint', checkpoint: { summary: 'Waiting for owner decision', proof: ['artifact:checkpoint-proof'], gaps: ['Decision needed'] }, ready: null } : job);
-    decisions.setJobsSnap({ ...original, jobs });
+    const atCheckpoint = (snap) => ({ ...snap, jobs: snap.jobs.map(job => job.id === ${JSON.stringify(threadId)} ? { ...job, status: 'checkpoint', checkpoint: { summary: 'Waiting for owner decision', proof: ['artifact:checkpoint-proof'], gaps: ['Decision needed'] }, ready: null } : job) });
+    // The real worker may settle meanwhile and a live refresh would replace the injected Job: refreshes see the same checkpoint,
+    // and one already in flight (its Jobs read sent before the patch) finishes first.
+    const shell = await import('/app/shell.js');
+    const realFetch = window.fetch;
+    window.fetch = async (url, init) => {
+      const response = await realFetch(url, init);
+      if (url !== '/api' || JSON.parse(init.body).action !== 'jobs-snapshot' || !response.ok) return response;
+      return new Response(JSON.stringify(atCheckpoint(await response.json())), { status: response.status, headers: response.headers });
+    };
+    const settled = async () => {
+      for (let i = 0; shell.polling !== null; i++) {
+        if (i > 500) throw new Error('refresh did not settle');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
+    await settled();
+    decisions.setJobsSnap(atCheckpoint(decisions.jobsSnap));
     await workers.inspectThread(${JSON.stringify(threadId)});
     const pane = document.querySelector('#inline-thread');
     const answer = { intermediate: pane.innerText.includes('Intermediate checkpoint'), summary: pane.innerText.includes('Waiting for owner decision'), proof: pane.innerText.includes('checkpoint-proof'), noApprove: !pane.querySelector('[data-action="job-approve"]') };
-    decisions.setJobsSnap(original);
+    window.fetch = realFetch;
+    await settled();
+    decisions.setJobsSnap(await shell.api({ action: 'jobs-snapshot', id: ${JSON.stringify(project.id)} }));
     await workers.inspectThread(${JSON.stringify(threadId)});
     return answer;
   })()`,

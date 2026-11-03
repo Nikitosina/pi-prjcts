@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { errorText, home, saveJson, type Request as RequestData } from "./state.ts";
 import { fitJson } from "./response-limit.ts";
+import { redactForAgent } from "./agent-redaction.ts";
 
 export type ApprovalRequester = { kind: "host-agent" } | { kind: "coordinator"; projectId: string; chatId: string };
 export type ApprovalState = "pending" | "approved" | "denied" | "done" | "failed";
@@ -57,7 +58,7 @@ function outcomeText(approval: Approval): string {
   const what = `"${approval.summary}" (${approval.action})`;
   const note = approval.note ? ` Note: ${approval.note}` : "";
   if (approval.state === "denied") return `${head} denied ${what}. It did not run.${note}`;
-  const result = JSON.stringify(approval.result ?? null);
+  const result = JSON.stringify(redactForAgent(approval.action, approval.result ?? null));
   if (approval.state === "done") return `${head} approved ${what}. The host ran it. Result: ${result}${note}`;
   return `${head} approved ${what}, and it failed: ${result}${note}`;
 }

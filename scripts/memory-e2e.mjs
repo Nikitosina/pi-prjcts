@@ -126,6 +126,41 @@ await kit.run(async () => {
       !(await rpc({ action: "memory-index", projectId: id })).entries.some((item) => item.path === "decisions/new.md"),
   );
 
+  // Recent writes say whether they were undone, so a reloaded client can show it.
+  const twice = await rpc({
+    action: "knowledge-write",
+    id,
+    path: "decisions/twice.md",
+    text: "# Twice\n\nFirst.\n",
+    expectedRevision: null,
+  });
+  const replaced = await rpc({
+    action: "knowledge-write",
+    id,
+    path: "decisions/twice.md",
+    text: "# Twice\n\nSecond.\n",
+    expectedRevision: twice.revision,
+  });
+  const recent = (await rpc({ action: "memory-recent", projectId: id })).writes;
+  const write = (path, revision) => recent.find((item) => item.path === path && item.revision === revision);
+  check(
+    "M11 an undone write reports undone",
+    write("preferences.md", written.revision)?.undone === true && write("preferences.md", written.revision)?.current === false,
+    recent.slice(0, 6),
+  );
+  check("M11 an undone creation reports undone", write("decisions/new.md", created.revision)?.undone === true);
+  check(
+    "M12 a replaced write is not current and not undone",
+    write("decisions/twice.md", twice.revision)?.current === false &&
+      write("decisions/twice.md", twice.revision)?.undone === false &&
+      write("decisions/twice.md", replaced.revision)?.current === true,
+  );
+  check(
+    "M13 newest first, bounded, undo records not listed as writes",
+    recent[0].revision === replaced.revision && recent.length <= 50 && recent.every((item) => item.author !== "memory-undo"),
+    recent.map((item) => [item.path, item.author]),
+  );
+
   // The prompt carries the generated index and the preferences brief, for every role.
   await kit.ask(id, "MEMORY-TURN hello");
   const coordinator = result.calls.findLast((call) => call.role === "coordinator").system;

@@ -84,3 +84,54 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - M8 The preferences brief reaches every role prompt (coordinator, worker, scout, reviewer), is bounded (4,000 chars) with its revision, and only lists current preferences.
 - M9 A superseded decision is marked in the index with its replacement.
 - M10 The coordinator prompt states the auto-remember rules and that memory grants no execution authority.
+
+## Round 2
+
+Scripts: `chat-stop-e2e` (S), `automations-e2e` (A), `memory-e2e` (M11–M13), `ui2-settings-e2e` (L5), `host-agent-e2e` (H3–H6), `ui2-trial-e2e` (X).
+
+### Chat stop (`chat-stop`)
+
+- S1 Stopping a running coordinator turn of a chat aborts that turn only: another chat's running turn keeps going.
+- S2 The stopped turn drains like other Stops: the answer stops streaming, history is kept, the chat accepts the next message and answers it.
+- S3 `chat-stop` on an idle chat returns `{ stopped: false }` and changes nothing; an unknown chat or an inactive project is refused.
+- S4 The chat topic is published, so a client watching `/changes` refetches.
+
+### Automations (`schedule-run`, `schedule-update`, `schedule-delete`, `schedule-restore`)
+
+- A1 Every schedule has a `revision` and a `name` (null when none); records saved before the change read with revision 0.
+- A2 `schedule-update` with a stale revision is refused and nothing changes; a fresh one changes name, prompt and timing, bumps the revision, and the next run time follows the new timing.
+- A3 Rescheduling a consumed one-shot is refused instead of silently never running.
+- A4 `schedule-run` submits the prompt to the coordinator now, also for a disabled schedule, and the run appears in the schedule's history; a second run while one is in flight is refused.
+- A5 `schedule-delete` with a stale revision is refused; a fresh one removes the schedule (no longer listed, never fires) and returns the deleted record.
+- A6 `schedule-restore` within the window brings the exact record back (enabled state, timing, name, revision); after the window, or for an id never deleted, it is refused; restoring over a live id is refused.
+- A7 Toggling with `schedule-enable` bumps the revision, so an edit made from an older read is refused.
+
+### Memory undo across reload (`memory-recent`)
+
+- M11 Each recent write lists path, revision, author and time, and `undone: true` once `memory-undo` reverted it, including a creation whose entry is gone.
+- M12 A write that a later write replaced reports `current: false`, so the client does not offer an undo that `memory-undo` would refuse.
+- M13 The list is bounded and newest first; undo records themselves are not listed as writes.
+
+### Locks and Host agent
+
+- L5 `owner_approval_request` is locked for the coordinator: a profile cannot disable it by name or with `group:core`, and `profile-tools` shows it locked.
+- H3 `host-agent-settings` with `model: null` clears the pin and the tier's model applies; with no tier, the newest project's model applies.
+- H4 `chat-stop`, `schedule-run`, `schedule-update` and `schedule-restore` are allowed for the Host agent; `schedule-delete` is dangerous and files an approval instead of running.
+- H5 `memory-recent` is allowed.
+
+### Trial launcher (`npm run ui2`)
+
+- X1 It uses only `~/.pi/agent/projects-ui2` (created 0700 when missing), even when `PI_PROJECTS_HOME` is set in the caller's environment, and creates nothing in other homes.
+- X2 It prints a working `/ui2/` URL with the token and a stop command; the URL serves the UI 2.0 page.
+- X3 A second start while that home's host runs refuses and leaves the running host alone.
+- X4 The stop command stops that host and only that host.
+
+### Review findings (2026-11-03)
+
+- G1 The Host agent turning on idle auto-deploy (`deploy-settings` with `idle: true`) files an approval instead of saving; saving other deploy fields with `idle: false` runs at once.
+- G2 Agent-facing results never carry `telegram-snapshot` `pairing.code` or `automation-snapshot` / `automation-update` `webhook.secret`; the browser's responses still do.
+- G3 An approved dangerous request's outcome posted to an agent is redacted the same way (`webhook-rotate` returns the new secret).
+- G4 A `plugin` call is gated by the plugin's declared policy per method (and per params): reads and safe writes run, `dangerous` methods file an approval, and a method the plugin does not classify is dangerous. The simulator's `reset` and `delete` operations and `recover` are dangerous; `snapshot` is a read.
+- G5 The coordinator's tier advances on quota or a rate limit: the failed chat moves to the tier's next model and continues once (stable request id per failed submission, so a replayed commit does not submit twice); the end of the tier leaves the failure visible; a chat without a tier keeps today's behaviour; other chats keep their model.
+- G6 `skill:<name>` in a profile's disabled tools is stored as the skill profile (`skillProfiles.off[profile]`), so the prompt's skill index and `projects_skill_file` follow it, `profile-tools` shows it off, `profiles-get` lists it back, and turning one skill back on for one profile leaves the other profiles as they were.
+- H6 A `host-agent-settings` patch choosing a tier clears a model pin in the same patch, so the tier applies.

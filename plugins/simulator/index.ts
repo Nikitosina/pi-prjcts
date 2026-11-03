@@ -48,6 +48,19 @@ export default {
         },
         recover: async (context) => simulators.recover(project(context), params(Recover, context.params)),
       },
+      // Erasing or deleting a device and settling an unknown outcome lose state, so agents need the owner's approval for them.
+      rpcPolicy: {
+        snapshot: "read",
+        configure: "write",
+        action: (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          "operation" in value &&
+          (value.operation === "reset" || value.operation === "delete")
+            ? "dangerous"
+            : "write",
+        recover: "dangerous",
+      },
       web: {
         script: fileURLToPath(new URL("web/ui.js", import.meta.url)),
         style: fileURLToPath(new URL("web/ui.css", import.meta.url)),

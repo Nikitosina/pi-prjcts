@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { createKit } from "./lib/e2e-kit.mjs";
 import { Request } from "../src/state.ts";
 import { ACTION_POLICY, DANGEROUS_MINIMUM } from "../src/host-agent-tools.ts";
+import { redactForAgent } from "../src/agent-redaction.ts";
 
 let releaseHold;
 const hold = new Promise((ok) => (releaseHold = ok));
@@ -33,6 +34,8 @@ const kit = await createKit("host-agent", {
     return undefined;
   },
 });
+
+kit.hostEnv.PI_PROJECTS_PLUGINS = new URL("./fixtures/policy-plugin/index.mjs", import.meta.url).pathname;
 
 /** Frames of a server-sent-events endpoint of the owned web server until `until` (a count or a predicate), then disconnect. */
 async function frames(path, until, after = async () => {}) {
@@ -131,18 +134,38 @@ await kit.run(async () => {
   });
   const tiered = await rpc({ action: "host-agent-settings", revision: saved.revision, patch: { tier: "host" } });
   check("a tier from tiers-set is accepted", tiered.tier === "host" && tiered.effectiveModel === "fake/fake-model", tiered);
+  check("H6 choosing a tier clears the model pin", tiered.model === null, tiered);
+  const pinned = await rpc({ action: "host-agent-settings", revision: tiered.revision, patch: { model: "fake/fake-model" } });
+  const unpinned = await rpc({ action: "host-agent-settings", revision: pinned.revision, patch: { model: null } });
+  check(
+    "H3 model null clears the pin and the tier applies",
+    pinned.model === "fake/fake-model" &&
+      unpinned.model === null &&
+      unpinned.tier === "host" &&
+      unpinned.effectiveModel === "fake/fake-model",
+    { pinned, unpinned },
+  );
 
   const history = async () => (await rpc({ action: "host-agent-history" })).items;
   const messages = async () => (await history()).filter((item) => item.kind === "message");
   const send = async (text) => {
-    const before = (await messages()).length;
+    // History is a bounded page, so a newer entry id, not a longer list, marks the answer.
+    const before = (await history()).at(-1)?.entryId ?? -1;
     await rpc({ action: "host-agent-send", requestId: crypto.randomUUID(), text });
     return eventually(async () => {
       const items = await history(),
         now = items.filter((item) => item.kind === "message"),
         last = items.at(-1);
-      return now.length > before && last.kind === "message" && last.role === "assistant" && last.text ? now : null;
-    }, `host agent answered: ${text}`);
+      return last.entryId > before &&
+        now.some((item) => item.role === "user" && item.entryId > before) &&
+        last.kind === "message" &&
+        last.role === "assistant" &&
+        last.text
+        ? now
+        : null;
+    }, `host agent answered: ${text}`).catch(async (error) => {
+      throw new Error(`${error.message}; last items: ${JSON.stringify((await history()).slice(-3)).slice(0, 1500)}`);
+    });
   };
 
   // Send and reply; owner origin.
@@ -253,6 +276,68 @@ await kit.run(async () => {
     const page = await rpc({ action: "chat-history", id });
     return page.items.some((item) => item.kind === "message" && item.origin === "internal" && item.text.includes(gate.id));
   }, "outcome posted to the coordinator chat");
+
+  // Round 2 policy: chat stop and schedule edits are allowed, schedule delete needs approval.
+  check(
+    "H4 chat-stop, schedule run/edit/restore and memory-recent are allowed",
+    ["chat-stop", "schedule-run", "schedule-update", "schedule-restore", "memory-recent"].every(
+      (action) => ACTION_POLICY[action]?.kind === "allow",
+    ),
+  );
+  check(
+    "H4 schedule-delete is dangerous and on the approval list",
+    ACTION_POLICY["schedule-delete"]?.kind === "dangerous" && DANGEROUS_MINIMUM.includes("schedule-delete"),
+  );
+
+  // G1: turning on automatic deploys needs approval; other deploy settings run.
+  const idleOn = await send(
+    `HA-CALL host_call {"action":"deploy-settings","input":{"settings":{"idle":true,"startHour":1,"endHour":5}},"summary":"Auto deploy"}`,
+  );
+  check("G1 enabling idle auto-deploy files an approval", /pending/i.test(idleOn.at(-1).text), idleOn.at(-1).text);
+  check("G1 auto-deploy stays off until approved", (await rpc({ action: "deploy-snapshot" })).settings.idle === false);
+  await send(`HA-CALL host_call {"action":"deploy-settings","input":{"settings":{"idle":false,"startHour":3,"endHour":6}}}`);
+  check("G1 other deploy settings run at once", (await rpc({ action: "deploy-snapshot" })).settings.startHour === 3);
+
+  // G2, G3: secrets never reach the agent, directly or in an approval outcome.
+  const secret = (await rpc({ action: "automation-snapshot", id })).webhook.secret;
+  const shown = await send(`HA-CALL host_call {"action":"automation-snapshot","input":{"id":"${id}"}}`);
+  check(
+    "G2 the webhook secret is redacted for the agent",
+    !shown.at(-1).text.includes(secret) && /redacted/.test(shown.at(-1).text),
+    shown.at(-1).text.slice(0, 300),
+  );
+  check(
+    "G2 the Telegram pairing code is redacted",
+    redactForAgent("telegram-snapshot", { pairing: { code: "424242", expiresAt: 1, wrong: 0 } }).pairing.code !== "424242",
+  );
+  await send(`HA-CALL host_call {"action":"webhook-rotate","input":{"id":"${id}","confirm":"${id}"},"summary":"Rotate"}`);
+  const rotation = (await rpc({ action: "approvals-list" })).approvals.find((a) => a.action === "webhook-rotate" && a.state === "pending");
+  await rpc({ action: "approval-decide", id: rotation.id, decision: "approve" });
+  const rotated = (await rpc({ action: "automation-snapshot", id })).webhook.secret;
+  const outcome = await eventually(
+    async () => (await messages()).find((m) => m.origin === "internal" && m.text.includes(rotation.id)),
+    "rotation outcome posted",
+  );
+  check("G3 the approval outcome carries no secret", rotated !== secret && !outcome.text.includes(rotated), outcome.text.slice(0, 300));
+
+  // G4: plugin calls follow the plugin's declared policy; unclassified methods need approval.
+  const peek = await send(`HA-CALL host_call {"action":"plugin","input":{"plugin":"policy","method":"peek"}}`);
+  check("G4 a declared read runs", /"calls"/.test(peek.at(-1).text), peek.at(-1).text.slice(0, 200));
+  await send(`HA-CALL host_call {"action":"plugin","input":{"plugin":"policy","method":"act","params":{"op":"tidy"}}}`);
+  const wipe = await send(
+    `HA-CALL host_call {"action":"plugin","input":{"plugin":"policy","method":"act","params":{"op":"wipe"}},"summary":"Wipe"}`,
+  );
+  const poke = await send(`HA-CALL host_call {"action":"plugin","input":{"plugin":"policy","method":"poke"},"summary":"Poke"}`);
+  const ran = (await rpc({ action: "plugin", plugin: "policy", method: "peek" })).calls;
+  check(
+    "G4 a declared write runs, a dangerous params call and an unclassified method file approvals",
+    ran.includes("act:tidy") &&
+      !ran.includes("act:wipe") &&
+      !ran.includes("poke") &&
+      /pending/i.test(wipe.at(-1).text) &&
+      /pending/i.test(poke.at(-1).text),
+    { ran, wipe: wipe.at(-1).text, poke: poke.at(-1).text },
+  );
 
   // Reset keeps history; stop clears a busy turn.
   await rpc({ action: "host-agent-reset" });

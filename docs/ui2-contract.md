@@ -35,6 +35,7 @@ type ProfileSettings = {
 
 type UiSettings = {
   theme: ThemeId;                       // default "claude"
+  font: "jetbrains-mono" | "system-sans" | "system-mono"; // default "jetbrains-mono"; missing in old documents resolves to the default
   animations: AnimationLevel;           // default "subtle"
   hotkeys: Record<string, string>;      // command id -> binding, only overrides of the defaults
   panels: { list: boolean; context: boolean; hostAgent: boolean };
@@ -54,12 +55,17 @@ type UiSettings = {
 | `profiles-set` | `{ projectId, revision, profile: ProfileId, patch: ProfileSettings }` | same as get; goes through `settings-application.ts` with an `EFFECTS` entry (`profiles`: models and prompts). The patch replaces the fields it names; `revision` is the `settings-snapshot` revision |
 | `profile-tools` | `{ projectId, profile: ProfileId }` | `{ groups: { id, label, source: "core" \| "plugin" \| "mcp" \| "skill", locked: boolean, tools: { name, description, parameters: unknown, enabled: boolean }[] }[] }` |
 | `prompt-render` | `{ projectId, profile: ProfileId, chatId? }` | `{ sections: { id, label, source: string, editable: boolean, text: string, tokens: number }[], totalTokens }` |
-| `chat-stop` | `{ id, chatId? }` | `{ stopped: boolean }` aborts the running Coordinator turn of that chat (⌘.); history kept. Added by the web workstream: no existing request stops a Coordinator turn. |
+| `chat-stop` | `{ projectId, chatId?, reason? }` | `{ stopped: boolean, chatId }` aborts the running Coordinator turn of that chat (⌘.) like the other Stops: queued inputs withdrawn, history kept, the chat answers the next message, other chats and background agents keep running. `stopped: false` when the chat was idle. Publishes the chat topic; refuses an unknown chat and an archived or deleted project. Allowed for the Host agent. |
+| `schedule-create` | existing input plus `name?` | the schedule, now with `name: string \| null` and `revision: number` (records saved before read as `null` and `0`) |
+| `schedule-update` | `{ id, scheduleId, revision, name?: string \| null, text?, schedule?: { atMs, everyMs?, calendar? } }` | the schedule, `revision + 1`. `schedule` replaces kind and next run together; a one-shot that already ran cannot be rescheduled. Stale revision refused. `schedule-enable` also bumps the revision |
+| `schedule-run` | `{ id, scheduleId }` | the run's outcome, like a due run. Runs enabled or not; a one-shot counts as run and is disabled; refused while a run of it is in flight |
+| `schedule-delete` | `{ id, scheduleId, revision }` | `{ schedule }`, the deleted record. Dangerous for agents (approval); the owner's Undo is `schedule-restore` |
+| `schedule-restore` | `{ id, scheduleId }` | the schedule, back exactly as it was (same id, revision, enabled). Within ten minutes of the delete; refused after, or when the id exists again |
 
 Notes:
 - Tier storage: `<home>/tiers.json`. On first read with no file, generate tiers from the current project models so nothing changes for existing projects.
 - Quota or rate-limit failure moves to the next model of the profile's tier (all of them, in order, never back to a model already left), replacing the single `fallbackModels` move. Without a tier the legacy rule stays: only quota moves, once, to `fallbackModels`. Telegram `/model` keeps working on legacy fields; it may show tiers later.
-- `profiles-set` refuses an unknown tier, a tier with no model that has credentials, and switching off a locked tool (`agents` for the coordinator, `job` for the worker). `tiers-set` refuses a stale revision, duplicate ids or models, an uninstalled model, an empty tier and removing a tier a project uses.
+- `profiles-set` refuses an unknown tier, a tier with no model that has credentials, and switching off a locked tool (`agents` and `owner_approval_request` for the coordinator, `job` for the worker). `skill:<name>` rows are the skill profile: switching one off stores it in the project's `skillProfiles.off[profile]` (not in `tools.disabled`), so the prompt's skills list, `projects_skill_file`, `profile-tools` and `profiles-get` all follow it; turning a skill on for one profile when it was off for all keeps it off for the others. `tiers-set` refuses a stale revision, duplicate ids or models, an uninstalled model, an empty tier and removing a tier a project uses.
 - Thinking level replaces the hardcoded `"medium"` in `durable-runtime.ts` for each role.
 - `profile-tools` must not contact MCP servers or allocate a workspace (same rule as the Tools/access panel). MCP servers appear as one group each with a write toggle as a pseudo-tool `mcp-writes:<server>`; skills appear as a `skill` group.
 - `prompt-render` sections, in order (`id` in brackets): host contract [`host`] (locked), instance AGENTS.md [`instance`], repository instructions [`repository`], project instructions [`project`] (the old `objective`, editable), role instructions [`role`] (editable), "Preferences (memory)" [`preferences`] (locked), "Memory index" [`memory`] (locked), skills list [`skills`] (locked). Tokens are an estimate (chars/4), labelled as such in `source`. `chatId` is accepted; every chat of a project renders the same prompt today.
@@ -79,6 +85,9 @@ Notes:
 | `approvals-list` | `{}` | `{ approvals: Approval[] }` |
 | `approval-decide` | `{ id, decision: "approve" \| "deny", note? }` | `{ approval: Approval }` |
 
+- Approval is per request, not only per action: `deploy-settings` that turns on idle auto-deploy, and a `plugin` call the plugin does not declare `read` or `write` in its `rpcPolicy` (PLUGINS.md), need approval like the dangerous actions.
+- Agent-facing results and approval outcomes redact secrets (`webhook.secret`, Telegram `pairing.code`, `secret`/`token`/`apiKey`/`password` fields) as `"[redacted]"`; the browser gets the real values.
+
 ```ts
 type Approval = {
   id: string;
@@ -92,7 +101,7 @@ type Approval = {
 };
 ```
 
-- Settings: `model` is a plain `"provider/model"` ref checked against the live catalog. Until tiers land, `effectiveModel` is the set model, else the tier's first model, else the newest active project's model (null when there is none, and send refuses). `tier: null` clears the tier. `tools` are the Host agent's own tools (what `disabledTools` names); `actions` are the host actions behind `host_call`. A patch needs the current `revision`.
+- Settings: `model` is a plain `"provider/model"` ref checked against the live catalog. Until tiers land, `effectiveModel` is the set model, else the tier's first model, else the newest active project's model (null when there is none, and send refuses). `tier: null` clears the tier; `model: null` clears the pin so the tier applies, and a patch that sets a tier without naming `model` clears the pin too. `tools` are the Host agent's own tools (what `disabledTools` names); `actions` are the host actions behind `host_call`. A patch needs the current `revision`.
 - Live streaming: `GET /live?project=host` streams the same frame shape as a coordinator chat's live stream (text, thinking, tools with status and duration).
 - Tools for the Host agent are generated from an allow-list over `Request` actions (`src/host-agent-tools.ts`): one `host_call { action, input }` tool validated with `Request`, one `host_actions` tool that lists allowed actions with their input schema and a one-line description, plus `ui_focus { view, projectId?, chatId?, section? }` and `ui_set` (wraps `ui-set`). A script asserts every `Request` action is either allowed, marked dangerous, or explicitly excluded with a reason.
 - Dangerous actions (at least: `delete`, `archive`, `remove`, `job-approve`, `deploy-start`, `workspace-revoke`, `github-revoke`, `telegram-unpair`, `upload-delete`, `worktrees-cleanup`, `remote-revoke`) create a pending `Approval` instead of running. The tool returns at once with the approval id. When the owner decides, the host runs the stored request (on approve) and posts the outcome to the Host agent as a follow-up.
@@ -132,6 +141,7 @@ type MemoryEntry = {
 | --- | --- | --- |
 | `memory-index` | `{ projectId, includeArchive?: boolean }` | `{ entries: MemoryEntry[], brokenLinks: { from: string, to: string }[] }` |
 | `memory-undo` | `{ projectId, path, revision }` | `{ entry: MemoryEntry \| null }` restores the previous revision (or removes a just-created entry) |
+| `memory-recent` | `{ projectId }` | `{ writes: { path, revision, author, updatedAt, created: boolean, undone: boolean, current: boolean }[] }`, newest first, at most 50, undo records left out. `undone`: `memory-undo` reverted this write; `current`: it is still the entry's revision, so Undo is offered only when `current && !undone` |
 
 - Kind, status, summary, supersededBy and source live in optional YAML front matter. Without it, classify by folder on read (`preferences.md` → preference, `decisions/` → decision, `MEMORY.md`, `research/` (legacy included), `plans/` and UUID-named notes → archive, everything else, `runbooks/` included → procedure). Malformed front matter is ignored and the folder rule applies. Never move or rewrite the owner's existing files during a read.
 - The index replaces the hand-written `MEMORY.md` injection: titles plus summaries, archive and preferences excluded, superseded decisions marked with their replacement, bounded (3,000 chars). It is the `prompt-render` section "Memory index". `brokenLinks` lists relative `.md` links and `supersededBy` targets that do not exist; external links are ignored.
