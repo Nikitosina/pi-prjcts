@@ -54,6 +54,7 @@ type UiSettings = {
 | `profiles-set` | `{ projectId, revision, profile: ProfileId, patch: ProfileSettings }` | same as get; goes through `settings-application.ts` with an `EFFECTS` entry |
 | `profile-tools` | `{ projectId, profile: ProfileId }` | `{ groups: { id, label, source: "core" \| "plugin" \| "mcp" \| "skill", locked: boolean, tools: { name, description, parameters: unknown, enabled: boolean }[] }[] }` |
 | `prompt-render` | `{ projectId, profile: ProfileId, chatId? }` | `{ sections: { id, label, source: string, editable: boolean, text: string, tokens: number }[], totalTokens }` |
+| `chat-stop` | `{ id, chatId? }` | `{ stopped: boolean }` aborts the running Coordinator turn of that chat (⌘.); history kept. Added by the web workstream: no existing request stops a Coordinator turn. |
 
 Notes:
 - Tier storage: `<home>/tiers.json`. On first read with no file, generate tiers from the current project models so nothing changes for existing projects.

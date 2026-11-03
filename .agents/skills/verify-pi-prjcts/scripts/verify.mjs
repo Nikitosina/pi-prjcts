@@ -473,6 +473,16 @@ async function openBrowser(run, sinks) {
         writeFileSync(join(dir, `${name}.png`), Buffer.from(image.data, "base64"));
       },
       waitFor: (expression, what, ms = 30000) => until(() => page.evaluate(expression), what, ms),
+      /** A real key press through the browser input pipeline; modifiers: 1 Alt, 2 Ctrl, 4 Meta, 8 Shift. */
+      press: async (key, { code = key.length === 1 ? `Key${key.toUpperCase()}` : key, keyCode = 0, modifiers = 0 } = {}) => {
+        const text = key.length === 1 && !(modifiers & 6) ? key : undefined;
+        await send(
+          "Input.dispatchKeyEvent",
+          { type: text ? "keyDown" : "rawKeyDown", key, code, windowsVirtualKeyCode: keyCode, modifiers, ...(text ? { text } : {}) },
+          sessionId,
+        );
+        await send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode, modifiers }, sessionId);
+      },
       /** A real pointer click at the centre of `selector`, after a hit test proving that point lands on that element. */
       click: async (selector) => {
         const point = await page.evaluate(
@@ -769,6 +779,198 @@ const journeys = {
     )
       throw Error(`deploy window default missing: ${deploy}`);
     record("visible", "Deploy section: Deploy button, deploy-when-idle switch and the 02:00-07:00 window");
+  },
+  // Feature: features/ui2.md
+  async ui2(run, page, record, dir, sinks) {
+    const origin = new URL(run.webUrl).origin,
+      hash = new URL(run.webUrl).hash;
+    // Serving: /ui2/ has the same security headers as /, /ui2 redirects, nothing outside web-ui2/ is reachable, and / is unchanged.
+    const served = await fetch(`${origin}/ui2/`);
+    if (!served.ok) throw Error(`/ui2/ not served: HTTP ${served.status}`);
+    for (const header of ["content-security-policy", "x-content-type-options", "referrer-policy"])
+      if (served.headers.get(header) !== (await fetch(`${origin}/`)).headers.get(header)) throw Error(`/ui2/ ${header} differs from /`);
+    const bare = await fetch(`${origin}/ui2`, { redirect: "manual" });
+    if (bare.status !== 308 || bare.headers.get("location") !== "/ui2/") throw Error(`/ui2 does not redirect: ${bare.status}`);
+    // Dot segments normalize away before the request (then the token rule answers 401); everything else under /ui2/ is a 404.
+    for (const probe of ["/ui2/%2e%2e/package.json", "/ui2/..%2fpackage.json", "/ui2/.env", "/ui2/missing.js", "/ui2/sub/app.js"]) {
+      const status = (await fetch(origin + probe)).status;
+      if (status !== 404 && status !== 401) throw Error(`${probe} answered ${status}`);
+    }
+    if ((await (await fetch(`${origin}/`)).text()) !== readFileSync(join(run.repo, "web/index.html"), "utf8")) throw Error("/ changed");
+    record("verified", "/ui2/ served with the same CSP and headers as /, /ui2 redirects, traversal and unknown files 404, / unchanged");
+    // Load with the launch link's token; it must leave the URL bar.
+    await page.navigate(`${origin}/ui2/${hash}`);
+    const name = JSON.stringify(PROJECT_NAME);
+    await page.waitFor(
+      `document.body.dataset.ready === "1" && [...document.querySelectorAll('#tree [data-project]')].some(n => n.innerText.includes(${name}))`,
+      "tree lists the seeded project",
+    );
+    if (await page.evaluate(`location.hash.includes("token")`)) throw Error("token left in the URL");
+    await page.waitFor(`!!document.querySelector('#tree [data-chat="main"]')`, "Main chat nested under the project");
+    record("entry", `opened ${origin}/ui2/ with the launch token; tree shows ${PROJECT_NAME} with Main nested`);
+    await page.shot(dir, "01-empty-claude");
+    // Send through the composer: one owner bubble, the spawn as a tool row, the worker in the context panel, the reply.
+    const prompt = "VERIFY-JOB please greet the world",
+      composer = "#composer textarea";
+    const bubbles = `[...document.querySelectorAll('#feed .msg.owner')].filter(n => n.innerText.includes(${JSON.stringify(prompt)})).length`;
+    const before = await page.evaluate(bubbles);
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: prompt });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    record("action", `typed ${JSON.stringify(prompt)} and pressed Enter`);
+    await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
+    await page.waitFor(`${bubbles} === ${before + 1}`, "exactly one new owner bubble");
+    await page.waitFor(`!!document.querySelector('#feed .tool-row[data-tool="agents"]')`, "agents tool row", 60000);
+    await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "Ready worker in the context panel", 90000);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes('The work is ready')`, "coordinator reply", 60000);
+    if (await page.evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some(n => n.innerText.includes('[worker '))`))
+      throw Error("internal worker report rendered as an owner bubble");
+    const row = await page.evaluate(
+      `(() => { const r = document.querySelector('#feed .tool-row[data-tool="agents"]'); return { text: r.innerText, mono: getComputedStyle(r.querySelector('.tool-name')).fontFamily, height: r.getBoundingClientRect().height }; })()`,
+    );
+    if (!/spawn/.test(row.text) || !/mono|Menlo|Courier|SF Mono|ui-monospace/i.test(row.mono) || row.height > 44)
+      throw Error(`tool row is not a compact mono row: ${JSON.stringify(row)}`);
+    record("visible", `tool row: ${JSON.stringify(row.text.replace(/\s+/g, " ").slice(0, 120))}`);
+    // The spawn links to the worker; the Ready worker card has one primary action (Approve) and plan progress.
+    const card = await page.evaluate(`document.querySelector('#workers .worker[data-status="ready"]').innerText`);
+    if (!/2\/2/.test(card) || !/Approve/.test(card)) throw Error(`worker card lacks plan progress or Approve: ${JSON.stringify(card)}`);
+    await page.shot(dir, "02-chat-tool-rows-claude");
+    // Expand the spawn row: parameters and a bounded result preview, escaped.
+    await page.click('#feed .tool-row[data-tool="agents"] .tool-head');
+    await page.waitFor(
+      `/requestId/.test(document.querySelector('#feed .tool-row[data-tool="agents"] .tool-detail')?.innerText ?? '')`,
+      "expanded params",
+    );
+    await delay(300); // let the open transition finish before the screenshot
+    await page.shot(dir, "03-tool-expanded");
+    // Worker opens in the center; Esc returns to the chat.
+    await page.click('#feed .tool-row[data-tool="agents"] [data-open-worker]');
+    await page.waitFor(
+      `document.querySelector('#center').dataset.focus === 'worker' && !!document.querySelector('#worker-feed')`,
+      "worker transcript in center",
+    );
+    await delay(300); // let the open transition finish before the screenshot
+    await page.shot(dir, "04-worker-center");
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc returns to chat");
+    record("visible", "spawn row opens the worker transcript in the center; Esc returns to the chat");
+    // Memory: a knowledge read and write render as memory rows; the entry opens in the center; the tree node lists it by kind.
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: "VERIFY-MEMORY greet in one short line from now on" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(`!!document.querySelector('#feed .memory-row[data-tool="projects_knowledge_write"]')`, "Remembered row", 60000);
+    await page.waitFor(`document.querySelector('#feed').innerText.includes('Remembered the greeting style')`, "memory reply", 60000);
+    const memoryRows = await page.evaluate(
+      `[...document.querySelectorAll('#feed .memory-row')].map(n => n.innerText.replace(/\\s+/g, ' ').trim())`,
+    );
+    if (
+      !memoryRows.some((text) => /Used memory: Preference · Preferences/.test(text)) ||
+      !memoryRows.some((text) => /Remembered: Greeting style.*Undo.*Edit/.test(text))
+    )
+      throw Error(`memory rows: ${JSON.stringify(memoryRows)}`);
+    record("visible", `memory rows: ${JSON.stringify(memoryRows)}`);
+    await page.shot(dir, "04b-memory-rows");
+    await page.click('#feed .memory-row[data-tool="projects_knowledge_write"] [data-memory]');
+    await page.waitFor(
+      `document.querySelector('#center').dataset.focus === 'memory' && /no emoji/.test(document.querySelector('#focus-view .doc')?.innerText ?? '')`,
+      "memory entry in center",
+    );
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc back from memory");
+    await page.click("#tree [data-memory-node]");
+    await page.waitFor(
+      `[...document.querySelectorAll('#focus-view .mem-group')].some(g => /decisions/i.test(g.querySelector('h2').textContent) && /Greeting style/.test(g.innerText))`,
+      "Memory view groups the decision",
+    );
+    await delay(300);
+    await page.shot(dir, "04c-memory-view");
+    await page.click("#memory-search");
+    await page.cdp("Input.insertText", { text: "zzz-nothing" });
+    await page.waitFor(`!/Greeting style/.test(document.querySelector('#focus-view').innerText)`, "search filters memory");
+    await page.press("Escape", { keyCode: 27 });
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc back from the memory view");
+    record("visible", "memory entry opens in the center; the Memory node groups it under Decisions; search filters");
+    // Settings by hotkey (⌘,), theme section by its letter, switch to Midnight.
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings overlay open");
+    await delay(300); // let the open transition finish before the screenshot
+    await page.shot(dir, "05-settings-claude");
+    const scopes = await page.evaluate(`[...document.querySelectorAll('#settings nav [data-section]')].map(n => n.dataset.scope)`);
+    if (!scopes.length || scopes.some((scope) => scope !== "project" && scope !== "host"))
+      throw Error(`nav items without scope: ${scopes}`);
+    await page.press("h", { keyCode: 72 });
+    await page.waitFor(`document.querySelector('#settings').dataset.section === 'theme'`, "theme section by letter H");
+    await page.click('#settings [data-theme-option="midnight"]');
+    await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "midnight applied");
+    await delay(300); // let the open transition finish before the screenshot
+    await page.shot(dir, "06-settings-midnight");
+    const ui = await rpc(run, { action: "ui-get" }).catch((error) => ({ unavailable: error.message }));
+    writeFileSync(join(dir, "host-ui-get.json"), JSON.stringify(ui, null, 2));
+    if (!ui.unavailable && ui.ui?.theme !== "midnight") throw Error(`host ui document not updated: ${JSON.stringify(ui)}`);
+    record(
+      "side-effect",
+      ui.unavailable ? `ui-get not available on this host (${ui.unavailable}); theme kept locally` : "host ui-get reports theme midnight",
+    );
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`!document.querySelector('#settings').open`, "settings closed");
+    await page.reload();
+    await page.waitFor(
+      `document.body.dataset.ready === "1" && document.documentElement.dataset.theme === 'midnight'`,
+      "midnight survives reload",
+    );
+    await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "worker after reload", 30000);
+    await page.shot(dir, "07-chat-midnight");
+    // Host agent drawer from anywhere with \.
+    await page.press("\\", { code: "Backslash", keyCode: 220 });
+    await page.waitFor(`document.querySelector('#host-agent')?.dataset.open === '1'`, "host agent drawer open");
+    await page.waitFor(`!!document.querySelector('#host-agent .ha-body')?.innerText.trim()`, "drawer content or quiet fallback");
+    await delay(300); // let the open transition finish before the screenshot
+    await page.shot(dir, "08-host-agent-midnight");
+    record(
+      "visible",
+      `host agent drawer: ${JSON.stringify((await page.evaluate(`document.querySelector('#host-agent .ha-body').innerText`)).slice(0, 160))}`,
+    );
+    await page.press("\\", { code: "Backslash", keyCode: 220 });
+    // Light theme through the settings overlay, then the narrow layout.
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings again");
+    await page.press("h", { keyCode: 72 });
+    await page.click('#settings [data-theme-option="light"]');
+    await page.waitFor(`document.documentElement.dataset.theme === 'light'`, "light applied");
+    await delay(300); // let the open transition finish before the screenshot
+    await page.press("Escape", { keyCode: 27 });
+    await page.shot(dir, "09-chat-light");
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+    await delay(400);
+    const overflow = await page.evaluate(`document.documentElement.scrollWidth - innerWidth`);
+    await page.shot(dir, "10-narrow-390-light");
+    if (overflow > 0) throw Error(`narrow layout overflows by ${overflow}px`);
+    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    // Back to the default theme so a rerun starts from Claude.
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings for reset");
+    await page.press("h", { keyCode: 72 });
+    await page.click('#settings [data-theme-option="claude"]');
+    await page.waitFor(`document.documentElement.dataset.theme === 'claude'`, "claude restored");
+    record("verified", "no horizontal overflow at 390 px; themes claude, midnight and light applied through the settings overlay");
+    writeFileSync(join(dir, "feed-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
+    // Before the backend merge each contract request is refused once with HTTP 400 (unknown action); the client shows a quiet
+    // state. Only on such a host are 400s from /api taken out of the sinks, and they are counted in the record.
+    if (ui.unavailable) {
+      const before = sinks.httpErrors.length;
+      sinks.httpErrors.splice(
+        0,
+        Infinity,
+        ...sinks.httpErrors.filter((item) => !(item.status === 400 && new URL(item.url).pathname === "/api")),
+      );
+      sinks.errors.splice(0, Infinity, ...sinks.errors.filter((item) => !/status of 400/.test(item)));
+      record(
+        "verified",
+        `pre-merge host: ${before - sinks.httpErrors.length} contract requests refused as unknown and shown as unavailable`,
+      );
+    }
+    if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },
   // Feature: features/message-coordinator.md
   async "message-coordinator"(run, page, record, dir) {

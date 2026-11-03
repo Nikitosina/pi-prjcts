@@ -1,0 +1,458 @@
+// Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
+// Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
+import { call, contract, isUnavailable, stream, uuid, UNAVAILABLE_TEXT } from "./api.js";
+import { clip, clock, dur, esc, markdown, oneLine } from "./format.js";
+import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
+import { memoryTitle } from "./memory.js";
+
+const feed = document.querySelector("#feed"),
+  input = document.querySelector("#composer-input"),
+  form = document.querySelector("#composer");
+let live = null,
+  liveKey = "",
+  older = [],
+  olderBefore = null,
+  loading = null,
+  stick = true;
+const expanded = new Set(); // tool callIds and group keys the owner opened
+const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+): ([^\]\n]*)\]([\s\S]*)$/;
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
+/** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
+export async function loadChat() {
+  if (loading) {
+    loading.again = true;
+    return loading.promise;
+  }
+  const run = { again: false };
+  loading = run;
+  run.promise = (async () => {
+    try {
+      do {
+        run.again = false;
+        const gen = state.generation,
+          id = state.projectId;
+        if (!id) return;
+        const view = await call("show", { id, ...chatArgs() });
+        if (stale(gen)) return;
+        state.view = view;
+        emit("view", view);
+        renderFeed();
+        renderQuestions();
+        ensureLive();
+      } while (run.again);
+    } catch (error) {
+      fail(error);
+    } finally {
+      loading = null;
+    }
+  })();
+  return run.promise;
+}
+on("select", () => {
+  older = [];
+  stick = true;
+  expanded.clear();
+  feed.replaceChildren();
+  document.querySelector("#questions").replaceChildren();
+  state.live = null;
+  live?.stop();
+  live = null;
+  liveKey = "";
+});
+
+function ensureLive() {
+  const key = `${state.projectId}:${state.chatId}`;
+  if (liveKey === key) return;
+  live?.stop();
+  liveKey = key;
+  const gen = state.generation;
+  live = stream(`/live?project=${encodeURIComponent(state.projectId)}&chat=${encodeURIComponent(state.chatId)}`, (frame) => {
+    if (stale(gen)) return;
+    const previous = state.live;
+    state.live = frame;
+    emit("live", frame);
+    if (previous && (previous.entries !== frame.entries || previous.running !== frame.running)) void loadChat();
+    else renderLive();
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------- transcript
+
+function messages() {
+  return [...older, ...(state.view?.messages ?? [])];
+}
+/** Turns: an owner (or internal) input followed by everything the coordinator did for it. */
+function turns(items) {
+  const out = [];
+  let current = null;
+  for (const item of items) {
+    if (item.kind === "reset") continue;
+    const opens = item.kind === "message" && item.role === "user";
+    if (opens || !current) {
+      current = { start: item, items: [] };
+      out.push(current);
+      if (opens) continue;
+    }
+    current.items.push(item);
+  }
+  return out;
+}
+export function renderFeed() {
+  if (!state.view) return;
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  const all = turns(messages()),
+    busy = !!state.live?.running || !!currentChat()?.busy;
+  const html = [];
+  if (older.length ? olderBefore : state.view.before) html.push(`<button type="button" class="earlier" data-earlier>Show earlier</button>`);
+  if (!all.length)
+    html.push(
+      `<div class="empty-chat"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p></div>`,
+    );
+  html.push(transcriptHtml(all, busy));
+  html.push(`<div id="live-turn"></div>`);
+  morph(feed, html.join(""));
+  renderLive();
+  if (stick || atBottom) feed.scrollTop = feed.scrollHeight;
+}
+/** Replaces children while keeping nodes whose key and html did not change, so rows only animate in when they are new. */
+function morph(parent, html) {
+  const next = document.createElement("div");
+  next.innerHTML = html;
+  const old = new Map([...parent.children].filter((node) => node.dataset.key).map((node) => [node.dataset.key, node]));
+  const nodes = [...next.children].map((node) => {
+    const keep = node.dataset.key && old.get(node.dataset.key);
+    if (keep && keep.dataset.sig === node.dataset.sig) return keep;
+    if (keep) node.classList.add("no-enter");
+    return node;
+  });
+  parent.replaceChildren(...nodes);
+}
+
+/** Turn sections for a list of transcript items (also used for worker transcripts in the center). */
+export function transcriptHtml(items, busy, who = "Coordinator") {
+  const all = Array.isArray(items[0]?.items) ? items : turns(items);
+  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who)).join("");
+}
+function turnHtml(turn, liveTurn, who) {
+  const { start } = turn,
+    key = `t${start.entryId ?? start.at}`;
+  const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : itemHtml(start, who);
+  const body = [];
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    body.push(run.length >= 2 && !liveTurn ? groupHtml(run) : run.map(toolRowHtml).join(""));
+    run = [];
+  };
+  const results = new Map(turn.items.filter((item) => item.kind === "tool-result").map((item) => [item.callId, item]));
+  for (const item of turn.items) {
+    // Memory rows never fold: what the agent remembered or relied on stays visible.
+    if (item.kind === "tool-call" && MEMORY.test(item.name)) {
+      flush();
+      body.push(toolRowHtml({ call: item, result: results.get(item.callId) }));
+    } else if (item.kind === "tool-call") run.push({ call: item, result: results.get(item.callId) });
+    else if (item.kind === "tool-result") continue;
+    else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking) continue;
+    else {
+      flush();
+      body.push(itemHtml(item, who));
+    }
+  }
+  flush();
+  const html = head + body.join("");
+  return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(html + liveTurn)}">${html}</section>`;
+}
+function hash(text) {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+  return String(h);
+}
+function inputHtml(message, who = "Coordinator") {
+  const text = message.text ?? "";
+  if (who !== "Coordinator" && message.origin !== "owner")
+    return `<article class="msg owner brief"><div class="msg-meta"><span class="who">Brief</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}</div></article>`;
+  if (message.origin === "owner")
+    return `<article class="msg owner"><div class="msg-meta"><span class="who">You</span><time>${esc(clock(message.at))}</time></div><div class="bubble">${markdown(text)}</div></article>`;
+  const report = reportPattern.exec(text);
+  if (report) return reportRowHtml(message, report);
+  const event = /^\[Owner-local event ([\w.-]+)\]\n/.exec(text);
+  if (event) return `<div class="sys-row"><span class="sys-icon" aria-hidden="true">⚑</span>Event <code>${esc(event[1])}</code></div>`;
+  if (message.origin === "internal")
+    return `<div class="sys-row muted"><span class="sys-icon" aria-hidden="true">↻</span>${esc(clip(oneLine(text), 120))}</div>`;
+  return `<article class="msg owner earlier-input"><div class="msg-meta"><span class="who">Earlier input</span></div><div class="bubble">${markdown(text)}</div></article>`;
+}
+function reportRowHtml(message, match) {
+  const [, role, id, status, title, body] = match;
+  const label =
+    {
+      ready: "Ready",
+      "ready-with-gaps": "Ready with gaps",
+      checkpoint: "Checkpoint",
+      completed: "Returned",
+      failed: "Failed",
+      stopped: "Stopped",
+    }[status] ?? status;
+  const summary = /Summary:\s*(.+)/.exec(body)?.[1] ?? "";
+  return `<div class="report-row" data-status="${esc(status)}"><span class="report-icon" aria-hidden="true">↩</span><span class="report-text"><b>${esc(role)}</b> <span class="badge s-${esc(status)}">${esc(label)}</span> ${esc(clip(title, 80))}${summary ? `<span class="muted"> · ${esc(clip(summary, 100))}</span>` : ""}</span><button type="button" class="link-btn" data-open-worker="${esc(id)}">Open ${esc(role)} ↗</button></div>`;
+}
+function itemHtml(item, who = "Coordinator") {
+  if (item.kind === "compaction") return `<div class="divider" role="separator"><span>Context compacted</span></div>`;
+  if (item.kind === "tool-call") return toolRowHtml({ call: item });
+  if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
+  if (item.kind !== "message") return "";
+  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${item.text?.trim() ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div><div class="prose">${markdown(item.text)}</div>${item.truncated ? `<p class="muted small">Message shortened in this view.</p>` : ""}</article>` : ""}`;
+}
+function thinkingHtml(text, key, running = false) {
+  const open = expanded.has(key);
+  return `<div class="thinking${running ? " running" : ""}"><button type="button" class="thinking-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="th-mark" aria-hidden="true">∴</span>Thinking<span class="th-preview">${esc(clip(oneLine(text), 90))}</span></button>${open ? `<div class="thinking-body">${esc(text)}</div>` : ""}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------- tool rows
+
+function parseArgs(preview) {
+  try {
+    return JSON.parse(preview);
+  } catch {
+    return null;
+  }
+}
+/** Short argument summary per tool; generic tools show their first string argument. */
+function summary(name, args, preview) {
+  if (!args) return oneLine(preview).slice(0, 100);
+  if (name === "agents") return [args.action, args.role, args.title ? `“${args.title}”` : (args.id ?? "")].filter(Boolean).join(" ");
+  if (name === "job") return [args.action, args.steps ? `${args.steps.length} steps` : (args.summary ?? "")].filter(Boolean).join(" · ");
+  if (name === "bash") return args.command ?? "";
+  if (/^(read|write|edit)$/.test(name)) return args.path ?? args.file_path ?? "";
+  const first = Object.values(args).find((value) => typeof value === "string");
+  return first ?? "";
+}
+const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
+export function toolRowHtml({ call: item, result }, liveStatus) {
+  const status = liveStatus ?? (result ? (result.isError ? "error" : "ok") : state.live?.running ? "running" : "ok");
+  const args = parseArgs(item.argsPreview);
+  if (MEMORY.test(item.name)) return memoryRowHtml(item, result, args, status);
+  const open = expanded.has(item.callId);
+  const took = result && Number.isFinite(item.at) && Number.isFinite(result.at) ? dur(result.at - item.at) : "";
+  const worker = item.name === "agents" && result ? UUID.exec(result.preview ?? "")?.[0] : null;
+  const icon =
+    status === "running"
+      ? `<span class="spin" aria-label="running"></span>`
+      : status === "error"
+        ? `<span class="st err" aria-label="failed">✕</span>`
+        : `<span class="st ok" aria-label="done">✓</span>`;
+  return `<div class="tool-row${open ? " open" : ""}" data-tool="${esc(item.name)}" data-status="${status}"><div class="tool-line"><button type="button" class="tool-head" data-toggle="${esc(item.callId)}" aria-expanded="${open}">${icon}<span class="tool-name">${esc(item.name)}</span><span class="tool-args">${esc(clip(oneLine(summary(item.name, args, item.argsPreview)), 140))}</span><span class="tool-dur">${esc(took)}</span></button>${worker ? `<button type="button" class="link-btn" data-open-worker="${esc(worker)}" aria-label="Open worker">worker ↗</button>` : ""}</div>${open ? toolDetailHtml(item, result, args) : ""}</div>`;
+}
+function toolDetailHtml(item, result, args) {
+  const params = args ? JSON.stringify(args, null, 2) : item.argsPreview;
+  return `<div class="tool-detail"><div class="td-label">Parameters</div><pre>${esc(params)}</pre>${result ? `<div class="td-label">${result.isError ? "Error" : "Result"}${result.truncated ? " · preview" : ""}</div><pre class="${result.isError ? "err" : ""}">${esc(clip(result.preview ?? "", 4000))}</pre>` : `<div class="td-label">Result</div><p class="muted small">Running…</p>`}</div>`;
+}
+function groupHtml(run) {
+  const key = `g${run[0].call.callId}`,
+    open = expanded.has(key);
+  const counts = new Map();
+  for (const { call: item } of run) counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+  const first = run[0].call.at,
+    last = run.at(-1).result?.at ?? run.at(-1).call.at;
+  const failed = run.filter(({ result }) => result?.isError).length;
+  const label = [...counts].map(([name, count]) => `${name} ×${count}`).join(", ");
+  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry)).join("")}</div>` : ""}</div>`;
+}
+function memoryRowHtml(item, result, args, status) {
+  const path = args?.path ?? "",
+    title = path ? memoryTitle(path) : "memory index";
+  const revision = /"revision":\s*"([^"]+)"/.exec(result?.preview ?? "")?.[1] ?? "";
+  if (item.name === "projects_knowledge_write")
+    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>` : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+  const kind = path ? memoryKindLabel(path) : "";
+  return `<div class="memory-row used" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◇</span><span class="mem-text">Used memory: ${kind ? `${esc(kind)} · ` : ""}${path ? `<button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button>` : esc(item.name === "projects_knowledge_list" ? "index" : title)}</span></div>`;
+}
+function memoryKindLabel(path) {
+  if (path === "preferences.md" || path.startsWith("preferences/")) return "Preference";
+  if (path.startsWith("decisions/")) return "Decision";
+  if (path.startsWith("runbooks/") || path.startsWith("procedures/")) return "Procedure";
+  return "";
+}
+
+// ---------------------------------------------------------------------------------------------------------------- live
+
+function renderLive() {
+  const node = document.querySelector("#live-turn");
+  if (!node) return;
+  const frame = state.live;
+  emit("busy", !!frame?.running);
+  document.querySelector("#stop-btn").hidden = !frame?.running;
+  document.querySelector("#send-mode").hidden = !frame?.running;
+  document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
+  if (!frame?.running) {
+    node.replaceChildren();
+    return;
+  }
+  const tools = frame.tools
+    .filter((tool) => tool.status !== "done")
+    .map(
+      (tool) =>
+        `<div class="tool-row live" data-tool="${esc(tool.name)}" data-status="running"><div class="tool-line"><span class="tool-head static"><span class="spin" aria-label="running"></span><span class="tool-name">${esc(tool.name)}</span><span class="tool-args">${esc(tool.status)}</span><span class="tool-dur"></span></span></div></div>`,
+    )
+    .join("");
+  const status = frame.compacting
+    ? "Compacting context"
+    : frame.retry
+      ? `Retrying · ${clip(frame.retry.error, 80)}`
+      : frame.text
+        ? "Writing"
+        : frame.thinking
+          ? "Thinking"
+          : tools
+            ? "Using tools"
+            : "Working";
+  node.innerHTML = `${frame.thinking && frame.thinkingText ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
+  if (stick) feed.scrollTop = feed.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------------------------------------------- questions
+
+export function currentChat() {
+  return (state.view?.chats ?? []).find((chat) => chat.id === state.chatId) ?? null;
+}
+function questionChat(item) {
+  const chats = state.view?.chats ?? [];
+  return (
+    chats.find((chat) => item.native && chat.conversationId === item.native.conversationId) ?? chats.find((chat) => chat.id === "main")
+  );
+}
+function renderQuestions() {
+  const box = document.querySelector("#questions");
+  const waiting = (state.view?.inbox ?? []).filter(
+    (item) => item.kind === "question" && !item.result && (questionChat(item)?.id ?? "main") === state.chatId,
+  );
+  // Keep a half-written answer when the list re-renders.
+  const drafts = new Map(
+    [...box.querySelectorAll("form[data-entry]")].map((node) => [node.dataset.entry, node.querySelector("textarea").value]),
+  );
+  box.innerHTML = waiting
+    .map(
+      (item) =>
+        `<form class="question" data-entry="${esc(item.id)}"><div class="q-head"><span class="badge s-needs">Needs you</span><b>${esc(item.title)}</b></div>${item.question && item.question.trim() !== item.title ? `<div class="q-body prose">${markdown(item.question)}</div>` : ""}${item.choices?.length ? `<div class="choices">${item.choices.map((choice, index) => `<button type="button" class="choice" data-choice="${esc(choice)}"><kbd>${index + 1}</kbd>${esc(choice)}</button>`).join("")}</div>` : ""}<div class="q-answer"><textarea rows="1" aria-label="Answer: ${esc(item.title)}" placeholder="Your answer…" maxlength="24000" required>${esc(drafts.get(item.id) ?? "")}</textarea><button type="submit" class="primary small">Answer</button></div></form>`,
+    )
+    .join("");
+}
+async function answer(entry, text) {
+  const gen = state.generation;
+  try {
+    await call("answer", { id: state.projectId, entry, text });
+    if (stale(gen)) return;
+    toast("Answer sent.");
+    void loadChat();
+  } catch (error) {
+    fail(error);
+  }
+}
+document.querySelector("#questions").addEventListener("click", (event) => {
+  const choice = event.target.closest("[data-choice]");
+  if (choice) void answer(choice.closest("form").dataset.entry, choice.dataset.choice);
+});
+document.querySelector("#questions").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const node = event.target.closest("form");
+  void answer(node.dataset.entry, node.querySelector("textarea").value.trim());
+});
+
+// ---------------------------------------------------------------------------------------------------------------- composer
+
+function grow() {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
+}
+input.addEventListener("input", grow);
+input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    form.requestSubmit();
+  }
+});
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text || !state.projectId) return;
+  const gen = state.generation;
+  input.value = "";
+  grow();
+  stick = true;
+  try {
+    await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
+    if (stale(gen)) return;
+    await loadChat();
+  } catch (error) {
+    if (!stale(gen) && !input.value) input.value = text;
+    fail(error);
+  }
+});
+export async function stopTurn() {
+  if (!state.live?.running) return;
+  const result = await contract("chat-stop", { id: state.projectId, ...chatArgs() }).catch(fail);
+  if (isUnavailable(result)) toast(`Stop: ${UNAVAILABLE_TEXT.toLowerCase()}`);
+  else if (result) toast(result.stopped ? "Stopped. History kept." : "Nothing was running.");
+}
+export function toggleSteer() {
+  if (!state.live?.running) return false;
+  toast("Steering a running coordinator turn needs a backend request; messages queue for now.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------------- clicks
+
+feed.addEventListener("scroll", () => {
+  stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+});
+/** Clicks inside any transcript (chat feed or a worker in the center); `rerender` repaints that transcript. */
+export async function transcriptClick(event, root, rerender) {
+  const toggle = event.target.closest("[data-toggle]");
+  if (toggle) {
+    const key = toggle.dataset.toggle;
+    expanded.has(key) ? expanded.delete(key) : expanded.add(key);
+    stick = false;
+    rerender();
+    root.querySelector(`[data-toggle="${CSS.escape(key)}"]`)?.focus();
+    return true;
+  }
+  const worker = event.target.closest("[data-open-worker]");
+  if (worker) {
+    emit("open", { kind: "worker", id: worker.dataset.openWorker });
+    return true;
+  }
+  const undo = event.target.closest("[data-memory-undo]");
+  if (undo) {
+    const gen = state.generation;
+    const result = await contract("memory-undo", {
+      projectId: state.projectId,
+      path: undo.dataset.memoryUndo,
+      revision: undo.dataset.revision,
+    }).catch(fail);
+    if (stale(gen) || !result) return true;
+    if (isUnavailable(result)) toast(`Undo: ${UNAVAILABLE_TEXT.toLowerCase()}. Edit the entry instead.`);
+    else toast(result.entry ? "Memory restored to the previous revision." : "Memory entry removed.");
+    return true;
+  }
+  const memory = event.target.closest("[data-memory]");
+  if (memory) {
+    emit("open", { kind: "memory", path: memory.dataset.memory, edit: !!memory.dataset.edit });
+    return true;
+  }
+  return false;
+}
+feed.addEventListener("click", async (event) => {
+  if (await transcriptClick(event, feed, renderFeed)) return;
+  if (event.target.closest("[data-earlier]")) {
+    const gen = state.generation,
+      before = older.length ? olderBefore : state.view.before;
+    if (!before) return;
+    const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100 }).catch(fail);
+    if (stale(gen) || !page) return;
+    older = [...page.items, ...older];
+    olderBefore = page.before;
+    stick = false;
+    renderFeed();
+    feed.scrollTop = 0;
+  }
+});

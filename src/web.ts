@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
@@ -128,6 +128,19 @@ export async function startWeb(
   // The feature modules under web/app/ are imported by app.js; only files that exist at start are served, never a path from the request.
   for (const file of readdirSync(fileURLToPath(new URL("../web/app/", import.meta.url))))
     if (/^[a-z]+\.js$/.test(file)) assets.set(`/app/${file}`, { path: `app/${file}`, mime: "text/javascript; charset=utf-8" });
+  // UI 2.0 client: the flat files present in web-ui2/ at start, under /ui2/; never a path from the request.
+  const ui2Assets = new Map<string, { path: string; mime: string }>();
+  const ui2Dir = fileURLToPath(new URL("../web-ui2/", import.meta.url));
+  for (const file of existsSync(ui2Dir) ? readdirSync(ui2Dir) : [])
+    if (/^[a-z0-9-]+\.(js|css|html)$/.test(file))
+      ui2Assets.set(file === "index.html" ? "/ui2/" : `/ui2/${file}`, {
+        path: join(ui2Dir, file),
+        mime: file.endsWith(".css")
+          ? "text/css; charset=utf-8"
+          : file.endsWith(".html")
+            ? "text/html; charset=utf-8"
+            : "text/javascript; charset=utf-8",
+      });
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store",
@@ -161,6 +174,19 @@ export async function startWeb(
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
         await sendAsset(fileURLToPath(new URL(`../web/${asset.path}`, import.meta.url)), asset.mime);
+        return;
+      }
+      const ui2Asset = ui2Assets.get(url.pathname);
+      if (request.method === "GET" && ui2Asset) {
+        await sendAsset(ui2Asset.path, ui2Asset.mime);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/ui2" && ui2Assets.has("/ui2/")) {
+        response.writeHead(308, { ...headers, location: "/ui2/" }).end();
+        return;
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/ui2/")) {
+        response.writeHead(404, { ...headers, "content-type": "text/plain; charset=utf-8" }).end("Not found");
         return;
       }
       // Only the files a plugin declared (web.script, web.style); never another path below the plugin.

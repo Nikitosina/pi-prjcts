@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" data-theme="claude">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pi-prjcts</title>
+    <script src="/ui2/boot.js"></script>
+    <link rel="stylesheet" href="/ui2/styles.css" />
+    <script type="module" src="/ui2/app.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#composer-input">Skip to composer</a>
+    <div id="app" data-list="1" data-context="1">
+      <header id="topbar">
+        <button type="button" class="icon-btn" data-cmd="toggle-list" aria-label="Toggle list" aria-controls="list">
+          <span aria-hidden="true">☰</span><kbd data-hint="toggle-list"></kbd>
+        </button>
+        <div class="crumbs" id="crumbs" aria-live="polite"></div>
+        <button type="button" id="status-pill" class="pill" data-cmd="status-jump" aria-label="Status">
+          <span class="dot" aria-hidden="true"></span><span class="pill-text">idle</span>
+        </button>
+        <div class="top-actions">
+          <button type="button" class="ghost-btn" data-cmd="palette" aria-label="Search and commands">
+            <span aria-hidden="true">⌕</span><span class="label">Search</span><kbd data-hint="palette"></kbd>
+          </button>
+          <button type="button" class="icon-btn" data-cmd="host-agent" aria-label="Host agent" aria-controls="host-agent">
+            <span aria-hidden="true">✦</span><kbd data-hint="host-agent"></kbd>
+          </button>
+          <button type="button" class="icon-btn" data-cmd="toggle-context" aria-label="Toggle context panel" aria-controls="context">
+            <span aria-hidden="true">◫</span><kbd data-hint="toggle-context"></kbd>
+          </button>
+          <button type="button" class="icon-btn" data-cmd="settings" aria-label="Settings">
+            <span aria-hidden="true">⚙</span><kbd data-hint="settings"></kbd>
+          </button>
+        </div>
+      </header>
+      <nav id="list" aria-label="Projects and chats">
+        <div class="list-head">
+          <button type="button" class="new-btn" data-cmd="new-project"><span aria-hidden="true">＋</span> New project</button>
+        </div>
+        <div id="tree" role="tree" aria-label="Projects"></div>
+        <div id="limits" class="limits" aria-label="Subscription limits"></div>
+      </nav>
+      <main id="center" data-focus="chat" aria-label="Focus">
+        <section id="chat-view" class="view" aria-label="Chat">
+          <div id="feed" role="log" aria-live="polite" aria-relevant="additions"></div>
+          <div id="dock">
+            <div id="questions" aria-label="Questions waiting"></div>
+            <form id="composer" autocomplete="off">
+              <span class="glyph" aria-hidden="true">❯</span>
+              <textarea
+                id="composer-input"
+                rows="1"
+                maxlength="24000"
+                aria-label="Message coordinator"
+                placeholder="Message the coordinator…"
+              ></textarea>
+              <div class="composer-side">
+                <span class="mode" id="send-mode" hidden></span>
+                <button type="button" id="stop-btn" class="ghost-btn small" data-cmd="stop" hidden aria-label="Stop the current turn">
+                  Stop <kbd data-hint="stop"></kbd>
+                </button>
+                <button type="submit" class="send" aria-label="Send">↵</button>
+              </div>
+            </form>
+            <p class="composer-hints" aria-hidden="true">
+              <span><kbd>↵</kbd> send</span><span><kbd>⇧↵</kbd> newline</span><span><kbd data-hint="focus-composer"></kbd> focus</span
+              ><span><kbd data-hint="toggle-steer"></kbd> queue/steer</span>
+            </p>
+          </div>
+        </section>
+        <section id="focus-view" class="view" hidden aria-live="polite"></section>
+      </main>
+      <aside id="context" aria-label="Context panel">
+        <section class="ctx-section" aria-labelledby="workers-h">
+          <h2 id="workers-h">Workers <span class="count" id="workers-count"></span></h2>
+          <div id="workers"></div>
+        </section>
+        <section class="ctx-section" aria-labelledby="prs-h">
+          <h2 id="prs-h">Pull requests</h2>
+          <div id="prs"></div>
+        </section>
+        <section class="ctx-section" id="plugin-cards" aria-label="Plugins"></section>
+      </aside>
+      <footer id="statusline" aria-label="Status line"></footer>
+    </div>
+    <aside id="host-agent" data-open="0" aria-label="Host agent" aria-hidden="true">
+      <header class="ha-head">
+        <span class="ha-title"><span aria-hidden="true">✦</span> Host agent</span>
+        <span class="ha-model" id="ha-model"></span>
+        <button type="button" class="ghost-btn small" data-cmd="host-agent-reset">New session</button>
+        <button type="button" class="icon-btn" data-cmd="host-agent" aria-label="Close host agent">
+          <span aria-hidden="true">✕</span><kbd data-hint="host-agent"></kbd>
+        </button>
+      </header>
+      <div class="ha-approvals" id="ha-approvals" aria-label="Pending approvals"></div>
+      <div class="ha-body" role="log" aria-live="polite"></div>
+      <form class="ha-composer" id="ha-composer" autocomplete="off">
+        <span class="glyph" aria-hidden="true">❯</span>
+        <textarea rows="1" maxlength="24000" aria-label="Message the host agent" placeholder="Ask the host agent…"></textarea>
+        <button type="submit" class="send" aria-label="Send to host agent">↵</button>
+      </form>
+    </aside>
+    <dialog id="settings" aria-label="Settings"></dialog>
+    <dialog id="palette" aria-label="Command palette"></dialog>
+    <dialog id="signin" aria-label="Sign in"></dialog>
+    <div id="toasts" role="status" aria-live="polite"></div>
+    <div id="popover" role="tooltip" hidden></div>
+  </body>
+</html>

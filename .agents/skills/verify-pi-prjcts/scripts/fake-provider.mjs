@@ -83,6 +83,18 @@ const server = createServer((req, res) => {
               requestId: "verify-job",
             })
           : say("Started the Job.");
+    } else if (user.includes("VERIFY-MEMORY") && names.includes("projects_knowledge_write")) {
+      // Memory rows: the coordinator reads the preferences, then records a decision.
+      reply =
+        stage === 0
+          ? call("projects_knowledge_read", { path: "preferences.md" })
+          : stage === 1
+            ? call("projects_knowledge_write", {
+                path: "decisions/greeting-style.md",
+                text: "# Greeting style\n\nGreet in one short line, no emoji.\n",
+                expectedRevision: null,
+              })
+            : say("Remembered the greeting style.");
     } else if (user.includes("VERIFY-JOB") && names.includes("job")) {
       const steps = (done) => [
         { title: "Write the greeting", status: done ? "done" : "doing", estimateMin: 5 },
