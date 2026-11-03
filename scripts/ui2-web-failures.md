@@ -106,3 +106,13 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 - Tier editor: a rename or a new tier is lost on Save, or a new tier saves with no model.
 - A coordinator's `owner_approval_request` shows only as a raw tool row: no card in the drawer, no needs-you in the pill, no way from the chat row to the decision; the outcome posted back to the chat renders as an owner bubble.
 - At 390 px the Host agent drawer overflows the screen, hides its composer, or cannot be closed by keyboard.
+
+## Final wiring, local font and PR36 transcript diagnostics
+
+- Stop sends the removed `id` shape or only reports the contract as unavailable; the running chat does not actually become idle.
+- Host agent settings cannot clear a pinned model, or choosing a tier leaves the old pin in force.
+- Automation cards lack working Run now, Edit or Delete; Delete has no owner confirmation; Undo does not restore the deleted schedule through its tombstone.
+- Memory Undo is only page-local: after a reload the same write offers Undo again instead of reading `memory-recent` and saying Undone.
+- JetBrains Mono is not bundled and actually loaded by default, its license is missing, or a font choice is only local and does not survive reload through the host `ui` document.
+- A nested codemode call has no compact running/done/failed detail, or a failed compaction disappears instead of remaining inspectable in Context without adding noise to the primary chat.
+- Rendering a diagnostic expands or stringifies an unbounded result instead of using the transcript's bounded preview.

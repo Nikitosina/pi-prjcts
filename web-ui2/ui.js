@@ -1,4 +1,4 @@
-// The host `ui` document (theme, animations, hotkeys, panels, status line) through `ui-get` / `ui-set`, followed on host topic `ui`.
+// The host `ui` document (theme, font, animations, hotkeys, panels, status line) through `ui-get` / `ui-set`, followed on host topic `ui`.
 // localStorage keeps the last copy only as the pre-paint cache (boot.js) and for a page that cannot reach the host.
 import { call } from "./api.js";
 import { setOverrides } from "./hotkeys.js";
@@ -6,6 +6,7 @@ import { emit, fail, state } from "./state.js";
 
 export const DEFAULT_UI = {
   theme: "claude",
+  font: "jetbrains-mono",
   animations: "subtle",
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },

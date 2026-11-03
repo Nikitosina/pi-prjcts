@@ -8,8 +8,10 @@ The owner opens the UI 2.0 client at `/ui2/`: a project tree with chats and Memo
 - `empty`: a chat with no messages offers three starter prompts. One click fills the composer and focuses it; nothing is sent.
 - `chat`: a sent message shows one owner bubble, a mono `agents` tool row with a `worker ↗` link, a worker report row and the reply. Clicking the row head shows params and the result.
 - `worker`: the Workers card shows plan progress and Approve. A spawn row opens the worker transcript in the center, and Esc returns to the chat.
-- `memory`: knowledge tool calls render as "Used memory" and "Remembered · Undo · Edit" rows. An entry opens in the center. The tree's Memory node groups `memory-index` entries as Preferences, Decisions and Procedures (status badge when not current, superseded link, broken links, archive behind a toggle), with search. Undo on a Remembered row calls `memory-undo` and the row then says "Undone".
-- `settings`: ⌘, opens the overlay. Section letters jump (H for Theme). The theme goes through `ui-set`, applies at once, and after a reload comes from `ui-get` even when the browser's cached copy says otherwise.
+- `memory`: knowledge tool calls render as "Used memory" and "Remembered · Undo · Edit" rows. An entry opens in the center. The tree's Memory node groups `memory-index` entries as Preferences, Decisions and Procedures (status badge when not current, superseded link, broken links, archive behind a toggle), with search. Undo calls `memory-undo`; `memory-recent` keeps the row "Undone" after reload and does not offer Undo for a superseded write.
+- `settings`: ⌘, opens the overlay. Section letters jump (H for Theme). Theme and font go through `ui-set`, apply at once, and after a reload come from `ui-get` even when the browser's cached copy says otherwise. JetBrains Mono is bundled locally and is the default; System sans and System mono are alternatives.
+- `automations`: schedule cards Run now, Edit with the record revision, Delete after confirmation, and Undo through `schedule-restore`; the journey checks history and the exact restored record.
+- `stop-and-diagnostics`: Stop calls `chat-stop` with `projectId` and keeps history. A codemode row shows nested running/done/failed calls. A failed compaction warns in the status line and opens bounded details in Context, not in the chat.
 - `feedback`: a change in Settings or the drawer settings is confirmed by one status line next to the section header, which fades. Toasts are only for background events and errors: an identical message shows once, at most two show, each leaves on its own, and they sit under the top bar, clear of both composers.
 - `usage`: the status line shows the coordinator cost of this chat ("$0.000 chat") and each subscription with its period ("Eliza · $1.42 this month"), with a tooltip saying where it comes from. The left bar has no usage footer.
 - `context`: Settings → Context shows current use over the window, the auto-compaction mark (drag, or ←/→; saves on release), the force mark where the runtime blocks for compaction (window − reserve, derived from the auto mark), the hatched reserve, and Compact now.
@@ -41,6 +43,5 @@ The drive uses these ids: `#tree`, `#composer textarea`, `#feed .tool-row[data-t
 
 ## Gotchas
 
-- The drive needs the merged backend (e8b6554 or later): every contract request must answer. Only `chat-stop` is still missing on the host; Stop then says the host cannot stop a coordinator turn yet. The drive does not press Stop.
-- The Host agent cannot unpin a model: `host-agent-settings` takes no `model: null`, and a pinned model wins over the tier.
-- Worker data, PR 12 and the memory text are scripted by the fake provider.
+- The drive needs the merged round-2 backend plus PR36: Stop, `memory-recent`, schedule edit/delete/restore, Host agent model clearing, `font`, nested codemode and compaction failures must all answer.
+- Worker data, PR 12, memory text and diagnostics are scripted at the existing fake-provider seam; all host state and browser behavior are real.

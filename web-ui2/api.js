@@ -1,5 +1,4 @@
-// The only module that talks to the host. Requests go through `call`; `contract` is for the one contract request the backend has
-// not added yet (chat-stop), and turns an unknown-action rejection into an `Unavailable` value.
+// The only module that talks to the host. Requests go through `call`.
 
 const key = `pi-projects-token:${location.origin}`;
 const supplied = new URLSearchParams(location.hash.slice(1)).get("token");
@@ -32,20 +31,6 @@ export class HostError extends Error {
     this.status = status;
   }
 }
-/** A contract request the running host does not know yet (before the backend merge). */
-export class Unavailable {
-  constructor(action) {
-    this.action = action;
-    this.unavailable = true;
-  }
-}
-export const isUnavailable = (value) => value instanceof Unavailable;
-
-// A pre-merge host validates /api input against a union of the actions it knows, so an unknown action shows up as
-// "/action: must be equal to constant" somewhere in the joined branch errors. Only contract() uses this, and logs the raw text.
-const unknownAction = (message) => /^Invalid data:.*\/action: must be equal to constant/.test(message) || /unknown action/i.test(message);
-const missing = new Set();
-
 export async function call(action, input = {}) {
   if (!token) throw new HostError("Not signed in", 401);
   const response = await fetch("/api", {
@@ -62,22 +47,6 @@ export async function call(action, input = {}) {
   if (!body.ok) throw new HostError(String(body.error ?? "Request failed"), response.status);
   return body.data;
 }
-
-/** A request from docs/ui2-contract.md: resolves to `Unavailable` when this host predates it, and never asks twice per page load. */
-export async function contract(action, input = {}) {
-  if (missing.has(action)) return new Unavailable(action);
-  try {
-    return await call(action, input);
-  } catch (error) {
-    if (error instanceof HostError && unknownAction(error.message)) {
-      console.info(`${action}: treated as not yet on this host (${error.message.slice(0, 160)})`);
-      missing.add(action);
-      return new Unavailable(action);
-    }
-    throw error;
-  }
-}
-export const knownMissing = (action) => missing.has(action);
 
 /**
  * Reads one SSE stream (`/live` or `/changes`) and calls `onFrame` per JSON frame. Reconnects with backoff until `stop()`.

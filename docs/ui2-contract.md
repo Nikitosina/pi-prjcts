@@ -19,6 +19,7 @@ type ThinkingLevel = "off" | "low" | "medium" | "high" | "max"; // maps to pi-ai
 type ProfileId = "coordinator" | "worker" | "scout" | "reviewer"; // verifier is removed
 type ThemeId = "claude" | "midnight" | "light" | "system";
 type AnimationLevel = "off" | "subtle" | "full";
+type FontId = "jetbrains-mono" | "system-sans" | "system-mono";
 
 type Tier = {
   id: string;          // stable slug, e.g. "workhorse"
@@ -35,6 +36,7 @@ type ProfileSettings = {
 
 type UiSettings = {
   theme: ThemeId;                       // default "claude"
+  font: FontId;                         // default "jetbrains-mono", including documents saved before this field
   animations: AnimationLevel;           // default "subtle"
   hotkeys: Record<string, string>;      // command id -> binding, only overrides of the defaults
   panels: { list: boolean; context: boolean; hostAgent: boolean };
@@ -54,7 +56,11 @@ type UiSettings = {
 | `profiles-set` | `{ projectId, revision, profile: ProfileId, patch: ProfileSettings }` | same as get; goes through `settings-application.ts` with an `EFFECTS` entry (`profiles`: models and prompts). The patch replaces the fields it names; `revision` is the `settings-snapshot` revision |
 | `profile-tools` | `{ projectId, profile: ProfileId }` | `{ groups: { id, label, source: "core" \| "plugin" \| "mcp" \| "skill", locked: boolean, tools: { name, description, parameters: unknown, enabled: boolean }[] }[] }` |
 | `prompt-render` | `{ projectId, profile: ProfileId, chatId? }` | `{ sections: { id, label, source: string, editable: boolean, text: string, tokens: number }[], totalTokens }` |
-| `chat-stop` | `{ id, chatId? }` | `{ stopped: boolean }` aborts the running Coordinator turn of that chat (⌘.); history kept. Added by the web workstream: no existing request stops a Coordinator turn. |
+| `chat-stop` | `{ projectId, chatId?, reason? }` | `{ stopped: boolean, chatId }` aborts the running Coordinator turn; queued inputs withdrawn, history kept, other chats and background agents keep running. |
+| `schedule-run` | `{ id, scheduleId }` | runs now, enabled or not; refuses a second in-flight run. |
+| `schedule-update` | `{ id, scheduleId, revision, name?, text?, schedule? }` | revision-checked edit of name, prompt and timing. |
+| `schedule-delete` | `{ id, scheduleId, revision }` | `{ schedule }`; owner delete keeps a ten-minute tombstone. |
+| `schedule-restore` | `{ id, scheduleId }` | restores the exact deleted schedule, including id, revision and enabled state. |
 
 Notes:
 - Tier storage: `<home>/tiers.json`. On first read with no file, generate tiers from the current project models so nothing changes for existing projects.
@@ -92,7 +98,7 @@ type Approval = {
 };
 ```
 
-- Settings: `model` is a plain `"provider/model"` ref checked against the live catalog. Until tiers land, `effectiveModel` is the set model, else the tier's first model, else the newest active project's model (null when there is none, and send refuses). `tier: null` clears the tier. `tools` are the Host agent's own tools (what `disabledTools` names); `actions` are the host actions behind `host_call`. A patch needs the current `revision`.
+- Settings: `model` is a plain `"provider/model"` ref checked against the live catalog. `effectiveModel` is the set model, else the tier's first model, else the newest active project's model (null when there is none, and send refuses). `tier: null` clears the tier; `model: null` clears the pin, and choosing a tier clears the pin too. `tools` are the Host agent's own tools (what `disabledTools` names); `actions` are the host actions behind `host_call`. A patch needs the current `revision`.
 - Live streaming: `GET /live?project=host` streams the same frame shape as a coordinator chat's live stream (text, thinking, tools with status and duration).
 - Tools for the Host agent are generated from an allow-list over `Request` actions (`src/host-agent-tools.ts`): one `host_call { action, input }` tool validated with `Request`, one `host_actions` tool that lists allowed actions with their input schema and a one-line description, plus `ui_focus { view, projectId?, chatId?, section? }` and `ui_set` (wraps `ui-set`). A script asserts every `Request` action is either allowed, marked dangerous, or explicitly excluded with a reason.
 - Dangerous actions (at least: `delete`, `archive`, `remove`, `job-approve`, `deploy-start`, `workspace-revoke`, `github-revoke`, `telegram-unpair`, `upload-delete`, `worktrees-cleanup`, `remote-revoke`) create a pending `Approval` instead of running. The tool returns at once with the approval id. When the owner decides, the host runs the stored request (on approve) and posts the outcome to the Host agent as a follow-up.
@@ -132,6 +138,7 @@ type MemoryEntry = {
 | --- | --- | --- |
 | `memory-index` | `{ projectId, includeArchive?: boolean }` | `{ entries: MemoryEntry[], brokenLinks: { from: string, to: string }[] }` |
 | `memory-undo` | `{ projectId, path, revision }` | `{ entry: MemoryEntry \| null }` restores the previous revision (or removes a just-created entry) |
+| `memory-recent` | `{ projectId }` | `{ writes: { path, revision, author, updatedAt, created, undone, current }[] }`; newest first, at most 50, so reloaded chat rows retain Undone and stale-write state. |
 
 - Kind, status, summary, supersededBy and source live in optional YAML front matter. Without it, classify by folder on read (`preferences.md` → preference, `decisions/` → decision, `MEMORY.md`, `research/` (legacy included), `plans/` and UUID-named notes → archive, everything else, `runbooks/` included → procedure). Malformed front matter is ignored and the folder rule applies. Never move or rewrite the owner's existing files during a read.
 - The index replaces the hand-written `MEMORY.md` injection: titles plus summaries, archive and preferences excluded, superseded decisions marked with their replacement, bounded (3,000 chars). It is the `prompt-render` section "Memory index". `brokenLinks` lists relative `.md` links and `supersededBy` targets that do not exist; external links are ignored.
@@ -139,3 +146,9 @@ type MemoryEntry = {
 - Current preferences (bounded, e.g. 4,000 chars, with revision) are injected into every role prompt as their own `prompt-render` section "Preferences (memory)".
 - Coordinator prompt: when the owner corrects something or states a lasting preference, save it as a preference without asking (YOLO), keep review packets and statuses out of memory, mark replaced decisions superseded instead of adding correction documents. Memory never grants execution authority.
 - Chat rendering: knowledge tool calls render as memory rows: a write as "Remembered: <title> · Undo · Edit", a read as "Used memory: <kind> · <title>", linking to the entry in the Memory view.
+
+## Appearance and transcript diagnostics
+
+- JetBrains Mono is bundled locally as a variable woff2 with its SIL OFL license; no runtime CDN. `font` applies across the app, with System sans and System mono alternatives and local fallbacks. `/ui2/*.woff2` is served as `font/woff2`; CSP allows only same-origin fonts.
+- PR36 live frames may include `nested: { running: string[], done: number, failed: number }`. A running codemode tool row summarizes these without expanding the row.
+- `show.context.compactionFailure` remains visible as a quiet status-line warning and an expandable, bounded error in Settings → Context; it is not inserted into the primary chat transcript.

@@ -30,6 +30,7 @@ export function memoryTitle(path) {
 }
 
 let cache = { projectId: null, entries: [], source: "", brokenLinks: [] };
+let recentWrites = new Map();
 let query = "";
 
 let archive = false;
@@ -42,6 +43,22 @@ export async function loadMemory() {
   return cache;
 }
 export const memoryEntry = (path) => (cache.projectId === state.projectId ? cache.entries.find((item) => item.path === path) : null);
+
+/** Host-owned Undo state, including writes made and undone before this page loaded. */
+export async function loadRecentMemory() {
+  const gen = state.generation,
+    projectId = state.projectId;
+  if (!projectId) return;
+  const recent = await call("memory-recent", { projectId });
+  if (stale(gen) || projectId !== state.projectId) return;
+  recentWrites = new Map(recent.writes.map((write) => [`${write.path}@${write.revision}`, write]));
+}
+export const memoryWrite = (path, revision) => recentWrites.get(`${path}@${revision}`);
+export function markMemoryUndone(path, revision) {
+  const key = `${path}@${revision}`,
+    write = recentWrites.get(key);
+  recentWrites.set(key, { ...write, path, revision, undone: true, current: false });
+}
 
 /** The Memory list in the center. */
 export async function renderMemoryList(root) {

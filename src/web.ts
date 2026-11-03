@@ -129,18 +129,20 @@ export async function startWeb(
   // The feature modules under web/app/ are imported by app.js; only files that exist at start are served, never a path from the request.
   for (const file of readdirSync(fileURLToPath(new URL("../web/app/", import.meta.url))))
     if (/^[a-z]+\.js$/.test(file)) assets.set(`/app/${file}`, { path: `app/${file}`, mime: "text/javascript; charset=utf-8" });
-  // UI 2.0 client: the flat files present in web-ui2/ at start, under /ui2/; never a path from the request.
+  // UI 2.0 client: the flat files and bundled font present in web-ui2/ at start, under /ui2/; never a path from the request.
   const ui2Assets = new Map<string, { path: string; mime: string }>();
   const ui2Dir = fileURLToPath(new URL("../web-ui2/", import.meta.url));
   for (const file of existsSync(ui2Dir) ? readdirSync(ui2Dir) : [])
-    if (/^[a-z0-9-]+\.(js|css|html)$/.test(file))
+    if (/^[a-z0-9-]+\.(js|css|html|woff2)$/.test(file))
       ui2Assets.set(file === "index.html" ? "/ui2/" : `/ui2/${file}`, {
         path: join(ui2Dir, file),
         mime: file.endsWith(".css")
           ? "text/css; charset=utf-8"
           : file.endsWith(".html")
             ? "text/html; charset=utf-8"
-            : "text/javascript; charset=utf-8",
+            : file.endsWith(".woff2")
+              ? "font/woff2"
+              : "text/javascript; charset=utf-8",
       });
   const server = createServer(async (request, response) => {
     const headers = {
@@ -149,7 +151,7 @@ export async function startWeb(
       "referrer-policy": "no-referrer",
       // style-src 'unsafe-inline': Mermaid's SVG carries a <style> element and style="" attributes (sanitized, securityLevel strict), which style-src 'self' blocks. Scripts stay 'self' only.
       "content-security-policy":
-        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     };
     let status = 400;
     try {

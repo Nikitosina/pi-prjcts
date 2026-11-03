@@ -1,9 +1,9 @@
 // Center: the Coordinator chat. Transcript from `show`, older pages from `chat-history`, live frames from `/live`.
 // Tool calls are compact rows; a finished turn folds runs of two or more rows into one group; reports link to the worker.
-import { call, contract, isUnavailable, stream, uuid } from "./api.js";
+import { call, stream, uuid } from "./api.js";
 import { clip, clock, dur, esc, markdown, oneLine } from "./format.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
-import { memoryEntry, memoryKind, memoryTitle } from "./memory.js";
+import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
@@ -33,7 +33,7 @@ export async function loadChat() {
         const gen = state.generation,
           id = state.projectId;
         if (!id) return;
-        const view = await call("show", { id, ...chatArgs() });
+        const [view] = await Promise.all([call("show", { id, ...chatArgs() }), loadRecentMemory().catch(fail)]);
         if (stale(gen)) return;
         state.view = view;
         emit("view", view);
@@ -72,7 +72,9 @@ function ensureLive() {
     const previous = state.live;
     state.live = frame;
     emit("live", frame);
-    if (previous && (previous.entries !== frame.entries || previous.running !== frame.running)) void loadChat();
+    const compaction =
+      previous && (previous.compacting !== frame.compacting || previous.compactionFailure?.error !== frame.compactionFailure?.error);
+    if (previous && (previous.entries !== frame.entries || previous.running !== frame.running || compaction)) void loadChat();
     else renderLive();
   });
 }
@@ -245,8 +247,6 @@ function summary(name, args, preview) {
   return first ?? "";
 }
 const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
-/** Writes undone from this page (path@revision), so their row says so instead of offering Undo again. */
-const undone = new Set();
 export function toolRowHtml({ call: item, result }, liveStatus) {
   const status = liveStatus ?? (result ? (result.isError ? "error" : "ok") : state.live?.running ? "running" : "ok");
   const args = parseArgs(item.argsPreview);
@@ -284,8 +284,15 @@ function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
     title = path ? (memoryEntry(path)?.title ?? memoryTitle(path)) : "memory index";
   const revision = /"revision":\s*"([^"]+)"/.exec(result?.preview ?? "")?.[1] ?? "";
-  if (item.name === "projects_knowledge_write")
-    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? (undone.has(`${path}@${revision}`) ? `<span class="muted small">Undone</span>` : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`) : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+  if (item.name === "projects_knowledge_write") {
+    const write = revision ? memoryWrite(path, revision) : null;
+    const action = write?.undone
+      ? `<span class="muted small">Undone</span>`
+      : write && !write.current
+        ? `<span class="muted small">Changed since</span>`
+        : `<button type="button" class="link-btn" data-memory-undo="${esc(path)}" data-revision="${esc(revision)}">Undo</button>`;
+    return `<div class="memory-row" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◆</span><span class="mem-text">${status === "error" ? "Could not remember" : "Remembered"}: <button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button></span>${status === "ok" && revision ? action : ""}<button type="button" class="link-btn" data-memory="${esc(path)}" data-edit="1">Edit</button></div>`;
+  }
   const kind = path ? memoryKindLabel(path) : "";
   return `<div class="memory-row used" data-tool="${esc(item.name)}" data-status="${status}"><span class="mem-icon" aria-hidden="true">◇</span><span class="mem-text">Used memory: ${kind ? `${esc(kind)} · ` : ""}${path ? `<button type="button" class="link-btn" data-memory="${esc(path)}">${esc(title)}</button>` : esc(item.name === "projects_knowledge_list" ? "index" : title)}</span></div>`;
 }
@@ -295,6 +302,15 @@ function memoryKindLabel(path) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------- live
+
+function nestedStatus(nested) {
+  if (!nested) return "";
+  const parts = [];
+  if (nested.running?.length) parts.push(`now ${nested.running.join(", ")}`);
+  if (nested.done)
+    parts.push(`${nested.done} ${nested.done === 1 ? "call" : "calls"} done${nested.failed ? `, ${nested.failed} failed` : ""}`);
+  return parts.join(" · ");
+}
 
 function renderLive() {
   const node = document.querySelector("#live-turn");
@@ -308,11 +324,12 @@ function renderLive() {
     node.replaceChildren();
     return;
   }
+  const nested = nestedStatus(frame.nested);
   const tools = frame.tools
     .filter((tool) => tool.status !== "done")
     .map(
       (tool) =>
-        `<div class="tool-row live" data-tool="${esc(tool.name)}" data-status="running"><div class="tool-line"><span class="tool-head static"><span class="spin" aria-label="running"></span><span class="tool-name">${esc(tool.name)}</span><span class="tool-args">${esc(tool.status)}</span><span class="tool-dur"></span></span></div></div>`,
+        `<div class="tool-row live" data-tool="${esc(tool.name)}" data-status="running"><div class="tool-line"><span class="tool-head static"><span class="spin" aria-label="running"></span><span class="tool-name">${esc(tool.name)}</span><span class="tool-args">${esc(tool.status)}${tool.name === "codemode" && nested ? ` <span data-nested>${esc(nested)}</span>` : ""}</span><span class="tool-dur"></span></span></div></div>`,
     )
     .join("");
   const status = frame.compacting
@@ -410,10 +427,15 @@ form.addEventListener("submit", async (event) => {
 });
 export async function stopTurn() {
   if (!state.live?.running) return;
-  const result = await contract("chat-stop", { id: state.projectId, ...chatArgs() }).catch(fail);
-  // chat-stop is the one request the backend has not added yet (docs/ui2-contract.md); say so plainly.
-  if (isUnavailable(result)) toast("This host cannot stop a coordinator turn yet.");
-  else if (result) toast(result.stopped ? "Stopped. History kept." : "Nothing was running.");
+  const gen = state.generation;
+  try {
+    const result = await call("chat-stop", { projectId: state.projectId, reason: "owner pressed Stop", ...chatArgs() });
+    if (stale(gen)) return;
+    toast(result.stopped ? "Stopped. History kept." : "Nothing was running.");
+    await loadChat();
+  } catch (error) {
+    fail(error);
+  }
 }
 export function toggleSteer() {
   if (!state.live?.running) return false;
@@ -462,7 +484,7 @@ export async function transcriptClick(event, root, rerender) {
       return null;
     });
     if (stale(gen) || !result) return true;
-    undone.add(`${undo.dataset.memoryUndo}@${undo.dataset.revision}`);
+    markMemoryUndone(undo.dataset.memoryUndo, undo.dataset.revision);
     toast(result.entry ? "Memory restored to the previous revision." : "Memory entry removed.");
     rerender();
     return true;

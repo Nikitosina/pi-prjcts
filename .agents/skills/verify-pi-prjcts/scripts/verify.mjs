@@ -467,6 +467,12 @@ async function openBrowser(run, sinks) {
       },
       navigate: (url) => send("Page.navigate", { url }, sessionId),
       reload: () => send("Page.reload", {}, sessionId),
+      select: async (selector, value) => {
+        const changed = await page.evaluate(
+          `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', { bubbles: true })); return el.value === ${JSON.stringify(value)}; })()`,
+        );
+        if (!changed) throw Error(`select target or option not found: ${selector} = ${value}`);
+      },
       cdp: (method, params) => send(method, params, sessionId),
       shot: async (dir, name) => {
         const image = await send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -808,6 +814,24 @@ const journeys = {
     if (await page.evaluate(`location.hash.includes("token")`)) throw Error("token left in the URL");
     await page.waitFor(`!!document.querySelector('#tree [data-chat="main"]')`, "Main chat nested under the project");
     record("entry", `opened ${origin}/ui2/ with the launch token; tree shows ${PROJECT_NAME} with Main nested`);
+    // The default face is a real locally served font, not merely a family name that can silently fall back.
+    const defaultFont = await page.evaluate(`(async () => {
+      await document.fonts.ready;
+      return { pref: document.documentElement.dataset.font, body: getComputedStyle(document.body).fontFamily,
+        faces: [...document.fonts].filter(f => f.family.replace(/["']/g, '') === 'JetBrains Mono').map(f => f.status) };
+    })()`);
+    const fontAsset = await fetch(`${origin}/ui2/jetbrains-mono-latin-wght-normal.woff2`);
+    if (
+      defaultFont.pref !== "jetbrains-mono" ||
+      !/JetBrains Mono/.test(defaultFont.body) ||
+      !defaultFont.faces.includes("loaded") ||
+      !fontAsset.ok ||
+      fontAsset.headers.get("content-type") !== "font/woff2"
+    )
+      throw Error(
+        `default local JetBrains Mono: ${JSON.stringify({ defaultFont, status: fontAsset.status, mime: fontAsset.headers.get("content-type") })}`,
+      );
+    record("verified", "JetBrains Mono is the default app font; the bundled woff2 loads locally with font/woff2");
     // An empty chat offers three starter prompts; one click puts the text in the focused composer without sending it.
     await page.waitFor(`document.querySelectorAll('#feed .starters [data-starter]').length === 3`, "three starter prompts");
     await page.click("#feed .starters [data-starter]");
@@ -920,7 +944,19 @@ const journeys = {
     );
     const undone = (await rpc(run, { action: "memory-index", projectId })).entries.some((entry) => entry.path === indexed.path);
     if (undone) throw Error("memory-undo left decisions/greeting-style.md in memory-index");
-    record("side-effect", `memory-index listed ${indexed.path} as a current decision; Undo removed it through memory-undo`);
+    const recent = (await rpc(run, { action: "memory-recent", projectId })).writes.find(
+      (write) => write.path === indexed.path && write.revision === indexed.revision,
+    );
+    if (!recent?.undone) throw Error(`memory-recent does not report the undone write: ${JSON.stringify(recent)}`);
+    await page.reload();
+    await page.waitFor(
+      `document.body.dataset.ready === '1' && /Undone/.test(document.querySelector('#feed .memory-row[data-tool="projects_knowledge_write"]')?.innerText ?? '') && !document.querySelector('#feed [data-memory-undo]')`,
+      "Remembered row stays Undone after reload",
+    );
+    record(
+      "side-effect",
+      `memory-index and memory-recent record Undo; the reloaded Remembered row stays Undone without another Undo action`,
+    );
     // Settings by hotkey (⌘,), theme section by its letter, switch to Midnight.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings overlay open");
@@ -939,18 +975,26 @@ const journeys = {
     writeFileSync(join(dir, "host-ui-get.json"), JSON.stringify(ui, null, 2));
     if (ui.ui?.theme !== "midnight") throw Error(`host ui document not updated: ${JSON.stringify(ui)}`);
     record("side-effect", `ui-set stored theme midnight on the host (ui revision ${String(ui.revision).slice(0, 8)})`);
+    // Appearance also selects the app font through the same host document.
+    await page.click('#settings [data-font-option="system-sans"]');
+    await page.waitFor(`document.documentElement.dataset.font === 'system-sans'`, "system sans applied");
+    const sans = await page.evaluate(`getComputedStyle(document.body).fontFamily`);
+    const uiSans = await rpc(run, { action: "ui-get" });
+    if (/JetBrains Mono/.test(sans) || uiSans.ui?.font !== "system-sans")
+      throw Error(`font selection: ${JSON.stringify({ sans, ui: uiSans.ui })}`);
+    record("side-effect", "Theme → Font selects System sans and ui-set stores font system-sans");
     await page.press("Escape", { keyCode: 27 });
     await page.waitFor(`!document.querySelector('#settings').open`, "settings closed");
     // Poison the browser's pre-paint cache: after reload the theme must come from the host's ui document, not localStorage.
     await page.evaluate(
-      `localStorage.setItem('pi-ui2-ui', JSON.stringify({ ...JSON.parse(localStorage.getItem('pi-ui2-ui') || '{}'), theme: 'light' }))`,
+      `localStorage.setItem('pi-ui2-ui', JSON.stringify({ ...JSON.parse(localStorage.getItem('pi-ui2-ui') || '{}'), theme: 'light', font: 'system-mono' }))`,
     );
     await page.reload();
     await page.waitFor(
-      `document.body.dataset.ready === "1" && document.documentElement.dataset.theme === 'midnight'`,
-      "midnight from the host survives reload over a stale local cache",
+      `document.body.dataset.ready === "1" && document.documentElement.dataset.theme === 'midnight' && document.documentElement.dataset.font === 'system-sans'`,
+      "midnight and system sans from the host survive reload over a stale local cache",
     );
-    record("verified", "after reload with a stale local cache (light), the page shows midnight from ui-get");
+    record("verified", "after reload with a stale local cache (light/system mono), ui-get restores midnight and system sans");
     await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "worker after reload", 30000);
     await page.shot(dir, "07-chat-midnight");
     // Host agent drawer from anywhere with \.
@@ -1032,6 +1076,25 @@ const journeys = {
         "thinking back to medium",
       );
       record("side-effect", `host-agent-settings thinking low at revision ${tuned.revision}, then back to medium`);
+      // A pin can be cleared, and choosing a tier clears the pin so the tier's effective model actually applies.
+      await page.select("#ha-model-select", "fake/fake-model");
+      await page.waitFor(`document.querySelector('#ha-model-select').value === 'fake/fake-model'`, "host model pinned");
+      await until(async () => (await rpc(run, { action: "host-agent-settings" })).model === "fake/fake-model", "host model pin saved");
+      const hostTiers = (await rpc(run, { action: "tiers-get" })).tiers;
+      await page.select("#ha-tier-select", hostTiers[0].id);
+      await until(async () => {
+        const current = await rpc(run, { action: "host-agent-settings" });
+        return current.tier === hostTiers[0].id && current.model === null;
+      }, "tier selection clears the model pin");
+      await page.select("#ha-model-select", "fake/fallback-model");
+      await until(
+        async () => (await rpc(run, { action: "host-agent-settings" })).model === "fake/fallback-model",
+        "second model pin saved",
+      );
+      await page.select("#ha-model-select", "");
+      await until(async () => (await rpc(run, { action: "host-agent-settings" })).model === null, "model pin cleared by the owner");
+      await page.waitFor(`document.querySelector('#ha-model-select').value === ''`, "From tier selected after clearing the pin");
+      record("side-effect", "host-agent-settings: pin a model, select a tier (pin cleared), pin again, then From tier sends model null");
       // Approve: a spare project, archived by the Host agent only after the owner presses Approve in the drawer.
       const spare = await rpc(run, {
         action: "create",
@@ -1229,7 +1292,86 @@ const journeys = {
     if (offTier.tier || offTier.effectiveModel !== "fake/fake-model")
       throw Error(`coordinator back on the project model: ${JSON.stringify(offTier)}`);
     record("side-effect", `Model rows: coordinator on ${named[1].id} (effective fake/fallback-model), then Project model (no tier)`);
+    // Automations: run for real, edit with the record revision, then confirm Delete and restore through the Undo tombstone.
+    const scheduled = await rpc(run, {
+      action: "schedule-create",
+      id: projectId,
+      atMs: Date.now() + 3600000,
+      everyMs: 3600000,
+      name: "UI2 hourly check",
+      text: "Verify automation run",
+    });
+    const autoCard = `#settings .auto-card[data-kind="schedule"][data-id="${scheduled.id}"]`;
+    await page.click('#settings nav [data-section="automations"]');
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(autoCard)})`, "schedule automation card");
+    await page.click(`${autoCard} [data-auto-run]`);
+    await until(async () => {
+      const history = await rpc(run, { action: "schedule-history", id: projectId, kind: "intents" });
+      return history.routines.some((routine) => routine.routineId === scheduled.id && routine.recentRuns.length === 1);
+    }, "Run now records a real schedule run");
+    await page.click(`${autoCard} [data-auto-edit]`);
+    await page.waitFor(`!!document.querySelector('${autoCard} [data-edit-name]')`, "schedule edit form");
+    await page.evaluate(`(() => {
+      const card = document.querySelector(${JSON.stringify(autoCard)});
+      const set = (selector, value) => { const field = card.querySelector(selector); field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); };
+      set('[data-edit-name]', 'UI2 edited check'); set('[data-edit-text]', 'Edited automation prompt'); set('[data-edit-minutes]', '120');
+    })()`);
+    await page.click(`${autoCard} [data-auto-save]`);
+    await until(async () => {
+      const item = (await rpc(run, { action: "schedule-snapshot", id: projectId })).schedules.find((entry) => entry.id === scheduled.id);
+      return item?.name === "UI2 edited check" && item.text === "Edited automation prompt" && item.everyMs === 7200000;
+    }, "edited schedule saved");
+    await page.click(`${autoCard} [data-auto-delete]`);
+    await page.waitFor(
+      `/Confirm delete/.test(document.querySelector('${autoCard} [data-auto-delete]')?.innerText ?? '')`,
+      "delete confirmation",
+    );
+    await page.click(`${autoCard} [data-auto-delete]`);
+    await page.waitFor(`!document.querySelector(${JSON.stringify(autoCard)})`, "deleted schedule leaves the cards");
+    await page.waitFor(`[...document.querySelectorAll('#toasts .toast button')].some(n => n.textContent === 'Undo')`, "delete Undo toast");
+    await page.evaluate(`[...document.querySelectorAll('#toasts .toast button')].find(n => n.textContent === 'Undo').click()`);
+    await until(async () => {
+      const item = (await rpc(run, { action: "schedule-snapshot", id: projectId })).schedules.find((entry) => entry.id === scheduled.id);
+      return item?.name === "UI2 edited check" && item.revision === scheduled.revision + 1 && item.enabled === scheduled.enabled;
+    }, "Undo restores the exact schedule tombstone");
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(autoCard)})`, "restored schedule card");
+    await delay(300);
+    await page.shot(dir, "15b-settings-automations");
+    record(
+      "side-effect",
+      "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule",
+    );
     await page.press("Escape", { keyCode: 27 });
+    // Stop is a real coordinator abort, not a contract placeholder; history stays and a follow-up can run.
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "VERIFY-STOP hold this turn" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(`document.querySelector('#stop-btn')?.hidden === false`, "running Stop button", 30000);
+    await page.click("#stop-btn");
+    await until(
+      async () => !(await rpc(run, { action: "show", id: projectId })).chats.find((chat) => chat.id === "main")?.busy,
+      "chat idle after Stop",
+    );
+    await page.waitFor(`document.querySelector('#stop-btn')?.hidden === true`, "Stop leaves after the abort");
+    const stoppedView = await rpc(run, { action: "show", id: projectId });
+    if (!stoppedView.messages.some((item) => item.text?.includes("VERIFY-STOP hold this turn")))
+      throw Error("Stop dropped the owner message");
+    record("side-effect", "Stop calls chat-stop with projectId; the running chat becomes idle and its history stays");
+    // PR36: a codemode row keeps nested calls inspectable in one compact live status and in its bounded detail.
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "VERIFY-CODEMODE nested diagnostics" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(
+      `/now bash/.test(document.querySelector('#feed [data-tool="codemode"] [data-nested]')?.innerText ?? '') && /1 call done, 1 failed/.test(document.querySelector('#feed [data-tool="codemode"] [data-nested]')?.innerText ?? '')`,
+      "nested codemode running/done/failed summary",
+      60000,
+    );
+    await page.waitFor(`/Nested codemode finished/.test(document.querySelector('#feed').innerText)`, "nested codemode reply", 60000);
+    await page.click('#feed [data-tool="codemode"] .tool-head');
+    const nestedDetail = await page.evaluate(`document.querySelector('#feed [data-tool="codemode"] .tool-detail')?.innerText ?? ''`);
+    if (!/nested-ok/.test(nestedDetail) || nestedDetail.length > 12000)
+      throw Error(`codemode detail is missing or unbounded: ${nestedDetail.length}`);
+    record("visible", "PR36 codemode row shows nested bash now, one done and one failed; expanding it keeps a bounded result preview");
     // A coordinator files a dangerous request through owner_approval_request: the chat row links to the card, the pill counts it.
     const spare2 = await rpc(run, {
       action: "create",
@@ -1270,6 +1412,35 @@ const journeys = {
       "side-effect",
       "coordinator owner_approval_request: chat row → drawer card (Coordinator) → Deny; outcome row in the chat; project kept",
     );
+    // PR36 compaction failures stay visible but quiet: a status-line warning and an expandable, bounded error in Context.
+    await page.click("#composer textarea");
+    await page.cdp("Input.insertText", { text: "VERIFY-COMPACTION-FAIL retain this diagnostic marker" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(
+      `/VERIFY-FAKE-REPLY: VERIFY-COMPACTION-FAIL/.test(document.querySelector('#feed').innerText)`,
+      "compaction fixture reply",
+      60000,
+    );
+    await rpc(run, { action: "compact", id: projectId });
+    await until(
+      async () => /UI2-SUMMARY-FAIL/.test((await rpc(run, { action: "show", id: projectId })).context.compactionFailure?.error ?? ""),
+      "compaction failure stored",
+    );
+    await page.waitFor(
+      `/compaction failed/i.test(document.querySelector('#statusline').innerText)`,
+      "status line names the failed compaction",
+    );
+    if (await page.evaluate(`document.querySelector('#feed').innerText.includes('UI2-SUMMARY-FAIL')`))
+      throw Error("compaction failure became chat noise");
+    await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
+    await page.click('#settings nav [data-section="context"]');
+    await page.waitFor(`!!document.querySelector('#settings [data-compaction-failure]')`, "Context compaction failure details");
+    await page.click("#settings [data-compaction-failure] summary");
+    const failureText = await page.evaluate(`document.querySelector('#settings [data-compaction-failure]').innerText`);
+    if (!/UI2-SUMMARY-FAIL/.test(failureText) || failureText.length > 5000) throw Error(`compaction detail: ${failureText.slice(0, 500)}`);
+    await page.shot(dir, "16c-context-compaction-failed");
+    await page.press("Escape", { keyCode: 27 });
+    record("visible", "PR36 failed compaction: status warning, no chat noise, expandable bounded UI2-SUMMARY-FAIL detail in Context");
     // Light theme through the settings overlay, then the narrow layout.
     await page.press(",", { code: "Comma", keyCode: 188, modifiers: 4 });
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings again");
@@ -1321,7 +1492,9 @@ const journeys = {
     await page.press("h", { keyCode: 72 });
     await page.click('#settings [data-theme-option="claude"]');
     await page.waitFor(`document.documentElement.dataset.theme === 'claude'`, "claude restored");
-    record("verified", "no horizontal overflow at 390 px; themes claude, midnight and light applied through the settings overlay");
+    await page.click('#settings [data-font-option="jetbrains-mono"]');
+    await page.waitFor(`document.documentElement.dataset.font === 'jetbrains-mono'`, "JetBrains Mono restored");
+    record("verified", "no horizontal overflow at 390 px; themes and host-persisted fonts applied through the settings overlay");
     writeFileSync(join(dir, "feed-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
     if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },

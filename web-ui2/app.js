@@ -207,7 +207,8 @@ function paintStatusLine() {
     ctx = view?.context;
   const modelRef = state.profiles?.coordinator?.effectiveModel ?? view?.project?.model ?? "";
   const pct = ctx?.window ? Math.round((100 * (ctx.tokens ?? 0)) / ctx.window) : null;
-  const cost = state.usage?.coordinator?.total?.cost?.total;
+  const cost = state.usage?.coordinator?.total?.cost?.total,
+    compactionFailed = ctx?.compactionFailure && !ctx?.compacting;
   const status = live?.running
     ? live.compacting
       ? "compacting"
@@ -220,7 +221,7 @@ function paintStatusLine() {
             : "working"
     : "idle";
   document.querySelector("#statusline").innerHTML =
-    `<span class="sl-item"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span><span class="sl-item mono" title="${esc(modelRef)}">${esc(shortModel(modelRef) || "–")}</span><span class="sl-item mono sl-think">think ${esc(state.thinking ?? "medium")}</span><span class="sl-item mono" title="Context">${pct === null ? "ctx –" : `ctx ${tokens(ctx.tokens)}/${tokens(ctx.window)} <span class="sl-bar"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`}</span><span class="sl-item sl-cost mono" title="Coordinator cost of this chat">${esc(Number.isFinite(cost) ? usd(cost) : "$–")} chat</span>${limitItems()}<span class="grow"></span><span class="sl-item mono ${state.connected ? "ok" : "off"}">${state.connected ? "● connected" : "○ reconnecting"}</span><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
+    `<span class="sl-item"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span><span class="sl-item mono" title="${esc(modelRef)}">${esc(shortModel(modelRef) || "–")}</span><span class="sl-item mono sl-think">think ${esc(state.thinking ?? "medium")}</span><span class="sl-item mono" title="Context">${pct === null ? "ctx –" : `ctx ${tokens(ctx.tokens)}/${tokens(ctx.window)} <span class="sl-bar"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`}</span>${compactionFailed ? `<span class="sl-item mono t-needs" title="${esc(ctx.compactionFailure.error)}">compaction failed</span>` : ""}<span class="sl-item sl-cost mono" title="Coordinator cost of this chat">${esc(Number.isFinite(cost) ? usd(cost) : "$–")} chat</span>${limitItems()}<span class="grow"></span><span class="sl-item mono ${state.connected ? "ok" : "off"}">${state.connected ? "● connected" : "○ reconnecting"}</span><span class="sl-item hint"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
 }
 async function loadUsage() {
   const gen = state.generation;

@@ -172,6 +172,7 @@ async function context(body, alive) {
       forcePct = (100 * (window - reserve)) / window,
       usedPct = used === null ? 0 : Math.min(100, (100 * used) / window);
     body.innerHTML = `${line(profile === "coordinator" ? "How full this chat is, and where compaction starts." : "Context policy is shared by all profiles of this project.", "Drag the auto mark, or focus it and use ←/→ (Shift for 5%). Auto-compaction summarizes older turns in the background. At the force mark only the answer reserve is left, so the next turn waits for compaction. The reserve follows the auto mark.")}
+${live.compactionFailure && !live.compacting ? `<details class="compaction-failure" data-compaction-failure><summary>Last compaction failed</summary><p class="error-line small">${esc(clip(live.compactionFailure.error, 2000))}</p><p class="muted small">History is kept. Compact now retries with the current context.</p></details>` : ""}
 <div class="ctx-head mono"><span class="ctx-total">${used === null ? "per-chat use shown for the coordinator" : `${tokens(used)} / ${tokens(window)}`}</span><span class="muted">${used === null ? `${tokens(window)} window` : `${Math.round(usedPct)}% used`}</span></div>
 <div class="ctx-bar" role="group" aria-label="Context window">${used === null ? "" : `<div class="ctx-used" style="width:${usedPct}%"></div><span class="ctx-now" style="left:${usedPct}%" title="Current use: ${tokens(used)}"></span>`}<div class="ctx-reserve" style="left:${forcePct}%" title="Answer reserve: ${tokens(reserve)}"></div><button type="button" class="mark auto" data-mark="auto" style="left:${threshold}%" role="slider" aria-label="Auto-compaction threshold" aria-valuemin="10" aria-valuemax="95" aria-valuenow="${threshold}" aria-valuetext="${threshold}% (${tokens((window * threshold) / 100)})"><span>auto ${threshold}%</span></button><span class="mark force" style="left:${forcePct}%" title="Forced compaction at ${tokens(window - reserve)}"><span>force ${Math.round(forcePct)}%</span></span></div>
 <div class="ctx-legend mono small"><span>0</span><span>${tokens((window * threshold) / 100)} auto · ${tokens(window - reserve)} force</span><span>${tokens(window)} window</span></div>
@@ -440,22 +441,24 @@ function every(ms) {
       : `every ${min} min`;
 }
 function cronOf(record) {
-  if (record.calendar?.kind === "daily") {
-    const [h, m] = record.calendar.time.split(":");
+  const calendar = record.kind === "calendar" ? record.rule : record.calendar;
+  if (calendar?.kind === "daily") {
+    const [h, m] = calendar.time.split(":");
     return `${Number(m)} ${Number(h)} * * *`;
   }
-  if (record.calendar?.kind === "weekly") {
-    const [h, m] = record.calendar.time.split(":");
-    return `${Number(m)} ${Number(h)} * * ${record.calendar.days.join(",")}`;
+  if (calendar?.kind === "weekly") {
+    const [h, m] = calendar.time.split(":");
+    return `${Number(m)} ${Number(h)} * * ${calendar.days.join(",")}`;
   }
   if (record.everyMs && record.everyMs % 3600000 === 0) return `0 */${record.everyMs / 3600000} * * *`;
   if (record.everyMs) return `*/${Math.round(record.everyMs / 60000)} * * * *`;
   return "once";
 }
 function words(record) {
-  if (record.calendar?.kind === "daily") return `Daily at ${record.calendar.time}`;
-  if (record.calendar?.kind === "weekly")
-    return `Weekly ${record.calendar.days.map((d) => "Sun Mon Tue Wed Thu Fri Sat".split(" ")[d]).join(", ")} at ${record.calendar.time}`;
+  const calendar = record.kind === "calendar" ? record.rule : record.calendar;
+  if (calendar?.kind === "daily") return `Daily at ${calendar.time}`;
+  if (calendar?.kind === "weekly")
+    return `Weekly ${calendar.days.map((d) => "Sun Mon Tue Wed Thu Fri Sat".split(" ")[d]).join(", ")} at ${calendar.time}`;
   if (record.everyMs) return every(record.everyMs).replace(/^./, (c) => c.toUpperCase());
   return record.atMs ? `Once at ${new Date(record.atMs).toLocaleString()}` : "Once";
 }
@@ -465,20 +468,25 @@ async function automations(body, alive) {
     call("automation-snapshot", { id: state.projectId }),
   ]);
   if (!alive()) return;
-  const card = ({ kind, id, name, when, cron, text, on: enabled, last, target }) =>
-    `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span><button type="button" class="link-btn" data-history>History</button></footer></article>`;
+  let editing = null;
+  const card = ({ kind, id, name, when, cron, text, on: enabled, last, target, record }) => {
+    if (record && editing === id)
+      return `<article class="auto-card editing" data-kind="${kind}" data-id="${esc(id)}"><form data-auto-edit-form><div class="field-row"><label for="auto-name-${esc(id)}">Name</label><input id="auto-name-${esc(id)}" data-edit-name value="${esc(record.name ?? "")}" maxlength="100" placeholder="Schedule name" /></div><div class="field-row top"><label for="auto-text-${esc(id)}">Prompt</label><textarea id="auto-text-${esc(id)}" data-edit-text rows="3" maxlength="12000" required>${esc(record.text)}</textarea></div><div class="field-row"><label for="auto-minutes-${esc(id)}">Repeat every (minutes)</label><input id="auto-minutes-${esc(id)}" data-edit-minutes type="number" min="1" step="1" value="${record.everyMs ? record.everyMs / 60000 : ""}" placeholder="Once" /></div><div class="row"><button type="submit" class="primary small" data-auto-save>Save</button><button type="button" class="ghost-btn small" data-auto-cancel>Cancel</button></div></form></article>`;
+    return `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span>${record ? `<button type="button" class="link-btn" data-auto-run>Run now</button><button type="button" class="link-btn" data-auto-edit>Edit</button>` : ""}<button type="button" class="link-btn" data-history>History</button>${record ? `<button type="button" class="link-btn danger" data-auto-delete>Delete</button>` : ""}</footer></article>`;
+  };
   const chatName = (id) => (state.view?.chats ?? []).find((chat) => chat.id === id)?.title ?? id;
-  const cards = [
+  const cards = () => [
     ...schedules.schedules.map((record) =>
       card({
         kind: "schedule",
         id: record.id,
-        name: clip(record.text.split("\n")[0], 60) || record.id,
+        name: record.name || clip(record.text.split("\n")[0], 60) || record.id,
         when: words(record),
         cron: cronOf(record),
         text: record.text,
         on: record.enabled,
         last: record.lastRunAt ?? record.lastAtMs,
+        record,
       }),
     ),
     card({
@@ -504,11 +512,14 @@ async function automations(body, alive) {
       target: `→ ${chatName(auto.eventChat)}`,
     }),
   ];
-  body.innerHTML = `${line("Schedules, PR following and webhooks for this project.", "Switching applies at once; use Undo in the toast to switch back. Ask the coordinator to create, change or delete a schedule.")}<div class="auto-grid">${cards.join("")}</div>`;
+  const draw = () => {
+    body.innerHTML = `${line("Schedules, PR following and webhooks for this project.", "Run now executes even while off. Edit is revision-checked. Delete asks once more; Undo restores it within ten minutes.")}<div class="auto-grid">${cards().join("")}</div>`;
+  };
+  draw();
   const apply = async (kind, id, enabled) => {
-    if (kind === "schedule") await call("schedule-enable", { id: state.projectId, scheduleId: id, enabled });
+    if (kind === "schedule") return call("schedule-enable", { id: state.projectId, scheduleId: id, enabled });
     else
-      await call("automation-update", {
+      return call("automation-update", {
         id: state.projectId,
         change: kind === "follow" ? { follow: { enabled } } : { webhook: { enabled } },
       });
@@ -519,7 +530,9 @@ async function automations(body, alive) {
     const node = toggle.closest(".auto-card"),
       enabled = toggle.checked;
     try {
-      await apply(node.dataset.kind, node.dataset.id, enabled);
+      const changed = await apply(node.dataset.kind, node.dataset.id, enabled);
+      const record = schedules.schedules.find((item) => item.id === node.dataset.id);
+      if (record && changed) Object.assign(record, changed);
       toast(`${node.querySelector("b").textContent} ${enabled ? "on" : "off"}.`, {
         action: "Undo",
         onAction: async () => {
@@ -532,7 +545,98 @@ async function automations(body, alive) {
       sayFail(error);
     }
   });
+  body.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-auto-edit-form]");
+    if (!form) return;
+    event.preventDefault();
+    const node = form.closest(".auto-card"),
+      record = schedules.schedules.find((item) => item.id === node.dataset.id);
+    if (!record) return;
+    const minutes = Number(form.querySelector("[data-edit-minutes]").value),
+      cadence = minutes > 0 ? Math.round(minutes) * 60000 : null;
+    const patch = {
+      id: state.projectId,
+      scheduleId: record.id,
+      revision: record.revision,
+      name: form.querySelector("[data-edit-name]").value.trim() || null,
+      text: form.querySelector("[data-edit-text]").value.trim(),
+    };
+    if (cadence !== (record.everyMs ?? null))
+      patch.schedule = {
+        atMs: record.nextAtMs ?? record.atMs ?? Date.now() + (cadence ?? 3600000),
+        ...(cadence ? { everyMs: cadence } : {}),
+      };
+    try {
+      const saved = await call("schedule-update", patch);
+      Object.assign(record, saved);
+      editing = null;
+      say("Schedule saved.");
+      draw();
+    } catch (error) {
+      sayFail(error);
+    }
+  });
   body.addEventListener("click", async (event) => {
+    const node = event.target.closest(".auto-card"),
+      record = node?.dataset.kind === "schedule" ? schedules.schedules.find((item) => item.id === node.dataset.id) : null;
+    if (event.target.closest("[data-auto-cancel]")) {
+      editing = null;
+      return draw();
+    }
+    if (event.target.closest("[data-auto-edit]") && record) {
+      editing = record.id;
+      draw();
+      body.querySelector("[data-edit-name]")?.focus();
+      return;
+    }
+    const run = event.target.closest("[data-auto-run]");
+    if (run && record) {
+      run.disabled = true;
+      try {
+        await call("schedule-run", { id: state.projectId, scheduleId: record.id });
+        say("Schedule ran. History updated.");
+        if (alive()) paint();
+      } catch (error) {
+        run.disabled = false;
+        sayFail(error);
+      }
+      return;
+    }
+    const remove = event.target.closest("[data-auto-delete]");
+    if (remove && record) {
+      if (remove.dataset.armed !== "1") {
+        remove.dataset.armed = "1";
+        remove.textContent = "Confirm delete";
+        return;
+      }
+      remove.disabled = true;
+      try {
+        await call("schedule-delete", { id: state.projectId, scheduleId: record.id, revision: record.revision });
+        schedules.schedules = schedules.schedules.filter((item) => item.id !== record.id);
+        editing = null;
+        draw();
+        toast(`Deleted ${record.name ?? "schedule"}.`, {
+          action: "Undo",
+          ms: 10000,
+          onAction: async () => {
+            try {
+              const restored = await call("schedule-restore", { id: state.projectId, scheduleId: record.id });
+              schedules.schedules.push(restored);
+              if (alive()) {
+                say("Schedule restored.");
+                draw();
+              }
+            } catch (error) {
+              sayFail(error);
+            }
+          },
+        });
+      } catch (error) {
+        remove.disabled = false;
+        sayFail(error);
+      }
+      return;
+    }
     if (!event.target.closest("[data-history]")) return;
     const history = await call("schedule-history", { id: state.projectId, kind: "intents", limit: 10 }).catch(sayFail);
     if (!history || !alive()) return;
@@ -677,14 +781,27 @@ const THEMES = [
   { id: "light", label: "Light", hint: "Paper and ink" },
   { id: "system", label: "System", hint: "Claude or Light with the OS" },
 ];
+const FONTS = [
+  { id: "jetbrains-mono", label: "JetBrains Mono", hint: "Bundled · default" },
+  { id: "system-sans", label: "System sans", hint: "Your device's UI font" },
+  { id: "system-mono", label: "System mono", hint: "Your device's mono font" },
+];
 function theme(body) {
-  const current = state.ui?.theme ?? "claude";
-  body.innerHTML = `${line("Same in every browser; the Host agent can change it too.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div>`;
+  const current = state.ui?.theme ?? "claude",
+    font = state.ui?.font ?? "jetbrains-mono";
+  body.innerHTML = `${line("Same in every browser; the Host agent can change it too.")}<div class="theme-grid" role="radiogroup" aria-label="Theme">${THEMES.map((item) => `<button type="button" role="radio" class="theme-card" data-theme-option="${item.id}" aria-checked="${item.id === current}"><span class="swatch sw-${item.id}" aria-hidden="true"><i></i><i></i><i></i></span><b>${item.label}</b><span class="muted small">${item.hint}</span></button>`).join("")}</div><div class="font-picker"><span class="label" id="font-label">Font</span><div class="font-options" role="radiogroup" aria-labelledby="font-label">${FONTS.map((item) => `<button type="button" role="radio" data-font-option="${item.id}" aria-checked="${item.id === font}"><span>${item.label}</span><span class="muted small">${item.hint}</span></button>`).join("")}</div></div>`;
   body.addEventListener("click", (event) => {
-    const pick = event.target.closest("[data-theme-option]");
-    if (!pick) return;
-    void setUi({ theme: pick.dataset.themeOption }).then((ok) => ok && say(`Theme: ${pick.querySelector("b").textContent}`));
-    body.querySelectorAll("[data-theme-option]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
+    const pick = event.target.closest("[data-theme-option]"),
+      fontPick = event.target.closest("[data-font-option]");
+    if (pick) {
+      void setUi({ theme: pick.dataset.themeOption }).then((ok) => ok && say(`Theme: ${pick.querySelector("b").textContent}`));
+      body.querySelectorAll("[data-theme-option]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
+    }
+    if (fontPick) {
+      const choice = FONTS.find((item) => item.id === fontPick.dataset.fontOption);
+      void setUi({ font: fontPick.dataset.fontOption }).then((ok) => ok && say(`Font: ${choice.label}`));
+      body.querySelectorAll("[data-font-option]").forEach((node) => node.setAttribute("aria-checked", String(node === fontPick)));
+    }
   });
 }
 function animations(body) {

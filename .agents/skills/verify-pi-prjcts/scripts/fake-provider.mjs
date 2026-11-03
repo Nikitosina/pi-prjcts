@@ -6,6 +6,7 @@
 // coordinator file the same request through owner_approval_request.
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 
 const [portFile, requestLog] = process.argv.slice(2);
 if (!portFile || !requestLog) {
@@ -122,6 +123,13 @@ const server = createServer((req, res) => {
               requestId: "verify-job",
             })
           : say("Started the Job.");
+    } else if (user.includes("VERIFY-CODEMODE") && names.includes("codemode")) {
+      reply =
+        stage === 0
+          ? call("codemode", {
+              code: `try { await tools.read({ path: "missing-ui2.txt" }); } catch {}\nconst nested = await tools.bash({ command: "sleep 2; printf nested-ok" });\nconsole.log(nested.output);`,
+            })
+          : say("Nested codemode finished.");
     } else if (user.includes("VERIFY-MEMORY") && names.includes("projects_knowledge_write")) {
       // Memory rows: the coordinator reads the preferences, then records a decision.
       reply =
@@ -154,7 +162,19 @@ const server = createServer((req, res) => {
                 })
               : say("Done.");
     }
+    if (/conversation to summarize/.test(user) && user.includes("VERIFY-COMPACTION-FAIL")) {
+      res.writeHead(500, { "content-type": "text/plain" }).end("UI2-SUMMARY-FAIL scripted");
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (user.includes("VERIFY-STOP") && names.includes("agents") && stage === 0) {
+      // The provider tail stays pending; Stop must abort it instead of waiting for the provider.
+      res.write(chunk({ role: "assistant", content: "working" }, null));
+      void delay(60000).then(() => {
+        if (!res.destroyed && !res.writableEnded) res.end(chunk({}, "stop") + "data: [DONE]\n\n");
+      });
+      return;
+    }
     res.end(
       reply ??
         chunk({ role: "assistant", content: `VERIFY-FAKE-REPLY: ${user.slice(0, 200)}` }, null) + chunk({}, "stop") + "data: [DONE]\n\n",

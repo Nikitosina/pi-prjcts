@@ -282,7 +282,7 @@ function paintSettings() {
   );
   if (current && !(models ?? []).some((item) => item.ref === current))
     options.unshift(`<option value="${esc(current)}" selected>${esc(current)}</option>`);
-  const auto = `<option value="" ${current ? "" : "selected"} disabled>From tier · ${esc(settings.effectiveModel ? shortModel(settings.effectiveModel) : "none")}</option>`;
+  const auto = `<option value="" ${current ? "" : "selected"}>From tier · ${esc(settings.effectiveModel ? shortModel(settings.effectiveModel) : "none")}</option>`;
   const tierOptions = [`<option value="" ${settings.tier ? "" : "selected"}>No tier · newest project's model</option>`]
     .concat(
       tierList.map(
@@ -327,8 +327,10 @@ settingsBox.addEventListener("change", (event) => {
     const tier = event.target.value || null;
     void saveSettings({ tier }, tier ? `Host agent tier: ${event.target.selectedOptions[0].textContent}` : "Host agent tier cleared");
   }
-  if (event.target.id === "ha-model-select" && event.target.value)
-    void saveSettings({ model: event.target.value }, `Host agent model: ${shortModel(event.target.value)}`);
+  if (event.target.id === "ha-model-select") {
+    const model = event.target.value || null;
+    void saveSettings({ model }, model ? `Host agent model: ${shortModel(model)}` : "Host agent model: from tier");
+  }
   const toggle = event.target.closest("[data-tool-toggle]");
   if (toggle) {
     const name = toggle.dataset.toolToggle;

@@ -1,9 +1,16 @@
 /* UI 2.0. Themes are CSS variable sets on :root[data-theme]; components use only the role variables below.
-   Type: system sans for prose, a monospace stack for tool rows, status line, chips and paths. Spacing on a 4 px grid. */
+   Type follows the host font setting; code and tool rows keep a mono face. Spacing on a 4 px grid. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/ui2/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
 :root {
-  --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --serif: ui-serif, "Iowan Old Style", Georgia, serif;
-  --mono: ui-monospace, "SF Mono", Menlo, "JetBrains Mono", Consolas, monospace;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --r-s: 6px;
   --r-m: 10px;
   --r-l: 14px;
@@ -14,6 +21,14 @@
   --ctx-w: 320px;
   --top-h: 46px;
   --sl-h: 26px;
+}
+:root[data-font="system-sans"] {
+  --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+:root[data-font="system-mono"] {
+  --font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --mono: var(--font);
 }
 /* Claude: warm charcoal, coral accent (default). */
 :root[data-theme="claude"] {
@@ -2076,9 +2091,24 @@ details.small-field select {
 }
 .auto-card footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
+  gap: 2px 6px;
   margin-top: 4px;
+}
+.auto-card.editing textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+.compaction-failure {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--bad);
+  border-radius: var(--r-m);
+}
+.compaction-failure summary {
+  cursor: pointer;
+  color: var(--bad);
 }
 .theme-grid {
   display: grid;
@@ -2096,6 +2126,28 @@ details.small-field select {
   text-align: left;
 }
 .theme-card[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.font-picker {
+  margin-top: 18px;
+}
+.font-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 7px;
+}
+.font-options button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  text-align: left;
+}
+.font-options button[aria-checked="true"] {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
