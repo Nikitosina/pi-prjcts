@@ -94,6 +94,14 @@ After PR33 was opened, the owner clarified that one Coordinator chat owns a larg
 - Missing grants, invalid ownership and unsupported isolated provider capabilities fail visibly. There is no fallback to the owner's checkout or provider trunk.
 - This decision does not authorize merging PR33, deploying it, restarting the live host or publishing the private Arc plugin.
 
+## Verifier retired (owner decision, 2026-11-03)
+
+The owner accepted removing the verifier role and Owner setup as part of UI 2.0 (`docs/ui2-plan.md`, Decisions 1). This replaces decision 5's "spawns a fresh verifier" and decision 7's verifier role.
+
+- The independent worker runs the project's verify skill itself and records every check with `projects_verify_run` on the candidate commit, repairing up to `verification.rounds`. `checkProofRefs` still rejects Ready proof that names missing, failed or other-commit runs.
+- New turns cannot start a verifier subagent; recorded verifier conversations still read. Turning verification on no longer needs a verifier model.
+- One automatic reviewer and one re-check stay as before; its brief carries the run ids instead of the verifier's proof.
+
 ## Quiet coordinator chat (2026-11-02)
 
 The owner approved removing service chatter from the main conversation and reducing unnecessary Coordinator invocations.

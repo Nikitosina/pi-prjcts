@@ -232,7 +232,7 @@ await kit.run(async () => {
   await page.navigate(await kit.webUrl(id));
   await page.waitFor(`document.querySelector('#owner-steps')?.innerText.length > 0`, "owner steps");
   await page.waitFor(
-    `document.querySelectorAll('#prompts [data-prompt]').length === 5`,
+    `document.querySelectorAll('#prompts [data-prompt]').length === 4`,
     `prompt editors: ${await page.evaluate("document.querySelector('#prompts')?.innerText.slice(0, 200)")}`,
   );
   const steps = await page.evaluate(`document.querySelector('#owner-steps').innerText`);
@@ -252,8 +252,8 @@ await kit.run(async () => {
   };
   const snapshot = await rpc({ action: "prompts-snapshot", id });
   check(
-    "P1 the snapshot lists all five roles with defaults and no overrides",
-    snapshot.roles.map((r) => r.role).join() === "coordinator,worker,scout,reviewer,verifier" &&
+    "P1 the snapshot lists all four roles (the verifier was retired) with defaults and no overrides",
+    snapshot.roles.map((r) => r.role).join() === "coordinator,worker,scout,reviewer" &&
       snapshot.roles.every((r) => r.override === null && r.effective === r.default && r.default.length > 50),
     snapshot.roles.map((r) => [r.role, r.override]),
   );
@@ -291,7 +291,7 @@ await kit.run(async () => {
   check(
     "P3 Reset to default is enabled only for the customized prompt",
     (await page.evaluate(`[...document.querySelectorAll('#prompts [data-action="prompt-reset"]')].map(b => b.disabled).join()`)) ===
-      "false,true,true,true,true",
+      "false,true,true,true",
   );
   await edit("worker", OVERRIDE_W);
   await kit.eventually(
@@ -316,7 +316,8 @@ await kit.run(async () => {
   );
   check(
     "P4 the host-appended identity and grant rules are still there",
-    coordAfter.system.includes(`Project ${id}. Objective:`) &&
+    coordAfter.system.includes(`project ${id}.`) &&
+      /Project instructions: /.test(coordAfter.system) &&
       /Project instructions: /.test(workerAfter.system) &&
       /Repository instructions|Leave publishing|Project instructions/.test(workerAfter.system),
   );
@@ -395,52 +396,53 @@ await kit.run(async () => {
     await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   };
   await page.viewport(1440, 1000);
-  const beforeVerifierNav = await page.evaluate("performance.timeOrigin");
+  // The verifier prompt was retired with the role (2026-11-03); the same pointer-input save and reset run on the reviewer prompt.
+  const beforeReviewerNav = await page.evaluate("performance.timeOrigin");
   await page.navigate(await kit.webUrl(id));
   await page.waitFor(
-    `performance.timeOrigin > ${beforeVerifierNav} && !!document.querySelector('[data-prompt="verifier"]')`,
-    "verifier editor",
+    `performance.timeOrigin > ${beforeReviewerNav} && !!document.querySelector('[data-prompt="reviewer"]')`,
+    "reviewer editor",
   );
-  await click('[data-prompt="verifier"]');
+  await click('[data-prompt="reviewer"]');
   await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 4, commands: ["selectAll"] });
   await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 4 });
-  await page.cdp("Input.insertText", { text: "CUSTOM-VERIFIER: inspect independent functional evidence." });
-  const typedVerifier = await page.evaluate(`document.querySelector('[data-prompt="verifier"]').value`);
+  await page.cdp("Input.insertText", { text: "CUSTOM-REVIEWER: inspect independent functional evidence." });
+  const typedReviewer = await page.evaluate(`document.querySelector('[data-prompt="reviewer"]').value`);
   check(
-    "P9 native input replaced verifier prompt",
-    typedVerifier === "CUSTOM-VERIFIER: inspect independent functional evidence.",
-    typedVerifier,
+    "P9 native input replaced reviewer prompt",
+    typedReviewer === "CUSTOM-REVIEWER: inspect independent functional evidence.",
+    typedReviewer,
   );
-  await click('[data-action="prompt-save"][data-role="verifier"]');
+  await click('[data-action="prompt-save"][data-role="reviewer"]');
   await kit.eventually(
     async () =>
-      (await rpc({ action: "settings-snapshot", id })).values.prompts?.verifier ===
-      "CUSTOM-VERIFIER: inspect independent functional evidence.",
-    "verifier prompt saved",
+      (await rpc({ action: "settings-snapshot", id })).values.prompts?.reviewer ===
+      "CUSTOM-REVIEWER: inspect independent functional evidence.",
+    "reviewer prompt saved",
   );
-  const beforeVerifierReload = await page.evaluate("performance.timeOrigin");
+  const beforeReviewerReload = await page.evaluate("performance.timeOrigin");
   await page.reload();
   await page.waitFor(
-    `performance.timeOrigin > ${beforeVerifierReload} && document.querySelector('[data-prompt="verifier"]')?.value === 'CUSTOM-VERIFIER: inspect independent functional evidence.'`,
-    "verifier persists after reload",
+    `performance.timeOrigin > ${beforeReviewerReload} && document.querySelector('[data-prompt="reviewer"]')?.value === 'CUSTOM-REVIEWER: inspect independent functional evidence.'`,
+    "reviewer persists after reload",
   );
   check(
-    "P9 verifier prompt saves through pointer input and persists without changing worker override",
+    "P9 reviewer prompt saves through pointer input and persists without changing worker override",
     (await rpc({ action: "settings-snapshot", id })).values.prompts?.worker === OVERRIDE_W,
   );
-  await page.evaluate(`document.querySelector('[data-prompt="verifier"]').scrollIntoView({ block: 'center' })`);
-  const verifierShot = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-  writeFileSync(join(kit.artifacts, "07-verifier-prompt-saved.png"), Buffer.from(verifierShot.data, "base64"));
+  await page.evaluate(`document.querySelector('[data-prompt="reviewer"]').scrollIntoView({ block: 'center' })`);
+  const reviewerShot = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  writeFileSync(join(kit.artifacts, "07-reviewer-prompt-saved.png"), Buffer.from(reviewerShot.data, "base64"));
   writeFileSync(
-    join(kit.artifacts, "host-verifier-settings.json"),
+    join(kit.artifacts, "host-reviewer-settings.json"),
     JSON.stringify(await rpc({ action: "settings-snapshot", id }), null, 2),
   );
-  await click('[data-action="prompt-reset"][data-role="verifier"]');
-  await kit.eventually(async () => !(await rpc({ action: "settings-snapshot", id })).values.prompts?.verifier, "verifier reset");
+  await click('[data-action="prompt-reset"][data-role="reviewer"]');
+  await kit.eventually(async () => !(await rpc({ action: "settings-snapshot", id })).values.prompts?.reviewer, "reviewer reset");
   check(
-    "P9 verifier reset restores its distinct default and keeps other customizations",
-    (await rpc({ action: "prompts-snapshot", id })).roles.find((r) => r.role === "verifier").effective ===
-      snapshot.roles.find((r) => r.role === "verifier").default &&
+    "P9 reviewer reset restores its distinct default and keeps other customizations",
+    (await rpc({ action: "prompts-snapshot", id })).roles.find((r) => r.role === "reviewer").effective ===
+      snapshot.roles.find((r) => r.role === "reviewer").default &&
       (await rpc({ action: "settings-snapshot", id })).values.prompts.worker === OVERRIDE_W,
   );
 });

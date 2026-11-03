@@ -23,8 +23,8 @@ const k = await createKit("model-refresh", {
     }
     if (role === "coordinator" && user === "INSTANCE-PROFILES" && !results.length)
       return call("projects_delegate", { role: "worker", task: "INSTANCE-WORKER" });
-    if (role === "worker" && user.includes("INSTANCE-WORKER") && results.length < 3)
-      return call("subagent", { role: ["verifier", "reviewer", "scout"][results.length], task: "INSTANCE-CHILD" });
+    if (role === "worker" && user.includes("INSTANCE-WORKER") && results.length < 2)
+      return call("subagent", { role: ["reviewer", "scout"][results.length], task: "INSTANCE-CHILD" });
     if (role === "worker" && user.includes("INSTANCE-HELD") && !results.length) {
       await heldInstructions;
       return call("projects_knowledge_list", {});
@@ -60,9 +60,8 @@ await k.run(async () => {
   );
   const instanceFile = join(k.home, "AGENTS.md");
   writeFileSync(instanceFile, "INSTANCE-INSTRUCTIONS-A.\n");
-  await k.updateSettings(id, { models: { verifier: "fake/fake-model" } });
   await k.ask(id, "INSTANCE-PROFILES");
-  for (const role of ["coordinator", "worker", "scout", "reviewer", "verifier"]) {
+  for (const role of ["coordinator", "worker", "scout", "reviewer"]) {
     const request = k.result.calls.find((c) => c.role === role && c.user.includes("INSTANCE-"));
     check(
       `${role} loads instance instructions before repository instructions`,

@@ -51,19 +51,20 @@ type UiSettings = {
 | `tiers-get` | `{}` | `{ revision, tiers: Tier[], catalog: { ref, name, provider, contextWindow, inputCost, outputCost, available }[] }` |
 | `tiers-set` | `{ revision, tiers: Tier[] }` | `{ revision, tiers }`, validated against the live catalog, publishes host `tiers` |
 | `profiles-get` | `{ projectId }` | `{ revision, profiles: Record<ProfileId, ProfileSettings & { effectiveModel: string \| null }> }` |
-| `profiles-set` | `{ projectId, revision, profile: ProfileId, patch: ProfileSettings }` | same as get; goes through `settings-application.ts` with an `EFFECTS` entry |
+| `profiles-set` | `{ projectId, revision, profile: ProfileId, patch: ProfileSettings }` | same as get; goes through `settings-application.ts` with an `EFFECTS` entry (`profiles`: models and prompts). The patch replaces the fields it names; `revision` is the `settings-snapshot` revision |
 | `profile-tools` | `{ projectId, profile: ProfileId }` | `{ groups: { id, label, source: "core" \| "plugin" \| "mcp" \| "skill", locked: boolean, tools: { name, description, parameters: unknown, enabled: boolean }[] }[] }` |
 | `prompt-render` | `{ projectId, profile: ProfileId, chatId? }` | `{ sections: { id, label, source: string, editable: boolean, text: string, tokens: number }[], totalTokens }` |
 | `chat-stop` | `{ id, chatId? }` | `{ stopped: boolean }` aborts the running Coordinator turn of that chat (⌘.); history kept. Added by the web workstream: no existing request stops a Coordinator turn. |
 
 Notes:
 - Tier storage: `<home>/tiers.json`. On first read with no file, generate tiers from the current project models so nothing changes for existing projects.
-- Quota or retryable provider failure moves to the next model of the profile's tier (all of them, in order), replacing the single `fallbackModels` move. Telegram `/model` keeps working on legacy fields; it may show tiers later.
+- Quota or rate-limit failure moves to the next model of the profile's tier (all of them, in order, never back to a model already left), replacing the single `fallbackModels` move. Without a tier the legacy rule stays: only quota moves, once, to `fallbackModels`. Telegram `/model` keeps working on legacy fields; it may show tiers later.
+- `profiles-set` refuses an unknown tier, a tier with no model that has credentials, and switching off a locked tool (`agents` for the coordinator, `job` for the worker). `tiers-set` refuses a stale revision, duplicate ids or models, an uninstalled model, an empty tier and removing a tier a project uses.
 - Thinking level replaces the hardcoded `"medium"` in `durable-runtime.ts` for each role.
 - `profile-tools` must not contact MCP servers or allocate a workspace (same rule as the Tools/access panel). MCP servers appear as one group each with a write toggle as a pseudo-tool `mcp-writes:<server>`; skills appear as a `skill` group.
-- `prompt-render` sections, in order: host contract (locked), instance AGENTS.md, repository instructions, project instructions (the old `objective`, editable), role instructions (editable), skills list (locked). Tokens may be an estimate (chars/4) and must be labelled as such in `source`.
+- `prompt-render` sections, in order (`id` in brackets): host contract [`host`] (locked), instance AGENTS.md [`instance`], repository instructions [`repository`], project instructions [`project`] (the old `objective`, editable), role instructions [`role`] (editable), "Preferences (memory)" [`preferences`] (locked), "Memory index" [`memory`] (locked), skills list [`skills`] (locked). Tokens are an estimate (chars/4), labelled as such in `source`. `chatId` is accepted; every chat of a project renders the same prompt today.
 - `create` grants the whole-repository workspace and GitHub access in the same step (reuse `workspace-quick-grant` / `github-quick-authorize` logic). A later revoke still shows a visible blocker.
-- Verifier: workers run the verify skill themselves through `projects_verify_run`; no verifier subagent role is offered to new turns. Recorded verifier conversations still read.
+- Verifier: workers run the verify skill themselves through `projects_verify_run`; no verifier subagent role is offered to new turns. Recorded verifier conversations still read. Turning verification on no longer needs `models.verifier`; the verifier prompt is no longer listed in `prompts-snapshot`.
 - Static: `GET /ui2/` serves `web-ui2/index.html` and `/ui2/*` its files, with the same token, CSP and origin rules as `web/`.
 
 ## Host agent requests
@@ -132,8 +133,9 @@ type MemoryEntry = {
 | `memory-index` | `{ projectId, includeArchive?: boolean }` | `{ entries: MemoryEntry[], brokenLinks: { from: string, to: string }[] }` |
 | `memory-undo` | `{ projectId, path, revision }` | `{ entry: MemoryEntry \| null }` restores the previous revision (or removes a just-created entry) |
 
-- Kind, status, summary, supersededBy and source live in optional YAML front matter. Without it, classify by folder on read (`preferences.md` → preference, `decisions/` → decision, `runbooks/` → procedure, `research/legacy/`, `plans/` and UUID-named notes → archive). Never move or rewrite the owner's existing files during a read.
-- The index replaces the hand-written `MEMORY.md` injection: titles plus summaries, archive excluded.
+- Kind, status, summary, supersededBy and source live in optional YAML front matter. Without it, classify by folder on read (`preferences.md` → preference, `decisions/` → decision, `MEMORY.md`, `research/` (legacy included), `plans/` and UUID-named notes → archive, everything else, `runbooks/` included → procedure). Malformed front matter is ignored and the folder rule applies. Never move or rewrite the owner's existing files during a read.
+- The index replaces the hand-written `MEMORY.md` injection: titles plus summaries, archive and preferences excluded, superseded decisions marked with their replacement, bounded (3,000 chars). It is the `prompt-render` section "Memory index". `brokenLinks` lists relative `.md` links and `supersededBy` targets that do not exist; external links are ignored.
+- `memory-undo` is itself a revision (author `memory-undo`) and refuses a revision that is no longer current.
 - Current preferences (bounded, e.g. 4,000 chars, with revision) are injected into every role prompt as their own `prompt-render` section "Preferences (memory)".
 - Coordinator prompt: when the owner corrects something or states a lasting preference, save it as a preference without asking (YOLO), keep review packets and statuses out of memory, mark replaced decisions superseded instead of adding correction documents. Memory never grants execution authority.
 - Chat rendering: knowledge tool calls render as memory rows: a write as "Remembered: <title> · Undo · Edit", a read as "Used memory: <kind> · <title>", linking to the entry in the Memory view.

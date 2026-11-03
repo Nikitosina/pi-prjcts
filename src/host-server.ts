@@ -24,6 +24,7 @@ import {
   projectDir,
   saveJob,
   saveProject,
+  type GithubAuthorization,
   type Request as RequestData,
 } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
@@ -38,9 +39,11 @@ import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
-import { feed, HOST_FEED } from "./change-feed.ts";
+import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
+import { profilesSnapshot, readUi, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
+import { memoryIndex, undoMemory } from "./memory.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
@@ -199,6 +202,39 @@ function withDefaultWorkspace(project: Project): Project {
   }
 }
 
+/** Saved tiers reach open projects whose profiles use one at their next request; a project that cannot resolve keeps its models and says why. */
+async function applyTiers(): Promise<void> {
+  for (const [id, opening] of durableRuntimes) {
+    try {
+      const project = loadProject(id);
+      if (!tiersFor(project).length) continue;
+      await withProjectLock(id, async () => (await opening).applyModels(loadProject(id)));
+    } catch (error) {
+      process.stderr.write(JSON.stringify({ event: "tiers-apply-failed", project: id, error: errorText(error) }) + "\n");
+    }
+  }
+}
+
+/** Create also connects GitHub one-click for a github.com checkout; best effort, so a missing gh or a mismatched origin leaves the usual setup step. */
+async function withDefaultGithub(id: string): Promise<void> {
+  const before = loadProject(id);
+  if (before.githubAuthorization?.length || before.githubAuthorizationHistory?.length || !before.workspaceAuthorization) return;
+  const expectedRevision = createHash("sha256")
+    .update(JSON.stringify([[], before.githubAuthorizationHistory ?? []]))
+    .digest("hex");
+  let authorization: GithubAuthorization;
+  try {
+    authorization = await authorizeGithubQuick(before, { action: "github-quick-authorize", id, confirm: id, expectedRevision });
+  } catch {
+    return;
+  }
+  await withProjectLock(id, async () => {
+    const project = loadProject(id);
+    if (project.githubAuthorization?.length || authorizationFingerprint(project) !== authorizationFingerprint(before)) return;
+    saveProject({ ...project, githubAuthorization: [authorization] });
+  });
+}
+
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
   if (closing) throw new Error("Host is stopping");
   if (ownerCloseFailed.has(id)) throw new Error("Project owner close failed; restart the owned host before retrying");
@@ -348,10 +384,15 @@ async function knowledgeDir(id: string): Promise<string> {
   return dir;
 }
 
+/** Requests that change the project list (names, membership); the host `projects` topic tells browsers to refetch it. */
+const PROJECT_LIST_ACTIONS: ReadonlySet<RequestData["action"]> = new Set(["create", "delete", "archive", "restore", "settings-update"]);
+
 function dispatch(input: RequestData): Promise<unknown> {
   // This request closes admission itself and must not wait on its own entry in activeRequests.
   if (input.action === "deploy-shutdown") return stopForDeploy(input.sha);
-  return trackRequest(() => dispatchRequest(input));
+  const operation = trackRequest(() => dispatchRequest(input));
+  if (PROJECT_LIST_ACTIONS.has(input.action)) void operation.then(() => publishHost("projects")).catch(() => {});
+  return operation;
 }
 
 function trackRequest<T>(start: () => Promise<T>): Promise<T> {
@@ -498,6 +539,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         return withScope;
       });
       if (!project.archived && !project.deleted) await ensureKnowledge(ownedProjectDir(project.id));
+      await withDefaultGithub(project.id);
       return loadProject(project.id);
     }
     case "models-snapshot":
@@ -569,6 +611,51 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.id, { topic: "settings" });
       return result;
     }
+    case "ui-get":
+      return readUi();
+    case "ui-set": {
+      const result = await setUi(input.revision, input.patch);
+      publishHost("ui");
+      return result;
+    }
+    case "tiers-get":
+      return tiersSnapshot();
+    case "tiers-set": {
+      const result = await setTiers(input.revision, input.tiers);
+      publishHost("tiers");
+      await applyTiers();
+      return result;
+    }
+    case "profiles-get":
+      return profilesSnapshot(loadProject(input.projectId), settings.snapshot(input.projectId).revision);
+    case "profiles-set": {
+      const project = loadProject(input.projectId);
+      // The patch replaces the fields it names; the others keep their saved values.
+      const merged = { ...project.profiles?.[input.profile], ...input.patch };
+      const saved = await settings.update({
+        action: "settings-update",
+        id: input.projectId,
+        confirm: input.projectId,
+        expectedRevision: input.revision,
+        changes: { profiles: { [input.profile]: merged } },
+      });
+      feed.publish(input.projectId, { topic: "settings" });
+      return profilesSnapshot(loadProject(input.projectId), saved.revision);
+    }
+    case "profile-tools":
+      return (await durable(input.projectId)).profileTools(input.profile);
+    case "prompt-render":
+      return (await durable(input.projectId)).promptRender(input.profile);
+    case "memory-index":
+      return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
+    case "memory-undo":
+      return withProjectLock(input.projectId, async () => {
+        const project = loadProject(input.projectId);
+        if (project.deleted || project.archived) throw new Error("Inactive project memory cannot be changed");
+        const result = await undoMemory(await knowledgeDir(input.projectId), input.path, input.revision);
+        feed.publish(input.projectId, { topic: "knowledge" });
+        return result;
+      });
     case "command-profiles-snapshot":
       return commandProfilesSnapshot(loadProject(input.id));
     case "command-profile-read": {

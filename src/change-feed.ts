@@ -14,6 +14,10 @@ export type FeedEvent =
   | ({ topic: "host-agent"; type: "focus" } & FocusTarget);
 /** Feed key of host topics; project ids are UUIDs, so it never collides. */
 export const HOST_FEED = "host";
+/** A host-wide read model changed; the Host agent's focus frames go through `feed.publish` with their target. */
+export const publishHost = (topic: HostTopic): void =>
+  // Two branches so each narrows to its own FeedEvent member.
+  feed.publish(HOST_FEED, topic === "host-agent" ? { topic } : { topic });
 type Listener = (event: FeedEvent) => void;
 
 const listeners = new Map<string, Set<Listener>>();

@@ -2,6 +2,7 @@ import type { DurableProjectRuntime } from "./durable-runtime.ts";
 import { applyCommandProfile, commandProfilesSnapshot, prepareCommandProfile } from "./command-profiles.ts";
 import { projectSettings, updateProjectSettings } from "./project-settings.ts";
 import { validateProjectModelChanges } from "./project-models.ts";
+import { validateProfileChanges } from "./host-documents.ts";
 import type { Project, Request } from "./state.ts";
 
 type Update = Extract<Request, { action: "settings-update" }>;
@@ -12,9 +13,10 @@ type Changes = Update["changes"];
  * How a changed field reaches a running owner. Every settings field applies without closing the owner:
  * - saved: read from the saved project at the moment it is used (a tool call, a delegation, a stall check), so saving is enough;
  * - models / context: pushed into the owner's live model and context state;
- * - prompts: coordinator chats are rebuilt from the saved project (busy chats before their next message); workers read it at delegation.
+ * - prompts: coordinator chats are rebuilt from the saved project (busy chats before their next message); workers read it at delegation;
+ * - profiles: both, since a profile carries a model (its tier), the coordinator's thinking level and its tool list.
  */
-type Effect = "saved" | "models" | "context" | "prompts";
+type Effect = "saved" | "models" | "context" | "prompts" | "profiles";
 const EFFECTS: Partial<Record<keyof Changes, Effect>> = {
   name: "prompts",
   objective: "prompts",
@@ -27,6 +29,7 @@ const EFFECTS: Partial<Record<keyof Changes, Effect>> = {
   model: "models",
   models: "models",
   fallbackModels: "models",
+  profiles: "profiles",
   context: "context",
   mcp: "saved",
   verification: "saved",
@@ -77,6 +80,7 @@ export function settingsApplication(deps: SettingsDeps) {
     async update(input: Update) {
       updateProjectSettings(deps.load(input.id), input);
       await validateProjectModelChanges(input.changes);
+      await validateProfileChanges(input.changes.profiles);
       const skill = input.changes.verification?.enabled ? input.changes.verification.skill.trim() : "";
       if (skill && !(await deps.skillInstalled(input.id, skill)))
         throw new Error(`Verification skill "${skill}" is not installed for this project`);
@@ -84,10 +88,10 @@ export function settingsApplication(deps: SettingsDeps) {
         const project = updateProjectSettings(deps.load(input.id), input);
         const owner = await deps.running(input.id);
         // Models are checked against the live catalog before anything is saved; a refusal leaves the settings untouched.
-        if (owner && touches(input.changes, "models")) await owner.applyModels(project);
+        if (owner && (touches(input.changes, "models") || touches(input.changes, "profiles"))) await owner.applyModels(project);
         if (owner && input.changes.context !== undefined) owner.applyContext(project.contextSettings);
         deps.save(project);
-        if (owner && touches(input.changes, "prompts")) await owner.applySettings();
+        if (owner && (touches(input.changes, "prompts") || touches(input.changes, "profiles"))) await owner.applySettings();
         return view(project);
       });
     },

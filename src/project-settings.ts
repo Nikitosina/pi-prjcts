@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
+import { PROFILE_IDS } from "./profiles.ts";
 
 type Update = Extract<Request, { action: "settings-update" }>;
 export function projectSettings(project: Project) {
@@ -21,6 +22,7 @@ export function projectSettings(project: Project) {
     worktreeSetup: project.worktreeSetup ?? "",
     context: project.contextSettings ?? null,
     verification: project.verification ?? null,
+    profiles: project.profiles ?? null,
   };
   return {
     values,
@@ -40,7 +42,8 @@ export function updateProjectSettings(project: Project, input: Update): Project 
   if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
   if (input.expectedRevision !== projectSettings(project).revision) throw new Error("Settings revision conflict; reread before updating");
   const patch = input.changes;
-  const { skillProfiles, mcp, worktreeSetup, contextSettings, scopedModels, prompts, verification, fallbackModels, ...rest } = project;
+  const { skillProfiles, mcp, worktreeSetup, contextSettings, scopedModels, prompts, verification, fallbackModels, profiles, ...rest } =
+    project;
   const merged = { ...prompts, ...patch.prompts };
   const promptValues = Object.fromEntries(
     Object.entries(merged).filter(([, text]) => typeof text === "string" && text.trim()),
@@ -65,10 +68,15 @@ export function updateProjectSettings(project: Project, input: Update): Project 
   const mcpSettings = patch.mcp === undefined ? mcp : (patch.mcp ?? undefined);
   const checks = patch.verification === undefined ? verification : (patch.verification ?? undefined);
   if (checks?.enabled && !checks.skill.trim()) throw new Error("Verification needs a verification skill");
-  if (checks?.enabled && !models.verifier) throw new Error("Verification needs its own verifier model; none is assumed");
   const unsupported = patch.verification?.enabled ? verificationProviderProblem(project) : null;
   if (unsupported) throw new Error(`Verification cannot be turned on: ${unsupported}`);
   const setup = (patch.worktreeSetup ?? worktreeSetup ?? "").trim();
+  const nextProfiles: NonNullable<Project["profiles"]> = { ...profiles };
+  for (const id of PROFILE_IDS) {
+    const choice = patch.profiles?.[id];
+    if (choice === null) delete nextProfiles[id];
+    else if (choice !== undefined) nextProfiles[id] = structuredClone(choice);
+  }
   return {
     ...rest,
     ...(skills ? { skillProfiles: structuredClone(skills) } : {}),
@@ -77,6 +85,7 @@ export function updateProjectSettings(project: Project, input: Update): Project 
     ...(setup ? { worktreeSetup: setup } : {}),
     ...(context ? { contextSettings: structuredClone(context) } : {}),
     ...(checks ? { verification: { ...checks } } : {}),
+    ...(Object.keys(nextProfiles).length ? { profiles: nextProfiles } : {}),
     name: patch.name ?? project.name,
     objective: patch.objective ?? project.objective,
     model: patch.model ?? project.model,

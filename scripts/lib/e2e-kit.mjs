@@ -122,10 +122,10 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         ? "coordinator"
         : systemText.includes("Review the pinned candidate")
           ? "reviewer"
-          : tools.includes("projects_verify_run")
-            ? "verifier"
-            : tools.includes("job")
-              ? "worker"
+          : tools.includes("job")
+            ? "worker"
+            : tools.includes("projects_verify_run")
+              ? "verifier"
               : tools.includes("code_read")
                 ? "scout"
                 : tools.includes("bash")
@@ -149,8 +149,9 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         userLength: user.length,
         tools,
         system,
+        reasoning: input.reasoning_effort ?? null,
       });
-      const out = await handler({ role, model: input.model, user, results, tools, system, msgs });
+      const out = await handler({ role, model: input.model, user, results, tools, system, msgs, request: input });
       // Async iterables let browser tests hold a stream open until an interaction finishes.
       if (out?.[Symbol.asyncIterator]) {
         res.writeHead(200, { "content-type": "text/event-stream" });

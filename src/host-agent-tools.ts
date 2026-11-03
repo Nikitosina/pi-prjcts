@@ -163,6 +163,16 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "host-agent-settings": allow("The Host agent's model, thinking and disabled tools."),
   "approvals-list": allow("Owner approvals and their states."),
   "approval-decide": exclude("Only the owner decides approvals."),
+  "ui-get": allow("The owner's UI settings (theme, animations, hotkeys, panels, status line) with their revision."),
+  "ui-set": allow("Change the owner's UI settings with a partial patch (revision from ui-get)."),
+  "tiers-get": allow("Model tiers with the model catalog (context window, prices, availability)."),
+  "tiers-set": allow("Replace the model tiers (revision from tiers-get); a tier a project uses cannot be removed."),
+  "profiles-get": allow("A project's profiles (coordinator, worker, scout, reviewer): tier, thinking, disabled tools, effective model."),
+  "profiles-set": allow("Change one profile of a project (revision from profiles-get)."),
+  "profile-tools": allow("The tools a project's profile is offered, grouped, with enabled flags."),
+  "prompt-render": allow("The assembled prompt of a project's profile, as sections with token estimates."),
+  "memory-index": allow("A project's memory entries (preferences, decisions, procedures) and broken links."),
+  "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
 };
 
 const members = new Map<string, TSchema>(
@@ -285,7 +295,6 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
     parameters: Type.Object({ patch: Type.Record(Type.String(), Type.Unknown()) }),
     replay: "unsafe",
     async execute(args) {
-      if (!hasAction("ui-set") || !hasAction("ui-get")) return text("ui_set is not available on this host yet.");
       try {
         const current = (await deps.dispatch(validateCall("ui-get", {}))) as { revision: unknown };
         return text({ ok: true, result: await deps.dispatch(validateCall("ui-set", { revision: current.revision, patch: args.patch })) });

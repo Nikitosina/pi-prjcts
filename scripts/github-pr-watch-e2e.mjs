@@ -161,8 +161,8 @@ const settleAll = (id) =>
 await kit.run(async () => {
   // ---- Setup: GitHub project (workspace grant + publication authorization), a plain git project, a folder-scoped project of the same repo ----
   const id = await kit.createProject("Mari");
-  const first = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: first.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const plainDir = join(root, "plain");
   mkdirSync(plainDir);
   kit.initRepo(plainDir);
