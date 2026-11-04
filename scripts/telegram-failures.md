@@ -47,3 +47,8 @@ Owner decision: one bot per host, token supplied in Settings. Long-polling `getU
 30. A multi-part message re-sends earlier parts after a mid-way send failure (duplicates), or reply-to on a later part does not route.
 31. Telegram still refuses the HTML (400 "can't parse entities"): the notice is stuck retrying forever instead of falling back to plain text.
 32. Bot command replies (help, /projects with names containing `<`) break because they are now parsed as HTML.
+
+## Questions answered from Telegram, added before the change
+33. A question answered in Telegram stays open in an open UI2 tab: the card stays until a reload, or reappears after one.
+34. Text the owner sends to the asking chat while its only question is open (plain routed text, or a reply to another message of that chat) reaches the coordinator as a plain message: work continues, the question stays open everywhere.
+35. That text answers a question of another chat, or picks one of several open questions in the chat; or a replayed update answers twice or admits a second turn.

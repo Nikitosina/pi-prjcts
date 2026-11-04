@@ -646,7 +646,11 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin }, { additionalProperties: false }),
+  Type.Object(
+    // `requestId` admits the turn the answer wakes, so a replayed Telegram update cannot wake the chat twice.
+    { action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin, requestId: Type.Optional(Id) },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object(
     {
