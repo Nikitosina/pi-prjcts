@@ -58,9 +58,11 @@ writeFileSync(
 let notices = [],
   approvals = [],
   approveResult = async () => ({ kind: "accepted", head: "a".repeat(40) });
+let dispatch = async () => ({}),
+  chatList = [];
 const bridge = startTelegram({
-  dispatch: async () => ({}),
-  chats: async () => [],
+  dispatch: (input) => dispatch(input),
+  chats: async () => chatList,
   notifier: { seq: () => notices.length, feed: (after) => ({ items: notices.filter((n) => n.seq > after) }) },
   approve: (projectId, jobId) => (approvals.push([projectId, jobId]), approveResult()),
   report: () => {},
@@ -221,6 +223,101 @@ try {
   } finally {
     await notifier.close();
   }
+
+  // /status: the route (or its absence) plus one owner-requested limits refresh through dispatch.
+  const now = Date.now(),
+    dispatched = [],
+    provider = (id, label, extra) => ({
+      provider: id,
+      label,
+      samples: [],
+      status: "no-data",
+      reason: null,
+      lastAttemptAt: null,
+      nextAttemptAt: null,
+      ...extra,
+    });
+  let snapshot = {
+    providers: [
+      provider("claude", "Claude", {
+        status: "ok",
+        samples: [
+          {
+            provider: "claude",
+            window: "5h",
+            usedPercent: 41.6,
+            resetsAt: now + (2 * 60 + 10) * 60_000,
+            observedAt: now,
+            source: "endpoint",
+          },
+          { provider: "claude", window: "7d", usedPercent: 12, resetsAt: null, observedAt: now, source: "endpoint" },
+        ],
+      }),
+      provider("codex", "Codex", {
+        status: "ok",
+        samples: [{ provider: "codex", window: "7d", usedPercent: 88, resetsAt: null, observedAt: now - 45 * 60_000, source: "endpoint" }],
+        reason: "Codex rate limited the usage request",
+        nextAttemptAt: now + 3 * 60_000,
+      }),
+      provider("cursor", "Cursor", { reason: "x".repeat(6000) }),
+      provider("eliza", "Eliza", {
+        status: "ok",
+        usage: { amountUsd: 12.3, periodStartAt: now - 86400e3, periodEndAt: now + 86400e3, account: "a", pool: null, observedAt: now },
+      }),
+      provider("kimi", "Kimi", { status: "unavailable", reason: "Kimi rejected the sign-in (HTTP 401)" }),
+    ],
+    visibility: { claude: true, codex: true, cursor: true, eliza: true, kimi: false },
+    observedAt: now,
+  };
+  dispatch = async (input) => {
+    dispatched.push(input.action);
+    if (input.action === "limits-refresh" || input.action === "limits-snapshot") return snapshot;
+    return {};
+  };
+  let updateId = 100;
+  const status = async () => {
+    const before = calls.length;
+    updates.push({ update_id: ++updateId, message: { message_id: updateId, chat: { id: OWNER, type: "private" }, text: "/status" } });
+    const sent = await until(() => calls.slice(before).find((c) => c.method === "sendMessage"));
+    return sent.input;
+  };
+  calls = [];
+  let reply = await status();
+  assert.deepEqual(dispatched, ["limits-refresh"], "one explicit refresh per /status");
+  assert.equal(reply.parse_mode, undefined);
+  assert.ok(reply.text.length <= 4096);
+  assert.match(reply.text, /No project picked: \/projects\./);
+  assert.match(reply.text, /Claude: 5h 42% · resets in 2h 1\dm; 7d 12%/);
+  assert.match(reply.text, /Codex: 7d 88% \(45m old\) · Codex rate limited the usage request · retry in 3m/);
+  assert.match(reply.text, /Cursor: no data · x+…/);
+  assert.match(reply.text, /Eliza: \$12\.30 this period · resets in 1d/);
+  assert.doesNotMatch(reply.text, /Kimi/);
+  assert.doesNotMatch(reply.text, /Cursor[^\n]*\d%|Cursor[^\n]*\$/);
+
+  // With a route: the route line stays first. Hidden-everything and a failed refresh still answer.
+  chatList = [{ id: "main", title: "Main" }];
+  updates.push({ update_id: ++updateId, message: { message_id: updateId, chat: { id: OWNER, type: "private" }, text: "/project Notify" } });
+  await until(() => texts().some((t) => t.startsWith("Now talking to Notify")));
+  snapshot = { ...snapshot, visibility: { claude: false, codex: false, cursor: false, eliza: false, kimi: false } };
+  reply = await status();
+  assert.match(reply.text, /^Text goes to Notify · Main\./);
+  assert.match(reply.text, /hidden/i);
+  dispatched.length = 0;
+  dispatch = async (input) => {
+    dispatched.push(input.action);
+    if (input.action === "limits-refresh") throw new Error("host busy");
+    return { ...snapshot, visibility: { ...snapshot.visibility, kimi: true } };
+  };
+  reply = await status();
+  assert.deepEqual(dispatched, ["limits-refresh", "limits-snapshot"]);
+  assert.match(reply.text, /Refresh failed: host busy/);
+  assert.match(reply.text, /Kimi: unavailable · Kimi rejected the sign-in/);
+  dispatch = async () => {
+    throw new Error("host down");
+  };
+  reply = await status();
+  assert.match(reply.text, /^Text goes to Notify · Main\./);
+  assert.match(reply.text, /Limits unavailable: host down/);
   console.log("telegram-jobs-unit ok");
 } finally {
   bridge.close();

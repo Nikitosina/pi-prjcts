@@ -47,3 +47,13 @@ Owner decision: one bot per host, token supplied in Settings. Long-polling `getU
 30. A multi-part message re-sends earlier parts after a mid-way send failure (duplicates), or reply-to on a later part does not route.
 31. Telegram still refuses the HTML (400 "can't parse entities"): the notice is stuck retrying forever instead of falling back to plain text.
 32. Bot command replies (help, /projects with names containing `<`) break because they are now parsed as HTML.
+
+## `/status` with subscription limits, added before the change
+Owner decision: limits refresh only on an explicit owner request (`scripts/limits-manual-failures.md`). `/status` is one, so it sends one `limits-refresh` through the normal dispatch and reports what that returns. Proof: `scripts/telegram-jobs-unit.mjs` (fake Bot API, fake dispatch).
+33. `/status` loses the route line, or fails without a picked project instead of still reporting host-wide limits.
+34. `/status` polls providers itself, polls more than once per command, or starts a timer; or it skips the refresh and only reads the cache.
+35. A provider with no reading shows a fabricated `0%` or `$0` instead of "no data", "unavailable" or its reason.
+36. A cached reading kept after a failed or rate-limited refresh is shown as fresh: its age, the failure reason and the Retry-After wait are missing.
+37. Providers hidden in Settings are listed, or all hidden gives an empty reply.
+38. A failed `limits-refresh` gives no reply; the last cached snapshot must be shown with the error, or the error alone if there is none.
+39. A long provider reason makes the reply exceed Telegram's limit, or the plain-text reply is sent with a `parse_mode`.

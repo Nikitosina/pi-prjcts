@@ -108,6 +108,31 @@ const modelPickerResponse = Compile(
     scopeSet: Type.Boolean(),
   }),
 );
+const limitsResponse = Compile(
+  Type.Object({
+    providers: Type.Array(
+      Type.Object({
+        label: Type.String(),
+        provider: Type.String(),
+        samples: Type.Array(
+          Type.Object({
+            window: Type.String(),
+            usedPercent: Type.Number(),
+            resetsAt: Type.Union([Type.Number(), Type.Null()]),
+            observedAt: Type.Number(),
+          }),
+        ),
+        status: Type.Union([Type.Literal("ok"), Type.Literal("no-data"), Type.Literal("unavailable")]),
+        reason: Type.Union([Type.String(), Type.Null()]),
+        nextAttemptAt: Type.Union([Type.Number(), Type.Null()]),
+        usage: Type.Optional(
+          Type.Union([Type.Object({ amountUsd: Type.Number(), periodEndAt: Type.Number(), observedAt: Type.Number() }), Type.Null()]),
+        ),
+      }),
+    ),
+    visibility: Type.Record(Type.String(), Type.Boolean()),
+  }),
+);
 const modelRole = Compile(Type.Union([Type.Literal("coordinator"), Type.KeyOf(Project.properties.models)]));
 const inheritedModelRoles: (keyof Project["models"])[] = ["worker", "scout", "reviewer"];
 const modelUsage =
@@ -137,6 +162,40 @@ const LABEL: Record<Notice["kind"], string> = {
   pr: "Pull request",
 };
 const clip = (text: string, max = LIMIT) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+/** A reading older than this shows its age, so a cached value kept after a skipped or failed refresh is not taken as fresh. */
+const LIMITS_FRESH_MS = 2 * 60_000;
+const span = (ms: number) => {
+  const minutes = Math.max(1, Math.round(ms / 60_000)),
+    [d, h, m] = [Math.floor(minutes / 1440), Math.floor((minutes % 1440) / 60), minutes % 60];
+  return d ? `${d}d${h ? ` ${h}h` : ""}` : h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
+};
+/** Plain-text `/status` limits: only what was observed (no invented 0% or $0), with its age, failure reason and Retry-After wait. */
+export function formatLimits(snapshot: unknown, now = Date.now()): string {
+  if (!limitsResponse.Check(snapshot)) return "Limits unavailable: invalid limits response";
+  const shown = snapshot.providers.filter((item) => snapshot.visibility[item.provider] !== false),
+    hidden = snapshot.providers.length - shown.length;
+  if (!shown.length) return "Subscription limits: all providers are hidden in Settings.";
+  const lines = shown.map((item) => {
+    const readings = [
+        ...item.samples.map(
+          (sample) =>
+            `${sample.window} ${Math.round(sample.usedPercent)}%${sample.resetsAt && sample.resetsAt > now ? ` · resets in ${span(sample.resetsAt - now)}` : ""}`,
+        ),
+        ...(item.usage
+          ? [
+              `$${item.usage.amountUsd.toFixed(2)} this period${item.usage.periodEndAt > now ? ` · resets in ${span(item.usage.periodEndAt - now)}` : ""}`,
+            ]
+          : []),
+      ],
+      oldest = Math.min(...item.samples.map((sample) => sample.observedAt), item.usage?.observedAt ?? Infinity);
+    return [
+      `${item.label}: ${item.status === "ok" && readings.length ? readings.join("; ") : item.status === "unavailable" ? "unavailable" : "no data"}${now - oldest > LIMITS_FRESH_MS ? ` (${span(now - oldest)} old)` : ""}`,
+      ...(item.reason ? [clip(item.reason, 200)] : []),
+      ...(item.nextAttemptAt && item.nextAttemptAt > now ? [`retry in ${span(item.nextAttemptAt - now)}`] : []),
+    ].join(" · ");
+  });
+  return `Subscription limits${hidden ? ` (${hidden} hidden in Settings)` : ""}:\n${lines.join("\n")}`;
+}
 const bounded = <T>(record: Record<string, T>) => {
   const keys = Object.keys(record);
   for (const key of keys.slice(0, Math.max(0, keys.length - KEEP))) delete record[key];
@@ -299,7 +358,7 @@ export function startTelegram(options: {
     await say(`Now talking to ${project.name} · ${chat.title}. Send text to it, or /chats to pick another chat.`);
   }
   const help =
-    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes. /models shows project models; /models <query> finds models; /model <role> opens scoped model buttons, or add <provider/model> to set one. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
+    "pi Projects. /projects pick a project, /chats pick a chat in it, /chat new <title> start one, /status where your text goes and refreshed subscription limits. /models shows project models; /models <query> finds models; /model <role> opens scoped model buttons, or add <provider/model> to set one. Plain text goes to the picked chat; reply to a message to send to its chat or answer its question.";
 
   async function readModelSettings(id: string) {
     const project = loadProject(id);
@@ -427,6 +486,19 @@ export function startTelegram(options: {
     return say(confirmation);
   }
 
+  /** `/status` is an owner request, so it is one manual refresh: the host's cooldown, Retry-After and in-flight sharing still apply. */
+  async function limitsStatus() {
+    try {
+      return formatLimits(await options.dispatch({ action: "limits-refresh" }));
+    } catch (error) {
+      const failed = `Refresh failed: ${clip(errorText(error), 200)}`;
+      try {
+        return `${failed}. Last known:\n${formatLimits(await options.dispatch({ action: "limits-snapshot" }))}`;
+      } catch (error) {
+        return `Limits unavailable: ${clip(errorText(error), 200)}`;
+      }
+    }
+  }
   async function command(text: string) {
     const [, name, rest = ""] = /^\/(\w+)(?:@\w+)?\s*([\s\S]*)$/.exec(text) ?? [];
     const query = rest.trim();
@@ -468,7 +540,10 @@ export function startTelegram(options: {
       if (!chat) return say(`No chat matches "${query}". /chats lists them.`);
       return select(projectId, chat.id);
     }
-    if (name === "status") return say(`${(await routeName()) ? `Text goes to ${await routeName()}.` : "No project picked: /projects."}`);
+    if (name === "status") {
+      const route = await routeName();
+      return say(`${route ? `Text goes to ${route}.` : "No project picked: /projects."}\n\n${await limitsStatus()}`);
+    }
     return say(help);
   }
 

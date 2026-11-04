@@ -2,7 +2,8 @@
 // Failure cases recorded in telegram-failures.md before implementation.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { kit, delay, randomUUID } from "./notify-kit.mjs";
 
@@ -197,12 +198,16 @@ const api = createServer((req, res) => {
   });
 });
 await new Promise((ok) => api.listen(0, "127.0.0.1", ok));
+// `/status` refreshes subscription limits: fixture readings, so no provider is contacted.
+const limitsFixture = join(mkdtempSync(join(tmpdir(), "telegram-limits-")), "limits.json");
+writeFileSync(limitsFixture, JSON.stringify({ claude: [{ window: "5h", usedPercent: 37, resetsAt: Date.now() + 3 * 3600e3 }] }));
 const k = await kit(
   "telegram",
   {
     PI_PROJECTS_TELEGRAM_API: `http://127.0.0.1:${api.address().port}`,
     PI_PROJECTS_TELEGRAM_POLL_S: "20",
     PI_PROJECTS_TELEGRAM_BACKOFF_MS: "200",
+    PI_PROJECTS_LIMITS_FIXTURE: limitsFixture,
   },
   respond,
 );
@@ -422,7 +427,7 @@ try {
     assert.equal((await settings()).revision, beforeBad.revision);
     text(STRANGER, "/model worker fake/other-model");
     text(GROUP, "/model worker fake/other-model");
-    await command("/status", /Alpha.*Two/);
+    assert.match((await command("/status", /Alpha.*Two/)).text, /Subscription limits[^]*Claude: 5h 37% · resets in [23]h/);
     assert.equal((await settings()).revision, beforeBad.revision);
     assert.equal((await rpc({ action: "settings-snapshot", id: b })).revision, otherProject.revision);
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).route, route);
