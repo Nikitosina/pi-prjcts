@@ -2,7 +2,8 @@
 // Failure cases recorded in telegram-failures.md before implementation.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { kit, delay, randomUUID } from "./notify-kit.mjs";
 
@@ -197,12 +198,16 @@ const api = createServer((req, res) => {
   });
 });
 await new Promise((ok) => api.listen(0, "127.0.0.1", ok));
+// `/status` refreshes subscription limits: fixture readings, so no provider is contacted.
+const limitsFixture = join(mkdtempSync(join(tmpdir(), "telegram-limits-")), "limits.json");
+writeFileSync(limitsFixture, JSON.stringify({ claude: [{ window: "5h", usedPercent: 37, resetsAt: Date.now() + 3 * 3600e3 }] }));
 const k = await kit(
   "telegram",
   {
     PI_PROJECTS_TELEGRAM_API: `http://127.0.0.1:${api.address().port}`,
     PI_PROJECTS_TELEGRAM_POLL_S: "20",
     PI_PROJECTS_TELEGRAM_BACKOFF_MS: "200",
+    PI_PROJECTS_LIMITS_FIXTURE: limitsFixture,
   },
   respond,
 );
@@ -422,7 +427,7 @@ try {
     assert.equal((await settings()).revision, beforeBad.revision);
     text(STRANGER, "/model worker fake/other-model");
     text(GROUP, "/model worker fake/other-model");
-    await command("/status", /Alpha.*Two/);
+    assert.match((await command("/status", /Alpha.*Two/)).text, /Subscription limits[^]*Claude: 5h 37% · resets in [23]h/);
     assert.equal((await settings()).revision, beforeBad.revision);
     assert.equal((await rpc({ action: "settings-snapshot", id: b })).revision, otherProject.revision);
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).route, route);
@@ -520,7 +525,7 @@ try {
     );
   }
 
-  // T17/T18/T33: question with buttons; a UI2 tab open on the asking chat drops the card when Telegram answers, without a reload.
+  // T17/T18/T40: question with buttons; a UI2 tab open on the asking chat drops the card when Telegram answers, without a reload.
   const ui2 = new URL((await rpc({ action: "web" })).url);
   ui2.pathname = "/ui2/";
   ui2.searchParams.set("project", a);
@@ -547,10 +552,10 @@ try {
   if (!tg.edits.some((e) => e.message_id === question.message_id)) throw Error("Answered question buttons were not removed");
   await waitFor(`window.__noReload && ${cards("/MARK-Q/")} === 0`, s, "UI2 card gone after the Telegram button");
   result.checks.push(
-    "T17/T18/T33 a needs-you question arrives with answer buttons; a press records the answer once, wakes the asking chat and drops the open UI2 card without a reload; a stale button is refused",
+    "T17/T18/T40 a needs-you question arrives with answer buttons; a press records the answer once, wakes the asking chat and drops the open UI2 card without a reload; a stale button is refused",
   );
 
-  // T34/T35: plain text routed to the asking chat answers its only open question (once, also across a replay); another chat's question stays open.
+  // T41/T42: plain text routed to the asking chat answers its only open question (once, also across a replay); another chat's question stays open.
   await k.ask(a, "main", "MARK-ASK in Main");
   const mainQuestion = (await rpc({ action: "show", id: a })).inbox.find((item) => item.kind === "question" && !item.result);
   mark = toOwner().length;
@@ -584,7 +589,7 @@ try {
   await waitFor(`window.__noReload && ${cards("/MARK-Q/")} === 0`, s, "UI2 Main card gone while paused");
   await rpc({ action: "resume", id: a, confirm: a });
   result.checks.push(
-    "T34/T35 plain text to the asking chat answers its only open question, wakes it once and drops the UI2 card; a question of another chat stays open; an answer to a paused project drops its card too",
+    "T41/T42 plain text to the asking chat answers its only open question, wakes it once and drops the UI2 card; a question of another chat stays open; an answer to a paused project drops its card too",
   );
 
   // T19: a Job's plan arrives as one progress message edited in place; its Ready message offers Approve, which reaches the host.
