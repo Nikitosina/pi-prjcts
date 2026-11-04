@@ -1092,10 +1092,30 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     if (line >= 0) sinks.errors.splice(line, 1);
   }
   record("verified", `E11 the conflict was noticed by ${refused >= 0 ? "the refused stale write" : "the change feed"}`);
+
+  // E23: in a chat other than Main, every tab renders its blocks and preview; only the coordinator preview is chat-specific.
+  const side = await rpc(run, { action: "chat-create", id: projectId, title: "Verify side chat" });
+  await page.navigate(`${origin}/ui2/?project=${projectId}&chat=${side.id}${hash}`);
+  await page.waitFor(
+    `document.body.dataset.ready === "1" && new URL(location.href).searchParams.get("chat") === ${q(side.id)}`,
+    "side chat open",
+  );
+  for (const target of ["coordinator", "worker", "taskHelper", "scout", "reviewer", "host"]) {
+    await open(target);
+    await page.click('#settings .pb-bar [data-pane="preview"]');
+    await page.waitFor(`document.querySelectorAll('#settings .pv-sec').length > 0`, `preview of ${target} in a side chat`);
+    const said = await status();
+    if (/applies to the coordinator|error|✕|⚠/i.test(said)) throw Error(`E23 ${target} in a side chat: ${said}`);
+    await page.click('#settings .pb-bar [data-pane="blocks"]');
+  }
+  record(
+    "visible",
+    "E23 in a side chat, all six Prompt tabs (coordinator, Job worker, task helper, scout, reviewer, Host agent) show blocks and a preview, no error",
+  );
 }
 
 const journeys = {
-  // Feature: features/ui2-prompts.md; failure list: scripts/ui2-prompt-editor-failures.md (E1-E18).
+  // Feature: features/ui2-prompts.md; failure list: scripts/ui2-prompt-editor-failures.md (E1-E23).
   async "ui2-prompts"(run, page, record, dir, sinks) {
     await ui2Prompts(run, page, record, dir, sinks);
   },

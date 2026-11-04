@@ -32,7 +32,8 @@ const render = (profile) =>
     ...where(profile),
     profile,
     ...(profile === "worker" ? { workerMode: workerMode === "task" ? "task" : "job" } : {}),
-    ...(profile !== "host" && state.chatId !== "main" ? { chatId: state.chatId } : {}),
+    // Only the coordinator's prompt is per chat; the host refuses chatId for every other profile.
+    ...(profile === "coordinator" && state.chatId !== "main" ? { chatId: state.chatId } : {}),
   });
 export const isStale = (error) => /revision/i.test(String(error?.message ?? error));
 const ADOPTS = {
