@@ -4,7 +4,7 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
-import { errorText, home, jobs, listProjects, loadProject, projectDir, saveJson, Project, type Request } from "./state.ts";
+import { errorText, home, listProjects, loadProject, projectDir, saveJson, Project, type Request } from "./state.ts";
 import type { Notice, Notifier } from "./notify.ts";
 import type { DurableChat } from "./durable-runtime.ts";
 import {
@@ -547,7 +547,7 @@ export function startTelegram(options: {
     return say(help);
   }
 
-  async function deliver(target: Target, text: string, updateId: number, openQuestions = 0) {
+  async function deliver(target: Target, text: string, updateId: number) {
     try {
       const project = loadProject(target.projectId);
       await options.dispatch({
@@ -559,10 +559,7 @@ export function startTelegram(options: {
         ...(target.chatId !== "main" ? { chatId: target.chatId } : {}),
       });
       await say(
-        `Sent to ${project.name} · ${(await options.chats(target.projectId)).find((chat) => chat.id === target.chatId)?.title ?? "Main"}.` +
-          (openQuestions
-            ? ` ${openQuestions === 1 ? "A question there is" : `${openQuestions} questions there are`} still open: reply to a question's message to answer it.`
-            : ""),
+        `Sent to ${project.name} · ${(await options.chats(target.projectId)).find((chat) => chat.id === target.chatId)?.title ?? "Main"}.`,
       );
     } catch (error) {
       await say(`Not sent: ${errorText(error)}`);
@@ -582,16 +579,6 @@ export function startTelegram(options: {
     });
     return `Answered: ${text}`;
   }
-  /** Open questions the chat asked; questions from before chats existed belong to Main, as on the web. */
-  async function openQuestions(target: Target) {
-    const chats = await options.chats(target.projectId);
-    return inbox(projectDir(target.projectId)).filter(
-      (item) =>
-        item.kind === "question" &&
-        !item.result &&
-        ((item.native && chats.find((chat) => chat.conversationId === item.native!.conversationId)?.id) || "main") === target.chatId,
-    );
-  }
 
   async function onMessage(message: Message, updateId: number) {
     const text = message.text?.trim();
@@ -602,14 +589,9 @@ export function startTelegram(options: {
       if (entry?.kind === "question" && !entry.result) return say(await answer(target.projectId, target.entryId, text, updateId));
     }
     if (text.startsWith("/")) return command(text);
-    const chat = target ?? state.route;
-    if (!chat) return say("Pick a project first: /projects");
-    // Telegram has one thread per chat: text to a chat whose only open question waits answers it, as the notice invites.
-    // Not a reply to another question's notice, and not an update already admitted (a replay keeps its first meaning).
-    const open = await openQuestions(chat),
-      handled = jobs(chat.projectId).some((job) => job.id === updateRequestId(state.bot!.id, updateId));
-    if (open.length === 1 && !target?.entryId && !handled) return say(await answer(chat.projectId, open[0].id, text, updateId));
-    return deliver(chat, text, updateId, open.length);
+    if (target) return deliver(target, text, updateId);
+    if (!state.route) return say("Pick a project first: /projects");
+    return deliver(state.route, text, updateId);
   }
   const approveButton = (projectId: string, jobId: string): Button[][] => [
     [{ text: "Approve", callback_data: key({ t: "approve-job", projectId, jobId }) }],

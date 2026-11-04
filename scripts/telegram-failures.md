@@ -60,5 +60,5 @@ Owner decision: limits refresh only on an explicit owner request (`scripts/limit
 
 ## Questions answered from Telegram, added before the change
 40. A question answered in Telegram stays open in an open UI2 tab: the card stays until a reload, or reappears after one.
-41. Text the owner sends to the asking chat while its only question is open (plain routed text, or a reply to another message of that chat) reaches the coordinator as a plain message: work continues, the question stays open everywhere.
-42. That text answers a question of another chat, or picks one of several open questions in the chat; or a replayed update answers twice or admits a second turn.
+41. Answering by button in one chat resolves or hides another chat's question, or a paused project (waking the chat deferred) leaves the card up until a reload.
+42. Ordinary text to a chat with an open question resolves it (only a button or a reply to the question's own message answers), or a replayed answer update wakes the chat twice.
