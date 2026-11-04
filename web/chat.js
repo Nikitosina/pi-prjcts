@@ -15,6 +15,7 @@ let live = null,
   older = [],
   olderBefore = null,
   loading = null,
+  held = null, // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
   stick = true;
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+): ([^\]\n]*)\]([\s\S]*)$/;
@@ -33,12 +34,14 @@ export async function loadChat() {
       do {
         run.again = false;
         const gen = state.generation,
-          id = state.projectId;
+          id = state.projectId,
+          entries = state.live?.entries ?? 0;
         if (!id) return;
         const [view] = await Promise.all([call("show", { id, ...chatArgs() }), loadRecentMemory().catch(fail)]);
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
+        if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
         renderQuestions();
@@ -59,6 +62,7 @@ on("select", () => {
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
   state.live = null;
+  held = state.liveHeld = null;
   live?.stop();
   live = null;
   liveKey = "";
@@ -74,15 +78,38 @@ function ensureLive() {
     if (stale(gen)) return;
     const previous = state.live;
     state.live = frame;
-    emit("live", frame);
     const compaction =
       previous && (previous.compacting !== frame.compacting || previous.compactionFailure?.error !== frame.compactionFailure?.error);
-    if (previous && (previous.entries !== frame.entries || previous.running !== frame.running || compaction)) void loadChat();
+    const refresh = previous && (previous.entries !== frame.entries || previous.running !== frame.running || compaction);
+    // A committed step (or the final answer) leaves the live frame now but reaches the transcript only with the next read:
+    // keep showing it until a read that started after this frame renders (live-chain-failures.md 13-14).
+    if (refresh && (previous.entries !== frame.entries || (previous.running && !frame.running))) {
+      const sameText = !!frame.text && frame.text === previous.text,
+        thinkingText = previous.thinking ? previous.thinkingText : "";
+      if (!sameText && (previous.text || thinkingText)) held = { entries: frame.entries, text: previous.text, thinkingText };
+      else if (held) held.entries = frame.entries;
+    }
+    state.liveHeld = held ? (held.text ? "writing" : "thinking") : null;
+    emit("live", frame);
+    // A refresh leaves the live turn as drawn: renderFeed redraws it with the transcript and keeps the reader's place.
+    if (refresh) void loadChat();
     else renderLive();
   });
 }
 
 // ---------------------------------------------------------------------------------------------------------------- transcript
+
+/** Whether a read that started before the commit frame already holds the held step, so it is not shown twice. */
+function committed(view, step) {
+  return (view.messages ?? [])
+    .slice(-12)
+    .some(
+      (item) =>
+        item.kind === "message" &&
+        item.role === "assistant" &&
+        (step.text ? item.text?.trim() === step.text.trim() : !!step.thinkingText && item.thinking?.trim() === step.thinkingText.trim()),
+    );
+}
 
 function messages() {
   return [...older, ...(state.view?.messages ?? [])];
@@ -362,8 +389,11 @@ function renderLive() {
   document.querySelector("#stop-btn").hidden = !frame?.running;
   document.querySelector("#send-mode").hidden = !frame?.running;
   document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
+  const kept = held
+    ? `${held.thinkingText ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
+    : "";
   if (!frame?.running) {
-    node.replaceChildren();
+    node.innerHTML = kept;
     hydrateMedia(feed, mediaSource());
     return;
   }
@@ -386,7 +416,7 @@ function renderLive() {
           : tools
             ? "Using tools"
             : "Working";
-  node.innerHTML = `${frame.thinking && frame.thinkingText ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
+  node.innerHTML = `${kept}${frame.thinking && frame.thinkingText ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
   hydrateMedia(feed, mediaSource());
   if (stick) feed.scrollTop = feed.scrollHeight;
 }

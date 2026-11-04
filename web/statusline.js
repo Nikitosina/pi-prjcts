@@ -31,7 +31,7 @@ function activity() {
           : live.thinking
             ? "thinking"
             : "working"
-    : "idle";
+    : (state.liveHeld ?? "idle"); // the run ended but its last step is not in the transcript yet (chat.js `held`)
   return `<span class="sl-item" data-item="activity"><span class="sl-dot ${live?.running ? "on" : ""}" aria-hidden="true"></span>${esc(status)}</span>`;
 }
 function model() {

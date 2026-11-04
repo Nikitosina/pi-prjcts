@@ -9,6 +9,7 @@ export const state = {
   view: null, // `show` for the selected chat
   jobs: null, // `jobs-snapshot`
   live: null, // last DurableLiveFrame of the selected chat
+  liveHeld: null, // "writing" | "thinking" while a committed step still shows live, waiting for the transcript read
   connected: false,
   focus: { kind: "chat" }, // center: chat | worker | memory | report
   ui: null, // UiSettings, or null while unknown

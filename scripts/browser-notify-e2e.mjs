@@ -17,6 +17,8 @@ try {
   await k.ask(b, "main", "MARK-BETA other project");
   await k.ask(a, "main", "MARK-ASK a question");
   await k.ask(a, "main", "MARK-SHIP a job");
+  // Main stays quiet while the Job runs (src/notify.ts); its final report is the event that ends that (browser-notify-failures.md).
+  await eventually(async () => has((n) => n.kind === "result" && /MARK-JOB/.test(n.text)), "no Job final report notice", 300);
   const failed = await k.ask(a, two.id, "MARK-FAIL break");
   if (failed.state !== "failed") throw Error("Fixture turn did not fail: " + failed.state);
   await k.ask(a, "main", "MARK-LONG reply");
