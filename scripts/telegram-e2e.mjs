@@ -525,10 +525,20 @@ try {
     );
   }
 
-  // T17/T18: question with buttons.
+  // T17/T18/T40: question with buttons; a UI2 tab open on the asking chat drops the card when Telegram answers, without a reload.
+  const ui2 = new URL((await rpc({ action: "web" })).url);
+  ui2.pathname = "/ui2/";
+  ui2.searchParams.set("project", a);
+  ui2.searchParams.set("chat", two.id);
+  await send("Page.navigate", { url: ui2.toString() }, s);
+  await waitFor(`document.body.dataset.ready === "1"`, s, "UI2 ready");
+  await evaluate(`window.__noReload = true`, s);
+  const cards = (pattern) =>
+    `[...document.querySelectorAll('#questions form.question')].filter((n) => ${pattern}.test(n.innerText)).length`;
   mark = toOwner().length;
   text(OWNER, "MARK-ASK please ask");
   const question = await lastTo(/MARK-Q Pick a colour/, "question notice", mark);
+  await waitFor(`${cards("/MARK-Q/")} === 1`, s, "UI2 question card");
   if (!buttons(question).some((btn) => btn.text === "red") || !buttons(question).some((btn) => btn.text === "blue"))
     throw Error("Question buttons missing");
   press(OWNER, question, buttons(question).find((btn) => btn.text === "blue").callback_data);
@@ -540,8 +550,51 @@ try {
   if ((await rpc({ action: "show", id: a, chatId: two.id })).inbox.find((item) => item.id === entry.id).result.text !== "blue")
     throw Error("Stale button changed the answer");
   if (!tg.edits.some((e) => e.message_id === question.message_id)) throw Error("Answered question buttons were not removed");
+  await waitFor(`window.__noReload && ${cards("/MARK-Q/")} === 0`, s, "UI2 card gone after the Telegram button");
   result.checks.push(
-    "T17/T18 a needs-you question arrives with answer buttons; a press records the answer once and wakes the asking chat; a stale button is refused",
+    "T17/T18/T40 a needs-you question arrives with answer buttons; a press records the answer once, wakes the asking chat and drops the open UI2 card without a reload; a stale button is refused",
+  );
+
+  // T41/T42: ordinary text to a chat with an open question stays a message; a button answers only its own chat's question.
+  await k.ask(a, "main", "MARK-ASK in Main");
+  const mainQuestion = (await rpc({ action: "show", id: a })).inbox.find((item) => item.kind === "question" && !item.result);
+  mark = toOwner().length;
+  text(OWNER, "MARK-ASK again");
+  const twoNotice = await lastTo(/Alpha · Two[\s\S]*MARK-Q Pick a colour/, "side chat question notice", mark);
+  await waitFor(`${cards("/MARK-Q/")} === 1`, s, "UI2 side chat question card");
+  const twoQuestion = (await rpc({ action: "show", id: a })).inbox.find(
+    (item) => item.kind === "question" && !item.result && item.id !== mainQuestion.id,
+  );
+  const twoJobs = (await jobs(a, two.id)).length;
+  text(OWNER, "MARK-PLAIN not an answer");
+  await lastTo(/Done MARK-PLAIN\./, "plain text reached the chat as a message", mark);
+  const stillOpen = (await rpc({ action: "show", id: a })).inbox
+    .filter((item) => item.kind === "question" && !item.result)
+    .map((item) => item.id);
+  assert.deepEqual(stillOpen.sort(), [mainQuestion.id, twoQuestion.id].sort(), "plain text resolves no question");
+  assert.equal((await jobs(a, two.id)).length, twoJobs + 1, "plain text admits one ordinary turn");
+  assert.equal(await evaluate(cards("/MARK-Q/"), s), 1, "the UI2 card stays after plain text");
+  mark = toOwner().length;
+  press(OWNER, twoNotice, buttons(twoNotice).find((btn) => btn.text === "blue").callback_data);
+  await lastTo(/ANSWER-ACK blue/, "side chat button answer reached its chat", mark);
+  await waitFor(`window.__noReload && ${cards("/MARK-Q/")} === 0`, s, "UI2 side chat card gone after the button");
+  const afterPress = (await rpc({ action: "show", id: a })).inbox;
+  assert.equal(afterPress.find((item) => item.id === twoQuestion.id).result?.text, "blue");
+  assert.equal(afterPress.find((item) => item.id === mainQuestion.id).result, null, "Main's question stays open");
+  // A paused project defers waking the chat; the UI2 card still goes.
+  ui2.searchParams.delete("chat");
+  await send("Page.navigate", { url: ui2.toString() }, s);
+  await waitFor(`document.body.dataset.ready === "1" && ${cards("/MARK-Q/")} === 1`, s, "UI2 Main question card");
+  await evaluate(`window.__noReload = true`, s);
+  await rpc({ action: "pause", id: a });
+  const mainNotice = toOwner().findLast((m) => /Alpha · Main/.test(m.text) && /MARK-Q Pick a colour/.test(m.text));
+  mark = toOwner().length;
+  press(OWNER, mainNotice, buttons(mainNotice).find((btn) => btn.text === "red").callback_data);
+  await lastTo(/Answered: red/, "Main answer while paused", mark);
+  await waitFor(`window.__noReload && ${cards("/MARK-Q/")} === 0`, s, "UI2 Main card gone while paused");
+  await rpc({ action: "resume", id: a, confirm: a });
+  result.checks.push(
+    "T41/T42 plain text to a chat with open questions stays an ordinary message and resolves none; a side chat button answers only its question and drops its UI2 card; a button answer to a paused project drops its card too",
   );
 
   // T19: a Job's plan arrives as one progress message edited in place; its Ready message offers Approve, which reaches the host.
@@ -841,8 +894,9 @@ try {
   }
   await k.startHost();
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await evaluate(`window.__old = true`, s);
   await send("Page.navigate", { url: await settingsUrl(a) }, s);
-  await waitFor(`!!document.querySelector('#telegram-token')`, s, "mobile card");
+  await waitFor(`!window.__old && document.readyState === 'complete' && !!document.querySelector('#telegram-token')`, s, "mobile card");
   result.httpErrors = result.httpErrors.filter((e) => e.status !== 401); // same restart window as above
   await waitFor(`!!document.querySelector('#notify-card')`, s, "#notify-card");
   await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);

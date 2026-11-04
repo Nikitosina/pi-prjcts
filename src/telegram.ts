@@ -565,11 +565,18 @@ export function startTelegram(options: {
       await say(`Not sent: ${errorText(error)}`);
     }
   }
-  async function answer(projectId: string, entryId: string, text: string): Promise<string> {
+  async function answer(projectId: string, entryId: string, text: string, updateId?: number): Promise<string> {
     const entry = inbox(projectDir(projectId)).find((item) => item.id === entryId);
     if (!entry || entry.kind !== "question") return "That question is gone.";
     if (entry.result) return `Already answered: ${entry.result.text}`;
-    await options.dispatch({ action: "answer", id: projectId, entry: entryId, text: text.slice(0, 32000), origin: "telegram" });
+    await options.dispatch({
+      action: "answer",
+      id: projectId,
+      entry: entryId,
+      text: text.slice(0, 32000),
+      origin: "telegram",
+      ...(updateId !== undefined ? { requestId: updateRequestId(state.bot!.id, updateId) } : {}),
+    });
     return `Answered: ${text}`;
   }
 
@@ -579,7 +586,7 @@ export function startTelegram(options: {
     const target = message.reply_to_message ? state.messages[String(message.reply_to_message.message_id)] : undefined;
     if (target?.entryId && !text.startsWith("/")) {
       const entry = inbox(projectDir(target.projectId)).find((item) => item.id === target.entryId);
-      if (entry?.kind === "question" && !entry.result) return say(await answer(target.projectId, target.entryId, text));
+      if (entry?.kind === "question" && !entry.result) return say(await answer(target.projectId, target.entryId, text, updateId));
     }
     if (text.startsWith("/")) return command(text);
     if (target) return deliver(target, text, updateId);

@@ -459,12 +459,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const asked = entry.native
         ? (await (await durable(input.id)).chats()).find((chat) => chat.conversationId === entry.native?.conversationId)?.id
         : undefined;
+      // The inbox is part of the chat's read model; tell browsers even when waking the chat is deferred.
+      feed.publish(input.id, { topic: "chat", chat: asked ?? "main" });
       try {
         await dispatchRequest({
           action: "message",
           id: input.id,
           text: `Owner answered your question "${entry.title}":\n${input.text}`,
           ...(input.origin ? { origin: input.origin } : {}),
+          ...(input.requestId ? { requestId: input.requestId } : {}),
           ...(asked && asked !== "main" ? { chatId: asked } : {}),
         });
       } catch (error) {

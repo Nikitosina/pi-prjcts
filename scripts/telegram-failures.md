@@ -57,3 +57,8 @@ Owner decision: limits refresh only on an explicit owner request (`scripts/limit
 37. Providers hidden in Settings are listed, or all hidden gives an empty reply.
 38. A failed `limits-refresh` gives no reply; the last cached snapshot must be shown with the error, or the error alone if there is none.
 39. A long provider reason makes the reply exceed Telegram's limit, or the plain-text reply is sent with a `parse_mode`.
+
+## Questions answered from Telegram, added before the change
+40. A question answered in Telegram stays open in an open UI2 tab: the card stays until a reload, or reappears after one.
+41. Answering by button in one chat resolves or hides another chat's question, or a paused project (waking the chat deferred) leaves the card up until a reload.
+42. Ordinary text to a chat with an open question resolves it (only a button or a reply to the question's own message answers), or a replayed answer update wakes the chat twice.
