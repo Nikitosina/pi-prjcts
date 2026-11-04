@@ -17,6 +17,9 @@ export const state = {
   limits: null, // `limits-snapshot` providers
   limitsRefreshing: false,
   limitsError: null,
+  limitsVisibility: null, // host's saved `limits-visibility`: provider → shown in the status line
+  limitsPending: {}, // provider → the choice a toggle shows while its save is queued or in flight
+  limitsVisibilityError: null,
   usage: null,
 };
 

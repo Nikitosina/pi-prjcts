@@ -1445,6 +1445,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return limitsSnapshot(Date.now(), true);
     case "limits-visibility":
       setLimitVisibility(input.provider, input.visible);
+      publishHost("limits");
       return limitsSnapshot();
     case "machine-status":
       return machineStatus();

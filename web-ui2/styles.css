@@ -2775,6 +2775,13 @@ table.hotkeys tr.clash td {
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
+.provider-list .one-line {
+  flex: 1;
+}
+.provider-list .sl-state {
+  color: var(--faint);
+  font-style: italic;
+}
 #palette {
   width: min(620px, calc(100vw - 24px));
   margin-top: 12vh;

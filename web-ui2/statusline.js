@@ -3,7 +3,7 @@
 import { esc, shortModel, tokens, usd } from "./format.js";
 import { on, state } from "./state.js";
 import { DEFAULT_UI } from "./ui.js";
-import { refreshLimits } from "./limits.js";
+import { limitShown, refreshLimits } from "./limits.js";
 
 /** Owner-facing names and one-line hints, in the built-in order; the ids are the host's fixed `statusItems` ids. */
 export const STATUS_ITEMS = [
@@ -59,9 +59,10 @@ function limitsRefresh(empty) {
     : "";
   return `<span class="sl-item sl-limits-refresh" data-item="limits">${button}</span>${failed}`;
 }
-/** Subscription usage: what it is, the period, and where it comes from, in words and a tooltip. */
+/** Subscription usage: what it is, the period, and where it comes from, in words and a tooltip. Hidden providers (Settings →
+ * Providers) leave only the refresh button, which stays even when every provider is hidden. */
 function limits() {
-  const shown = (state.limits ?? []).filter((item) => item.status === "ok");
+  const shown = (state.limits ?? []).filter((item) => item.status === "ok" && limitShown(item.provider));
   return `${shown
     .map((item) => {
       if (item.usage) {

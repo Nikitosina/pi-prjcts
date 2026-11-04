@@ -407,6 +407,8 @@ async function start() {
     if (change.t !== "topic") return;
     if (change.topic === "host-agent") emit("prompts-changed"); // Host agent prompt blocks, among its other changes
     if (change.topic === "ui") void loadUi();
+    else if (change.topic === "limits")
+      void loadLimits(); // which providers show, saved here or elsewhere; reads only
     else if (change.topic === "tiers") {
       emit("tiers");
       onTiersChanged();

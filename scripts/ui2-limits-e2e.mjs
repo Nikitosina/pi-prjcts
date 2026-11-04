@@ -1,4 +1,4 @@
-// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M13). Private host, fake
+// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M20). Private host, fake
 // model, PI_PROJECTS_LIMITS_FIXTURE for the non-Cursor providers and a local fake Cursor dashboard that counts every provider request.
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -48,9 +48,17 @@ writeFileSync(
 // Every page fetch of a limits action, and every interval the page sets, so the test can fire them all.
 const PROBE = `window.__limitCalls = []; window.__intervals = [];
 const realFetch = window.fetch;
+window.__visibilityInFlight = 0; window.__visibilityMax = 0; window.__failVisibility = false;
 window.fetch = function (url, options) {
-  try { const action = JSON.parse(options?.body ?? "{}").action; if (/^limits-/.test(action)) window.__limitCalls.push(action); } catch {}
-  return realFetch.apply(this, arguments);
+  let action;
+  try { action = JSON.parse(options?.body ?? "{}").action; if (/^limits-/.test(action)) window.__limitCalls.push(action); } catch {}
+  if (action !== "limits-visibility") return realFetch.apply(this, arguments);
+  // Saves are counted in flight, and the test can make the next ones fail the way a host error does.
+  window.__visibilityMax = Math.max(window.__visibilityMax, ++window.__visibilityInFlight);
+  const sent = window.__failVisibility
+    ? new Promise((ok) => setTimeout(() => ok(new Response(JSON.stringify({ ok: false, error: "disk full" }), { status: 500 })), 150))
+    : realFetch.apply(this, arguments);
+  return sent.finally(() => window.__visibilityInFlight--);
 };
 const realInterval = window.setInterval;
 window.setInterval = function (fn, ms, ...rest) { window.__intervals.push(fn); return realInterval.call(this, fn, ms, ...rest); };`;
@@ -192,7 +200,145 @@ try {
       cursorHits === 3 && /Cursor mo.*80%/.test(after) && /Claude 5h.*70%/.test(after) && !/refresh failed/.test(after),
       { cursorHits, after },
     );
+
+    // Showing and hiding each provider: the host's saved limits-visibility, switched from Settings → Providers.
+    const box = (provider) => `document.querySelector('dialog[open] [data-limit-visible="${provider}"]')`;
+    const settled = `!document.querySelector('dialog[open] [data-limit-visible][aria-busy="true"]')`;
+    const visibility = async () => (await rpc({ action: "limits-snapshot" })).visibility;
+    const since = (count) => page.evaluate(`window.__limitCalls.slice(${count}).join(",")`);
+    const callCount = () => page.evaluate(`window.__limitCalls.length`);
+    const press = async (key, code, text) => {
+      for (const type of ["keyDown", "keyUp"])
+        await page.cdp("Input.dispatchKeyEvent", { type, key, code, ...(type === "keyDown" && text ? { text } : {}) });
+    };
+    const toggle = await page.evaluate(
+      `(() => { const b = ${box("cursor")}; return b && { name: (b.labels?.[0]?.innerText ?? "").trim() || b.getAttribute("aria-label"), checked: b.checked, type: b.type }; })()`,
+    );
+    check("M20 each provider has a named show toggle", toggle?.type === "checkbox" && toggle.checked && /Cursor/.test(toggle.name), toggle);
+    let mark = await callCount(),
+      hits = cursorHits;
+    await page.evaluate(`${box("cursor")}.focus()`);
+    await press(" ", "Space", " ");
+    await page.waitFor(`!/Cursor/.test(document.querySelector('#statusline').innerText) && ${settled}`, "Cursor hidden");
+    let saved = await visibility();
+    check("M14 Space hides Cursor in the status line and saves it on the host", saved.cursor === false && saved.claude === true, saved);
+    check("M14 the other providers stay", /Claude 5h.*70%/.test(await bar()), await bar());
+    check("M20 the keyboard stays on the Cursor toggle", await page.evaluate(`document.activeElement === ${box("cursor")}`));
+    const row = await page.evaluate(
+      `(() => { const b = ${box("cursor")}; return { checked: b.checked, text: b.closest("li").innerText.replace(/\\s+/g, " ") }; })()`,
+    );
+    check(
+      "M17 a hidden provider keeps its Providers row and reading",
+      !row.checked && /80% used/.test(row.text) && /hidden/.test(row.text),
+      row,
+    );
+    let sent = await since(mark);
+    check(
+      "M15 a toggle saves and reads only, and reaches no provider",
+      /limits-visibility/.test(sent) && !/refresh/.test(sent) && cursorHits === hits,
+      {
+        sent,
+        cursorHits,
+      },
+    );
+    await page.shot("06-cursor-hidden", { force: true });
+
+    // A change saved elsewhere (another browser, the Host agent, the classic inbox) reaches this page without a reload. A second UI2
+    // tab is not opened here: each tab holds several streams and Chrome's per-host connection cap would stall it.
+    hits = cursorHits;
+    await rpc({ action: "limits-visibility", provider: "claude", visible: false });
+    await page.waitFor(
+      `!/Claude/.test(document.querySelector('#statusline').innerText) && !${box("claude")}.checked`,
+      "Claude hidden here",
+    );
+    check("M19 a change saved elsewhere reaches the open page and contacts no provider", cursorHits === hits);
+    const allHidden = await page.evaluate(
+      `(() => { const b = ${button}; return b && { label: b.getAttribute("aria-label"), text: b.innerText.trim(), rows: document.querySelectorAll('dialog[open] [data-limit-visible]').length }; })()`,
+    );
+    check(
+      "M17 with every reading hidden the status line keeps its refresh button and Providers keeps every row",
+      allHidden?.label === "Refresh subscription limits" && allHidden.text === "limits" && allHidden.rows === 5,
+      allHidden,
+    );
+    await page.shot("07-all-hidden", { force: true });
+
+    // A refresh still reads hidden providers, and they stay hidden.
+    await kit.delay(COOLDOWN_MS + 500);
+    cursorPercent = 90;
+    setClaude(75);
+    hits = cursorHits;
+    await page.evaluate(`document.querySelector('dialog[open] [data-providers-refresh]').click()`);
+    await page.waitFor(`/90% used/.test(${box("cursor")}.closest("li").innerText)`, "hidden Cursor refreshed");
+    check("M16 a refresh reads hidden providers and keeps them hidden", cursorHits === hits + 1 && !/Cursor|Claude/.test(await bar()), {
+      cursorHits,
+      bar: await bar(),
+    });
+
+    // Rapid toggles of two providers are saved one at a time, and the page ends where the host ends.
+    mark = await callCount();
+    await page.evaluate(
+      `["claude", "cursor", "cursor", "cursor"].forEach((p) => document.querySelector('dialog[open] [data-limit-visible="' + p + '"]').click())`,
+    );
+    await page.waitFor(
+      `((t) => /Claude 5h.*75%/.test(t) && /Cursor mo.*90%/.test(t))(document.querySelector('#statusline').innerText.replace(/\\s+/g, " ")) && ${settled}`,
+      "rapid toggles settled",
+    );
+    saved = await visibility();
+    const boxes = await page.evaluate(
+      `({ claude: ${box("claude")}.checked, cursor: ${box("cursor")}.checked, max: window.__visibilityMax })`,
+    );
+    sent = await since(mark);
+    check(
+      "M18 rapid toggles end with page and host agreeing, one save at a time",
+      saved.claude &&
+        saved.cursor &&
+        boxes.claude &&
+        boxes.cursor &&
+        boxes.max === 1 &&
+        (sent.match(/limits-visibility/g) ?? []).length === 4,
+      { saved, boxes, sent },
+    );
+
+    // A failed save says so in place and shows the choice the host kept.
+    await page.evaluate(`(window.__failVisibility = true, ${box("cursor")}.focus())`);
+    await press(" ", "Space", " ");
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-visibility-error]') && ${settled}`, "save failure note");
+    const failedSave = await page.evaluate(
+      `({ checked: ${box("cursor")}.checked, note: document.querySelector('dialog[open] [data-visibility-error]').innerText, focused: document.activeElement === ${box("cursor")} })`,
+    );
+    saved = await visibility();
+    check(
+      "M18 a failed save keeps the host's choice on the toggle and in the status line",
+      failedSave.checked && /disk full/.test(failedSave.note) && failedSave.focused && saved.cursor && /Cursor mo.*90%/.test(await bar()),
+      { failedSave, saved },
+    );
+    await page.shot("08-save-failed", { force: true });
+    await page.evaluate(`window.__failVisibility = false`);
+
+    // The saved choice survives a reload, which still only reads.
+    await press(" ", "Space", " ");
+    await page.waitFor(`!/Cursor/.test(document.querySelector('#statusline').innerText) && ${settled}`, "Cursor hidden again");
+    await page.reload();
+    await page.waitFor(`document.body.dataset.ready === "1" && /Claude/.test(document.querySelector('#statusline').innerText)`, "reloaded");
+    await kit.delay(1000);
+    check("M14 the choice survives a reload, which only reads", !/Cursor/.test(await bar()) && (await calls()) === "limits-snapshot", {
+      bar: await bar(),
+      calls: await calls(),
+    });
+
+    // Narrow screen: the Providers rows and their toggles fit.
+    await page.viewport(390, 844, true);
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-section="providers"]')`, "settings open (narrow)");
+    await page.evaluate(`document.querySelector('dialog[open] [data-section="providers"]').click()`);
+    await page.waitFor(`!!${box("cursor")}`, "providers (narrow)");
+    const fit = await page.evaluate(
+      `(() => { const list = document.querySelector('dialog[open] .provider-list'); const r = ${box("cursor")}.getBoundingClientRect(); return { over: list.scrollWidth - list.clientWidth, inView: r.left >= 0 && r.right <= innerWidth }; })()`,
+    );
+    check("M20 on a narrow screen the toggles fit", fit.over <= 1 && fit.inView, fit);
+    await page.shot("09-providers-narrow", { force: true });
     await page.evaluate(`document.querySelector('dialog[open] [data-cmd="settings"]').click()`);
+    await page.viewport(1440, 1000);
 
     // Hiding the limits item hides its refresh button with it.
     const ui = await rpc({ action: "ui-get" });

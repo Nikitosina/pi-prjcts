@@ -7,7 +7,7 @@ import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
-import { loadLimits, refreshLimits } from "./limits.js";
+import { limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -923,30 +923,41 @@ async function deploy(body, alive) {
   if (!alive()) return;
   body.innerHTML = `${line("Self-deploys of pi-prjcts in a quiet window.", "Deploy is an owner-only action: the Host agent may prepare it, never press it.")}<div class="field-row"><span class="label">Window</span><span class="mono">${esc(snap.settings ? `${snap.settings.startHour}:00–${snap.settings.endHour}:00${snap.settings.idle ? " · when idle" : ""}` : (snap.error ?? ""))}</span><span class="badge ${snap.running ? "t-work" : ""}">${snap.running ? "deploying" : "idle"}</span></div>`;
 }
-/** Same readings and refresh as the status line (web-ui2/limits.js): opening this section reads, only Refresh asks the providers. */
+/** Same readings and refresh as the status line (web-ui2/limits.js): opening this section reads, only Refresh asks the providers.
+ * Each row's switch shows or hides that provider in the status line; hidden rows stay so they can be shown again. */
 async function providers(body, alive) {
   await loadLimits();
   if (!alive()) return;
   const draw = () => {
     const busy = state.limitsRefreshing;
-    body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; Cursor connects from the classic inbox. Limits update only when you refresh them.")}<div class="field-row"><button type="button" class="ghost-btn small" data-providers-refresh${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${busy ? "Refreshing…" : "Refresh limits"}</button>${state.limitsError ? `<span class="error-line small" data-limits-error>${esc(oneLine(state.limitsError))}</span>` : ""}</div><ul class="provider-list">${(
+    body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; Cursor connects from the classic inbox. Limits update only when you refresh them. The switch chooses which providers the status line and Telegram /status show.")}<div class="field-row"><button type="button" class="ghost-btn small" data-providers-refresh${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${busy ? "Refreshing…" : "Refresh limits"}</button>${state.limitsError ? `<span class="error-line small" data-limits-error>${esc(oneLine(state.limitsError))}</span>` : ""}</div>${state.limitsVisibilityError ? `<p class="error-line small" role="alert" data-visibility-error>${esc(state.limitsVisibilityError)}</p>` : ""}<ul class="provider-list">${(
       state.limits ?? []
     )
-      .map(
-        (item) =>
-          `<li><b>${esc(item.label)}</b><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span></li>`,
-      )
+      .map((item) => {
+        const saving = item.provider in state.limitsPending;
+        const shown = saving ? state.limitsPending[item.provider] : limitShown(item.provider);
+        return `<li data-provider="${esc(item.provider)}"><label class="switch" title="Show ${esc(item.label)} in the status line"><input type="checkbox" data-limit-visible="${esc(item.provider)}" aria-label="Show ${esc(item.label)} in the status line" ${shown ? "checked" : ""}${saving ? ` aria-busy="true"` : ""}/><b>${esc(item.label)}</b></label><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small one-line">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span><span class="sl-state small">${saving ? "saving…" : shown ? "" : "hidden"}</span></li>`;
+      })
       .join("")}</ul>`;
   };
   draw();
   body.addEventListener("click", (event) => {
     if (event.target.closest("[data-providers-refresh]")) void refreshLimits();
   });
-  // The button stays focusable while busy (aria-disabled, not disabled), so the redraw keeps the keyboard on it.
+  body.addEventListener("change", (event) => {
+    const toggle = event.target.closest("[data-limit-visible]");
+    if (toggle) void setLimitShown(toggle.dataset.limitVisible, toggle.checked);
+  });
+  // Buttons and switches stay focusable while busy (aria-disabled / aria-busy, not disabled), so the redraw keeps the keyboard there.
   const off = on("limits", () => {
     if (!alive()) return off();
-    const focused = document.activeElement?.matches?.("[data-providers-refresh]");
+    const active = document.activeElement;
+    const focus = active?.matches?.("[data-providers-refresh]")
+      ? "[data-providers-refresh]"
+      : active?.matches?.("[data-limit-visible]")
+        ? `[data-limit-visible="${CSS.escape(active.dataset.limitVisible)}"]`
+        : null;
     draw();
-    if (focused) body.querySelector("[data-providers-refresh]")?.focus();
+    if (focus) body.querySelector(focus)?.focus();
   });
 }

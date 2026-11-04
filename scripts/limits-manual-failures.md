@@ -20,3 +20,18 @@ Written before the code. Owner decision: usage limits refresh only when the owne
 - M11 A failed refresh is silent, removes the values already shown, or opens a dialog or popup instead of saying so in place.
 - M12 Settings → Providers refresh uses a different path and leaves the status line on old numbers.
 - M13 Hiding the Subscription limits status item still shows the refresh button.
+
+## UI 2.0: which providers the status line shows
+
+Owner request: show or hide each provider's limits in the status line. The choice is the host's saved `limits-visibility` (the classic
+inbox and Telegram `/status` read the same file), not page or `ui` state. Proof: `scripts/ui2-limits-e2e.mjs`.
+
+- M14 Hiding a provider in Settings → Providers leaves it in the status line, or the choice is kept only in the page, so a reload, another
+  browser or Telegram `/status` disagree.
+- M15 Toggling a provider, or reading the toggles, sends `limits-refresh` or reaches a provider endpoint.
+- M16 A refresh brings a hidden provider back into the status line, or stops refreshing it so re-showing it shows old numbers.
+- M17 With every provider hidden the status line loses its refresh control, or Providers drops the rows of hidden providers so they
+  cannot be shown again.
+- M18 A failed save shows the new choice anyway, or rapid toggles of several providers leave the page and the host disagreeing.
+- M19 A change from another tab or the Host agent leaves an open page on the old choice until a reload.
+- M20 A toggle has no accessible name, cannot be switched from the keyboard, or loses focus when the list redraws.
