@@ -7,7 +7,6 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { createKit, call, say, delay } from "./lib/e2e-kit.mjs";
-import { contrastLib } from "./lib/contrast-scan.mjs";
 
 // Minimal fake Telegram Bot API (never real Telegram): getMe, long-poll getUpdates, recorded sendMessage.
 const TOKEN = "123456:AAFakeTokenForE2E_ghprwatch0123456789abcdef",
@@ -590,93 +589,24 @@ await kit.run(async () => {
     [...kinds],
   );
 
-  // ---- UI: card, watch by input, hide, `#` menu ----
-  const page = await kit.openPage(await kit.webUrl(id, "coordinator"));
-  await page.waitFor(
-    `document.querySelector('#prs-card')?.hidden === false && document.querySelectorAll('.pr-row').length >= 6`,
-    "PR card",
-  );
-  await page.evaluate(contrastLib);
+  // ---- UI: the inbox at `/` lists the PRs (the classic card's toggles, hide/show and `#` menu were retired 2026-11-04) ----
+  const page = await kit.openPage(await kit.webUrl(id));
+  await page.waitFor(`document.querySelectorAll('#prs .pr-row').length >= 6`, "PR list");
   const ev = page.evaluate;
   check(
-    "UI rows: failing before running before green; draft, review, unresolved and conflicts shown",
+    "UI the PR list shows the project's PRs; the hostile title is escaped text, never markup",
     await ev(
-      `(() => { const rows = [...document.querySelectorAll('.pr-row')]; const rank = { failing: 0, running: 1, green: 2, none: 3 }; const order = rows.map(row => row.classList[1]); const text = document.querySelector('#prs').innerText; return order.every((state, i) => i === 0 || rank[order[i - 1]] <= rank[state]) && /draft/.test(text) && /changes requested/.test(text) && /2 unresolved/.test(text) && /conflicts/.test(text) && /auto-merge/.test(text); })()`,
+      `!document.querySelector('#prs img') && document.querySelector('#prs').textContent.includes('<img src=x onerror=alert(1)>') && /#3/.test(document.querySelector('#prs').innerText)`,
     ),
   );
+  await page.shot("pr-list");
+  // Watch by URL: the call the classic card input made.
+  await rpc({ action: "pr-watch", id, provider: "github", pr: "https://github.com/acme/mari/pull/5", watch: true });
   check(
-    "UI hostile title is escaped text, never markup",
-    await ev(`!document.querySelector('#prs img') && document.querySelector('#prs').textContent.includes('<img src=x onerror=alert(1)>')`),
-  );
-  check(
-    "UI watch toggles reflect the stored state; links open GitHub",
-    await ev(
-      `document.querySelector('[data-pr="4"].pr-watch').getAttribute('aria-pressed') === 'true' && document.querySelector('[data-pr="3"].pr-watch').getAttribute('aria-pressed') === 'false' && document.querySelector('a.pr-title[href="https://github.com/acme/mari/pull/3"]') !== null`,
-    ),
-  );
-  for (const [theme, dark] of [
-    ["light", false],
-    ["dark", true],
-  ]) {
-    await ev(`piTheme.set('${theme}')`);
-    await delay(500);
-    const scan = await ev(`window.__scan(${dark}, document.querySelector('#prs-card'))`);
-    check(
-      `UI ${theme}: PR card contrast >= 4.5${dark ? " and no light surfaces" : ""}`,
-      scan.low.length === 0 && (!dark || scan.bright.length === 0) && scan.texts > 15,
-      scan,
-    );
-    await page.shot(`card-${theme}`);
-  }
-  await ev(`piTheme.set('light')`);
-  await ev(
-    `(() => { const form = document.querySelector('[data-pr-add]'); form.querySelector('input').value = 'https://github.com/acme/mari/pull/5'; form.requestSubmit(); })()`,
-  );
-  await page.waitFor(`!!document.querySelector('[data-pr="5"].pr-watch[aria-pressed="true"]')`, "watch by URL from the card input");
-  check(
-    "UI watch by URL from the card input stores the id and shows the foreign PR",
+    "watch by URL stores the normalized id",
     JSON.stringify((await group(id)).watched.sort()) === '["4","5","6","7","8"]',
     (await group(id)).watched,
   );
-  await ev(`document.querySelector('[data-action="pr-watch"][data-pr="5"]').click()`);
-  await page.waitFor(`document.querySelector('[data-pr="5"].pr-watch')?.getAttribute('aria-pressed') !== 'true'`, "unwatch");
-  await ev(`document.querySelector('[data-action="pr-hide"][data-pr="9"]').click()`);
-  await page.waitFor(
-    `!document.querySelector('.pr-row [data-pr="9"]') && !!document.querySelector('[data-pr-show-hidden]')`,
-    "hidden row gone",
-  );
-  await ev(`document.querySelector('[data-pr-show-hidden]').click()`);
-  await page.waitFor(
-    `!!document.querySelector('.pr-row.hidden-pr [data-action="pr-hide"][data-pr="9"][data-hide="false"]')`,
-    "hidden list",
-  );
-  await page.shot("card-hidden-shown-light");
-  await ev(`document.querySelector('.pr-row.hidden-pr [data-action="pr-hide"]').click()`);
-  await page.waitFor(
-    `!document.querySelector('.pr-row.hidden-pr') && !!document.querySelector('[data-action="pr-watch"][data-pr="9"]')`,
-    "unhidden",
-  );
-  const type = (text) =>
-    ev(
-      `(() => { const t = document.querySelector('#compose textarea'); t.focus(); t.value = ${JSON.stringify(text)}; t.setSelectionRange(t.value.length, t.value.length); t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-    );
-  for (const [theme, dark] of [
-    ["light", false],
-    ["dark", true],
-  ]) {
-    await ev(`piTheme.set('${theme}')`);
-    await delay(400);
-    await type("see #");
-    await page.waitFor(
-      `!document.querySelector('#skill-menu').hidden && document.querySelectorAll('#skill-menu [data-action="pr-pick"]').length >= 6`,
-      "# menu",
-    );
-    const scan = await ev(`window.__scan(${dark}, document.querySelector('#skill-menu'))`);
-    check(`UI ${theme}: # menu lists the card PRs; contrast ok`, scan.low.length === 0 && (!dark || scan.bright.length === 0), scan);
-    await page.shot(`hash-menu-${theme}`);
-  }
-  await ev(`piTheme.set('light')`);
-  await type("");
   await rpc({ action: "pr-watch", id, provider: "github", pr: "5", watch: false });
 
   // ---- Monitoring (16-24): Follow PRs on; first sight is a silent baseline ----

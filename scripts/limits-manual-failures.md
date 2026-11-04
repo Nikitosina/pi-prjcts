@@ -23,8 +23,8 @@ Written before the code. Owner decision: usage limits refresh only when the owne
 
 ## UI 2.0: which providers the status line shows
 
-Owner request: show or hide each provider's limits in the status line. The choice is the host's saved `limits-visibility` (the classic
-inbox and Telegram `/status` read the same file), not page or `ui` state. Proof: `scripts/ui2-limits-e2e.mjs`.
+Owner request: show or hide each provider's limits in the status line. The choice is the host's saved `limits-visibility` (Telegram
+`/status` reads the same file), not page or `ui` state. Proof: `scripts/ui2-limits-e2e.mjs`.
 
 - M14 Hiding a provider in Settings → Providers leaves it in the status line, or the choice is kept only in the page, so a reload, another
   browser or Telegram `/status` disagree.
@@ -47,3 +47,15 @@ Owner request: bring back the classic bar's per-provider details on hover. The d
 - M24 The details open only for a mouse: no keyboard focus or tap opens them, Escape or a press outside does not close them, or
   Escape loses the keyboard's place.
 - M25 On a narrow screen the details run off the screen or are cut by the status line's sideways scroll.
+
+## UI 2.0: connecting Cursor
+
+Owner decision (2026-11-04): the classic inbox is retired, and it was the only place to connect Cursor. Settings → Providers now
+offers the same host sign-in (`cursor-connect`, PKCE through Cursor's own page). Proof: `scripts/ui2-limits-e2e.mjs`.
+
+- M26 A signed-out (or failed) Cursor row in Settings → Providers offers no way to connect.
+- M27 Connect sends anything but `cursor-connect`, or does not open Cursor's sign-in page with a PKCE challenge and no verifier; while
+  the host waits, the row does not say so with a link to that page.
+- M28 After the sign-in completes on the host, the open page shows Cursor's usage only after a reload, or learns it by polling instead
+  of the host `limits` topic; the sign-in is not stored in the agent's `auth.json` at 0600.
+- M29 A Cursor token reaches the page or a limits snapshot.

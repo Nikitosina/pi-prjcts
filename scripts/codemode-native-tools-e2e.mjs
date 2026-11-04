@@ -147,24 +147,15 @@ await k.run(async () => {
     results[3],
   );
 
-  const page = await k.openPage(await k.webUrl(id, "coordinator"));
-  await page.waitFor(`!!document.querySelector("#composer, #compose")`, "chat page");
+  const page = await k.openPage(await k.webUrl(id));
+  await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector("#composer")`, "chat page");
   await k.rpc({ action: "message", id, text: "MARK-NESTED" });
   await k.eventually(() => existsSync(join(k.root, "nested-started")), "nested bash started");
-  await page.waitFor(
-    `/now Ran a command/.test(document.querySelector("#live-reply .live-status")?.textContent ?? "")`,
-    "nested live status",
-    60,
-  );
-  const live = await page.evaluate(
-    `({ frame: window.liveFrame?.nested, status: document.querySelector("#live-reply .live-status").textContent })`,
-  );
+  const nested = `document.querySelector('#feed .tool-row.live[data-tool="codemode"] [data-nested]')?.textContent ?? ""`;
+  await page.waitFor(`/now .*bash/.test(${nested}) && /2 calls done, 1 failed/.test(${nested})`, "nested live status", 60000);
+  const live = await page.evaluate(nested);
   await page.shot("nested-live-status");
-  k.check(
-    "N13 the live frame and status name the running nested tool and count finished and failed calls in text",
-    live.frame?.running?.includes("bash") && live.frame.done === 2 && live.frame.failed === 1 && /2 calls done, 1 failed/.test(live.status),
-    live,
-  );
+  k.check("N13 the live codemode row names the running nested tool and counts finished and failed calls in text", true, live);
   await k.settle(id);
 
   await k.ask(id, "MARK-WORKER");

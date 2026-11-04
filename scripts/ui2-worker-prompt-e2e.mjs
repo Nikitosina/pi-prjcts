@@ -39,9 +39,9 @@ try {
     await kit.updateSettings(id, { prompts: { worker: "NEWER-OVERRIDE: two" } });
     await kit.ask(id, "MARK-WORKER proven");
 
-    // Upgrade: the same home, now on this branch's code (backend and UI2).
+    // Upgrade: the same home, now on this branch's code (backend and the inbox).
     await kit.stopHost();
-    for (const dir of ["src", "web-ui2"]) {
+    for (const dir of ["src", "web"]) {
       rmSync(join(core, dir), { recursive: true, force: true });
       cpSync(join(repo, dir), join(core, dir), { recursive: true });
     }
@@ -58,7 +58,6 @@ try {
     const focusId = (item) => item.jobId ?? item.id;
 
     const web = new URL((await rpc({ action: "web" })).url);
-    web.pathname = "/ui2/";
     web.searchParams.set("project", id);
     const page = await kit.openPage(web.toString());
     await page.waitFor(`document.body.dataset.ready === "1"`, "UI2 ready");

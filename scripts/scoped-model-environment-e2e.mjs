@@ -1,3 +1,5 @@
+// E2E: a scoped model whose provider credentials are missing from the host environment stays visible but unusable, and works once
+// they are present. Host checks only: the classic Settings model picker was retired on 2026-11-04 (docs/classic-retirement.md).
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
@@ -46,33 +48,6 @@ await k.run(async () => {
     "explicit project scope also preserves unavailable model without widening cycle scope",
     !data.scoped.length && data.unavailableScoped.join() === reference && data.scopeSet,
   );
-  const page = await k.openPage(await k.webUrl(id, "coordinator"));
-  await page.waitFor(`document.querySelector('#settings-button')?.hidden === false`, "settings button");
-  await page.evaluate(`document.querySelector('#settings-button').click()`);
-  await page.waitFor(`!!document.querySelector('[data-settings-form]')`, "settings form");
-  await page.evaluate(`document.querySelector('.mp[data-role="coordinator"] .mp-current').click()`);
-  const row = `.mp[data-role="coordinator"] .mp-row[data-ref="${reference}"]`;
-  await page.waitFor(`!!document.querySelector(${JSON.stringify(row)})`, "unconfigured scoped Kimi visible without search");
-  k.check(
-    "unconfigured scoped model is disabled with host credential explanation",
-    await page.evaluate(
-      `document.querySelector(${JSON.stringify(row)}).getAttribute('aria-disabled') === 'true' && document.querySelector('.mp.open').innerText.includes('credentials are unavailable to this host')`,
-    ),
-  );
-  await page.shot("01-missing-host-environment", { force: true });
-  await page.cdp("Input.insertText", { text: "kimi-k3.1" });
-  await page.waitFor(`!!document.querySelector(${JSON.stringify(row)})`, "id search with punctuation");
-  k.check(
-    "model id search finds the named provider model",
-    await page.evaluate(`document.querySelector(${JSON.stringify(row)}).innerText.includes('Kimi K3.1 Pro (Eliza)')`),
-  );
-  await page.evaluate(`document.querySelector('.mp.open .mp-search').value = ''`);
-  await page.cdp("Input.insertText", { text: "Kimi K3.1 Pro" });
-  await page.waitFor(`!!document.querySelector(${JSON.stringify(row)})`, "display-name search");
-  k.check(
-    "display-name search resolves the same provider reference",
-    await page.evaluate(`!!document.querySelector(${JSON.stringify(row)})`),
-  );
   provider.apiKey = "${PI_TEST_CONFIGURED_PROVIDER_KEY}";
   provider.headers.Authorization = "Bearer ${PI_TEST_CONFIGURED_PROVIDER_KEY}";
   writeFileSync(file, JSON.stringify(config));
@@ -84,14 +59,4 @@ await k.run(async () => {
   await k.updateSettings(id, { model: reference });
   await k.ask(id, "Resolve intended provider model");
   k.check("provider dispatch uses intended nested model id", k.result.calls.at(-1)?.model === "moonshotai/kimi-k3.1-pro");
-  await page.reload();
-  await page.waitFor(`document.querySelector('#settings-button')?.hidden === false`, "settings after credentials available");
-  await page.evaluate(`document.querySelector('#settings-button').click()`);
-  await page.waitFor(`!!document.querySelector('[data-settings-form]')`, "updated settings");
-  await page.evaluate(`document.querySelector('.mp[data-role="coordinator"] .mp-current').click()`);
-  await page.waitFor(
-    `document.querySelector(${JSON.stringify(row)})?.getAttribute('data-action') === 'mp-pick'`,
-    "configured Kimi selectable",
-  );
-  await page.shot("02-provider-resolved", { force: true });
 });

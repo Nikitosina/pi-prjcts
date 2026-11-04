@@ -569,7 +569,8 @@ async function storeCursorLogin(credential: { type: "oauth"; access: string; ref
 }
 const LOGIN_WINDOW_MS = 5 * 60_000;
 let connect: CursorConnect & { startedAt: number } = { state: "idle", loginUrl: null, error: null, startedAt: 0 };
-export function startCursorLogin(now = Date.now()): CursorConnect {
+/** `changed` runs when the flow ends (signed in and read once, failed or timed out), so open pages reread without polling. */
+export function startCursorLogin(now = Date.now(), changed: () => void = () => {}): CursorConnect {
   if (connect.state === "waiting" && now - connect.startedAt < LOGIN_WINDOW_MS) return connect;
   const verifier = randomBytes(96).toString("base64url"),
     challenge = createHash("sha256").update(verifier).digest("base64url"),
@@ -601,19 +602,24 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
       connect = { state: "idle", loginUrl: null, error: null, startedAt: 0 };
       // The owner pressed Connect: read the new sign-in's usage once, outside the refresh cooldown.
       entry("cursor").lastManualAt = -Infinity;
-      void refreshProvider("cursor", Date.now());
+      await refreshProvider("cursor", Date.now()).catch(() => {});
+      changed();
       return;
     }
-    if (connect === flow)
+    if (connect === flow) {
       connect = { state: "failed", loginUrl: null, error: "The Cursor sign-in was not completed in time", startedAt: flow.startedAt };
+      changed();
+    }
   })().catch((error) => {
-    if (connect === flow)
+    if (connect === flow) {
       connect = {
         state: "failed",
         loginUrl: null,
         error: error instanceof Error ? error.message : "Cursor sign-in failed",
         startedAt: flow.startedAt,
       };
+      changed();
+    }
   });
   return connect;
 }

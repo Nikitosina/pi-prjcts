@@ -62,3 +62,12 @@ Owner decision: limits refresh only on an explicit owner request (`scripts/limit
 40. A question answered in Telegram stays open in an open UI2 tab: the card stays until a reload, or reappears after one.
 41. Answering by button in one chat resolves or hides another chat's question, or a paused project (waking the chat deferred) leaves the card up until a reload.
 42. Ordinary text to a chat with an open question resolves it (only a button or a reply to the question's own message answers), or a replayed answer update wakes the chat twice.
+
+## Telegram setup in Settings → Notifications, added before the change
+Owner decision (2026-11-04): the classic inbox is retired, and it was the only place to save the bot token and pair. The same card
+moves to the new client's Settings → Notifications; host behaviour is unchanged. Proof: `scripts/telegram-e2e.mjs` (T1/T2/T5/T6/T22, 43-45).
+43. Settings → Notifications only says whether Telegram is paired: no token field, no Pair, Unpair or Remove, or a refused token is
+    not said in place.
+44. Pairing finished in Telegram leaves an open Settings page on "not paired" until it is reopened, or the page learns it by polling
+    instead of a host topic.
+45. Remove bot works on one press, the typed token stays in the field after Save, or a redraw drops what the owner is typing.

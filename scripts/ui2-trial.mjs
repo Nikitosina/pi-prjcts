@@ -88,9 +88,7 @@ if (!url) {
   console.error(`The UI 2.0 trial host did not come up; see ${join(home, "host.log")}.`);
   process.exit(1);
 }
-const page = new URL(url);
-page.pathname = "/ui2/";
 console.log(`UI 2.0 trial host (pid ${host.pid}) on ${home}
-Open:  ${page.href}
+Open:  ${url}
 Stop:  npm run ui2 -- stop
 Log:   ${join(home, "host.log")}`);

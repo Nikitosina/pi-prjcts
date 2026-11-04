@@ -7,7 +7,7 @@ import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
-import { limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
+import { connectCursor, limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -37,7 +37,8 @@ export const SECTIONS = [
 let section = "general",
   profile = "coordinator",
   paintGen = 0,
-  prompts = null; // the open Prompt section: back() for Esc, refresh() for writes from elsewhere
+  prompts = null, // the open Prompt section: back() for Esc, refresh() for writes from elsewhere
+  back = null; // another open section's own Esc step (an inline edit); true when it stepped back
 
 export const settingsOpen = () => dialog.open;
 export function openSettings(id) {
@@ -49,7 +50,7 @@ export function closeSettings() {
   if (dialog.open) dialog.close();
 }
 /** Esc inside Settings: a section with its own inner view (the Prompt editor) steps back first; true when it did. */
-export const settingsBack = () => !!prompts?.back();
+export const settingsBack = () => !!prompts?.back() || !!back?.();
 /** Prompt blocks changed elsewhere (another tab, the Host agent): an open Prompt section re-reads; nothing opens. */
 on("prompts-changed", () => void prompts?.refresh().catch(() => {}));
 export function showSection(id) {
@@ -77,6 +78,7 @@ function paint() {
   dialog.dataset.section = section;
   if (profile === "host" && section !== "prompt") profile = "coordinator";
   prompts = null;
+  back = null;
   const scope = current.profile && profile === "host" ? "host" : current.scope;
   const tabs = section === "prompt" ? [...PROFILES, { id: "host", label: "Host agent" }] : PROFILES;
   const groups = [...new Set(SECTIONS.map((item) => item.group))];
@@ -903,46 +905,292 @@ function hotkeys(body) {
     body.querySelector(`[data-rebind="${edit.dataset.rebind}"]`)?.focus();
   });
 }
+/** Browser alerts, and the host's one Telegram bot (scripts/telegram-failures.md 43-45). The token goes in once and never comes back;
+ * pairing finished in Telegram reaches this page on host topic `telegram`, so nothing polls. */
 async function notifications(body, alive) {
-  const telegram = await call("telegram-snapshot").catch(() => null);
+  let telegram = await call("telegram-snapshot").catch((error) => ({ error: error.message }));
   if (!alive()) return;
   const permission = "Notification" in window ? Notification.permission : "unsupported";
-  body.innerHTML = `${line("Browser alerts and Telegram.", "Browser alerts are per browser. Telegram pairing is done from the CLI or the classic inbox.")}<div class="field-row"><span class="label">Browser</span><span class="badge">${esc(permission)}</span>${permission === "default" ? `<button type="button" class="ghost-btn small" id="notify-ask">Allow</button>` : ""}</div><div class="field-row"><span class="label">Telegram</span><span class="badge ${telegram?.paired ? "t-ready" : ""}">${telegram?.paired ? `paired${telegram.botUsername ? ` · @${esc(telegram.botUsername)}` : ""}` : telegram?.configured ? "not paired" : "not set up"}</span></div>`;
+  body.innerHTML = `${line("Browser alerts and Telegram.", "Browser alerts are per browser. One Telegram bot serves this host: it sends questions with answer buttons, approvals, results and errors, and your text goes to the chat picked with /projects and /chats.")}<div class="field-row"><span class="label">Browser</span><span class="badge">${esc(permission)}</span>${permission === "default" ? `<button type="button" class="ghost-btn small" id="notify-ask">Allow</button>` : ""}</div><div id="telegram"></div>`;
   body.querySelector("#notify-ask")?.addEventListener("click", async () => {
     await Notification.requestPermission();
     if (alive()) paint();
   });
+  const box = body.querySelector("#telegram");
+  let problem = "",
+    armed = false,
+    busy = false;
+  const draw = () => {
+    const t = telegram,
+      input = box.querySelector("#telegram-token"),
+      typed = input?.value ?? "",
+      active = box.contains(document.activeElement) ? document.activeElement : null,
+      focus =
+        active?.id === "telegram-token"
+          ? "#telegram-token"
+          : active?.dataset.telegramAction
+            ? `[data-telegram-action="${active.dataset.telegramAction}"]`
+            : null;
+    const bot = t.botUsername ? `@${t.botUsername}` : "the bot";
+    const button = (action, label, tone = "ghost-btn") =>
+      `<button type="button" class="${tone} small" data-telegram-${action} data-telegram-action="${action}"${busy ? ` aria-disabled="true"` : ""}>${label}</button>`;
+    box.innerHTML = t.error
+      ? `<p class="error-line small" role="alert">Telegram: ${esc(t.error)}</p>`
+      : `<div class="field-row"><label class="label" for="telegram-token">Telegram</label><input type="password" id="telegram-token" autocomplete="off" spellcheck="false" aria-label="Telegram bot token" placeholder="${t.configured ? "Saved. Paste a new token to replace it" : "Bot token from @BotFather"}" />${button("save", t.configured ? "Replace token" : "Save token")}</div><div class="field-row"><span class="label">Bot</span><span class="badge ${t.configured ? "t-ready" : ""}">${t.configured ? esc(bot) : "not set up"}</span></div><div class="field-row"><span class="label">Owner chat</span><span class="badge ${t.paired ? "t-ready" : ""}">${t.paired ? `paired with ${esc(t.owner)}` : "not paired"}</span></div>${t.configured ? `<div class="field-row"><span class="label">Text goes to</span><span class="small">${t.route?.name ? esc(t.route.name) : "nothing picked (use /projects in Telegram)"}</span></div><div class="field-row"><span class="label">Polling</span><span class="small">${t.polling ? `on${t.lastPollAt ? ` · ${esc(ago(t.lastPollAt))}` : ""}` : "off"}</span></div>` : ""}${t.lastError ? `<p class="error-line small">${esc(t.lastError)}</p>` : ""}${problem ? `<p class="error-line small" role="alert" data-telegram-error>${esc(problem)}</p>` : ""}${t.pairing ? `<p class="small" data-telegram-code>Send <code>/pair ${esc(t.pairing.code)}</code> to ${esc(bot)} in a private chat before ${esc(new Date(t.pairing.expiresAt).toLocaleTimeString())}. Only that chat will be heard.</p>` : ""}${t.configured ? `<div class="field-row">${button("pair", t.pairing ? "New code" : t.paired ? "Pair another chat" : "Pair my chat")}${t.paired ? button("unpair", "Unpair") : ""}${button("remove", armed ? "Confirm: remove bot" : "Remove bot", armed ? "ghost-btn danger" : "ghost-btn")}</div>` : ""}<p class="muted small">The token is kept in a private file on this machine and never shown again.</p>`;
+    const next = box.querySelector("#telegram-token");
+    if (next) next.value = typed;
+    if (focus) box.querySelector(focus)?.focus();
+  };
+  const act = async (input, cleared) => {
+    if (busy) return;
+    busy = true;
+    draw();
+    try {
+      telegram = await call(input.action, input);
+      problem = "";
+    } catch (error) {
+      problem = error.message || "The host did not answer";
+    }
+    busy = false;
+    if (cleared) cleared();
+    if (alive()) draw();
+  };
+  draw();
+  box.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-telegram-action]")?.dataset.telegramAction;
+    if (!action) return;
+    if (action === "save") {
+      const input = box.querySelector("#telegram-token"),
+        token = input.value.trim();
+      // The field is emptied before the call, so the token never sits in the page after Save.
+      input.value = "";
+      if (!token) {
+        problem = "Paste the bot token first";
+        return draw();
+      }
+      void act({ action: "telegram-token", token });
+    } else if (action === "pair") void act({ action: "telegram-pair" });
+    else if (action === "unpair") void act({ action: "telegram-unpair" });
+    else if (action === "remove") {
+      if (!armed) {
+        armed = true;
+        draw();
+        setTimeout(() => {
+          if (armed && alive()) {
+            armed = false;
+            draw();
+          }
+        }, 6000);
+        return;
+      }
+      armed = false;
+      void act({ action: "telegram-remove", confirm: "remove" });
+    }
+  });
+  box.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.id === "telegram-token") box.querySelector("[data-telegram-save]").click();
+  });
+  const off = on("telegram", async () => {
+    if (!alive()) return off();
+    const fresh = await call("telegram-snapshot").catch(() => null);
+    if (!alive()) return off();
+    if (fresh) telegram = fresh;
+    draw();
+  });
 }
+const RELAY = { off: "off", connecting: "connecting…", connected: "connected", error: "unreachable" };
+/** Remote devices (scripts/remote-settings-failures.md R1-R10). Pairing, rename and revoke happen only on this machine (src/web.ts
+ * LOCAL_ONLY); a paired device sees the list. Status, devices and pairing changes arrive on host topic `remote`, so nothing polls. */
 async function remote(body, alive) {
-  const status = await call("remote-status").catch((error) => ({ error: error.message }));
+  // The relay bootstrap labels a page it serves with its host (relay/bootstrap/host-page.js); a local page has no label.
+  const local = document.documentElement.dataset.remoteHost === undefined;
+  let status = {},
+    devices = [],
+    pairing = null,
+    problem = "",
+    renaming = null,
+    armed = null,
+    busy = false;
+  const read = async () => {
+    try {
+      status = await call("remote-status");
+      devices = status.enabled ? (await call("remote-devices")).filter((device) => !device.revokedAt) : [];
+    } catch (error) {
+      status = { error: error.message };
+    }
+    if (!status.pairing) pairing = null;
+  };
+  await read();
   if (!alive()) return;
-  body.innerHTML = `${line("Reach this host from your phone through the relay.", "Pairing and device management stay in the local inbox or CLI.")}<div class="field-row"><span class="label">Relay</span><span class="badge ${status.enabled ? "t-ready" : ""}">${esc(status.error ?? status.connection ?? "off")}</span><code class="small">${esc(status.hostName ?? "")}</code></div>${status.lastError ? `<p class="error-line small">${esc(status.lastError)}</p>` : ""}`;
+  body.innerHTML = `${line("Reach this host from your phone through the relay.", "Each device pairs once with a one-time QR code or link from this machine. A revoked device is cut off at once.")}<div id="remote-access"></div>`;
+  const box = body.querySelector("#remote-access");
+  const button = (attr, label, tone = "ghost-btn", extra = "") =>
+    `<button type="button" class="${tone} small" ${attr}${extra}${busy ? ` aria-disabled="true"` : ""}>${label}</button>`;
+  const qr = () =>
+    // Only a plain SVG from the host's QR encoder is drawn.
+    pairing && /^<svg[\s>]/.test(pairing.qrSvg) && !/<script|\bon\w+=|href=/i.test(pairing.qrSvg) ? pairing.qrSvg : "";
+  const deviceRow = (device) => {
+    const seen = `paired ${esc(ago(device.pairedAt))} · seen ${device.lastSeenAt ? esc(ago(device.lastSeenAt)) : "never"}${device.push ? " · notifications on" : ""}`;
+    const name =
+      renaming === device.id
+        ? `<input id="remote-rename" maxlength="80" value="${esc(device.name)}" aria-label="Device name" />${button(`data-remote-rename-save="${esc(device.id)}"`, "Save")}${button("data-remote-rename-cancel", "Cancel")}`
+        : `<b class="remote-name">${esc(device.name)}</b>`;
+    const actions =
+      local && renaming !== device.id
+        ? `${button(`data-remote-rename="${esc(device.id)}"`, "Rename")}${button(`data-remote-revoke="${esc(device.id)}"`, armed === device.id ? "Revoke now" : "Revoke", armed === device.id ? "ghost-btn danger" : "ghost-btn")}`
+        : "";
+    return `<div class="field-row remote-device" data-remote-device="${esc(device.id)}"><span class="dot${device.online ? " online" : ""}" role="img" aria-label="${device.online ? "Connected now" : "Not connected"}"></span>${name}<span class="muted small">${seen}</span>${actions}</div>`;
+  };
+  const draw = () => {
+    const typed = box.querySelector("#remote-rename")?.value,
+      active = box.contains(document.activeElement) ? document.activeElement : null,
+      focus =
+        active?.id === "remote-rename"
+          ? "#remote-rename"
+          : active?.dataset.remoteAction
+            ? `[data-remote-action="${active.dataset.remoteAction}"]`
+            : null;
+    const state = status.error ? "unknown" : status.enabled ? (status.connection ?? "off") : "off";
+    const error = problem ? `<p class="error-line small" role="alert" data-remote-error>${esc(problem)}</p>` : "";
+    if (status.error || !status.enabled) {
+      box.innerHTML = `<div class="field-row"><span class="label">Relay</span><span class="badge" data-remote-state="${state}">${status.error ? "unknown" : "off"}</span></div>${status.error ? `<p class="error-line small" role="alert">${esc(status.error)}</p>` : `<p class="small">Off for this host. To turn it on, deploy the relay (<code>relay/deploy/README.md</code>), then run <code>npm run projects -- remote enable https://relay.&lt;your-domain&gt;</code> on this Mac.</p>`}${error}`;
+      return;
+    }
+    const pair = pairing
+      ? `<div class="remote-pair" data-remote-pairing>${qr() ? `<div class="remote-qr" data-remote-qr role="img" aria-label="Pairing QR code">${qr()}</div>` : ""}<div class="remote-pair-text"><p class="small">Scan with the device's camera, or open the link on it. It works once, until ${esc(new Date(pairing.expiresAt).toLocaleTimeString())}.</p><code class="path" data-remote-link>${esc(pairing.link)}</code><div class="field-row">${button(`data-remote-copy data-remote-action="copy"`, "Copy link")}${button(`data-remote-pair-cancel data-remote-action="cancel"`, "Cancel")}</div></div></div>`
+      : local
+        ? `<div class="field-row">${button(`data-remote-pair data-remote-action="pair"`, "Pair a device", "ghost-btn")}</div>`
+        : `<p class="small muted">Pair, rename and revoke devices in the inbox on this host.</p>`;
+    box.innerHTML = `<div class="field-row"><span class="label">Relay</span><span class="badge ${state === "connected" ? "t-ready" : state === "error" ? "t-needs" : ""}" data-remote-state="${esc(state)}">${esc(RELAY[state] ?? state)}</span><code class="path">${esc(status.relay ?? "")}</code></div><div class="field-row"><span class="label">Host</span><span>${esc(status.hostName ?? "")}</span><code class="path muted">${esc(status.hostId ?? "")}</code></div><div class="field-row"><span class="label">Fingerprint</span><code class="path">${esc(status.fingerprint ?? "unknown")}</code></div>${status.lastError && state !== "connected" ? `<p class="error-line small">${esc(status.lastError)}</p>` : ""}${pair}${error}<p class="remote-heading">Devices</p>${devices.length ? devices.map(deviceRow).join("") : `<p class="small muted">No paired devices.</p>`}<p class="muted small">Compare the fingerprint with the one your phone shows when the app warns that it changed.</p>`;
+    const input = box.querySelector("#remote-rename");
+    if (input && typed !== undefined) input.value = typed;
+    if (input && (focus === "#remote-rename" || typed === undefined)) input.focus();
+    else if (focus) box.querySelector(focus)?.focus();
+  };
+  const act = async (input) => {
+    if (busy) return null;
+    busy = true;
+    draw();
+    let answer = null;
+    try {
+      answer = await call(input.action, input);
+      problem = "";
+    } catch (error) {
+      problem = error.message || "The host did not answer";
+    }
+    busy = false;
+    if (!alive()) return null;
+    await read();
+    if (alive()) draw();
+    return answer;
+  };
+  const stopRenaming = () => {
+    if (!renaming) return false;
+    renaming = null;
+    problem = "";
+    draw();
+    return true;
+  };
+  const save = async (id) => {
+    const name = box.querySelector("#remote-rename")?.value.trim() ?? "";
+    if (!name) {
+      problem = "Name the device first";
+      return draw();
+    }
+    renaming = null;
+    await act({ action: "remote-rename", deviceId: id, name });
+  };
+  back = stopRenaming; // Esc in the rename field cancels it and keeps Settings open
+  draw();
+  box.addEventListener("click", async (event) => {
+    const target = event.target.closest("button");
+    if (!target || busy) return;
+    const data = target.dataset;
+    if ("remotePair" in data) {
+      const started = await act({ action: "remote-pair-start" });
+      if (started && alive()) {
+        pairing = started;
+        draw();
+      }
+    } else if ("remotePairCancel" in data) {
+      pairing = null;
+      await act({ action: "remote-pair-cancel" });
+    } else if ("remoteCopy" in data && pairing) {
+      await navigator.clipboard.writeText(pairing.link).then(
+        () => toast("Pairing link copied. It works once."),
+        () => toast("Copy failed; select the link instead."),
+      );
+    } else if (data.remoteRename) {
+      renaming = data.remoteRename;
+      armed = null;
+      problem = "";
+      draw();
+    } else if ("remoteRenameCancel" in data) stopRenaming();
+    else if (data.remoteRenameSave) await save(data.remoteRenameSave);
+    else if (data.remoteRevoke) {
+      const id = data.remoteRevoke;
+      if (armed !== id) {
+        armed = id;
+        draw();
+        setTimeout(() => {
+          if (armed === id && alive()) {
+            armed = null;
+            draw();
+          }
+        }, 6000);
+        return;
+      }
+      armed = null;
+      if (await act({ action: "remote-revoke", deviceId: id, confirm: id })) toast("Device revoked.");
+    }
+  });
+  box.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.id === "remote-rename" && renaming) {
+      event.preventDefault();
+      void save(renaming);
+    }
+  });
+  const off = on("remote", async () => {
+    if (!alive()) return off();
+    await read();
+    if (alive()) draw();
+  });
 }
 async function deploy(body, alive) {
   const snap = await call("deploy-snapshot").catch((error) => ({ error: error.message }));
   if (!alive()) return;
   body.innerHTML = `${line("Self-deploys of pi-prjcts in a quiet window.", "Deploy is an owner-only action: the Host agent may prepare it, never press it.")}<div class="field-row"><span class="label">Window</span><span class="mono">${esc(snap.settings ? `${snap.settings.startHour}:00–${snap.settings.endHour}:00${snap.settings.idle ? " · when idle" : ""}` : (snap.error ?? ""))}</span><span class="badge ${snap.running ? "t-work" : ""}">${snap.running ? "deploying" : "idle"}</span></div>`;
 }
-/** Same readings and refresh as the status line (web-ui2/limits.js): opening this section reads, only Refresh asks the providers.
+/** Cursor signs in through the host (PKCE on Cursor's own page); offered while Cursor has no fresh reading or the sign-in failed. */
+function cursorConnect(item) {
+  const connect = item.connect;
+  if (!connect) return "";
+  if (connect.state === "waiting")
+    return `<span class="small" data-cursor-waiting>Waiting for you to sign in. <a href="${esc(connect.loginUrl)}" target="_blank" rel="noopener noreferrer" data-cursor-login>Open the Cursor sign-in page</a></span>`;
+  if (item.status === "ok" && !item.reason && connect.state !== "failed") return "";
+  return `${connect.error ? `<span class="error-line small">${esc(connect.error)}</span>` : ""}<button type="button" class="ghost-btn small" data-cursor-connect>Connect Cursor</button>`;
+}
+/** Same readings and refresh as the status line (web/limits.js): opening this section reads, only Refresh asks the providers.
  * Each row's switch shows or hides that provider in the status line; hidden rows stay so they can be shown again. */
 async function providers(body, alive) {
   await loadLimits();
   if (!alive()) return;
   const draw = () => {
     const busy = state.limitsRefreshing;
-    body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; Cursor connects from the classic inbox. Limits update only when you refresh them. The switch chooses which providers the status line and Telegram /status show.")}<div class="field-row"><button type="button" class="ghost-btn small" data-providers-refresh${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${busy ? "Refreshing…" : "Refresh limits"}</button>${state.limitsError ? `<span class="error-line small" data-limits-error>${esc(oneLine(state.limitsError))}</span>` : ""}</div>${state.limitsVisibilityError ? `<p class="error-line small" role="alert" data-visibility-error>${esc(state.limitsVisibilityError)}</p>` : ""}<ul class="provider-list">${(
+    body.innerHTML = `${line("Subscriptions and their limits.", "Sign in from the CLI with /login; connect Cursor here. Limits update only when you refresh them. The switch chooses which providers the status line and Telegram /status show.")}<div class="field-row"><button type="button" class="ghost-btn small" data-providers-refresh${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${busy ? "Refreshing…" : "Refresh limits"}</button>${state.limitsError ? `<span class="error-line small" data-limits-error>${esc(oneLine(state.limitsError))}</span>` : ""}</div>${state.limitsVisibilityError ? `<p class="error-line small" role="alert" data-visibility-error>${esc(state.limitsVisibilityError)}</p>` : ""}<ul class="provider-list">${(
       state.limits ?? []
     )
       .map((item) => {
         const saving = item.provider in state.limitsPending;
         const shown = saving ? state.limitsPending[item.provider] : limitShown(item.provider);
-        return `<li data-provider="${esc(item.provider)}"><label class="switch" title="Show ${esc(item.label)} in the status line"><input type="checkbox" data-limit-visible="${esc(item.provider)}" aria-label="Show ${esc(item.label)} in the status line" ${shown ? "checked" : ""}${saving ? ` aria-busy="true"` : ""}/><b>${esc(item.label)}</b></label><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small one-line">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span><span class="sl-state small">${saving ? "saving…" : shown ? "" : "hidden"}</span></li>`;
+        return `<li data-provider="${esc(item.provider)}"><label class="switch" title="Show ${esc(item.label)} in the status line"><input type="checkbox" data-limit-visible="${esc(item.provider)}" aria-label="Show ${esc(item.label)} in the status line" ${shown ? "checked" : ""}${saving ? ` aria-busy="true"` : ""}/><b>${esc(item.label)}</b></label><span class="badge ${item.status === "ok" ? "t-ready" : ""}">${esc(item.status)}</span><span class="muted small one-line">${esc(item.reason ?? (item.usage ? `${usd(item.usage.amountUsd)} this period` : item.samples?.[0] ? `${Math.round(item.samples[0].usedPercent ?? 0)}% used` : ""))}</span><span class="sl-state small">${saving ? "saving…" : shown ? "" : "hidden"}</span>${cursorConnect(item)}</li>`;
       })
       .join("")}</ul>`;
   };
   draw();
   body.addEventListener("click", (event) => {
     if (event.target.closest("[data-providers-refresh]")) void refreshLimits();
+    else if (event.target.closest("[data-cursor-connect]")) void connectCursor();
   });
   body.addEventListener("change", (event) => {
     const toggle = event.target.closest("[data-limit-visible]");
@@ -954,9 +1202,11 @@ async function providers(body, alive) {
     const active = document.activeElement;
     const focus = active?.matches?.("[data-providers-refresh]")
       ? "[data-providers-refresh]"
-      : active?.matches?.("[data-limit-visible]")
-        ? `[data-limit-visible="${CSS.escape(active.dataset.limitVisible)}"]`
-        : null;
+      : active?.matches?.("[data-cursor-connect], [data-cursor-login]")
+        ? "[data-cursor-login], [data-cursor-connect]"
+        : active?.matches?.("[data-limit-visible]")
+          ? `[data-limit-visible="${CSS.escape(active.dataset.limitVisible)}"]`
+          : null;
     draw();
     if (focus) body.querySelector(focus)?.focus();
   });

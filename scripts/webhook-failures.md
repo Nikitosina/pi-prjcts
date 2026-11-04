@@ -20,5 +20,8 @@ Owner decision: a local HTTP endpoint per project with a per-project secret (HMA
 13. The webhook URL changes on every host restart, so configured senders break.
 
 ## UI
-14. Settings do not show the URL and secret, the secret is shown without a reveal step, or Rotate needs no confirmation.
+14. Retired with the classic inbox (2026-11-04): its card showed the URL and a masked secret with Reveal and a two-click Rotate. The
+    inbox at `/` only switches the webhook on and off; the URL, secret and chat are read and set through `automation-snapshot`,
+    `automation-update` and `webhook-rotate` (CLI RPC or the Host agent, which asks the owner before a rotate). Rotate still needs
+    the project id as confirmation (3).
 15. The transcript shows the delivery as a raw owner message instead of an event card.

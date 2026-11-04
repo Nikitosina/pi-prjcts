@@ -1,4 +1,4 @@
-// Isolated Chrome regression for follow intent at streaming completion.
+// Isolated Chrome regression for follow intent at streaming completion, in the inbox at `/`.
 // The fake provider gates completion so each scroll is exercised before the final commit.
 import { createKit, delay } from "./lib/e2e-kit.mjs";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -28,17 +28,15 @@ const k = await createKit("streaming-follow-intent", {
 });
 const gap = (page) =>
   page.evaluate(
-    `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.clientHeight - t.scrollTop, height: t.scrollHeight }; })()`,
+    `(() => { const t = document.querySelector('#feed'); return { top: t.scrollTop, gap: t.scrollHeight - t.clientHeight - t.scrollTop, height: t.scrollHeight }; })()`,
   );
 
 await k.run(async () => {
   const id = await k.createProject("Follow intent", { grant: false });
   await k.ask(id, "Seed transcript");
-  const url = new URL(await k.webUrl(id, "coordinator"));
-  url.searchParams.set("e2e", "1");
-  const page = await k.openPage(url.toString());
+  const page = await k.openPage(await k.webUrl(id));
   await page.waitFor(
-    `document.querySelector('#messages')?.innerText.includes('Seed transcript') && !document.querySelector('#compose button[type="submit"]').disabled`,
+    `document.body.dataset.ready === "1" && document.querySelector('#feed').innerText.includes('Seed transcript')`,
     "composer ready",
   );
   const failures = [];
@@ -59,25 +57,22 @@ await k.run(async () => {
         await delay(Math.max(0, 100 - (Date.now() - started)));
       }
     })();
-    await page.evaluate(`document.querySelector('#compose textarea').focus()`);
+    await page.evaluate(`document.querySelector('#composer-input').focus()`);
     await page.cdp("Input.insertText", { text: `FOLLOW-CASE ${scenario}` });
-    await page.evaluate(`document.querySelector('#compose').requestSubmit()`);
-    await page.waitFor(
-      `!document.querySelector('#live-reply').hidden && document.querySelector('#live-reply').innerText.includes('Paragraph 23')`,
-      `${scenario} stream`,
-    );
+    await page.evaluate(`document.querySelector('#composer').requestSubmit()`);
+    await page.waitFor(`document.querySelector('#live-turn')?.innerText.includes('Paragraph 23')`, `${scenario} stream`);
     await k.waitFor(() => release, "provider gate", { interval: 100 });
     await delay(300);
     let programmaticGap = null;
     if (scenario === "near-bottom-up") {
       const point = await page.evaluate(
-        `(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
+        `(() => { const r = document.querySelector('#feed').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`,
       );
       await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...point, deltaX: 0, deltaY: -20 });
       await delay(300);
     } else if (scenario === "programmatic") {
       programmaticGap = await page.evaluate(
-        `(() => { const t = document.querySelector('#transcript'); t.scrollTop -= 20; return t.scrollHeight - t.clientHeight - t.scrollTop; })()`,
+        `(() => { const t = document.querySelector('#feed'); t.scrollTop -= 20; return t.scrollHeight - t.clientHeight - t.scrollTop; })()`,
       );
       await delay(300);
     }
@@ -85,14 +80,14 @@ await k.run(async () => {
     await delay(600);
     release();
     await page.waitFor(
-      `document.querySelector('#live-reply').hidden && [...document.querySelectorAll('#messages .msg.them .text')].at(-1)?.innerText.includes('Completion marker:')`,
+      `!document.querySelector('#live-turn .streaming') && [...document.querySelectorAll('#feed .msg.agent')].at(-1)?.innerText.includes('Completion marker:')`,
       `${scenario} completion`,
     );
     await delay(1000);
     const after = await gap(page);
     if (scenario === "pinned") {
       await page.evaluate(
-        `(() => { const image = document.createElement('img'); image.alt = 'late layout fixture'; image.style.cssText = 'display:block;width:120px;height:1px'; document.querySelector('#messages .msg .text').prepend(image); requestAnimationFrame(() => { image.style.height = '180px'; }); })()`,
+        `(() => { const image = document.createElement('img'); image.alt = 'late layout fixture'; image.style.cssText = 'display:block;width:120px;height:1px'; document.querySelector('#feed .msg.agent').prepend(image); requestAnimationFrame(() => { image.style.height = '180px'; }); })()`,
       );
       await delay(300);
     }
@@ -130,7 +125,7 @@ await k.run(async () => {
     const host = (await k.rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text;
     const expected = prefix + suffix;
     const browserMatches = await page.evaluate(
-      `(() => { const expected = document.createElement('div'); expected.innerHTML = window.__projectsRenderMarkdown(${JSON.stringify(expected)}); return [...document.querySelectorAll('#messages .msg.them .text')].at(-1).innerHTML === expected.innerHTML; })()`,
+      `(() => { const text = [...document.querySelectorAll('#feed .msg.agent')].at(-1).innerText; return text.includes('Paragraph 0:') && text.includes('Paragraph 23:') && text.includes('Completion marker: the answer is complete.'); })()`,
     );
     const fixture =
       scenario === "pinned"

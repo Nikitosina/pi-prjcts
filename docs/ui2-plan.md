@@ -133,6 +133,7 @@ So knowledge stays, renamed **Memory**, with these changes:
 4. Theme set and hotkeys: use the defaults above.
 5. Style direction: borrow from terminal UIs (herdr, Pi, Hermes): monospace tool rows and status line, a prompt glyph in the composer, keyboard hints everywhere, dense lists. Not a full terminal look.
 6. Prototype: a real client at `/ui2` on the real host RPCs, with real backend parts (Host agent, tiers, per-profile tools, host `ui` document). Built in worktree `pi-prjcts-ui2`, branch `ui-2.0`.
+7. Only inbox (owner, 2026-11-04): the classic inbox is removed and this client moves from `/ui2` to `/` (`web/`). Flows only the classic inbox had are ported or listed in `docs/classic-retirement.md`.
 
 ### Order
 1. **Quiet down** (cheap, no new concepts): clean up the left bar, merge questions into the transcript, move subtitles behind ⓘ, remove the chat tab strip and the Observability tab.

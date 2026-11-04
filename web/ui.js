@@ -1,5 +1,5 @@
 // The host `ui` document (theme, font, animations, hotkeys, panels, status line and its items) through `ui-get` / `ui-set`, followed on host topic `ui`.
-// localStorage keeps the last copy only as the pre-paint cache (boot.js) and for a page that cannot reach the host.
+// localStorage keeps the last copy only as the pre-paint cache (theme.js) and for a page that cannot reach the host.
 import { call } from "./api.js";
 import { setOverrides } from "./hotkeys.js";
 import { emit, fail, state } from "./state.js";
@@ -38,7 +38,7 @@ function normalize(ui) {
 function apply(ui) {
   state.ui = ui;
   try {
-    localStorage.setItem(LOCAL, JSON.stringify(ui)); // also the pre-paint cache read by boot.js
+    localStorage.setItem(LOCAL, JSON.stringify(ui)); // also the pre-paint cache read by theme.js
   } catch {}
   window.piUi2Boot.apply(ui);
   const app = document.querySelector("#app");

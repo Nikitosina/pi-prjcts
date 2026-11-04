@@ -26,3 +26,8 @@ Verified by `scripts/context-settings-e2e.mjs` unless marked (inspection).
 - X15 Compact now on an archived/unknown chat or a paused project mutates anything, or on a short transcript errors instead of reporting "nothing to compact".
 - X16 Compact now shows no progress/result; the context meter does not drop afterwards.
 - X17 Double-click starts two compactions.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+
+X1 is driven in Settings → Context of the new client (the auto mark by Shift+←, window and keep under Advanced); X14/X16 use its
+Compact now button. The classic card summary text and the composer's context ring popup are retired with the classic client.

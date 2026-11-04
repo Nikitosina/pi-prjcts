@@ -684,7 +684,7 @@ async function ui2Images(run, page, record, dir, sinks) {
     "missing artifact degrades to a labelled note",
   );
   const facts = await page.evaluate(`(async () => {
-    const { transcriptHtml } = await import('/ui2/chat.js');
+    const { transcriptHtml } = await import('/chat.js');
     const only = transcriptHtml([{ kind: 'message', role: 'assistant', entryId: 9e9, at: 0, text: '', ref: '1.0', truncated: false, images: [{ ref: '1.0.0', mime: 'image/png', bytes: 2048 }] },
       { kind: 'message', role: 'user', origin: 'owner', entryId: 9e9 + 1, at: 0, text: '', ref: '2.0', truncated: false, images: [{ ref: '2.0.1', mime: 'image/"png', bytes: 10 }] }], false);
     const box = document.createElement('div');
@@ -751,7 +751,7 @@ async function ui2WorkerImages(run, page, record, dir) {
       try { const body = JSON.parse(init?.body ?? 'null'); if (body?.action === 'thread-history') seen.push(body.threadId); } catch {}
       return real(url, init);
     };
-    (await import('/ui2/state.js')).emit('jobs');
+    (await import('/state.js')).emit('jobs');
     await new Promise(done => setTimeout(done, 1500));
     window.fetch = real;
     return { seen, head: document.querySelector('#focus-view .focus-head h1')?.textContent };
@@ -850,9 +850,9 @@ async function ui2Prompts(run, page, record, dir, sinks) {
       `document.documentElement.scrollWidth <= innerWidth && document.querySelector('#settings').scrollWidth <= document.querySelector('#settings').clientWidth`,
     );
 
-  await page.navigate(`${origin}/ui2/${hash}`);
+  await page.navigate(`${origin}/${hash}`);
   await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "ui2 ready");
-  record("entry", `opened ${origin}/ui2/; ⌘, → Prompt`);
+  record("entry", `opened ${origin}/; ⌘, → Prompt`);
   await open("coordinator");
 
   // E2/E3: compact rows; generated sections are read-only rows in their own folded group.
@@ -1095,7 +1095,7 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 
   // E23: in a chat other than Main, every tab renders its blocks and preview; only the coordinator preview is chat-specific.
   const side = await rpc(run, { action: "chat-create", id: projectId, title: "Verify side chat" });
-  await page.navigate(`${origin}/ui2/?project=${projectId}&chat=${side.id}${hash}`);
+  await page.navigate(`${origin}/?project=${projectId}&chat=${side.id}${hash}`);
   await page.waitFor(
     `document.body.dataset.ready === "1" && new URL(location.href).searchParams.get("chat") === ${q(side.id)}`,
     "side chat open",
@@ -1119,299 +1119,132 @@ const journeys = {
   async "ui2-prompts"(run, page, record, dir, sinks) {
     await ui2Prompts(run, page, record, dir, sinks);
   },
-  // Feature: features/verification-settings.md
-  async "verification-settings"(run, page, record, dir, sinks) {
-    const origin = new URL(run.webUrl).origin,
-      snap = async () => rpc(run, { action: "settings-snapshot", id: run.projectId });
-    await page.navigate(run.webUrl);
-    await page.waitFor(
-      `document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)}) && !document.querySelector('#sign-in')?.open`,
-      "seeded project shown",
-    );
-    const open = async () => {
-      await page.click("button[data-tab=settings]");
-      await page.waitFor(`!document.querySelector('#settings-button')?.hidden`, "settings tab with its edit button");
-      await page.click("#settings-button");
-      await page.waitFor(`!!document.querySelector('[data-settings-form]')`, "settings form");
-    };
-    const review = async () => {
-      await page.click("[data-settings-form] [type=submit]");
-      await page.waitFor(`!!document.querySelector('[data-settings-confirm]')`, "review dialog");
-    };
-    record("entry", `opened ${origin}; Project settings dialog`);
-    await open();
-    if ((await snap()).values.verification !== null) throw Error("verification must be off in a fresh project");
-    const trust = await page.evaluate(`document.querySelector('[data-verify-trust]')?.innerText ?? ''`),
-      emptyModel = await page.evaluate(`document.querySelector('.mp[data-role=verifier] .mp-current')?.innerText ?? ''`);
-    if (!/trusted like the worker, not sandboxed/.test(trust) || !/not a security boundary/.test(trust))
-      throw Error(`trusted execution disclosure is missing or misleading: ${trust}`);
-    if (!/No verifier model/.test(emptyModel)) throw Error(`empty verifier model is not labelled clearly: ${emptyModel}`);
-    record("visible", "verification discloses trusted shell execution and no security boundary; the empty verifier model is labelled");
-    await page.shot(dir, "01-settings-off");
-    // 1. Opting in without a verifier model is refused by the host; nothing is stored.
-    await page.click("input[name=verifyEnabled]");
-    await page.click("input[name=verifySkill]");
-    await page.cdp("Input.insertText", { text: "verify-pi-prjcts" });
-    await page.shot(dir, "02-enabled-no-model");
-    await review();
-    await page.shot(dir, "03-review-diff");
-    const diff = await page.evaluate(`document.querySelector('.diff-list').innerText`);
-    if (!/Verification/.test(diff) || !/verify-pi-prjcts/.test(diff))
-      throw Error(`review dialog does not show the verification change: ${diff}`);
-    await page.click("[data-settings-confirm] [type=submit]");
-    await page.waitFor(`/own verifier model/.test(document.body.innerText)`, "host refusal visible");
-    await page.shot(dir, "04-refused-without-model");
-    record("action", "enabled verification with skill verify-pi-prjcts and no verifier model, reviewed and saved");
-    record("visible", "the host refused: verification needs its own verifier model");
-    // The refusal is an HTTP 400 by design: take exactly that one out of the error sinks, so any other error still fails the drive.
-    const bad = sinks.httpErrors.findIndex((item) => item.status === 400);
-    if (bad < 0) throw Error("expected the refusal to be an HTTP 400");
-    sinks.httpErrors.splice(bad, 1);
-    const log = sinks.errors.findIndex((item) => /status of 400/.test(item));
-    if (log >= 0) sinks.errors.splice(log, 1);
-    if ((await snap()).values.verification !== null) throw Error("refused update must not store anything");
-    record("side-effect", "settings-snapshot still reports verification: null");
-    // 2. Pick the verifier model, save again.
-    await page.navigate(run.webUrl);
-    await page.waitFor(`document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)})`, "project shown again");
-    await open();
-    await page.click(".mp[data-role=verifier] .mp-current");
-    await page.waitFor(`!!document.querySelector('.mp[data-role=verifier] .mp-row[data-ref="fake/fake-model"]')`, "verifier options");
-    await page.click('.mp[data-role=verifier] .mp-row[data-ref="fake/fake-model"]');
-    await page.click("input[name=verifyEnabled]");
-    await page.click("input[name=verifySkill]");
-    await page.cdp("Input.insertText", { text: "verify-pi-prjcts" });
-    await page.shot(dir, "05-model-and-skill");
-    await review();
-    await page.click("[data-settings-confirm] [type=submit]");
-    await page.waitFor(`!document.querySelector('dialog[open]')`, "saved");
-    const saved = (await snap()).values;
-    if (!saved.verification?.enabled || saved.verification.skill !== "verify-pi-prjcts" || saved.models.verifier !== "fake/fake-model")
-      throw Error(`not stored: ${JSON.stringify(saved.verification)} ${saved.models.verifier}`);
-    writeFileSync(
-      join(dir, "host-settings-snapshot.json"),
-      JSON.stringify({ verification: saved.verification, models: saved.models }, null, 2),
-    );
-    record("side-effect", `settings-snapshot: verification ${JSON.stringify(saved.verification)}, verifier model ${saved.models.verifier}`);
-    // 3. Persistence: reopen after a reload, and turn it off again.
-    await page.reload();
-    await page.waitFor(`document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)})`, "project after reload");
-    await open();
-    const shown = await page.evaluate(
-      `({ on: document.querySelector('input[name=verifyEnabled]').checked, skill: document.querySelector('input[name=verifySkill]').value })`,
-    );
-    if (!shown.on || shown.skill !== "verify-pi-prjcts") throw Error(`settings dialog after reload: ${JSON.stringify(shown)}`);
-    await page.shot(dir, "06-after-reload");
-    record("persist", "after reload the dialog shows verification on with the skill");
-    await page.click("input[name=verifyEnabled]");
-    await review();
-    await page.click("[data-settings-confirm] [type=submit]");
-    await page.waitFor(`!document.querySelector('dialog[open]')`, "turned off");
-    if ((await snap()).values.verification !== null) throw Error("verification did not turn off");
-    await page.shot(dir, "07-turned-off");
-    record("side-effect", "turning it off stores verification: null again; the verifier model choice stays");
-  },
-  // Feature: features/quota-settings.md
-  async "quota-settings"(run, page, record, dir) {
-    const url = new URL(run.webUrl);
-    url.searchParams.set("tab", "settings");
-    await page.navigate(url.toString());
-    await page.waitFor(
-      `document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`,
-      "settings available",
-    );
-    await page.click("#settings-button");
-    const picker = '.mp[data-role="worker-fallback"]';
-    await page.waitFor(`!!document.querySelector('${picker}')`, "quota fallback picker");
-    await page.evaluate(`document.querySelector('${picker}').scrollIntoView({ block: 'center' })`);
-    await page.shot(dir, "01-before");
-    await page.click(`${picker} .mp-current`);
-    await page.click(`${picker} .mp-search`);
-    await page.cdp("Input.insertText", { text: "Fallback fake" });
-    await page.waitFor(`!!document.querySelector('${picker} .mp-row[data-ref="fake/fallback-model"]')`, "configured fallback result");
-    await page.shot(dir, "02-typed");
-    await page.click(`${picker} .mp-row[data-ref="fake/fallback-model"]`);
-    await page.click("[data-settings-form] button[type=submit]");
-    await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "save review");
-    const review = await page.evaluate(`document.querySelector('#dialog').innerText`);
-    if (!review.includes("Worker quota fallback") || !review.includes("fake/fallback-model"))
-      throw Error("review omitted fallback selection");
-    await page.shot(dir, "03-review");
-    await page.click("[data-settings-confirm] button[type=submit]");
-    await page.waitFor(`!document.querySelector('#dialog').open`, "save completed");
-    await page.reload();
-    await page.waitFor(
-      `document.querySelector('#settings-button')?.hidden === false && document.querySelector('#settings-button').getBoundingClientRect().width > 0`,
-      "settings after reload",
-    );
-    await page.click("#settings-button");
-    await page.waitFor(`!!document.querySelector('${picker}[data-value="fake/fallback-model"]')`, "persisted fallback");
-    await page.evaluate(`document.querySelector('${picker}').scrollIntoView({ block: 'center' })`);
-    await page.shot(dir, "04-saved");
-    const view = await rpc(run, { action: "show", id: run.projectId });
-    writeFileSync(join(dir, "host-show-proof.json"), JSON.stringify(view, null, 2));
-    if (view.project.fallbackModels?.worker !== "fake/fallback-model" || view.project.models.worker !== "fake/fake-model")
-      throw Error("host state differs from UI selection");
-    writeFileSync(
-      join(dir, "host-jobs-proof.json"),
-      JSON.stringify(await rpc(run, { action: "jobs-snapshot", id: run.projectId }), null, 2),
-    );
-    record(
-      "verified",
-      "pointer clicks and browser text input saved the exact worker fallback; reload and read-only host show confirmed it without changing the primary model",
-    );
-  },
   // Feature: features/jobs.md
   async jobs(run, page, record, dir, sinks) {
     const prompt = "VERIFY-JOB please greet the world",
-      composer = 'textarea[aria-label="Message coordinator"]',
+      composer = "#composer textarea",
       origin = new URL(run.webUrl).origin;
+    const worker = (status) => `#workers .worker[data-status="${status}"]`;
     await page.navigate(run.webUrl);
-    await page.waitFor(
-      `document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)}) && !!document.querySelector(${JSON.stringify(composer)}) && !document.querySelector('#sign-in')?.open`,
-      "seeded project and composer",
-    );
-    await page.waitFor(`!document.querySelector('#job-tree').innerText.includes('Reading Jobs')`, "Jobs tree loaded");
-    record("entry", `opened ${origin}; sidebar shows Chats, the right column the Workers card`);
+    await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "UI ready on Main");
+    await page.waitFor(`/No workers in this chat/.test(document.querySelector('#workers').innerText)`, "empty Workers panel");
+    record("entry", `opened ${origin}/; Main is selected and the context panel lists no workers`);
     await page.shot(dir, "00-before-send");
     await page.click(composer);
     await page.cdp("Input.insertText", { text: prompt });
-    await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ${JSON.stringify(prompt)}`, "typed text in composer");
-    await page.click("#compose button[type=submit]");
-    record("action", `pointer-clicked Send with ${JSON.stringify(prompt)}`);
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    record("action", `typed ${JSON.stringify(prompt)} and pressed Enter`);
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
-    await page.waitFor(`document.querySelector('#job-tree .job')?.innerText.includes('VERIFY-JOB')`, "Job in the Workers card", 60000);
-    await page.shot(dir, "01-job-in-tree");
-    await page.waitFor(`!!document.querySelector('#job-tree .job[data-status="ready"]')`, "Ready task", 90000);
-    if (await page.evaluate(`!!document.querySelector('#messages .job-msg, #messages .event-card')`))
+    await page.waitFor(`document.querySelector('#workers .worker')?.innerText.includes('VERIFY-JOB')`, "Job in the Workers panel", 60000);
+    await page.shot(dir, "01-job-in-panel");
+    await page.waitFor(`!!document.querySelector('${worker("ready")}')`, "Ready worker", 90000);
+    if (await page.evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some(n => n.innerText.includes('[worker '))`))
       throw Error("Internal report leaked into coordinator chat");
-    await page.click('#job-tree [data-action="thread"]');
-    await page.waitFor(
-      `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
-      "worker details",
-    );
-    await page.waitFor(`!!document.querySelector('#inline-thread [data-action="job-approve"]')`, "Approve in Ready task details");
-    const ready = await page.evaluate(
-      `({ tree: document.querySelector('#job-tree').innerText, details: document.querySelector('#inline-thread').innerText })`,
-    );
-    if (!/2\/2/.test(ready.tree) || !ready.details.includes("Proof")) throw Error(`Ready details or tree wrong: ${JSON.stringify(ready)}`);
+    const card = await page.evaluate(`document.querySelector('${worker("ready")}').innerText`);
+    if (!/2\/2/.test(card) || !/Approve/.test(card) || !/PR #12/.test(card)) throw Error(`Ready card wrong: ${JSON.stringify(card)}`);
     await page.shot(dir, "02-ready-with-approve");
-    record("visible", "coordinator conversation contains no internal report; Ready task details retain proof and Approve");
+    record("visible", "coordinator chat has no internal report; the Ready card shows 2/2, PR #12 and Approve");
     const jobs = await rpc(run, { action: "jobs-snapshot", id: run.projectId });
     writeFileSync(join(dir, "host-jobs-snapshot.json"), JSON.stringify(jobs, null, 2));
     if (jobs.jobs.length !== 1 || jobs.jobs[0].status !== "ready" || jobs.jobs[0].pr !== "12")
       throw Error(`host Job wrong: ${JSON.stringify(jobs.jobs.map((j) => [j.status, j.pr]))}`);
     record("side-effect", `jobs-snapshot lists one ${jobs.jobs[0].status} Job with PR ${jobs.jobs[0].pr}`);
-    // Approve is a real host call; the private host has no GitHub, so the outcome line says why it did not merge.
+    // Approve takes two presses; it is a real host call, and the private host has no GitHub, so the toast says why it did not merge.
     const seen = { errors: sinks.errors.length, http: sinks.httpErrors.length };
-    await page.click('#inline-thread [data-action="job-approve"]');
-    await page.waitFor(`!!document.querySelector('#inline-thread .job-outcome, #error:not([hidden])')`, "Approve outcome", 60000);
-    const outcome = await page.evaluate(
-      `document.querySelector('#inline-thread .job-outcome')?.innerText ?? document.querySelector('#error')?.innerText ?? ''`,
+    const toasts = await page.evaluate(`document.querySelector('#toasts').innerText`);
+    await page.click(`${worker("ready")} [data-approve]`);
+    await page.waitFor(
+      `/Confirm approve #12/.test(document.querySelector('${worker("ready")} [data-approve]')?.innerText ?? '')`,
+      "armed Approve",
     );
+    await page.shot(dir, "02a-confirm-approve");
+    await page.click(`${worker("ready")} [data-approve]`);
+    await page.waitFor(`document.querySelector('#toasts').innerText !== ${JSON.stringify(toasts)}`, "Approve outcome", 60000);
+    const outcome = await page.evaluate(`document.querySelector('#toasts').innerText`);
     await page.shot(dir, "02b-approve-outcome");
-    // The host answers the failed gh call with a 400; that is the expected result here, not a browser problem.
+    // The host answers the failed gh call with an error; that is the expected result here, not a browser problem.
     sinks.errors.length = seen.errors;
     sinks.httpErrors.length = seen.http;
     writeFileSync(join(dir, "approve-outcome.txt"), outcome);
-    record("visible", `after clicking Approve: ${JSON.stringify(outcome.slice(0, 160))}`);
-    await page.click('[data-action="thread-close"]');
-    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to chat");
-    // Expand the Job: its worker node shows status, plan progress and ETA.
-    await page.click("#job-tree .job-toggle");
-    await page.waitFor(`!!document.querySelector('#job-tree .job-children [data-action="thread"]')`, "expanded Job");
-    await page.shot(dir, "03-job-tree-expanded");
-    record("visible", `expanded Job: ${JSON.stringify(await page.evaluate(`document.querySelector('#job-tree').innerText`))}`);
-    // Open the worker node: its transcript replaces the chat.
-    await page.click('#job-tree [data-action="thread"]');
+    record("visible", `after confirming Approve: ${JSON.stringify(outcome.slice(0, 160))}`);
+    // The worker opens in the center with its transcript; Esc returns to the chat.
+    await page.click(`#workers .worker .w-title`);
     await page.waitFor(
-      `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
+      `document.querySelector('#center').dataset.focus === 'worker' && !!document.querySelector('#worker-feed')`,
       "worker transcript",
     );
     await page.shot(dir, "04-worker-transcript");
-    record("visible", "opening the worker node shows its transcript");
-    await page.click('[data-action="thread-close"]');
-    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "back to the chat");
+    await page.press("Escape", { keyCode: 27 });
+    await page.waitFor(`document.querySelector('#center').dataset.focus === 'chat'`, "Esc returns to chat");
+    record("visible", "the worker title opens its transcript in the center; Esc returns to the chat");
+    // An independent checkpoint: a concise reply, evidence held on the host, Open instead of Approve.
     await page.click(composer);
     await page.cdp("Input.insertText", { text: "VERIFY-CHECKPOINT stop at the decision boundary" });
-    await page.click("#compose button[type=submit]");
-    await page.waitFor(`!!document.querySelector('#job-tree .job[data-status="checkpoint"]')`, "independent checkpoint", 12000);
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(`!!document.querySelector('${worker("checkpoint")}')`, "independent checkpoint", 60000);
     await page.waitFor(
-      `document.querySelector('#messages').innerText.includes('The intermediate result needs your decision.')`,
+      `document.querySelector('#feed').innerText.includes('The intermediate result needs your decision.')`,
       "concise checkpoint reply",
+      60000,
     );
-    if (
-      await page.evaluate(
-        `!!document.querySelector('#messages .job-msg, #messages .event-card') || document.querySelector('#messages').innerText.includes('VERIFY-FAKE-REPLY: [worker')`,
-      )
-    )
+    if (await page.evaluate(`document.querySelector('#feed').innerText.includes('VERIFY-FAKE-REPLY: [worker')`))
       throw Error("Checkpoint internals leaked into owner conversation");
-    await page.shot(dir, "04e-clean-checkpoint-conversation");
-    await page.click('#job-tree .job[data-status="checkpoint"] [data-action="thread"]');
-    await page.waitFor(
-      `document.querySelector('#inline-thread').innerText.includes('Intermediate checkpoint') && document.querySelector('#inline-thread').innerText.includes('checkpoint-evidence')`,
-      "checkpoint evidence in details",
-    );
-    if (await page.evaluate(`!!document.querySelector('#inline-thread [data-action="job-approve"]')`))
+    if (await page.evaluate(`!!document.querySelector('${worker("checkpoint")} [data-approve]')`))
       throw Error("Checkpoint offers approval");
+    await page.shot(dir, "04e-clean-checkpoint-conversation");
     const held = await rpc(run, { action: "jobs-snapshot", id: run.projectId });
     writeFileSync(join(dir, "host-checkpoint-snapshot.json"), JSON.stringify(held, null, 2));
     const checkpoint = held.jobs.find((job) => job.status === "checkpoint");
     if (checkpoint?.ready || !checkpoint?.checkpoint?.proof.includes("checkpoint-evidence"))
       throw Error("Host checkpoint state differs from UI");
-    await page.shot(dir, "04f-checkpoint-evidence-no-approve");
-    record("verified", "real independent worker checkpoint retains evidence, has no Approve, and generates a concise coordinator reply");
-    await page.click('[data-action="thread-close"]');
-    await page.waitFor(`document.querySelector('#inline-thread').hidden`, "checkpoint details closed");
-    // A second chat opens a second tab; its Workers card is empty while the first chat keeps the Job.
-    await page.click('[data-action="chat-new"]');
-    await page.waitFor(
-      `document.querySelectorAll('#tab-strip .chat-tab').length === 2 && !document.querySelector('#tab-strip').hidden`,
-      "two tabs",
+    await page.click(`${worker("checkpoint")} [data-open-worker]`);
+    await page.waitFor(`document.querySelector('#center').dataset.focus === 'worker'`, "checkpoint worker opened");
+    await page.shot(dir, "04f-checkpoint-no-approve");
+    await page.press("Escape", { keyCode: 27 });
+    record(
+      "verified",
+      "a real independent checkpoint keeps its evidence on the host, offers Open but no Approve, and gets a concise coordinator reply",
     );
-    await page.waitFor(`document.querySelector('#job-tree').innerText.includes('No workers in this chat')`, "empty card in the new chat");
-    await page.shot(dir, "04b-tabs-new-chat");
+    // A new chat has its own, empty Workers panel; Main keeps the Jobs.
+    await page.click(`#tree [data-new-chat]`);
+    await page.waitFor(
+      `document.querySelectorAll('#tree [data-chat]').length >= 2 && /No workers in this chat/.test(document.querySelector('#workers').innerText)`,
+      "empty panel in the new chat",
+    );
+    await page.shot(dir, "04b-new-chat");
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await page.shot(dir, "04c-tabs-390");
+    await page.shot(dir, "04c-new-chat-390");
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await page.click('#tab-strip .chat-tab-open[data-index="0"]');
-    await page.waitFor(`document.querySelector('#job-tree').innerText.includes('VERIFY-JOB')`, "Job card back on the first tab");
-    await page.shot(dir, "04d-tabs-back");
-    record("visible", "second chat opens a second tab with an empty Workers card; the first tab shows the Job again");
-    // Host settings: the Deploy section.
-    await page.click("button[data-tab=settings]");
-    await page.waitFor(`!!document.querySelector('#deploy [data-action="deploy-start"]')`, "Deploy section", 30000);
-    await page.evaluate(`document.querySelector('#set-deploy').scrollIntoView()`);
+    await page.click(`#tree [data-chat="main"]`);
+    await page.waitFor(`document.querySelector('#workers').innerText.includes('VERIFY-JOB')`, "Jobs back on Main");
+    await page.shot(dir, "04d-back-on-main");
+    record("visible", "a new chat shows an empty Workers panel; Main shows its Jobs again");
+    // Host settings: the Deploy section reports the default window (read only in this client; the CLI deploys).
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-section="deploy"]')`, "settings open");
+    await page.click(`dialog[open] [data-section="deploy"]`);
+    await page.waitFor(`/2:00–7:00/.test(document.querySelector('dialog[open]').innerText)`, "Deploy window", 30000);
     await page.shot(dir, "05-deploy-settings");
-    const deploy = await page.evaluate(`document.querySelector('#deploy').innerText`);
-    writeFileSync(join(dir, "deploy-section.txt"), deploy);
-    if (
-      !/02:00 07:00/.test(
-        await page.evaluate(`[...document.querySelectorAll('#deploy select')].map(n => n.selectedOptions[0]?.textContent).join(' ')`),
-      )
-    )
-      throw Error(`deploy window default missing: ${deploy}`);
-    record("visible", "Deploy section: Deploy button, deploy-when-idle switch and the 02:00-07:00 window");
+    writeFileSync(join(dir, "deploy-section.txt"), await page.evaluate(`document.querySelector('dialog[open]').innerText`));
+    record("visible", "Settings → Deploy shows the 2:00–7:00 window and the idle state");
   },
   // Feature: features/ui2.md
   async ui2(run, page, record, dir, sinks) {
     const origin = new URL(run.webUrl).origin,
       hash = new URL(run.webUrl).hash;
-    // Serving: /ui2/ has the same security headers as /, /ui2 redirects, nothing outside web-ui2/ is reachable, and / is unchanged.
-    const served = await fetch(`${origin}/ui2/`);
-    if (!served.ok) throw Error(`/ui2/ not served: HTTP ${served.status}`);
-    for (const header of ["content-security-policy", "x-content-type-options", "referrer-policy"])
-      if (served.headers.get(header) !== (await fetch(`${origin}/`)).headers.get(header)) throw Error(`/ui2/ ${header} differs from /`);
-    const bare = await fetch(`${origin}/ui2`, { redirect: "manual" });
-    if (bare.status !== 308 || bare.headers.get("location") !== "/ui2/") throw Error(`/ui2 does not redirect: ${bare.status}`);
-    // Dot segments normalize away before the request (then the token rule answers 401); everything else under /ui2/ is a 404.
-    for (const probe of ["/ui2/%2e%2e/package.json", "/ui2/..%2fpackage.json", "/ui2/.env", "/ui2/missing.js", "/ui2/sub/app.js"]) {
+    // Serving (scripts/ui2-web-failures.md S1-S6): / is this client with the CSP, the classic files are gone, old /ui2 links redirect.
+    const served = await fetch(`${origin}/`);
+    if (!served.ok || !/script-src 'self'/.test(served.headers.get("content-security-policy") ?? ""))
+      throw Error(`/ not served: ${served.status}`);
+    if ((await served.text()) !== readFileSync(join(run.repo, "web/index.html"), "utf8")) throw Error("/ is not web/index.html");
+    for (const probe of ["/app/chat.js", "/vendor/mermaid.min.js", "/%2e%2e/package.json", "/..%2fpackage.json", "/.env", "/sub/app.js"]) {
       const status = (await fetch(origin + probe)).status;
       if (status !== 404 && status !== 401) throw Error(`${probe} answered ${status}`);
     }
-    if ((await (await fetch(`${origin}/`)).text()) !== readFileSync(join(run.repo, "web/index.html"), "utf8")) throw Error("/ changed");
-    record("verified", "/ui2/ served with the same CSP and headers as /, /ui2 redirects, traversal and unknown files 404, / unchanged");
-    // Load with the launch link's token; it must leave the URL bar.
+    const bare = await fetch(`${origin}/ui2`, { redirect: "manual" });
+    if (bare.status !== 308 || bare.headers.get("location") !== "/") throw Error(`/ui2 does not redirect to /: ${bare.status}`);
+    record("verified", "/ serves web/index.html with the CSP; classic files, traversal and unknown paths refused; /ui2 redirects to /");
+    // An old launch link (`/ui2/#token=…`) still signs in: the 308 keeps the fragment, the page stores the token and drops it from the URL.
     await page.navigate(`${origin}/ui2/${hash}`);
     const name = JSON.stringify(PROJECT_NAME);
     await page.waitFor(
@@ -1420,14 +1253,15 @@ const journeys = {
     );
     if (await page.evaluate(`location.hash.includes("token")`)) throw Error("token left in the URL");
     await page.waitFor(`!!document.querySelector('#tree [data-chat="main"]')`, "Main chat nested under the project");
-    record("entry", `opened ${origin}/ui2/ with the launch token; tree shows ${PROJECT_NAME} with Main nested`);
+    if ((await page.evaluate(`location.pathname`)) !== "/") throw Error("the old /ui2/ link did not land on /");
+    record("entry", `opened the old ${origin}/ui2/ launch link; landed on / signed in; tree shows ${PROJECT_NAME} with Main nested`);
     // The default face is a real locally served font, not merely a family name that can silently fall back.
     const defaultFont = await page.evaluate(`(async () => {
       await document.fonts.ready;
       return { pref: document.documentElement.dataset.font, body: getComputedStyle(document.body).fontFamily,
         faces: [...document.fonts].filter(f => f.family.replace(/["']/g, '') === 'JetBrains Mono').map(f => f.status) };
     })()`);
-    const fontAsset = await fetch(`${origin}/ui2/jetbrains-mono-latin-wght-normal.woff2`);
+    const fontAsset = await fetch(`${origin}/jetbrains-mono-latin-wght-normal.woff2`);
     if (
       defaultFont.pref !== "jetbrains-mono" ||
       !/JetBrains Mono/.test(defaultFont.body) ||
@@ -1833,7 +1667,7 @@ const journeys = {
       );
       // Two quick changes: the host's answer to the first must not undo the second while it is still being written.
       const race = await page.evaluate(`(async () => {
-        const { setUi } = await import('/ui2/ui.js'), { state } = await import('/ui2/state.js');
+        const { setUi } = await import('/ui.js'), { state } = await import('/state.js');
         const first = setUi({ statusLine: true });
         const second = setUi({ statusItems: state.ui.statusItems.map(item => item.id === 'model' ? { ...item, enabled: false } : item) });
         await first;
@@ -2389,7 +2223,7 @@ const journeys = {
     );
     // An unchanged settings event (the host's echo of this page's own write) leaves the rows in place, so a click is not lost.
     const kept = await page.evaluate(`(async () => {
-      const { emit, state } = await import('/ui2/state.js'), row = document.querySelector('#settings [data-sl-item="thinking"]');
+      const { emit, state } = await import('/state.js'), row = document.querySelector('#settings [data-sl-item="thinking"]');
       emit('ui', state.ui);
       return row.isConnected;
     })()`);
@@ -2456,17 +2290,14 @@ const journeys = {
   // Feature: features/message-coordinator.md
   async "message-coordinator"(run, page, record, dir) {
     const prompt = `VERIFY-PING ${run.id}`,
-      composer = 'textarea[aria-label="Message coordinator"]';
+      composer = "#composer textarea";
     const origin = new URL(run.webUrl).origin;
     await page.navigate(run.webUrl);
     await page.waitFor(
-      `document.querySelector('#title')?.textContent.includes(${JSON.stringify(PROJECT_NAME)})`,
-      "seeded project title shown",
+      `document.body.dataset.ready === "1" && [...document.querySelectorAll('#tree [data-project]')].some(n => n.innerText.includes(${JSON.stringify(PROJECT_NAME)})) && !!document.querySelector('#tree [data-chat="main"]')`,
+      "seeded project and Main chat shown",
     );
-    await page.waitFor(
-      `!!document.querySelector(${JSON.stringify(composer)}) && !document.querySelector('#sign-in')?.open`,
-      "composer visible, sign-in closed",
-    );
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(composer)})`, "composer visible");
     record("entry", `opened ${origin} through the launch link; project "${PROJECT_NAME}" selected`);
     await page.shot(dir, "01-before-send");
     // Real user input: pointer-click the composer, insert text through the browser input pipeline, pointer-click Send.
@@ -2475,28 +2306,28 @@ const journeys = {
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ${JSON.stringify(prompt)}`, "typed text in composer");
     await page.shot(dir, "02-typed");
     const before = existsSync(run.requestLog) ? readFileSync(run.requestLog, "utf8").split("\n").filter(Boolean).length : 0;
-    await page.click("#compose button[type=submit]");
-    record("action", `pointer-clicked "Send ↵" with message ${JSON.stringify(prompt)}`);
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    record("action", `pressed Enter to send ${JSON.stringify(prompt)}`);
     // The user's own bubble appears once, and the composer clears.
-    const bubbles = (role) => `[...document.querySelectorAll('#messages article.msg.${role} .text')].map(n => n.innerText)`;
-    await page.waitFor(`${bubbles("you")}.some(t => t.includes(${JSON.stringify(prompt)}))`, "user bubble rendered");
+    const bubbles = (role) => `[...document.querySelectorAll('#feed .msg.${role}')].map(n => n.innerText)`;
+    await page.waitFor(`${bubbles("owner")}.some(t => t.includes(${JSON.stringify(prompt)}))`, "user bubble rendered");
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
     record("visible", "user bubble shows the message and the composer is empty");
-    await page.waitFor(`${bubbles("them")}.some(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}'))`, "coordinator reply rendered", 60000);
+    await page.waitFor(`${bubbles("agent")}.some(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}'))`, "coordinator reply rendered", 60000);
     await page.shot(dir, "03-reply");
     const count = await page.evaluate(
-      `({ you: ${bubbles("you")}.filter(t => t.includes(${JSON.stringify(prompt)})).length, them: ${bubbles("them")}.filter(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}')).length })`,
+      `({ you: ${bubbles("owner")}.filter(t => t.includes(${JSON.stringify(prompt)})).length, them: ${bubbles("agent")}.filter(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}')).length })`,
     );
     if (count.you !== 1 || count.them !== 1) throw Error(`expected exactly one user and one reply bubble, got ${JSON.stringify(count)}`);
     record("visible", "one user bubble and one coordinator bubble with the VERIFY-FAKE-REPLY echo");
     // Persistence: a reload (token kept in localStorage) re-renders both turns from the host.
     await page.reload();
     await page.waitFor(
-      `${bubbles("you")}.some(t => t.includes(${JSON.stringify(prompt)})) && ${bubbles("them")}.some(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}'))`,
+      `${bubbles("owner")}.some(t => t.includes(${JSON.stringify(prompt)})) && ${bubbles("agent")}.some(t => t.includes('VERIFY-FAKE-REPLY: ${prompt}'))`,
       "both bubbles after reload",
     );
     await page.shot(dir, "04-after-reload");
-    writeFileSync(join(dir, "messages-dom.txt"), await page.evaluate(`document.querySelector('#messages').innerText`));
+    writeFileSync(join(dir, "messages-dom.txt"), await page.evaluate(`document.querySelector('#feed').innerText`));
     record("persist", "after reload both bubbles are rendered again");
     // Side effects: the model seam received the prompt, and the host's stored transcript has both turns.
     const calls = readFileSync(run.requestLog, "utf8")

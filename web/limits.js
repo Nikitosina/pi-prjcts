@@ -1,6 +1,6 @@
 // Subscription limits for the status line and Settings → Providers. Manual only: `limits-snapshot` returns what the host last
 // observed and never contacts a provider; only the refresh button (`limits-refresh`) does. Nothing here runs on a timer.
-// Which providers the status line shows is the host's saved `limits-visibility` (the classic inbox and Telegram /status read it too),
+// Which providers the status line shows is the host's saved `limits-visibility` (Telegram /status reads it too),
 // followed on host topic `limits`.
 import { call } from "./api.js";
 import { emit, state } from "./state.js";
@@ -77,4 +77,13 @@ export function setLimitShown(provider, visible) {
     emit("limits");
   });
   return queue;
+}
+
+/** Starts the host's Cursor sign-in and opens Cursor's page. The host says on topic `limits` when it ends; nothing polls. */
+export async function connectCursor() {
+  const started = await call("cursor-connect").catch((error) => ({ state: "failed", loginUrl: null, error: error.message }));
+  const cursor = state.limits?.find((item) => item.provider === "cursor");
+  if (cursor) cursor.connect = started;
+  emit("limits");
+  if (started.loginUrl) window.open(started.loginUrl, "_blank", "noopener,noreferrer");
 }

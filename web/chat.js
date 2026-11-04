@@ -36,7 +36,8 @@ export async function loadChat() {
           id = state.projectId;
         if (!id) return;
         const [view] = await Promise.all([call("show", { id, ...chatArgs() }), loadRecentMemory().catch(fail)]);
-        if (stale(gen)) return;
+        // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
+        if (stale(gen)) continue;
         state.view = view;
         emit("view", view);
         renderFeed();
@@ -109,7 +110,6 @@ const STARTERS = [
 ];
 export function renderFeed() {
   if (!state.view) return;
-  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   const all = turns(messages()),
     busy = !!state.live?.running || !!currentChat()?.busy;
   const html = [];
@@ -119,10 +119,37 @@ export function renderFeed() {
       `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
   html.push(transcriptHtml(all, busy));
+  html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
+  const anchor = stick ? null : readingAnchor();
   morph(feed, html.join(""));
   renderLive();
-  if (stick || atBottom) feed.scrollTop = feed.scrollHeight;
+  if (stick) feed.scrollTop = feed.scrollHeight;
+  else if (anchor) keepAnchor(anchor);
+}
+/** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
+function failureHtml() {
+  const job = (state.view.jobs ?? []).at(-1);
+  if (!job || (job.state !== "failed" && job.state !== "interrupted")) return "";
+  return `<div class="turn-failure" data-key="f${esc(job.id)}" role="status"><span class="st err" aria-hidden="true">✕</span><span class="tf-text">Turn ${esc(job.state)}: ${esc(clip(oneLine(job.error ?? "no reason recorded"), 300))}</span><button type="button" class="link-btn" data-retry-job="${esc(job.id)}">Retry</button></div>`;
+}
+// A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
+// `show` returns (streaming-scroll-viewport-failures.md R1).
+function readingAnchor() {
+  const top = feed.getBoundingClientRect().top;
+  return [...feed.querySelectorAll(":scope > .turn[data-key]")]
+    .filter((node) => node.getBoundingClientRect().bottom > top)
+    .slice(0, 8)
+    .map((node) => ({ key: node.dataset.key, offset: node.getBoundingClientRect().top - top }));
+}
+function keepAnchor(anchor) {
+  const top = feed.getBoundingClientRect().top;
+  for (const { key, offset } of anchor) {
+    const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);
+    if (!node) continue;
+    feed.scrollTop += node.getBoundingClientRect().top - top - offset;
+    return;
+  }
 }
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
@@ -137,7 +164,13 @@ export function morph(parent, html) {
     if (keep) node.classList.add("no-enter");
     return node;
   });
-  parent.replaceChildren(...nodes);
+  // Kept nodes stay attached unless they are out of order, so a selection or focus inside them survives the render.
+  const wanted = new Set(nodes);
+  for (const child of [...parent.childNodes]) if (!wanted.has(child)) child.remove();
+  nodes.forEach((node, index) => {
+    const at = parent.children[index];
+    if (at !== node) parent.insertBefore(node, at ?? null);
+  });
 }
 
 /** Turn sections for a list of transcript items (also used for worker transcripts in the center). */
@@ -154,15 +187,18 @@ function turnHtml(turn, liveTurn, who, fold = true) {
   let run = [];
   const flush = () => {
     if (!run.length) return;
-    body.push(run.length >= 2 && !liveTurn && fold ? groupHtml(run) : run.map((entry) => toolRowHtml(entry)).join(""));
+    body.push(run.length >= 2 && !liveTurn && fold ? groupHtml(run) : run.map((entry) => toolRowHtml(entry, callStatus(entry))).join(""));
     run = [];
   };
   const results = new Map(turn.items.filter((item) => item.kind === "tool-result").map((item) => [item.callId, item]));
+  // A call without a result runs only in this transcript's own live turn (a worker's, not the coordinator's).
+  const callStatus = (entry) => (entry.result ? undefined : liveTurn ? "running" : "ok");
   for (const item of turn.items) {
     // Memory rows never fold: what the agent remembered or relied on stays visible.
     if (item.kind === "tool-call" && MEMORY.test(item.name)) {
       flush();
-      body.push(toolRowHtml({ call: item, result: results.get(item.callId) }));
+      const entry = { call: item, result: results.get(item.callId) };
+      body.push(toolRowHtml(entry, callStatus(entry)));
     } else if (item.kind === "tool-call") run.push({ call: item, result: results.get(item.callId) });
     else if (item.kind === "tool-result") continue;
     else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking && !item.images?.length) continue;
@@ -284,7 +320,7 @@ function groupHtml(run) {
     last = run.at(-1).result?.at ?? run.at(-1).call.at;
   const failed = run.filter(({ result }) => result?.isError).length;
   const label = [...counts].map(([name, count]) => `${name} ×${count}`).join(", ");
-  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry)).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
+  return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
@@ -465,8 +501,33 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
+// Following stops on the owner's own upward scroll (wheel, keys, touch), however small, and resumes once they are back at the
+// bottom. A scroll the page makes itself only stops it when it leaves the bottom band (streaming-follow-intent-failures.md).
+let touchY = null;
+feed.addEventListener(
+  "wheel",
+  (event) => {
+    if (event.deltaY < 0) stick = false;
+  },
+  { passive: true },
+);
+feed.addEventListener("touchstart", (event) => void (touchY = event.touches[0]?.clientY ?? null), { passive: true });
+feed.addEventListener(
+  "touchmove",
+  (event) => {
+    const y = event.touches[0]?.clientY ?? null;
+    if (touchY !== null && y !== null && y > touchY) stick = false;
+    touchY = y;
+  },
+  { passive: true },
+);
+feed.addEventListener("keydown", (event) => {
+  if (["ArrowUp", "PageUp", "Home"].includes(event.key)) stick = false;
+});
 feed.addEventListener("scroll", () => {
-  stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+  const gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+  if (gap < 2) stick = true;
+  else if (gap >= 40) stick = false;
 });
 /** Clicks inside any transcript (chat feed or a worker in the center); `rerender` repaints that transcript. */
 export async function transcriptClick(event, root, rerender) {
@@ -527,6 +588,20 @@ feed.addEventListener("click", async (event) => {
     return;
   }
   if (await transcriptClick(event, feed, renderFeed)) return;
+  const retry = event.target.closest("[data-retry-job]");
+  if (retry) {
+    const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
+    if (!job || retry.disabled) return;
+    retry.disabled = true; // a second click must not resend
+    try {
+      await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
+      stick = true;
+    } catch (error) {
+      retry.disabled = false;
+      fail(error);
+    }
+    return;
+  }
   if (event.target.closest("[data-earlier]")) {
     const gen = state.generation,
       before = older.length ? olderBefore : state.view.before;

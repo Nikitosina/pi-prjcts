@@ -4,11 +4,22 @@ Written before the code. The scripted proof is the `ui2` journey in `.agents/ski
 
 ## Serving and sign-in
 
-- `/ui2/` is not served, or is served without the CSP, nosniff and no-store headers that `/` gets.
-- `/ui2` (no slash) 404s instead of redirecting to `/ui2/`.
-- A request path under `/ui2/` reads a file outside `web-ui2/` (`..`, encoded slashes, dotfiles); only files present at start are served.
-- `/ui2/` changes what `/` serves (the existing client must be byte-identical).
-- The token from the launch link (`/ui2/#token=…`) is not stored, or stays in the URL bar after load.
+The owner retired the classic inbox (2026-11-04): this client is the only one and lives at `/`. S1-S11 are scripted in `scripts/ui2-trial-e2e.mjs` (no browser) and again in the `ui2` journey.
+
+- S1 `/` does not serve this client, or serves it without the CSP, nosniff, `no-cache` and ETag headers; or it still serves the classic page.
+- S2 A root asset (`/theme.js`, `/app.js`, `/styles.css`, a feature module, the bundled font) is missing or has the wrong MIME type.
+- S3 A classic file (`/app/chat.js`, `/vendor/mermaid.min.js`) is still served.
+- S4 A path outside `web/` (`..`, encoded slashes, dotfiles, subfolders, `package.json`) is served; only flat files present at start are.
+- S5 An old `/ui2` or `/ui2/` link 404s, or loses `?project=…&chat=…`, instead of a 308 to `/` with the same query (the browser keeps the `#token` fragment); a redirect ever points at another origin or a scheme-relative path.
+- S6 An old `/ui2/<asset>` (an open tab or the relay's cache) 404s instead of a 308 to the root asset (`/ui2/boot.js` → `/theme.js`); any other `/ui2/` path is not a 404.
+- S7 `/api` answers without the token.
+- S8 The launch link (`web.json`, `projects ui-url`, `npm run ui2`) is not the root.
+- S9 A deep link (`/?project=…&chat=…`) does not serve the same page, or a deep path (`/projects/…`, `/settings`, `/index.html`) falls
+  back to the page or to anything classic instead of refusing (401 without the token, 404 with it).
+- S10 A media route at the root (`/artifacts/…`, `/uploads/…`, `/evidence/…`, `/live`, `/changes`) answers without the token, or with it
+  serves something for an unknown project or a traversal path.
+- S11 `projects ui-url [<project>]` (`src/client.ts` `inboxUrl`) prints a link that is not this host's root with the token.
+- The token from the launch link (`/#token=…`) is not stored, or stays in the URL bar after load.
 - No token: the page throws instead of showing the sign-in prompt.
 - An inline script or inline event handler is blocked by the CSP and a feature silently does nothing (console error).
 

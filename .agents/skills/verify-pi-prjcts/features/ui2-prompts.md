@@ -1,6 +1,6 @@
 # UI 2.0 Settings → Prompt blocks
 
-The owner shapes what each agent is told in Settings → Prompt of the UI 2.0 client: for the coordinator, the Job worker, the task helper, the scout, the reviewer and the Host agent, a compact list of behavior blocks (built-in and custom, each with a switch, a source badge and a token estimate) beside one editor, plus the assembled prompt as a preview. Project instructions keep their own editable row, which saves the project's objective. The other generated sections (host contract, instance and repository instructions, preferences, Memory, skills) are listed read-only. Failure list: `scripts/ui2-prompt-editor-failures.md` (E1–E18).
+The owner shapes what each agent is told in Settings → Prompt of the inbox: for the coordinator, the Job worker, the task helper, the scout, the reviewer and the Host agent, a compact list of behavior blocks (built-in and custom, each with a switch, a source badge and a token estimate) beside one editor, plus the assembled prompt as a preview. Project instructions keep their own editable row, which saves the project's objective. The other generated sections (host contract, instance and repository instructions, preferences, Memory, skills) are listed read-only. Failure list: `scripts/ui2-prompt-editor-failures.md` (E1–E18).
 
 ## Sub-features
 
@@ -17,7 +17,7 @@ The owner shapes what each agent is told in Settings → Prompt of the UI 2.0 cl
 
 ## How to get to it (user POV)
 
-- Open `/ui2/`, press ⌘, then P (Prompt). Pick a tab, then a row.
+- Open the inbox, press ⌘, then P (Prompt). Pick a tab, then a row.
 - Type in the editor and press ⌘↵, or click Save. "+ New block" under the list.
 - Blocks | Preview switches the view.
 

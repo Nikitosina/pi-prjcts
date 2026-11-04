@@ -1,29 +1,21 @@
-// Runs before first paint (blocking script in <head>; the CSP forbids inline scripts). Preference lives in localStorage per browser: system | light | dark.
+// Runs before first paint (a blocking classic script; the CSP forbids inline scripts). Applies the last known theme, font and animation
+// level from this browser's cache of the host `ui` document. The host document stays the source.
 (() => {
-  const key = "pi-projects-theme",
-    query = matchMedia("(prefers-color-scheme: dark)");
-  const preference = () => {
-    try {
-      const value = localStorage.getItem(key);
-      return value === "light" || value === "dark" ? value : "system";
-    } catch {
-      return "system";
-    }
+  const root = document.documentElement,
+    dark = matchMedia("(prefers-color-scheme: dark)"),
+    reduced = matchMedia("(prefers-reduced-motion: reduce)");
+  let cached = {};
+  try {
+    cached = JSON.parse(localStorage.getItem("pi-ui2-ui") || "{}") || {};
+  } catch {}
+  const apply = (ui) => {
+    const theme = ["claude", "midnight", "light", "system"].includes(ui.theme) ? ui.theme : "claude";
+    root.dataset.themePref = theme;
+    root.dataset.theme = theme === "system" ? (dark.matches ? "claude" : "light") : theme;
+    root.dataset.font = ["jetbrains-mono", "system-sans", "system-mono"].includes(ui.font) ? ui.font : "jetbrains-mono";
+    const level = ["off", "subtle", "full"].includes(ui.animations) ? ui.animations : "subtle";
+    root.dataset.motion = reduced.matches ? "off" : level;
   };
-  const apply = () => {
-    const pref = preference();
-    document.documentElement.dataset.theme = pref === "system" ? (query.matches ? "dark" : "light") : pref;
-    document.documentElement.dataset.themePref = pref;
-  };
-  apply();
-  query.addEventListener("change", apply);
-  window.piTheme = {
-    get: preference,
-    set(value) {
-      try {
-        value === "light" || value === "dark" ? localStorage.setItem(key, value) : localStorage.removeItem(key);
-      } catch {}
-      apply();
-    },
-  };
+  apply(cached);
+  window.piUi2Boot = { apply, dark, reduced };
 })();

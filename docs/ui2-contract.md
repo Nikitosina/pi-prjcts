@@ -1,12 +1,12 @@
 # UI 2.0 contract (branch `ui-2.0`)
 
-This is the shared contract between three parallel workstreams: **backend** (tiers, profiles, host `ui` document, `/ui2` serving, creation auto-grant, verifier removal), **host agent** (the Host agent runtime and its RPCs) and **web** (the new client in `web-ui2/`). The plan and the owner's decisions are in `docs/ui2-plan.md`. Reference screenshots are in `docs/ui2-reference/`. Terms follow `CONTEXT.md`. New terms: **Host agent**, **Tier**, **Profile**.
+This is the shared contract between three parallel workstreams: **backend** (tiers, profiles, host `ui` document, serving, creation auto-grant, verifier removal), **host agent** (the Host agent runtime and its RPCs) and **web** (the client, first in `web-ui2/` at `/ui2/`, since 2026-11-04 the only inbox in `web/` at `/`; see `docs/classic-retirement.md`). The plan and the owner's decisions are in `docs/ui2-plan.md`. Reference screenshots are in `docs/ui2-reference/`. Terms follow `CONTEXT.md`. New terms: **Host agent**, **Tier**, **Profile**.
 
 If a workstream needs to change a shape below, edit this file in the same commit and say so in its handback.
 
 ## Conventions
 
-- Every new request is a member of the closed `Request` union in `src/state.ts` and goes through `dispatch` in `src/host-server.ts`. The browser calls `POST /api` with the bearer token, exactly like `web/`.
+- Every new request is a member of the closed `Request` union in `src/state.ts` and goes through `dispatch` in `src/host-server.ts`. The browser calls `POST /api` with the bearer token.
 - Validation fails before any runtime opens (ARCHITECTURE rule).
 - Writes take a `revision` and refuse when it is stale (`{ error: "stale revision" }`-style errors in the existing format).
 - Host-level change topics are published on the change feed under the reserved key `"host"`. The browser subscribes with `GET /changes?project=host` (same SSE framing as project changes). Host topics: `ui`, `tiers`, `host-agent`, `approvals`, `projects` (list changed).
@@ -78,7 +78,7 @@ Notes:
 - `prompt-render` sections, in order (`id` in brackets): host contract [`host`] (locked), instance AGENTS.md [`instance`], repository instructions [`repository`], project instructions [`project`] (the old `objective`, editable), role instructions [`role`] (editable), "Preferences (memory)" [`preferences`] (locked), "Memory index" [`memory`] (locked), skills list [`skills`] (locked). Tokens are an estimate (chars/4), labelled as such in `source`. The role section is the assembled prompt blocks. Sections are the configured prompt for the next use, not what a running agent has; `chatId` adds whether that chat runs it (`active`). `workerMode: "task"` renders a task helper: its parts in prompt order, joined by the helper template rather than by blank lines.
 - `create` grants the whole-repository workspace and GitHub access in the same step (reuse `workspace-quick-grant` / `github-quick-authorize` logic). A later revoke still shows a visible blocker.
 - Verifier: workers run the verify skill themselves through `projects_verify_run`; no verifier subagent role is offered to new turns. Recorded verifier conversations still read. Turning verification on no longer needs `models.verifier`; the verifier prompt is no longer listed in `prompts-snapshot`.
-- Static: `GET /ui2/` serves `web-ui2/index.html` and `/ui2/*` its files, with the same token, CSP and origin rules as `web/`.
+- Static: `GET /` serves `web/index.html` and `/<file>` the flat files of `web/` present at start, with the CSP, nosniff, `no-cache` and ETag headers. Old `/ui2/` links and known `/ui2/<asset>` paths answer `308` to the root; any other `/ui2/` path is `404` (`scripts/ui2-web-failures.md` S1–S11).
 
 ## Host agent requests
 
@@ -117,11 +117,11 @@ type Approval = {
 - Coordinators get the same gate through the tool `owner_approval_request { action, input, summary }`. It accepts only dangerous actions, files an `Approval` with `requestedBy: { kind: "coordinator", projectId, chatId }` and returns at once. The outcome is posted to that chat as an internal follow-up (Main when the chat is gone). Outcome messages start with `[approval <id>]`.
 - Storage: `<home>/host-agent/` with its own pi-durable storage, opened only by the host.
 
-## Web client (`web-ui2/`)
+## Web client (`web/`)
 
-- Plain ES modules, no build step, same as `web/`. Shares nothing at runtime with `web/` except copied helpers (escaping, markdown); escape everything from providers, transcripts and plugins.
+- Plain ES modules, no build step. Escape everything from providers, transcripts and plugins.
 - Uses existing reads for projects, chats, jobs, settings, knowledge, automations, limits, PRs and live frames. Uses the requests above for the new parts.
-- Hotkeys come from one registry (`web-ui2/hotkeys.js`) whose bindings are merged from defaults and `UiSettings.hotkeys`.
+- Hotkeys come from one registry (`web/hotkeys.js`) whose bindings are merged from defaults and `UiSettings.hotkeys`.
 
 ## Memory (knowledge reimagined)
 
@@ -159,6 +159,6 @@ type MemoryEntry = {
 
 ## Appearance and transcript diagnostics
 
-- JetBrains Mono is bundled locally as a variable woff2 with its SIL OFL license; no runtime CDN. `font` applies across the app, with System sans and System mono alternatives and local fallbacks. `/ui2/*.woff2` is served as `font/woff2`; CSP allows only same-origin fonts.
+- JetBrains Mono is bundled locally as a variable woff2 with its SIL OFL license; no runtime CDN. `font` applies across the app, with System sans and System mono alternatives and local fallbacks. `/*.woff2` is served as `font/woff2`; CSP allows only same-origin fonts.
 - PR36 live frames may include `nested: { running: string[], done: number, failed: number }`. A running codemode tool row summarizes these without expanding the row.
 - `show.context.compactionFailure` remains visible as a quiet status-line warning and an expandable, bounded error in Settings → Context; it is not inserted into the primary chat transcript.

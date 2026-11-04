@@ -50,7 +50,7 @@ function cost() {
   return `<span class="sl-item sl-cost mono" data-item="cost" title="Coordinator cost of this chat">${esc(Number.isFinite(total) ? usd(total) : "$–")} chat</span>`;
 }
 const REFRESH_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-/** Refreshing is manual only: this button is the one way the page asks the providers (web-ui2/limits.js). */
+/** Refreshing is manual only: this button is the one way the page asks the providers (web/limits.js). */
 function limitsRefresh(empty) {
   const busy = state.limitsRefreshing;
   const button = `<button type="button" class="sl-refresh${busy ? " busy" : ""}" data-limits-refresh aria-label="${busy ? "Refreshing subscription limits" : "Refresh subscription limits"}" title="${busy ? "Refreshing…" : "Refresh subscription limits now"}"${busy ? ` aria-disabled="true" aria-busy="true"` : ""}>${REFRESH_ICON}${empty && !busy ? "<span>limits</span>" : ""}</button>`;
@@ -59,7 +59,7 @@ function limitsRefresh(empty) {
     : "";
   return `<span class="sl-item sl-limits-refresh" data-item="limits">${button}</span>${failed}`;
 }
-/** Subscription usage, one button per shown provider: hover, focus or a tap opens its details (web-ui2/limit-detail.js). Hidden
+/** Subscription usage, one button per shown provider: hover, focus or a tap opens its details (web/limit-detail.js). Hidden
  * providers (Settings → Providers) leave only the refresh button, which stays even when every provider is hidden. */
 function limits() {
   const shown = (state.limits ?? []).filter((item) => item.status === "ok" && limitShown(item.provider));

@@ -251,8 +251,7 @@ const settle = async (id, job) =>
     const found = view.jobs.find((j) => j.id === job.id);
     return ["done", "failed", "interrupted"].includes(found?.state) && found;
   }, "Job did not settle");
-const liveText = (s) =>
-  evaluate(`(() => { const n = document.querySelector('#live-reply'); return n && !n.hidden ? n.innerText : ''; })()`, s);
+const liveText = (s) => evaluate(`document.querySelector('#live-turn')?.innerText.trim() ?? ''`, s);
 try {
   await eventually(async () => {
     if (hostEnded) throw Error("Host exited");
@@ -296,31 +295,23 @@ try {
 
   const launch = new URL(web.url);
   launch.searchParams.set("project", a.id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `!!document.querySelector('#compose textarea') && !document.querySelector('#compose textarea').disabled && document.querySelector('#title').innerText === 'Live A'`,
-    s,
-    "project A loaded",
-  );
+  const selected = `(document.querySelector('#tree .tree-project.selected .tree-head')?.innerText ?? '')`;
+  const live = `(document.querySelector('#live-turn')?.innerText ?? '')`;
+  await waitFor(`!document.querySelector('#composer-input').disabled && ${selected}.includes('Live A')`, s, "project A loaded");
 
   const slow = await rpc({ action: "message", id: a.id, text: "MARK-SLOW stream please" });
-  await waitFor(
-    `/thinking|working/i.test(document.querySelector('#live-reply')?.innerText ?? '') && !document.querySelector('#live-reply').hidden`,
-    s,
-    "thinking indicator",
-    40,
-  );
+  await waitFor(`/thinking|working/i.test(${live})`, s, "thinking indicator", 40);
   if (result.calls.filter((c) => c.marker === "MARK-SLOW").length !== 1 || /LIVE-PART/.test(await liveText(s)))
     throw Error("Thinking check raced the first token");
   result.checks.push("L2 waiting for first token shows a live thinking indicator");
   await shot("01-thinking", s);
-  await waitFor(`(document.querySelector('#live-reply')?.innerText ?? '').includes('LIVE-PART-ONE')`, s, "partial text", 40);
+  await waitFor(`${live}.includes('LIVE-PART-ONE')`, s, "partial text", 40);
   const partial = await liveText(s),
     slowState = (await rpc({ action: "show", id: a.id })).jobs.find((j) => j.id === slow.id).state;
   if (partial.includes("LIVE-PART-TWO") || slowState === "done")
@@ -329,64 +320,56 @@ try {
   await shot("02-partial", s);
 
   await settle(a.id, slow);
-  await waitFor(
-    `(document.querySelector('#messages').innerText.includes('LIVE-PART-TWO')) && document.querySelector('#live-reply').hidden`,
-    s,
-    "final message replaces live bubble",
-    40,
-  );
+  const feedCopies = `(document.querySelector('#feed').innerText.split('LIVE-PART-TWO').length - 1)`;
+  await waitFor(`${feedCopies} === 1 && !${live}.trim()`, s, "final message replaces the live turn", 40);
   const lag = Date.now() - finished["MARK-SLOW"];
-  const copies = await evaluate(`document.querySelector('#messages').innerText.split('LIVE-PART-TWO').length - 1`, s);
+  await delay(500);
+  const copies = await evaluate(feedCopies, s);
   if (copies !== 1) throw Error(`Final text shown ${copies} times`);
-  result.checks.push(`L4 final message replaces live bubble once (${lag} ms after stream end)`);
+  result.checks.push(`L4 final message replaces the live turn once (${lag} ms after stream end)`);
   result.finalLagMs = lag;
 
   const retry = await rpc({ action: "message", id: a.id, text: "MARK-RETRY once" });
-  await waitFor(
-    `/retry/i.test(document.querySelector('#live-reply')?.innerText ?? '') && /overloaded/i.test(document.querySelector('#live-reply').innerText)`,
-    s,
-    "retry indicator",
-    40,
-  );
+  await waitFor(`/retrying/i.test(${live}) && /overloaded/i.test(${live})`, s, "retry indicator", 40);
   await shot("03-retrying", s);
   if ((await settle(a.id, retry)).state !== "done") throw Error("Retry turn failed");
   result.checks.push("L5 model retry backoff is shown with its error");
 
+  // L6/L7: the Memory node (the classic memory card and Knowledge tab were retired 2026-11-04).
+  await evaluate(`document.querySelector('#tree .tree-project.selected [data-memory-node]').click()`, s);
+  await waitFor(`!!document.querySelector('#focus-view #memory-archive')`, s, "memory list", 40);
+  // research/ notes sit in the archive (the new memory shows Preferences, Decisions and Procedures first).
+  await evaluate(`document.querySelector('#focus-view #memory-archive').click()`, s);
+  await waitFor(`!!document.querySelector('#focus-view .mem-group.archive')`, s, "archive shown", 40);
   const know = await rpc({ action: "message", id: a.id, text: "MARK-KNOW save it" });
   if ((await settle(a.id, know)).state !== "done") throw Error("Knowledge turn failed");
-  await waitFor(`!!document.querySelector('#notes [data-path="research/live-test.md"]')`, s, "memory card lists knowledge doc", 40);
-  result.checks.push("L6 Project memory card lists coordinator-written doc without reload");
-  await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
-  await waitFor(`!!document.querySelector('#knowledge-inline [data-path="research/live-test.md"]')`, s, "inline knowledge list", 40);
-  await evaluate(`document.querySelector('#knowledge-inline [data-path="research/live-test.md"]').click()`, s);
+  await waitFor(`!!document.querySelector('#focus-view .mem-entry[data-memory="research/live-test.md"]')`, s, "memory lists the doc", 40);
+  result.checks.push("L6 the open Memory list (archive shown) gains a coordinator-written research doc without reload");
+  await evaluate(`document.querySelector('#focus-view .mem-entry[data-memory="research/live-test.md"]').click()`, s);
+  await waitFor(`(document.querySelector('#focus-view')?.innerText ?? '').includes('KNOW-BODY')`, s, "doc opens", 40);
+  result.checks.push("L7 Memory lists docs; click opens the doc");
+  await shot("04-knowledge", s);
+  await evaluate(`document.querySelector('#tree .tree-project.selected [data-chat="main"]').click()`, s);
   await waitFor(
-    `document.querySelector('dialog[open]')?.open && document.querySelector('dialog[open]').innerText.includes('KNOW-BODY')`,
+    `!!document.querySelector('#feed') && !document.querySelector('#focus-view .mem-entry, #focus-view .prose')`,
     s,
-    "doc opens",
+    "back to Main",
     40,
   );
-  result.checks.push("L7 Knowledge tab lists docs inline; click opens the doc");
-  await shot("04-knowledge", s);
-  await evaluate(`document.querySelector('dialog[open]').close(); document.querySelector('[data-tab="coordinator"]').click()`, s);
 
   const leak = await rpc({ action: "message", id: a.id, text: "MARK-SLOW second stream" });
-  await waitFor(`/thinking|working|LIVE-PART/i.test(document.querySelector('#live-reply')?.innerText ?? '')`, s, "A live again", 40);
-  await evaluate(`document.querySelector('[data-select-project="${b.id}"]').click()`, s);
-  await waitFor(`document.querySelector('#title').innerText === 'Live B'`, s, "switched to B", 40);
+  await waitFor(`/thinking|working|LIVE-PART/i.test(${live})`, s, "A live again", 40);
+  await evaluate(`document.querySelector('#tree .tree-head[data-project="${b.id}"]').click()`, s);
+  await waitFor(`${selected}.includes('Live B')`, s, "switched to B", 40);
   for (let i = 0; i < 16; i++) {
     if (await liveText(s)) throw Error("Project A stream leaked into B: " + (await liveText(s)));
     await delay(250);
   }
   result.checks.push("L8 switching projects drops the other project stream");
-  await evaluate(`document.querySelector('[data-select-project="${a.id}"]').click()`, s);
+  await evaluate(`document.querySelector('#tree .tree-head[data-project="${a.id}"]').click()`, s);
   await settle(a.id, leak);
-  await waitFor(
-    `document.querySelector('#messages').innerText.split('LIVE-PART-TWO').length - 1 === 2 && document.querySelector('#live-reply').hidden`,
-    s,
-    "A settled after switching back",
-    60,
-  );
-  result.checks.push("L9 stream resumes after switching back");
+  await waitFor(`${feedCopies} === 2 && !${live}.trim()`, s, "A settled after switching back", 60);
+  result.checks.push("L9 the stream resumes after switching back");
   if (result.errors.length || result.httpErrors.length) throw Error("Browser errors captured");
   result.status = "passed";
 } catch (error) {

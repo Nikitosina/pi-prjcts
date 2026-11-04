@@ -127,7 +127,7 @@ Scripts: `chat-stop-e2e` (S), `automations-e2e` (A), `memory-e2e` (M11–M13), `
 ### Trial launcher (`npm run ui2`)
 
 - X1 It uses only `~/.pi/agent/projects-ui2` (created 0700 when missing), even when `PI_PROJECTS_HOME` is set in the caller's environment, and creates nothing in other homes.
-- X2 It prints a working `/ui2/` URL with the token and a stop command; the URL serves the UI 2.0 page.
+- X2 It prints a working root URL with the token and a stop command; the URL serves the inbox (the classic inbox was retired 2026-11-04).
 - X3 A second start while that home's host runs refuses and leaves the running host alone.
 - X4 The stop command stops that host and only that host.
 

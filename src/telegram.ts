@@ -219,6 +219,8 @@ export function startTelegram(options: {
   /** Approve a mergeable Job (result acceptance). Absent: the Approve button answers that it is unavailable. */
   approve?: (projectId: string, jobId: string) => Promise<AcceptanceOutcome>;
   report: (detail: string) => void;
+  /** The bot or pairing state changed without an RPC (a chat paired), so open pages reread the snapshot. */
+  changed?: () => void;
 }) {
   const base = (process.env.PI_PROJECTS_TELEGRAM_API ?? "https://api.telegram.org").replace(/\/+$/, "");
   const pollSeconds = Number(process.env.PI_PROJECTS_TELEGRAM_POLL_S ?? 25),
@@ -668,6 +670,7 @@ export function startTelegram(options: {
       if (Date.now() > pairing.expiresAt) {
         state.pairing = null;
         persist();
+        options.changed?.();
         return;
       }
       // Wrong codes and group chats get no reply; five wrong codes cancel the code.
@@ -676,6 +679,7 @@ export function startTelegram(options: {
         pairing.wrong++;
         if (pairing.wrong >= PAIR_TRIES) state.pairing = null;
         persist();
+        if (!state.pairing) options.changed?.();
         return;
       }
       state.owner = {
@@ -688,6 +692,7 @@ export function startTelegram(options: {
       state.pairing = null;
       state.sentSeq = options.notifier.seq();
       persist();
+      options.changed?.();
       await say(`Paired. ${help}`);
       return;
     }

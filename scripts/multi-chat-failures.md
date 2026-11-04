@@ -32,3 +32,11 @@ Owner decision: each chat is its own durable coordinator conversation. All chats
 
 ## Regressions to keep
 19. live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+Chats are the selected project's `[data-chat]` rows in `#tree`; New chat is `[data-new-chat]`; the transcript is `#feed` and the live
+turn `#live-turn`. F8 opens the scout from `#workers` into the worker view. F12 checks that switching chats swaps the transcript and
+the Workers list. F14 renames with `/name`; archiving goes through `chat-update` over RPC (the new client has no archive control).
+Retired with the classic layout: per-chat composer drafts and the chat tab strip.
+Known gap: the tree's dot for a background chat does not turn "working" while it streams: running turns publish no topic, so the
+project list only refreshes on the next commit or the 15 s list read. F13 checks busy flags over RPC, as before.

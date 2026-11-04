@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
 import { UPLOAD_MAX_BYTES, uploadBytes, validUploadName } from "./uploads.ts";
@@ -119,23 +119,13 @@ export async function startWeb(
   const previous = new URLSearchParams(saved?.hash.slice(1) ?? "").get("token");
   const token = previous && /^[a-f0-9]{64}$/.test(previous) ? previous : randomBytes(32).toString("hex");
   let origin = "";
-  const assets = new Map([
-    ["/", { path: "index.html", mime: "text/html; charset=utf-8" }],
-    ["/theme.js", { path: "theme.js", mime: "text/javascript; charset=utf-8" }],
-    ["/app.js", { path: "app.js", mime: "text/javascript; charset=utf-8" }],
-    ["/styles.css", { path: "styles.css", mime: "text/css; charset=utf-8" }],
-    ["/vendor/mermaid.min.js", { path: "vendor/mermaid.min.js", mime: "text/javascript; charset=utf-8" }],
-  ]);
-  // The feature modules under web/app/ are imported by app.js; only files that exist at start are served, never a path from the request.
-  for (const file of readdirSync(fileURLToPath(new URL("../web/app/", import.meta.url))))
-    if (/^[a-z]+\.js$/.test(file)) assets.set(`/app/${file}`, { path: `app/${file}`, mime: "text/javascript; charset=utf-8" });
-  // UI 2.0 client: the flat files and bundled font present in web-ui2/ at start, under /ui2/; never a path from the request.
-  const ui2Assets = new Map<string, { path: string; mime: string }>();
-  const ui2Dir = fileURLToPath(new URL("../web-ui2/", import.meta.url));
-  for (const file of existsSync(ui2Dir) ? readdirSync(ui2Dir) : [])
+  // The inbox: the flat files and bundled font present in web/ at start; never a path from the request.
+  const assets = new Map<string, { path: string; mime: string }>();
+  const webDir = fileURLToPath(new URL("../web/", import.meta.url));
+  for (const file of readdirSync(webDir))
     if (/^[a-z0-9-]+\.(js|css|html|woff2)$/.test(file))
-      ui2Assets.set(file === "index.html" ? "/ui2/" : `/ui2/${file}`, {
-        path: join(ui2Dir, file),
+      assets.set(file === "index.html" ? "/" : `/${file}`, {
+        path: join(webDir, file),
         mime: file.endsWith(".css")
           ? "text/css; charset=utf-8"
           : file.endsWith(".html")
@@ -144,12 +134,18 @@ export async function startWeb(
               ? "font/woff2"
               : "text/javascript; charset=utf-8",
       });
+  /** Where an old `/ui2/` link or cached asset lives now (the inbox moved to `/` on 2026-11-04); only known targets, never the request path. */
+  const movedFromUi2 = (path: string) => {
+    if (path === "/ui2" || path === "/ui2/") return "/";
+    const target = path === "/ui2/boot.js" ? "/theme.js" : path.slice("/ui2".length);
+    return path.startsWith("/ui2/") && target !== "/" && assets.has(target) ? target : undefined;
+  };
   const server = createServer(async (request, response) => {
     const headers = {
       "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
-      // style-src 'unsafe-inline': Mermaid's SVG carries a <style> element and style="" attributes (sanitized, securityLevel strict), which style-src 'self' blocks. Scripts stay 'self' only.
+      // style-src 'unsafe-inline': bars and markers set their width or position in a style="" attribute, which style-src 'self' blocks. Scripts stay 'self' only.
       "content-security-policy":
         "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     };
@@ -176,19 +172,16 @@ export async function startWeb(
       };
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
-        await sendAsset(fileURLToPath(new URL(`../web/${asset.path}`, import.meta.url)), asset.mime);
+        await sendAsset(asset.path, asset.mime);
         return;
       }
-      const ui2Asset = ui2Assets.get(url.pathname);
-      if (request.method === "GET" && ui2Asset) {
-        await sendAsset(ui2Asset.path, ui2Asset.mime);
+      const moved = request.method === "GET" ? movedFromUi2(url.pathname) : undefined;
+      if (moved) {
+        // The page link keeps its query (project, chat); the browser keeps the #token fragment across the redirect.
+        response.writeHead(308, { ...headers, location: moved === "/" ? `/${url.search}` : moved }).end();
         return;
       }
-      if (request.method === "GET" && url.pathname === "/ui2" && ui2Assets.has("/ui2/")) {
-        response.writeHead(308, { ...headers, location: "/ui2/" }).end();
-        return;
-      }
-      if (request.method === "GET" && url.pathname.startsWith("/ui2/")) {
+      if (request.method === "GET" && (url.pathname === "/ui2" || url.pathname.startsWith("/ui2/"))) {
         response.writeHead(404, { ...headers, "content-type": "text/plain; charset=utf-8" }).end("Not found");
         return;
       }
@@ -239,7 +232,7 @@ export async function startWeb(
         const input = parse(Request, JSON.parse(await body(request)));
         if (!local && LOCAL_ONLY.has(input.action)) {
           status = 403;
-          throw new Error("Pairing, device management and relay configuration require the local inbox or CLI");
+          throw new Error("Pairing, device management and relay configuration are only allowed from this machine");
         }
         const data = await dispatch(input);
         response.writeHead(200, { ...headers, "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));

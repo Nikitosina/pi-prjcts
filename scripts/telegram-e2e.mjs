@@ -225,11 +225,22 @@ const lastTo = async (pattern, label, from = 0) =>
     300,
   );
 const buttons = (message) => (message.reply_markup?.inline_keyboard ?? []).flat();
+let opens = 0;
 const settingsUrl = async (id) => {
   const url = new URL((await rpc({ action: "web" })).url);
   url.searchParams.set("project", id);
-  url.searchParams.set("tab", "settings");
+  // The page drops the token from the address bar; a fresh query keeps the next open a full load, not a fragment change.
+  url.searchParams.set("open", String(++opens));
   return url.toString();
+};
+// Settings → Notifications holds the Telegram card (scripts/telegram-failures.md 43-45).
+const card = `document.querySelector('dialog[open] #telegram')`;
+const openTelegram = async (s) => {
+  await waitFor(`document.body.dataset.ready === "1"`, s, "page ready");
+  await evaluate(`document.querySelector('[data-cmd="settings"]').click()`, s);
+  await waitFor(`!!document.querySelector('dialog[open] [data-section="notifications"]')`, s, "settings open");
+  await evaluate(`document.querySelector('dialog[open] [data-section="notifications"]').click()`, s);
+  await waitFor(`!!document.querySelector('dialog[open] #telegram-token')`, s, "telegram card");
 };
 const jobs = async (id, chatId) => (await rpc({ action: "show", id, ...(chatId && chatId !== "main" ? { chatId } : {}) })).jobs;
 try {
@@ -240,30 +251,17 @@ try {
   await k.ask(a, "main", "MARK-BEFORE history before pairing");
 
   // T1/T2: token in Settings; a wrong token is refused; the token never comes back.
-  const web = new URL((await rpc({ action: "web" })).url);
-  web.searchParams.set("project", a);
-  web.searchParams.set("tab", "settings");
-  const s = await k.openPage(web.toString());
-  await waitFor(
-    `!!document.querySelector('#telegram-token') && !document.querySelector('[data-action="telegram-save"]').disabled`,
-    s,
-    "telegram card",
-  );
-  await evaluate(
-    `(() => { document.querySelector('#telegram-token').value = '999:WrongTokenWrongTokenWrongToken123'; document.querySelector('[data-action="telegram-save"]').click(); })()`,
-    s,
-  );
-  await waitFor(
-    `/rejected|unauthorized/i.test(document.querySelector('#telegram').innerText + document.querySelector('#error').innerText)`,
-    s,
-    "wrong token refused",
-  );
+  const s = await k.openPage(await settingsUrl(a));
+  await openTelegram(s);
+  const typeToken = (token) =>
+    `(() => { const i = document.querySelector('dialog[open] #telegram-token'); i.value = ${JSON.stringify(token)}; i.dispatchEvent(new Event('input')); document.querySelector('dialog[open] [data-telegram-save]').click(); })()`;
+  await evaluate(typeToken("999:WrongTokenWrongTokenWrongToken123"), s);
+  await waitFor(`/rejected|unauthorized/i.test(${card}.innerText)`, s, "wrong token refused in place");
   if ((await rpc({ action: "telegram-snapshot" })).configured) throw Error("Wrong token saved");
-  await evaluate(
-    `(() => { document.querySelector('#telegram-token').value = ${JSON.stringify(TOKEN)}; document.querySelector('[data-action="telegram-save"]').click(); })()`,
-    s,
-  );
-  await waitFor(`document.querySelector('#telegram').innerText.includes('@pi_fake_bot')`, s, "bot connected");
+  await evaluate(typeToken(TOKEN), s);
+  await waitFor(`${card}.innerText.includes('@pi_fake_bot')`, s, "bot connected");
+  if (await evaluate(`document.querySelector('dialog[open] #telegram-token').value`, s))
+    throw Error("45 the saved token stayed in the field");
   const snap1 = await rpc({ action: "telegram-snapshot" });
   const file = join(k.home, "telegram.json");
   if (
@@ -285,23 +283,22 @@ try {
   result.checks.push("T4 before pairing, messages are ignored and nothing is admitted");
 
   // T5/T6: pairing code; wrong-code cap; private chats only; code not reusable.
-  await evaluate(`document.querySelector('[data-action="telegram-pair"]').click()`, s);
-  await waitFor(`/\\/pair \\d{6}/.test(document.querySelector('#telegram').innerText)`, s, "pair code");
-  let code = /\/pair (\d{6})/.exec(await evaluate(`document.querySelector('#telegram').innerText`, s))[1];
+  await evaluate(`document.querySelector('dialog[open] [data-telegram-pair]').click()`, s);
+  await waitFor(`/\\/pair \\d{6}/.test(${card}.innerText)`, s, "pair code");
+  let code = /\/pair (\d{6})/.exec(await evaluate(`${card}.innerText`, s))[1];
   for (let i = 0; i < 5; i++) text(STRANGER, `/pair ${String((Number(code) + 1 + i) % 1000000).padStart(6, "0")}`);
   await eventually(async () => !(await rpc({ action: "telegram-snapshot" })).pairing, "wrong-code cap did not cancel pairing", 100);
   text(STRANGER, `/pair ${code}`);
   await delay(1000);
   if ((await rpc({ action: "telegram-snapshot" })).paired) throw Error("Cancelled code paired");
-  await evaluate(`document.querySelector('[data-action="telegram-pair"]').click()`, s);
-  await waitFor(
-    `/\\/pair \\d{6}/.test(document.querySelector('#telegram').innerText) && !document.querySelector('#telegram').innerText.includes('/pair ${code}')`,
+  await evaluate(`document.querySelector('dialog[open] [data-telegram-pair]').click()`, s);
+  await waitFor(`/\\/pair \\d{6}/.test(${card}.innerText) && !${card}.innerText.includes('/pair ${code}')`, s, "second pair code");
+  code = /\/pair (\d{6})/.exec(await evaluate(`${card}.innerText`, s))[1];
+  // Pairing ends in Telegram; the open page follows the host topic and never polls for it (44).
+  await evaluate(
+    `(window.__tgReads = 0, window.__realFetch ??= window.fetch, window.fetch = function (url, options) { try { if (JSON.parse(options?.body ?? "{}").action === "telegram-snapshot") window.__tgReads++; } catch {} return window.__realFetch.apply(this, arguments); })`,
     s,
-    "second pair code",
   );
-  code = /\/pair (\d{6})/.exec(await evaluate(`document.querySelector('#telegram').innerText`, s))[1];
-  await waitFor(`!!document.querySelector('#notify-card')`, s, "#notify-card");
-  await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
   await shot("01-settings-pairing", s);
   text(GROUP, `/pair ${code}`);
   await delay(1000);
@@ -309,11 +306,16 @@ try {
   text(OWNER, `/pair ${code}`);
   await lastTo(/paired/i, "pair confirmation");
   text(STRANGER, `/pair ${code}`);
-  await waitFor(
-    `/paired/i.test(document.querySelector('#telegram').innerText) && document.querySelector('#telegram').innerText.includes('Owner')`,
-    s,
-    "paired shown",
-  );
+  await waitFor(`/paired/i.test(${card}.innerText) && ${card}.innerText.includes('Owner')`, s, "paired shown without a reload");
+  await delay(2500);
+  const reads = await evaluate(`window.__tgReads`, s);
+  if (reads < 1 || reads > 3) throw Error(`44 the page read Telegram ${reads} times while pairing (polling, or no topic)`);
+  result.checks.push("44 pairing finished in Telegram reaches the open Settings page through the host topic, without polling");
+  // Remove bot asks for a second press (45); the first press changes nothing on the host.
+  await evaluate(`document.querySelector('dialog[open] [data-telegram-remove]').click()`, s);
+  await waitFor(`/Confirm: remove bot/.test(document.querySelector('dialog[open] [data-telegram-remove]').innerText)`, s, "armed remove");
+  if (!(await rpc({ action: "telegram-snapshot" })).configured) throw Error("45 one press removed the bot");
+  result.checks.push("45 Remove bot needs a second press");
   const paired = await rpc({ action: "telegram-snapshot" });
   if (!paired.paired || paired.pairing || sentTo(STRANGER.id).length || sentTo(GROUP.id).some((m) => /paired/i.test(m.text)))
     throw Error("Pairing wrong: " + JSON.stringify(paired));
@@ -527,7 +529,6 @@ try {
 
   // T17/T18/T40: question with buttons; a UI2 tab open on the asking chat drops the card when Telegram answers, without a reload.
   const ui2 = new URL((await rpc({ action: "web" })).url);
-  ui2.pathname = "/ui2/";
   ui2.searchParams.set("project", a);
   ui2.searchParams.set("chat", two.id);
   await send("Page.navigate", { url: ui2.toString() }, s);
@@ -847,15 +848,11 @@ try {
   // T3/T2: switching bots resets pairing and offset; a revoked token stops polling with an error; removing the token stops polling.
   await evaluate(`window.__old = true`, s);
   await send("Page.navigate", { url: await settingsUrl(a) }, s);
-  await waitFor(
-    `!window.__old && document.readyState === 'complete' && !!document.querySelector('#telegram-token')`,
-    s,
-    "card after restart",
-  );
+  await waitFor(`!window.__old && document.readyState === 'complete'`, s, "page after restart");
+  await openTelegram(s);
   // The page left open across the restart polled the new host with its old token (401) until it was reopened with the new address.
   result.httpErrors = result.httpErrors.filter((e) => e.status !== 401);
-  await waitFor(`!!document.querySelector('#notify-card')`, s, "#notify-card");
-  await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
+  await evaluate(`${card}.scrollIntoView()`, s);
   await shot("02-settings-paired", s);
   tg.revoked.add(TOKEN);
   wake();
@@ -896,10 +893,10 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await evaluate(`window.__old = true`, s);
   await send("Page.navigate", { url: await settingsUrl(a) }, s);
-  await waitFor(`!window.__old && document.readyState === 'complete' && !!document.querySelector('#telegram-token')`, s, "mobile card");
+  await waitFor(`!window.__old && document.readyState === 'complete'`, s, "mobile page");
+  await openTelegram(s);
   result.httpErrors = result.httpErrors.filter((e) => e.status !== 401); // same restart window as above
-  await waitFor(`!!document.querySelector('#notify-card')`, s, "#notify-card");
-  await evaluate(`document.querySelector('#notify-card').scrollIntoView()`, s);
+  await evaluate(`${card}.scrollIntoView()`, s);
   if (!(await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s))) throw Error("Telegram card overflows at 390px");
   await shot("03-settings-mobile", s);
   result.checks.push("T1/T22 no host log contains a token; the card fits a 390 px screen");

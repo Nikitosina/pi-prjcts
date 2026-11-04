@@ -22,3 +22,9 @@ Observed on Mari (2026-10-06): the composer showed nothing while the coordinator
 - Knowledge docs appear only inside a dialog, not inline on the Knowledge tab.
 - Docs written by the coordinator don't appear until a page reload.
 - Clicking a listed doc doesn't open it.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+L2-L5 and L8-L9 read `#live-turn` and `#feed`; project switches go through the tree. L6/L7 use the Memory node: the open Memory list
+(with the archive shown, where research/ notes live) must gain a doc an agent just wrote, without a reload, and opening it shows the
+body. (Red on the UI 2.0 client: an agent's `projects_knowledge_write` published no `knowledge` topic, so the open list stayed stale
+until reopened; artifacts/only-inbox/red-coordinator-live-memory.json.)

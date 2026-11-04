@@ -1,7 +1,9 @@
-// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M25). Private host, fake
-// model, PI_PROJECTS_LIMITS_FIXTURE for the non-Cursor providers and a local fake Cursor dashboard that counts every provider request.
+// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M29). Private host, fake
+// model, PI_PROJECTS_LIMITS_FIXTURE for the non-Cursor providers and a local fake Cursor dashboard that counts every provider request,
+// whose /auth/poll stands in for Cursor's sign-in.
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
 
@@ -9,7 +11,15 @@ let cursorHits = 0,
   cursorPercent = 75,
   cursorFail = false,
   hold = null;
+const signIn = { polls: [], access: "", refresh: "refresh-ui2-e2e" };
 const cursor = createServer(async (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  // Sign-in: not finished on the first poll, then the new tokens.
+  if (url.pathname === "/auth/poll") {
+    signIn.polls.push(Object.fromEntries(url.searchParams));
+    res.writeHead(signIn.polls.length < 2 ? 404 : 200, { "content-type": "application/json" });
+    return res.end(signIn.polls.length < 2 ? "{}" : JSON.stringify({ accessToken: signIn.access, refreshToken: signIn.refresh }));
+  }
   cursorHits++;
   await hold?.promise;
   if (cursorFail) {
@@ -39,6 +49,7 @@ setClaude(42);
 Object.assign(kit.hostEnv, {
   PI_PROJECTS_LIMITS_FIXTURE: fixture,
   PI_PROJECTS_CURSOR_DASHBOARD: `http://127.0.0.1:${cursor.address().port}`,
+  PI_PROJECTS_CURSOR_API: `http://127.0.0.1:${cursor.address().port}`,
 });
 const jwt = `x.${Buffer.from(JSON.stringify({ sub: "auth0|e2e", exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.y`;
 writeFileSync(
@@ -51,7 +62,7 @@ const realFetch = window.fetch;
 window.__visibilityInFlight = 0; window.__visibilityMax = 0; window.__failVisibility = false;
 window.fetch = function (url, options) {
   let action;
-  try { action = JSON.parse(options?.body ?? "{}").action; if (/^limits-/.test(action)) window.__limitCalls.push(action); } catch {}
+  try { action = JSON.parse(options?.body ?? "{}").action; if (/^(limits|cursor)-/.test(action)) window.__limitCalls.push(action); } catch {}
   if (action !== "limits-visibility") return realFetch.apply(this, arguments);
   // Saves are counted in flight, and the test can make the next ones fail the way a host error does.
   window.__visibilityMax = Math.max(window.__visibilityMax, ++window.__visibilityInFlight);
@@ -75,7 +86,6 @@ try {
     check("M2 an older page's visit read never contacts a provider", cursorHits === 0 && (await attempts()).every((at) => at === null));
 
     const web = new URL((await rpc({ action: "web" })).url);
-    web.pathname = "/ui2/";
     web.searchParams.set("project", id);
     const page = await kit.openPage("about:blank");
     await page.cdp("Page.addScriptToEvaluateOnNewDocument", { source: PROBE });
@@ -423,6 +433,89 @@ try {
       sent: await since(mark),
       cursorHits,
     });
+
+    // Connecting Cursor from Settings → Providers (M26-M29): signed out, Connect, sign in on Cursor's page, the open page follows.
+    writeFileSync(join(kit.agentDir, "auth.json"), "{}");
+    const cursorRow = async () => (await rpc({ action: "limits-snapshot" })).providers.find((item) => item.provider === "cursor");
+    // The sign-in is gone: the next refresh (after the cooldown) fails with a reason and keeps the older reading.
+    for (let i = 0; i < 40 && !(await cursorRow()).reason; i++) {
+      await rpc({ action: "limits-refresh" });
+      if (!(await cursorRow()).reason) await kit.delay(1000);
+    }
+    const signedOut = await cursorRow();
+    check("setup: Cursor's sign-in is gone on the host", /sign|credential|log/i.test(signedOut.reason ?? ""), signedOut);
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-section="providers"]')`, "settings open");
+    await page.evaluate(`document.querySelector('dialog[open] [data-section="providers"]').click()`);
+    const connectButton = `document.querySelector('dialog[open] li[data-provider="cursor"] [data-cursor-connect]')`;
+    await page.waitFor(`!!${connectButton}`, "Connect Cursor in Providers");
+    check(
+      "M26 a signed-out Cursor row offers a named Connect button",
+      await page.evaluate(`${connectButton}.tagName === "BUTTON" && /Connect Cursor/.test(${connectButton}.innerText)`),
+    );
+    await page.shot("12-cursor-signed-out", { force: true });
+    await page.evaluate(
+      `(window.__opened = [], window.open = (url, target, features) => { window.__opened.push({ url: String(url), target, features }); return null; })`,
+    );
+    signIn.access = `x.${Buffer.from(JSON.stringify({ sub: "auth0|connected", exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.y`;
+    cursorPercent = 33;
+    mark = await callCount();
+    hits = cursorHits;
+    const intervals = await page.evaluate(`window.__intervals.length`);
+    await page.evaluate(`${connectButton}.focus()`);
+    await press("Enter", "Enter", "\r");
+    await page.waitFor(`window.__opened.length === 1`, "Cursor sign-in page opened");
+    const opened = await page.evaluate(`window.__opened[0]`);
+    const login = new URL(opened.url);
+    check(
+      "M27 Connect opens Cursor's sign-in page with a PKCE challenge and no verifier, in a new tab without an opener",
+      login.pathname.endsWith("/loginDeepControl") &&
+        !!login.searchParams.get("challenge") &&
+        !!login.searchParams.get("uuid") &&
+        !login.searchParams.get("verifier") &&
+        opened.target === "_blank" &&
+        /noopener/.test(opened.features ?? ""),
+      opened,
+    );
+    // The fake answers the second poll, about a second later; the row may already be past waiting by the time it is read.
+    const waiting = await page.evaluate(
+      `(() => { const li = document.querySelector('dialog[open] li[data-provider="cursor"]'); const a = li.querySelector('a[data-cursor-login]'); return { text: li.innerText, href: a?.href ?? null }; })()`,
+    );
+    check(
+      "M27 while the host waits the row says so and links the sign-in page",
+      (/Waiting for you to sign in/.test(waiting.text) && waiting.href === login.href) || /33% used/.test(waiting.text),
+      waiting,
+    );
+    await page.waitFor(
+      `/33% used/.test(document.querySelector('dialog[open] li[data-provider="cursor"]').innerText)`,
+      "Cursor usage after sign-in",
+      30000,
+    );
+    const poll = signIn.polls.at(-1);
+    const stored = JSON.parse(readFileSync(join(kit.agentDir, "auth.json"), "utf8"));
+    sent = await since(mark);
+    check(
+      "M28 the open page shows Cursor's usage from the host's limits topic: one connect, then reads only, no timer",
+      /^cursor-connect(,limits-snapshot)+$/.test(sent) && (await page.evaluate(`window.__intervals.length`)) === intervals,
+      { sent, intervals },
+    );
+    check(
+      "M28 the host polled with the verifier of that challenge, stored the sign-in at 0600 and read usage once",
+      createHash("sha256").update(poll.verifier).digest("base64url") === login.searchParams.get("challenge") &&
+        poll.uuid === login.searchParams.get("uuid") &&
+        stored.cursor?.access === signIn.access &&
+        (statSync(join(kit.agentDir, "auth.json")).mode & 0o777) === 0o600 &&
+        cursorHits === hits + 1,
+      { poll: { uuid: poll?.uuid }, mode: (statSync(join(kit.agentDir, "auth.json")).mode & 0o777).toString(8), cursorHits, hits },
+    );
+    const html = await page.evaluate(`document.documentElement.outerHTML`);
+    const snapshotText = JSON.stringify(await rpc({ action: "limits-snapshot" }));
+    check(
+      "M29 no Cursor token reaches the page or the snapshot",
+      ![signIn.access, signIn.refresh, poll.verifier].some((secret) => html.includes(secret) || snapshotText.includes(secret)),
+    );
+    await page.shot("13-cursor-connected", { force: true });
+    await press("Escape", "Escape");
 
     // Hiding the limits item hides its refresh button with it.
     const ui = await rpc({ action: "ui-get" });

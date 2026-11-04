@@ -10,13 +10,13 @@ A detached Node host owns every project's durable storage while your Mac is awak
 npm run inbox
 ```
 
-This opens the selected project, or lets you choose or create one. The inbox lists saved questions with choice buttons, the project's Jobs with their plan, progress and Approve button, coordinator chats, knowledge, artifacts and settings. Answering a question records it under `decisions/` and wakes the asking chat's coordinator; it grants no execution authority.
+This opens the inbox on the selected project. Projects with their chats and Memory are on the left; the Coordinator chat is in the center with questions (choice buttons) and Job approvals inline; the chat's workers and pull requests are on the right; a status line shows the model, context and subscription limits. ⌘K searches, ⌘, opens Settings, and `\` opens the Host agent, which also creates projects (`npm run projects -- create <name> <workspace>` does too). Answering a question records it under `decisions/` and wakes the asking chat's coordinator; it grants no execution authority.
 
 The listener binds to `127.0.0.1` on a random port. A private launch link authenticates the tab and then leaves the address bar. Do not share launch links or `web.json`. The host rejects foreign origins and Host headers. Closing the tab does not stop work. After a host restart, run `npm run inbox` again because the port and token change; `npm run projects -- ui-url <project-id>` prints the link.
 
-## UI 2.0 trial
+## Trial host
 
-`npm run ui2` starts a host from this checkout on its own home `~/.pi/agent/projects-ui2` (created empty; nothing is copied from other homes) with your real providers, and prints the `/ui2/` link; it refuses while that home's host is running.
+`npm run ui2` starts a host from this checkout on its own home `~/.pi/agent/projects-ui2` (created empty; nothing is copied from other homes) with your real providers, and prints its inbox link; it refuses while that home's host is running.
 `npm run ui2 -- stop` stops it.
 
 ## Remote access

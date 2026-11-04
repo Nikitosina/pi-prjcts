@@ -437,13 +437,12 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     };
     return page;
   };
-  /** Settings tab URL of a project in the owned host's browser UI. */
-  kit.webUrl = async (id, tab = "settings") => {
+  /** The inbox at `/` with a project selected (optionally one of its chats), in the owned host's browser UI. */
+  kit.webUrl = async (id, chatId) => {
     const web = await kit.rpc({ action: "web" });
     const url = new URL(web.url);
     url.searchParams.set("project", id);
-    url.searchParams.set("tab", tab);
-    url.searchParams.set("e2e", "1");
+    if (chatId && chatId !== "main") url.searchParams.set("chat", chatId);
     return url.toString();
   };
 

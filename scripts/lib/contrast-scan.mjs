@@ -1,4 +1,4 @@
-// Page-side contrast helper shared by the theme and settings-polish E2Es: window.__scan(dark, root) -> { bright, low, texts }.
+// Page-side contrast helper used by the theme E2E: window.__scan(dark, root) -> { bright, low, texts }.
 export const contrastLib = `(() => {
   const parse = c => { const m = c.match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,\\/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p[3] ?? 1 }; };
   const over = (top, bottom) => { const a = top.a + bottom.a * (1 - top.a); return a === 0 ? { r: 0, g: 0, b: 0, a: 0 } : { r: (top.r * top.a + bottom.r * bottom.a * (1 - top.a)) / a, g: (top.g * top.a + bottom.g * bottom.a * (1 - top.a)) / a, b: (top.b * top.a + bottom.b * bottom.a * (1 - top.a)) / a, a }; };

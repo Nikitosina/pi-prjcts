@@ -22,5 +22,5 @@ Scope: host-owned MCP pool (`src/mcp-servers.ts`), two stable gateway tools `pro
 18. Gateway call argument validation: missing `server`/`tool`, non-object `arguments`, unknown tool name -> clear error, never a crash.
 19. Concurrent calls to the same cold server spawn two processes (connect must be de-duplicated).
 20. Host shutdown leaves orphan server processes (pool closes all; idle servers close after 10 minutes).
-21. Picker UI: servers not listed, disabled/OAuth not locked, 390px overflow, save/reset not persisting, "All profiles" inheritance not shown.
+21. Saved profiles do not persist exactly. (The classic picker UI, with locked servers and its 390 px layout, was retired on 2026-11-04.)
 22. Prompts: role instruction note present; no schemas of every tool pushed into prompts (tool listing is on demand and paged).

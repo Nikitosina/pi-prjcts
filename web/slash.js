@@ -1,4 +1,4 @@
-// "/" completion in the Coordinator composer, as on the classic page: commands at the start of the message, skills anywhere a
+// "/" completion in the Coordinator composer: commands at the start of the message, skills anywhere a
 // word starts (after a space or an opening bracket). Skills come from the project's `coordinator-skills` catalog. The textarea keeps
 // focus; the menu is a listbox it points at through aria-activedescendant.
 import { call } from "./api.js";

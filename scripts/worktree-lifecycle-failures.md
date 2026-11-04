@@ -49,3 +49,9 @@ Written before implementation. E2E: `scripts/worktree-lifecycle-e2e.mjs`; guard 
 
 ## Misc
 - M1 `attempt.toolNames` still `[]` for workers.
+
+## Classic inbox retired (2026-11-04)
+The classic Settings worktree card (setup command field, worktree list, Clean up button, toast) is gone. The test now drives the same
+calls over the host API: the revision-checked `settings-update` of `worktreeSetup` (W5), the `worktrees-snapshot` inventory
+(K7: reclaimable space, removable and kept worktrees) and `worktrees-cleanup` (C9). The script no longer starts a browser.
+Gap: the new client has no worktree view or cleanup control (Host agent or CLI).

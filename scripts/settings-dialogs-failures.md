@@ -43,3 +43,9 @@ Other dialogs
 32. Approvals: decision buttons lose the fingerprint binding; exact operation dialog hides identity (project, id, fingerprint) completely.
 33. Provider receipts / known PR inspection: lens switch lacks selected state; known-PR form accepts a short head SHA.
 34. Usage: tokens shown as raw long sentences, page-only total not labeled as page-only.
+
+## After the classic inbox (2026-11-04)
+
+The dialogs these cases describe were classic-only and are retired with it (docs/classic-retirement.md). The script keeps the host
+contracts: 13 (only changed fields are written), 15 (a stale revision is rejected, not rebased), 18-20 (scoped list, `settings.json`
+isolation and fallback), and 21 (the host rejects unconfigured models). Settings in the inbox at `/` is covered by `ui2-trial-e2e`.

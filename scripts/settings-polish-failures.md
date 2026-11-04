@@ -13,3 +13,7 @@ Owner feedback (handoff 7, Track U). `scripts/settings-polish-e2e.mjs` checks th
 9. Existing element ids, data-action values and checkbox/radio selectors used by other E2Es disappear.
 10. Long lists grow the page instead of scrolling inside their card.
 11. Dirty state invisible: Save enabled without a visible "Unsaved changes" hint or the hint stays after save.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+`settings-polish-e2e` is deleted with the classic Settings dialog it checked (section nav, bulk skill/MCP pickers). The new Settings
+sections are covered by `settings-dialogs-e2e`, `context-settings-e2e`, `theme-e2e` and `remote-settings-e2e`. Kept as a record.

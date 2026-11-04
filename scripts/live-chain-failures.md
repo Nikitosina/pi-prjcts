@@ -21,3 +21,10 @@ Found with real coordinators (`gpt-5.6-sol` on the owner's live project, `gpt-6-
 
 ## Regressions to keep
 12. ui-polish, coordinator-live, coordinator-workers-ui, workers-card-ui, worker-chat-ui and projects-chat-md keep passing.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The chain is sampled from `#feed` turns, `#live-turn` and the status bar's activity item, which stays visible while the reader
+scrolls up (LC3; the classic floating working pill is retired). LC4 thoughts are collapsed Thinking lines with a preview; LC7 checks
+the order of message, thought, text, tool row, thought, text, tool row and answer inside the turn. KT4 opens the decision from the
+Memory node. Retired with the classic layout: O1 and KT1-KT3 (rail Knowledge card and the Knowledge tab folder tree; the new Memory
+groups entries by kind instead) and LC6 (the new client shows tool names on purpose).

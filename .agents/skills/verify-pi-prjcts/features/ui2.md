@@ -1,10 +1,10 @@
-# UI 2.0 client at /ui2/
+# The inbox at /
 
-The owner opens the UI 2.0 client at `/ui2/`: a project tree with chats and Memory, a coordinator chat with compact tool rows, a Workers context panel, a settings overlay with letter hotkeys and themes, and the Host agent drawer. `/` stays the current client.
+The owner opens the inbox at `/` (the UI 2.0 client; the classic inbox was retired 2026-11-04): a project tree with chats and Memory, a coordinator chat with compact tool rows, a Workers context panel, a settings overlay with letter hotkeys and themes, and the Host agent drawer.
 
 ## Sub-features
 
-- `serve`: `/ui2/` has the same token, CSP and headers as `/`; `/ui2` redirects; nested and unknown paths return 404.
+- `serve`: `/` serves this client with the CSP, nosniff, `no-cache` and ETag headers; classic files are gone; an old `/ui2/` launch link 308s to `/` and still signs in; nested and unknown paths are refused (`scripts/ui2-web-failures.md` S1–S11).
 - `empty`: a chat with no messages offers three starter prompts. One click fills the composer and focuses it; nothing is sent.
 - `chat`: a sent message shows one owner bubble, a mono `agents` tool row with a `worker ↗` link, a worker report row and the reply. Clicking the row head shows params and the result.
 - `worker`: the Workers card shows plan progress and Approve. A spawn row opens the worker transcript in the center, and Esc returns to the chat.
@@ -23,7 +23,7 @@ The owner opens the UI 2.0 client at `/ui2/`: a project tree with chats and Memo
 
 ## How to get to it (user POV)
 
-- Open the launch link with `/ui2/` before the `#token` fragment.
+- Open the launch link (`/#token=…`).
 - Type in the composer (❯) and press Enter. Click a tool row, a `worker ↗` link or a memory row link.
 - Click Memory under the project in the tree.
 - Press ⌘, then a section letter. Press `\` for the Host agent. Esc leaves any focus view.

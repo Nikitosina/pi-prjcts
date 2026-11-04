@@ -44,7 +44,7 @@ function costRows(usage) {
       .join(" · "),
   )}</small></div>`;
 }
-/** What the classic bar's popup said: each window's use and reset, the reading's age and source, the cost, and failures. */
+/** What the retired classic inbox's popup said: each window's use and reset, the reading's age and source, the cost, and failures. */
 function detailHtml(item) {
   const has = item.samples?.length || item.usage;
   const rows = item.usage ? costRows(item.usage) : (item.samples ?? []).map(windowRow).join("");

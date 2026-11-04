@@ -241,22 +241,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     else if (line) root.querySelector(".focus-head").insertAdjacentHTML("afterend", line);
     paint();
   };
-  await load();
-  if (!alive()) return;
-  node.addEventListener("click", (event) => void transcriptClick(event, root, paint));
-  const unsub = on("jobs", () => {
-    if (!alive()) return unsub();
-    void load();
-  });
-  root.addEventListener("click", async (event) => {
-    if (!alive() || !event.target.closest("[data-stop-worker]")) return;
-    try {
-      await call("thread-stop", { id: state.projectId, threadId: id });
-      toast("Stopped. History and files kept.");
-    } catch (error) {
-      fail(error);
-    }
-  });
+  // The composer works while the transcript loads: Enter right after opening sends (scripts/worker-chat-ui-failures.md C6).
   const form = root.querySelector(".worker-send"),
     text = form.querySelector("textarea");
   if (steer) text.focus();
@@ -279,6 +264,22 @@ export async function renderWorker(root, id, { steer = false } = {}) {
       void load();
     } catch (error) {
       text.value = value;
+      fail(error);
+    }
+  });
+  await load();
+  if (!alive()) return;
+  node.addEventListener("click", (event) => void transcriptClick(event, root, paint));
+  const unsub = on("jobs", () => {
+    if (!alive()) return unsub();
+    void load();
+  });
+  root.addEventListener("click", async (event) => {
+    if (!alive() || !event.target.closest("[data-stop-worker]")) return;
+    try {
+      await call("thread-stop", { id: state.projectId, threadId: id });
+      toast("Stopped. History and files kept.");
+    } catch (error) {
       fail(error);
     }
   });

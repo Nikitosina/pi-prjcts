@@ -376,119 +376,13 @@ try {
   );
   const preThread = (await plan()).find((w) => w.text.includes("W-TASK pre")).threadId;
 
-  // Settings picker in the browser.
-  const web = await rpc({ action: "web" });
-  const launch = new URL(web.url);
-  launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "settings");
-  startChrome();
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
-  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 6`, s, "skills picker");
-  const groups = await evaluate(
-    `[...document.querySelectorAll('#skills-picker fieldset.skill-group')].map(g => [g.dataset.source, [...g.querySelectorAll('[data-skill-pick]')].map(i => [i.dataset.skillPick, i.checked])])`,
-    s,
-  );
-  result.groups = groups;
-  const groupOf = (name) => groups.find((g) => g[1].some(([n]) => n === name))?.[0];
-  check(
-    "S17 the picker lists all six loaded skills grouped by source (repository vs global)",
-    groupOf("repo-one") === groupOf("repo-two") &&
-      groupOf("glob-alpha") === groupOf("glob-delta") &&
-      groupOf("repo-one") !== groupOf("glob-alpha") &&
-      groups.length === 2,
-    groups,
-  );
-  check(
-    'S1 the default "All profiles" tab has every skill checked (on)',
-    groups
-      .flatMap((g) => g[1])
-      .filter(([, on]) => on)
-      .map(([n]) => n)
-      .sort()
-      .join() === "glob-alpha,glob-beta,glob-delta,glob-gamma,repo-one,repo-two",
-    groups,
-  );
-  await evaluate(
-    `(() => { const i = document.querySelector('#skills-search'); i.value = 'gamma'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-    s,
-  );
-  await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 1`, s, "search filter");
-  check(
-    "S17 search narrows the list",
-    (await evaluate(`document.querySelector('#skills-picker [data-skill-pick]').dataset.skillPick`, s)) === "glob-gamma",
-  );
-  await evaluate(
-    `(() => { const i = document.querySelector('#skills-search'); i.value = ''; i.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-    s,
-  );
-  await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 6`, s, "search cleared");
-  const pick = async (role, name) => {
-    await evaluate(`document.querySelector('[data-action="skills-tab"][data-role="${role}"]').click()`, s);
-    await waitFor(`document.querySelector('[data-action="skills-tab"][data-role="${role}"]').classList.contains('on')`, s, `${role} tab`);
-    await evaluate(`document.querySelector('[data-skill-pick="${name}"]').click()`, s);
-  };
-  // A Settings read still in flight when the owner starts picking must not overwrite the picks when it lands.
-  await evaluate(
-    `(() => { const f = window.fetch; window.fetch = async (u, o) => { const r = await f(u, o); if (String(o?.body).includes('settings-snapshot')) await new Promise((x) => { window.__release = x; }); return r; }; window.__realFetch = f; })()`,
-    s,
-  );
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
-  await delay(300);
-  await evaluate(`document.querySelector('[data-tab="settings"]').click()`, s);
-  await delay(300);
-  await pick("all", "repo-two"); // switch repo-two off for every profile
-  await waitFor(`typeof window.__release === 'function'`, s, "settings read held in flight");
-  await evaluate(`window.__release(); window.fetch = window.__realFetch`, s);
-  await delay(300);
-  await pick("worker", "glob-alpha");
-  await pick("scout", "glob-beta");
-  await pick("coordinator", "glob-gamma");
-  const inherited = await evaluate(
-    `(() => { const i = document.querySelector('[data-skill-pick="repo-two"]'); return { checked: i.checked, disabled: i.disabled }; })()`,
-    s,
-  );
-  check(
-    'S5 a skill switched off for "All profiles" shows as off and locked in a role tab',
-    !inherited.checked && inherited.disabled,
-    inherited,
-  );
-  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
-  await delay(300);
-  await evaluate(`document.querySelector('#skills-card').scrollIntoView()`, s);
-  const narrow = await evaluate(
-    `(() => { const c = document.querySelector('#skills-card').getBoundingClientRect(); return { right: c.right, width: innerWidth, scroll: document.documentElement.scrollWidth > innerWidth + 1 }; })()`,
-    s,
-  );
-  await shot("01-skills-picker-390", s);
-  check("S20 the picker fits 390 px without horizontal scroll", !narrow.scroll && narrow.right <= narrow.width + 1, narrow);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-  await evaluate(`document.querySelector('[data-action="skills-save"]').click()`, s);
-  await eventually(async () => (await rpc({ action: "settings-snapshot", id })).values.skills !== null, "skills not saved", 100);
+  // Profiles are saved through the host: the inbox at `/` has no skill-profile picker yet (the classic Settings picker, S17/S20 and the
+  // in-flight read race, was retired 2026-11-04; see the failures doc).
   settings = await rpc({ action: "settings-snapshot", id });
   const want = { off: { all: ["repo-two"], coordinator: ["glob-gamma"], worker: ["glob-alpha"], scout: ["glob-beta"], reviewer: [] } };
-  check(
-    "S18 saving the picker persists the profiles",
-    JSON.stringify(settings.values.skills) === JSON.stringify(want),
-    settings.values.skills,
-  );
-  await send("Page.reload", {}, s);
-  await waitFor(`document.querySelectorAll('#skills-picker [data-skill-pick]').length === 6`, s, "picker after reload");
-  await evaluate(`document.querySelector('[data-action="skills-tab"][data-role="worker"]').click()`, s);
-  await delay(200);
-  const afterReload = await evaluate(
-    `[...document.querySelectorAll('#skills-picker [data-skill-pick]')].filter(i => i.checked).map(i => i.dataset.skillPick).sort().join()`,
-    s,
-  );
-  check(
-    "S18 after a reload the worker tab shows what is on for workers",
-    afterReload === "glob-beta,glob-delta,glob-gamma,repo-one",
-    afterReload,
-  );
-  await shot("02-skills-picker-worker", s);
+  await rpc({ action: "settings-update", id, confirm: id, expectedRevision: settings.revision, changes: { skills: want } });
+  settings = await rpc({ action: "settings-snapshot", id });
+  check("S18 saving the profiles persists them", JSON.stringify(settings.values.skills) === JSON.stringify(want), settings.values.skills);
 
   // Effective sets per role, .
   await ask("MARK-W child");
@@ -568,21 +462,28 @@ try {
     names.join() === "glob-alpha,glob-beta,glob-delta,glob-gamma,repo-one,repo-two",
     names,
   );
-  await send("Page.navigate", { url: new URL(launch.toString().replace("tab=settings", "tab=coordinator")).toString() }, s);
-  await waitFor(
-    `!!document.querySelector('#compose textarea') && document.querySelector('#messages')?.innerText.includes('Noted')`,
-    s,
-    "composer",
-  );
+  const web = await rpc({ action: "web" });
+  const launch = new URL(web.url);
+  launch.searchParams.set("project", id);
+  startChrome();
+  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
+  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
+  await send("Page.navigate", { url: launch.toString() }, s);
+  await waitFor(`document.body.dataset.ready === "1" && document.querySelector('#feed')?.innerText.includes('Noted')`, s, "composer");
   await delay(500);
-  await evaluate(`(() => { const t = document.querySelector('#compose textarea'); t.value = ''; t.focus(); })()`, s);
+  await evaluate(`(() => { const t = document.querySelector('#composer-input'); t.value = ''; t.focus(); })()`, s);
   await send("Input.insertText", { text: "/" }, s);
   await waitFor(
-    `!document.querySelector('#skill-menu').hidden && document.querySelectorAll('#skill-menu .skill-option').length > 0`,
+    `!document.querySelector('#slash-menu').hidden && document.querySelectorAll('#slash-menu .slash-opt[data-source="skill"]').length > 0`,
     s,
     "skill menu",
   );
-  const menuNames = await evaluate(`[...document.querySelectorAll('#skill-menu .skill-option .skill-name')].map(n => n.innerText)`, s);
+  const menuNames = await evaluate(
+    `[...document.querySelectorAll('#slash-menu .slash-opt[data-source="skill"]')].map(n => '/' + n.dataset.name)`,
+    s,
+  );
   check(
     "S19 the composer / menu lists all six skills",
     ["repo-one", "repo-two", "glob-alpha", "glob-beta", "glob-gamma", "glob-delta"].every((n) => menuNames.includes(`/${n}`)),

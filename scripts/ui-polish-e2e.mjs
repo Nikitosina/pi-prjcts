@@ -354,29 +354,29 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
+  // The inbox at `/` (classic inbox retired 2026-11-04; see ui-polish-failures.md for what moved and what was retired).
   await waitFor(
-    `document.querySelector('#title')?.innerText === 'Polish UI' && document.querySelector('#messages').innerText.includes('MARK-FAKE')`,
+    `document.body?.dataset.ready === "1" && document.querySelector("#feed").innerText.includes("MARK-FAKE")`,
     s,
     "project loaded",
   );
   await delay(500);
   await shot("01-coordinator", s);
 
-  // Conversation
-  if (await evaluate(`!!document.querySelector('#messages .job-msg, #messages .event-card, #messages .tool-call')`, s))
-    throw Error("Internal reports or tools leaked into coordinator conversation");
-  const youText = await evaluate(`[...document.querySelectorAll('#messages .msg.you')].map(n => n.innerText).join('\\n')`, s);
-  if (!/MARK-FAKE/.test(youText)) throw Error("Look-alike user message vanished");
-  result.checks.push("C1-C4 coordinator conversation keeps owner text and hides internal report/tool diagnostics");
-  const stamps = await evaluate(`[...document.querySelectorAll('#messages .who small')].map(n => n.innerText)`, s);
-  if (!stamps.length || stamps.some((t) => /[A-Z][a-z]{2} \\d/.test(t))) throw Error("Today timestamps still carry a date: " + stamps);
+  // Conversation: the owner's text stays the owner's; internal worker reports never show as owner messages.
+  const owner = await evaluate(`[...document.querySelectorAll('#feed .msg.owner')].map(n => n.innerText)`, s);
+  if (!owner.some((t) => t.includes("[worker but not really] MARK-FAKE")))
+    throw Error("Look-alike user message vanished: " + JSON.stringify(owner));
+  if (owner.some((t) => /\[(worker|scout|reviewer) [0-9a-f-]{36}/.test(t))) throw Error("Internal report shown as an owner message");
+  result.checks.push("C1-C4 the conversation keeps owner text and never shows internal reports as owner messages");
+  const stamps = await evaluate(`[...document.querySelectorAll('#feed .msg-meta time')].map(n => n.innerText)`, s);
+  if (!stamps.length || stamps.some((t) => /[A-Z][a-z]{2} \d/.test(t))) throw Error("Today timestamps still carry a date: " + stamps);
   result.checks.push("C5 messages from today show time only");
 
   // Layout
@@ -384,133 +384,75 @@ try {
     `({ scroll: document.scrollingElement.scrollHeight, inner: innerHeight, width: document.scrollingElement.scrollWidth })`,
     s,
   );
-  const head = await box("#title", s),
-    composer = await box("#compose", s);
-  if (page.scroll > page.inner + 1 || head.top < 0 || composer.bottom > 900)
-    throw Error("Page overflows/clips: " + JSON.stringify({ page, head, composer }));
-  const transcriptScrolls = await evaluate(
-    `(() => { const t = document.querySelector('#transcript'); return t.scrollHeight > t.clientHeight && ['auto','scroll'].includes(getComputedStyle(t).overflowY); })()`,
-    s,
-  );
-  if (!transcriptScrolls) throw Error("Transcript does not scroll on its own");
-  result.checks.push("L1 1440x900: no page scroll, header visible, composer in viewport, transcript scrolls on its own");
+  const composer = await box("#composer", s);
+  if (page.scroll > page.inner + 1 || composer.bottom > 900) throw Error("Page overflows/clips: " + JSON.stringify({ page, composer }));
+  const feedScrolls = await evaluate(`['auto','scroll'].includes(getComputedStyle(document.querySelector('#feed')).overflowY)`, s);
+  if (!feedScrolls) throw Error("Transcript does not scroll on its own");
+  result.checks.push("L1 1440x900: no page scroll, composer in viewport, transcript scrolls on its own");
 
-  // Header and composer
-  const life = await evaluate(
-    `({ pause: !!document.querySelector('#project-pause')?.offsetParent, resume: !!document.querySelector('#project-resume')?.offsetParent, height: document.querySelector('.phead').getBoundingClientRect().height })`,
-    s,
-  );
-  if (!life.pause || life.resume || life.height > 56) throw Error("Header controls wrong: " + JSON.stringify(life));
-  result.checks.push("H1 only Pause shows while ready; header is one compact row");
+  // Composer
   const comp = await evaluate(
-    `({ placeholder: document.querySelector('#compose textarea').placeholder, hint: document.querySelector('#model-cycle').innerText, resize: getComputedStyle(document.querySelector('#compose textarea')).resize })`,
+    `({ placeholder: document.querySelector('#composer-input').placeholder, model: document.querySelector('.sl-item[data-item="model"]')?.innerText ?? '', resize: getComputedStyle(document.querySelector('#composer-input')).resize })`,
     s,
   );
-  if (/enter/i.test(comp.placeholder) || !comp.hint.includes("fake-model") || comp.resize !== "none")
+  if (/enter/i.test(comp.placeholder) || !comp.model.includes("fake-model") || comp.resize !== "none")
     throw Error("Composer copy wrong: " + JSON.stringify(comp));
   const grow = await evaluate(
-    `(async () => { const t = document.querySelector('#compose textarea'); const before = t.offsetHeight; t.focus(); t.value = 'line\\n'.repeat(6); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const mid = t.offsetHeight; t.value = 'line\\n'.repeat(200); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const big = t.offsetHeight; t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); t.blur(); return { before, mid, big, after: t.offsetHeight }; })()`,
+    `(async () => { const t = document.querySelector('#composer-input'); const before = t.offsetHeight; t.focus(); t.value = 'line\\n'.repeat(6); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const mid = t.offsetHeight; t.value = 'line\\n'.repeat(200); t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); const big = t.offsetHeight; t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); await new Promise(r => requestAnimationFrame(r)); t.blur(); return { before, mid, big, after: t.offsetHeight }; })()`,
     s,
   );
-  if (!(grow.mid > grow.before) || grow.big > 260 || grow.after > grow.before + 2)
+  if (!(grow.mid > grow.before) || grow.big > 320 || grow.after > grow.before + 2)
     throw Error("Composer auto-grow wrong: " + JSON.stringify(grow));
-  result.checks.push("H2 composer: short placeholder, model in hint, no resize grip, grows with content up to a cap and shrinks back");
+  result.checks.push("H2 composer: short placeholder, model in the status line, no resize grip, grows up to a cap and shrinks back");
 
-  // Side rail
-  if (await evaluate(`!!document.querySelector('#needs-card')?.offsetParent`, s)) throw Error("Empty Needs-you card shown");
-  result.checks.push("R1 empty Needs-you card hidden");
-  const rail = await evaluate(`document.querySelector('#job-tree').innerText`, s);
-  if (!rail.includes("MARK-FAILTASK") || !rail.includes("MARK-HOLDTASK") || /work items/.test(rail))
-    throw Error("Jobs tree content wrong: " + JSON.stringify(rail));
-  result.checks.push('R2 the Jobs tree lists the failed and the running Job; no "work items" grammar');
-  await evaluate(`document.querySelector('#job-tree [data-action="thread"][data-thread="${scout.threadId}"]').click()`, s);
+  // Workers
+  await waitFor(`(document.querySelector('#workers')?.innerText ?? '').includes('MARK-HOLDTASK')`, s, "workers list");
+  const rail = await evaluate(`document.querySelector('#workers').innerText`, s);
+  if (!rail.includes("MARK-FAILTASK") || /work items/.test(rail)) throw Error("Workers content wrong: " + JSON.stringify(rail));
+  result.checks.push('R2 the Workers list shows the failed and the running worker; no "work items" grammar');
+  await evaluate(`document.querySelector('#workers [data-open-worker="${scout.threadId}"]')?.click()`, s);
   await waitFor(
-    `!document.querySelector('#inline-thread').hidden && document.querySelector('#inline-thread').innerText.includes('REPORT-BODY')`,
+    `(document.querySelector('#focus-view #worker-feed')?.innerText ?? '').includes('REPORT-BODY')`,
     s,
-    "result opens worker view",
+    "scout opens in the worker view",
   );
   const opened = await evaluate(
-    `({ coordinatorHidden: document.querySelector('[data-panel="coordinator"]').hidden, deepLink: /^[a-f0-9-]{36}$/.test(new URL(location.href).searchParams.get('worker') ?? ''), back: !!document.querySelector('#inline-thread [data-action="thread-close"]'), steer: !!document.querySelector('#inline-thread [data-action="thread-steer"]'), composer: !!document.querySelector('#inline-thread [data-inline-thread-send]'), artifacts: !!document.querySelector('#inline-thread #artifact-pane') })`,
+    `({ back: !!document.querySelector('#focus-view [data-cmd="leave-focus"]'), composer: !!document.querySelector('#focus-view .worker-send textarea'), feedGone: !document.querySelector('#feed')?.offsetParent })`,
     s,
   );
   if (Object.values(opened).some((value) => value !== true)) throw Error("Worker view incomplete: " + JSON.stringify(opened));
-  result.checks.push(
-    "R3 opening an agent from the Workers card opens its agent view (deep link, Back, Steer, composer, artifacts) in place of the chat",
-  );
-  // Round 2
-  const list = await evaluate(
-    `(() => { const ol = [...document.querySelectorAll('#worker-messages .msg ol')]; return ol.map(n => n.children.length); })()`,
-    s,
-  );
+  result.checks.push("R3/A1 a worker opens as its own view (Back, composer) in place of the chat");
+  const list = await evaluate(`[...document.querySelectorAll('#focus-view #worker-feed ol')].map(n => n.children.length)`, s);
   if (!list.includes(3)) throw Error("Blank-line separated numbered list split: " + JSON.stringify(list));
   result.checks.push("M1 numbered list with blank lines stays one list");
   await shot("02-worker-view", s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
   await waitFor(
-    `document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden && !new URL(location.href).searchParams.has('worker')`,
+    `!document.querySelector('#focus-view #worker-feed') && !!document.querySelector('#feed')?.offsetParent`,
     s,
     "Escape returns to the chat",
   );
-  result.checks.push("R3b Escape returns to the coordinator chat and drops ?worker");
-  await evaluate(`document.querySelector('#job-tree .job-open').click()`, s);
-  await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, "worker view");
-  const panes = await evaluate(
-    `(() => ({ chatHidden: document.querySelector('[data-panel="coordinator"]').hidden, outsideCard: !document.querySelector('#job-tree').contains(document.querySelector('#inline-thread')), inlineExpansion: !!document.querySelector('#job-tree #worker-messages'), context: !!document.querySelector('#worker-context') }))()`,
-    s,
-  );
-  if (!panes.chatHidden || !panes.outsideCard || panes.inlineExpansion || !panes.context)
-    throw Error("Worker did not open as its own view: " + JSON.stringify(panes));
-  result.checks.push("A1 a Job opens as its own view, not an inline expansion in the Jobs tree");
-  await shot("04-worker-view", s);
-  await evaluate(`document.querySelector('#inline-thread [data-action="thread-close"]').click()`, s);
-  await waitFor(
-    `document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden`,
-    s,
-    "Back returns to the chat",
-  );
-  result.checks.push("A2 Back returns to the coordinator chat");
-  await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
-  await waitFor(`document.querySelectorAll('#knowledge-inline .tree-file').length >= 2`, s, "doc rows");
-  const knowledge = await evaluate(
-    `({ tiles: document.querySelectorAll('[data-panel="knowledge"] .tile').length, text: document.querySelector('#knowledge-inline').innerText })`,
-    s,
-  );
-  if (knowledge.tiles || /bytes|\d{1,2}\/\d{1,2}\/\d{4}/.test(knowledge.text) || !/updated .*ago|just now/.test(knowledge.text))
-    throw Error("Knowledge list not tidy: " + JSON.stringify(knowledge));
-  result.checks.push("K1 Knowledge: tree file rows with relative time, no tiles or raw bytes/dates");
-  await evaluate(`document.querySelector('#knowledge-inline .tree-file').click()`, s);
-  await waitFor(`!!document.querySelector('#dialog [data-action="knowledge-edit"]')`, s, "doc dialog");
-  await evaluate(`document.querySelector('#dialog [data-action="knowledge-edit"]').click()`, s);
-  await waitFor(`!!document.querySelector('#dialog form[data-knowledge-write]')`, s, "edit form");
-  if (await evaluate(`!!document.querySelector('#dialog input[name="confirm"]:not([type="hidden"])')`, s))
-    throw Error("Knowledge edit asks to type the project ID");
-  await evaluate(`document.querySelector('#dialog [data-action="close-dialog"]').click()`, s);
-  result.checks.push("K2 knowledge edit needs no typed project ID");
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
+  result.checks.push("R3b/A2 Escape returns to the coordinator chat");
+
+  // 1100 px: the composer hints stay on one row; the context item shows a percentage.
   await send("Emulation.setDeviceMetricsOverride", { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false }, s);
   await delay(400);
-  const narrow = await evaluate(
-    `(() => { const a = document.querySelector('#avatar').getBoundingClientRect(), t = document.querySelector('#title').getBoundingClientRect(), more = document.querySelector('[data-action="lifecycle-more"]').getBoundingClientRect(), pause = document.querySelector('#project-pause').getBoundingClientRect(), hint = document.querySelector('#compose .help-btn').getBoundingClientRect(), send = document.querySelector('#compose [type="submit"]').getBoundingClientRect(); return { avatarRow: Math.abs((a.top + a.bottom) / 2 - (t.top + t.bottom) / 2) < 30, moreRow: Math.abs(more.top - pause.top) < 12, footerRow: Math.abs((hint.top + hint.bottom) / 2 - (send.top + send.bottom) / 2) < 12 }; })()`,
+  const hints = await evaluate(
+    `(() => { const spans = [...document.querySelectorAll('.composer-hints > span')].filter(n => n.offsetParent); return new Set(spans.map(n => Math.round(n.getBoundingClientRect().top))).size; })()`,
     s,
   );
-  if (!Object.values(narrow).every(Boolean)) throw Error("1100px header/composer wraps: " + JSON.stringify(narrow));
-  const ring = await evaluate(`document.querySelector('.context-pct').innerText`, s);
-  if (!/^\d+%$/.test(ring)) throw Error("Context ring has no number: " + ring);
-  result.checks.push("L3 1100px: header and composer footer stay on one row; context ring shows a percentage");
+  if (hints > 1) throw Error("1100px composer hints wrap: " + hints);
+  const ring = await evaluate(`document.querySelector('.sl-item[data-item="context"]')?.innerText ?? ''`, s);
+  if (!/\d+%/.test(ring)) throw Error("Context item has no percentage: " + ring);
+  result.checks.push("L3 1100px: composer hints stay on one row; the context item shows a percentage");
   // Mobile
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await delay(500);
   const mobile = await evaluate(`document.scrollingElement.scrollWidth`, s);
   if (mobile > 391) throw Error("Mobile overflows horizontally: " + mobile);
-  const compact = await evaluate(
-    `({ list: !!document.querySelector('#project-list').offsetParent, select: !!document.querySelector('#projects').offsetParent, title: document.querySelector('#title').getBoundingClientRect().top })`,
-    s,
-  );
-  if (compact.list || !compact.select || compact.title > 200) throw Error("Mobile sidebar not compact: " + JSON.stringify(compact));
   await shot("03-mobile", s);
-  result.checks.push("L2 390px: no horizontal overflow; sidebar collapses to a project picker");
+  result.checks.push("L2 390px: no horizontal overflow");
   if (result.errors.length || result.httpErrors.length) throw Error("Browser errors captured");
   result.status = "passed";
 } catch (error) {

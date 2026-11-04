@@ -19,3 +19,14 @@ Verify through an isolated host, fake model, browser. No real models, CI.
 - Q15 Light or dark theme: unreadable card/buttons (contrast), overflow at 420 px.
 - Q16 Keys 1-9 pick a choice while typing in a textarea (must only act outside inputs).
 - Q17 Existing E2Es driving #letter silently pass without verifying the answer path.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+
+`chat-questions-e2e.mjs` now drives the UI 2.0 client. Its cards live in the chat's dock above the composer (Q2), only in the chat
+that asked (Q3), with the project's open-question count in the tree (Q12). Cases of classic presentation that the new client does
+not have, so are no longer checked: Q1/Q11 (sidebar "Needs you" card and jump link), Q3's Open banner for another chat's question,
+Q8's in-place "Answered:" record (the card goes away and the answer reaches the coordinator), Q5's Enter-to-send in the answer field
+(the Answer button sends; Enter is a newline), Q16's digit keys (the cards show numbers but no key picks them).
+
+Known, not fixed here: Q15 white text on a primary button (the brand accent) measures 4.03:1 in the light theme and 3.12:1 in the
+claude theme, under WCAG AA 4.5:1. The test scans the rest of the card and leaves this to a palette decision.

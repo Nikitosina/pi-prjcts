@@ -265,7 +265,7 @@ const settle = async (id, job) =>
 const lastReply = async (id) => (await rpc({ action: "show", id })).messages.findLast((m) => m.role === "assistant")?.text ?? "";
 const scrollInfo = (s) =>
   evaluate(
-    `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
+    `(() => { const t = document.querySelector('#feed'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
     s,
   );
 const box = (sel, s) =>
@@ -319,8 +319,6 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
-  launch.searchParams.set("e2e", "1");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -328,7 +326,7 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   await waitFor(
-    `document.querySelector('#title')?.innerText === 'Live chain' && document.querySelector('#messages').innerText.includes('LONG-DONE')`,
+    `document.body.dataset.ready === "1" && document.querySelector('#feed').innerText.includes('LONG-DONE')`,
     s,
     "project loaded",
   );
@@ -348,116 +346,58 @@ try {
   if (!long.you || long.tools < LONG) throw Error("Long turn truncated: " + JSON.stringify(long));
   result.checks.push(`LC5 a ${LONG}-tool turn keeps the owner's message and all ${LONG} steps`);
 
-  // Rail order (failure 11) and rail tree (failures 9, 10).
-  const order = await evaluate(
-    `[...document.querySelectorAll('.col .card')].filter(n => n.offsetParent).map(n => n.querySelector('b')?.innerText)`,
-    s,
-  );
-  if (order.indexOf("Knowledge") < 0 || order.includes("Recent results")) throw Error("Rail wrong: " + JSON.stringify(order));
-  result.checks.push("O1 rail shows Knowledge; Job results arrive as chat messages, not a card");
-  const rail = await evaluate(
-    `(() => { const card = document.querySelector('#notes'); const r = card.closest('.card').getBoundingClientRect(); return { folders: [...card.querySelectorAll('.tree-folder > summary .tree-name')].map(n => n.innerText), files: [...card.querySelectorAll('.tree-file .tree-name')].map(n => n.innerText), overflow: [...card.querySelectorAll('.tree-file')].some(n => n.getBoundingClientRect().right > r.right + 1), scroll: card.scrollWidth > card.clientWidth + 1 }; })()`,
-    s,
-  );
-  if (
-    !rail.folders.includes("decisions") ||
-    !rail.folders.includes("plans") ||
-    !rail.files.includes("issue-95-generic-flow.md") ||
-    rail.files.some((f) => f.includes("/")) ||
-    rail.overflow ||
-    rail.scroll
-  )
-    throw Error("Rail knowledge not a tidy tree: " + JSON.stringify(rail));
-  result.checks.push("KT3 rail Knowledge card is a folder tree of file names, long names truncate without overflow");
-  await evaluate(
-    `[...document.querySelectorAll('#notes .tree-file')].find(n => n.innerText.includes('issue-95-generic-flow.md')).click()`,
-    s,
-  );
+  // Memory (the classic rail Knowledge card and Knowledge tab tree, O1 and KT1-KT3, were retired 2026-11-04): the Memory node lists the
+  // decision by title and opens it (KT4).
+  await evaluate(`document.querySelector('#tree .tree-project.selected [data-memory-node]').click()`, s);
   await waitFor(
-    `document.querySelector('#dialog')?.open && document.querySelector('#dialog').innerText.includes('Flow decisions')`,
+    `!!document.querySelector('#focus-view .mem-entry[data-memory="decisions/issue-95-generic-flow.md"]')`,
     s,
-    "rail file opens doc",
+    "memory lists the decision",
   );
-  await evaluate(`document.querySelector('#dialog [data-action="close-dialog"]').click()`, s);
-  result.checks.push("KT4 a rail tree file opens its document");
-  await shot("01-rail", s);
-
-  // Knowledge panel tree (failures 7, 8).
-  await evaluate(`document.querySelector('[data-tab="knowledge"]').click()`, s);
-  await waitFor(`document.querySelectorAll('#knowledge-inline .tree-file').length >= 6`, s, "knowledge tree");
-  const tree = await evaluate(
-    `(() => { const root = document.querySelector('#knowledge-inline'); const folder = name => [...root.querySelectorAll('.tree-folder')].find(n => n.querySelector(':scope > summary .tree-name').innerText === name); const file = name => [...root.querySelectorAll('.tree-file')].find(n => n.querySelector('.tree-name').innerText === name); const depth = n => { let d = 0; for (let p = n.parentElement; p && p !== root; p = p.parentElement) if (p.classList.contains('tree-folder')) d++; return d; }; const legacyFolder = folder('legacy'); return { rootFiles: ['MEMORY.md', 'preferences.md'].map(n => file(n) && depth(file(n))), decisions: file('issue-95-generic-flow.md') && depth(file('issue-95-generic-flow.md')), legacyDepth: legacyFolder && depth(legacyFolder), legacyOpen: legacyFolder?.open, researchOpen: folder('research')?.open, count: folder('plans')?.querySelector(':scope > summary .tree-count')?.innerText, meta: file('issue-95-generic-flow.md')?.innerText, fullPaths: [...root.querySelectorAll('.tree-name')].some(n => n.innerText.includes('/')) }; })()`,
-    s,
-  );
-  if (
-    JSON.stringify(tree.rootFiles) !== "[0,0]" ||
-    tree.decisions !== 1 ||
-    tree.legacyDepth !== 1 ||
-    tree.legacyOpen !== false ||
-    tree.researchOpen !== true ||
-    tree.count !== "2" ||
-    !/just now|ago/.test(tree.meta ?? "") ||
-    tree.fullPaths
-  )
-    throw Error("Knowledge tree wrong: " + JSON.stringify(tree));
-  result.checks.push(
-    "KT1 Knowledge panel is a nested folder tree: root files at depth 0, folder files nested, folder counts, relative times",
-  );
-  await evaluate(
-    `[...document.querySelectorAll('#knowledge-inline .tree-folder > summary')].find(n => n.innerText.includes('plans')).click()`,
-    s,
-  );
-  const collapsed = await evaluate(
-    `[...document.querySelectorAll('#knowledge-inline .tree-folder')].find(n => n.querySelector(':scope > summary').innerText.includes('plans')).open`,
-    s,
-  );
-  if (collapsed !== false) throw Error("Folder does not collapse");
-  await evaluate(`render()`, s);
-  if (
-    (await evaluate(
-      `[...document.querySelectorAll('#knowledge-inline .tree-folder')].find(n => n.querySelector(':scope > summary').innerText.includes('plans')).open`,
-      s,
-    )) !== false
-  )
-    throw Error("Folder state lost on re-render");
-  result.checks.push("KT2 folders collapse and stay collapsed across re-render; research/legacy is collapsed by default");
-  await shot("02-knowledge-tree", s);
-  await evaluate(`document.querySelector('[data-tab="coordinator"]').click()`, s);
+  await evaluate(`document.querySelector('#focus-view .mem-entry[data-memory="decisions/issue-95-generic-flow.md"]').click()`, s);
+  await waitFor(`(document.querySelector('#focus-view')?.innerText ?? '').includes('Flow decisions')`, s, "decision opens");
+  result.checks.push("KT4 Memory lists the decision and opens its document");
+  await shot("01-memory", s);
+  await evaluate(`document.querySelector('#tree .tree-project.selected [data-chat="main"]').click()`, s);
+  await waitFor(`document.querySelector('#feed').innerText.includes('LONG-DONE')`, s, "back to Main");
 
   // Live chain (failures 1-4, 6): sample the DOM every 50 ms during a three-step turn.
+  // `status` is the live turn's status line plus the status bar's activity item, which stays on screen while the reader scrolls.
   await evaluate(
-    `(() => { window.__samples = []; const visible = n => !!n && !n.hidden && n.offsetParent !== null; window.__timer = setInterval(() => { const live = document.querySelector('#live-reply'), pill = document.querySelector('#working-pill'), messages = document.querySelector('#messages').innerText; window.__samples.push({ t: performance.now(), messages, live: visible(live) ? live.innerText : '', status: visible(live) ? live.querySelector('.live-status')?.innerText ?? '' : '', pill: visible(pill) ? pill.innerText : '' }); }, 50); const ta = document.querySelector('#compose textarea'); ta.value = 'MARK-CHAIN check knowledge'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`,
+    `(() => { window.__samples = []; window.__timer = setInterval(() => { const live = document.querySelector('#live-turn'); window.__samples.push({ t: performance.now(), messages: [...document.querySelectorAll('#feed > .turn')].map(n => n.innerText).join('\\n'), live: live?.innerText ?? '', status: document.querySelector('.sl-item[data-item="activity"]')?.innerText ?? '', pill: '' }); }, 50); const ta = document.querySelector('#composer-input'); ta.value = 'MARK-CHAIN check knowledge'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#composer').requestSubmit(); })()`,
     s,
   );
   await waitFor(
-    `window.__samples.some(x => x.messages.includes('STEP-TWO')) && document.querySelector('#live-reply').innerText.includes('Thinking')`,
+    `window.__samples.some(x => (x.messages + x.live).includes('STEP-TWO')) && /working|thinking/i.test(document.querySelector('.sl-item[data-item="activity"]').innerText) && document.querySelector('#feed').innerText.includes('STEP-TWO')`,
     s,
     "stage two committed",
   );
-  // Held before the final answer: scroll up and the working pill must appear (failure 3).
+  // Held before the final answer: scroll up; the status bar must still say the coordinator is working (failure 3).
   await delay(600);
   const transcriptPoint = await evaluate(
-    `(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    `(() => { const r = document.querySelector('#feed').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
     s,
   );
   await send("Input.dispatchMouseEvent", { type: "mouseWheel", ...transcriptPoint, deltaX: 0, deltaY: -5000 }, s);
-  await waitFor(
-    `!!document.querySelector('#working-pill') && !document.querySelector('#working-pill').hidden`,
-    s,
-    "working pill while scrolled up",
-    40,
-  );
+  await delay(300);
+  if (
+    !(await evaluate(
+      `document.querySelector('.sl-item[data-item="activity"]').innerText !== 'idle' && !!document.querySelector('.sl-item[data-item="activity"]').offsetParent`,
+      s,
+    ))
+  )
+    throw Error("No working indicator while scrolled up");
   await shot("03-scrolled-working", s);
-  await evaluate(`document.querySelector('#working-pill').click()`, s);
+  await send("Input.dispatchMouseEvent", { type: "mouseWheel", ...transcriptPoint, deltaX: 0, deltaY: 100000 }, s);
   await waitFor(
-    `(() => { const t = document.querySelector('#transcript'); return t.scrollHeight - t.scrollTop - t.clientHeight < 40 && document.querySelector('#working-pill').hidden; })()`,
+    `(() => { const t = document.querySelector('#feed'); return t.scrollHeight - t.scrollTop - t.clientHeight < 40; })()`,
     s,
-    "pill returns to latest",
+    "back at latest",
   );
   await shot("04-live-chain", s);
   releaseHold();
   await waitFor(
-    `document.querySelector('#messages').innerText.includes('STEP-FINAL') && document.querySelector('#live-reply').hidden`,
+    `document.querySelector('#feed').innerText.includes('STEP-FINAL') && !document.querySelector('#live-turn').innerText.trim()`,
     s,
     "final answer",
   );
@@ -481,20 +421,18 @@ try {
   result.checks.push("LC1/LC2 streamed step text never vanishes once shown, through tool rounds and refreshes");
   const finalAt = samples.findIndex((x) => x.messages.includes("STEP-FINAL"));
   const runStart = samples.findIndex((x) => x.messages.includes("MARK-CHAIN check knowledge"));
-  const idle = samples.slice(runStart + 4, finalAt).filter((x) => !x.status && !x.pill);
+  const idle = samples.slice(runStart + 4, finalAt).filter((x) => !x.status || x.status === "idle");
   if (runStart < 0 || idle.length)
     throw Error(`No working indicator in ${idle.length} samples: ` + JSON.stringify(idle[0] ?? {}).slice(0, 400));
   result.checks.push("LC3 a working indicator is visible for the whole run, including while scrolled up");
   if (!samples.some((x) => x.live.includes("Planning the check of the index"))) throw Error("Live reasoning summary not shown");
-  const thoughts = await evaluate(`[...document.querySelectorAll('#messages .thought')].map(n => n.innerText)`, s);
+  const thoughts = await evaluate(`[...document.querySelectorAll('#feed .thinking .th-preview')].map(n => n.innerText)`, s);
   if (!thoughts.some((t) => t.includes("Planning the check of the index")) || !thoughts.some((t) => t.includes("Choosing a document")))
     throw Error("Committed thoughts missing: " + JSON.stringify(thoughts));
-  result.checks.push("LC4 reasoning summaries show live and stay as quiet thought lines in the transcript");
-  const raw = samples.filter((x) => /projects_/.test(x.status + x.pill));
-  if (raw.length) throw Error("Raw tool names in live status: " + JSON.stringify(raw[0]).slice(0, 300));
-  result.checks.push("LC6 live status never shows raw tool names");
+  result.checks.push("LC4 reasoning summaries show live and stay as collapsed Thinking lines in the transcript");
+  // LC6 (no raw tool names in the live status) is retired: the new client shows tool names on purpose, terminal-style.
   const order2 = await evaluate(
-    `(() => { const t = document.querySelector('#messages').innerText; return ['MARK-CHAIN check knowledge', 'Planning the check', 'STEP-ONE', 'Listed knowledge', 'Choosing a document', 'STEP-TWO', 'Read knowledge MEMORY.md', 'STEP-FINAL'].reduce((at, k) => [...at, t.indexOf(k, (at.at(-1) ?? 0) + 1)], []); })()`,
+    `(() => { const turn = [...document.querySelectorAll('#feed > .turn')].find(n => n.innerText.includes('MARK-CHAIN check knowledge')); const parts = [...turn.querySelectorAll('.msg, .thinking, .memory-row, .tool-row, .tool-group')].map(n => n.classList.contains('thinking') ? 'thought:' + n.querySelector('.th-preview').innerText : n.matches('.memory-row, .tool-row, .tool-group') ? 'tool:' + (n.dataset.tool ?? n.innerText) : n.innerText); const want = ['MARK-CHAIN check knowledge', 'thought:Planning the check', 'STEP-ONE', 'tool:', 'thought:Choosing a document', 'STEP-TWO', 'tool:', 'STEP-FINAL']; let at = -1; return want.map(k => (at = parts.findIndex((p, i) => i > at && p.includes(k)))); })()`,
     s,
   );
   if (order2.some((v) => v < 0)) throw Error("Chain out of order: " + JSON.stringify(order2));

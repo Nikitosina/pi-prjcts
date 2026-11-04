@@ -921,7 +921,7 @@ export async function openDurableProject(input: {
     ];
     const ownerApproval = defineExtension({ name: "projects.owner-approval", tools: ownerApprovalTools });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
-    const tools = maintainedKnowledgeTools(dir);
+    const tools = maintainedKnowledgeTools(dir, () => input.onChange?.({ topic: "knowledge" }));
     const workerKnowledge = () => (knowledgeAccess() === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name)));
     // Library and decision tools authorize against the saved project on every call; the grant only decides whether a chat is offered them.
     const libraryTools = coordinatorLibraryTools({ projectId: project.id, dir, root: () => rootReference, isCoordinator });
@@ -2746,7 +2746,8 @@ export async function openDurableProject(input: {
   }
 }
 
-export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
+/** `changed` runs after an agent writes knowledge or a note, so open Memory views re-read (topic `knowledge`). */
+export function maintainedKnowledgeTools(dir: string, changed: () => void = () => {}): ToolRegistration[] {
   const list = defineTool({
     name: "projects_knowledge_list",
     description:
@@ -2813,6 +2814,7 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
     async execute(args) {
       // A receipt: the caller sent the text, so echoing it only fills the context; projects_knowledge_read returns it.
       const { text: _text, ...receipt } = await writeKnowledge({ dir, author: "durable-agent", ...args });
+      changed();
       return jsonResult(JSON.stringify(receipt));
     },
   });
@@ -2824,6 +2826,7 @@ export function maintainedKnowledgeTools(dir: string): ToolRegistration[] {
     structuredOutputSchema: Type.Object({ id: Type.String(), at: Type.String(), author: Type.String(), size: Type.Integer() }),
     async execute(args) {
       const { text, ...receipt } = addNote(dir, "durable-agent", args.text);
+      changed();
       return jsonResult(JSON.stringify({ ...receipt, size: Buffer.byteLength(text) }));
     },
   });

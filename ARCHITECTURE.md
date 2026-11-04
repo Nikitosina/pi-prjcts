@@ -144,10 +144,11 @@ Rule: Telegram never decides. Its buttons call host actions that re-check the Jo
 
 ## Web feature modules
 
-`web/index.html` loads `web/app.js`, which imports one module per feature from `web/app/`: `chat`, `decisions`, `workers`, `knowledge`, `artifacts`, `composer`, `admin`, `settings`, `observability`, `creation`, `notifications`, `search`, `limits`, `prs`. `web/app/shell.js` owns `projectId`, `view`, `busy`, the request `generation` and the dialog; it exposes getters and named setters. Features register hooks with the shell (`registerActions`, `registerForms`, `onProjectChange`, `onTab`, `onRender`, `onBusyChange`, `registerDrafts`) and talk to the host through `api` and `mutate`.
+The inbox is one client, served flat from `web/` at `/` (`src/web.ts` maps the files present at start; old `/ui2/` links answer `308` to the root, see `docs/classic-retirement.md`). `web/index.html` runs `web/theme.js` before first paint, then loads `web/app.js`, which owns selection, the center focus, the `/live` and `/changes` streams and the hotkeys. One module per area: `tree` (projects, chats, Memory), `chat` (Coordinator transcript), `workers` (context panel and worker view), `memory`, `settings` (with `prompts` and `limits`), `palette`, `slash`, `statusline`, `limit-detail`, `hostagent`, `media`, `ui` (the host `ui` document). `web/api.js` is the only module that talks to the host (`call`); `web/state.js` holds shared state, the request `generation` and a small event bus (`on`, `emit`) that host topics feed.
 
 Rules:
-- Features never assign shell state directly. They use the setters, and they check `getGeneration()` after every `await` before touching the page, so a late response cannot render into another project.
+- Code that awaits compares the generation afterwards (`stale(gen)`) before touching the page, so a late response cannot render into another project.
+- Views follow host topics instead of polling: a change publishes a topic and the open view rereads. The one timer is the project list (`loadProjects`, every 15 s).
 - Everything from a provider, a transcript or a plugin is data: escape it (`esc`) before inserting HTML.
 - Coordinator chat shows owner and Coordinator messages, hiding tool diagnostics, thinking, reset handoffs and internal reports/events. Worker details and transcripts retain reports, evidence and approval for actual Ready Jobs; checkpoints never offer approval. Owner-origin text is never parsed as an internal report or event. Unclassified legacy input stays readable with a neutral label, not "You".
 

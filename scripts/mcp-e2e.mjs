@@ -1,4 +1,5 @@
-// Browser E2E: MCP servers per profile (Settings picker, gateway tools, write guard, pool resilience, recovery). Fakes only:
+// E2E: MCP servers per profile (saved profiles, gateway tools, write guard, pool resilience, recovery). The classic Settings picker was
+// retired on 2026-11-04; profiles are saved through settings-update as it did. Fakes only:
 // fake stdio MCP server, temp mcp.json via PI_PROJECTS_MCP_CONFIG, fake model, private HOME. Failure cases: mcp-failures.md.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -161,48 +162,19 @@ await kit.run(async () => {
     /projects_mcp_tools/.test(kit.lastCall("coordinator", "#1").system) && !/launch_status/.test(kit.lastCall("coordinator", "#1").system),
   );
 
-  // Picker.
-  const page = await kit.openPage(await kit.webUrl(id));
-  await page.waitFor(`document.querySelectorAll('#mcp-picker [data-mcp-pick]').length === 5`, "mcp picker lists five servers");
-  const locked = await page.evaluate(
-    `[...document.querySelectorAll('#mcp-picker [data-mcp-pick]')].filter(i => i.disabled).map(i => i.dataset.mcpPick).sort().join()`,
-  );
-  check("F21 disabled and sign-in servers are locked in the picker", locked === "fake-oauth,fake-off", locked);
-  const tab = async (role) => {
-    await page.evaluate(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').click()`);
-    await page.waitFor(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').classList.contains('on')`, `${role} tab`);
+  // Profiles: the classic inbox's MCP picker was retired on 2026-11-04 (docs/classic-retirement.md); it saved exactly this change.
+  const off = {
+    all: [],
+    coordinator: ["fake-xcode"],
+    worker: ["fake-ci", "fake-tracker"],
+    scout: ["fake-ci", "fake-tracker", "fake-xcode"],
+    reviewer: [],
   };
-  const pick = (name) => page.evaluate(`document.querySelector('[data-mcp-pick="${name}"]').click()`);
-  const checkedAll = await page.evaluate(
-    `[...document.querySelectorAll('#mcp-picker [data-mcp-pick]')].filter(i => i.checked).map(i => i.dataset.mcpPick).sort().join()`,
-  );
-  check("F21 the default picker has every ready server checked (on)", checkedAll === "fake-ci,fake-tracker,fake-xcode", checkedAll);
-  await tab("coordinator");
-  await pick("fake-xcode");
-  await tab("worker");
-  await pick("fake-ci");
-  await pick("fake-tracker");
-  await tab("scout");
-  await pick("fake-ci");
-  await pick("fake-tracker");
-  await pick("fake-xcode");
-  await tab("all");
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  await page.shot("01-mcp-picker");
-  await page.viewport(390, 844, true);
-  await delay(300);
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  const narrow = await page.evaluate(
-    `(() => { const c = document.querySelector('#mcp-card').getBoundingClientRect(); return { right: c.right, width: innerWidth, scroll: document.documentElement.scrollWidth > innerWidth + 1 }; })()`,
-  );
-  await page.shot("02-mcp-picker-390");
-  check("F21 the picker fits 390 px", !narrow.scroll && narrow.right <= narrow.width + 1, narrow);
-  await page.viewport(1440, 1000);
-  await page.evaluate(`document.querySelector('[data-action="mcp-save"]').click()`);
+  await kit.updateSettings(id, { mcp: { off, writes: [] } });
   await kit.eventually(async () => (await rpc({ action: "settings-snapshot", id })).values.mcp !== null, "mcp settings not saved", 100);
   const saved = (await rpc({ action: "settings-snapshot", id })).values.mcp;
   check(
-    "F21 saving the picker persists the profiles",
+    "F21 saved profiles persist exactly",
     JSON.stringify(saved) ===
       JSON.stringify({
         off: {
@@ -320,15 +292,12 @@ await kit.run(async () => {
     /get_settings ok/.test(await coord("MCP-CALL fake-tracker get_settings")) &&
       /list_hints ok/.test(await coord("MCP-CALL fake-tracker list_hints")),
   );
-  await page.evaluate(`document.querySelector('[data-mcp-writes="fake-tracker"]').click()`);
-  await page.evaluate(`document.querySelector('[data-action="mcp-save"]').click()`);
+  await kit.updateSettings(id, { mcp: { off, writes: ["fake-tracker"] } });
   await kit.eventually(
     async () => (await rpc({ action: "settings-snapshot", id })).values.mcp.writes.includes("fake-tracker"),
     "writes toggle not saved",
     100,
   );
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  await page.shot("03-mcp-writes");
   check(
     "F9 with writes on for fake-tracker the change goes through, live",
     /ChangeIssueStatus ok/.test(await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-1","status":"Closed"}')) &&
@@ -433,8 +402,6 @@ await kit.run(async () => {
   const probe = await rpc({ action: "mcp-probe", id, server: "fake-ci" });
   check("probe reports the tool count", probe.ok === true && probe.tools === 12, probe);
   check("probe refuses unavailable servers", (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok === false);
-
-  await page.navigate("about:blank");
 
   // Saved OAuth is shared with Pi, refreshed once, and never used for another named server.
   const authPath = join(kit.agentDir, "mcp-auth.json");

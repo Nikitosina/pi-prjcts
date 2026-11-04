@@ -1,7 +1,7 @@
-// Browser E2E for one-click "Connect GitHub" (owner setup step 2). Fresh isolated home, Git fixture, local bare remote and fake GitHub CLI. No model; never contacts GitHub.
-// Failure list (before implementation): U1 stepper has no Connect GitHub button after step 1; U2 confirm dialog hides repo, numeric id, default branch, pi/ prefix or merge rule;
-// U3 confirm still asks to type the project ID; U4 confirm does not store a one-click authorization; U5 Advanced opens by default; U6 stepper keeps the button after connecting;
-// U7 the browser flow performs a GitHub write.
+// E2E for one-click "Connect GitHub". Fresh isolated home, Git fixture, local bare remote and fake GitHub CLI. No model; never contacts GitHub.
+// Failure list: U0 create does not connect GitHub one-click; U4 one-click authorize does not store the authorization, or accepts a stale
+// revision; U7 the flow performs a GitHub write. U1-U3, U5, U6 (the classic Owner setup stepper and dialog) were retired with the
+// classic inbox on 2026-11-04 (docs/classic-retirement.md).
 import { execFileSync, spawn } from "node:child_process";
 import { request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
@@ -101,110 +101,7 @@ function rpc(input) {
   });
 }
 
-// Minimal CDP over pipe.
-let chromeSession,
-  chrome,
-  cdpEnded = false,
-  id = 0,
-  buffer = "";
-const pending = new Map();
-function startChrome() {
-  const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "wx", mode: 0o600 });
-  chrome = spawn(
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    [
-      "--headless",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      `--user-data-dir=${join(root, "chrome-profile")}`,
-      "--remote-debugging-pipe",
-      "about:blank",
-    ],
-    { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] },
-  );
-  chrome.stdout.pipe(clog);
-  chrome.stderr.pipe(clog);
-  chrome.once("exit", () => {
-    cdpEnded = true;
-  });
-  chrome.stdio[4].on("data", (chunk) => {
-    buffer += chunk.toString();
-    let end;
-    while ((end = buffer.indexOf("\0")) >= 0) {
-      const text = buffer.slice(0, end);
-      buffer = buffer.slice(end + 1);
-      if (!text) continue;
-      const msg = JSON.parse(text);
-      if (msg.id) {
-        const p = pending.get(msg.id);
-        if (p) {
-          pending.delete(msg.id);
-          msg.error ? p.reject(Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
-        }
-      } else if (msg.method === "Runtime.exceptionThrown")
-        result.errors.push(redact(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text));
-      else if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") result.errors.push(redact(msg.params.entry.text));
-      else if (msg.method === "Network.responseReceived" && msg.params.response.status >= 400) {
-        const u = new URL(msg.params.response.url);
-        result.httpErrors.push({ url: u.origin + u.pathname, status: msg.params.response.status });
-      }
-    }
-  });
-}
-function send(method, params = {}, sessionId) {
-  return new Promise((resolve, reject) => {
-    const key = ++id;
-    const timer = setTimeout(() => {
-      pending.delete(key);
-      reject(Error(`CDP timeout: ${method}`));
-    }, 15000);
-    pending.set(key, {
-      resolve: (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      reject: (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    });
-    chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
-  });
-}
-async function evaluate(expression, session) {
-  const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, session);
-  if (r.exceptionDetails) throw Error(r.exceptionDetails.text + " " + (r.exceptionDetails.exception?.description ?? ""));
-  return r.result.value;
-}
-async function shot(name, session, full = false) {
-  if (process.env.E2E_SHOTS !== "1") return;
-  const params = { format: "png" };
-  if (full) {
-    const m = await send("Page.getLayoutMetrics", {}, session);
-    params.clip = { x: 0, y: 0, width: 1440, height: Math.min(2400, Math.ceil(m.cssContentSize.height)), scale: 1 };
-    params.captureBeyondViewport = true;
-  }
-  const image = await send("Page.captureScreenshot", params, session);
-  writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, "base64"), { mode: 0o600 });
-}
-async function waitFor(expression, session, label) {
-  for (let i = 0; i < 60 * 2.5; i++) {
-    if (
-      await evaluate(expression, session).catch((error) => {
-        if (i > 100) throw error;
-        return false;
-      })
-    )
-      return;
-    await delay(100);
-  }
-  throw new Error(`Timed out waiting for ${label}`);
-}
-
 const git = (...args) => execFileSync("/usr/bin/git", ["-C", workspace, ...args], { encoding: "utf8" }).trim();
-const dialogText = (s) => evaluate(`document.querySelector('#dialog').innerText`, s);
 try {
   execFileSync("/usr/bin/git", ["init", "--bare", "-b", "main", bare], { stdio: "ignore" });
   git("init", "-b", "main");
@@ -247,37 +144,15 @@ try {
     confirm: project.id,
     expectedRevision: first.githubRevision,
   });
-  const web = await rpc({ action: "web" });
-  const launch = new URL(web.url);
-  launch.searchParams.set("project", project.id);
-  launch.searchParams.set("tab", "settings");
-  launch.searchParams.set("e2e", "1");
-  startChrome();
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
-  chromeSession = s;
-  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#owner-steps [data-action=github-quick]')`, s, "stepper Connect GitHub button");
-  if (!/Workers cannot open draft PRs yet/.test(await evaluate(`document.querySelector('#owner-steps').innerText`, s)))
-    throw new Error("Step 2 copy missing");
-  result.checks.push('U1 stepper offers "Connect GitHub" once workers can edit the repo');
-  await shot("01-stepper-before", s, true);
-
-  await evaluate(`document.querySelector('#owner-steps [data-action=github-quick]').click()`, s);
-  await waitFor(`!!document.querySelector('#dialog [data-action=github-quick-confirm]')`, s, "confirm dialog");
-  const summary = await dialogText(s);
-  for (const fact of [/acme\/quick/, /4242/, /\bmain\b/, /pi\//, /Merges always need your approval/])
-    if (!fact.test(summary)) throw new Error(`Summary missing ${fact}: ${summary}`);
-  result.checks.push("U2 confirm dialog shows repo, numeric id, default branch, pi/ prefix and merge rule");
-  if (await evaluate(`!!document.querySelector('#dialog input[name=confirm]')`, s))
-    throw new Error("GitHub dialog asks to type the project ID");
-  result.checks.push("U3 no typed project ID");
-  await shot("02-confirm-dialog", s);
-
-  await evaluate(`document.querySelector('#dialog [data-action=github-quick-confirm]').click()`, s);
-  await waitFor(`/GitHub connected/.test(document.querySelector('#dialog').innerText)`, s, "connected state in owner setup");
+  // The classic Owner setup stepper and its Connect GitHub dialog were retired on 2026-11-04; the call they made stays.
+  const revoked = await rpc({ action: "owner-setup-snapshot", id: project.id });
+  if (revoked.github?.length) throw new Error("Revoke left an authorization: " + JSON.stringify(revoked.github));
+  await rpc({
+    action: "github-quick-authorize",
+    id: project.id,
+    confirm: project.id,
+    expectedRevision: revoked.githubRevision,
+  });
   const snap = await rpc({ action: "owner-setup-snapshot", id: project.id });
   const auth = snap.github?.[0];
   if (
@@ -290,44 +165,26 @@ try {
     !auth.localPublication
   )
     throw new Error("API lacks the one-click authorization: " + JSON.stringify(snap.github));
-  result.checks.push("U4 confirm stores a one-click authorization (4242, main, pi/, reviewReplies, localPublication)");
-  if (await evaluate(`document.querySelector('#dialog details.advanced').open`, s))
-    throw new Error("Advanced section should start collapsed");
-  result.checks.push("U5 owner setup shows GitHub connected with Advanced collapsed");
-  await shot("03-owner-setup-connected", s);
-
-  await evaluate(`document.querySelector('#dialog [data-action=close-dialog]').click()`, s);
-  await waitFor(
-    `/Draft PRs on acme\\/quick/.test(document.querySelector('#owner-steps').innerText) && !document.querySelector('#owner-steps [data-action=github-quick]')`,
-    s,
-    "stepper done",
-  );
-  result.checks.push("U6 stepper marks GitHub done and hides the button");
-  await shot("04-stepper-after", s, true);
+  result.checks.push("U4 one-click authorize stores 4242, main, pi/, reviewReplies, localPublication");
+  try {
+    await rpc({ action: "github-quick-authorize", id: project.id, confirm: project.id, expectedRevision: revoked.githubRevision });
+    throw new Error("A stale revision was accepted");
+  } catch (error) {
+    if (!/changed; refresh/.test(String(error.message))) throw error;
+  }
+  result.checks.push("U4 a stale authorization revision is refused");
   const ghLog = readFileSync(ghCalls, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
   result.githubCalls = ghLog;
-  if (!ghLog.length || ghLog.some((call) => call.method !== "GET"))
-    throw new Error("Browser flow made a GitHub write or no fake GitHub read");
+  if (!ghLog.length || ghLog.some((call) => call.method !== "GET")) throw new Error("The flow made a GitHub write or no fake GitHub read");
   result.checks.push("U7 only fake GitHub GETs were made");
-  if (result.errors.length || result.httpErrors.length) throw new Error("Browser JS errors or HTTP failures captured");
   result.status = "passed";
 } catch (error) {
   result.status = "failed";
   result.failure = redact(error?.stack ?? error);
-  try {
-    result.diagnostic = await evaluate(`document.querySelector('#dialog').innerText.slice(0, 2000)`, chromeSession);
-  } catch {}
 } finally {
-  if (chrome && !cdpEnded) {
-    try {
-      await send("Browser.close");
-    } catch {}
-    for (let i = 0; i < 1000 / 20 && !cdpEnded; i++) await delay(20);
-    if (!cdpEnded) chrome.kill("SIGTERM");
-  }
   save();
 }
 if (!hostEnded) {

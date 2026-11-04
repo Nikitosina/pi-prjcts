@@ -1453,7 +1453,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "machine-status":
       return machineStatus();
     case "cursor-connect":
-      return startCursorLogin();
+      return startCursorLogin(Date.now(), () => publishHost("limits"));
     case "thread-history":
       return (await durable(input.id)).threadHistory(input.threadId, input);
     case "chat-history":
@@ -1600,17 +1600,18 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "telegram-token": {
       const snapshot = await telegram.setToken(input.token);
       recordHostEvent("telegram", `bot set: @${snapshot.botUsername}`);
+      publishHost("telegram");
       return snapshot;
     }
     case "telegram-pair":
       recordHostEvent("telegram", "pairing code issued");
-      return telegram.pair();
+      return telegram.pair().finally(() => publishHost("telegram"));
     case "telegram-unpair":
       recordHostEvent("telegram", "unpaired");
-      return telegram.unpair();
+      return telegram.unpair().finally(() => publishHost("telegram"));
     case "telegram-remove":
       recordHostEvent("telegram", "bot removed");
-      return telegram.remove();
+      return telegram.remove().finally(() => publishHost("telegram"));
     case "deploy-snapshot":
       return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
     case "deploy-settings":
@@ -1693,6 +1694,7 @@ const web = await startWeb(
 remote = createRemote({
   webUrl: web.url,
   report: (detail) => recordHostEvent("remote", detail),
+  changed: () => publishHost("remote"),
   summary: async () => {
     let needs = 0;
     for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
@@ -1739,6 +1741,7 @@ const telegram = startTelegram({
   chats: async (id) => (await durable(id)).chats(),
   notifier,
   report: (detail) => recordHostEvent("telegram", detail),
+  changed: () => publishHost("telegram"),
 });
 void telegram.flush();
 async function automationSnapshot(id: string) {

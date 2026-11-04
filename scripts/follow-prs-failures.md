@@ -31,3 +31,9 @@ Owner decision: a per-project opt-in poller over the authorized GitHub repositor
 18. A `gh` failure (rate limit, 404, bad JSON) crashes the host, stops future polls, or advances the baseline so the change is lost.
 19. A paused project still polls or dispatches.
 20. Settings do not show follow status (last poll, error, fix attempts) or a Check now control.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+Opt-in is now the Follow PRs switch in Settings → Automations (F9); the card names the chosen chat ("→ Alerts"), the last check and
+fits 390 px (F20). The Alerts transcript in `#feed` shows the coordinator's answer and never the internal event (F11). Retired with
+the classic Events form: choosing the event chat, cadence, auto-fix and fix cap in the browser (kept over `automation-update`), the
+"Check now" button (kept over `follow-poll`) and the per-fix list (kept in `automation-snapshot`). Gaps: those controls in the new client.

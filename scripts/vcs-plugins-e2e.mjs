@@ -1,4 +1,4 @@
-// E2E: VCS / PR provider plugin API with a FAKE plugin (scripts/fixtures). Fake model, private HOME, browser. No real VCS, PR service, gh or live host.
+// E2E: VCS / PR provider plugin API with a FAKE plugin (scripts/fixtures). Fake model, private HOME, browser (inbox at `/`). No real VCS, PR service, gh or live host.
 // Failure cases written first: vcs-plugins-failures.md (numbers in check labels). Artifact: artifacts/vcs-plugins-<stamp>/ (report.json, screenshots, host logs).
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -376,53 +376,22 @@ await kit.run(async () => {
     blocked,
   );
 
-  // ---- Browser: grouped card, # menu, plugin failure banner ----
-  const page = await kit.openPage(await kit.webUrl(id, "coordinator"));
+  // ---- Browser: the inbox at `/` lists both providers' PRs, titles escaped. The classic card's per-provider actions, # menu,
+  // failed-plugin banner and Owner setup steps were retired on 2026-11-04 (vcs-plugins-failures.md).
+  const page = await kit.openPage(await kit.webUrl(id));
   await page.waitFor(
-    `document.querySelector('#prs-card')?.hidden === false && document.querySelectorAll('#prs .pr-group').length === 2`,
-    "two provider groups in the PR card",
+    `document.body.dataset.ready === "1" && /Second provider PR/.test(document.querySelector('#prs')?.innerText ?? '')`,
+    "PR list",
   );
-  const cardText = await page.evaluate(`document.querySelector('#prs-card').innerText`);
+  const prsText = await page.evaluate(`document.querySelector('#prs').innerText`);
   check(
-    "11 the browser shows both provider groups, escaped hostile titles and per-provider actions",
-    /Fake/.test(cardText) &&
-      /Second/.test(cardText) &&
-      /Second provider PR <b>x<\/b>/.test(cardText) &&
-      !(await page.evaluate(`!!document.querySelector('#prs img, #prs b')`)) &&
-      (await page.evaluate(`document.querySelectorAll('#prs [data-action="pr-watch"][data-provider="fake"]').length > 0`)),
-    cardText,
+    "11 the inbox lists PRs from both providers with hostile titles escaped",
+    (await page.evaluate(`document.querySelectorAll('#prs .pr-row').length`)) >= 2 &&
+      /Second provider PR <b>x<\/b>/.test(prsText) &&
+      !(await page.evaluate(`!!document.querySelector('#prs img, #prs b')`)),
+    prsText,
   );
-  check(
-    "11/23 the composer help lists # for PRs",
-    await page.evaluate(
-      `(() => { document.querySelector('#compose .help-btn').click(); const text = document.querySelector('#compose .help-pop').innerText; document.querySelector('#compose .help-btn').click(); return /#\\s*Pull requests/.test(text); })()`,
-    ),
-  );
-  await page.evaluate(
-    `(() => { const t = document.querySelector('#compose textarea'); t.focus(); t.value = '#2'; t.setSelectionRange(2, 2); t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-  );
-  await page.waitFor(
-    `document.querySelector('#skill-menu')?.hidden === false && document.querySelectorAll('#skill-menu .pr-opt').length >= 1`,
-    "# menu",
-  );
-  check(
-    "11 the # menu lists provider PRs by their ref",
-    /#21/.test(await page.evaluate(`document.querySelector('#skill-menu').innerText`)),
-  );
-  await page.shot("01-pr-card-two-providers");
-  check(
-    "9 the browser shows the failed plugins",
-    await page.evaluate(`/Plugin not loaded/.test(document.body.innerText)`),
-    await page.evaluate(`document.body.innerText.slice(0, 300)`),
-  );
-  await page.evaluate(`document.querySelector('[data-action="close-dialog"]')?.click()`);
-  const step = await (async () => {
-    await page.navigate(await kit.webUrl(id, "settings"));
-    await page.waitFor(`document.querySelectorAll('#owner-steps li').length >= 2`, "owner steps");
-    return page.evaluate(`document.querySelector('#owner-steps').innerText`);
-  })();
-  check("10 Owner setup step 1 is the plugin card", /Fake service/.test(step) && /Connected to fake-repo/.test(step), step);
-  await page.shot("02-owner-steps");
+  await page.shot("01-prs-two-providers");
 
   // ---- Config problems and the plugin missing after use (19-21) ----
   const snapshotBefore = {
@@ -506,15 +475,6 @@ await kit.run(async () => {
       !kit.lastCall("coordinator", "MARK-LOOKUP 11 after unload").tools.includes("fake_pr_lookup"),
     kit.lastCall("coordinator", "MARK-LOOKUP 11 after unload")?.tools,
   );
-  const page2 = page;
-  await page2.navigate(await kit.webUrl(id, "coordinator"));
-  await page2.waitFor(
-    `document.querySelector('#prs-card')?.hidden === false && /plugin is not loaded/.test(document.querySelector('#prs-card').innerText)`,
-    "unloaded note in the PR card",
-  );
-  check("20 the browser says the provider plugin is not loaded", true);
-  await page2.shot("03-plugin-not-loaded");
-
   // ---- Plugin back (21) ----
   writeConfig({ plugins: [fakePath] });
   kit.hostEnv.PI_PROJECTS_PLUGINS = secondPath;

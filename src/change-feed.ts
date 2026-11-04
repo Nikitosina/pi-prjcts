@@ -3,8 +3,9 @@ import type { CommitPublication } from "@earendil-works/pi-durable";
 /** What a browser refetches: one topic per read model. `chat` and `jobs` carry the chat id or agent id they concern so a view can ignore the rest. */
 export type Topic = "chat" | "jobs" | "knowledge" | "settings";
 /** Topics published under the reserved key `HOST_FEED`: host-wide read models, not one project's. */
-/** `limits` is the saved provider visibility only; readings never publish (a refresh answers the page that asked). */
-export type HostTopic = "ui" | "tiers" | "host-agent" | "approvals" | "projects" | "limits";
+/** `limits` is the saved provider visibility only; readings never publish (a refresh answers the page that asked). `telegram` is the
+ * bot and pairing state (never the token). */
+export type HostTopic = "ui" | "tiers" | "host-agent" | "approvals" | "projects" | "limits" | "telegram" | "remote";
 /** Where the Host agent asks the browser to look (`ui_focus`). */
 export type FocusTarget = { view: string; projectId?: string; chatId?: string; section?: string };
 export type ProjectEvent = { topic: Topic; chat?: string; thread?: string };

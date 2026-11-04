@@ -1,4 +1,4 @@
-// Browser E2E: worktree lifecycle (C2 git merge/rebase + any thread continues a project PR branch, C3 PR-head reads,
+// E2E: worktree lifecycle (C2 git merge/rebase + any thread continues a project PR branch, C3 PR-head reads,
 // C4 per-project setup command, C9 safe cleanup + Settings action, C11 a/c/d/f/g, attempt.toolNames).
 // Isolated host, local fake model, fake gh, local bare remote. No real providers, no network.
 // Failure cases recorded in worktree-lifecycle-failures.md before implementation.
@@ -341,104 +341,6 @@ async function stopHost() {
   if (!hostEnded) host.kill("SIGKILL");
 }
 
-let chrome,
-  cdpEnded = false,
-  cdpId = 0,
-  buffer = "";
-const pending = new Map();
-function startChrome() {
-  const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "wx", mode: 0o600 });
-  chrome = spawn(
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    [
-      "--headless",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      `--user-data-dir=${join(root, "chrome-profile")}`,
-      "--remote-debugging-pipe",
-      "about:blank",
-    ],
-    { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] },
-  );
-  chrome.stdout.pipe(clog);
-  chrome.stderr.pipe(clog);
-  chrome.once("exit", () => {
-    cdpEnded = true;
-  });
-  chrome.stdio[4].on("data", (part) => {
-    buffer += part.toString();
-    let end;
-    while ((end = buffer.indexOf("\0")) >= 0) {
-      const text = buffer.slice(0, end);
-      buffer = buffer.slice(end + 1);
-      if (!text) continue;
-      const msg = JSON.parse(text);
-      if (msg.id) {
-        const p = pending.get(msg.id);
-        if (p) {
-          pending.delete(msg.id);
-          msg.error ? p.reject(Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
-        }
-      } else if (msg.method === "Runtime.exceptionThrown")
-        result.errors.push(redact(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text));
-      else if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") result.errors.push(redact(msg.params.entry.text));
-      else if (msg.method === "Network.responseReceived" && msg.params.response.status >= 400) {
-        const u = new URL(msg.params.response.url);
-        result.httpErrors.push({ url: u.origin + u.pathname, status: msg.params.response.status });
-      }
-    }
-  });
-}
-function send(method, params = {}, sessionId) {
-  return new Promise((resolve, reject) => {
-    const key = ++cdpId;
-    const timer = setTimeout(() => {
-      pending.delete(key);
-      reject(Error(`CDP timeout: ${method}`));
-    }, 15000);
-    pending.set(key, {
-      resolve: (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      reject: (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    });
-    chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
-  });
-}
-async function evaluate(expression, session) {
-  const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, session);
-  if (r.exceptionDetails) throw Error(r.exceptionDetails.text + " " + (r.exceptionDetails.exception?.description ?? ""));
-  return r.result.value;
-}
-async function shot(name, session) {
-  if (process.env.E2E_SHOTS !== "1") return;
-  const image = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, session);
-  writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, "base64"), { mode: 0o600 });
-}
-async function waitFor(expression, session, label, tries = 240) {
-  for (let i = 0; i < tries * 2.5; i++) {
-    if (
-      await evaluate(expression, session).catch((error) => {
-        if (i > 100) throw error;
-        return false;
-      })
-    )
-      return;
-    await delay(100);
-  }
-  let page = "";
-  try {
-    page = await evaluate(`document.body.innerText.slice(0, 3000)`, session);
-  } catch {}
-  throw Error(`Timed out waiting for ${label}; page: ${page}`);
-}
-
 startHost();
 try {
   await waitHost();
@@ -492,27 +394,15 @@ try {
   const inventory = () => rpc({ action: "worktrees-snapshot", id });
 
   // UI: Settings → Worktrees card; save the setup command through the page.
-  const web = await rpc({ action: "web" });
-  const launch = new URL(web.url);
-  launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "settings");
-  startChrome();
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
-  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#worktrees #worktree-setup')`, s, "worktrees card");
   const setupCommand = "mkdir -p node_modules/dep && echo installed > node_modules/dep/ok.txt && echo SETUP-DONE";
-  await evaluate(
-    `(() => { document.querySelector('#worktree-setup').value = ${JSON.stringify(setupCommand)}; document.querySelector('[data-action="worktree-setup-save"]').click(); })()`,
-    s,
-  );
+  // The classic Settings worktree card was retired 2026-11-04; its save is the same revision-checked settings-update.
+  const before = await rpc({ action: "settings-snapshot", id });
+  await rpc({ action: "settings-update", id, confirm: id, expectedRevision: before.revision, changes: { worktreeSetup: setupCommand } });
   await eventually(
     async () => (await rpc({ action: "settings-snapshot", id })).values.worktreeSetup === setupCommand,
-    "setup command not saved from the UI",
+    "setup command not saved",
   );
-  check("W5 the setup command is saved from Settings (revision-checked settings-update)", true);
+  check("W5 the setup command is saved (revision-checked settings-update)", true);
 
   // Step 1: W1 builds and opens a PR; setup ran in its fresh worktree.
   await ask("MARK-BUILD");
@@ -673,38 +563,18 @@ try {
     inv.items.find((e) => e.threadId === w1.threadId)?.removable === true,
     inv.items.find((e) => e.threadId === w1.threadId),
   );
-  await send("Page.reload", {}, s);
-  await waitFor(
-    `!!document.querySelector('#worktree-list') && document.querySelector('[data-action="worktrees-cleanup"]') && !document.querySelector('[data-action="worktrees-cleanup"]').disabled`,
-    s,
-    "worktree list with cleanup",
-  );
-  await evaluate(`document.querySelector('#worktrees-card').scrollIntoView()`, s);
-  await delay(300);
-  await shot("01-worktrees-before-cleanup", s);
-  const uiText = await evaluate(
-    `document.querySelector('#worktrees-summary').innerText + '\\n' + document.querySelector('#worktrees-card').innerText`,
-    s,
-  ); // the summary sits in the section header since the Settings redesign
   check(
-    "K7 Settings shows sizes, kept reasons, setup failure and the reclaimable cleanup button",
-    /reclaimable/.test(uiText) &&
-      /uncommitted or untracked changes/.test(uiText) &&
-      /not on any remote/.test(uiText) &&
-      /setup failed \(exit 3\)/.test(uiText) &&
-      /#1 merged/.test(uiText) &&
-      /Clean up worktrees \(/.test(uiText),
-    uiText,
+    "K7 the inventory reports reclaimable space and the removable worktrees",
+    inv.reclaimableKb > 0 && inv.items.some((e) => e.removable) && inv.items.some((e) => !e.removable),
+    { reclaimableKb: inv.reclaimableKb },
   );
   const w1Path = inv.items.find((e) => e.threadId === w1.threadId).path,
     w2Path = i2.path,
     w3Path = i3.path,
     headPath = heads[0].path;
-  await evaluate(`document.querySelector('[data-action="worktrees-cleanup"]').click()`, s);
+  const cleanup = await rpc({ action: "worktrees-cleanup", id, confirm: id });
   await eventually(async () => !existsSync(w1Path) && !existsSync(headPath), "cleanup did not remove W1 and the snapshot", 300);
-  await waitFor(`/Removed 2 worktree/.test(document.querySelector('#toast')?.innerText ?? '')`, s, "cleanup toast");
-  await delay(500);
-  await shot("02-worktrees-after-cleanup", s);
+  check("C9 cleanup reports two removed worktrees", cleanup.removed?.length === 2, cleanup);
   check(
     "C9 manual cleanup removed W1 and the PR-head snapshot; W2 and W3 stay",
     !existsSync(w1Path) && !existsSync(headPath) && existsSync(w2Path) && existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
@@ -784,21 +654,11 @@ try {
     w3Reports.slice(-1200),
   );
 
-  result.errors = result.errors.filter((e) => !/Failed to load resource/.test(e));
-  result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/api"));
-  check("no browser errors", !result.errors.length && !result.httpErrors.length, result.errors.concat(result.httpErrors));
   result.status = "passed";
 } catch (error) {
   result.status = "failed";
   result.failure = redact(error?.stack ?? error);
 } finally {
-  if (chrome && !cdpEnded) {
-    try {
-      await send("Browser.close");
-    } catch {}
-    for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20);
-    if (!cdpEnded) chrome.kill("SIGTERM");
-  }
   await stopHost().catch(() => host.kill("SIGKILL"));
   model.closeAllConnections();
   model.close();
