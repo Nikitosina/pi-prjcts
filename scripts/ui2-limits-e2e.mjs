@@ -1,4 +1,4 @@
-// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M20). Private host, fake
+// Browser E2E: UI2 subscription limits are manual only (scripts/limits-manual-failures.md M1, M2, M4, M6, M8-M25). Private host, fake
 // model, PI_PROJECTS_LIMITS_FIXTURE for the non-Cursor providers and a local fake Cursor dashboard that counts every provider request.
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -84,6 +84,16 @@ try {
     const button = `document.querySelector('#statusline [data-limits-refresh]')`;
     const calls = () => page.evaluate(`window.__limitCalls.join(",")`);
     const bar = () => page.evaluate(`document.querySelector('#statusline').innerText.replace(/\\s+/g, " ")`);
+    const since = (count) => page.evaluate(`window.__limitCalls.slice(${count}).join(",")`);
+    const callCount = () => page.evaluate(`window.__limitCalls.length`);
+    const press = async (key, code, text) => {
+      for (const type of ["keyDown", "keyUp"])
+        await page.cdp("Input.dispatchKeyEvent", { type, key, code, ...(type === "keyDown" && text ? { text } : {}) });
+    };
+    // One provider's details: a single popup outside the bar, so the bar's sideways scroll cannot cut it.
+    const item = (provider) => `document.querySelector('#statusline [data-limit-item="${provider}"]')`;
+    const popOpen = `!!document.querySelector('#limit-detail:not([hidden])')`;
+    const popText = () => page.evaluate(`document.querySelector('#limit-detail').innerText.replace(/\\s+/g, " ")`);
     await page.waitFor(`window.__limitCalls.length >= 1`, "the first limits read");
     const empty = await page.evaluate(
       `(() => { const b = ${button}; return b && { label: b.getAttribute("aria-label"), text: b.innerText.trim(), busy: b.getAttribute("aria-busy") }; })()`,
@@ -171,6 +181,22 @@ try {
       failed,
     );
     await page.shot("04-failed", { force: true });
+    let detailMark = await callCount();
+    await page.evaluate(`${item("cursor")}.focus()`);
+    await page.waitFor(popOpen, "Cursor details on focus");
+    const failedDetail = await popText();
+    check(
+      "M22 the details keep the last numbers and say why the refresh failed",
+      /Cursor/.test(failedDetail) &&
+        /75% used/.test(failedDetail) &&
+        /resets in \d+d \d+h/.test(failedDetail) &&
+        /Last refresh failed/.test(failedDetail),
+      failedDetail,
+    );
+    await page.shot("04b-failed-details", { force: true });
+    await press("Escape", "Escape");
+    await page.waitFor(`!${popOpen}`, "Escape closes the details");
+    check("M21 opening the details asks nothing", (await since(detailMark)) === "", await since(detailMark));
 
     // Settings → Providers reads the same state, and its Refresh updates the status line too.
     await page.evaluate(`document.querySelector('#topbar [data-cmd="settings"], [data-cmd="settings"]').click()`);
@@ -205,12 +231,6 @@ try {
     const box = (provider) => `document.querySelector('dialog[open] [data-limit-visible="${provider}"]')`;
     const settled = `!document.querySelector('dialog[open] [data-limit-visible][aria-busy="true"]')`;
     const visibility = async () => (await rpc({ action: "limits-snapshot" })).visibility;
-    const since = (count) => page.evaluate(`window.__limitCalls.slice(${count}).join(",")`);
-    const callCount = () => page.evaluate(`window.__limitCalls.length`);
-    const press = async (key, code, text) => {
-      for (const type of ["keyDown", "keyUp"])
-        await page.cdp("Input.dispatchKeyEvent", { type, key, code, ...(type === "keyDown" && text ? { text } : {}) });
-    };
     const toggle = await page.evaluate(
       `(() => { const b = ${box("cursor")}; return b && { name: (b.labels?.[0]?.innerText ?? "").trim() || b.getAttribute("aria-label"), checked: b.checked, type: b.type }; })()`,
     );
@@ -328,6 +348,7 @@ try {
 
     // Narrow screen: the Providers rows and their toggles fit.
     await page.viewport(390, 844, true);
+    await kit.delay(500); // the panes animate into the narrow layout
     await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
     await page.waitFor(`!!document.querySelector('dialog[open] [data-section="providers"]')`, "settings open (narrow)");
     await page.evaluate(`document.querySelector('dialog[open] [data-section="providers"]').click()`);
@@ -339,6 +360,69 @@ try {
     await page.shot("09-providers-narrow", { force: true });
     await page.evaluate(`document.querySelector('dialog[open] [data-cmd="settings"]').click()`);
     await page.viewport(1440, 1000);
+
+    // A provider's details come from the readings the page holds: hover, keyboard focus and tap open them, nothing is asked.
+    mark = await callCount();
+    hits = cursorHits;
+    check("M23 a hidden provider has no item to open", await page.evaluate(`!${item("cursor")} && !!${item("claude")}`));
+    const centre = (selector) =>
+      page.evaluate(`(() => { const r = ${selector}.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    let at = await centre(item("claude"));
+    await page.cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: at.x, y: at.y });
+    await page.waitFor(popOpen, "details on hover");
+    const detail = await popText();
+    check(
+      "M22 hover shows each window's use, reset, the reading's age and its source",
+      /Claude/.test(detail) &&
+        /5h/.test(detail) &&
+        /75% used/.test(detail) &&
+        /resets in \d/.test(detail) &&
+        /read (just now|\d+[mhd] ago)/.test(detail) &&
+        /usage endpoint|response headers/.test(detail),
+      detail,
+    );
+    await page.shot("10-details-hover", { force: true });
+    await page.cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 300 });
+    await page.waitFor(`!${popOpen}`, "details close when the pointer leaves");
+    await page.evaluate(`${item("claude")}.focus()`);
+    await page.waitFor(popOpen, "details on keyboard focus");
+    check(
+      "M24 the focused provider says its details are open",
+      await page.evaluate(`${item("claude")}.getAttribute("aria-expanded") === "true"`),
+    );
+    await press("Escape", "Escape");
+    await page.waitFor(`!${popOpen}`, "Escape closes");
+    check(
+      "M24 Escape closes the details and keeps the keyboard on the provider",
+      await page.evaluate(`document.activeElement === ${item("claude")} && ${item("claude")}.getAttribute("aria-expanded") === "false"`),
+    );
+    // A tap on a narrow screen opens them inside the screen; a press elsewhere closes them.
+    await page.evaluate(`document.activeElement.blur()`);
+    await page.viewport(390, 844, true);
+    await kit.delay(500); // the panes animate into the narrow layout
+    // Only the bar scrolls sideways (scrollIntoView would also scroll the page's clipped panes).
+    await page.evaluate(`(() => { const b = ${item("claude")}; b.parentElement.scrollLeft = b.offsetLeft - 120; })()`);
+    at = await centre(item("claude"));
+    for (const type of ["mousePressed", "mouseReleased"])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, button: "left", clickCount: 1 });
+    await page.waitFor(popOpen, "details on tap");
+    const box2 = await page.evaluate(
+      `(() => { const r = document.querySelector('#limit-detail').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: innerWidth, h: innerHeight, over: document.documentElement.scrollWidth - innerWidth }; })()`,
+    );
+    check(
+      "M25 on a narrow screen the details stay inside the screen and the page does not scroll sideways",
+      box2.left >= 0 && box2.right <= box2.w && box2.top >= 0 && box2.bottom <= box2.h && box2.over <= 0,
+      box2,
+    );
+    await page.shot("11-details-narrow", { force: true });
+    for (const type of ["mousePressed", "mouseReleased"])
+      await page.cdp("Input.dispatchMouseEvent", { type, x: 195, y: 120, button: "left", clickCount: 1 });
+    await page.waitFor(`!${popOpen}`, "a press outside closes");
+    await page.viewport(1440, 1000);
+    check("M21 hover, focus and tap asked the host nothing and reached no provider", (await since(mark)) === "" && cursorHits === hits, {
+      sent: await since(mark),
+      cursorHits,
+    });
 
     // Hiding the limits item hides its refresh button with it.
     const ui = await rpc({ action: "ui-get" });

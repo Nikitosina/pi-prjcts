@@ -7,6 +7,7 @@ import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { loadUi, setUi } from "./ui.js";
 import { paintStatusLine } from "./statusline.js";
 import { loadLimits } from "./limits.js";
+import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
 import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
@@ -247,6 +248,7 @@ const COMMANDS = {
 };
 /** Esc closes the topmost layer: the "/" menu, palette, settings, drawer, center focus; then leaves the text field. */
 function leaveTop() {
+  if (limitDetailOpen()) return closeLimitDetail();
   if (slashMenuOpen()) return closeSlashMenu();
   if (paletteOpen()) return closePalette();
   if (app.dataset.sheet) return void (app.dataset.sheet = "");

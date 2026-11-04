@@ -35,3 +35,15 @@ inbox and Telegram `/status` read the same file), not page or `ui` state. Proof:
 - M18 A failed save shows the new choice anyway, or rapid toggles of several providers leave the page and the host disagreeing.
 - M19 A change from another tab or the Host agent leaves an open page on the old choice until a reload.
 - M20 A toggle has no accessible name, cannot be switched from the keyboard, or loses focus when the list redraws.
+
+## UI 2.0: details of one provider
+
+Owner request: bring back the classic bar's per-provider details on hover. The details come from the readings the page already holds.
+
+- M21 Hovering, focusing or tapping a provider asks the host for limits or reaches a provider, or a timer refreshes or closes the details.
+- M22 The details miss what the classic popup said: each window's use, its reset (in how long and when), how old the reading is and
+  where it came from, the period cost and account for Eliza, or the reason of a failed refresh next to the numbers it kept.
+- M23 A hidden provider can still be opened from the status line.
+- M24 The details open only for a mouse: no keyboard focus or tap opens them, Escape or a press outside does not close them, or
+  Escape loses the keyboard's place.
+- M25 On a narrow screen the details run off the screen or are cut by the status line's sideways scroll.

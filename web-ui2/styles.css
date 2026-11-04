@@ -3107,7 +3107,52 @@ table.hotkeys tr.clash td {
 .sl-limit {
   padding-left: 10px;
   border-left: 1px solid var(--line);
-  cursor: help;
+  border-radius: 0;
+  white-space: nowrap;
+}
+.sl-limit:hover,
+.sl-limit[aria-expanded="true"] {
+  color: var(--text);
+}
+/* One provider's details (web-ui2/limit-detail.js): above its status line item, kept inside the screen by the script. */
+#limit-detail {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 6px;
+  min-width: min(260px, calc(100vw - 16px));
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: var(--r-m);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+#limit-detail[hidden] {
+  display: none;
+}
+#limit-detail p {
+  margin: 0;
+}
+#limit-detail .ld-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 2px 8px;
+}
+#limit-detail .ld-row .sl-bar {
+  width: 100%;
+}
+#limit-detail .ld-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+#limit-detail .ld-error {
+  color: var(--bad);
+}
+#limit-detail .ld-foot {
+  font-size: 11px;
 }
 .sl-refresh {
   display: inline-flex;

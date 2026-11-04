@@ -4,6 +4,7 @@ import { esc, shortModel, tokens, usd } from "./format.js";
 import { on, state } from "./state.js";
 import { DEFAULT_UI } from "./ui.js";
 import { limitShown, refreshLimits } from "./limits.js";
+import { drawLimitDetail, limitDetailFor, limitSummary } from "./limit-detail.js";
 
 /** Owner-facing names and one-line hints, in the built-in order; the ids are the host's fixed `statusItems` ids. */
 export const STATUS_ITEMS = [
@@ -48,7 +49,6 @@ function cost() {
   const total = state.usage?.coordinator?.total?.cost?.total;
   return `<span class="sl-item sl-cost mono" data-item="cost" title="Coordinator cost of this chat">${esc(Number.isFinite(total) ? usd(total) : "$–")} chat</span>`;
 }
-const WINDOW_WORDS = { "5h": "5-hour window", "7d": "7-day window", mo: "month" };
 const REFRESH_ICON = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7M13.4 2.2v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 /** Refreshing is manual only: this button is the one way the page asks the providers (web-ui2/limits.js). */
 function limitsRefresh(empty) {
@@ -59,24 +59,26 @@ function limitsRefresh(empty) {
     : "";
   return `<span class="sl-item sl-limits-refresh" data-item="limits">${button}</span>${failed}`;
 }
-/** Subscription usage: what it is, the period, and where it comes from, in words and a tooltip. Hidden providers (Settings →
- * Providers) leave only the refresh button, which stays even when every provider is hidden. */
+/** Subscription usage, one button per shown provider: hover, focus or a tap opens its details (web-ui2/limit-detail.js). Hidden
+ * providers (Settings → Providers) leave only the refresh button, which stays even when every provider is hidden. */
 function limits() {
   const shown = (state.limits ?? []).filter((item) => item.status === "ok" && limitShown(item.provider));
+  const item = (provider, body) =>
+    `<button type="button" class="sl-item sl-limit mono" data-item="limits" data-limit-item="${esc(provider.provider)}" aria-controls="limit-detail" aria-expanded="${limitDetailFor() === provider.provider}" aria-label="${esc(limitSummary(provider))}">${body}</button>`;
   return `${shown
-    .map((item) => {
-      if (item.usage) {
-        const { amountUsd, periodStartAt, periodEndAt, account } = item.usage;
+    .map((provider) => {
+      if (provider.usage) {
+        const { amountUsd, periodStartAt, periodEndAt } = provider.usage;
         const days = (periodEndAt - periodStartAt) / 86400000;
-        const period = days > 26 && days < 33 ? "this month" : "this period";
-        const tip = `${item.label} subscription: ${usd(amountUsd)} spent ${period} (${new Date(periodStartAt).toLocaleDateString()}–${new Date(periodEndAt).toLocaleDateString()}${account ? `, ${account}` : ""}), read from ${item.label}'s usage endpoint. Not the cost of this chat.`;
-        return `<span class="sl-item sl-limit mono" data-item="limits" title="${esc(tip)}">${esc(item.label)} · ${esc(usd(amountUsd))} ${period}</span>`;
+        return item(provider, `${esc(provider.label)} · ${esc(usd(amountUsd))} ${days > 26 && days < 33 ? "this month" : "this period"}`);
       }
-      const sample = [...(item.samples ?? [])].sort((a, b) => b.usedPercent - a.usedPercent)[0];
+      const sample = [...(provider.samples ?? [])].sort((a, b) => b.usedPercent - a.usedPercent)[0];
       if (!sample) return "";
       const pct = Math.round(sample.usedPercent ?? 0);
-      const tip = `${item.label} subscription: ${pct}% of the ${WINDOW_WORDS[sample.window] ?? sample.window} used${sample.resetsAt ? `, resets ${new Date(sample.resetsAt).toLocaleString()}` : ""}.`;
-      return `<span class="sl-item sl-limit mono" data-item="limits" title="${esc(tip)}">${esc(item.label)} ${esc(sample.window)} <span class="sl-bar ${pct >= 90 ? "hot" : ""}"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%</span>`;
+      return item(
+        provider,
+        `${esc(provider.label)} ${esc(sample.window)} <span class="sl-bar ${pct >= 90 ? "hot" : ""}"><span style="width:${Math.min(100, pct)}%"></span></span> ${pct}%`,
+      );
     })
     .join("")}${limitsRefresh(!shown.length)}`;
 }
@@ -90,13 +92,24 @@ const RENDER = { activity, model, thinking, context, cost, limits, spacer, conne
 export function paintStatusLine() {
   const items = state.ui?.statusItems ?? DEFAULT_UI.statusItems;
   const bar = document.querySelector("#statusline");
-  // Repaints follow every live frame; the keyboard stays on the refresh button (aria-disabled while busy, so still focusable).
-  const focused = bar.contains(document.activeElement) && document.activeElement.matches("[data-limits-refresh]");
-  bar.innerHTML = items
+  // Repaints follow every live frame; the keyboard stays on the refresh button (aria-disabled while busy, so still focusable)
+  // or on the provider it was on.
+  const active = bar.contains(document.activeElement) ? document.activeElement : null;
+  const focus = active?.matches("[data-limits-refresh]")
+    ? "[data-limits-refresh]"
+    : active?.dataset.limitItem
+      ? `[data-limit-item="${CSS.escape(active.dataset.limitItem)}"]`
+      : null;
+  const html = items
     .filter((item) => item.enabled && RENDER[item.id])
     .map((item) => RENDER[item.id]())
     .join("");
-  if (focused) bar.querySelector("[data-limits-refresh]")?.focus();
+  if (bar.dataset.html !== html) {
+    bar.innerHTML = html;
+    bar.dataset.html = html;
+    if (focus) bar.querySelector(focus)?.focus();
+  }
+  drawLimitDetail();
 }
 on("ui", paintStatusLine);
 on("limits", paintStatusLine);
