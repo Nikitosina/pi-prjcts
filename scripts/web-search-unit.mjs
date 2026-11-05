@@ -46,11 +46,8 @@ try {
   assert.equal(sent.headers.authorization, `Bearer ${token}`, "W2 bearer token");
   assert.equal(sent.headers["chatgpt-account-id"], "acct-1", "W2 account id from the token");
   assert.equal(sent.body.commands.search_query[0].q, "latest pi release", "W2 the query");
-  assert.match(
-    text,
-    /^Pi 2 was released\.\n\nSources:\n1\. \[Pi release\]\(https:\/\/example\.com\/pi\)\n {3}Version 2/,
-    "W2 answer and sources",
-  );
+  assert.match(text, /^1\. \[Pi release\]\(https:\/\/example\.com\/pi\)\n {3}Version 2\n2\. /, "W2 results as a list");
+  assert.ok(!text.includes("Pi 2 was released"), "W2 the raw output dump is not repeated");
 
   // W6: unsafe URLs dropped, at most 10 sources.
   assert.ok(!text.includes("javascript:"), "W6 unsafe URL dropped");
