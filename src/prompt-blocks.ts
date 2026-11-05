@@ -107,11 +107,11 @@ export type PromptProject = Pick<Project, "prompts" | "promptBlocks"> & Partial<
 const refuse = (detail: string): never => {
   throw new Error(`Prompt blocks: ${detail}`);
 };
-const joinBlocks = (blocks: readonly ResolvedPromptBlock[], mode: WorkerMode = "job") =>
+const joinBlocks = (blocks: readonly ResolvedPromptBlock[], mode: WorkerMode = "job", separator = BLOCK_SEPARATOR) =>
   blocks
     .filter((block) => block.enabled && block.active && (!block.mode || block.mode === mode))
     .map((block) => block.text)
-    .join(BLOCK_SEPARATOR);
+    .join(separator);
 const values = (project: Partial<Project>): Record<Placeholder, string> => ({
   project: project.name ?? "",
   projectId: project.id ?? "",
@@ -246,7 +246,8 @@ export function resolvePromptBlocks(
     customized: saved !== undefined || legacy !== undefined,
     legacy: !saved && legacy !== undefined,
     blocks,
-    text: fill(joinBlocks(blocks), project),
+    // Integration blocks are one bullet each, so they read as one list.
+    text: fill(target === "integrations" ? joinBlocks(blocks, "job", "\n") : joinBlocks(blocks), project),
   };
 }
 

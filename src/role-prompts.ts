@@ -170,7 +170,7 @@ export const ROLE_BLOCKS = {
       id: "role",
       name: "Role",
       text: `ROLE
-- Implement one Job from the brief, in the workspace the host prepared.
+- Implement the task in your brief, in the workspace the host prepared.
 - Bash runs as the host user, not in a sandbox.`,
     },
     {
