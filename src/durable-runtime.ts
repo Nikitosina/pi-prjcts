@@ -97,6 +97,7 @@ import {
 } from "./profiles.ts";
 import { tiersFor } from "./host-documents.ts";
 import type { ProfileToolGroup } from "./profiles.ts";
+import { webSearchTools } from "./web-search.ts";
 import { mcpCatalog } from "./mcp-servers.ts";
 import {
   estimateTokens as estimateTextTokens,
@@ -991,6 +992,8 @@ export async function openDurableProject(input: {
     const sandbox = new CodemodeSandbox();
     const codemode = createCodemodeExtension({ sandbox, models: false, inlineBudget: 0 });
     const codemodeTool = codemode.tools!.find((tool) => tool.name === "codemode")!;
+    const web = webSearchTools(async () => (await models.getAuth("openai-codex").catch(() => undefined))?.auth.apiKey);
+    registry.install(web.extension);
     const commands = commandExecution();
     // Worker leases (host-wide) and background commands (this project's threads): freed with the work, the thread or the runtime.
     const background = createBackgroundCommands({ controlRoot: dir });
@@ -1153,8 +1156,8 @@ export async function openDurableProject(input: {
     // What each agent profile can be offered before its disabled list; workspace tools join a worker when its worktree is bound.
     const roleTools = (role: AgentProfile): ToolRegistration[] =>
       role === "worker"
-        ? [...workerKnowledge(), skillFiles.tool, ...mcp.tools, verifyRun, ...jobs.tools.worker, codemodeTool]
-        : [...workerKnowledge(), ...readOnlyCode.tools, skillFiles.tool, ...mcp.tools, codemodeTool];
+        ? [...workerKnowledge(), skillFiles.tool, ...mcp.tools, verifyRun, ...jobs.tools.worker, web.tool, codemodeTool]
+        : [...workerKnowledge(), ...readOnlyCode.tools, skillFiles.tool, ...mcp.tools, web.tool, codemodeTool];
     /** Model, tools and prompt of one agent role. A subagent (`jobId` set) works in its worker's cwd and has no verdict or spawn tools. */
     const agentSetup = (spec: { role: DurableRole; jobId: string | null; cwd?: string }): AgentChange => {
       if (spec.role === "verifier") throw new Error("The verifier role was removed: workers run the verify skill with projects_verify_run");
@@ -1166,13 +1169,13 @@ export async function openDurableProject(input: {
           ...base,
           cwd: project.cwd,
           tools: offeredFor(current, role, roleTools(role)),
-          extensions: [policy, skillFiles.extension, mcp.extension, proof.extension, jobs.worker, codemode],
+          extensions: [policy, skillFiles.extension, mcp.extension, proof.extension, jobs.worker, web.extension, codemode],
         };
       return {
         ...base,
         cwd: spec.cwd ?? project.cwd,
         tools: offeredFor(current, role, roleTools(role)),
-        extensions: [policy, readOnlyCode.extension, skillFiles.extension, mcp.extension, codemode],
+        extensions: [policy, readOnlyCode.extension, skillFiles.extension, mcp.extension, web.extension, codemode],
       };
     };
     /** Threads the host knows these conversations by (agent and Job ids): background commands and leases are keyed by them. */
@@ -1434,6 +1437,7 @@ export async function openDurableProject(input: {
             ...mcp.tools,
             ...artifacts.tools,
             ...ownerApprovalTools,
+            web.tool,
             codemodeTool,
             ...jobs.tools.coordinator,
           ],
@@ -1741,6 +1745,7 @@ export async function openDurableProject(input: {
       ...mcp.tools.map((tool) => tool.name),
       ...artifacts.tools.map((tool) => tool.name),
       ...ownerApprovalTools.map((tool) => tool.name),
+      web.tool.name,
       codemodeTool.name,
     ]);
     type AgentNow = Awaited<ReturnType<Conversation["agent"]>>;
@@ -1754,6 +1759,7 @@ export async function openDurableProject(input: {
       ...mcp.tools,
       ...artifacts.tools,
       ...ownerApprovalTools,
+      web.tool,
       codemodeTool,
     ];
     const coordinatorToolsFor = (agent: AgentNow, current: Project) =>

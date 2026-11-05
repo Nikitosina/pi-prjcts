@@ -195,6 +195,7 @@ export const ROLE_BLOCKS = {
       name: "Answer",
       text: `- Answer the question you were asked from the code and documents you can read.
 - Cite files, symbols and lines.
+- When the question needs current outside facts (library docs, versions, platform behavior), use web_search if you have it, and cite the URLs.
 - Separate what you observed from what you infer. Name what you could not find.
 - Read only: no edits, builds or runs.
 - Reply with the answer and the evidence the caller needs next.`,
