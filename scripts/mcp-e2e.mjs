@@ -1,4 +1,4 @@
-// E2E: MCP servers per profile (saved profiles, gateway tools, write guard, pool resilience, recovery). The classic Settings picker was
+// E2E: MCP servers per profile (saved profiles, unrestricted gateway tools, pool resilience, recovery). The classic Settings picker was
 // retired on 2026-11-04; profiles are saved through settings-update as it did. Fakes only:
 // fake stdio MCP server, temp mcp.json via PI_PROJECTS_MCP_CONFIG, fake model, private HOME. Failure cases: mcp-failures.md.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -157,6 +157,13 @@ await kit.run(async () => {
   );
   const okDefault = await coord('MCP-CALL fake-ci launch_status {"id":"L0"}');
   check("F3 by default a call goes through", /launch L0: PASSED/.test(okDefault), okDefault);
+  const writeDefault = await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-0","status":"Closed"}');
+  check(
+    "F7 an enabled server allows every tool without a write setting",
+    /ChangeIssueStatus ok/.test(writeDefault) &&
+      serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.args?.key === "K-0"),
+    writeDefault,
+  );
   check(
     "F22 the coordinator prompt carries the MCP note, not tool schemas",
     /projects_mcp_tools/.test(kit.lastCall("coordinator", "#1").system) && !/launch_status/.test(kit.lastCall("coordinator", "#1").system),
@@ -170,7 +177,7 @@ await kit.run(async () => {
     scout: ["fake-ci", "fake-tracker", "fake-xcode"],
     reviewer: [],
   };
-  await kit.updateSettings(id, { mcp: { off, writes: [] } });
+  await kit.updateSettings(id, { mcp: { off } });
   await kit.eventually(async () => (await rpc({ action: "settings-snapshot", id })).values.mcp !== null, "mcp settings not saved", 100);
   const saved = (await rpc({ action: "settings-snapshot", id })).values.mcp;
   check(
@@ -184,7 +191,6 @@ await kit.run(async () => {
           scout: ["fake-ci", "fake-tracker", "fake-xcode"],
           reviewer: [],
         },
-        writes: [],
       }),
     saved,
   );
@@ -207,15 +213,9 @@ await kit.run(async () => {
   );
   const tools = await coord("MCP-TOOLS fake-tracker");
   const toolInfo = JSON.parse(tools);
-  const flag = (name) => toolInfo.tools.find((item) => item.name === name)?.write;
   check(
-    "F7 tool listing marks writes by annotation and heuristic",
-    flag("ChangeIssueStatus") === true &&
-      flag("start_launch") === true &&
-      flag("purge") === true &&
-      flag("get_settings") === false &&
-      flag("list_hints") === false &&
-      flag("launch_status") === false,
+    "F8 tool listings carry no obsolete write classification",
+    toolInfo.tools.every((item) => item.write === undefined),
     toolInfo.tools.map((item) => [item.name, item.write]),
   );
   const schema = JSON.parse(await coord("MCP-TOOLS fake-tracker launch_status"));
@@ -228,7 +228,6 @@ await kit.run(async () => {
     JSON.parse((await coord(`MCP-CODE ${server} ${tool}`)).split("\n").find((line) => line.startsWith("{")) ?? "null");
   const structured = await scripted("launches"),
     failed = await scripted("launch_failed"),
-    blockedScript = await scripted("purge", "fake-tracker"),
     shown = await coord("MCP-CALL fake-ci launches");
   check(
     "N12 a script gets structuredContent as an object, the model sees its JSON instead of (no output)",
@@ -239,12 +238,9 @@ await kit.run(async () => {
     { structured, shown },
   );
   check(
-    "N12 a server error resolves with isError and its structuredContent; a blocked write still rejects",
-    failed?.value?.isError === true &&
-      failed.value.structuredContent?.code === "E1" &&
-      /launch broke/.test(failed.value.text) &&
-      /Blocked/.test(blockedScript?.error ?? ""),
-    { failed, blockedScript },
+    "N12 a server error resolves with isError and its structuredContent",
+    failed?.value?.isError === true && failed.value.structuredContent?.code === "E1" && /launch broke/.test(failed.value.text),
+    { failed },
   );
   const ok = await coord('MCP-CALL fake-ci launch_status {"id":"L1"}');
   check("coordinator reads through fake-ci", /launch L1: PASSED/.test(ok), ok);
@@ -272,44 +268,29 @@ await kit.run(async () => {
     /no MCP servers/i.test(await scout("MCP-TOOLS")) && /not enabled for your role/i.test(await scout("MCP-CALL fake-xcode whoami")),
   );
 
-  // Write guard.
+  // Enabled means full access, as in Pi; legacy writes settings are irrelevant.
   const before = serverLog().length;
-  const blocked = [
+  const writes = [
     await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-1","status":"Closed"}'),
     await coord('MCP-CALL fake-tracker start_launch {"id":"L3"}'),
     await coord("MCP-CALL fake-tracker purge"),
+    await coord('MCP-CALL fake-ci ChangeIssueStatus {"key":"K-1","status":"Closed"}'),
   ];
   check(
-    "F7/F8 writes are refused with guidance and never reach the server",
-    blocked.every((text) => /allow writes/i.test(text) && /owner/i.test(text)) &&
+    "F7/F9 mutating tools pass on every enabled server without a write grant",
+    writes.every((text) => / ok/.test(text)) &&
       serverLog()
         .slice(before)
-        .every((entry) => !["ChangeIssueStatus", "start_launch", "purge"].includes(entry.tool)),
-    blocked,
+        .filter((entry) => entry.event === "call")
+        .map((entry) => entry.tool)
+        .join(",") === "ChangeIssueStatus,start_launch,purge,ChangeIssueStatus",
+    writes,
   );
   check(
     "F7 reads pass: unannotated get_settings and readOnlyHint list_hints",
     /get_settings ok/.test(await coord("MCP-CALL fake-tracker get_settings")) &&
       /list_hints ok/.test(await coord("MCP-CALL fake-tracker list_hints")),
   );
-  await kit.updateSettings(id, { mcp: { off, writes: ["fake-tracker"] } });
-  await kit.eventually(
-    async () => (await rpc({ action: "settings-snapshot", id })).values.mcp.writes.includes("fake-tracker"),
-    "writes toggle not saved",
-    100,
-  );
-  check(
-    "F9 with writes on for fake-tracker the change goes through, live",
-    /ChangeIssueStatus ok/.test(await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-1","status":"Closed"}')) &&
-      serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.tag === "tracker"),
-  );
-  const stillBlocked = await coord('MCP-CALL fake-ci ChangeIssueStatus {"key":"K-1","status":"Closed"}');
-  check(
-    "F9 the writes toggle is per server",
-    /allow writes/i.test(stillBlocked) && !serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.tag === "ci"),
-    stillBlocked,
-  );
-
   // Resilience.
   const pidOf = (text) => /pid=(\d+)/.exec(text)?.[1];
   const pid1 = pidOf(await coord("MCP-CALL fake-ci whoami"));
@@ -349,14 +330,13 @@ await kit.run(async () => {
         worker: ["fake-ci", "fake-tracker"],
         scout: ["fake-ci", "fake-tracker", "fake-xcode"],
       },
-      writes: ["fake-tracker"],
     },
   });
   check(
     "F4 removing a server applies to the very next call",
     /not enabled for your role/i.test(await coord('MCP-CALL fake-ci launch_status {"id":"L4"}')),
   );
-  await kit.updateSettings(id, { mcp: { off: { all: ["ghost"] }, writes: [] } });
+  await kit.updateSettings(id, { mcp: { off: { all: ["ghost"] } } });
   const unavailable = await coord("MCP-TOOLS");
   check(
     "F5/F6 unavailable servers and stale opt-out names are never offered",
@@ -374,7 +354,7 @@ await kit.run(async () => {
       id,
       confirm: id,
       expectedRevision: settings.revision,
-      changes: { mcp: { off: { admin: [] }, writes: [] } },
+      changes: { mcp: { off: { admin: [] } } },
     })) !== null,
   );
   check(
@@ -384,7 +364,7 @@ await kit.run(async () => {
       id,
       confirm: id,
       expectedRevision: settings.revision,
-      changes: { mcp: { off: { all: [42] }, writes: [] } },
+      changes: { mcp: { off: { all: [42] } } },
     })) !== null,
   );
   await kit.updateSettings(id, {
@@ -394,7 +374,6 @@ await kit.run(async () => {
         worker: ["fake-ci", "fake-tracker"],
         scout: ["fake-ci", "fake-tracker", "fake-xcode"],
       },
-      writes: [],
     },
   });
 

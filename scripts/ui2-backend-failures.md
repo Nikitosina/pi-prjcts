@@ -38,7 +38,7 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 
 - L1 Must not contact an MCP server (a dead server URL still answers instantly) and must not allocate a workspace (no new worktree directory).
 - L2 Every group has an id that the disabled list understands; `enabled` matches what the role is offered after the filter.
-- L3 MCP servers appear as one group each with a `mcp-writes:<server>` pseudo-tool; skills appear as one `skill` group.
+- L3 MCP has no per-server write pseudo-tool; an enabled server allows all its tools. Skills appear as one `skill` group.
 - L4 Works for a closed project (does not need an open runtime, or opens it the normal way without side effects).
 
 ## Prompt render (`prompt-render`)

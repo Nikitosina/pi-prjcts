@@ -244,8 +244,8 @@ await kit.run(async () => {
   const bash = tools.groups.flatMap((item) => item.tools).find((tool) => tool.name === "bash");
   check("L2 a disabled tool shows enabled: false", bash && bash.enabled === false && typeof bash.description === "string", bash);
   check(
-    "L3 one group per MCP server with a writes pseudo-tool",
-    group("mcp:deadsrv")?.tools.some((tool) => tool.name === "mcp-writes:deadsrv"),
+    "L3 MCP has no per-server write pseudo-tools",
+    group("mcp") && !group("mcp:deadsrv") && !JSON.stringify(tools).includes("mcp-writes:"),
     tools.groups.map((item) => item.id),
   );
   check(

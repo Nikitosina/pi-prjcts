@@ -188,7 +188,7 @@ export const Project = Type.Object(
     skillProfiles: Type.Optional(SkillProfiles),
     /** Per-profile tier, thinking level and switched-off tools; an absent profile keeps the legacy model fields and medium thinking. */
     profiles: Type.Optional(Profiles),
-    /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
+    /** MCP servers per profile; absent enables every ready server (mcp-profiles.ts). */
     mcp: Type.Optional(McpSettings),
     /** Owner overrides of the editable role instructions, per role (this project only). Absent = the built-in text. */
     prompts: Type.Optional(PromptOverrides),

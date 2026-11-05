@@ -1829,8 +1829,13 @@ const journeys = {
     // Tools: switch one unlocked coordinator tool off; profile-tools reports it disabled; switch it back on.
     await page.click('#settings nav [data-section="tools"]');
     await page.waitFor(`!!document.querySelector('#settings [data-tool-name]:not([disabled])')`, "tools grid");
-    const toolName = await page.evaluate(`document.querySelector('#settings [data-tool-name]:not([disabled])').dataset.toolName`);
+    const toolName = await page.evaluate(
+      `[...document.querySelectorAll('#settings [data-tool-name]:not([disabled])')].at(-1).dataset.toolName`,
+    );
     const toolBox = `#settings [data-tool-name="${toolName}"]`;
+    await page.evaluate(`(() => { const b = document.querySelector('#settings .settings-body'); b.scrollTop = b.scrollHeight; })()`);
+    const toolScroll = await page.evaluate(`document.querySelector('#settings .settings-body').scrollTop`);
+    if (toolScroll <= 0) throw Error("Tools journey needs a scrollable settings body");
     await page.click(toolBox);
     const toolOff = async () =>
       (await rpc(run, { action: "profile-tools", projectId, profile: "coordinator" })).groups
@@ -1838,10 +1843,12 @@ const journeys = {
         .find((tool) => tool.name === toolName)?.enabled === false;
     await until(toolOff, `profile-tools reports ${toolName} off`);
     await page.waitFor(`document.querySelector(${JSON.stringify(toolBox)})?.checked === false`, "tool box unchecked after reload");
+    await page.waitFor(`document.querySelector('#settings .settings-body')?.scrollTop >= ${toolScroll - 1}`, "tool save preserves scroll");
     await page.shot(dir, "14-settings-tools-off");
     await page.click(toolBox);
     await until(async () => !(await toolOff()), `profile-tools reports ${toolName} on again`);
-    record("side-effect", `Tools: ${toolName} off for the coordinator (profile-tools enabled false), then on again`);
+    await page.waitFor(`document.querySelector('#settings .settings-body')?.scrollTop > 0`, "second tool save preserves scroll");
+    record("side-effect", `Tools: ${toolName} off for the coordinator, then on again; both saves preserved scroll`);
     // Tier editor: rename the tier and add a tier with the fallback model; tiers-get keeps both.
     await page.click('#settings nav [data-section="tiers"]');
     await page.waitFor(`!!document.querySelector('#settings .tier-edit .tier-name-input')`, "tiers editor again");

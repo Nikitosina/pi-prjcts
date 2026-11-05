@@ -73,7 +73,8 @@ dialog.addEventListener("click", (event) => {
   }
 });
 
-function paint() {
+function paint(keepScroll = false) {
+  const scroll = keepScroll ? (dialog.querySelector(".settings-body")?.scrollTop ?? 0) : 0;
   const current = SECTIONS.find((item) => item.id === section);
   dialog.dataset.section = section;
   if (profile === "host" && section !== "prompt") profile = "coordinator";
@@ -101,9 +102,13 @@ function paint() {
   const gen = ++paintGen,
     body = dialog.querySelector(".settings-body");
   const alive = () => gen === paintGen && dialog.open && body.isConnected;
-  Promise.resolve(current.render(body, alive)).catch((error) => {
-    if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
-  });
+  Promise.resolve(current.render(body, alive))
+    .then(() => {
+      if (alive()) body.scrollTop = scroll;
+    })
+    .catch((error) => {
+      if (alive()) body.innerHTML = `<p class="error-line">${esc(error.message)}</p>`;
+    });
 }
 /** Confirms a change next to the section header: the control that changed is in this section. */
 let said = null;
@@ -274,7 +279,7 @@ async function setProfile(revision, patch, label) {
   } catch (error) {
     sayFail(error);
   }
-  paint();
+  paint(true);
 }
 /** Per-million price, like the reference: "$4 in $20 out". */
 const perM = (n) => (!Number.isFinite(n) ? "" : n === 0 ? "$0" : `$${n < 0.1 ? n.toFixed(3) : String(+n.toFixed(2))}`);

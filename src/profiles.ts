@@ -148,16 +148,14 @@ export const offeredFor = <T extends { name: string }>(
   groupOf?: (name: string) => string | undefined,
 ): T[] => tools.filter((tool) => !toolDisabled(project, profile, tool.name, groupOf?.(tool.name)));
 
-/** The saved MCP settings with this profile's switched-off servers (`group:mcp:<server>`) and writes (`mcp-writes:<server>`) applied. */
+/** The saved MCP settings with this profile's switched-off servers (`group:mcp:<server>`) applied. */
 export function mcpForProfile(project: Pick<Project, "profiles" | "mcp">, profile: ProfileId): McpSettings | undefined {
   const disabled = project.profiles?.[profile]?.tools?.disabled ?? [];
   if (!disabled.length) return project.mcp;
   const off = disabled.flatMap((item) => (item.startsWith("group:mcp:") ? [item.slice("group:mcp:".length)] : []));
-  const writes = (project.mcp?.writes ?? []).filter((server) => !disabled.includes(`mcp-writes:${server}`));
   return {
     ...project.mcp,
     off: { ...project.mcp?.off, [profile]: [...new Set([...(project.mcp?.off?.[profile] ?? []), ...off])] },
-    writes,
   };
 }
 
