@@ -24,7 +24,6 @@ const STATUSES: readonly MemoryStatus[] = ["current", "superseded", "historical"
 const UUID_NAME = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 /** Bounds of what reaches every prompt. */
 export const PREFERENCES_LIMIT = 4000;
-export const INDEX_LIMIT = 3000;
 
 type Front = { fields: Record<string, string>; source: MemorySource; body: string };
 /** Optional YAML front matter: flat `key: value` lines plus one nested `source:` block. Anything else is not front matter. */
@@ -121,23 +120,11 @@ export async function memoryIndex(dir: string, options: { includeArchive?: boole
   };
 }
 
-/** The prompt's memory index: titles and summaries of everything but the archive, bounded. */
-export async function memoryIndexText(dir: string): Promise<string> {
-  const { entries: listed } = await memoryIndex(dir);
-  const lines = listed
-    .filter((entry) => entry.kind !== "preference")
-    .map(
-      (entry) =>
-        `- [${entry.kind}] ${entry.title} (${entry.path})${entry.summary ? `: ${entry.summary}` : ""}${entry.status === "superseded" ? ` (superseded${entry.supersededBy ? ` by ${entry.supersededBy}` : ""})` : ""}`,
-    );
-  const head = "Memory index (generated from knowledge/; read an entry with projects_knowledge_read; archive left out):";
-  let text = head;
-  for (const [index, line] of lines.entries()) {
-    if (text.length + line.length + 1 > INDEX_LIMIT)
-      return `${text}\n- … ${lines.length - index} more; list them with projects_knowledge_list`;
-    text += `\n${line}`;
-  }
-  return lines.length ? text : `${head}\n- (empty)`;
+/** Memory entries for agents, archive included: all, or those whose title, summary or path contains `query` (case-insensitive). */
+export async function findMemory(dir: string, query?: string): Promise<MemoryEntry[]> {
+  const needle = query?.trim().toLowerCase();
+  const { entries: listed } = await memoryIndex(dir, { includeArchive: true });
+  return needle ? listed.filter((entry) => [entry.title, entry.summary, entry.path].some((field) => field.toLowerCase().includes(needle))) : listed;
 }
 
 /** Current preferences, injected into every role prompt: bounded and tagged with each entry's revision. */

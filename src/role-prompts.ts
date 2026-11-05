@@ -94,7 +94,7 @@ export const ROLE_BLOCKS = {
       id: "memory",
       name: "Memory",
       text: `MEMORY
-- Your prompt carries the owner's preferences. Before a non-trivial decision or a repeatable procedure, search decisions/ and runbooks/ with projects_knowledge_list and read the entry with projects_knowledge_read.
+- Your prompt carries the owner's preferences. Before a non-trivial decision or a repeatable procedure, search memory with projects_knowledge_list (query: a few words) and read the entry with projects_knowledge_read.
 - When the owner corrects you or states a lasting preference, save it to preferences.md with projects_knowledge_write without asking:
   - One rule per bullet, under a topic heading, at most two lines, imperative.
   - No dates, PR numbers, quotes or history. Context and reasons go to decisions/.

@@ -81,8 +81,8 @@ export type { DurableGenerationLifecycle, DurableGenerationLifecycleObserver } f
 import { loadDurableStanding, loadInstanceInstructions } from "./durable-standing.ts";
 import { durableWorkspaceBinding, verifierShell } from "./durable-workspace-binding.ts";
 import { commandExecution, commandIntentsSnapshot, commandIntentInspect } from "./command-runtime.ts";
-import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
-import { memoryIndexText, preferencesText } from "./memory.ts";
+import { ensureKnowledge, historyKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
+import { findMemory, preferencesText } from "./memory.ts";
 import {
   GROUP_LABELS,
   LOCKED_TOOLS,
@@ -960,7 +960,6 @@ export async function openDurableProject(input: {
           return text ? `Instance instructions ($PI_PROJECTS_HOME/AGENTS.md):\n${text}` : undefined;
         }),
         section("projects-memory-preferences", async () => (await preferencesText(dir)) || undefined),
-        section("projects-memory-index", () => memoryIndexText(dir)),
       ],
       hooks: [
         hook(GenerationTask, {
@@ -2481,7 +2480,6 @@ export async function openDurableProject(input: {
             false,
             await preferencesText(dir),
           ),
-          promptSection("memory", "Memory index", "generated from knowledge/, archive left out", false, await memoryIndexText(dir)),
           built.skills,
         ];
         const measured = sections.map((item) => ({ ...item, tokens: estimateTextTokens(item.text) }));
@@ -2766,11 +2764,17 @@ export function maintainedKnowledgeTools(dir: string, changed: () => void = () =
   const list = defineTool({
     name: "projects_knowledge_list",
     description:
-      "List maintained-project knowledge metadata, up to 8 KiB per call (pass limit for more, or follow nextOffset); read topics on demand.",
-    parameters: Type.Object({ offset: pageOffset, limit: pageLimit }),
+      "List project memory (preferences, decisions/, runbooks/, archive): path, kind, title, summary, status and revision. Pass query to keep only entries whose title, summary or path contains it (case-insensitive). Up to 8 KiB per call (pass limit for more, or follow nextOffset); read an entry with projects_knowledge_read.",
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Words to find in titles, summaries and paths." })),
+      offset: pageOffset,
+      limit: pageLimit,
+    }),
     replay: "safe",
     async execute(args) {
-      return pageResult(await listKnowledge(dir), args, 100);
+      await ensureKnowledge(dir);
+      const found = (await findMemory(dir, args.query)).map(({ source: _source, lastConfirmedAt: _confirmed, ...entry }) => entry);
+      return pageResult(found, args, 100);
     },
   });
   const read = defineTool({
