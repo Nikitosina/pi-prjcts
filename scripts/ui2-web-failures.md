@@ -114,7 +114,7 @@ The owner retired the classic inbox (2026-11-04): this client is the only one an
 - A new chat shows an empty page with no next step; a starter prompt sends without the owner seeing it, or fills a composer that is not focused.
 - Tool rows and message headers start at different left edges; spacing between turns is uneven.
 - Prompt editor: Save sends nothing, or the saved project instructions do not appear in `prompt-render`.
-- Tools: switching a tool off does not reach `profile-tools` (enabled stays true), or a locked tool can be switched off.
+- Tools: switching a tool off does not reach `profile-tools` (enabled stays true), a locked tool can be switched off, or the save redraw resets the body's scroll position.
 - Tier editor: a rename or a new tier is lost on Save, or a new tier saves with no model.
 - A coordinator's `owner_approval_request` shows only as a raw tool row: no card in the drawer, no needs-you in the pill, no way from the chat row to the decision; the outcome posted back to the chat renders as an owner bubble.
 - At 390 px the Host agent drawer overflows the screen, hides its composer, or cannot be closed by keyboard.

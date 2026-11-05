@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Fake MCP server (stdio, newline-delimited JSON-RPC) for offline E2Es. Logs connections and tool calls to FAKE_MCP_CALLS.
-// Tools: whoami (cwd/tag/pid), launch_status, get_settings, slow, crash, big (reads); ChangeIssueStatus (no annotations, name heuristic);
-// launches and launch_failed return structuredContent; start_launch (readOnlyHint:false) and purge (destructiveHint:true) are writes by annotation; list_hints (readOnlyHint:true named like a write) is a read by annotation.
+// Tools: whoami (cwd/tag/pid), launch_status, get_settings, slow, crash, big; ChangeIssueStatus has no annotations.
+// launches and launch_failed return structuredContent; start_launch and purge carry write/destructive annotations; every enabled tool is callable.
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const tag = process.env.FAKE_MCP_TAG ?? "none",

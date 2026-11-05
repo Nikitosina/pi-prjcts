@@ -203,63 +203,6 @@ export function mcpCatalog(): { path: string; servers: McpServerInfo[]; error?: 
   };
 }
 
-/** Write classification: tool annotations when present, else the name's words. */
-const WRITE_WORDS = new Set([
-  "create",
-  "update",
-  "delete",
-  "start",
-  "cancel",
-  "interrupt",
-  "force",
-  "transition",
-  "merge",
-  "publish",
-  "set",
-  "add",
-  "move",
-  "bulk",
-  "change",
-  "remove",
-  "write",
-  "edit",
-  "send",
-  "post",
-  "close",
-  "reopen",
-  "assign",
-  "link",
-  "unlink",
-  "approve",
-  "retry",
-  "rerun",
-  "restart",
-  "stop",
-  "kill",
-  "purge",
-  "drop",
-  "run",
-  "execute",
-  "deploy",
-  "trigger",
-  "upload",
-  "install",
-  "patch",
-  "put",
-  "rename",
-  "reset",
-]);
-export function isWriteTool(tool: Pick<Tool, "name" | "annotations">): boolean {
-  const hints = tool.annotations;
-  if (hints?.readOnlyHint === true) return false;
-  if (hints?.readOnlyHint === false || hints?.destructiveHint === true) return true;
-  return tool.name
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .some((word) => WRITE_WORDS.has(word));
-}
-
 type Entry = {
   client: McpClient;
   auth?: ReturnType<typeof createMcpOAuth>;

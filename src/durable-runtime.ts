@@ -2403,23 +2403,6 @@ export async function openDurableProject(input: {
               enabled: effective.has(skill.name),
             });
         }
-        const mcpSettings = mcpForProfile(current, profile);
-        const off = new Set([...(mcpSettings?.off?.all ?? []), ...(mcpSettings?.off?.[profile] ?? [])]);
-        for (const server of mcpCatalog().servers)
-          groups.set(`mcp:${server.name}`, {
-            id: `mcp:${server.name}`,
-            label: `MCP: ${server.name}`,
-            source: "mcp",
-            locked: false,
-            tools: [
-              {
-                name: `mcp-writes:${server.name}`,
-                description: `Allow the write tools of ${server.name} (${server.status}${off.has(server.name) ? ", switched off for this profile" : ""})`,
-                parameters: null,
-                enabled: !off.has(server.name) && (mcpSettings?.writes?.includes(server.name) ?? false),
-              },
-            ],
-          });
         return { groups: [...groups.values()] };
       },
       promptRender: async (profile, options = {}) => {
