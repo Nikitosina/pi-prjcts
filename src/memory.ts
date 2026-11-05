@@ -124,7 +124,9 @@ export async function memoryIndex(dir: string, options: { includeArchive?: boole
 export async function findMemory(dir: string, query?: string): Promise<MemoryEntry[]> {
   const needle = query?.trim().toLowerCase();
   const { entries: listed } = await memoryIndex(dir, { includeArchive: true });
-  return needle ? listed.filter((entry) => [entry.title, entry.summary, entry.path].some((field) => field.toLowerCase().includes(needle))) : listed;
+  return needle
+    ? listed.filter((entry) => [entry.title, entry.summary, entry.path].some((field) => field.toLowerCase().includes(needle)))
+    : listed;
 }
 
 /** Current preferences, injected into every role prompt: bounded and tagged with each entry's revision. */

@@ -1422,6 +1422,7 @@ export async function openDurableProject(input: {
           mcp.extension,
           artifacts.extension,
           ownerApproval,
+          web.extension,
           codemode,
         ],
         tools: offeredFor(
@@ -1786,6 +1787,7 @@ export async function openDurableProject(input: {
       mcp.extension.name,
       artifacts.extension.name,
       ownerApproval.name,
+      web.extension.name,
       codemode.name,
     ]);
     const coordinatorExtensionsFor = (agent: AgentNow) => [
@@ -1800,6 +1802,7 @@ export async function openDurableProject(input: {
       mcp.extension,
       artifacts.extension,
       ownerApproval,
+      web.extension,
       codemode,
     ];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
@@ -1811,6 +1814,7 @@ export async function openDurableProject(input: {
       pluginExtensions.some((plugin) => !recoveredAgent.extensions.some((extension) => extension.name === plugin.name)) ||
       !recoveredAgent.extensions.some((extension) => extension.name === artifacts.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === ownerApproval.name) ||
+      !recoveredAgent.extensions.some((extension) => extension.name === web.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === codemode.name) ||
       recoveredAgent.model?.provider !== coordinatorModel.provider ||
       recoveredAgent.model?.modelId !== coordinatorModel.modelId ||
