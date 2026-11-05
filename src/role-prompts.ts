@@ -190,11 +190,11 @@ export const ROLE_BLOCKS = {
       id: "verify",
       name: "Verify",
       text: `VERIFY
-- Prove every acceptance criterion yourself. Follow the project's verify skill (read it with projects_skill_file).
+- Prove every acceptance criterion yourself. When your host contract names a verify skill, follow it (read it with projects_skill_file).
 - Run each check with projects_verify_run on a commit, so every result has a run id.
 - When a check fails, fix it, commit and run again, up to the project's round limit.
 - Capture proof media (screenshots, recordings) of every user-visible change as artifacts.
-- Without a verify skill, check the criteria the same way and list the gap "No verify skill".
+- When it names none, don't look for one: check the criteria the same way and list the gap "No verify skill".
 - Never call dirty changes pinned, or verified against HEAD alone.`,
     },
     {
