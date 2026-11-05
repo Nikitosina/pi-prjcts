@@ -1,20 +1,23 @@
-// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering and frames (scripts/prompt-blocks-failures.md B1–B10).
+// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering and frames (scripts/prompt-blocks-failures.md B1–B13).
 import assert from "node:assert/strict";
+import { Value } from "typebox/value";
 import {
   BUILTIN_PROMPT_BLOCKS,
   PROMPT_BLOCK_LIMITS,
   PROMPT_TARGETS,
+  ProjectPromptBlocks,
   composePrompt,
   legacyEditorText,
   normalizePromptBlocks,
   projectBehavior,
   resolvePromptBlocks,
-  taskHelperBehavior,
+  workerBehavior,
 } from "../src/prompt-blocks.ts";
 import {
   COORDINATOR_CONTEXT_RULES,
   DEFAULT_ROLE_PROMPTS,
   HOST_AGENT_PROMPT,
+  ROLE_BLOCKS,
   SHARED_ROLE_RULES,
   TASK_HELPER_PROMPT,
   taskHelperFrame,
@@ -23,14 +26,20 @@ import {
 const project = (extra = {}) => ({ name: "Demo", objective: "Build it", ...extra });
 const ids = (target) => BUILTIN_PROMPT_BLOCKS[target].map((block) => block.id);
 const defaults = (target) => BUILTIN_PROMPT_BLOCKS[target].map((block) => ({ id: block.id, enabled: true }));
+const joined = (texts) => texts.join("\n\n");
 const refused = (target, list, pattern, label) => assert.throws(() => normalizePromptBlocks(target, list), pattern, label);
 
-// B1: nothing saved is today's text, byte for byte.
+// B1: nothing saved is the built-in text, byte for byte, built-in blocks one blank line apart.
 for (const role of ["coordinator", "worker", "scout", "reviewer"])
   assert.equal(projectBehavior(project(), role).text, DEFAULT_ROLE_PROMPTS[role], `B1 ${role} default`);
 assert.equal(resolvePromptBlocks("host").text, HOST_AGENT_PROMPT, "B1 host default");
-assert.equal(projectBehavior(project(), "taskHelper").text, TASK_HELPER_PROMPT, "B1 task helper default");
-const helper = (p, access, standing) => composePrompt(taskHelperFrame(p, access, standing, "\nSUFFIX"), taskHelperBehavior(p));
+assert.equal(
+  DEFAULT_ROLE_PROMPTS.coordinator,
+  joined(ROLE_BLOCKS.coordinator.map((block) => block.text)),
+  "B1 coordinator blocks are one blank line apart",
+);
+assert.equal(workerBehavior(project(), "helper"), TASK_HELPER_PROMPT, "B1 task helper default");
+const helper = (p, access, standing) => composePrompt(taskHelperFrame(p, access, standing, "\nSUFFIX"), workerBehavior(p, "helper"));
 assert.equal(
   helper(project(), "maintain", "STANDING"),
   `You are a task helper for Demo. Project instructions: Build it\n\nRepository instructions (frozen for this thread):\nSTANDING\n\n${TASK_HELPER_PROMPT}\n${SHARED_ROLE_RULES} You may write revision-checked knowledge topics with projects_knowledge_write.\nSUFFIX`,
@@ -43,20 +52,26 @@ assert.equal(
 );
 for (const target of PROMPT_TARGETS) assert.equal(resolvePromptBlocks(target).customized, false, `B1 ${target} not customized`);
 
-// B2: a legacy override is the exact old text, marked legacy, and reaches task helpers as owner worker instructions.
+// B2: a legacy override is the exact old text plus the mode's delivery block, marked legacy, and reaches task helpers too.
+const delivery = (id) => ROLE_BLOCKS.worker.find((block) => block.id === id).text;
 const legacy = project({ prompts: { worker: "OWNER WORKER TEXT", scout: "S" } });
 const legacyWorker = projectBehavior(legacy, "worker");
-assert.equal(legacyWorker.text, "OWNER WORKER TEXT", "B2 legacy text");
+assert.equal(legacyWorker.text, joined(["OWNER WORKER TEXT", delivery("delivery-pr")]), "B2 legacy text with the Job delivery");
+assert.equal(projectBehavior(legacy, "scout").text, "S", "B2 legacy scout text");
 assert.ok(legacyWorker.legacy && legacyWorker.customized, "B2 legacy flagged");
 assert.deepEqual(
   legacyWorker.blocks.filter((block) => block.enabled).map((block) => [block.id, block.kind]),
-  [["custom:legacy", "custom"]],
-  "B2 legacy shows as one custom block over disabled built-ins",
+  [
+    ["custom:legacy", "custom"],
+    ["delivery-pr", "builtin"],
+    ["delivery-return", "builtin"],
+  ],
+  "B2 legacy shows as one custom block over disabled built-ins, delivery kept",
 );
 assert.equal(projectBehavior(legacy, "coordinator").text, DEFAULT_ROLE_PROMPTS.coordinator, "B2 other roles keep defaults");
 assert.ok(
-  helper(legacy, "maintain", "").includes(`Build it\n\nOwner worker instructions:\nOWNER WORKER TEXT\n\n${TASK_HELPER_PROMPT}\n`),
-  "B2 task helper owner instructions",
+  helper(legacy, "maintain", "").includes(`Build it\n\n${joined(["OWNER WORKER TEXT", delivery("delivery-return")])}\n`),
+  "B2 task helper gets the override and its own delivery",
 );
 
 // B3: the list order is the order; disabled text is gone.
@@ -70,16 +85,21 @@ const saved = normalizePromptBlocks("worker", [
 ]);
 const ordered = resolvePromptBlocks("worker", saved);
 const texts = BUILTIN_PROMPT_BLOCKS.worker.map((block) => block.text);
-assert.equal(ordered.text, ["Prefer small commits.", texts[1], ...texts.slice(2)].join("\n"), "B3 order and disabled");
+const jobTexts = (list) => list.filter((block) => block.mode !== "helper").map((block) => block.text);
+assert.equal(
+  ordered.text,
+  joined(["Prefer small commits.", ...jobTexts(BUILTIN_PROMPT_BLOCKS.worker.filter((block) => block.id !== first))]),
+  "B3 order and disabled",
+);
+assert.equal(texts.length, BUILTIN_PROMPT_BLOCKS.worker.length);
 assert.deepEqual(
   ordered.blocks.map((block) => block.id),
   ["custom:style", second, first, ...rest],
   "B3 resolved order",
 );
 assert.ok(ordered.customized && !ordered.legacy, "B3 customized");
-assert.equal(
-  taskHelperBehavior(project({ promptBlocks: { worker: saved } })).startsWith("Owner worker instructions:\nPrefer small commits.\n\n"),
-  true,
+assert.ok(
+  workerBehavior(project({ promptBlocks: { worker: saved } }), "helper").startsWith("Prefer small commits.\n\n"),
   "B3 custom worker blocks reach task helpers",
 );
 
@@ -111,7 +131,7 @@ refused("worker", [...list, { id: "custom:big", name: "Big", enabled: true, text
 // B5: default text is no override; a default list stores nothing.
 const restored = normalizePromptBlocks(
   "worker",
-  BUILTIN_PROMPT_BLOCKS.worker.map((block, n) => ({ id: block.id, enabled: n !== 0, text: block.text })),
+  BUILTIN_PROMPT_BLOCKS.worker.map((block, n) => ({ id: block.id, enabled: n !== 0 || block.required === true, text: block.text })),
 );
 assert.ok(
   restored.every((block) => !("text" in block)),
@@ -136,6 +156,10 @@ assert.equal(composePrompt(frame, "ROLE"), "HOST\n\nREPO\n\nROLE\n\nSKILLS\nWORK
 assert.equal(composePrompt(frame, ""), "HOST\n\nREPO\n\nSKILLS\nWORKSPACE", "B7 empty behavior");
 
 // B8: authority stays out of every block.
+assert.ok(PROMPT_TARGETS.length === 5 && !PROMPT_TARGETS.includes("taskHelper"), "B13 taskHelper is no longer a target");
+const retired = { worker: defaults("worker"), taskHelper: [{ id: "custom:old", name: "Old", enabled: true, text: "OLD HELPER" }] };
+assert.ok(Value.Check(ProjectPromptBlocks, retired), "B13 a saved taskHelper list still loads");
+assert.ok(!workerBehavior(project({ promptBlocks: retired }), "helper").includes("OLD HELPER"), "B13 and never reaches a prompt");
 for (const target of PROMPT_TARGETS)
   for (const block of BUILTIN_PROMPT_BLOCKS[target])
     assert.ok(!block.text.includes(SHARED_ROLE_RULES) && !block.text.includes(COORDINATOR_CONTEXT_RULES), `B8 ${target}.${block.id}`);
@@ -152,34 +176,22 @@ const hostOff = normalizePromptBlocks(
 );
 assert.equal(
   resolvePromptBlocks("host", hostOff).text,
-  HOST_AGENT_PROMPT.split("\n")
-    .filter((_, n) => n !== 1)
-    .join("\n"),
+  joined(ROLE_BLOCKS.host.filter((_, n) => n !== 1).map((block) => block.text)),
   "B9 host block off",
 );
 
 // B10: the coordinator's context habits are an editable block; the generated contract keeps only the fact and the guard.
-const OLD_CONTEXT_RULES = `Every tool answer stays in this chat until compaction. Read an agent's report first, then only the evidence it points to: one diff path, one artifact, one transcript ref. Read files and diffs by path and line range, not whole trees. Brief agents with refs they can open (branch, commit, file paths, artifact and report refs) instead of pasting source or logs. A skill or file you read fully in this chat stays in context while it is unchanged: you need not reread it. Read it again after a compaction or /reload, when it or your instructions changed, when your earlier read was partial, or when a skill, instruction or task requires it. These habits never replace a required skill read, proof or evidence check.`;
 const habits = BUILTIN_PROMPT_BLOCKS.coordinator.find((block) => block.id === "context");
-assert.ok(habits && !("locked" in habits), "B10 context habits are an editable coordinator block");
-const generated = `${COORDINATOR_CONTEXT_RULES}\n${DEFAULT_ROLE_PROMPTS.coordinator}`;
-for (const sentence of OLD_CONTEXT_RULES.split(/(?<=\.) /)) {
-  const where = [COORDINATOR_CONTEXT_RULES.includes(sentence), habits.text.includes(sentence)];
-  assert.ok(generated.split(sentence).length === 2 || sentence.startsWith("These habits"), `B10 "${sentence.slice(0, 40)}" appears once`);
-  assert.ok(where.filter(Boolean).length <= 1, `B10 "${sentence.slice(0, 40)}" is in one place`);
-}
-assert.ok(
-  habits.text.startsWith("Read an agent's report first") && habits.text.includes("when a skill, instruction or task requires it."),
-  "B10 habits moved",
-);
+assert.ok(habits && !habits.required, "B10 context habits are an editable coordinator block");
+assert.ok(/by path and line range/.test(habits.text) && /reread/.test(habits.text), "B10 habits are in the block");
 assert.ok(
   COORDINATOR_CONTEXT_RULES.includes("Every tool answer stays in this chat until compaction") &&
     /never replaces? a required skill read, proof or evidence check/.test(COORDINATOR_CONTEXT_RULES) &&
-    !COORDINATOR_CONTEXT_RULES.includes("Read an agent's report first"),
+    !/by path and line range/.test(COORDINATOR_CONTEXT_RULES),
   "B10 the contract keeps the fact and the guard only",
 );
 const legacyCoordinator = projectBehavior(project({ prompts: { coordinator: "OLD COORD" } }), "coordinator");
-assert.equal(legacyCoordinator.text, `OLD COORD\n${habits.text}`, "B10 a legacy coordinator override keeps the habits it ran with");
+assert.equal(legacyCoordinator.text, joined(["OLD COORD", habits.text]), "B10 a legacy coordinator override keeps the habits it ran with");
 assert.equal(
   projectBehavior(project({ prompts: { coordinator: legacyEditorText(project(), "coordinator") } }), "coordinator").text,
   DEFAULT_ROLE_PROMPTS.coordinator,
@@ -190,5 +202,39 @@ const habitsOff = normalizePromptBlocks(
   defaults("coordinator").map((block) => ({ ...block, enabled: block.id !== "context" })),
 );
 assert.ok(!resolvePromptBlocks("coordinator", habitsOff).text.includes(habits.text), "B10 habits can be turned off");
+
+// B11: one worker block list; each mode gets only its own delivery, and shared edits reach both modes.
+const edited = normalizePromptBlocks(
+  "worker",
+  defaults("worker").map((block) => (block.id === "verify" ? { ...block, text: "VERIFY EDITED" } : block)),
+);
+const both = project({ promptBlocks: { worker: edited } });
+for (const [mode, own, other] of [
+  ["job", "delivery-pr", "delivery-return"],
+  ["helper", "delivery-return", "delivery-pr"],
+]) {
+  const text = workerBehavior(both, mode);
+  assert.ok(text.includes("VERIFY EDITED") && text.includes(delivery(own)), `B11 ${mode} has the shared edit and its delivery`);
+  assert.ok(!text.includes(delivery(other)), `B11 ${mode} lacks the other delivery`);
+}
+assert.equal(projectBehavior(both, "worker").text, workerBehavior(both, "job"), "B11 the worker target's text is the Job worker's");
+
+// B12: delivery blocks are required: editable, never off.
+for (const id of ["delivery-pr", "delivery-return"]) {
+  refused(
+    "worker",
+    defaults("worker").map((block) => ({ ...block, enabled: block.id !== id })),
+    /required/i,
+    `B12 ${id} cannot be turned off`,
+  );
+  const changed = normalizePromptBlocks(
+    "worker",
+    defaults("worker").map((block) => (block.id === id ? { ...block, text: `${id} EDITED` } : block)),
+  );
+  assert.ok(
+    workerBehavior(project({ promptBlocks: { worker: changed } }), id === "delivery-pr" ? "job" : "helper").includes(`${id} EDITED`),
+    `B12 ${id} can be edited`,
+  );
+}
 
 console.log("prompt-blocks-unit: ok");

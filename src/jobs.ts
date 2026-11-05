@@ -1171,13 +1171,6 @@ export function createJobs(host: JobsHost) {
     }),
     replay: "safe",
     execute: async (args, api, callContext) => {
-      const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
-        (item) => item.workerConversation === api.conversationId,
-      );
-      if (current?.workspace)
-        return reply(
-          "Task helpers cannot spawn subagents. Return findings and ask the Coordinator to spawn a static reviewer against a committed full SHA.",
-        );
       const cwd = (await api.agent(callContext)).cwd;
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];

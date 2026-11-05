@@ -1,19 +1,18 @@
 import { createHash } from "node:crypto";
 import { Type, type Static } from "typebox";
-import { DEFAULT_ROLE_PROMPTS, HOST_AGENT_PROMPT, TASK_HELPER_PROMPT } from "./role-prompts.ts";
+import { BLOCK_SEPARATOR, ROLE_BLOCKS, type RoleBlock, type WorkerMode } from "./role-prompts.ts";
 import { estimateTokens } from "./prompt-sections.ts";
 import type { Project } from "./state.ts";
 
 /**
  * Prompt blocks: the editable behavior part of an agent's prompt, as ordered named blocks (docs/prompt-blocks.md).
- * Built-in blocks are the lines of today's role prompts; custom blocks are the owner's. Generated context (host contract,
+ * Built-in blocks are the role prompts' sections (role-prompts.ts); custom blocks are the owner's. Generated context (host contract,
  * repository and instance instructions, skills, memory, workspace bindings) frames the behavior and is never a block.
  */
-export const PROMPT_TARGETS = ["coordinator", "worker", "taskHelper", "scout", "reviewer", "host"] as const;
+export const PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer", "host"] as const;
 export type PromptTarget = (typeof PROMPT_TARGETS)[number];
-export const PROJECT_PROMPT_TARGETS = ["coordinator", "worker", "taskHelper", "scout", "reviewer"] as const;
+export const PROJECT_PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer"] as const;
 export type ProjectPromptTarget = (typeof PROJECT_PROMPT_TARGETS)[number];
-type LegacyRole = Exclude<ProjectPromptTarget, "taskHelper">;
 
 export const PROMPT_BLOCK_LIMITS = {
   maxBlocks: 32,
@@ -24,8 +23,11 @@ export const PROMPT_BLOCK_LIMITS = {
 } as const;
 const CUSTOM_ID = /^custom:[a-z0-9][a-z0-9-]{0,47}$/;
 const LEGACY_ID = "custom:legacy";
-/** Built-ins that were not part of the role prompt a legacy override replaced (the coordinator's context habits were host text). */
-const OUTSIDE_LEGACY: Partial<Record<PromptTarget, readonly string[]>> = { coordinator: ["context"] };
+/** Built-ins a legacy override leaves on: the coordinator's context habits were host text, and a worker keeps its delivery. */
+const OUTSIDE_LEGACY: Partial<Record<PromptTarget, readonly string[]>> = {
+  coordinator: ["context"],
+  worker: ["delivery-pr", "delivery-return"],
+};
 
 export const PromptBlock = Type.Object(
   {
@@ -41,50 +43,20 @@ export const PromptBlock = Type.Object(
 export type PromptBlock = Static<typeof PromptBlock>;
 export const PromptBlockList = Type.Array(PromptBlock, { maxItems: PROMPT_BLOCK_LIMITS.maxBlocks });
 export const ProjectPromptBlocks = Type.Object(
-  Object.fromEntries(PROJECT_PROMPT_TARGETS.map((target) => [target, Type.Optional(PromptBlockList)])) as Record<
-    ProjectPromptTarget,
-    Type.TOptional<typeof PromptBlockList>
-  >,
+  {
+    ...(Object.fromEntries(PROJECT_PROMPT_TARGETS.map((target) => [target, Type.Optional(PromptBlockList)])) as Record<
+      ProjectPromptTarget,
+      Type.TOptional<typeof PromptBlockList>
+    >),
+    /** Retired target (task helpers use the worker's blocks): read so older projects still load, never applied. */
+    taskHelper: Type.Optional(Type.Unknown()),
+  },
   { additionalProperties: false },
 );
 export type ProjectPromptBlocks = Static<typeof ProjectPromptBlocks>;
 
-type Builtin = { id: string; name: string; text: string };
-/** Names each line of a built-in prompt; the lines joined with "\n" are the prompt, so the defaults stay byte-identical. */
-const named = (text: string, names: readonly (readonly [string, string])[]): readonly Builtin[] => {
-  const lines = text.split("\n");
-  if (lines.length !== names.length) throw new Error(`Built-in prompt has ${lines.length} lines for ${names.length} block names`);
-  return names.map(([id, name], index) => ({ id, name, text: lines[index]! }));
-};
-export const BUILTIN_PROMPT_BLOCKS: Record<PromptTarget, readonly Builtin[]> = {
-  coordinator: named(DEFAULT_ROLE_PROMPTS.coordinator, [
-    ["delivery", "Delivery and direct work"],
-    ["delegation", "Delegation and workspaces"],
-    ["task-helpers", "Task helper results"],
-    ["reporting", "Reports to the owner"],
-    ["memory", "Memory and agent lifecycle"],
-    ["context", "Context habits"],
-  ]),
-  worker: named(DEFAULT_ROLE_PROMPTS.worker, [
-    ["job", "Plan and build"],
-    ["proof", "Prove the candidate"],
-    ["review", "Independent review"],
-    ["report", "Ready report"],
-  ]),
-  taskHelper: named(TASK_HELPER_PROMPT, [
-    ["workspace", "Prepared workspace"],
-    ["handback-rules", "Return, not Ready"],
-    ["handback", "Handback contents"],
-    ["integration", "Coordinator owns delivery"],
-  ]),
-  scout: named(DEFAULT_ROLE_PROMPTS.scout, [["answer", "Read-only answers"]]),
-  reviewer: named(DEFAULT_ROLE_PROMPTS.reviewer, [["review", "Findings"]]),
-  host: named(HOST_AGENT_PROMPT, [
-    ["identity", "Role and scope"],
-    ["actions", "Actions and approvals"],
-    ["reporting", "Reporting and focus"],
-  ]),
-};
+type Builtin = RoleBlock;
+export const BUILTIN_PROMPT_BLOCKS: Record<PromptTarget, readonly Builtin[]> = ROLE_BLOCKS;
 
 export type ResolvedPromptBlock = {
   id: string;
@@ -95,6 +67,10 @@ export type ResolvedPromptBlock = {
   /** A built-in's default text; null for custom blocks. */
   defaultText: string | null;
   edited: boolean;
+  /** Edited but never turned off. */
+  required: boolean;
+  /** The worker mode a delivery block belongs to; null when it applies to every agent of the target. */
+  mode: WorkerMode | null;
 };
 export type ResolvedPromptBlocks = {
   target: PromptTarget;
@@ -103,18 +79,18 @@ export type ResolvedPromptBlocks = {
   /** The text comes from the retired `project.prompts[role]` override. */
   legacy: boolean;
   blocks: ResolvedPromptBlock[];
-  /** The enabled blocks' text in order, one block per line: what the agent's behavior section carries. */
+  /** The enabled blocks' text in order, separated by a blank line: what the agent's behavior section carries (a worker: the Job worker's). */
   text: string;
 };
 
 const refuse = (detail: string): never => {
   throw new Error(`Prompt blocks: ${detail}`);
 };
-const joinBlocks = (blocks: readonly ResolvedPromptBlock[]) =>
+const joinBlocks = (blocks: readonly ResolvedPromptBlock[], mode: WorkerMode = "job") =>
   blocks
-    .filter((block) => block.enabled)
+    .filter((block) => block.enabled && (!block.mode || block.mode === mode))
     .map((block) => block.text)
-    .join("\n");
+    .join(BLOCK_SEPARATOR);
 
 /**
  * Validates a whole ordered list for a target and drops what restates a default. Returns undefined for the default list
@@ -132,6 +108,7 @@ export function normalizePromptBlocks(target: PromptTarget, input: readonly Prom
     const builtin = builtins.get(block.id);
     if (builtin) {
       if (block.name !== undefined) refuse(`built-in block ${block.id} keeps its name`);
+      if (builtin.required && !block.enabled) refuse(`block ${block.id} is required; edit it instead of turning it off`);
       return block.text === undefined || block.text === builtin.text
         ? { id: block.id, enabled: block.enabled }
         : { id: block.id, enabled: block.enabled, text: block.text };
@@ -148,7 +125,8 @@ export function normalizePromptBlocks(target: PromptTarget, input: readonly Prom
   if (missing.length) refuse(`missing built-in blocks ${missing.join(", ")}; turn a block off instead of removing it`);
   if (list.filter((block) => !builtins.has(block.id)).length > PROMPT_BLOCK_LIMITS.maxCustom)
     refuse(`at most ${PROMPT_BLOCK_LIMITS.maxCustom} custom blocks`);
-  const total = resolvePromptBlocks(target, list).text.length;
+  const resolved = resolvePromptBlocks(target, list);
+  const total = Math.max(...(["job", "helper"] as const).map((mode) => joinBlocks(resolved.blocks, mode).length));
   if (total > PROMPT_BLOCK_LIMITS.maxTotalChars)
     refuse(`enabled blocks total ${total} characters, over ${PROMPT_BLOCK_LIMITS.maxTotalChars}`);
   const isDefault =
@@ -164,10 +142,12 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
     id: block.id,
     name: block.name,
     kind: "builtin",
-    enabled,
+    enabled: enabled || block.required === true,
     text: text ?? block.text,
     defaultText: block.text,
     edited: text !== undefined && text !== block.text,
+    required: block.required === true,
+    mode: block.mode ?? null,
   });
   const custom = (id: string, name: string, enabled: boolean, text: string): ResolvedPromptBlock => ({
     id,
@@ -177,6 +157,8 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
     text,
     defaultText: null,
     edited: false,
+    required: false,
+    mode: null,
   });
   let blocks: ResolvedPromptBlock[];
   if (saved) {
@@ -219,48 +201,32 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
 }
 
 type PromptConfig = Pick<Project, "prompts" | "promptBlocks">;
-const legacyOverride = (project: PromptConfig, target: ProjectPromptTarget) =>
-  target === "taskHelper" ? undefined : project.prompts?.[target as LegacyRole];
 /** A project's behavior for one target: its saved blocks, else its legacy override, else the built-ins. */
 export const projectBehavior = (project: PromptConfig, target: ProjectPromptTarget): ResolvedPromptBlocks =>
-  resolvePromptBlocks(target, project.promptBlocks?.[target], legacyOverride(project, target));
+  resolvePromptBlocks(target, project.promptBlocks?.[target], project.prompts?.[target]);
 
 /**
  * The text the older per-role prompt editor (`prompts-snapshot`, `settings-update` `prompts`) shows and saves: the behavior
  * without the blocks a legacy override leaves on, so saving it back as an override gives the same behavior.
  */
-export const legacyEditorText = (project: PromptConfig, target: Exclude<ProjectPromptTarget, "taskHelper">): string =>
+export const legacyEditorText = (project: PromptConfig, target: ProjectPromptTarget): string =>
   joinBlocks(projectBehavior(project, target).blocks.filter((block) => !OUTSIDE_LEGACY[target]?.includes(block.id)));
 
-/** A task helper's behavior: the owner's own worker blocks, then the helper contract blocks (the helper replaces the Job workflow). */
-export function taskHelperBehavior(project: PromptConfig): string {
-  const owner = projectBehavior(project, "worker")
-    .blocks.filter((block) => block.kind === "custom" && block.enabled)
-    .map((block) => block.text)
-    .join("\n");
-  return [owner ? `Owner worker instructions:\n${owner}` : "", projectBehavior(project, "taskHelper").text].filter(Boolean).join("\n\n");
-}
+/** A worker's behavior in one mode: the worker blocks with that mode's delivery block. */
+export const workerBehavior = (project: PromptConfig, mode: WorkerMode): string =>
+  joinBlocks(projectBehavior(project, "worker").blocks, mode);
 
 /**
- * Behavior texts an agent prepared before frames existed could have started with: the built-ins, the legacy override, the
- * text of a kept `custom:legacy` block, or the current behavior. Used only to prove a rebuilt frame by exact equality.
+ * Behavior texts an agent prepared before frames existed could have started with: the current behavior, the built-ins, or the
+ * legacy override. Used only to prove a rebuilt frame by exact equality.
  */
-export function legacyBehaviors(project: PromptConfig, target: ProjectPromptTarget): string[] {
-  const earlier = (role: LegacyRole) => [
-    project.prompts?.[role],
-    project.promptBlocks?.[role]?.find((block) => block.id === LEGACY_ID)?.text,
+export function legacyBehaviors(project: PromptConfig, target: ProjectPromptTarget, mode: WorkerMode = "job"): string[] {
+  const texts = [
+    target === "worker" ? workerBehavior(project, mode) : projectBehavior(project, target).text,
+    joinBlocks(resolvePromptBlocks(target).blocks, mode),
+    project.prompts?.[target],
+    project.promptBlocks?.[target]?.find((block) => block.id === LEGACY_ID)?.text,
   ];
-  const texts =
-    target === "taskHelper"
-      ? [
-          taskHelperBehavior(project),
-          ...["", ...earlier("worker")].flatMap((owner) =>
-            [projectBehavior(project, "taskHelper").text, resolvePromptBlocks("taskHelper").text].map((helper) =>
-              owner === undefined ? undefined : [owner ? `Owner worker instructions:\n${owner}` : "", helper].filter(Boolean).join("\n\n"),
-            ),
-          ),
-        ]
-      : [projectBehavior(project, target).text, resolvePromptBlocks(target).text, ...earlier(target)];
   return [...new Set(texts.filter((text): text is string => text !== undefined))];
 }
 

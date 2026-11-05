@@ -105,7 +105,7 @@ await kit.run(async () => {
     "P1 a fresh project shows the built-in worker blocks",
     !fresh.customized &&
       !fresh.legacy &&
-      fresh.blocks.length === 4 &&
+      fresh.blocks.length === 7 &&
       fresh.blocks.every((block) => block.kind === "builtin" && block.enabled && block.tokens > 0),
     fresh,
   );

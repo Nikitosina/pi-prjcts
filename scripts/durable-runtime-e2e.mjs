@@ -99,7 +99,7 @@ try {
   assert.equal(answer.status, "done");
   assert.match(answer.text, /ADAPTER_READY/);
   pass("Fake-model coordinator answers");
-  assert.ok(modelRequests.some((request) => request.includes("After asking for an owner decision, end your turn")));
+  assert.ok(modelRequests.some((request) => request.includes("After asking the owner for a decision, end the turn")));
   assert.ok(modelRequests.some((request) => request.includes("agents report")));
   pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();

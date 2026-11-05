@@ -1,4 +1,4 @@
-// Settings → Prompt: the behavior blocks of one target (a project role, the task helper or the Host agent) as a compact list, one
+// Settings → Prompt: the behavior blocks of one target (a project role or the Host agent) as a compact list, one
 // selected editor and the assembled preview. Project instructions keep their own row (the project's objective); the other generated
 // sections are listed read-only. Unsaved text is kept per block in localStorage until it is saved, so a reload or a refused stale
 // write never loses it. The host owns the data: `prompt-blocks-get`/`-set`, `prompt-render`, `settings-snapshot`/`-update`.
@@ -9,7 +9,7 @@ import { state } from "./state.js";
 const estimate = (text) => Math.ceil(text.length / 4);
 const narrow = matchMedia("(max-width: 760px)");
 const OBJECTIVE = "objective"; // the Project instructions row; never a block id (built-ins are named, customs are `custom:<slug>`)
-let workerMode = "job"; // Worker tab: an independent Job worker or a task helper (target `taskHelper`); kept across repaints
+let workerMode = "job"; // Worker tab preview: an independent Job worker or a task helper (one block list, a delivery block per mode)
 
 // ---------------------------------------------------------------------------------------------------------------- host
 
@@ -80,7 +80,7 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
   // Reads overlap (a save re-reads while the change feed asks for one too): only the newest one started may land.
   const fetchAll = async () => {
     const mine = ++reads,
-      next = profile === "worker" && workerMode === "task" ? "taskHelper" : profile;
+      next = profile;
     const result = await Promise.all([
       call("prompt-blocks-get", { ...where(next), target: next }),
       render(profile),
@@ -131,8 +131,10 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
     const lead =
       item.kind === "project"
         ? `<span class="pb-lead" aria-hidden="true"></span>`
-        : `<label class="pb-switch"><input class="pb-toggle" type="checkbox" tabindex="-1" ${on ? "checked" : ""} aria-label="${esc(item.name)} ${on ? "on" : "off"}"/><span class="track"></span></label>`;
-    return `<li class="pb-row" role="option" tabindex="${item.id === selected ? 0 : -1}" data-block="${esc(item.id)}" data-enabled="${on}" aria-selected="${item.id === selected}">${lead}<span class="pb-name">${esc(item.name)}</span>${on ? "" : `<span class="pb-off">off</span>`}${readDraft(target, item.id) ? `<span class="pb-draft">draft</span>` : ""}${badge(item)}<span class="pb-tok mono">${tokens(item.tokens ?? estimate(item.text))}</span></li>`;
+        : item.required
+          ? `<span class="pb-lead lock" aria-label="${esc(item.name)} is required">🔒</span>`
+          : `<label class="pb-switch"><input class="pb-toggle" type="checkbox" tabindex="-1" ${on ? "checked" : ""} aria-label="${esc(item.name)} ${on ? "on" : "off"}"/><span class="track"></span></label>`;
+    return `<li class="pb-row" role="option" tabindex="${item.id === selected ? 0 : -1}" data-block="${esc(item.id)}" data-enabled="${on}" aria-selected="${item.id === selected}">${lead}<span class="pb-name">${esc(item.name)}</span>${item.mode ? `<span class="pb-mode small muted">${item.mode === "job" ? "Job only" : "Helper only"}</span>` : ""}${on ? "" : `<span class="pb-off">off</span>`}${readDraft(target, item.id) ? `<span class="pb-draft">draft</span>` : ""}${badge(item)}<span class="pb-tok mono">${tokens(item.tokens ?? estimate(item.text))}</span></li>`;
   };
   const generatedRow = (item) =>
     `<li class="pb-row" data-generated data-block="${esc(item.id)}" title="${esc(sourceLine(item))}"><span class="pb-lead" aria-hidden="true"></span><span class="pb-name">${esc(item.label)}</span><span class="pb-tok mono">${tokens(item.tokens)}</span></li>`;
@@ -177,7 +179,10 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     const parts = rendered.sections.flatMap((item) =>
       item.id === "role"
         ? model.blocks
-            .filter((entry) => entry.enabled !== false && entry.text.trim())
+            .filter(
+              (entry) =>
+                entry.enabled !== false && entry.text.trim() && (!entry.mode || entry.mode === (workerMode === "task" ? "helper" : "job")),
+            )
             .map((entry) => own(source(entry), entry.id, entry.name, entry.id, entry.text, entry.tokens ?? estimate(entry.text)))
         : item.id === "project" && settings
           ? [own("Project", item.id, item.label, sourceLine(item), item.text, item.tokens)]
@@ -289,7 +294,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
   });
   const toggle = queued((id) => {
     const item = block(id);
-    if (!item || item.kind === "project" || id === "new") return;
+    if (!item || item.kind === "project" || item.required || id === "new") return;
     const on = item.enabled === false;
     return writeBlocks(replace(id, { enabled: on }), `${item.name} ${on ? "on" : "off"} · saved`, { focus: "row" });
   });

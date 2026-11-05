@@ -5,7 +5,7 @@ Written before the code. The scripted proof is the `ui2-prompts` journey in `.ag
 ## Target and layout
 
 - E1 The target picker does not offer the Host agent next to the project roles, or picking it keeps showing the previous project's blocks.
-- E2 A block row is missing its switch (a lock for a locked built-in), name, source badge (Built-in, Edited, Custom, Legacy) or token estimate, or the list grows into stacked full-height forms instead of one selected editor.
+- E2 A block row is missing its switch (a lock for a required built-in, such as a worker's delivery block, which Space must leave on), name, source badge (Built-in, Edited, Custom, Legacy) or token estimate, or the list grows into stacked full-height forms instead of one selected editor.
 - E3 Generated sections (host contract, instance and repository instructions, tools, skills, preferences, Memory) can be edited, toggled or moved, or are missing from the preview.
 - E4 At 390 px the list and the editor share the screen, overflow sideways, or the editor has no way back to the list.
 
@@ -28,7 +28,7 @@ Written before the code. The scripted proof is the `ui2-prompts` journey in `.ag
 ## Preview
 
 - E13 The preview does not show the assembled prompt in order with each section's source and tokens, or generated sections are expanded by default and bury the blocks.
-- E14 The Worker tab does not switch between an independent Job worker and a task helper (blocks of target `taskHelper`, preview with `workerMode: task`), or shows the same text for both.
+- E14 The Worker tab does not switch its preview between an independent Job worker and a task helper (one worker block list; the preview with `workerMode: task` carries the helper's delivery block), or shows the same text for both.
 - E15 The preview does not say it shows the configuration for the next use, presents configured text as what a running conversation has, or hides that an edit applies only on the next safe turn.
 - E16 Rendered prompt text is inserted as HTML (block text with `<b>` renders bold or runs a script).
 - E23 In a chat other than Main, a Prompt tab other than the coordinator fails ("chatId applies to the coordinator profile only"): the preview asks for chat-specific text a worker, scout, reviewer or the Host agent does not have.

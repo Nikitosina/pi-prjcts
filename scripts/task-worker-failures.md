@@ -13,5 +13,6 @@ These failure cases precede the task workspace implementation. Fix-specific red/
 - Ordinary helper return requires a PR/Ready report, publishes automatically, or becomes owner approval.
 - Queued messages, empty output, provider failure or interrupted delivery become false completion.
 - A dirty helper tree is presented as independently verified or a reviewer gains execution tools.
+- A task helper cannot start its own reviewer or scout with `subagent`, or that child can spawn agents.
 - Task helpers drop owner-configured worker instructions or immutable authority rules.
 - Existing independent Job/PR/Approve behavior or static pinned readers regress.

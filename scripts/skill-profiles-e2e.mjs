@@ -357,8 +357,8 @@ try {
   }
   check(
     "S23 the coordinator is told to keep reads focused and reuse skills it read, and skill reads stay mandatory",
-    /report first, then only the evidence it points to/.test(coord0.system) &&
-      /you need not reread it\. Read it again after a compaction or \/reload, when it or your instructions changed, when your earlier read was partial, or when a skill, instruction or task requires it/.test(
+    /report first \(agents report with the notification's ref\), then only the evidence it points to/.test(coord0.system) &&
+      /Don't reread an unchanged file or skill you fully read in this chat\. Reread after a compaction or \/reload, after a partial read, or when a skill, instruction or task requires it/.test(
         coord0.system,
       ) &&
       /never replace a required skill read/.test(coord0.system) &&

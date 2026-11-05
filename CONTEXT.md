@@ -15,10 +15,10 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Task helper**: a worker doing a subtask for its Coordinator, either in the chat's shared workspace or in an isolated workspace from a chosen commit. It returns changes and findings without needing its own PR.
 - **Completed**: a task helper has returned control and an answer. This does not mean acceptance criteria passed, the result was independently verified or delivery was approved.
 - **Agent roles**: coordinator, worker, scout, reviewer. The verifier role was retired on 2026-11-03; recorded verifier conversations still read.
-  - **Worker**: implements one Job. An independent worker verifies the candidate itself with the project's verify skill and `projects_verify_run`, gets reviewed and reports Ready; a task helper returns its answer for the Coordinator to inspect and integrate.
+  - **Worker**: implements one Job. Every worker verifies its work itself with the project's verify skill and `projects_verify_run` and gets it reviewed. An independent worker then reports Ready with a PR; a task helper returns its answer for the Coordinator to inspect and integrate.
   - **Scout**: read-only investigation.
   - **Reviewer**: read-only review of a pinned candidate.
-- **Spawn**: starting an agent as a conversation owned by the spawning tool call. The Coordinator spawns workers, scouts and reviewers in the background; an independent worker spawns reviewers and scouts in the foreground. Task helpers leave further delegation to the Coordinator. Children of a worker cannot spawn.
+- **Spawn**: starting an agent as a conversation owned by the spawning tool call. The Coordinator spawns workers, scouts and reviewers in the background; every worker, independent or task helper, spawns reviewers and scouts in the foreground. Children of a worker cannot spawn.
 - **Steer**: a message queued into a running agent's conversation, placed after its current tool round.
 - **Dismiss**: clearing an ended Job or agent from the lists. Nothing is deleted.
 - **Stop**: an explicit abort of an agent with a stated reason. Aborting drains everything the agent owns.

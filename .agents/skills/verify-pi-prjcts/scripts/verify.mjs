@@ -817,13 +817,15 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings open");
     if ((await page.evaluate(`document.querySelector('#settings').dataset.section`)) !== "prompt")
       await page.click('#settings nav [data-section="prompt"]');
-    await page.click(`#settings .profiles [data-profile="${target === "taskHelper" ? "worker" : target}"]`);
-    if (target === "taskHelper" || target === "worker") {
+    // "taskHelper" is the Worker tab in task helper mode: the same worker blocks, the helper's preview.
+    const profile = target === "taskHelper" ? "worker" : target;
+    await page.click(`#settings .profiles [data-profile="${profile}"]`);
+    if (profile === "worker") {
       await page.waitFor(`!!document.querySelector('#settings .pb-bar [data-kind]')`, "worker kind switch");
       await page.click(`#settings .pb-bar [data-kind="${target === "worker" ? "job" : "task"}"]`);
     }
     await page.waitFor(
-      `document.querySelector('#settings .pb')?.dataset.target === ${q(target)} && document.querySelectorAll('#settings .pb-row').length > 0`,
+      `document.querySelector('#settings .pb')?.dataset.target === ${q(profile)} && document.querySelectorAll('#settings .pb-row').length > 0`,
       `prompt blocks of ${target}`,
     );
   };
@@ -944,6 +946,19 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   if (await page.evaluate(`!!document.querySelector(${q(customRow)})`)) throw Error("E7 a coordinator block shows for the worker");
   if ((await blocks("worker")).blocks.some((b) => b.id === custom.id)) throw Error("E7 a coordinator block was stored for the worker");
   record("side-effect", `E7 custom block ${custom.id} stored for the coordinator only, with its name and text; markup inert`);
+
+  // E2: a required block (a worker's delivery) shows a lock instead of a switch, and Space leaves it on.
+  const delivery = row("delivery-pr");
+  const lockShape = await page.evaluate(
+    `(() => { const r = document.querySelector(${q(delivery)}); return r && { lock: !!r.querySelector('.pb-lead.lock'), toggle: !!r.querySelector('input.pb-toggle'), mode: r.querySelector('.pb-mode')?.innerText.trim() }; })()`,
+  );
+  if (!lockShape?.lock || lockShape.toggle || lockShape.mode !== "Job only")
+    throw Error(`E2 required delivery row: ${JSON.stringify(lockShape)}`);
+  await page.evaluate(`document.querySelector(${q(delivery)}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await delay(300);
+  if (!(await blocks("worker")).blocks.find((b) => b.id === "delivery-pr")?.enabled) throw Error("E2 Space turned a required block off");
+  record("side-effect", "E2 the Job delivery block shows a lock and a Job only tag; Space leaves it on in the stored list");
 
   // E8: Alt+↑ moves the focused row up; the saved order follows and focus stays on the moved row.
   await open("coordinator");
@@ -1110,7 +1125,7 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   }
   record(
     "visible",
-    "E23 in a side chat, all six Prompt tabs (coordinator, Job worker, task helper, scout, reviewer, Host agent) show blocks and a preview, no error",
+    "E23 in a side chat, all six Prompt views (coordinator, Job worker, task helper, scout, reviewer, Host agent) show blocks and a preview, no error",
   );
 }
 

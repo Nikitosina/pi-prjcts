@@ -58,7 +58,6 @@ const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const PromptTargetSchema = Type.Union([
   Type.Literal("coordinator"),
   Type.Literal("worker"),
-  Type.Literal("taskHelper"),
   Type.Literal("scout"),
   Type.Literal("reviewer"),
   Type.Literal("host"),

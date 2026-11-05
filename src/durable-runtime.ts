@@ -122,12 +122,12 @@ import { catalog } from "./workspace-authorization.ts";
 import { providerFailure, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
-import { COORDINATOR_CONTEXT_RULES, SHARED_ROLE_RULES, taskHelperFrame } from "./role-prompts.ts";
+import { COORDINATOR_CONTEXT_RULES, SHARED_ROLE_RULES, taskHelperFrame, type WorkerMode } from "./role-prompts.ts";
 import {
   composePrompt,
   legacyBehaviors,
   projectBehavior,
-  taskHelperBehavior,
+  workerBehavior,
   type PromptFrame,
   type ProjectPromptTarget,
 } from "./prompt-blocks.ts";
@@ -1109,9 +1109,9 @@ export async function openDurableProject(input: {
         role: promptSection(
           "role",
           "Role instructions",
-          "Settings: worker and taskHelper prompt blocks",
+          "Settings: worker prompt blocks (task helper delivery)",
           true,
-          taskHelperBehavior(current),
+          workerBehavior(current, "helper"),
         ),
         skills: promptSection(
           "skills",
@@ -1130,10 +1130,16 @@ export async function openDurableProject(input: {
       prompt: { frame, behavior },
     });
     // An agent prepared before frames gets its rebuilt frame with every behavior it could have started with, for an exact-match proof.
-    const reframed = (stored: PromptFrame | null, rebuilt: PromptFrame, target: ProjectPromptTarget, behavior: string) => {
+    const reframed = (
+      stored: PromptFrame | null,
+      rebuilt: PromptFrame,
+      target: ProjectPromptTarget,
+      behavior: string,
+      mode?: WorkerMode,
+    ) => {
       if (stored) return framed(stored, behavior);
       const built = framed(rebuilt, behavior);
-      const proofs = legacyBehaviors(loadProject(project.id), target).map((text) => ({
+      const proofs = legacyBehaviors(loadProject(project.id), target, mode).map((text) => ({
         instructions: composePrompt(rebuilt, text),
         behavior: text,
       }));
@@ -1210,7 +1216,7 @@ export async function openDurableProject(input: {
       },
       refuseSend: (agent) => unscopedRefusal(agent),
       promptBehavior: (agent, job) =>
-        agent.role === "worker" && job?.workspace ? taskHelperBehavior(loadProject(project.id)) : behaviorOf(agent.role),
+        agent.role === "worker" && job?.workspace ? workerBehavior(loadProject(project.id), "helper") : behaviorOf(agent.role),
       prepare: async ({ agent, job, frame }) => {
         await refreshDelegatedSkills();
         const conversation = Number(agent.conversationId);
@@ -1271,8 +1277,9 @@ export async function openDurableProject(input: {
                 standing.text,
                 `\nRole profile: worker.${roleIndex("worker")}${environment.workerInstructions ?? ""}`,
               ),
-              "taskHelper",
-              taskHelperBehavior(current),
+              "worker",
+              workerBehavior(current, "helper"),
+              "helper",
             ),
             tools: offeredFor(loadProject(project.id), "worker", [...(base.tools as ToolRegistration[]), ...environment.tools]),
             extensions: [...(base.extensions as Extension[]), environment.extension],

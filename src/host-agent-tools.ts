@@ -183,7 +183,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
     "The assembled prompt of a project's profile (or profile host: yours), as sections with token estimates, and whether a chat runs it yet.",
   ),
   "prompt-blocks-get": allow(
-    "Ordered behavior blocks of a prompt target (coordinator, worker, taskHelper, scout, reviewer of a project; host: your own), with the revision.",
+    "Ordered behavior blocks of a prompt target (coordinator, worker, scout, reviewer of a project; host: your own; a worker has one delivery block per mode), with the revision.",
   ),
   "prompt-blocks-set": allow(
     "Replace a target's whole ordered block list (revision from prompt-blocks-get; null restores the built-ins). Your own changes apply from your next turn.",

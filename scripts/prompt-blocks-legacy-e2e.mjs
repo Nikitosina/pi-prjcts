@@ -61,7 +61,10 @@ try {
     );
 
     const legacy = await rpc({ action: "prompt-blocks-get", projectId: id, target: "worker" });
-    check("L2 the legacy override shows as legacy", legacy.legacy && legacy.text === "NEWER-OVERRIDE: two");
+    check(
+      "L2 the legacy override shows as legacy, with the Job delivery kept",
+      legacy.legacy && legacy.text.startsWith("NEWER-OVERRIDE: two\n\nDELIVERY: PR"),
+    );
     const adopted = { id: "custom:adopted", name: "Adopted", enabled: true, text: "ADOPTED-BEHAVIOR: say what you checked." };
     const saved = await rpc({
       action: "prompt-blocks-set",
@@ -103,11 +106,11 @@ try {
       revision: scout.revision,
       blocks: [{ id: "answer", enabled: true, text: "CUSTOM-SCOUT: list file paths first." }],
     });
+    // The base's built-in scout prompt is not a built-in any more, so the scout's stored prompt cannot be proven.
     const scoutFollow = await follow("TASK-SCOUT legacy", "FOLLOW-SCOUT");
-    check(
-      "P8 a legacy scout on the built-in prompt adopts saved behavior",
-      scoutFollow === started("TASK-SCOUT legacy").replace(scout.text, "CUSTOM-SCOUT: list file paths first."),
-    );
+    check("P8 a legacy scout on a retired built-in prompt keeps the prompt it started with", scoutFollow === started("TASK-SCOUT legacy"));
+    const scoutState = (await agent("TASK-SCOUT legacy")).prompt;
+    check("P8 and says why", scoutState?.state === "frozen" && /does not match/.test(scoutState.reason ?? ""), scoutState);
   });
 } finally {
   if (existsSync(core)) rmSync(core, { recursive: true, force: true });

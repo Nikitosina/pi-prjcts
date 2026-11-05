@@ -2375,6 +2375,7 @@ details.small-field select {
   color: var(--faint);
 }
 .pb-off,
+.pb-mode,
 .pb-draft {
   flex: none;
   font: 10.5px var(--mono);
@@ -2394,6 +2395,10 @@ details.small-field select {
 .pb-lead {
   flex: none;
   width: 26px;
+}
+.pb-lead.lock {
+  font-size: 11px;
+  text-align: center;
 }
 .pb-group {
   margin: 8px 8px 2px;

@@ -19,7 +19,11 @@ symlinkSync(join(repo, "node_modules"), join(core, "node_modules"));
 const promptsFile = join(core, "src/role-prompts.ts"),
   current = readFileSync(promptsFile, "utf8");
 const ROLES = ["coordinator", "worker", "scout", "reviewer"];
-const legacy = ROLES.reduce((text, role) => text.replace(`  ${role}: \``, `  ${role}: \`LEGACY-DEFAULT ${role}. `), current);
+// Each role's first built-in block starts with the marker.
+const legacy = ROLES.reduce((text, role) => {
+  const at = text.indexOf("text: `", text.indexOf(`  ${role}: [`)) + "text: `".length;
+  return `${text.slice(0, at)}LEGACY-DEFAULT ${role}. ${text.slice(at)}`;
+}, current);
 if (ROLES.some((role) => !legacy.includes(`LEGACY-DEFAULT ${role}.`))) throw Error("could not mark every legacy default");
 writeFileSync(promptsFile, legacy);
 process.env.PI_PROJECTS_CORE = core;
