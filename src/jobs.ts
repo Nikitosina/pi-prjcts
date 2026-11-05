@@ -227,6 +227,29 @@ export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, 
   );
 const isLive = (status: JobStatus) => status === "running";
 
+/** An agent whose independent Job already ended (Ready, checkpoint, failed, stopped) but that was never marked ended. Helpers settle on their own. */
+const endedJobAgent = (doc: Readonly<JobsState>, agent: Readonly<Agent>) => {
+  const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+  return agent.endedAt === null && !!job && !job.workspace && !isLive(job.status);
+};
+/** Work that can still run: a task that is not blocked, or input waiting for a turn. A queued passive write (a compaction summary) runs nothing. */
+const runsWork = (live: Awaited<ReturnType<Harness["inspect"]>>) =>
+  live.tasks.some((task) => task.state.kind !== "blocked") || live.submissions.some((submission) => submission.type === "input");
+/** Agents an unfinished, runnable reporter task still delivers to. */
+const reportedAgents = (live: Awaited<ReturnType<Harness["inspect"]>>) =>
+  new Set(
+    live.tasks.flatMap((task) => {
+      const input = task.record.input;
+      return task.record.kind === "projects.agent-reporter" &&
+        task.state.kind !== "blocked" &&
+        input &&
+        typeof input === "object" &&
+        !Array.isArray(input)
+        ? [String(input.agentId)]
+        : [];
+    }),
+  );
+
 /** A step in progress counts down from its start; one that overran its estimate still has a minute left. */
 const remaining = (step: PlanStep, accuracy: number, now: number) =>
   step.status === "doing" && step.startedAt !== null
@@ -693,7 +716,14 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
       },
     },
-    abort: (_reporter, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
+    // An abort (a project pause aborts every chat with its background tasks) skips the report, so end an agent whose Job already ended here.
+    abort: (reporter, runtime, taskContext) =>
+      runtime.commit(async (tx) => {
+        const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+        const agent = state.agents[reporter.input.agentId];
+        if (agent && endedJobAgent(state, agent) && (agent.sends ?? 0) <= (reporter.input.seq ?? 0)) agent.endedAt = Date.now();
+        return { status: "terminal", outcome: { status: "aborted" } };
+      }, taskContext),
   });
 
 const acceptanceText = (criteria: readonly string[]) =>
@@ -718,7 +748,8 @@ export type JobsSnapshot = {
     /** The model the worker's conversation runs on now (`provider/model`): its tier's model or where a quota move left it. */
     model: string | null;
   })[];
-  agents: (Agent & { working: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
+  /** `working`: its conversation runs now; `active`: a runnable reporter task still delivers to it (preparing, running or reporting). */
+  agents: (Agent & { working: boolean; active: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
 };
 
 export type SpawnArgs = {
@@ -1379,6 +1410,13 @@ export function createJobs(host: JobsHost) {
 
   /** After a reopen, before the scheduler runs: let the host rebuild what live agents need (workspace tools). */
   async function recover(harness: Harness): Promise<void> {
+    // An older host could abort a reporter after its Job ended without ending the agent; nothing would ever end it.
+    const reported = reportedAgents(await harness.inspect(context));
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      for (const agent of Object.values(state.agents))
+        if (endedJobAgent(state, agent) && !reported.has(agent.id)) agent.endedAt = Date.now();
+    }, context);
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return;
     for (const agent of liveAgents(doc))
@@ -1414,10 +1452,12 @@ export function createJobs(host: JobsHost) {
         };
       }),
     );
+    const reported = reportedAgents(await harness.inspect(context));
     const agents = await Promise.all(
       Object.values(doc.agents).map(async (agent) => ({
         ...agent,
         working: await working(harness, agent.conversationId),
+        active: reported.has(agent.id),
         model: await agentModel(harness, agent.conversationId),
         prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
       })),
@@ -1444,12 +1484,9 @@ export function createJobs(host: JobsHost) {
       : { state: "pending", reason: "Adopts the saved behavior on its next continued or retried turn while it is idle." };
   }
 
-  async function busy(harness: Harness): Promise<boolean> {
-    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
-    if (doc && !doc.paused && Object.values(doc.agents).some((agent) => agent.endedAt === null)) return true;
-    const active = await harness.inspect(context);
-    // Pause retains identities, but every owned task (including abort cleanup) must actually drain.
-    return active.tasks.length > 0 || active.submissions.length > 0;
+  /** Something can still run. Every live agent has a reporter task, so identities alone (paused or ended without a report) are not work. */
+  async function busy(harness: Pick<Harness, "inspect">): Promise<boolean> {
+    return runsWork(await harness.inspect(context));
   }
 
   async function approve(harness: Harness, jobId: string): Promise<{ outcome: AcceptanceOutcome } | { refused: string }> {

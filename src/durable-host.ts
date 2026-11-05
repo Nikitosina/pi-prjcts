@@ -89,7 +89,8 @@ function settleLedger(projectId: string, ledger: JobLedger, submissions: Durable
 }
 
 export type ChatActivity = { working: boolean; needs: boolean; finishedAt: number };
-export type ProjectActivity = ChatActivity & { chats: Record<string, ChatActivity> };
+/** `paused`: the owner paused the project; `working` is still true while its cut-off work drains. */
+export type ProjectActivity = ChatActivity & { paused: boolean; chats: Record<string, ChatActivity> };
 
 /** Brings the job ledger of every chat in line with the runtime and records the project's phase and problem. Called by commits, never by a read. */
 export async function settleProject(owner: DurableProjectRuntime, projectId: string): Promise<void> {
@@ -141,11 +142,8 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
     for (const job of ledger) if (job.state === "done" && job.settledAt !== undefined) finishedAt = Math.max(finishedAt, job.settledAt);
     for (const item of mine) if (item.status !== "running") finishedAt = Math.max(finishedAt, item.endedAt ?? 0);
     byChat[chat.id] = {
-      working:
-        chat.busy ||
-        plan.agents.some(
-          (agent) => Number(agent.chat) === chat.conversationId && (agent.working || (!plan.paused && agent.endedAt === null)),
-        ),
+      // An agent counts while its conversation runs or its reporter can still deliver; an end time left unset is not work.
+      working: chat.busy || plan.agents.some((agent) => Number(agent.chat) === chat.conversationId && (agent.working || agent.active)),
       needs:
         asked ||
         ledger.findLast((job) => job.state === "done" || job.state === "failed")?.state === "failed" ||
@@ -156,6 +154,7 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
   const states = Object.values(byChat);
   return {
     working: await owner.isBusy(),
+    paused: plan.paused,
     needs: states.some((item) => item.needs),
     finishedAt: Math.max(0, ...states.map((item) => item.finishedAt)),
     chats: byChat,

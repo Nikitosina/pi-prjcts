@@ -91,6 +91,12 @@ function route(request) {
         gaps: [],
       });
     if (tag === "BRIEF-LONGHELPER" || tag === "BRIEF-LONGFAIL") return say(longAnswer);
+    // Ready first, then a last reply held at the gate (the live A1 sequence).
+    if (tag === "BRIEF-READYHOLD") {
+      if (result.startsWith("Ready recorded")) return call("gate", {});
+      if (result === "gate open") return say("Recorded.");
+      return call("job", { action: "ready", summary: "Held", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK" });
+    }
     if (tag === "BRIEF-LONGREADY" || tag === "BRIEF-LONGCHECKPOINT") {
       if (result.startsWith("Ready recorded") || result.startsWith("Checkpoint recorded")) return say("Recorded.");
       return call(
@@ -880,6 +886,52 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await second.wait(context).catch(() => {});
   assert.equal((await h.snapshot(LiveDoc, conversation.id, context))?.run, undefined, "the stopped conversation is no longer working");
   await h.close(context);
+}
+
+// A1-A5 (jobs-failures.md "Activity reflects what runs"): work is what can still run, not an agent without an end time.
+{
+  const agentOf = async (id) => (await jobs.snapshot(harness)).agents.find((item) => item.id === id);
+  gateOpen = false;
+  gateEntered = false;
+  await say_(root, "Start READYHOLD");
+  await until(() => gateEntered, "READYHOLD worker holds its last reply after Ready");
+  const held = (await jobsOf(harness)).find((item) => item.title === "Job READYHOLD");
+  assert.equal(held.status, "ready");
+  // A project pause: jobs pause, then every chat aborts with its background tasks (the worker's reporter among them).
+  await jobs.pause(harness);
+  await root.abort(context, { background: true });
+  gateOpen = true;
+  await quiet(harness);
+  assert.notEqual((await agentOf(held.id)).endedAt, null, "A1 a reporter aborted after Ready ends its agent");
+  assert.equal(await jobs.busy(harness), false, "A1 a paused project whose Ready worker was cut off is idle");
+  await jobs.resume(harness);
+  await quiet(harness);
+
+  // A2/A3: a ghost left by an older host (Ready Job, no end time, no reporter) is not work and is ended on open.
+  await harness.commit(async (tx) => {
+    (await tx.doc(Jobs, root.id)).agents[held.id].endedAt = null;
+  }, context);
+  assert.equal(await jobs.busy(harness), false, "A3 an agent without an end time but with nothing to run is not work");
+  await harness.close(context);
+  ({ harness, root, jobs, killed } = await open());
+  await jobs.recover(harness);
+  assert.notEqual((await agentOf(held.id)).endedAt, null, "A2 opening the project ends an agent whose Job already ended");
+
+  // A4/A5: a queued passive write and a blocked task run nothing; queued input and a runnable task are work.
+  const fake = (tasks, submissions) => ({
+    snapshot: async () => ({ paused: false, jobs: {}, agents: {}, subagents: {}, requests: {} }),
+    inspect: async () => ({ scheduling: "running", tasks, submissions }),
+  });
+  const write = { id: 1, conversationId: 9, requestId: "compaction:8", type: "write", status: "queued" };
+  const blocked = { record: { id: 2, kind: "x" }, state: { kind: "blocked", reason: "restart_limit" } };
+  assert.equal(await jobs.busy(fake([], [write])), false, "A4 a queued passive write is not work");
+  assert.equal(await jobs.busy(fake([blocked], [])), false, "A5 a blocked task is not work");
+  assert.equal(await jobs.busy(fake([], [{ ...write, type: "input" }])), true, "queued input is work");
+  assert.equal(
+    await jobs.busy(fake([{ record: { id: 3, kind: "x" }, state: { kind: "sleeping", until: 1 } }], [])),
+    true,
+    "a sleeping task is work",
+  );
 }
 
 await harness.close(context);
