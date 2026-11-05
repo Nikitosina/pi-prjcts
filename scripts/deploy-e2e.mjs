@@ -1,19 +1,33 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { FAKE_MODEL, pinFakeRoles, startFakeModel } from "./fake-model.mjs";
 
 // Deploys a temporary clone of this repository on an isolated PI_PROJECTS_HOME; never the owner's checkout or home.
 const repo = resolve(import.meta.dirname, ".."),
-  base = mkdtempSync("/tmp/pdeploy-"),
+  base = realpathSync(mkdtempSync("/tmp/pdeploy-")),
   clone = join(base, "checkout");
+// Offline: the hosts this script starts see only the fake model.
+const fake = await startFakeModel(join(base, "fake"));
 process.env.PI_PROJECTS_HOME = join(base, "home");
 mkdirSync(process.env.PI_PROJECTS_HOME, { recursive: true });
 const git = (...args) => execFileSync("git", ["-C", clone, ...args], { encoding: "utf8" }).trim();
 execFileSync("git", ["clone", "-q", repo, clone]);
 symlinkSync(join(repo, "node_modules"), join(clone, "node_modules"));
 (git("config", "user.email", "t@example.com"), git("config", "user.name", "t"));
-const { deploy, deployPending, hostDeps, inDeployWindow, idleDeployTick, readDeployState, recordHostSha, queueDeploy, clearQueuedDeploy } =
+const { deploy, deployPending, hostDeps, inDeployWindow, idleDeployTick, readDeployState, recordHostSha } =
   await import("../src/deploy.ts");
 const { health, request } = await import("../src/client.ts");
 const told = [],
@@ -35,6 +49,40 @@ const deps = {
   },
 };
 const commit = (message) => git("commit", "-qam", message);
+const marks = join(base, "marks");
+mkdirSync(marks);
+const until = async (what, check, timeout = 120_000) => {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const value = await check().catch(() => undefined);
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out: ${what}`);
+    await sleep(250);
+  }
+};
+const show = (id) => request({ action: "show", id }, false);
+const answerOf = (id, job) =>
+  until(`job ${job} settles`, async () => {
+    const view = await show(id);
+    if (view.jobs.find((item) => item.id === job)?.state !== "done") return undefined;
+    return JSON.stringify(view.messages.at(-1));
+  });
+/** A deploy whose stop starts `command` in the project's coordinator first and reports how long the stop held the host. */
+async function deployDuring(project, command, mark) {
+  let job, heldMs;
+  const result = await deploy({
+    ...deps,
+    async stopForDeploy(sha) {
+      job = (await request({ action: "message", id: project, text: `FAKE-CALL bash ${JSON.stringify({ command })}` })).id;
+      await until(`${mark} starts`, async () => existsSync(join(marks, mark)));
+      const started = Date.now();
+      const stopping = await real.stopForDeploy(sha);
+      heldMs = Date.now() - started;
+      return stopping;
+    },
+  });
+  return { result, job, heldMs };
+}
 try {
   // 0. Without a recorded start sha there is no rollback target, so nothing deploys.
   await assert.rejects(deploy(deps), /unknown/);
@@ -55,13 +103,50 @@ try {
   // The host records the sha it started from.
   assert.equal(await deployPending(clone), false);
 
-  // 1b. Work admitted during preparation requeues the deploy instead of stopping the host.
+  // 1b. A checkout that changed during preparation fails the deploy; the host keeps running and nothing is queued.
   const beforeRace = (await health()).pid;
   result = await deploy({ ...deps, stopForDeploy: async () => false });
-  assert.equal(result.queued, true);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /changed during preparation/);
   assert.equal((await health()).pid, beforeRace);
-  assert.ok(readDeployState().queuedAt > 0);
-  clearQueuedDeploy();
+  assert.equal(readDeployState().queuedAt, undefined);
+
+  // 1c. Deploy is live: a tool call that ends inside the window finishes, the host stops right after it, and the turn continues.
+  const live = await request({ action: "create", name: "pi-prjcts", cwd: clone, model: FAKE_MODEL });
+  await pinFakeRoles(request, live.id);
+  const other = await request({ action: "create", name: "Other", cwd: join(base, "marks"), model: FAKE_MODEL });
+  let pid = (await health()).pid;
+  let run = await deployDuring(live.id, `touch ${marks}/fast; sleep 3; echo FAST_DONE`, "fast");
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.ok(run.heldMs > 1500 && run.heldMs < 9000, `the stop waited for the short call only: ${run.heldMs} ms`);
+  assert.notEqual((await health()).pid, pid);
+  let answer = await answerOf(live.id, run.job);
+  assert.match(answer, /FAST_DONE/);
+  assert.doesNotMatch(answer, /interrupted/i);
+
+  // 1d. A call longer than the window is cut off after 10 s, its process dies, and the turn continues after the start.
+  pid = (await health()).pid;
+  run = await deployDuring(live.id, `touch ${marks}/slow; sleep 61; echo SLOW_DONE`, "slow");
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.ok(run.heldMs >= 9500 && run.heldMs < 20_000, `the stop held the host for the window: ${run.heldMs} ms`);
+  assert.notEqual((await health()).pid, pid);
+  assert.equal(spawnSync("pgrep", ["-f", "sleep 61"]).stdout.toString().trim(), "", "the cut-off process is gone");
+  answer = await answerOf(live.id, run.job);
+  assert.match(answer, /interrupted/i, "the model learns its call was cut off");
+  assert.doesNotMatch(answer, /SLOW_DONE/);
+
+  // 1e. The pi-prjcts Coordinator redeploys itself without approval; its call returns after the restart with the outcome.
+  assert.ok((await show(live.id)).coordinatorAccess.toolNames.includes("projects_redeploy"));
+  assert.ok(!(await show(other.id)).coordinatorAccess.toolNames.includes("projects_redeploy"), "only the host's own project");
+  pid = (await health()).pid;
+  const selfJob = (await request({ action: "message", id: live.id, text: "FAKE-CALL projects_redeploy {}" })).id;
+  answer = await answerOf(live.id, selfJob);
+  assert.match(answer, new RegExp(`Deployed ${git("rev-parse", "HEAD").slice(0, 8)}`));
+  assert.notEqual((await health()).pid, pid);
+  const { lastResult } = readDeployState();
+  assert.ok(lastResult.requestId, "the result names the call that asked for it");
+  assert.equal(lastResult.stop.cutOff, 0, "its own call is not counted as running work");
+  assert.ok(lastResult.stop.heldMs < 5000, `its own call does not hold the window: ${lastResult.stop.heldMs} ms`);
 
   // 2. A lockfile change runs npm ci once, and the host restarts.
   appendFileSync(join(clone, "package-lock.json"), "\n");
@@ -94,35 +179,28 @@ try {
   assert.match(told.at(-1), /Rolled back/);
   assert.equal(readDeployState().lastGood, good);
 
-  // 3b. Queued deploys are state the host reads at its next idle moment.
-  queueDeploy();
-  assert.ok(readDeployState().queuedAt > 0);
-  clearQueuedDeploy();
-  assert.equal(readDeployState().queuedAt, undefined);
-
   // 4. A dirty checkout is refused before anything stops.
-  const pid = (await health()).pid;
+  pid = (await health()).pid;
   appendFileSync(join(clone, "README.md"), "dirty\n");
   await assert.rejects(deploy(deps), /uncommitted/);
   assert.equal((await health()).pid, pid);
   git("checkout", "--", "README.md");
 
-  // 5. Windows and the idle trigger.
+  // 5. Windows and the nightly trigger, which deploys live like every other deploy.
   const at = (hour) => new Date(2026, 0, 5, hour, 30);
   assert.ok(inDeployWindow(at(2)) && inDeployWindow(at(6)) && !inDeployWindow(at(7)) && !inDeployWindow(at(1)));
   assert.ok(inDeployWindow(at(23), { startHour: 22, endHour: 6 }) && inDeployWindow(at(3), { startHour: 22, endHour: 6 }));
   assert.ok(!inDeployWindow(at(12), { startHour: 22, endHour: 6 }));
   let started = 0;
-  const tick = (hour, idle) => idleDeployTick({ now: at(hour), idle, pending: () => true, start: () => void started++ });
-  assert.equal(await tick(12, () => true), "outside-window");
-  assert.equal(await tick(3, () => false), "busy");
-  assert.equal(await tick(3, () => Promise.reject(new Error("unknown"))), "busy");
-  assert.equal(await tick(3, () => true), "started");
-  assert.equal(await tick(4, () => true), "already-tried");
+  const tick = (hour) => idleDeployTick({ now: at(hour), pending: () => true, start: () => void started++ });
+  assert.equal(await tick(12), "outside-window");
+  assert.equal(await tick(3), "started");
+  assert.equal(await tick(4), "already-tried");
   assert.equal(started, 1);
   console.log("deploy-e2e ok");
 } finally {
   await request({ action: "shutdown" }, false).catch(() => {});
   await new Promise((done) => setTimeout(done, 500));
+  fake.close();
   rmSync(base, { recursive: true, force: true });
 }
