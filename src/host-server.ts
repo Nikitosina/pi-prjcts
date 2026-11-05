@@ -1,7 +1,18 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -48,7 +59,18 @@ import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
-import { clearQueuedDeploy, deployPending, idleDeployTick, queueDeploy, readDeployState, recordHostSha, forgetHostSha } from "./deploy.ts";
+import {
+  deployPending,
+  deployRunning,
+  idleDeployTick,
+  quietWindow,
+  readDeployState,
+  recordDeployRequest,
+  recordDeployStop,
+  recordHostSha,
+  forgetHostSha,
+  type DeployRequest,
+} from "./deploy.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
 import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
@@ -252,12 +274,26 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
     project = granted;
   }
   // Opening may install a configured package once, as before; later catalog lookups are passive.
-  const opening = loadProjectResourceLoader(project).then((loader) => openDurableHost(project, loader, () => configuredSkills(id)));
+  // Only the project whose repository is this host's own checkout redeploys it; the owner allowed that without approval.
+  const redeploy = isHostCheckout(project)
+    ? (requestId: string, taskId: string) => startDeploy({ requestId, projectId: id, taskId })
+    : undefined;
+  const opening = loadProjectResourceLoader(project).then((loader) =>
+    openDurableHost(project, loader, () => configuredSkills(id), redeploy),
+  );
   durableRuntimes.set(id, opening);
   opening.catch(() => {
     if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id);
   });
   return opening;
+}
+
+function isHostCheckout(project: Project): boolean {
+  try {
+    return realpathSync(project.cwd) === realpathSync(repoRoot);
+  } catch {
+    return false;
+  }
 }
 
 async function lifecycle<T>(
@@ -1618,25 +1654,13 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       saveDeploySettings(input.settings);
       recordHostEvent(
         "deploy",
-        `deploy when idle ${input.settings.idle ? "on" : "off"} ${input.settings.startHour}-${input.settings.endHour}`,
+        `nightly deploy ${input.settings.idle ? "on" : "off"} ${input.settings.startHour}-${input.settings.endHour}`,
       );
       return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
     case "deploy-start":
-      if (deployRunning()) throw new Error("A deploy is already running");
-      if (!(await noOwnerBusy())) {
-        queueDeploy();
-        recordHostEvent("deploy", "deploy queued: work is running");
-        return {
-          settings: loadDeploySettings(),
-          state: readDeployState(),
-          running: false,
-          queued: true,
-          line: "Work is running, so the deploy is queued. It runs at the next moment no project has work running, whatever the deploy window.",
-        };
-      }
       startDeploy();
       recordHostEvent("deploy", "deploy started by the owner");
-      return { settings: loadDeploySettings(), state: readDeployState(), running: true, queued: false };
+      return { settings: loadDeploySettings(), state: readDeployState(), running: true };
     case "deploy-shutdown":
       return stopForDeploy(input.sha);
     case "host-agent-history":
@@ -1761,17 +1785,10 @@ try {
   forgetHostSha();
   recordHostEvent("deploy", `could not record the sha this host started from; deploy will refuse: ${errorText(error)}`);
 }
-function deployRunning(): boolean {
-  try {
-    const pid = Number(readFileSync(join(home(), "deploy.lock"), "utf8"));
-    process.kill(pid, 0);
-    return Number.isSafeInteger(pid) && pid > 0;
-  } catch {
-    return false;
-  }
-}
-/** The deploy stops this host, so it must outlive it: detached, with its own log. */
-function startDeploy(): void {
+/** The deploy stops this host, so it must outlive it: detached, with its own log. `by` names an agent call waiting for the result. */
+function startDeploy(by?: Omit<DeployRequest, "at">): void {
+  if (deployRunning()) throw new Error("A deploy is already running");
+  recordDeployRequest({ requestId: by?.requestId ?? randomUUID(), at: Date.now(), ...by });
   const log = openSync(join(home(), "deploy.log"), "a", 0o600);
   const child = spawn(process.execPath, [join(repoRoot, "src", "cli.ts"), "deploy", repoRoot], {
     detached: true,
@@ -1783,60 +1800,55 @@ function startDeploy(): void {
   child.unref();
   closeSync(log);
 }
-/** Idle means no open project owner is busy; a project whose runtime is not open has nothing running. */
-async function noOwnerBusy(): Promise<boolean> {
-  for (const opening of durableRuntimes.values()) if (await ownerBusy(await opening)) return false;
-  return true;
+/** Tool calls running in open projects; the redeploy call that asked for this deploy (and a codemode call around it) does not count. */
+async function runningToolCalls(): Promise<number> {
+  const by = readDeployState().current;
+  let count = 0;
+  for (const [id, opening] of durableRuntimes)
+    count += await opening.then(
+      (owner) => owner.runningToolCalls(by?.projectId === id ? by.taskId : undefined),
+      () => 0,
+    );
+  return count;
 }
-/** Drain requests before checking the checkout: an admitted Approve may still pull. */
-async function stopForDeploy(sha: string): Promise<{ stopping: boolean; queued?: boolean }> {
+/** Drain requests, give running tool calls the window, then check the checkout: an admitted Approve may still pull. */
+async function stopForDeploy(sha: string): Promise<{ stopping: boolean }> {
   closing = true;
   try {
+    const started = Date.now();
     await Promise.allSettled([...activeRequests]);
-    const idle = shutdownOperation || (await noOwnerBusy());
+    const cut = await quietWindow(runningToolCalls);
     // No await between these reads and shutdown, so host requests cannot change the checked checkout.
     const git = (...args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 10_000 }).trim();
-    if (idle && git("rev-parse", "HEAD") === sha && !git("status", "--porcelain", "--untracked-files=no")) {
+    if (git("rev-parse", "HEAD") === sha && !git("status", "--porcelain", "--untracked-files=no")) {
+      const stop = { heldMs: Date.now() - started, cutOff: cut };
+      recordDeployStop(stop);
+      recordHostEvent("deploy", `stopping for deploy after ${stop.heldMs} ms, ${cut} tool calls cut off`);
       setTimeout(() => void shutdown(), 50);
       return { stopping: true };
     }
     closing = false;
-    queueDeploy();
-    recordHostEvent("deploy", "deploy requeued: work or checkout changed during deployment preparation");
-    return { stopping: false, queued: true };
+    recordHostEvent("deploy", "deploy failed: the checkout changed during deployment preparation");
+    return { stopping: false };
   } catch (error) {
     closing = false;
-    queueDeploy();
-    recordHostEvent("deploy", `deploy requeued: preparation failed: ${errorText(error)}`);
-    return { stopping: false, queued: true };
+    recordHostEvent("deploy", `deploy failed while stopping: ${errorText(error)}`);
+    return { stopping: false };
   }
 }
 const idleDeployTimer = setInterval(
   () => {
     const settings = loadDeploySettings();
-    if (closing) return;
-    if (readDeployState().queuedAt !== undefined && !deployRunning()) {
-      void noOwnerBusy()
-        .then((idle) => {
-          if (!idle || closing) return;
-          clearQueuedDeploy();
-          startDeploy();
-          recordHostEvent("deploy", "queued deploy started: the host is idle");
-        })
-        .catch((error) => recordHostEvent("deploy", `queued deploy check failed: ${errorText(error)}`));
-      return;
-    }
-    if (!settings.idle) return;
+    if (closing || !settings.idle || deployRunning()) return;
     idleDeployTick({
       now: new Date(),
       window: settings,
-      idle: noOwnerBusy,
       pending: () => deployPending(repoRoot),
       start() {
         startDeploy();
-        recordHostEvent("deploy", "deploy started: host idle inside the deploy window");
+        recordHostEvent("deploy", "deploy started: new code inside the nightly deploy window");
       },
-    }).catch((error) => recordHostEvent("deploy", `idle deploy check failed: ${errorText(error)}`));
+    }).catch((error) => recordHostEvent("deploy", `nightly deploy check failed: ${errorText(error)}`));
   },
   Number(process.env.PI_PROJECTS_DEPLOY_TICK_MS ?? 5 * 60_000),
 );
@@ -1846,6 +1858,7 @@ hostAgent = await openHostAgent({
     dispatch: (request) => dispatch(request),
     requestApproval: ({ key, request, summary }) => approvals.request({ key, requestedBy: { kind: "host-agent" }, request, summary }),
     focus: (target) => feed.publish(HOST_FEED, { topic: "host-agent", type: "focus", ...target }),
+    redeploy: (requestId) => startDeploy({ requestId }),
   },
   publish: (event) => feed.publish(HOST_FEED, event),
   report: (detail) => recordHostEvent("host-agent", detail),

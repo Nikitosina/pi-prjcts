@@ -27,7 +27,7 @@ export const PromptOverrides = Type.Object(
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
-/** Host-wide "deploy when idle" opt-in: hours of the local day, end exclusive (see deploy.ts). */
+/** Host-wide nightly deploy opt-in (`idle` keeps its stored name): hours of the local day, end exclusive (see deploy.ts). */
 export const DeploySettings = Type.Object(
   { idle: Type.Boolean(), startHour: Type.Integer({ minimum: 0, maximum: 23 }), endHour: Type.Integer({ minimum: 0, maximum: 23 }) },
   { additionalProperties: false },

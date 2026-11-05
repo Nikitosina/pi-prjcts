@@ -51,6 +51,7 @@ import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory 
 import { coordinatorArtifactTools } from "./artifacts.ts";
 import { approvals } from "./approvals.ts";
 import { ownerApprovalTool } from "./host-agent-tools.ts";
+import { redeployTool } from "./redeploy-tool.ts";
 import { createBackgroundCommands } from "./background-commands.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
@@ -352,6 +353,8 @@ export type DurableProjectRuntime = {
   approvalsBusy(): boolean;
   /** Running, draining or queued work; paused identities alone are not execution. */
   isBusy(): Promise<boolean>;
+  /** Tool calls running now, without the call `excluded` and the tool calls that own it (a codemode script). */
+  runningToolCalls(excluded?: string): Promise<number>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
   workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
   /** A page of an agent's transcript with its tool names and recent generation state; text beyond a preview is read with `transcriptText`. */
@@ -597,6 +600,8 @@ export async function openDurableProject(input: {
     import("@earendil-works/pi-coding-agent").DefaultResourceLoader
   >;
   knowledgeAccess?: KnowledgeAccess;
+  /** Present only for the project whose repository is the host's own checkout: its Coordinator gets projects_redeploy. */
+  redeploy?: (requestId: string, taskId: string) => void;
   onReport?: (report: DurableRuntimeReport) => void;
   /** Receives one event per read model that a commit changed (chat, jobs); see change-feed.ts. */
   onChange?: (event: FeedEvent) => void;
@@ -918,6 +923,7 @@ export async function openDurableProject(input: {
           });
         },
       }),
+      ...(input.redeploy ? [redeployTool({ scope: project.id, start: input.redeploy })] : []),
     ];
     const ownerApproval = defineExtension({ name: "projects.owner-approval", tools: ownerApprovalTools });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
@@ -2138,6 +2144,19 @@ export async function openDurableProject(input: {
       },
       approvalsBusy: () => approver.busy(),
       isBusy: async () => (await jobs.busy(openedHarness)) || approver.busy(),
+      runningToolCalls: async (excluded) => {
+        const tasks = (await openedHarness.inspect(context)).tasks,
+          owners = new Map(tasks.map((task) => [String(task.record.id), task.record.owner]));
+        const skipped = new Set<string>();
+        for (let id = excluded; id !== undefined;) {
+          skipped.add(id);
+          const owner = owners.get(id);
+          id = owner === undefined ? undefined : String(owner);
+        }
+        return tasks.filter(
+          (task) => task.record.kind === "pi.tool" && task.state.kind === "running" && !skipped.has(String(task.record.id)),
+        ).length;
+      },
       workerDiff: async (threadId, base, page) => {
         assertOpen();
         return workerChanges(await agentCwd(threadId), base, page);

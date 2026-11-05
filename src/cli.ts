@@ -64,13 +64,10 @@ if (command === "deploy") {
       process.stdout.write(JSON.stringify(result, null, 2) + "\n");
       if (!result.ok) process.exitCode = 1;
     } else {
-      // The host decides: it queues the deploy while any project has work running, so a deploy never kills it.
+      // The host starts its own detached deploy: it does not wait for idle projects, running tool calls get a short window.
       if (first) throw new Error("Usage: deploy (it deploys the checkout the host runs from)");
-      const answer = (await request({ action: "deploy-start" })) as { running: boolean; queued: boolean; line?: string };
-      process.stdout.write(
-        (answer.line ??
-          (answer.running ? "Deploy started; the host restarts when it is done (see deploy.log and Telegram)." : "Not started.")) + "\n",
-      );
+      await request({ action: "deploy-start" });
+      process.stdout.write("Deploy started; the host restarts when it is done (see deploy.log and Telegram).\n");
     }
   } catch (error) {
     process.stderr.write(errorText(error) + "\n");

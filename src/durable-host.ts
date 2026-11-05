@@ -10,6 +10,7 @@ export async function openDurableHost(
   project: Project,
   configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader,
   discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>,
+  redeploy?: (requestId: string, taskId: string) => void,
 ): Promise<DurableProjectRuntime> {
   // Settling is driven by commits, so reads never write. The owner is not yet known while the first commits arrive; they are caught up below.
   let settling: Promise<void> = Promise.resolve(),
@@ -26,6 +27,7 @@ export async function openDurableHost(
     dir: projectDir(project.id),
     configuredSkillLoader,
     discoverSkills,
+    redeploy,
     onChange: (event) => {
       // The ledger is settled before the browser is told, so its next read already shows the new state.
       if (event.topic === "chat") void settle().then(() => feed.publish(project.id, event));

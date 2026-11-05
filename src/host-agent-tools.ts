@@ -7,6 +7,7 @@ import type { FocusTarget } from "./change-feed.ts";
 import { plugins } from "./plugins.ts";
 import { redactForAgent } from "./agent-redaction.ts";
 import { STATUS_ITEM_IDS } from "./ui-settings.ts";
+import { redeployTool } from "./redeploy-tool.ts";
 
 type Action = RequestData["action"];
 /** What the Host agent may do with one host action: run it, ask the owner first, or never (with the reason). */
@@ -22,7 +23,6 @@ export const DANGEROUS_MINIMUM = [
   "archive",
   "remove",
   "job-approve",
-  "deploy-start",
   "workspace-revoke",
   "github-revoke",
   "telegram-unpair",
@@ -157,8 +157,8 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   shutdown: exclude("Stops the host the Host agent runs in; the owner stops it."),
   "deploy-shutdown": exclude("Internal step of a deploy."),
   "deploy-snapshot": allow("Deploy settings and state."),
-  "deploy-settings": allow("Change deploy settings; turning on automatic idle deploys needs the owner's approval."),
-  "deploy-start": dangerous("Deploy a new host version."),
+  "deploy-settings": allow("Change deploy settings; turning on nightly automatic deploys needs the owner's approval."),
+  "deploy-start": exclude("Use the projects_redeploy tool: it deploys without approval and waits for the outcome."),
   "notify-feed": allow("Recent notices."),
   "telegram-snapshot": allow("Telegram connection status."),
   "telegram-token": exclude("Takes the bot token, a secret that must not enter a transcript."),
@@ -251,6 +251,7 @@ export type HostToolDeps = {
   dispatch(request: RequestData): Promise<unknown>;
   requestApproval(input: { key: string; request: RequestData; summary: string }): Promise<{ id: string; state: string }>;
   focus(target: FocusTarget): void;
+  redeploy(requestId: string, taskId: string): void;
 };
 
 export const pendingText = (approval: { id: string; state: string }) =>
@@ -334,7 +335,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
       }
     },
   });
-  return [actions, call, focus, uiSet] as ToolRegistration[];
+  return [actions, call, focus, uiSet, redeployTool({ scope: "host-agent", start: deps.redeploy })] as ToolRegistration[];
 }
 
 /** A Coordinator's way to a dangerous host action: it only files the approval; the host runs it after the owner approves. The key is unique within one project's storage. */

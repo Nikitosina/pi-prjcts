@@ -8,7 +8,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Project**: a repository checkout (Git or Arc) with its settings, models, knowledge and automations.
 - **Host**: the one process that owns every project's durable storage and serves the web UI, CLI and Telegram.
 - **Host agent**: the owner's agent over the whole host. It does through tools what the owner does in the browser: projects, chats, settings, automations, UI. It is not a Coordinator, owns no delivery and has no project or workspace.
-- **Owner approval**: a dangerous host action (delete or archive a project, Approve, Deploy, revoking grants and devices, deleting files) requested by the Host agent or a Coordinator. It runs only after the owner approves it, exactly as stored, and the outcome goes back to whoever asked.
+- **Owner approval**: a dangerous host action (delete or archive a project, Approve, revoking grants and devices, deleting files) requested by the Host agent or a Coordinator. It runs only after the owner approves it, exactly as stored, and the outcome goes back to whoever asked.
 - **Chat**: a coordinator conversation in a project. A project has a main chat and may have more.
 - **Coordinator**: the trusted agent in a chat that owns delivery. It investigates and makes changes directly in its own persistent workspace, or delegates work and judges the results.
 - **Job**: one delegated request with its worker, plan and result. An independent Job delivers a PR for owner approval; a task helper returns its work to the Coordinator. A Job is not a pi-durable task.
@@ -27,7 +27,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Checkpoint**: an independent worker's intermediate handback while work is unfinished or needs a decision. It preserves the workspace and evidence for continuation, without offering Approve.
 - **Ready report**: an independent worker's delivery report, distinct from an unfinished Checkpoint. It includes the PR, summary, proof, review findings, gaps and cumulative Job time and cost.
 - **Approve**: the owner's one consequential action on a Job: merge the PR when mergeable, then pull the project's main checkout if it is clean.
-- **Deploy**: restart the pi-prjcts host from its main checkout, with a smoke test and rollback. Separate from Approve.
+- **Deploy**: restart the pi-prjcts host from its main checkout, with a smoke test and rollback. Separate from Approve. It does not wait for idle projects: running tool calls get 10 s, then the work continues after the start. No owner approval: the owner, the Host agent and the pi-prjcts Coordinator (`projects_redeploy`) may start it.
 - **Stall**: an agent with no transcript progress for a set time or an identical tool call with an identical result five times. A quiet background service alone is not evidence of stalled work. An agent waiting on an active subagent is not stalled.
 - **Plan**: an agent's own list of steps with status and estimates, shown as progress and ETA.
 - **Knowledge** (shown as **Memory**): durable project memory in `knowledge/`, read as three kinds, Preferences, Decisions and Procedures, plus a read-only Archive of legacy files. Not reviews, statuses or proof. Current preferences and a generated index go into every role prompt; the rest is read on demand.

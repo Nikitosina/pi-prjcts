@@ -1159,7 +1159,7 @@ async function remote(body, alive) {
 async function deploy(body, alive) {
   const snap = await call("deploy-snapshot").catch((error) => ({ error: error.message }));
   if (!alive()) return;
-  body.innerHTML = `${line("Self-deploys of pi-prjcts in a quiet window.", "Deploy is an owner-only action: the Host agent may prepare it, never press it.")}<div class="field-row"><span class="label">Window</span><span class="mono">${esc(snap.settings ? `${snap.settings.startHour}:00–${snap.settings.endHour}:00${snap.settings.idle ? " · when idle" : ""}` : (snap.error ?? ""))}</span><span class="badge ${snap.running ? "t-work" : ""}">${snap.running ? "deploying" : "idle"}</span></div>`;
+  body.innerHTML = `${line("Self-deploys of pi-prjcts, also every night in the window.", "A deploy does not wait for idle projects: running tool calls get 10 s, then every agent continues after the restart.")}<div class="field-row"><span class="label">Window</span><span class="mono">${esc(snap.settings ? `${snap.settings.startHour}:00–${snap.settings.endHour}:00${snap.settings.idle ? " · nightly" : ""}` : (snap.error ?? ""))}</span><span class="badge ${snap.running ? "t-work" : ""}">${snap.running ? "deploying" : "idle"}</span></div>`;
 }
 /** Cursor signs in through the host (PKCE on Cursor's own page); offered while Cursor has no fresh reading or the sign-in failed. */
 function cursorConnect(item) {

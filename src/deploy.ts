@@ -29,12 +29,18 @@ export function inDeployWindow(now: Date, window: DeployWindow = DEFAULT_DEPLOY_
     : hour >= window.startHour || hour < window.endHour;
 }
 
+/** Running tool calls get this long to finish before the stop cuts them off; Pi Durable continues the work after the start. */
+export const DEPLOY_WINDOW_MS = 10_000;
+
+/** Who asked for the running deploy: an agent's `projects_redeploy` call waits for the result under its `requestId`. */
+export type DeployRequest = { requestId: string; at: number; projectId?: string; taskId?: string };
+/** How the stop went: how long running tool calls held it and how many it cut off. */
+export type DeployStop = { heldMs: number; cutOff: number };
 type DeployState = {
   lastGood?: string;
-  /** When the owner asked to deploy while work was running; the deploy starts at the next idle moment, window or not. */
-  queuedAt?: number;
   lastIdleAttemptDay?: string;
-  lastResult?: { at: number; ok: boolean; sha: string; message: string };
+  current?: DeployRequest & { stop?: DeployStop };
+  lastResult?: { at: number; ok: boolean; sha: string; message: string; requestId?: string; stop?: DeployStop };
 };
 const statePath = () => join(home(), "deploy.json");
 const lockPath = () => join(home(), "deploy.lock");
@@ -47,8 +53,53 @@ export function readDeployState(): DeployState {
 }
 const writeDeployState = (patch: Partial<DeployState>) => saveJson(statePath(), { ...readDeployState(), ...patch });
 
-export const queueDeploy = () => writeDeployState({ queuedAt: Date.now() });
-export const clearQueuedDeploy = () => writeDeployState({ queuedAt: undefined });
+export const recordDeployRequest = (current: DeployRequest) => writeDeployState({ current });
+export function recordDeployStop(stop: DeployStop): void {
+  const current = readDeployState().current;
+  if (current) writeDeployState({ current: { ...current, stop } });
+}
+/** The result names the request it answers, so a caller that restarted with the host finds its own. */
+function settle(result: { ok: boolean; sha: string; message: string }): void {
+  const current = readDeployState().current;
+  writeDeployState({ lastResult: { at: Date.now(), ...result, requestId: current?.requestId, stop: current?.stop }, current: undefined });
+}
+
+export function deployRunning(): boolean {
+  try {
+    const pid = Number(readFileSync(lockPath(), "utf8"));
+    process.kill(pid, 0);
+    return Number.isSafeInteger(pid) && pid > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The outcome of the deploy started for `requestId`, once its result is written; a deploy child that died says so after a grace period. */
+export async function awaitDeploy(requestId: string, signal?: AbortSignal): Promise<string> {
+  for (;;) {
+    const state = readDeployState(),
+      result = state.lastResult;
+    if (result?.requestId === requestId)
+      return result.ok
+        ? `Deployed ${result.sha.slice(0, 8)}; the host passed its smoke test.`
+        : `Deploy${result.sha ? ` of ${result.sha.slice(0, 8)}` : ""} failed: ${result.message}`;
+    if (state.current?.requestId !== requestId) return "No deploy is running for this call; see deploy-snapshot.";
+    // The child takes the lock a moment after the host records the request.
+    if (!deployRunning() && Date.now() - state.current.at > 30_000)
+      return "The deploy ended without a result; see deploy.log in the host home.";
+    await sleep(500, undefined, { signal });
+  }
+}
+
+/** Waits until no tool call runs, at most `windowMs`; answers how many still ran when it stopped waiting. */
+export async function quietWindow(running: () => Promise<number>, windowMs = DEPLOY_WINDOW_MS): Promise<number> {
+  const deadline = Date.now() + windowMs;
+  for (;;) {
+    const count = await running();
+    if (count === 0 || Date.now() >= deadline) return count;
+    await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
+  }
+}
 
 const hostShaPath = () => join(home(), "host-sha");
 /** The host records the sha it started from; that is the only trustworthy rollback target. */
@@ -72,14 +123,14 @@ export type DeployDeps = {
   repo: string;
   run?: RunCommand;
   stopHost(): Promise<void>;
-  /** Drain admitted requests, then stop only if idle and still clean at sha; false requeues preparation. */
+  /** Drain admitted requests, give running tool calls the window, then stop only if still clean at sha; false fails the deploy. */
   stopForDeploy?(sha: string): Promise<boolean>;
   startHost(): Promise<void>;
   /** Undefined when the new host is healthy, else the first failed check. */
   smoke(): Promise<string | undefined>;
   tell(text: string): Promise<void>;
 };
-export type DeployResult = { ok: true; sha: string; queued?: boolean } | { ok: false; sha: string; rolledBack: boolean; reason: string };
+export type DeployResult = { ok: true; sha: string } | { ok: false; sha: string; rolledBack: boolean; reason: string };
 
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const path = lockPath();
@@ -111,99 +162,112 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
 export async function deploy(deps: DeployDeps): Promise<DeployResult> {
   const run = deps.run ?? defaultRun,
     git = (...args: string[]) => run("git", args, deps.repo);
-  return withLock(async () => {
-    const previous = readHostSha();
-    if (!previous) throw new Error("The sha the running host started from is unknown; deploy refused (restart the host once to record it)");
-    if (await git("status", "--porcelain", "--untracked-files=no"))
-      throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
-    const sha = await git("rev-parse", "HEAD");
-    const lockfileChanged = async (from: string, to: string) =>
-      Boolean(await git("diff", "--name-only", from, to, "--", "package-lock.json")) || !existsSync(join(deps.repo, "node_modules"));
-    const fail = async (result: DeployResult & { ok: false }) => {
-      writeDeployState({ lastResult: { at: Date.now(), ok: false, sha, message: result.reason } });
-      await deps.tell(`${HOST_LABEL}\nDeploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
-      return result;
-    };
-    const schemaAt = async (revision: string) => {
-      const lock = parse(DurableLock, JSON.parse(await git("show", `${revision}:package-lock.json`)));
-      const version = lock.packages["node_modules/@earendil-works/pi-durable"].version;
-      return Number(version.split(".")[1]) >= 4 ? 2 : 1;
-    };
-    if ((await schemaAt(previous)) !== (await schemaAt(sha)))
+  return withLock(() =>
+    // A refusal before any result still answers the request, so a waiting caller does not wait for nothing.
+    unsettledThrows(async () => {
+      const previous = readHostSha();
+      if (!previous)
+        throw new Error("The sha the running host started from is unknown; deploy refused (restart the host once to record it)");
+      if (await git("status", "--porcelain", "--untracked-files=no"))
+        throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
+      const sha = await git("rev-parse", "HEAD");
+      const lockfileChanged = async (from: string, to: string) =>
+        Boolean(await git("diff", "--name-only", from, to, "--", "package-lock.json")) || !existsSync(join(deps.repo, "node_modules"));
+      const fail = async (result: DeployResult & { ok: false }) => {
+        settle({ ok: false, sha, message: result.reason });
+        await deps.tell(`${HOST_LABEL}\nDeploy of ${sha.slice(0, 8)} failed: ${result.reason}`).catch(() => {});
+        return result;
+      };
+      const schemaAt = async (revision: string) => {
+        const lock = parse(DurableLock, JSON.parse(await git("show", `${revision}:package-lock.json`)));
+        const version = lock.packages["node_modules/@earendil-works/pi-durable"].version;
+        return Number(version.split(".")[1]) >= 4 ? 2 : 1;
+      };
+      if ((await schemaAt(previous)) !== (await schemaAt(sha)))
+        return fail({
+          ok: false,
+          sha,
+          rolledBack: false,
+          reason:
+            "Pi Durable SQLite schema changes cannot use code-only rollback. Take a consistent project-home backup and perform a manual upgrade; restore that backup before downgrading.",
+        });
+      const changed = await lockfileChanged(previous, sha);
+      const checkDir = join(home(), "deploy-check");
+      try {
+        // The running host keeps its node_modules and files until the check has passed.
+        rmSync(checkDir, { recursive: true, force: true });
+        await git("worktree", "prune");
+        await git("worktree", "add", "--detach", checkDir, sha);
+        if (changed) await run("npm", ["ci"], checkDir);
+        else symlinkSync(join(deps.repo, "node_modules"), join(checkDir, "node_modules"));
+        await run("npm", ["run", "check"], checkDir);
+      } catch (error) {
+        // Nothing was stopped, so the running host is untouched.
+        return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
+      } finally {
+        await git("worktree", "remove", "--force", checkDir).catch(() => rmSync(checkDir, { recursive: true, force: true }));
+      }
+      const changedDuringPreparation = () =>
+        fail({ ok: false, sha, rolledBack: false, reason: "the checkout changed during preparation; nothing was stopped, deploy again" });
+      try {
+        if ((await git("rev-parse", "HEAD")) !== sha || (await git("status", "--porcelain", "--untracked-files=no")))
+          return changedDuringPreparation();
+      } catch (error) {
+        return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
+      }
+      let reason: string | undefined;
+      try {
+        if (deps.stopForDeploy && !(await deps.stopForDeploy(sha))) return changedDuringPreparation();
+        await deps.stopHost();
+        if (changed) await run("npm", ["ci"], deps.repo);
+        await deps.startHost();
+        reason = await deps.smoke();
+      } catch (error) {
+        reason = errorText(error);
+      }
+      if (!reason) {
+        writeDeployState({ lastGood: sha });
+        settle({ ok: true, sha, message: "deployed" });
+        const subject = await git("log", "-1", "--format=%s", sha).catch(() => "");
+        await deps
+          .tell(
+            `${HOST_LABEL}\nDeployed ${sha.slice(0, 8)}${subject ? ` (${subject.slice(0, 120)})` : ""}; the host passed its smoke test.`,
+          )
+          .catch(() => {});
+        return { ok: true, sha };
+      }
+      try {
+        await deps.stopHost().catch(() => {});
+        await git("checkout", "--detach", previous);
+        if (await lockfileChanged(sha, previous)) await run("npm", ["ci"], deps.repo);
+        await deps.startHost();
+        const again = await deps.smoke();
+        if (again) throw new Error(`the previous version also fails: ${again}`);
+      } catch (error) {
+        return fail({
+          ok: false,
+          sha,
+          rolledBack: false,
+          reason: `${reason}; rollback to ${previous.slice(0, 8)} failed: ${errorText(error).slice(0, 400)}. The host may be down.`,
+        });
+      }
       return fail({
         ok: false,
         sha,
-        rolledBack: false,
-        reason:
-          "Pi Durable SQLite schema changes cannot use code-only rollback. Take a consistent project-home backup and perform a manual upgrade; restore that backup before downgrading.",
+        rolledBack: true,
+        reason: `${reason}. Rolled back to ${previous.slice(0, 8)} and restarted; the checkout is detached there (git switch main to return).`,
       });
-    const changed = await lockfileChanged(previous, sha);
-    const checkDir = join(home(), "deploy-check");
-    try {
-      // The running host keeps its node_modules and files until the check has passed.
-      rmSync(checkDir, { recursive: true, force: true });
-      await git("worktree", "prune");
-      await git("worktree", "add", "--detach", checkDir, sha);
-      if (changed) await run("npm", ["ci"], checkDir);
-      else symlinkSync(join(deps.repo, "node_modules"), join(checkDir, "node_modules"));
-      await run("npm", ["run", "check"], checkDir);
-    } catch (error) {
-      // Nothing was stopped, so the running host is untouched.
-      return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
-    } finally {
-      await git("worktree", "remove", "--force", checkDir).catch(() => rmSync(checkDir, { recursive: true, force: true }));
-    }
-    try {
-      if ((await git("rev-parse", "HEAD")) !== sha || (await git("status", "--porcelain", "--untracked-files=no"))) {
-        queueDeploy();
-        return { ok: true, sha, queued: true };
-      }
-    } catch (error) {
-      return fail({ ok: false, sha, rolledBack: false, reason: `preparation failed: ${errorText(error).slice(0, 600)}` });
-    }
-    let reason: string | undefined;
-    try {
-      if (deps.stopForDeploy && !(await deps.stopForDeploy(sha))) {
-        queueDeploy();
-        return { ok: true, sha, queued: true };
-      }
-      await deps.stopHost();
-      if (changed) await run("npm", ["ci"], deps.repo);
-      await deps.startHost();
-      reason = await deps.smoke();
-    } catch (error) {
-      reason = errorText(error);
-    }
-    if (!reason) {
-      writeDeployState({ lastGood: sha, lastResult: { at: Date.now(), ok: true, sha, message: "deployed" } });
-      const subject = await git("log", "-1", "--format=%s", sha).catch(() => "");
-      await deps
-        .tell(`${HOST_LABEL}\nDeployed ${sha.slice(0, 8)}${subject ? ` (${subject.slice(0, 120)})` : ""}; the host passed its smoke test.`)
-        .catch(() => {});
-      return { ok: true, sha };
-    }
-    try {
-      await deps.stopHost().catch(() => {});
-      await git("checkout", "--detach", previous);
-      if (await lockfileChanged(sha, previous)) await run("npm", ["ci"], deps.repo);
-      await deps.startHost();
-      const again = await deps.smoke();
-      if (again) throw new Error(`the previous version also fails: ${again}`);
-    } catch (error) {
-      return fail({
-        ok: false,
-        sha,
-        rolledBack: false,
-        reason: `${reason}; rollback to ${previous.slice(0, 8)} failed: ${errorText(error).slice(0, 400)}. The host may be down.`,
-      });
-    }
-    return fail({
-      ok: false,
-      sha,
-      rolledBack: true,
-      reason: `${reason}. Rolled back to ${previous.slice(0, 8)} and restarted; the checkout is detached there (git switch main to return).`,
-    });
-  });
+    }),
+  );
+}
+
+async function unsettledThrows(attempt: () => Promise<DeployResult>): Promise<DeployResult> {
+  try {
+    return await attempt();
+  } catch (error) {
+    settle({ ok: false, sha: "", message: errorText(error) });
+    throw error;
+  }
 }
 
 async function waitFor(check: () => Promise<string | undefined>, timeoutMs: number): Promise<string | undefined> {
@@ -289,20 +353,18 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
   };
 }
 
-/** One idle-deploy tick: deploys once per day inside the window when new code is waiting and nothing is running. `start` launches the detached deploy. */
+/** One nightly tick: deploys once per day inside the window when new code is waiting; like every deploy it does not wait for idle projects. `start` launches the detached deploy. */
 export async function idleDeployTick(options: {
   now: Date;
   window?: DeployWindow;
-  idle: () => boolean | Promise<boolean>;
   /** True when the checkout is at a sha the host is not running. */
   pending: () => boolean | Promise<boolean>;
   start: () => void;
-}): Promise<"started" | "outside-window" | "already-tried" | "busy" | "nothing-to-deploy"> {
+}): Promise<"started" | "outside-window" | "already-tried" | "nothing-to-deploy"> {
   if (!inDeployWindow(options.now, options.window)) return "outside-window";
   const day = options.now.toDateString();
   if (readDeployState().lastIdleAttemptDay === day) return "already-tried";
   if (!(await options.pending())) return "nothing-to-deploy";
-  if (!(await Promise.resolve(options.idle()).catch(() => false))) return "busy";
   writeDeployState({ lastIdleAttemptDay: day });
   options.start();
   return "started";
