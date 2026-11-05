@@ -6,13 +6,20 @@ import type { Project } from "./state.ts";
 
 /**
  * Prompt blocks: the editable behavior part of an agent's prompt, as ordered named blocks (docs/prompt-blocks.md).
- * Built-in blocks are the role prompts' sections (role-prompts.ts); custom blocks are the owner's. Generated context (host contract,
- * repository and instance instructions, skills, memory, workspace bindings) frames the behavior and is never a block.
+ * Built-in blocks are the role prompts' sections, the base contract and the coordinator's integrations (role-prompts.ts, plus
+ * plugin blocks); custom blocks are the owner's. Generated context (role line, repository and instance instructions, skills,
+ * preferences, workspace bindings) frames them and is never a block.
  */
-export const PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer", "host"] as const;
+export const PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer", "contract", "integrations", "host"] as const;
 export type PromptTarget = (typeof PROMPT_TARGETS)[number];
-export const PROJECT_PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer"] as const;
+export const PROJECT_PROMPT_TARGETS = ["coordinator", "worker", "scout", "reviewer", "contract", "integrations"] as const;
 export type ProjectPromptTarget = (typeof PROJECT_PROMPT_TARGETS)[number];
+/** Targets that are one role's behavior; only these had legacy `project.prompts` overrides. */
+const ROLE_TARGETS: readonly ProjectPromptTarget[] = ["coordinator", "worker", "scout", "reviewer"];
+/** Values a project block may name as `{name}`; an unknown name is refused on save. */
+export const PLACEHOLDERS = ["project", "projectId", "githubRepos"] as const;
+type Placeholder = (typeof PLACEHOLDERS)[number];
+const PLACEHOLDER = /\{([A-Za-z]+)\}/g;
 
 export const PROMPT_BLOCK_LIMITS = {
   maxBlocks: 32,
@@ -56,7 +63,15 @@ export const ProjectPromptBlocks = Type.Object(
 export type ProjectPromptBlocks = Static<typeof ProjectPromptBlocks>;
 
 type Builtin = RoleBlock;
+/** The core built-ins; `builtinBlocks` adds the loaded plugins' integration blocks. */
 export const BUILTIN_PROMPT_BLOCKS: Record<PromptTarget, readonly Builtin[]> = ROLE_BLOCKS;
+let pluginBlocks: () => readonly Builtin[] = () => [];
+/** Called by the plugin registry: integration blocks of loaded plugins (`plugin:<name>`), read on every resolve. */
+export const usePluginPromptBlocks = (source: () => readonly Builtin[]): void => {
+  pluginBlocks = source;
+};
+export const builtinBlocks = (target: PromptTarget): readonly Builtin[] =>
+  target === "integrations" ? [...BUILTIN_PROMPT_BLOCKS.integrations, ...pluginBlocks()] : BUILTIN_PROMPT_BLOCKS[target];
 
 export type ResolvedPromptBlock = {
   id: string;
@@ -71,6 +86,10 @@ export type ResolvedPromptBlock = {
   required: boolean;
   /** The worker mode a delivery block belongs to; null when it applies to every agent of the target. */
   mode: WorkerMode | null;
+  /** The grant a block is tied to, by label; null for blocks that always apply. */
+  grant: string | null;
+  /** Whether the block's grant is on for the project (always true without a grant), so enabled text reaches the agent. */
+  active: boolean;
 };
 export type ResolvedPromptBlocks = {
   target: PromptTarget;
@@ -79,25 +98,41 @@ export type ResolvedPromptBlocks = {
   /** The text comes from the retired `project.prompts[role]` override. */
   legacy: boolean;
   blocks: ResolvedPromptBlock[];
-  /** The enabled blocks' text in order, separated by a blank line: what the agent's behavior section carries (a worker: the Job worker's). */
+  /** The enabled, active blocks' text in order, placeholders replaced, separated by a blank line (a worker: the Job worker's). */
   text: string;
 };
+/** What resolving for a project reads: grants and the placeholder values. */
+export type PromptProject = Pick<Project, "prompts" | "promptBlocks"> & Partial<Project>;
 
 const refuse = (detail: string): never => {
   throw new Error(`Prompt blocks: ${detail}`);
 };
 const joinBlocks = (blocks: readonly ResolvedPromptBlock[], mode: WorkerMode = "job") =>
   blocks
-    .filter((block) => block.enabled && (!block.mode || block.mode === mode))
+    .filter((block) => block.enabled && block.active && (!block.mode || block.mode === mode))
     .map((block) => block.text)
     .join(BLOCK_SEPARATOR);
+const values = (project: Partial<Project>): Record<Placeholder, string> => ({
+  project: project.name ?? "",
+  projectId: project.id ?? "",
+  githubRepos: (project.githubAuthorization ?? []).map((item) => item.repositoryId).join(", "),
+});
+/** Replaces known `{name}` placeholders with the project's values; anything else stays as written. */
+const fill = (text: string, project: Partial<Project> | undefined) => {
+  if (!project) return text;
+  const known = values(project);
+  return text.replace(PLACEHOLDER, (whole, name: string) =>
+    (PLACEHOLDERS as readonly string[]).includes(name) ? known[name as Placeholder] : whole,
+  );
+};
 
 /**
  * Validates a whole ordered list for a target and drops what restates a default. Returns undefined for the default list
  * (every built-in, in order, enabled, unedited, nothing custom), so saving the defaults stores nothing.
  */
 export function normalizePromptBlocks(target: PromptTarget, input: readonly PromptBlock[]): PromptBlock[] | undefined {
-  const builtins = new Map(BUILTIN_PROMPT_BLOCKS[target].map((block) => [block.id, block]));
+  const defaults = builtinBlocks(target);
+  const builtins = new Map(defaults.map((block) => [block.id, block]));
   const seen = new Set<string>();
   if (input.length > PROMPT_BLOCK_LIMITS.maxBlocks) refuse(`at most ${PROMPT_BLOCK_LIMITS.maxBlocks} blocks`);
   const list = input.map((block): PromptBlock => {
@@ -105,6 +140,10 @@ export function normalizePromptBlocks(target: PromptTarget, input: readonly Prom
     seen.add(block.id);
     if (block.text !== undefined && block.text.length > PROMPT_BLOCK_LIMITS.maxBlockChars)
       refuse(`block ${block.id} is over ${PROMPT_BLOCK_LIMITS.maxBlockChars} characters`);
+    if (target !== "host")
+      for (const [, name] of block.text?.matchAll(PLACEHOLDER) ?? [])
+        if (!(PLACEHOLDERS as readonly string[]).includes(name!))
+          refuse(`block ${block.id} uses placeholder {${name}}; known: ${PLACEHOLDERS.map((item) => `{${item}}`).join(", ")}`);
     const builtin = builtins.get(block.id);
     if (builtin) {
       if (block.name !== undefined) refuse(`built-in block ${block.id} keeps its name`);
@@ -130,14 +169,21 @@ export function normalizePromptBlocks(target: PromptTarget, input: readonly Prom
   if (total > PROMPT_BLOCK_LIMITS.maxTotalChars)
     refuse(`enabled blocks total ${total} characters, over ${PROMPT_BLOCK_LIMITS.maxTotalChars}`);
   const isDefault =
-    list.length === builtins.size &&
-    list.every((block, index) => block.id === BUILTIN_PROMPT_BLOCKS[target][index]!.id && block.enabled && !block.text);
+    list.length === builtins.size && list.every((block, index) => block.id === defaults[index]!.id && block.enabled && !block.text);
   return isDefault ? undefined : list;
 }
 
-/** The one resolver: a saved list, else a legacy override, else the built-ins. Tolerates lists saved by other versions. */
-export function resolvePromptBlocks(target: PromptTarget, saved?: readonly PromptBlock[], legacy?: string): ResolvedPromptBlocks {
-  const defaults = BUILTIN_PROMPT_BLOCKS[target];
+/**
+ * The one resolver: a saved list, else a legacy override, else the built-ins. Tolerates lists saved by other versions. With
+ * `project`, grant-tied blocks follow its grants and the text has its placeholder values.
+ */
+export function resolvePromptBlocks(
+  target: PromptTarget,
+  saved?: readonly PromptBlock[],
+  legacy?: string,
+  project?: Partial<Project>,
+): ResolvedPromptBlocks {
+  const defaults = builtinBlocks(target);
   const builtin = (block: Builtin, enabled: boolean, text?: string): ResolvedPromptBlock => ({
     id: block.id,
     name: block.name,
@@ -148,6 +194,8 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
     edited: text !== undefined && text !== block.text,
     required: block.required === true,
     mode: block.mode ?? null,
+    grant: block.grant?.label ?? null,
+    active: !block.grant || !project || block.grant.on(project as Project),
   });
   const custom = (id: string, name: string, enabled: boolean, text: string): ResolvedPromptBlock => ({
     id,
@@ -159,6 +207,8 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
     edited: false,
     required: false,
     mode: null,
+    grant: null,
+    active: true,
   });
   let blocks: ResolvedPromptBlock[];
   if (saved) {
@@ -196,14 +246,16 @@ export function resolvePromptBlocks(target: PromptTarget, saved?: readonly Promp
     customized: saved !== undefined || legacy !== undefined,
     legacy: !saved && legacy !== undefined,
     blocks,
-    text: joinBlocks(blocks),
+    text: fill(joinBlocks(blocks), project),
   };
 }
 
-type PromptConfig = Pick<Project, "prompts" | "promptBlocks">;
-/** A project's behavior for one target: its saved blocks, else its legacy override, else the built-ins. */
+type PromptConfig = PromptProject;
+const legacyOf = (project: PromptConfig, target: ProjectPromptTarget) =>
+  ROLE_TARGETS.includes(target) ? project.prompts?.[target as keyof NonNullable<Project["prompts"]>] : undefined;
+/** A project's blocks for one target: its saved blocks, else its legacy override, else the built-ins; grants and placeholders applied. */
 export const projectBehavior = (project: PromptConfig, target: ProjectPromptTarget): ResolvedPromptBlocks =>
-  resolvePromptBlocks(target, project.promptBlocks?.[target], project.prompts?.[target]);
+  resolvePromptBlocks(target, project.promptBlocks?.[target], legacyOf(project, target), project);
 
 /**
  * The text the older per-role prompt editor (`prompts-snapshot`, `settings-update` `prompts`) shows and saves: the behavior
@@ -214,7 +266,7 @@ export const legacyEditorText = (project: PromptConfig, target: ProjectPromptTar
 
 /** A worker's behavior in one mode: the worker blocks with that mode's delivery block. */
 export const workerBehavior = (project: PromptConfig, mode: WorkerMode): string =>
-  joinBlocks(projectBehavior(project, "worker").blocks, mode);
+  fill(joinBlocks(projectBehavior(project, "worker").blocks, mode), project);
 
 /**
  * Behavior texts an agent prepared before frames existed could have started with: the current behavior, the built-ins, or the
@@ -224,7 +276,7 @@ export function legacyBehaviors(project: PromptConfig, target: ProjectPromptTarg
   const texts = [
     target === "worker" ? workerBehavior(project, mode) : projectBehavior(project, target).text,
     joinBlocks(resolvePromptBlocks(target).blocks, mode),
-    project.prompts?.[target],
+    legacyOf(project, target),
     project.promptBlocks?.[target]?.find((block) => block.id === LEGACY_ID)?.text,
   ];
   return [...new Set(texts.filter((text): text is string => text !== undefined))];
@@ -243,8 +295,16 @@ export const composePrompt = (frame: PromptFrame, behavior: string): string => {
 /** Short, stable identity of behavior text, recorded when an agent adopts it. */
 export const behaviorKey = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
-/** When saved blocks reach running agents: coordinator chats before their next message, agents per instance (jobs-snapshot `prompt`), the Host agent from its next turn. */
-export type PromptApplication = { adopts: "next-message" } | { adopts: "next-turn-per-agent" } | { adopts: "next-turn"; pending: boolean };
+/**
+ * When saved blocks reach running agents: coordinator chats before their next message, agents per instance (jobs-snapshot `prompt`),
+ * the contract (part of an agent's frozen frame) coordinators before their next message and agents started after the save, the Host
+ * agent from its next turn.
+ */
+export type PromptApplication =
+  | { adopts: "next-message" }
+  | { adopts: "next-turn-per-agent" }
+  | { adopts: "next-message-and-new-agents" }
+  | { adopts: "next-turn"; pending: boolean };
 /** What `prompt-blocks-get` and `prompt-blocks-set` answer (docs/ui2-contract.md). */
 export function promptBlocksView(input: {
   projectId: string | null;

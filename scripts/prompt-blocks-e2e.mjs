@@ -392,4 +392,80 @@ await kit.run(async () => {
   );
   await set("host", null);
   check("P9 the host target restores its built-in prompt", !(await get("host")).customized);
+
+  // B14: one contract edit reaches every project role, the task helper included.
+  const contract = await get("contract");
+  check("B14 contract adoption is per next message and new agents", contract.application.adopts === "next-message-and-new-agents");
+  await set(
+    "contract",
+    inputs(contract).map((block) => (block.id === "evidence" ? { ...block, text: "CONTRACT-MARK: cite {project} evidence." } : block)),
+  );
+  const hostText = (render) => render.sections.find((section) => section.id === "host").text;
+  for (const [profile, workerMode] of [["coordinator"], ["worker"], ["worker", "task"], ["scout"], ["reviewer"]]) {
+    const view = await rpc({ action: "prompt-render", projectId: id, profile, ...(workerMode ? { workerMode } : {}) });
+    check(
+      `B14 ${profile}${workerMode ? " task helper" : ""} carries the edited contract`,
+      hostText(view).includes("CONTRACT-MARK: cite Blocks evidence."),
+      hostText(view),
+    );
+  }
+  await kit.ask(id, "plain question contract");
+  check(
+    "B14 the next coordinator request carries it",
+    kit.result.calls
+      .findLast((c) => c.role === "coordinator" && c.user.includes("plain question contract"))
+      .system.includes("CONTRACT-MARK"),
+  );
+
+  // B15: an integration block follows its grant; turning it off keeps the tool.
+  const integrations = await get("integrations");
+  const ghBlock = integrations.blocks.find((block) => block.id === "gh");
+  check("B15 the gh block is active with its grant named", ghBlock.active && ghBlock.grant === "GitHub CLI", ghBlock);
+  await set(
+    "integrations",
+    inputs(integrations).map((block) => (block.id === "gh" ? { ...block, enabled: false } : block)),
+  );
+  await kit.ask(id, "plain question integrations");
+  const integrationCall = kit.result.calls.findLast((c) => c.role === "coordinator" && c.user.includes("plain question integrations"));
+  check(
+    "B15 a block turned off leaves the prompt and keeps the tool",
+    !integrationCall.system.includes("projects_gh runs gh as the owner") && integrationCall.tools.includes("projects_gh"),
+  );
+  const settingsNow = await rpc({ action: "settings-snapshot", id });
+  await rpc({
+    action: "settings-update",
+    id,
+    confirm: id,
+    expectedRevision: settingsNow.revision,
+    changes: { githubCli: "none" },
+  });
+  const revoked = await get("integrations");
+  check("B15 a revoked grant marks its block inactive", revoked.blocks.find((block) => block.id === "gh").active === false);
+
+  // B16: an unknown placeholder is refused.
+  check(
+    "B16 an unknown placeholder is refused",
+    /placeholder \{nope\}/.test(
+      String(
+        await rejects({
+          action: "prompt-blocks-set",
+          projectId: id,
+          target: "integrations",
+          revision: revoked.revision,
+          blocks: [...inputs(revoked), { id: "custom:nope", name: "Nope", enabled: true, text: "Use {nope}" }],
+        }),
+      ),
+    ),
+  );
+
+  // B18: the task helper has the project instructions in their own section, once, and no false verification line.
+  const helper = await rpc({ action: "prompt-render", projectId: id, profile: "worker", workerMode: "task" });
+  const helperText = helper.sections.map((section) => section.text).join("\n");
+  check(
+    "B18 the task helper's project instructions are their own section, once",
+    helper.sections.find((section) => section.id === "project").text.startsWith("Project instructions:") &&
+      helperText.split("Project instructions:").length === 2 &&
+      !helperText.includes("Verification is not configured"),
+    helper.sections.map((section) => [section.id, section.text.slice(0, 80)]),
+  );
 });

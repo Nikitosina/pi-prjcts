@@ -421,7 +421,12 @@ export type CoordinatorToolsProvider = {
     extension: Extension;
   };
   applies(project: Project): boolean;
-  /** Appended to the coordinator instructions of matching projects. */
+  /**
+   * The coordinator's rules for these tools as an editable integration block (`plugin:<plugin name>`, Settings → Prompt): shown
+   * while `applies` and `on` hold. `text` may use `{project}`, `{projectId}` and `{githubRepos}`. Replaces `instructions`.
+   */
+  prompt?: { name: string; text: string; on?(project: Project): boolean };
+  /** Older form: appended to the coordinator instructions of matching projects as locked text. Ignored when `prompt` is set. */
   instructions?(project: Project): string;
 };
 export type PluginRpcContext = {

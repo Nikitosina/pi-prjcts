@@ -26,8 +26,9 @@ import type {
   WorkerToolsProvider,
   WorkspaceProvider,
 } from "./plugin-types.ts";
+import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
-import { home, loadProject, projectDir } from "./state.ts";
+import { home, loadProject, projectDir, type Project } from "./state.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
   authorizationFingerprint,
@@ -56,6 +57,22 @@ const each = <T>(pick: (capabilities: PluginCapabilities) => T | undefined): T[]
     const value = pick(item.capabilities);
     return value === undefined ? [] : [value];
   });
+// Plugin rules for the coordinator are editable integration blocks, resolved with the project's other prompt blocks.
+usePluginPromptBlocks(() =>
+  [...builtins(), ...loaded].flatMap((item) => {
+    const tools = item.capabilities.coordinatorTools,
+      prompt = tools?.prompt;
+    if (!tools || !prompt) return [];
+    return [
+      {
+        id: `plugin:${item.plugin}`,
+        name: prompt.name,
+        text: prompt.text,
+        grant: { label: prompt.name, on: (project: Project) => tools.applies(project) && (prompt.on?.(project) ?? true) },
+      },
+    ];
+  }),
+);
 export const plugins = {
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),

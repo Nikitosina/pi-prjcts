@@ -60,6 +60,8 @@ const PromptTargetSchema = Type.Union([
   Type.Literal("worker"),
   Type.Literal("scout"),
   Type.Literal("reviewer"),
+  Type.Literal("contract"),
+  Type.Literal("integrations"),
   Type.Literal("host"),
 ]);
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);

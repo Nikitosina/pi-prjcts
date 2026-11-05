@@ -1,9 +1,11 @@
-// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering and frames (scripts/prompt-blocks-failures.md B1–B13).
+// Unit checks for src/prompt-blocks.ts: defaults, legacy overrides, validation, ordering, frames, the contract and integrations (scripts/prompt-blocks-failures.md B1–B17).
 import assert from "node:assert/strict";
 import { Value } from "typebox/value";
 import {
   BUILTIN_PROMPT_BLOCKS,
   PROMPT_BLOCK_LIMITS,
+  builtinBlocks,
+  usePluginPromptBlocks,
   PROMPT_TARGETS,
   ProjectPromptBlocks,
   composePrompt,
@@ -18,9 +20,7 @@ import {
   DEFAULT_ROLE_PROMPTS,
   HOST_AGENT_PROMPT,
   ROLE_BLOCKS,
-  SHARED_ROLE_RULES,
   TASK_HELPER_PROMPT,
-  taskHelperFrame,
 } from "../src/role-prompts.ts";
 
 const project = (extra = {}) => ({ name: "Demo", objective: "Build it", ...extra });
@@ -39,17 +39,6 @@ assert.equal(
   "B1 coordinator blocks are one blank line apart",
 );
 assert.equal(workerBehavior(project(), "helper"), TASK_HELPER_PROMPT, "B1 task helper default");
-const helper = (p, access, standing) => composePrompt(taskHelperFrame(p, access, standing, "\nSUFFIX"), workerBehavior(p, "helper"));
-assert.equal(
-  helper(project(), "maintain", "STANDING"),
-  `You are a task helper for Demo. Project instructions: Build it\n\nRepository instructions (frozen for this thread):\nSTANDING\n\n${TASK_HELPER_PROMPT}\n${SHARED_ROLE_RULES} You may write revision-checked knowledge topics with projects_knowledge_write.\nSUFFIX`,
-  "B1 task helper instructions",
-);
-assert.equal(
-  helper(project(), "read-only", ""),
-  `You are a task helper for Demo. Project instructions: Build it\n\n${TASK_HELPER_PROMPT}\n${SHARED_ROLE_RULES}\nSUFFIX`,
-  "B1 task helper without repository instructions",
-);
 for (const target of PROMPT_TARGETS) assert.equal(resolvePromptBlocks(target).customized, false, `B1 ${target} not customized`);
 
 // B2: a legacy override is the exact old text plus the mode's delivery block, marked legacy, and reaches task helpers too.
@@ -69,8 +58,9 @@ assert.deepEqual(
   "B2 legacy shows as one custom block over disabled built-ins, delivery kept",
 );
 assert.equal(projectBehavior(legacy, "coordinator").text, DEFAULT_ROLE_PROMPTS.coordinator, "B2 other roles keep defaults");
-assert.ok(
-  helper(legacy, "maintain", "").includes(`Build it\n\n${joined(["OWNER WORKER TEXT", delivery("delivery-return")])}\n`),
+assert.equal(
+  workerBehavior(legacy, "helper"),
+  joined(["OWNER WORKER TEXT", delivery("delivery-return")]),
   "B2 task helper gets the override and its own delivery",
 );
 
@@ -155,14 +145,27 @@ const frame = { before: "HOST\n\nREPO", lead: "\n\n", after: "\n\nSKILLS\nWORKSP
 assert.equal(composePrompt(frame, "ROLE"), "HOST\n\nREPO\n\nROLE\n\nSKILLS\nWORKSPACE", "B7 compose");
 assert.equal(composePrompt(frame, ""), "HOST\n\nREPO\n\nSKILLS\nWORKSPACE", "B7 empty behavior");
 
-// B8: authority stays out of every block.
-assert.ok(PROMPT_TARGETS.length === 5 && !PROMPT_TARGETS.includes("taskHelper"), "B13 taskHelper is no longer a target");
+assert.ok(!PROMPT_TARGETS.includes("taskHelper"), "B13 taskHelper is no longer a target");
 const retired = { worker: defaults("worker"), taskHelper: [{ id: "custom:old", name: "Old", enabled: true, text: "OLD HELPER" }] };
 assert.ok(Value.Check(ProjectPromptBlocks, retired), "B13 a saved taskHelper list still loads");
 assert.ok(!workerBehavior(project({ promptBlocks: retired }), "helper").includes("OLD HELPER"), "B13 and never reaches a prompt");
+
+// B8: the contract is blocks (Authority required, editable); generated facts stay out of every block.
+assert.deepEqual(ids("contract"), ["authority", "evidence"], "B8 contract blocks");
+assert.equal(resolvePromptBlocks("contract").text, joined(ROLE_BLOCKS.contract.map((block) => block.text)), "B8 contract default");
+refused(
+  "contract",
+  defaults("contract").map((block) => ({ ...block, enabled: block.id !== "authority" })),
+  /required/i,
+  "B8 authority cannot be turned off",
+);
+const authority = normalizePromptBlocks(
+  "contract",
+  defaults("contract").map((block) => (block.id === "authority" ? { ...block, text: "AUTHORITY EDITED" } : block)),
+);
+assert.ok(resolvePromptBlocks("contract", authority).text.startsWith("AUTHORITY EDITED"), "B8 authority can be edited");
 for (const target of PROMPT_TARGETS)
-  for (const block of BUILTIN_PROMPT_BLOCKS[target])
-    assert.ok(!block.text.includes(SHARED_ROLE_RULES) && !block.text.includes(COORDINATOR_CONTEXT_RULES), `B8 ${target}.${block.id}`);
+  for (const block of BUILTIN_PROMPT_BLOCKS[target]) assert.ok(!block.text.includes(COORDINATOR_CONTEXT_RULES), `B8 ${target}.${block.id}`);
 
 // B9: every built-in block is editable behavior, including the Host agent's own.
 for (const target of PROMPT_TARGETS)
@@ -236,5 +239,63 @@ for (const id of ["delivery-pr", "delivery-return"]) {
     `B12 ${id} can be edited`,
   );
 }
+
+// B15: an integration block reaches the prompt only while its grant is on, and stays listed, inactive, when it is off.
+const github = { githubAuthorization: [{ repositoryId: "owner/repo" }] };
+const granted = projectBehavior(project(github), "integrations");
+const gh = (resolved) => resolved.blocks.find((block) => block.id === "gh");
+assert.ok(gh(granted).active && gh(granted).grant, "B15 gh is on by default and names its grant");
+assert.ok(granted.text.includes("projects_gh") && granted.text.includes("owner/repo"), "B15 granted blocks reach the text");
+const revoked = projectBehavior(project({ githubCli: "none" }), "integrations");
+assert.ok(!gh(revoked).active && !revoked.text.includes("projects_gh"), "B15 a revoked grant hides its block");
+assert.ok(!revoked.text.includes("projects_github_issue"), "B15 no GitHub issue text without the authorization");
+assert.ok(
+  revoked.blocks.some((block) => block.id === "github" && !block.active),
+  "B15 an inactive block is still listed",
+);
+
+// B16: placeholders are replaced; an unknown one is refused; built-ins use only known ones.
+const placed = normalizePromptBlocks("integrations", [
+  ...defaults("integrations"),
+  { id: "custom:where", name: "Where", enabled: true, text: "PLACE {project} {projectId}" },
+]);
+assert.ok(
+  projectBehavior(project({ id: "p-1", promptBlocks: { integrations: placed } }), "integrations").text.includes("PLACE Demo p-1"),
+  "B16 placeholders rendered",
+);
+refused(
+  "integrations",
+  [...defaults("integrations"), { id: "custom:bad", name: "Bad", enabled: true, text: "Use {nope}" }],
+  /placeholder \{nope\}/i,
+  "B16 unknown placeholder refused",
+);
+for (const target of PROMPT_TARGETS)
+  for (const block of builtinBlocks(target))
+    for (const [, name] of block.text.matchAll(/\{([A-Za-z]+)\}/g))
+      assert.ok(["project", "projectId", "githubRepos"].includes(name), `B16 ${target}.${block.id} uses {${name}}`);
+
+// B17: a plugin's prompt block is an editable, grant-tied integration block.
+usePluginPromptBlocks(() => [
+  { id: "plugin:demo", name: "Demo plugin", text: "DEMO for {projectId}", grant: { label: "Demo", on: (p) => p.name === "Demo" } },
+]);
+assert.ok(
+  builtinBlocks("integrations").some((block) => block.id === "plugin:demo"),
+  "B17 plugin block is a built-in integration",
+);
+assert.ok(projectBehavior(project({ id: "p-2" }), "integrations").text.includes("DEMO for p-2"), "B17 plugin block rendered");
+assert.ok(!projectBehavior(project({ id: "p-2", name: "Other" }), "integrations").text.includes("DEMO"), "B17 plugin block gated");
+const pluginEdited = normalizePromptBlocks(
+  "integrations",
+  builtinBlocks("integrations").map((block) => ({
+    id: block.id,
+    enabled: true,
+    ...(block.id === "plugin:demo" ? { text: "DEMO EDITED" } : {}),
+  })),
+);
+assert.ok(
+  projectBehavior(project({ promptBlocks: { integrations: pluginEdited } }), "integrations").text.includes("DEMO EDITED"),
+  "B17 plugin block editable",
+);
+usePluginPromptBlocks(() => []);
 
 console.log("prompt-blocks-unit: ok");

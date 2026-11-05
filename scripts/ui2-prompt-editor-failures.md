@@ -32,6 +32,7 @@ Written before the code. The scripted proof is the `ui2-prompts` journey in `.ag
 - E15 The preview does not say it shows the configuration for the next use, presents configured text as what a running conversation has, or hides that an edit applies only on the next safe turn.
 - E16 Rendered prompt text is inserted as HTML (block text with `<b>` renders bold or runs a script).
 - E23 In a chat other than Main, a Prompt tab other than the coordinator fails ("chatId applies to the coordinator profile only"): the preview asks for chat-specific text a worker, scout, reviewer or the Host agent does not have.
+- E24 The project's contract and integration blocks are missing from a role's tab, the required Authority block can be switched off, an integration whose grant is off looks active, or a contract edit made on the coordinator tab is stored on the coordinator instead of the `contract` target (so other roles never get it).
 
 ## Running agents (worker details, `jobs-snapshot` `agents[].prompt`; scripts/ui2-worker-prompt-e2e.mjs)
 

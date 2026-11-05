@@ -2407,6 +2407,11 @@ details.small-field select {
   text-transform: uppercase;
   color: var(--faint);
 }
+.pb-group .muted {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .pb-src.project,
 .pv-src.project {
   color: var(--ready);

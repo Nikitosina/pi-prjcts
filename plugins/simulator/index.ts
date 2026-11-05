@@ -34,7 +34,11 @@ export default {
       return value;
     };
     api.provide({
-      coordinatorTools: { applies: () => true, instructions: () => COORDINATOR_NOTE, create: (input) => tools.coordinator(input) },
+      coordinatorTools: {
+        applies: () => true,
+        prompt: { name: "iOS simulators", text: COORDINATOR_NOTE, on: (project) => simulators.enabled(project.id) },
+        create: (input) => tools.coordinator(input),
+      },
       workerTools: { offered: simulators.enabled, create: (input) => tools.worker(input), instructions: WORKER_NOTE },
       leaseName,
       lifecycle: { pause: simulators.pause, close: simulators.close },

@@ -862,7 +862,7 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     const rows = [...document.querySelectorAll('#settings .pb-row')];
     const own = rows.filter(r => !r.matches('[data-generated]')), gen = rows.filter(r => r.matches('[data-generated]'));
     return {
-      own: own.map(r => ({ id: r.dataset.block, project: r.dataset.block === 'objective', toggle: !!r.querySelector('input.pb-toggle[type=checkbox]'), name: r.querySelector('.pb-name')?.innerText.trim(),
+      own: own.map(r => ({ id: r.dataset.block, project: r.dataset.block === 'objective', toggle: !!r.querySelector('input.pb-toggle[type=checkbox]'), lock: !!r.querySelector('.pb-lead.lock'), name: r.querySelector('.pb-name')?.innerText.trim(),
         src: r.querySelector('.pb-src')?.innerText.trim(), tok: r.querySelector('.pb-tok')?.innerText.trim(), h: r.getBoundingClientRect().height })),
       gen: gen.map(r => ({ id: r.dataset.block, toggle: !!r.querySelector('input'), name: r.querySelector('.pb-name')?.innerText.trim() })),
       textareas: document.querySelectorAll('#settings textarea').length,
@@ -872,7 +872,12 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   if (
     !shape.own.length ||
     shape.own.some(
-      (r) => (!r.toggle && !r.project) || !r.name || !/^(Built-in|Edited|Custom|Project)$/.test(r.src) || !/\d/.test(r.tok) || r.h > 48,
+      (r) =>
+        (!r.toggle && !r.project && !r.lock) ||
+        !r.name ||
+        !/^(Built-in|Edited|Custom|Project)$/.test(r.src) ||
+        !/\d/.test(r.tok) ||
+        r.h > 48,
     )
   )
     throw Error(`E2 block rows: ${JSON.stringify(shape.own)}`);
@@ -885,7 +890,12 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   await page.shot(dir, "01-blocks");
   if (shape.own[0]?.id !== "objective" || shape.own[0].toggle || shape.own[0].src !== "Project")
     throw Error(`E19 Project instructions row: ${JSON.stringify(shape.own[0])}`);
-  const first = shape.own.find((r) => r.src === "Built-in").id;
+  // Rows of the shared contract and integration groups are keyed `<target>~<id>`; the first coordinator-owned one is the subject.
+  const first = shape.own.find((r) => r.src === "Built-in" && r.toggle && !r.id.includes("~")).id;
+  const shared = ["contract~authority", "contract~evidence", "integrations~questions"];
+  if (shared.some((id) => !shape.own.some((r) => r.id === id)) || !shape.own.find((r) => r.id === "contract~authority").lock)
+    throw Error(`E24 contract and integration groups: ${JSON.stringify(shape.own.map((r) => r.id))}`);
+  record("visible", "E24 the coordinator tab lists the contract group (Authority locked) and its integration blocks");
 
   // E5: Space on a focused row switches the block off; the host stores it and the preview leaves it out.
   await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
@@ -904,6 +914,8 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
   await page.press(" ", { code: "Space", keyCode: 32 });
   await until(async () => (await blocks("coordinator")).blocks.find((b) => b.id === first)?.enabled === true, `E5 ${first} stored on`);
+  // The redraw after this write focuses the row, which can scroll the list: wait for it before clicking anything.
+  await saved("E5 switch back", `${firstName} on · saved`);
 
   // E6: editing a built-in stores an override on that block (badge Edited); Restore default removes it (badge Built-in).
   await select(first);
@@ -925,6 +937,27 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     "E6 Built-in badge and default text back",
   );
   record("side-effect", `E6 ${first} edited (override stored, badge Edited), then restored (override removed, default text back)`);
+
+  // E24: a contract block edited on the coordinator tab is stored on the contract target and reaches the worker's preview.
+  await select("contract~evidence");
+  await type("VERIFY contract: cite evidence for {project}.");
+  await page.click("#settings #pb-save");
+  await saved("E24 contract", "Evidence saved");
+  const contractEvidence = (await blocks("contract")).blocks.find((b) => b.id === "evidence");
+  if (!contractEvidence?.edited || !contractEvidence.text.includes("VERIFY contract"))
+    throw Error(`E24 contract: ${JSON.stringify(contractEvidence)}`);
+  if ((await blocks("coordinator")).blocks.some((b) => JSON.stringify(b).includes("VERIFY contract")))
+    throw Error("E24 a contract edit was stored on the coordinator");
+  const workerView = await rpc(run, { action: "prompt-render", projectId, profile: "worker" });
+  if (!workerView.sections.find((section) => section.id === "host").text.includes("VERIFY contract: cite evidence for Verify seed."))
+    throw Error("E24 the worker's host contract lacks the edit");
+  await page.shot(dir, "03b-contract");
+  await page.click("#settings #pb-restore");
+  await saved("E24 contract restore", "Evidence restored to default");
+  record(
+    "side-effect",
+    "E24 Evidence edited on the coordinator tab: stored on contract, filled {project} in the worker's contract; restored",
+  );
 
   // E7/E16: a new custom block for the coordinator; text with markup stays text.
   const marked = 'VERIFY custom: <b>bold?</b><img src=x onerror="window.__pwned=1">';
