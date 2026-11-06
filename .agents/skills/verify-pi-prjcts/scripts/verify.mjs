@@ -1865,8 +1865,10 @@ const journeys = {
     await page.press("Enter", { keyCode: 13, modifiers: 4 });
     await status(`${blockName} saved`, "prompt saved inline");
     const rendered = await rpc(run, { action: "prompt-render", projectId, profile: "coordinator" });
-    if (!rendered.sections.find((item) => item.id === "role")?.text.includes("VERIFY coordinator block"))
-      throw Error("prompt-render role section does not hold the saved block text");
+    // The first editable block may be the role's or the contract's (host section): the saved text must render in one of them.
+    const holder = rendered.sections.find((item) => item.text?.includes("VERIFY coordinator block"));
+    if (!holder || !["role", "host"].includes(holder.id))
+      throw Error(`prompt-render does not hold the saved ${blockId} block text (found in ${holder?.id ?? "no section"})`);
     await page.click("#settings #pb-restore");
     await until(
       async () =>
