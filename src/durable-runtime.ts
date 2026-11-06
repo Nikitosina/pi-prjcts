@@ -44,7 +44,7 @@ import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
 import { FULL_COMMIT, Jobs, createJobs, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
-import { changedFiles } from "./vcs.ts";
+import { changedFiles, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
@@ -1252,6 +1252,7 @@ export async function openDurableProject(input: {
       agent.role === "worker" && !agent.scopeId && catalog(loadProject(project.id)).length
         ? "This worker was started without a workspace, so it has no shell or file tools and cannot get them. Start a new worker (new workers get the repository workspace by default) instead of following up or steering this one."
         : null;
+    const conversationCwd = async (id: ConversationId) => (await (await harness?.conversation(id, context))?.agent(context))?.cwd;
     const jobs = createJobs({
       agentChange: agentSetup,
       onRetry: refreshInstanceInstructions,
@@ -1260,6 +1261,18 @@ export async function openDurableProject(input: {
         return scopes.length === 1 && scopes[0]!.wholeRepository ? scopes[0]!.id : undefined;
       },
       refuseSend: (agent) => unscopedRefusal(agent),
+      // R9: the worktree a reader read must still be where it was when the reader's message started.
+      readDrift: async (agent) => {
+        const target = (await harness?.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agent.readRef ?? ""];
+        const cwd = target ? await conversationCwd(target.conversationId) : undefined;
+        const [head, dirty] = cwd && existsSync(cwd) ? await Promise.all([headCommit(cwd), changedFiles(cwd)]) : [null, null];
+        if (head === agent.readHead && dirty?.length === 0) return null;
+        const what =
+          head === null
+            ? "can no longer be read"
+            : `${head === agent.readHead ? `is still at ${head}` : `moved from ${agent.readHead} to ${head}`}${dirty?.length ? " and has uncommitted changes" : ""}`;
+        return `[This report is not valid for the current code: agent ${agent.readRef}'s worktree ${what} since this reader started. Spawn a new reader on its current commit.]`;
+      },
       promptBehavior: (agent, job) =>
         agent.role === "worker" && job?.workspace ? taskHelperBehavior(loadProject(project.id)) : behaviorOf(agent.role),
       prepare: async ({ agent, job, frame }) => {
@@ -1278,15 +1291,15 @@ export async function openDurableProject(input: {
               throw new Error(
                 "Task helper worktrees may be dirty. Ask Coordinator for a full committed SHA to review an immutable snapshot.",
               );
-            const cwd = (await (await harness!.conversation(target.conversationId, context))?.agent(context))?.cwd;
+            const cwd = await conversationCwd(target.conversationId);
             if (!cwd || !existsSync(cwd))
               throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
-            const dirty = await changedFiles(cwd);
-            if (dirty === null || dirty.length)
+            const [dirty, head] = await Promise.all([changedFiles(cwd), headCommit(cwd)]);
+            if (dirty === null || dirty.length || !head)
               throw new Error(
-                `Agent ${agent.readRef}'s worktree ${dirty === null ? "status is unreadable" : "has uncommitted changes"}. Ask it to commit, then spawn the reader with that full commit SHA.`,
+                `Agent ${agent.readRef}'s worktree ${dirty?.length ? "has uncommitted changes" : "status is unreadable"}. Ask it to commit, then spawn the reader with that full commit SHA.`,
               );
-            return { cwd, ...reader };
+            return { cwd, ...reader, readHead: head };
           }
           if (!FULL_COMMIT.test(agent.readRef))
             throw new Error(`readRef ${JSON.stringify(agent.readRef)} is not an agent id or a full commit SHA`);

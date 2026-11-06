@@ -137,6 +137,8 @@ export type Agent = {
   /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
   scopeId: string | null;
   readRef: string | null;
+  /** The commit of the agent worktree this reader reads, recorded when its current message started. */
+  readHead?: string;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -320,7 +322,13 @@ export type JobsHost = {
    * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
    * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
    */
-  prepare?(spec: { agent: Agent; job: Job | null; frame: PromptFrame | null }): Promise<(AgentChange & { prompt?: PreparedPrompt }) | void>;
+  prepare?(spec: {
+    agent: Agent;
+    job: Job | null;
+    frame: PromptFrame | null;
+  }): Promise<(AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void>;
+  /** For a reader of another agent's worktree: why its report does not match that worktree now, or null when it still does. */
+  readDrift?(agent: Agent): Promise<string | null>;
   /** The behavior text this agent would get now, or null when its prompt is not built from blocks. */
   promptBehavior?(agent: Agent, job: Job | null): string | null;
   /** Stops the background processes and releases the leases of these conversations. */
@@ -415,7 +423,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
     phases: {
       prepare: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId } = reporter.input;
-        let change: (AgentChange & { prompt?: PreparedPrompt }) | void = undefined;
+        let change: (AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void = undefined;
         let failure: string | null = null;
         try {
           const state = await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext);
@@ -437,8 +445,9 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
             return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
+            if (change?.readHead) agent.readHead = change.readHead;
             if (change) {
-              const { prompt, ...built } = change;
+              const { prompt, readHead: _readHead, ...built } = change;
               let setup = built;
               const saved = await tx.doc(AgentPrompt, conversationId);
               // An agent prepared before frames gets one only when a rebuilt prompt equals its stored one exactly; nothing is parsed out of it.
@@ -673,12 +682,17 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           return;
         }
         if (report !== undefined && reportRef === undefined) {
+          const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
+          const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
+          // The warning goes right under the report's first line, so a clipped preview still shows it.
+          const flagged = (text: string) =>
+            drift ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${drift}\n`) : text;
           await runtime.commit(async (tx) => {
             const entry = await tx.appendEntry(reporter.input.conversationId, {
               kind: "projects.agent-report",
-              data: { text: details ?? report, at: runtime.now() },
+              data: { text: flagged(details ?? report), at: runtime.now() },
             });
-            return { status: "running", checkpoint: { phase: "report", report, reportRef: entry.id } } as const;
+            return { status: "running", checkpoint: { phase: "report", report: flagged(report), reportRef: entry.id } } as const;
           }, taskContext);
           return;
         }

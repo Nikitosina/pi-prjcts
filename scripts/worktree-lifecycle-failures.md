@@ -26,6 +26,7 @@ isolated worktree through the task-helper mechanism (no setup command), removed 
 - R6 a branch or PR name is accepted without a pinned commit, or refused without saying to resolve it to a full SHA first.
 - R7 reviewers without a ref lose their previous behaviour (project checkout).
 - R8 a reader of another worker's worktree starts while that worktree has uncommitted changes, which may change under it.
+- R9 the worker commits, moves HEAD or leaves uncommitted changes while a reader of its worktree reads; the reader's report then describes code that is no longer there. The commit is recorded when each reader message starts; when the report is filed, a moved HEAD or a dirty tree puts a first line on the report saying it is not valid for the current code, with both commits, so the Coordinator respawns the reader on the new SHA. A report of a reader whose target stayed put has no such line.
 
 ## C11f Scout/reviewer with workspaceScopeId
 - S1 a scout delegated with workspaceScopeId still fails; must run read-only (scope ignored, receipt says so).

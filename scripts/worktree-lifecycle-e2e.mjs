@@ -142,6 +142,8 @@ const model = createServer((req, res) => {
         if (n === 5) return res.end(call("projects_delegate", { role: "reviewer", ref: "f".repeat(40), task: "UNKNOWN-COMMIT" }));
         return res.end(say("Review dispatched."));
       }
+      if (/MARK-DRIFT (\S+)/.test(userText) && n === 0)
+        return res.end(call("projects_delegate", { role: "reviewer", ref: /MARK-DRIFT (\S+)/.exec(userText)[1], task: "DRIFT-REVIEW" }));
       if (/MARK-LOCAL/.test(userText) && n === 0)
         return res.end(call("projects_delegate", { role: "worker", task: "W3-TASK commit local.txt locally; do not push" }));
       if (/MARK-FOLLOW3 (\S+)/.test(userText) && n === 0)
@@ -225,6 +227,11 @@ const model = createServer((req, res) => {
         return res.end(say("W3-DONE"));
       }
       return res.end(say("Worker done."));
+    }
+    if (role === "reviewer" && /DRIFT-REVIEW/.test(firstUser) && results.length === 0) {
+      // R9: hold the read open until the test has moved the worker's HEAD.
+      brain.driftWaiting = true;
+      await brain.driftGate;
     }
     if (role === "reviewer" || role === "scout") {
       const file = /CHILD-REVIEW/.test(firstUser) ? "wip-note.txt" : /REVIEW-HEAD/.test(firstUser) ? "feature.txt" : "README.md";
@@ -596,6 +603,45 @@ try {
     "K7 reclaimable size is reported",
     inv.reclaimableKb > 0 && inv.reclaimableKb === inv.items.filter((e) => e.removable).reduce((a, e) => a + e.sizeKb, 0),
     inv,
+  );
+
+  // R9: W3 commits while a reader of its worktree reads; the report says it is not valid for the current code.
+  const driftFrom = git(i3.path, "rev-parse", "HEAD");
+  let releaseDrift;
+  brain.driftGate = new Promise((ok) => (releaseDrift = ok));
+  await rpc({ action: "message", id, text: `MARK-DRIFT ${w3.threadId}` });
+  await eventually(async () => brain.driftWaiting, "the drift reader did not start", 300);
+  git(
+    i3.path,
+    "-c",
+    "user.email=e2e@example.invalid",
+    "-c",
+    "user.name=E2E",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "Moved during the read",
+  );
+  const driftTo = git(i3.path, "rev-parse", "HEAD");
+  releaseDrift();
+  await settleAll();
+  const driftReport = await eventually(
+    async () =>
+      (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").find((text) => /^\[reviewer [^\]]*DRIFT-REVIEW/.test(text)),
+    "the drift reader did not report",
+    300,
+  );
+  check(
+    "R9 a reader whose target worktree moved during the read reports first that it is not valid for the current code, with both commits",
+    /^\[reviewer [^\n]*\n.*not valid for the current code/.test(driftReport) &&
+      driftReport.includes(driftFrom) &&
+      driftReport.includes(driftTo),
+    driftReport.slice(0, 600),
+  );
+  check(
+    "R9 a reader whose target stayed put has no such line",
+    !/not valid for the current code/.test(seen("CHILD-REVIEW", "reviewer") + reports),
   );
 
   // PR #1 merged → W1 becomes removable (its old pre-rebase commit is off-remote, but the PR is merged).
