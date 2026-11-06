@@ -46,6 +46,7 @@ export function visibleChats() {
 function dot(activity) {
   if (activity?.needs) return `<span class="dot needs" aria-label="needs you"></span>`;
   if (activity?.working) return `<span class="dot working" aria-label="working"></span>`;
+  if (activity?.paused) return `<span class="dot paused" aria-label="paused"></span>`;
   return `<span class="dot idle" aria-hidden="true"></span>`;
 }
 export function renderTree() {

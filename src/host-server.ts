@@ -443,7 +443,7 @@ function trackRequest<T>(start: () => Promise<T>): Promise<T> {
 
 // Live activity per project for the sidebar. Only runtimes that are already open are asked (a closed project has nothing running), and a result is reused for 1.5 s.
 const activityCache = new Map<string, { at: number; value: Promise<ProjectActivity> }>();
-const IDLE_ACTIVITY: ProjectActivity = { working: false, needs: false, finishedAt: 0, chats: {} };
+const IDLE_ACTIVITY: ProjectActivity = { working: false, paused: false, needs: false, finishedAt: 0, chats: {} };
 async function projectActivity(id: string): Promise<ProjectActivity> {
   const opening = durableRuntimes.get(id);
   if (!opening || closing || lifecycleChanging.has(id) || settingsUpdating.has(id) || ownerCloseFailed.has(id)) return IDLE_ACTIVITY;

@@ -10,7 +10,8 @@ The original list was referenced by `scripts/status-dots-e2e.mjs` but never comm
 - D5 Opening a chat does not clear its unread mark, or the mark comes back after leaving.
 - S1 The open project's head does not show red when any chat needs the owner.
 - S2 Another project's head is not drawn from the list summary; S2b it loses its working state while another project is open;
-  S2c it keeps working after its work finished; S2d it does not turn red after a failed coordinator turn.
+  S2c it keeps working after its work finished; S2d it does not turn red after a failed coordinator turn; S2e a paused project shows
+  the working dot or nothing, so it cannot be told apart from an idle one (jobs-failures.md A8).
 - V1 Choosing a worker in `#workers` does not open the worker view with title, Back, conversation and composer; V2 Back does not
   return to the chat.
 - N1/N2 At 390 px the inbox or the worker view scrolls horizontally.

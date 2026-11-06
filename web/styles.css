@@ -519,6 +519,10 @@ a {
   border-color: var(--work);
   animation: pulse 1.4s ease-in-out infinite;
 }
+.dot.paused {
+  border-color: var(--muted);
+  background: linear-gradient(90deg, var(--muted) 0 30%, transparent 30% 70%, var(--muted) 70%);
+}
 .dot.needs {
   background: var(--needs);
   border-color: var(--needs);
