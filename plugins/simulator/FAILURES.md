@@ -50,3 +50,12 @@ Written before the rotation code. Rotation sends the GSEvent device-orientation 
 - Worker binding: worker threads bound before rotation existed keep exactly their bound simulator tools; only new threads get the rotate tool.
 - Known limit: an iPhone home screen stays portrait; apps that support landscape rotate.
 - Storage: the Settings → Storage row counts only this project's owned clones; what it calls freeable is the data of exactly the clones the cleanup step would erase now (shut down, unleased, unused past the window). A failing inventory makes the row unknown, never zero.
+
+## XcodeBuildMCP test products
+
+Written before the code. Every simulator test run through XcodeBuildMCP leaves a 2-4 GB `.xctestproducts` folder under `~/Library/Developer/XcodeBuildMCP/workspaces/<key>/test-products`, and XcodeBuildMCP itself keeps up to 100 of them for 3 days per workspace; one busy project filled 70 GB in an afternoon. The plugin prunes them hourly and in the cleanup step. Proof: `scripts/workspace-cleanup-unit.mjs` (T1-T4).
+
+- T1 A run in progress is removed: a folder younger than the window, or whose owner process is alive and has not written the completion marker, is deleted.
+- T2 The newest finished run of a workspace is deleted, so a test-without-building rerun has to build again.
+- T3 Something other than an XcodeBuildMCP test products folder is deleted (DerivedData, result bundles, a file or folder whose name does not match XcodeBuildMCP's pattern), or a folder is followed out through a symlink.
+- T4 A removed folder leaves its completion marker behind, a missing root throws, or the summary does not say how many folders and bytes were freed.

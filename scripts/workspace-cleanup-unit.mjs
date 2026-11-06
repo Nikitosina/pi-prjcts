@@ -15,6 +15,7 @@ import {
 } from "../src/workspace-cleanup.ts";
 import { workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
+import { pruneTestProducts } from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -174,6 +175,50 @@ try {
   assert.equal(usage.bytes, du(idle.directory) + du(booted.directory));
   assert.equal(usage.reclaimableBytes, du(join(idle.directory, "data")));
   assert.deepEqual(await cloneUsage({ owned: [], idle: [] }), { count: 0, bytes: 0, reclaimableBytes: 0 });
+
+  // T1-T4 (plugins/simulator/FAILURES.md): finished XcodeBuildMCP test products past the window go, except each workspace's newest.
+  const xbm = join(root, "XcodeBuildMCP", "workspaces");
+  const HOUR = 3600_000;
+  const products = (key) => join(xbm, key, "test-products");
+  const product = (key, name, ageHours, { marker = true, bytes = 32 * 1024 } = {}) => {
+    const path = join(products(key), name);
+    mkdirSync(join(path, "Debug-iphonesimulator"), { recursive: true });
+    writeFileSync(join(path, "Debug-iphonesimulator", "App.bin"), Buffer.alloc(bytes));
+    const at = new Date(Date.now() - ageHours * HOUR);
+    if (marker) {
+      writeFileSync(`${path}.xcodebuildmcp-completed`, "");
+      utimesSync(`${path}.xcodebuildmcp-completed`, at, at);
+    }
+    utimesSync(path, at, at);
+    return path;
+  };
+  const name = (stamp, pid) => `test_sim_2026-11-06T${stamp}-000Z_pid${pid}_0a1b2c3d.xctestproducts`;
+  const deadPid = 999_999;
+  const old1 = product("app-1", name("01-00-00", deadPid), 10);
+  const old2 = product("app-1", name("02-00-00", deadPid), 9);
+  const newestFinished = product("app-1", name("03-00-00", deadPid), 8);
+  const running = product("app-1", name("04-00-00", process.pid), 7, { marker: false });
+  const young = product("app-1", name("05-00-00", process.pid), 0.5, { marker: false });
+  const crashed = product("app-2", name("01-00-00", deadPid), 12, { marker: false });
+  const lone = product("app-2", name("02-00-00", deadPid), 11);
+  const foreign = join(products("app-1"), "my-build.xctestproducts");
+  mkdirSync(foreign, { recursive: true });
+  utimesSync(foreign, new Date(Date.now() - 20 * HOUR), new Date(Date.now() - 20 * HOUR));
+  mkdirSync(join(xbm, "app-1", "DerivedData", "old"), { recursive: true });
+  const escape = join(root, "outside.xctestproducts");
+  mkdirSync(escape);
+  writeFileSync(join(escape, "keep"), "x");
+  symlinkSync(escape, join(products("app-2"), name("00-00-00", deadPid)));
+  const pruned = await pruneTestProducts({ root: xbm, now: Date.now(), keepMs: 2 * HOUR });
+  assert.ok(!existsSync(old1) && !existsSync(old2) && !existsSync(crashed), "finished runs past the window are removed");
+  assert.ok(!existsSync(`${old1}.xcodebuildmcp-completed`), "T4 the completion marker goes with its folder");
+  assert.ok(existsSync(running) && existsSync(young), "T1 a running or recent run stays");
+  assert.ok(existsSync(newestFinished) && existsSync(lone), "T2 each workspace keeps its newest finished run");
+  assert.ok(existsSync(foreign) && existsSync(join(xbm, "app-1", "DerivedData", "old")), "T3 other folders stay");
+  assert.ok(existsSync(join(escape, "keep")), "T3 a symlink is never followed");
+  assert.equal(pruned.removed, 3);
+  assert.ok(pruned.bytes >= 3 * 32 * 1024, `T4 freed bytes are counted: ${pruned.bytes}`);
+  assert.deepEqual(await pruneTestProducts({ root: join(root, "missing"), now: Date.now(), keepMs: HOUR }), { removed: 0, bytes: 0 });
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

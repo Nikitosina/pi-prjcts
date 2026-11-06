@@ -1,8 +1,18 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
 import { createSimulators, leaseName } from "./simulator.ts";
+import { pruneTestProducts } from "./test-products.ts";
 import { COORDINATOR_NOTE, WORKER_NOTE, createSimulatorTools } from "./tools.ts";
+
+const TEST_PRODUCTS_ROOT = join(homedir(), "Library", "Developer", "XcodeBuildMCP", "workspaces");
+const TEST_PRODUCTS_KEEP_MS = 2 * 3600_000;
+const pruneXcodeTestProducts = async () => {
+  const { removed, bytes } = await pruneTestProducts({ root: TEST_PRODUCTS_ROOT, now: Date.now(), keepMs: TEST_PRODUCTS_KEEP_MS });
+  return removed ? `XcodeBuildMCP: removed ${removed} old test products (${(bytes / 1024 ** 3).toFixed(1)} GB).` : "";
+};
 
 /**
  * Optional iOS simulators per project: owner-enabled clones of a shut-down simulator, managed by the coordinator,
@@ -13,6 +23,9 @@ export default {
   name: "simulator",
   register(api: HostPluginApi) {
     const simulators = createSimulators(api);
+    // Each simulator test run leaves 2-4 GB of test products; a daily cleanup is too rare for a busy afternoon (FAILURES.md T1-T4).
+    const pruning = setInterval(() => void pruneXcodeTestProducts().catch(() => {}), 3600_000);
+    pruning.unref();
     const tools = createSimulatorTools(api, simulators);
     const { Type } = api.lib.typebox,
       { Value } = api.lib.value;
@@ -37,8 +50,17 @@ export default {
       coordinatorTools: { applies: () => true, instructions: () => COORDINATOR_NOTE, create: (input) => tools.coordinator(input) },
       workerTools: { offered: simulators.enabled, create: (input) => tools.worker(input), instructions: WORKER_NOTE },
       leaseName,
-      lifecycle: { pause: simulators.pause, close: simulators.close },
-      cleanup: (input) => simulators.eraseIdle(input.projectId, input.unusedDays, input.signal),
+      lifecycle: {
+        pause: simulators.pause,
+        close: async () => {
+          clearInterval(pruning);
+          await simulators.close();
+        },
+      },
+      cleanup: async (input) =>
+        [await simulators.eraseIdle(input.projectId, input.unusedDays, input.signal), await pruneXcodeTestProducts()]
+          .filter(Boolean)
+          .join(" "),
       usage: (input) => simulators.usage(input.projectId, input.unusedDays, input.signal),
       rpc: {
         snapshot: async (context) => simulators.snapshot(project(context)),

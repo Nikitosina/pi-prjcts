@@ -27,7 +27,7 @@ export function idleClones<T extends { udid: string; directory: string }>(input:
   );
 }
 
-const duBytes = async (paths: readonly string[]) => {
+export const diskBytes = async (paths: readonly string[]) => {
   if (!paths.length) return 0;
   const { stdout } = await run("/usr/bin/du", ["-skP", "--", ...paths], { maxBuffer: 1 << 20 });
   return stdout
@@ -43,7 +43,7 @@ export async function cloneUsage(input: {
 }): Promise<{ count: number; bytes: number; reclaimableBytes: number }> {
   return {
     count: input.owned.length,
-    bytes: await duBytes(input.owned.map((owned) => owned.directory)),
-    reclaimableBytes: await duBytes(input.idle.map((owned) => join(owned.directory, "data"))),
+    bytes: await diskBytes(input.owned.map((owned) => owned.directory)),
+    reclaimableBytes: await diskBytes(input.idle.map((owned) => join(owned.directory, "data"))),
   };
 }
