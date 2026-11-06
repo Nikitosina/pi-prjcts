@@ -176,10 +176,12 @@ await kit.run(async () => {
   // ui_set is the host's real ui-set.
   await send(`HA-CALL ui_set {"patch":{"theme":"light"}}`);
   check("ui_set changes the host ui document", (await rpc({ action: "ui-get" })).ui.theme === "light");
-  const statusItems = ["hints", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection"].map((item) => ({
-    id: item,
-    enabled: item !== "hints",
-  }));
+  const statusItems = ["hints", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "connection"].map(
+    (item) => ({
+      id: item,
+      enabled: item !== "hints",
+    }),
+  );
   await send(`HA-CALL ui_set ${JSON.stringify({ patch: { statusItems } })}`);
   check(
     "U9 ui_set reorders and hides status line items",

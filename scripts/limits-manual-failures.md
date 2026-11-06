@@ -59,3 +59,16 @@ offers the same host sign-in (`cursor-connect`, PKCE through Cursor's own page).
 - M28 After the sign-in completes on the host, the open page shows Cursor's usage only after a reload, or learns it by polling instead
   of the host `limits` topic; the sign-in is not stored in the agent's `auth.json` at 0600.
 - M29 A Cursor token reaches the page or a limits snapshot.
+
+## UI 2.0: machine readout
+
+Owner decision (2026-11-06): the classic inbox's machine readout returns as the status line item `machine`, and the disk shows free
+space so a filling disk is visible. Proof: `scripts/machine-status-unit.mjs`, `scripts/ui2-settings-e2e.mjs` (U6),
+`scripts/ui2-limits-e2e.mjs` (S1, S2; `PI_PROJECTS_MACHINE_FIXTURE`).
+
+- S1 The status line has no memory, CPU, disk or battery reading, or shows the disk only as percent used, which hides how much room is
+  left on a large disk.
+- S2 Less than 50 GB free looks the same as a roomy disk.
+- S3 A `ui` document saved before the item existed fails to read, or gains the item in a new place and loses the owner's order or
+  hidden items.
+- S4 The readout polls while the tab is hidden, or every poll rebuilds the whole status line and drops a provider's open details.

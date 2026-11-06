@@ -3175,6 +3175,15 @@ table.hotkeys tr.clash td {
 .sl-bar.hot span {
   background: var(--bad);
 }
+.sl-machine {
+  gap: 4px;
+}
+.sl-mach {
+  padding: 0 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .sl-limit {
   padding-left: 10px;
   border-left: 1px solid var(--line);
@@ -3433,7 +3442,9 @@ table.hotkeys tr.clash td {
   .top-actions kbd,
   #topbar > .icon-btn kbd,
   .composer-hints,
-  .sl-item .sl-bar {
+  .sl-item .sl-bar,
+  .sl-mach[data-kind="cpu"],
+  .sl-mach[data-kind="battery"] {
     display: none;
   }
   #toasts {

@@ -136,7 +136,7 @@ const server = createServer((req, res) => {
           : say("Archiving the spare project waits for your approval.");
     } else if (names.includes("ui_set") && user.includes("VERIFY-HOST-STATUS")) {
       // Host agent: reorder the status line (Connection first, Chat cost hidden), then point the browser at its settings.
-      const order = ["connection", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "hints"];
+      const order = ["connection", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "hints"];
       reply =
         stage === 0
           ? call("ui_set", { patch: { statusItems: order.map((id) => ({ id, enabled: id !== "cost" })) } })

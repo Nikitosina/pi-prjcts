@@ -10,6 +10,7 @@ const StatusItemId = Type.Union([
   Type.Literal("cost"),
   Type.Literal("limits"),
   Type.Literal("spacer"),
+  Type.Literal("machine"),
   Type.Literal("connection"),
   Type.Literal("hints"),
 ]);
@@ -58,6 +59,19 @@ export const DEFAULT_UI: UiSettings = {
   statusLine: true,
   statusItems: STATUS_ITEM_IDS.map((id) => ({ id, enabled: true })),
 };
+
+/** Gives a stored list from before an item existed that item, enabled, right after its predecessor in the built-in order; the
+ * result is still validated by the schema. */
+export function withNewStatusItems(items: readonly unknown[]): unknown[] {
+  const has = (list: readonly unknown[], id: StatusItemId) => list.some((item) => (item as { id?: unknown } | null)?.id === id);
+  const out = [...items];
+  STATUS_ITEM_IDS.forEach((id, index) => {
+    if (has(out, id)) return;
+    const after = index === 0 ? -1 : out.findIndex((item) => (item as { id?: unknown } | null)?.id === STATUS_ITEM_IDS[index - 1]);
+    out.splice(after + 1, 0, { id, enabled: true });
+  });
+  return out;
+}
 
 /** Refuses a list that names an item twice or leaves one out; the schema already refuses unknown ids. */
 export function checkStatusItems(items: readonly { id: StatusItemId }[]): void {

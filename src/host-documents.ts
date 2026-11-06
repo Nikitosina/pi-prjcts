@@ -14,7 +14,7 @@ import {
   type ProfileSettings,
   type Tier,
 } from "./profiles.ts";
-import { DEFAULT_UI, UiSettings, checkStatusItems, type UiPatch } from "./ui-settings.ts";
+import { DEFAULT_UI, UiSettings, checkStatusItems, withNewStatusItems, type UiPatch } from "./ui-settings.ts";
 import { home, listProjects, parse, saveJson, type Project, type Request } from "./state.ts";
 
 /** Host-level documents shared by every project and browser: model tiers and the UI settings (docs/ui2-contract.md). */
@@ -52,11 +52,16 @@ const serial = <T>(operation: () => Promise<T> | T): Promise<T> => {
 export function readUi(): { revision: string; ui: UiSettings } {
   const ui =
     readDocument(uiPath(), (value) => {
-      // Documents saved before `font` or `statusItems` existed read with today's defaults for them.
+      // Documents saved before `font`, `statusItems` or a status item existed read with today's defaults for them.
+      const record = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
       const ui = parse(
         UiSettings,
-        typeof value === "object" && value !== null && !Array.isArray(value)
-          ? { font: DEFAULT_UI.font, statusItems: DEFAULT_UI.statusItems, ...value }
+        record
+          ? {
+              font: DEFAULT_UI.font,
+              ...record,
+              statusItems: Array.isArray(record.statusItems) ? withNewStatusItems(record.statusItems) : DEFAULT_UI.statusItems,
+            }
           : value,
       );
       checkStatusItems(ui.statusItems);

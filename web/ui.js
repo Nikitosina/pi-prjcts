@@ -11,7 +11,7 @@ export const DEFAULT_UI = {
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },
   statusLine: true,
-  statusItems: ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"].map((id) => ({
+  statusItems: ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "connection", "hints"].map((id) => ({
     id,
     enabled: true,
   })),

@@ -43,8 +43,9 @@ type UiSettings = {
   statusLine: boolean;                  // terminal-style bottom status line, default true
   statusItems: { id: StatusItemId; enabled: boolean }[]; // bar order: every id exactly once; default all shown in this order
   // StatusItemId: "activity" | "model" | "thinking" | "context" | "cost" | "limits" (all provider usage, one item)
-  //             | "spacer" (pushes later items right) | "connection" | "hints". A missing field reads as the default;
-  //             ui-set refuses an unknown, duplicate or missing id.
+  //             | "spacer" (pushes later items right) | "machine" (memory, CPU, free disk, battery; disk warns below
+  //             50 GB free) | "connection" | "hints". A missing field reads as the default; a stored list without a newer
+  //             id gains it, shown, after its default predecessor; ui-set refuses an unknown, duplicate or missing id.
 };
 ```
 

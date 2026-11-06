@@ -514,7 +514,7 @@ async function openBrowser(run, sinks) {
   return page;
 }
 
-const ITEM_ORDER = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
+const ITEM_ORDER = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "connection", "hints"];
 
 /** A 1000×640 PNG (a realistic screenshot size) with a solid accent bar: what a VERIFY-IMAGE read returns. */
 function fakeScreenshot(width = 1000, height = 640) {
@@ -2188,7 +2188,10 @@ const journeys = {
       };
     })()`);
     await page.click('#settings [data-sl-item="connection"] [data-sl-move="up"]');
-    await until(async () => (await rpc(run, { action: "ui-get" })).ui.statusItems[6]?.id === "connection", "Connection moved up at 390 px");
+    await until(
+      async () => (await rpc(run, { action: "ui-get" })).ui.statusItems[ITEM_ORDER.indexOf("connection") - 1]?.id === "connection",
+      "Connection moved up at 390 px",
+    );
     const thinkingAt = `(() => { const r = document.querySelector('#settings [data-sl-toggle="thinking"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`;
     if (!(await page.evaluate(`window.__heldUiSet === true`))) throw Error("the move's ui-set answer was not held");
     const aimed = await page.evaluate(thinkingAt);

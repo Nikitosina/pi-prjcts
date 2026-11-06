@@ -37,7 +37,7 @@
     "plugins/**": ["vcs-plugins-e2e", "host-agent-e2e"],
     "docs/**": [],
     "*.md": [],
-    "src/machine-status.ts": ["machine-status-unit", "status-dots-e2e"],
+    "src/machine-status.ts": ["machine-status-unit", "status-dots-e2e", "ui2-limits-e2e"],
     "src/host-agent*.ts": ["host-agent-e2e"],
     "src/approvals.ts": ["host-agent-e2e"],
     "src/role-prompts.ts": ["settings-prompts-refresh", "workspace-defaults", "memory-e2e", "prompt-blocks-*"],

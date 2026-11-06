@@ -353,12 +353,29 @@ await kit.run(async () => {
   check("U4 saving the ui document publishes the host ui topic", true);
 
   // Status line items: fixed ids, each once; an old document reads as today's bar.
-  const ITEMS = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "connection", "hints"];
+  const ITEMS = ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "connection", "hints"];
   check(
     "U6 a document without statusItems reads as today's bar",
     JSON.stringify(ui.ui.statusItems) === JSON.stringify(ITEMS.map((id) => ({ id, enabled: true }))),
     ui.ui.statusItems,
   );
+  // A document uiDocument before the machine item existed keeps its order and visibility and gains the item at its default place.
+  const uiDocument = JSON.parse(readFileSync(join(kit.home, "ui.json"), "utf8"));
+  const older = ["hints", "connection", "spacer", "limits", "cost", "context", "thinking", "model", "activity"];
+  writeFileSync(
+    join(kit.home, "ui.json"),
+    JSON.stringify({ ...uiDocument, font: "jetbrains-mono", statusItems: older.map((id) => ({ id, enabled: id !== "cost" })) }),
+  );
+  const gained = await rpc({ action: "ui-get" });
+  check(
+    "U6 a document from before the machine item gains it after its default predecessor, enabled",
+    JSON.stringify(gained.ui.statusItems.map((item) => item.id)) ===
+      JSON.stringify(["hints", "connection", "spacer", "machine", "limits", "cost", "context", "thinking", "model", "activity"]) &&
+      gained.ui.statusItems.find((item) => item.id === "machine").enabled === true &&
+      gained.ui.statusItems.find((item) => item.id === "cost").enabled === false,
+    gained.ui.statusItems,
+  );
+  writeFileSync(join(kit.home, "ui.json"), JSON.stringify(uiDocument));
   const reordered = [...ITEMS].reverse().map((id) => ({ id, enabled: id !== "limits" }));
   const items = await rpc({ action: "ui-set", revision: themed.revision, patch: { statusItems: reordered } });
   const rereadItems = await rpc({ action: "ui-get" });

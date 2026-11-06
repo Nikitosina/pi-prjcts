@@ -1,5 +1,6 @@
 // Bottom status line: built-in items drawn in the order and visibility of the host `ui` document's `statusItems`
 // (Settings → Status line, or the Host agent's ui_set). `statusLine: false` hides the whole bar (ui.js).
+import { call } from "./api.js";
 import { esc, shortModel, tokens, usd } from "./format.js";
 import { on, state } from "./state.js";
 import { DEFAULT_UI } from "./ui.js";
@@ -15,6 +16,7 @@ export const STATUS_ITEMS = [
   { id: "cost", label: "Chat cost", hint: "coordinator cost of this chat" },
   { id: "limits", label: "Subscription limits", hint: "usage of every provider subscription that reports it" },
   { id: "spacer", label: "Spacer", hint: "pushes the items after it to the right" },
+  { id: "machine", label: "Machine", hint: "memory, CPU, free disk and battery of the host machine" },
   { id: "connection", label: "Connection", hint: "connected or reconnecting to the host" },
   { id: "hints", label: "Key hints", hint: "⌘K commands, ? in settings" },
 ];
@@ -83,11 +85,57 @@ function limits() {
     .join("")}${limitsRefresh(!shown.length)}`;
 }
 const spacer = () => `<span class="grow" data-item="spacer"></span>`;
+// Machine readout (host-sampled, cached ~5 s there), polled every 10 s while the tab is visible. Its values fill a fixed container, so a
+// CPU tick never rebuilds the rest of the bar. A null value is unreadable (–); a missing one does not exist on this machine.
+const LOW_DISK_GB = 50;
+let machineStatus = null;
+const machine = () => `<span class="sl-item sl-machine mono" data-item="machine" role="group" aria-label="Machine status"></span>`;
+function machineHtml() {
+  const m = machineStatus;
+  if (!m) return "";
+  const pct = (value) => (typeof value === "number" ? `${value}%` : "–");
+  const items = [];
+  if ("ram" in m) items.push(["ram", m.ram ? `mem ${m.ram.usedGb}/${m.ram.totalGb} GB` : "mem –", "Memory in use / total"]);
+  if ("cpu" in m) items.push(["cpu", `cpu ${pct(m.cpu)}`, "CPU usage across all cores"]);
+  if ("ssdFreeGb" in m || "ssd" in m) {
+    const free = typeof m.ssdFreeGb === "number" ? m.ssdFreeGb : null;
+    const low = free !== null && free < LOW_DISK_GB;
+    items.push([
+      "ssd",
+      free === null ? `disk ${pct(m.ssd)}` : `${Math.round(free)} GB free`,
+      `Disk: ${pct(m.ssd)} used${low ? `, less than ${LOW_DISK_GB} GB free` : ""}`,
+      low,
+    ]);
+  }
+  if ("battery" in m) items.push(["battery", `bat ${pct(m.battery)}`, "Battery charge"]);
+  return items
+    .map(
+      ([kind, text, what, low]) =>
+        `<span class="sl-mach${low ? " t-needs" : ""}" data-kind="${kind}" title="${esc(what)}" aria-label="${esc(`${what}: ${text}`)}">${esc(text)}</span>`,
+    )
+    .join("");
+}
+function fillMachine() {
+  const slot = document.querySelector('#statusline [data-item="machine"]');
+  const html = machineHtml();
+  if (slot && slot.dataset.html !== html) {
+    slot.innerHTML = html;
+    slot.dataset.html = html;
+  }
+}
+async function loadMachine() {
+  if (document.hidden) return;
+  const loaded = await call("machine-status").catch(() => null);
+  if (loaded && typeof loaded === "object") {
+    machineStatus = loaded;
+    fillMachine();
+  }
+}
 const connection = () =>
   `<span class="sl-item mono ${state.connected ? "ok" : "off"}" data-item="connection">${state.connected ? "● connected" : "○ reconnecting"}</span>`;
 const hints = () => `<span class="sl-item hint" data-item="hints"><kbd>⌘K</kbd> commands <kbd>?</kbd> in settings</span>`;
 
-const RENDER = { activity, model, thinking, context, cost, limits, spacer, connection, hints };
+const RENDER = { activity, model, thinking, context, cost, limits, spacer, machine, connection, hints };
 
 export function paintStatusLine() {
   const items = state.ui?.statusItems ?? DEFAULT_UI.statusItems;
@@ -109,6 +157,7 @@ export function paintStatusLine() {
     bar.dataset.html = html;
     if (focus) bar.querySelector(focus)?.focus();
   }
+  fillMachine();
   drawLimitDetail();
 }
 on("ui", paintStatusLine);
@@ -116,3 +165,6 @@ on("limits", paintStatusLine);
 document.querySelector("#statusline").addEventListener("click", (event) => {
   if (event.target.closest("[data-limits-refresh]")) void refreshLimits();
 });
+setInterval(() => void loadMachine(), 10_000);
+document.addEventListener("visibilitychange", () => void loadMachine());
+void loadMachine();

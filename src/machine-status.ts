@@ -8,6 +8,8 @@ export type MachineStatus = {
   ram?: { usedGb: number; totalGb: number } | null;
   cpu?: number | null;
   ssd?: number | null;
+  /** Space a non-root process may still write on the data volume. */
+  ssdFreeGb?: number | null;
   battery?: number | null;
 };
 export type CpuTimes = { idle: number; total: number };
@@ -56,6 +58,10 @@ export function statfsPercent(stats: { blocks: number; bfree: number; bavail: nu
   return stats.blocks > 0 && denominator > 0 && used >= 0 ? Math.round((used / denominator) * 100) : null;
 }
 
+export function statfsFreeGb(stats: { bavail: number; bsize: number }): number | null {
+  return stats.bsize > 0 ? roundGb(stats.bavail * stats.bsize) : null;
+}
+
 export function parseMeminfoUsedBytes(text: string): number | null {
   const kb = (label: string) => {
     const raw = new RegExp(`^${label}:\\s+(\\d+) kB`, "m").exec(text)?.[1];
@@ -97,18 +103,22 @@ async function sampleBattery(os: string): Promise<MachineStatus["battery"]> {
   return text === null ? null : parsePmsetBattery(text);
 }
 
-async function sampleDisk(os: string): Promise<number | null> {
-  return statfsPercent(await statfs(os === "darwin" ? "/System/Volumes/Data" : "/").catch(() => ({ blocks: 0, bfree: 0, bavail: 0 })));
+async function sampleDisk(os: string): Promise<{ ssd: number | null; ssdFreeGb: number | null }> {
+  const stats = await statfs(os === "darwin" ? "/System/Volumes/Data" : "/").catch(() => ({ blocks: 0, bfree: 0, bavail: 0, bsize: 0 }));
+  return { ssd: statfsPercent(stats), ssdFreeGb: statfsFreeGb(stats) };
 }
 
 const CACHE_MS = 5000;
 let cached: { at: number; value: Promise<MachineStatus> } | null = null;
 
 export function machineStatus(now = Date.now()): Promise<MachineStatus> {
+  // Browser e2e only: the readout comes from a file, read on every call.
+  const fixture = process.env.PI_PROJECTS_MACHINE_FIXTURE;
+  if (fixture) return readFile(fixture, "utf8").then((text) => JSON.parse(text) as MachineStatus);
   if (cached && now - cached.at < CACHE_MS) return cached.value;
   const os = platform();
-  const value = Promise.all([sampleRam(os), sampleCpu(), sampleDisk(os), sampleBattery(os)]).then(([ram, cpu, ssd, battery]) => {
-    const status: MachineStatus = { cpu, ssd };
+  const value = Promise.all([sampleRam(os), sampleCpu(), sampleDisk(os), sampleBattery(os)]).then(([ram, cpu, disk, battery]) => {
+    const status: MachineStatus = { cpu, ...disk };
     if (ram !== undefined) status.ram = ram;
     if (battery !== undefined) status.battery = battery;
     return status;

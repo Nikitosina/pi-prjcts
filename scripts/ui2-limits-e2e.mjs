@@ -43,11 +43,17 @@ const holdCursor = () => {
 
 const kit = await createKit("ui2-limits");
 const fixture = join(kit.root, "limits.json");
+// Machine readout fixture (PI_PROJECTS_MACHINE_FIXTURE): the host reads it instead of this machine on every machine-status call.
+const machineFixture = join(kit.root, "machine.json");
+const setMachine = (ssdFreeGb) =>
+  writeFileSync(machineFixture, JSON.stringify({ ram: { usedGb: 21.4, totalGb: 64 }, cpu: 37, ssd: 91, ssdFreeGb, battery: 82 }));
+setMachine(120);
 const setClaude = (usedPercent) =>
   writeFileSync(fixture, JSON.stringify({ claude: [{ window: "5h", usedPercent, resetsAt: Date.now() + 2 * 3600e3 }] }));
 setClaude(42);
 Object.assign(kit.hostEnv, {
   PI_PROJECTS_LIMITS_FIXTURE: fixture,
+  PI_PROJECTS_MACHINE_FIXTURE: machineFixture,
   PI_PROJECTS_CURSOR_DASHBOARD: `http://127.0.0.1:${cursor.address().port}`,
   PI_PROJECTS_CURSOR_API: `http://127.0.0.1:${cursor.address().port}`,
 });
@@ -128,6 +134,33 @@ try {
     await page.waitFor(`document.body.dataset.ready === "1" && window.__limitCalls.length >= 1`, "UI2 ready after reload");
     await kit.delay(1000);
     check("M8 a reload reads once and contacts no provider", (await calls()) === "limits-snapshot" && cursorHits === 0, await calls());
+
+    // Machine readout: RAM, CPU, free disk and battery from the host; the disk turns into a warning below 50 GB free.
+    const machine = () =>
+      page.evaluate(
+        `(() => { const m = document.querySelector('#statusline [data-item="machine"]'); const d = m?.querySelector('[data-kind="ssd"]'); return m && { text: m.innerText.replace(/\\s+/g, " "), low: d?.classList.contains("t-needs") ?? null }; })()`,
+      );
+    await page.waitFor(
+      `/120 GB free/.test(document.querySelector('#statusline [data-item="machine"]')?.innerText ?? "")`,
+      "machine readout",
+    );
+    const roomy = await machine();
+    check(
+      "S1 the status line shows memory, CPU, free disk and battery from the host",
+      /21\.4\/64 GB/.test(roomy.text) &&
+        /37%/.test(roomy.text) &&
+        /120 GB free/.test(roomy.text) &&
+        /82%/.test(roomy.text) &&
+        roomy.low === false,
+      roomy,
+    );
+    setMachine(42.6);
+    await page.evaluate(`window.__intervals.forEach((fn) => { try { fn(); } catch {} })`);
+    await page.waitFor(`/43 GB free/.test(document.querySelector('#statusline [data-item="machine"]').innerText)`, "low disk readout");
+    const low = await machine();
+    check("S2 less than 50 GB free marks the disk as a warning", low.low === true, low);
+    await page.shot("02-machine-low-disk", { force: true });
+    setMachine(120);
 
     // The keyboard path: focus the button, press Enter, a second Enter while busy sends nothing more.
     holdCursor();
