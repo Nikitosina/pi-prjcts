@@ -5,7 +5,7 @@ exactly and run with `/bin/zsh -lc` in the project folder, with the owner checko
 10-minute default timeout, no overlapping runs, and no runs while the project is paused. The last 50 runs keep their exit code,
 duration and the last 64 KB of output; a failed run sends the output tail to the routine's chat. Creating a script routine or
 changing its command needs the owner's approval when an agent asks; timing and on/off do not. Proof:
-`scripts/routine-script-unit.mjs` (S1-S5) and `scripts/routine-script-e2e.mjs` (S6-S12).
+`scripts/routine-script-unit.mjs` (S1-S5) and `scripts/routine-script-e2e.mjs` (S6-S16).
 
 ## Running
 - S1 The command is changed on the way (trimmed, re-quoted, split), or runs in another folder or another shell.
@@ -22,3 +22,9 @@ changing its command needs the owner's approval when an agent asks; timing and o
 - S10 A paused project still runs scripts.
 - S11 A script command can be changed through the prompt edit (`schedule-update` text), bypassing approval.
 - S12 The Host agent creates a script routine or changes its command without the owner's approval.
+
+## Coordinator routine tools
+- S13 The Coordinator cannot list, create, retime, turn on or off, run, delete or restore prompt routines without the owner; or the routine tools cannot be switched off, or start switched off.
+- S14 The Coordinator creates a script routine or changes its command without the owner's approval, or the approval it files targets another project.
+- S15 The Coordinator deletes the cleanup routine.
+- S16 A routine list or run output answer is unbounded and floods the model context.

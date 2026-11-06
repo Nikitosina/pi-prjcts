@@ -145,6 +145,7 @@ try {
     view.before !== null && !sequence(view.messages).includes("uFILL-1") && view.messages.some((m) => m.kind === "compaction"),
     { before: view.before },
   );
+  const contextBefore = view.context.tokens;
   await send("Page.reload", {}, s);
   await waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#feed [data-earlier]')`, s, "show earlier button");
   await evaluate(`document.querySelector('#feed [data-earlier]').click()`, s);
@@ -160,7 +161,7 @@ try {
     all,
   );
   view = await show();
-  check("T10 showing history does not change the model context", brain.summaries.length === 2 && view.context.tokens < 18000, {
+  check("T10 showing history does not change the model context", brain.summaries.length === 2 && view.context.tokens === contextBefore, {
     summaries: brain.summaries.length,
     context: view.context,
   });

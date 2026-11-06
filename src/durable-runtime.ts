@@ -53,6 +53,7 @@ import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory 
 import { coordinatorArtifactTools } from "./artifacts.ts";
 import { approvals } from "./approvals.ts";
 import { ownerApprovalTool } from "./host-agent-tools.ts";
+import { coordinatorRoutineTools } from "./routine-tools.ts";
 import { createBackgroundCommands } from "./background-commands.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { coordinatorShellTools } from "./coordinator-shell.ts";
@@ -934,20 +935,29 @@ export async function openDurableProject(input: {
       },
     });
     // Dangerous host actions go to the owner (approvals.ts); the host posts the outcome back to the asking chat.
-    const ownerApprovalTools = [
-      ownerApprovalTool({
-        requestApproval: async ({ key, conversationId, request, summary }) => {
-          const chat = (await chatList()).find((item) => item.conversationId === conversationId);
-          return approvals.request({
-            key: `coordinator:${project.id}:${key}`,
-            requestedBy: { kind: "coordinator", projectId: project.id, chatId: chat?.id ?? MAIN_CHAT },
-            request,
-            summary,
-          });
-        },
-      }),
-    ];
+    const requestApproval: Parameters<typeof ownerApprovalTool>[0]["requestApproval"] = async ({
+      key,
+      conversationId,
+      request,
+      summary,
+    }) => {
+      const chat = (await chatList()).find((item) => item.conversationId === conversationId);
+      return approvals.request({
+        key: `coordinator:${project.id}:${key}`,
+        requestedBy: { kind: "coordinator", projectId: project.id, chatId: chat?.id ?? MAIN_CHAT },
+        request,
+        summary,
+      });
+    };
+    const ownerApprovalTools = [ownerApprovalTool({ requestApproval })];
     const ownerApproval = defineExtension({ name: "projects.owner-approval", tools: ownerApprovalTools });
+    const routineTools = coordinatorRoutineTools({
+      projectId: project.id,
+      runtime: () => runtimeReference,
+      isCoordinator: (id) => coordinatorIds.has(id),
+      requestApproval,
+    });
+    const routinesExtension = defineExtension({ name: "projects.routines", tools: routineTools });
     // The coordinator always maintains knowledge; knowledgeAccess gates workers only.
     const tools = maintainedKnowledgeTools(dir, () => input.onChange?.({ topic: "knowledge" }));
     const workerKnowledge = () => (knowledgeAccess() === "maintain" ? tools : tools.filter((tool) => !mutationTools.has(tool.name)));
@@ -1400,6 +1410,7 @@ export async function openDurableProject(input: {
     registry.install(mcp.extension);
     registry.install(artifacts.extension);
     registry.install(ownerApproval);
+    registry.install(routinesExtension);
     registry.install(codemode);
     storage = await openNodeSqliteStorage(databasePath);
     harness = await Harness.open(
@@ -1450,6 +1461,7 @@ export async function openDurableProject(input: {
           mcp.extension,
           artifacts.extension,
           ownerApproval,
+          routinesExtension,
           codemode,
         ],
         tools: offeredFor(
@@ -1464,6 +1476,7 @@ export async function openDurableProject(input: {
             ...mcp.tools,
             ...artifacts.tools,
             ...ownerApprovalTools,
+            ...routineTools,
             codemodeTool,
             ...jobs.tools.coordinator,
           ],
@@ -1855,6 +1868,7 @@ export async function openDurableProject(input: {
       ...mcp.tools.map((tool) => tool.name),
       ...artifacts.tools.map((tool) => tool.name),
       ...ownerApprovalTools.map((tool) => tool.name),
+      ...routineTools.map((tool) => tool.name),
       codemodeTool.name,
     ]);
     type AgentNow = Awaited<ReturnType<Conversation["agent"]>>;
@@ -1868,6 +1882,7 @@ export async function openDurableProject(input: {
       ...mcp.tools,
       ...artifacts.tools,
       ...ownerApprovalTools,
+      ...routineTools,
       codemodeTool,
     ];
     const coordinatorToolsFor = (agent: AgentNow, current: Project) =>
@@ -1895,6 +1910,7 @@ export async function openDurableProject(input: {
       mcp.extension.name,
       artifacts.extension.name,
       ownerApproval.name,
+      routinesExtension.name,
       codemode.name,
     ]);
     const coordinatorExtensionsFor = (agent: AgentNow) => [
@@ -1909,6 +1925,7 @@ export async function openDurableProject(input: {
       mcp.extension,
       artifacts.extension,
       ownerApproval,
+      routinesExtension,
       codemode,
     ];
     const instructions = coordinatorInstructions(project, standing.text, roleIndex("coordinator"));
@@ -1920,6 +1937,7 @@ export async function openDurableProject(input: {
       pluginExtensions.some((plugin) => !recoveredAgent.extensions.some((extension) => extension.name === plugin.name)) ||
       !recoveredAgent.extensions.some((extension) => extension.name === artifacts.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === ownerApproval.name) ||
+      !recoveredAgent.extensions.some((extension) => extension.name === routinesExtension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === codemode.name) ||
       recoveredAgent.model?.provider !== coordinatorModel.provider ||
       recoveredAgent.model?.modelId !== coordinatorModel.modelId ||
