@@ -1192,6 +1192,40 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
+    {
+      action: Type.Literal("routine-script-create"),
+      id: Id,
+      scheduleId,
+      ...scheduleTiming,
+      name: Type.Optional(scheduleName),
+      command: Type.String({ minLength: 1, maxLength: 32000 }),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 7200000 })),
+      chatId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("routine-script-set"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+      command: Type.Optional(Type.String({ minLength: 1, maxLength: 32000 })),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 7200000 })),
+      chatId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 256 }), Type.Null()])),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-output"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      requestId: Type.String({ minLength: 1, maxLength: 512 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
     { action: Type.Literal("schedule-enable"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }), enabled: Type.Boolean() },
     { additionalProperties: false },
   ),

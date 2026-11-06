@@ -112,6 +112,6 @@ export function workspaceCaches(input: {
     const cacheRoot = input.cacheRoot();
     return (await existing()).map((item) => ({ ...item, cache: workspaceCacheDir({ ...input, intentId: item.intentId, cacheRoot }) }));
   }
-  return { forIntent, forCwd, sweep, live };
+  return { forIntent, forCwd, sweep, live, root: () => cacheRoots({ ...input, cacheRoot: input.cacheRoot() }) };
 }
 export type WorkspaceCaches = ReturnType<typeof workspaceCaches>;

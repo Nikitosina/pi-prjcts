@@ -52,6 +52,7 @@ export PI_PROJECTS_LAUNCHD=0 PI_PROJECTS_HOST=0 PI_PROJECTS_NOTIFY_TICK_MS=1
 export PI_SUBAGENT_PARENT_ID=wrong PI_SESSION_FILE=/wrong-session
 export NODE_OPTIONS='--require /wrong-preload' NODE_PATH=/wrong-modules PI_PACKAGE_DIR=/wrong-package
 export PI_ARTIFACTS_DIR=/wrong-artifacts PI_WORKSPACE_CACHE=/wrong-cache TMPDIR=/wrong-tmp
+export PI_OWNER_CHECKOUT=/wrong-checkout PI_WORKSPACE_CACHE_ROOT=/wrong-cache-root
 export NODE_DEBUG=http NODE_DEBUG_NATIVE=http
 `);
   const shell = await readShellEnvironment({ env });
@@ -82,6 +83,8 @@ export NODE_DEBUG=http NODE_DEBUG_NATIVE=http
       "PI_PACKAGE_DIR",
       "PI_ARTIFACTS_DIR",
       "PI_WORKSPACE_CACHE",
+      "PI_OWNER_CHECKOUT",
+      "PI_WORKSPACE_CACHE_ROOT",
       "PI_SUBAGENT_PARENT_ID",
       "PI_SESSION_FILE",
     ].every((k) => !(k in merged)),

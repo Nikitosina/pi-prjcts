@@ -7,8 +7,13 @@ import { plugins } from "./plugins.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
 import { cleanupSettingsError, type CleanupSettings } from "./workspace-cleanup.ts";
-/** What a routine does when it fires: send its text to a chat, or a built-in host action that runs without a model. */
-export type RoutineAction = { kind: "prompt" } | { kind: "cleanup"; settings: CleanupSettings };
+import { scriptError } from "./routine-script.ts";
+/** What a routine does when it fires: send its text to a chat, or a host action that runs without a model. */
+export type RoutineAction =
+  | { kind: "prompt" }
+  | { kind: "cleanup"; settings: CleanupSettings }
+  /** One shell command, stored exactly; a failed run tells `chatId` (default Main). */
+  | { kind: "script"; command: string; timeoutMs: number; chatId?: string };
 export type HostAction = Exclude<RoutineAction, { kind: "prompt" }>;
 type Schedule = {
   id: string;
@@ -83,10 +88,10 @@ type ScheduleState = {
 function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
-const actionCopy = (action: HostAction): HostAction => ({
-  kind: action.kind,
-  settings: { ...action.settings, disposable: [...action.settings.disposable] },
-});
+const actionCopy = (action: HostAction): HostAction =>
+  action.kind === "cleanup"
+    ? { kind: action.kind, settings: { ...action.settings, disposable: [...action.settings.disposable] } }
+    : { ...action };
 function scheduleCopy(value: Schedule): ScheduleView {
   const copy = storedCopy(value);
   return { ...copy, name: value.name ?? null, revision: value.revision ?? 0, action: copy.action ?? { kind: "prompt" } };
@@ -198,7 +203,10 @@ export function scheduleRuntime(
     ) => Promise<void>;
     beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>;
     /** Runs a host action; resolves with a one-line summary, throws when it failed. */
-    runAction?: (action: HostAction) => Promise<string>;
+    runAction?: (
+      action: HostAction,
+      run: { requestId: string; recordedAtMs: number; routineId: string; name: string },
+    ) => Promise<{ ok: boolean; summary: string }>;
   } = {},
 ) {
   const mutex = new AdmissionMutex();
@@ -355,10 +363,10 @@ export function scheduleRuntime(
       return root.commit(async (tx) => {
         const state = await tx.doc(DurableSchedule, root.id);
         const current = withRevision(own(state.schedules, id), revision);
-        if (current.action && change.text !== undefined) throw new Error("A built-in routine has no prompt text");
+        if (current.action && change.text !== undefined) throw new Error("Only prompt routines have prompt text");
         if (change.cleanup && current.action?.kind !== "cleanup") throw new Error("Only the cleanup routine has cleanup settings");
         const action =
-          change.cleanup && current.action
+          change.cleanup && current.action?.kind === "cleanup"
             ? { kind: current.action.kind, settings: { ...current.action.settings, ...change.cleanup } }
             : undefined;
         const refused = action && cleanupSettingsError(action.settings);
@@ -392,6 +400,77 @@ export function scheduleRuntime(
         return scheduleCopy(next);
       }, BACKGROUND_CONTEXT);
     });
+  /** A script routine, off until enabled like any new routine; its command is stored exactly. */
+  const createScript = (input: {
+    id?: string;
+    name?: string;
+    command: string;
+    timeoutMs: number;
+    chatId?: string;
+    atMs: number;
+    everyMs?: number;
+    calendar?: CalendarRule;
+  }) =>
+    mutex.run(async () => {
+      const refused = scriptError(input);
+      if (refused) throw new Error(refused);
+      const timing = timingFields(input);
+      if (isClosed()) throw new Error("Project is closed");
+      const id = input.id ?? crypto.randomUUID(),
+        now = Date.now();
+      const action: HostAction = {
+        kind: "script",
+        command: input.command,
+        timeoutMs: input.timeoutMs,
+        ...(input.chatId ? { chatId: input.chatId } : {}),
+      };
+      return root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id),
+          prior = own(state.schedules, id);
+        if (prior) {
+          if (JSON.stringify(prior.action) !== JSON.stringify(action) || prior.name !== input.name || prior.atMs !== input.atMs)
+            throw new Error("Conflicting schedule ID");
+          return scheduleCopy(prior);
+        }
+        const value: Schedule = {
+          id,
+          projectId,
+          enabled: false,
+          atMs: input.atMs,
+          text: "",
+          createdAtMs: now,
+          updatedAtMs: now,
+          ...(input.name ? { name: input.name } : {}),
+          revision: 0,
+          action,
+          ...timing,
+        };
+        state.schedules = { ...state.schedules, [id]: value };
+        return scheduleCopy(value);
+      }, BACKGROUND_CONTEXT);
+    });
+  /** Changes a script routine's command, timeout or chat (revision-checked). */
+  const setScript = (id: string, revision: number, change: { command?: string; timeoutMs?: number; chatId?: string | null }) =>
+    mutex.run(async () =>
+      root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        const current = withRevision(own(state.schedules, id), revision);
+        if (current.action?.kind !== "script") throw new Error("Only script routines have a command");
+        const { chatId: _chat, ...kept } = current.action;
+        const chatId = change.chatId === undefined ? current.action.chatId : (change.chatId ?? undefined);
+        const action: HostAction = {
+          ...kept,
+          ...(change.command !== undefined ? { command: change.command } : {}),
+          ...(change.timeoutMs !== undefined ? { timeoutMs: change.timeoutMs } : {}),
+          ...(chatId ? { chatId } : {}),
+        };
+        const refused = scriptError(action);
+        if (refused) throw new Error(refused);
+        const next: Schedule = { ...current, action, updatedAtMs: Date.now(), revision: revision + 1 };
+        state.schedules = { ...state.schedules, [id]: next };
+        return scheduleCopy(next);
+      }, BACKGROUND_CONTEXT),
+    );
   /** Runs the prompt now, enabled or not; a one-shot counts as run. Refused while a run of it is still in flight. */
   const runNow = (id: string) =>
     mutex.run(async () => {
@@ -452,9 +531,14 @@ export function scheduleRuntime(
         const current = own((await tx.doc(DurableSchedule, root.id)).intents, intent.requestId);
         if (current) Object.assign(current, { status, outcome, summary, durationMs: Date.now() - startedAt });
       }, BACKGROUND_CONTEXT);
-    const work = runAction(action)
+    const work = runAction(action, {
+      requestId: intent.requestId,
+      recordedAtMs: intent.recordedAtMs,
+      routineId: intent.stableId,
+      name: intent.text,
+    })
       .then(
-        (summary) => finish("submitted", "completed", summary),
+        (result) => (result.ok ? finish("submitted", "completed", result.summary) : finish("failed", result.summary, result.summary)),
         (error) => {
           const message = error instanceof Error ? error.message : String(error);
           return finish("failed", message, message);
@@ -505,7 +589,7 @@ export function scheduleRuntime(
       root.commit(async (tx) => {
         const state = await tx.doc(DurableSchedule, root.id);
         const schedule = withRevision(own(state.schedules, id), revision);
-        if (schedule.action) throw new Error("A built-in routine cannot be deleted; turn it off instead");
+        if (schedule.action?.kind === "cleanup") throw new Error("The cleanup routine cannot be deleted; turn it off instead");
         const now = Date.now();
         const { [id]: _removed, ...rest } = state.schedules;
         state.schedules = rest;
@@ -764,6 +848,8 @@ export function scheduleRuntime(
     nextDeadline,
     reconcile,
     ensureRoutine,
+    createScript,
+    setScript,
     drain,
     mutex,
   };

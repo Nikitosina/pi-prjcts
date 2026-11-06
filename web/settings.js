@@ -453,11 +453,12 @@ async function automations(body, alive) {
   if (!alive()) return;
   let editing = null;
   const card = ({ kind, id, name, when, cron, text, on: enabled, last, target, record }) => {
-    // Built-in routines (cleanup) have no prompt to edit and cannot be deleted, only turned off.
-    const prompt = record && (record.action?.kind ?? "prompt") === "prompt";
+    // Only prompt routines have a prompt to edit; the cleanup routine cannot be deleted, only turned off.
+    const prompt = record && (record.action?.kind ?? "prompt") === "prompt",
+      deletable = record && record.action?.kind !== "cleanup";
     if (record && editing === id)
       return `<article class="auto-card editing" data-kind="${kind}" data-id="${esc(id)}"><form data-auto-edit-form><div class="field-row"><label for="auto-name-${esc(id)}">Name</label><input id="auto-name-${esc(id)}" data-edit-name value="${esc(record.name ?? "")}" maxlength="100" placeholder="Schedule name" /></div><div class="field-row top"><label for="auto-text-${esc(id)}">Prompt</label><textarea id="auto-text-${esc(id)}" data-edit-text rows="3" maxlength="12000" required>${esc(record.text)}</textarea></div><div class="field-row"><label for="auto-minutes-${esc(id)}">Repeat every (minutes)</label><input id="auto-minutes-${esc(id)}" data-edit-minutes type="number" min="1" step="1" value="${record.everyMs ? record.everyMs / 60000 : ""}" placeholder="Once" /></div><div class="row"><button type="submit" class="primary small" data-auto-save>Save</button><button type="button" class="ghost-btn small" data-auto-cancel>Cancel</button></div></form></article>`;
-    return `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span>${record ? `<button type="button" class="link-btn" data-auto-run>Run now</button>` : ""}${prompt ? `<button type="button" class="link-btn" data-auto-edit>Edit</button>` : ""}<button type="button" class="link-btn" data-history>History</button>${prompt ? `<button type="button" class="link-btn danger" data-auto-delete>Delete</button>` : ""}</footer></article>`;
+    return `<article class="auto-card" data-kind="${kind}" data-id="${esc(id)}"><header><b>${esc(name)}</b><span class="grow"></span><label class="switch" aria-label="${esc(name)} on or off"><input type="checkbox" data-auto-toggle ${enabled ? "checked" : ""} /><span class="track" aria-hidden="true"></span></label></header><p class="auto-when">${esc(when)} <code class="small">${esc(cron)}</code>${target ? ` · <span class="muted">${esc(target)}</span>` : ""}</p>${text ? `<p class="auto-text">${esc(clip(text, 160))}</p>` : ""}<footer><span class="muted small">${last ? `Last run ${esc(ago(last))}` : "Not run yet"}</span><span class="grow"></span>${record ? `<button type="button" class="link-btn" data-auto-run>Run now</button>` : ""}${prompt ? `<button type="button" class="link-btn" data-auto-edit>Edit</button>` : ""}<button type="button" class="link-btn" data-history>History</button>${deletable ? `<button type="button" class="link-btn danger" data-auto-delete>Delete</button>` : ""}</footer></article>`;
   };
   const cleanupText = (settings) =>
     `Removes settled worktrees, workspace caches over ${settings.cacheCapGb} GB or unused for ${settings.unusedDays} days, ${settings.disposable.length ? `ignored ${settings.disposable.join(", ")} older than a day, ` : ""}and videos of Jobs approved or dismissed ${settings.videoDays} days ago.`;
@@ -470,7 +471,12 @@ async function automations(body, alive) {
         name: record.name || clip(record.text.split("\n")[0], 60) || record.id,
         when: words(record),
         cron: cronOf(record),
-        text: record.action?.kind === "cleanup" ? cleanupText(record.action.settings) : record.text,
+        text:
+          record.action?.kind === "cleanup"
+            ? cleanupText(record.action.settings)
+            : record.action?.kind === "script"
+              ? `$ ${record.action.command}`
+              : record.text,
         on: record.enabled,
         last: record.lastRunAt ?? record.lastAtMs,
         record,

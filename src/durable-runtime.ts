@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pruneRunLogs, runScript, type ScriptRun } from "./routine-script.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { join, parse as parsePath, resolve } from "node:path";
@@ -437,6 +438,10 @@ export type DurableProjectRuntime = {
   }): Promise<unknown>;
   scheduleSetEnabled(id: string, enabled: boolean): Promise<unknown>;
   scheduleUpdate: ReturnType<typeof scheduleRuntime>["update"];
+  scheduleCreateScript: ReturnType<typeof scheduleRuntime>["createScript"];
+  scheduleSetScript: ReturnType<typeof scheduleRuntime>["setScript"];
+  /** The kept output of one script run. */
+  scheduleOutput(id: string, requestId: string): Promise<{ text: string; truncated: boolean; exitCode: number | null; durationMs: number }>;
   scheduleRun(id: string): Promise<unknown>;
   scheduleDelete: ReturnType<typeof scheduleRuntime>["remove"];
   scheduleRestore: ReturnType<typeof scheduleRuntime>["restore"];
@@ -1555,7 +1560,8 @@ export async function openDurableProject(input: {
     const schedules = scheduleRuntime(root, project.id, () => closed, {
       afterScheduleIntentRecorded: input.afterScheduleIntentRecorded,
       beforeScheduleReceiptCommit: input.beforeScheduleReceiptCommit,
-      runAction: (action) => cleanupRoutine(action.settings),
+      runAction: async (action, run) =>
+        action.kind === "cleanup" ? { ok: true, summary: await cleanupRoutine(action.settings) } : scriptRoutine(action, run),
     });
     const worktreeMutex = new AdmissionMutex();
     // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
@@ -1673,6 +1679,51 @@ export async function openDurableProject(input: {
       })());
     // The cleanup routine (scripts/workspace-cleanup-failures.md): the safe worktree rule and cache sweep, then the routine's own steps.
     const cleanupAbort = new AbortController();
+    const routineRuns = (routineId: string) => join(dir, "routines", createHash("sha256").update(routineId).digest("hex").slice(0, 16));
+    // Script routines (scripts/routine-script-failures.md): the run record is kept on disk; a failure tells the routine's chat.
+    async function scriptRoutine(
+      action: { command: string; timeoutMs: number; chatId?: string },
+      run: { requestId: string; recordedAtMs: number; routineId: string; name: string },
+    ): Promise<{ ok: boolean; summary: string }> {
+      const result = await runScript({
+        command: action.command,
+        cwd: dir,
+        env: { ...process.env, PI_OWNER_CHECKOUT: loadProject(project.id).cwd, PI_WORKSPACE_CACHE_ROOT: caches.root() },
+        timeoutMs: action.timeoutMs,
+        signal: cleanupAbort.signal,
+      });
+      const logs = routineRuns(run.routineId);
+      mkdirSync(logs, { recursive: true, mode: 0o700 });
+      writeFileSync(join(logs, `${run.recordedAtMs}.json`), JSON.stringify(result), { mode: 0o600 });
+      pruneRunLogs(logs);
+      const seconds = `${(result.durationMs / 1000).toFixed(1)} s`;
+      const summary = result.timedOut
+        ? `timed out after ${Math.round(action.timeoutMs / 1000)} s`
+        : result.exitCode === null
+          ? `stopped after ${seconds} (killed, or the shell could not start)`
+          : `exit ${result.exitCode} in ${seconds}`;
+      const ok = result.exitCode === 0 && !result.timedOut;
+      if (!ok && !closed) {
+        let target = root;
+        try {
+          const chosen = await resolveChat(action.chatId);
+          if (!chosen.chat.archived) target = chosen.conversation;
+        } catch {
+          /* an unknown chat falls back to Main */
+        }
+        await target.submit(
+          {
+            type: "input",
+            content: `[Routine "${run.name}" failed: ${summary}]\nLast output:\n\`\`\`\n${result.output.slice(-4000)}\n\`\`\`\nThe kept output (last 64 KB): schedule-output, requestId ${run.requestId}.`,
+            entry: { kind: "projects.internal-input" },
+            requestId: `${run.requestId}:failed`,
+            whenBusy: "followUp",
+          },
+          BACKGROUND_CONTEXT,
+        );
+      }
+      return { ok, summary };
+    }
     async function cleanupRoutine(settings: CleanupSettings): Promise<string> {
       // Test seam: a run the host dies in.
       const hold = Date.now() + (Number(process.env.PI_PROJECTS_CLEANUP_START_DELAY_MS) || 0);
@@ -2260,6 +2311,24 @@ export async function openDurableProject(input: {
         const value = await schedules.setEnabled(id, enabled);
         await armWake();
         return value;
+      },
+      scheduleCreateScript: async (input) => {
+        const value = await schedules.createScript(input);
+        await armWake();
+        return value;
+      },
+      scheduleSetScript: async (id, revision, change) => {
+        const value = await schedules.setScript(id, revision, change);
+        await armWake();
+        return value;
+      },
+      scheduleOutput: async (id, requestId) => {
+        const run = (await schedules.snapshot()).intents.find((item) => item.requestId === requestId && item.stableId === id);
+        if (!run || run.action !== "script") throw new Error("No script run with this request id for this routine");
+        const path = join(routineRuns(id), `${run.recordedAtMs}.json`);
+        if (!existsSync(path)) throw new Error("This run's output is no longer kept (the last 50 runs are)");
+        const kept = JSON.parse(readFileSync(path, "utf8")) as ScriptRun;
+        return { text: kept.output, truncated: kept.truncated, exitCode: kept.exitCode, durationMs: kept.durationMs };
       },
       scheduleUpdate: async (id, revision, change) => {
         const value = await schedules.update(id, revision, change);

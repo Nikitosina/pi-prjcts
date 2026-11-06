@@ -1902,6 +1902,14 @@ const journeys = {
       name: "UI2 hourly check",
       text: "Verify automation run",
     });
+    const script = await rpc(run, {
+      action: "routine-script-create",
+      id: projectId,
+      atMs: Date.now() + 3600000,
+      everyMs: 3600000,
+      name: "UI2 nightly script",
+      command: "make verify-nightly",
+    });
     const autoCard = `#settings .auto-card[data-kind="schedule"][data-id="${scheduled.id}"]`;
     await page.click('#settings nav [data-section="automations"]');
     await page.waitFor(`!!document.querySelector(${JSON.stringify(autoCard)})`, "schedule automation card");
@@ -1937,6 +1945,15 @@ const journeys = {
       return item?.name === "UI2 edited check" && item.revision === scheduled.revision + 1 && item.enabled === scheduled.enabled;
     }, "Undo restores the exact schedule tombstone");
     await page.waitFor(`!!document.querySelector(${JSON.stringify(autoCard)})`, "restored schedule card");
+    // A script routine shows its command and can be deleted, not edited as a prompt.
+    const scriptSelector = `#settings .auto-card[data-kind="schedule"][data-id="${script.id}"]`;
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(scriptSelector)})`, "script routine card");
+    const scriptCard = await page.evaluate(`(() => {
+      const card = document.querySelector(${JSON.stringify(scriptSelector)});
+      return { text: card.innerText, edit: !!card.querySelector('[data-auto-edit]'), remove: !!card.querySelector('[data-auto-delete]') };
+    })()`);
+    if (!/\$ make verify-nightly/.test(scriptCard.text) || scriptCard.edit || !scriptCard.remove)
+      throw Error(`script routine card: ${JSON.stringify(scriptCard)}`);
     // The built-in cleanup routine describes its settings and can only be run or turned off.
     const cleanupCard = await page.evaluate(`(() => {
       const card = document.querySelector('#settings .auto-card[data-kind="schedule"][data-id="workspace-cleanup"]');
@@ -1956,7 +1973,7 @@ const journeys = {
     await page.shot(dir, "15b-settings-automations");
     record(
       "side-effect",
-      "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule; the cleanup routine card shows its settings with Run now and the switch only",
+      "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule; the cleanup routine card shows its settings with Run now and the switch only; a script card shows its command with Delete and no prompt Edit",
     );
     await page.press("Escape", { keyCode: 27 });
     // Stop is a real coordinator abort, not a contract placeholder; history stays and a follow-up can run.

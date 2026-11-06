@@ -130,6 +130,8 @@ function hostOwned(name: string): boolean {
       "PI_PACKAGE_DIR",
       "PI_ARTIFACTS_DIR",
       "PI_WORKSPACE_CACHE",
+      "PI_OWNER_CHECKOUT",
+      "PI_WORKSPACE_CACHE_ROOT",
       "NODE_OPTIONS",
       "NODE_PATH",
       "NODE_CHANNEL_FD",

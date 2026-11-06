@@ -30,6 +30,8 @@ export const DANGEROUS_MINIMUM = [
   "worktrees-cleanup",
   "remote-revoke",
   "schedule-delete",
+  "routine-script-create",
+  "routine-script-set",
 ] as const;
 
 /**
@@ -132,6 +134,9 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "schedule-create": allow("Schedule a message for a project."),
   "schedule-enable": allow("Enable or disable a schedule."),
   "schedule-run": allow("Run a schedule's prompt now, enabled or not."),
+  "routine-script-create": dangerous("Create a script routine: one shell command run on a schedule in the project folder."),
+  "routine-script-set": dangerous("Change a script routine's command, timeout or failure chat."),
+  "schedule-output": allow("The kept output (last 64 KB), exit code and duration of one script routine run."),
   "schedule-update": allow("Change a routine's name, prompt, timing or cleanup settings (revision from schedule-snapshot)."),
   "schedule-delete": dangerous("Delete a schedule (restorable with schedule-restore for ten minutes)."),
   "schedule-restore": allow("Bring back a schedule deleted in the last ten minutes."),

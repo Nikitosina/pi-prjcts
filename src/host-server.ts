@@ -92,6 +92,7 @@ import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlock
 import { estimateTokens, promptSection } from "./prompt-sections.ts";
 import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
+import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
 
 process.env.PI_PROJECTS_HOST = "1";
 initTheme("light", false);
@@ -1349,6 +1350,33 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       });
     case "schedule-run":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleRun(input.scheduleId) });
+    case "routine-script-create":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleCreateScript({
+            id: input.scheduleId,
+            name: input.name,
+            command: input.command,
+            timeoutMs: input.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS,
+            chatId: input.chatId,
+            atMs: input.atMs,
+            everyMs: input.everyMs,
+            calendar: input.calendar,
+          }),
+      });
+    case "routine-script-set":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleSetScript(input.scheduleId, input.revision, {
+            command: input.command,
+            timeoutMs: input.timeoutMs,
+            chatId: input.chatId,
+          }),
+      });
+    case "schedule-output":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleOutput(input.scheduleId, input.requestId) });
     case "schedule-update":
       return withDurableOwner({
         id: input.id,
