@@ -41,6 +41,8 @@ Shared helpers borrow the spawning chat's verified allocation and prepared files
 
 Isolated helpers freeze a fresh owned allocation at the explicitly chosen commit. Git's selected base is distinct from the observed owner HEAD used by allocation preflight. Provider task support is explicit; unsupported providers refuse rather than substituting their independent-worker default base. Dirty files, untracked files and dependencies are not copied. Retry preserves the frozen intent, while runtime ownership checks allow the worker's HEAD and files to advance.
 
+Helpers never publish. Their shell runs the workspace plugin's `helperGuard`, or core's Git helper policy (no `git push`, no `gh` PR or release writes). The Coordinator pushes, rebases and updates PRs itself, or starts an independent Job that continues the branch.
+
 A helper returns an ordinary answer and becomes `completed`, `failed` or `stopped`. Completion is a worker-reported execution handback, not independently accepted delivery. Helpers do not publish PRs, report Ready or enter Approve. The Coordinator inspects and integrates their changes, then verifies the combined task. A helper may start its own reviewer or scout with `subagent`; it commits first, and the shared tree stays still while the helper is live because the Coordinator cannot mutate it then.
 
 ## Jobs engine

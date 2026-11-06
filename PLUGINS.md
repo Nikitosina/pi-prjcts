@@ -56,6 +56,8 @@ Shared task helpers borrow that verified chat attachment. They do not call indep
 
 Isolated task helpers require the separate optional `workspace.task` adapter. `plan(TaskPlanContext)` receives the verified source chat workspace, actual worker identity and explicit `baseCommit`; it must return that exact base and a fresh branch, never fetch trunk as a substitute or continue another branch. Core freezes the resulting allocation intent before allocation. `attach(TaskAttachContext)` returns the same owned-attachment operations plus task instructions. Its checks must retain task-specific receipt and lease ownership, not relax Coordinator checks to accept arbitrary paths.
 
+`helperGuard(command)` is the optional shell policy of every task helper, shared or isolated. Helpers never publish, so it should keep the provider's safety rules and refuse pushes and PR writes with a message that sends the work back to the Coordinator. Without it, core's Git helper policy applies.
+
 Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
 
 ## GitHub PR watching (built in)

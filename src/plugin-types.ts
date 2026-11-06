@@ -219,6 +219,8 @@ export type WorkspaceProvider = {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
     attach(context: CoordinatorAttachContext): Promise<CoordinatorAttachment>;
   };
+  /** Shell policy of task helpers (shared and isolated), which never publish; core's Git helper policy applies when absent. */
+  helperGuard?(command: string): string;
   /** Chosen-commit task allocation without independent publication policy. */
   task?: {
     plan(context: TaskPlanContext): Promise<AllocationPlan>;
