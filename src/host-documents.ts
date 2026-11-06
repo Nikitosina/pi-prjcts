@@ -16,6 +16,7 @@ import {
 } from "./profiles.ts";
 import { DEFAULT_UI, UiSettings, checkStatusItems, withNewStatusItems, type UiPatch } from "./ui-settings.ts";
 import { home, listProjects, parse, saveJson, type Project, type Request } from "./state.ts";
+import { cacheRootError } from "./workspace-cache.ts";
 
 /** Host-level documents shared by every project and browser: model tiers and the UI settings (docs/ui2-contract.md). */
 const TiersFile = Type.Object(
@@ -24,7 +25,8 @@ const TiersFile = Type.Object(
 );
 
 const uiPath = () => join(home(), "ui.json"),
-  tiersPath = () => join(home(), "tiers.json");
+  tiersPath = () => join(home(), "tiers.json"),
+  storagePath = () => join(home(), "storage.json");
 const revisionOf = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** A missing file is the default; a damaged one is an error, never silently replaced. */
 function readDocument<T>(path: string, read: (value: unknown) => T): T | undefined {
@@ -82,6 +84,29 @@ export const setUi = (revision: string, patch: Static<typeof UiPatch>) =>
     });
     saveJson(uiPath(), ui);
     return { revision: revisionOf(ui), ui };
+  });
+
+/** Host storage settings: where workspace caches live (src/workspace-cache.ts). */
+export const StorageSettings = Type.Object({ cacheRoot: Type.Union([Type.String(), Type.Null()]) }, { additionalProperties: false });
+export type StorageSettings = Static<typeof StorageSettings>;
+const StoragePatch = Type.Partial(StorageSettings);
+const DEFAULT_STORAGE: StorageSettings = { cacheRoot: null };
+function checkStorage(value: StorageSettings): StorageSettings {
+  const error = cacheRootError(value.cacheRoot);
+  if (error) throw new Error(error);
+  return value;
+}
+export function readStorage(): { revision: string; storage: StorageSettings } {
+  const storage = readDocument(storagePath(), (value) => checkStorage(parse(StorageSettings, value))) ?? DEFAULT_STORAGE;
+  return { revision: revisionOf(storage), storage };
+}
+export const setStorage = (revision: string, patch: Static<typeof StoragePatch>) =>
+  serial(() => {
+    const current = readStorage();
+    if (current.revision !== revision) throw new Error("Storage settings revision conflict; reread before updating");
+    const storage = checkStorage(parse(StorageSettings, { ...current.storage, ...patch }));
+    saveJson(storagePath(), storage);
+    return { revision: revisionOf(storage), storage };
   });
 
 /** Today's per-role models as tiers: one per distinct chain (the role model and its quota fallback), assigned to nobody. */

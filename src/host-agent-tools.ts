@@ -174,6 +174,10 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "approval-decide": exclude("Only the owner decides approvals."),
   "ui-get": allow("The owner's UI settings (theme, animations, hotkeys, panels, status line) with their revision."),
   "ui-set": allow("Change the owner's UI settings with a partial patch (revision from ui-get)."),
+  "storage-get": allow("Host storage settings: the workspace cache root (null keeps caches in each project's folder) with its revision."),
+  "storage-set": allow(
+    "Move the workspace cache root to an absolute folder, or null for each project's folder (revision from storage-get).",
+  ),
   "tiers-get": allow("Model tiers with the model catalog (context window, prices, availability)."),
   "tiers-set": allow("Replace the model tiers (revision from tiers-get); a tier a project uses cannot be removed."),
   "profiles-get": allow("A project's profiles (coordinator, worker, scout, reviewer): tier, thinking, disabled tools, effective model."),

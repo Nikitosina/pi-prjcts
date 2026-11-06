@@ -42,7 +42,7 @@ import { startWeb } from "./web.ts";
 import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
 import { approvals } from "./approvals.ts";
 import { openHostAgent, type HostAgent } from "./host-agent.ts";
-import { profilesSnapshot, readUi, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
+import { profilesSnapshot, readStorage, readUi, setStorage, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
 import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
 import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
@@ -628,6 +628,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       publishHost("ui");
       return result;
     }
+    case "storage-get":
+      return readStorage();
+    case "storage-set":
+      return setStorage(input.revision, input.patch);
     case "tiers-get":
       return tiersSnapshot();
     case "tiers-set": {

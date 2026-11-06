@@ -21,6 +21,7 @@ import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts
 import { worktreeSetup } from "./worktree-maintenance.ts";
 import { verificationProviderProblem } from "./project-settings.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
+import { CACHE_VARIABLE, workspaceCacheInstructions, type WorkspaceCaches } from "./workspace-cache.ts";
 import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
@@ -52,6 +53,7 @@ export function durableWorkspaceBinding(input: {
     leases: ResourceLeases;
     background: BackgroundCommands;
   };
+  caches?: WorkspaceCaches;
 }): DurablePrepareWorkerEnvironment | undefined {
   const authorization = input.project.workspaceAuthorization;
   if (!authorization) return undefined;
@@ -328,6 +330,7 @@ export function durableWorkspaceBinding(input: {
     if (attachment) tools.push(...(await attachment.tools(authority)));
     // Evidence folder per thread, in the project home (survives worktree cleanup); path in the instructions and $PI_ARTIFACTS_DIR.
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
+    const cache = whole ? input.caches?.forIntent(intentId) : undefined;
     let pluginNotes = "";
     if (whole) {
       // Plugin worker tools freeze with the thread: a bound thread keeps exactly what it had; only new threads follow the plugin's offer.
@@ -357,6 +360,7 @@ export function durableWorkspaceBinding(input: {
       });
       const builtins = coordinatorExecutionTools({
         controlRoot: input.controlRoot,
+        cache: input.caches?.forCwd,
         target: async () => ({
           cwd: workDir,
           scope: request.threadId,
@@ -380,7 +384,12 @@ export function durableWorkspaceBinding(input: {
           ...workerEnvironmentTools({
             projectId: input.project.id,
             ...input.environment,
-            target: () => ({ threadId: request.threadId, cwd: workDir, env: { ...process.env, PI_ARTIFACTS_DIR: artifacts! }, guard }),
+            target: () => ({
+              threadId: request.threadId,
+              cwd: workDir,
+              env: { ...process.env, PI_ARTIFACTS_DIR: artifacts!, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
+              guard,
+            }),
           }),
         );
     }
@@ -411,7 +420,7 @@ export function durableWorkspaceBinding(input: {
       tools,
       extension,
       repositoryStanding,
-      workerInstructions: `${whole ? `\n\nWorktree ${workDir} (branch ${branch}): run commands and make every edit here. Never cd into, run git against or write to the owner's checkout ${repository.ownerCheckout}; reading it is fine.` : ""}${handover}${whole ? `${attachment ? `\n${attachment.instructions}` : `\nPush to your branch or another project branch (${gitPolicy.prefix}*): git push origin HEAD:<branch>. You may fetch, merge, rebase and cherry-pick; after a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other branches, force-push plainly, delete branches or merge PRs.${publication ? ` Open or update a draft PR (open_draft_pr, against ${publication.baseBranch}) only when your task asks for a PR; pushing to an existing PR branch updates it.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`,
+      workerInstructions: `${whole ? `\n\nWorktree ${workDir} (branch ${branch}): run commands and make every edit here. Never cd into, run git against or write to the owner's checkout ${repository.ownerCheckout}; reading it is fine.` : ""}${handover}${whole ? `${attachment ? `\n${attachment.instructions}` : `\nPush to your branch or another project branch (${gitPolicy.prefix}*): git push origin HEAD:<branch>. You may fetch, merge, rebase and cherry-pick; after a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other branches, force-push plainly, delete branches or merge PRs.${publication ? ` Open or update a draft PR (open_draft_pr, against ${publication.baseBranch}) only when your task asks for a PR; pushing to an existing PR branch updates it.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`,
       bindingRevision: hash(
         JSON.stringify({
           receipt: receipt.providerFacts,

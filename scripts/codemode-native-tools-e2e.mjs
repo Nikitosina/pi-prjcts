@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-const where = `await tools.bash({ command: 'pwd; echo "ART=$PI_ARTIFACTS_DIR"' })`;
+const where = `await tools.bash({ command: 'pwd; echo "ART=$PI_ARTIFACTS_DIR"; echo "CACHE=$PI_WORKSPACE_CACHE"' })`;
 let owner = "",
   root = "",
   approvalTarget = "",
@@ -129,6 +129,15 @@ await k.run(async () => {
     worktree.startsWith(k.root) && worktree !== k.workspace && /ART=\S*\/artifacts\//.test(coordinator?.ok?.output ?? ""),
     coordinator?.ok,
   );
+  const cacheOf = (output) => /CACHE=(\S*)/.exec(output ?? "")?.[1] ?? "";
+  const coordinatorCache = cacheOf(coordinator?.ok?.output);
+  k.check(
+    "C3 a coordinator's bash names its chat workspace's cache folder, outside the worktree",
+    /\/workspace-cache\/[0-9a-f-]{36}$/.test(coordinatorCache) &&
+      coordinatorCache.startsWith(k.home) &&
+      !coordinatorCache.startsWith(worktree),
+    coordinator?.ok,
+  );
   k.check("N7 scripts get no models global", coordinator?.models === "undefined", coordinator);
   k.check(
     "N9 output past the budget keeps its full text in a file",
@@ -158,6 +167,25 @@ await k.run(async () => {
   k.check("N13 the live codemode row names the running nested tool and counts finished and failed calls in text", true, live);
   await k.settle(id);
 
+  // Cache root setting: absolute only, revision-checked; a set root holds each project's caches in its own folder.
+  const storage = await k.rpc({ action: "storage-get" });
+  const refused = async (input, pattern) => {
+    try {
+      await k.rpc({ action: "storage-set", ...input });
+      return false;
+    } catch (error) {
+      return pattern.test(String(error.message ?? error));
+    }
+  };
+  k.check(
+    "C12 a relative cache root and a stale revision are refused",
+    storage.storage.cacheRoot === null &&
+      (await refused({ revision: storage.revision, patch: { cacheRoot: "caches" } }, /absolute/i)) &&
+      (await refused({ revision: "0".repeat(64), patch: { cacheRoot: "/tmp/x" } }, /revision/i)),
+    storage,
+  );
+  const cacheRoot = join(k.root, "custom-cache");
+  await k.rpc({ action: "storage-set", revision: storage.revision, patch: { cacheRoot } });
   await k.ask(id, "MARK-WORKER");
   k.check(
     "N1 a scoped worker is offered codemode",
@@ -171,6 +199,11 @@ await k.run(async () => {
       !worker.at.output.startsWith(k.workspace) &&
       worker.at.output.split("\n")[0] !== worktree &&
       /ART=\S*\/artifacts\//.test(worker.at.output),
+    worker?.at,
+  );
+  k.check(
+    "C3/C13 a worker's cache folder is its own, under the set cache root in the project's folder",
+    new RegExp(`^${cacheRoot}/${id}/[0-9a-f-]{36}$`).test(cacheOf(worker?.at?.output)),
     worker?.at,
   );
   k.check(

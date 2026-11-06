@@ -94,7 +94,8 @@ import {
   type ModelSelection,
   type ProfileId,
 } from "./profiles.ts";
-import { tiersFor } from "./host-documents.ts";
+import { readStorage, tiersFor } from "./host-documents.ts";
+import { COORDINATOR_CACHE_RULE, withoutCacheInstructions, workspaceCaches } from "./workspace-cache.ts";
 import type { ProfileToolGroup } from "./profiles.ts";
 import { mcpCatalog } from "./mcp-servers.ts";
 import {
@@ -753,6 +754,12 @@ export async function openDurableProject(input: {
 
     let rootReference: Conversation | undefined;
     let runtimeReference: DurableProjectRuntime | undefined;
+    const caches = workspaceCaches({
+      projectId: project.id,
+      controlRoot: dir,
+      root: () => rootReference,
+      cacheRoot: () => readStorage().storage.cacheRoot,
+    });
     // Main (root) and every chat conversation; worker threads are never coordinators.
     const coordinatorIds = new Set<number>();
     const isCoordinator = (id: Conversation["id"]) => coordinatorIds.has(Number(id));
@@ -790,7 +797,7 @@ export async function openDurableProject(input: {
         await api.commit((tx) => configure(tx, api.conversationId, { cwd: target.cwd }), callContext);
       return target;
     };
-    const execution = coordinatorExecutionTools({ controlRoot: dir, target: coordinatorTarget });
+    const execution = coordinatorExecutionTools({ controlRoot: dir, target: coordinatorTarget, cache: caches.forCwd });
     const bash = execution.tools.find((tool) => tool.name === "bash");
     if (!bash) throw new Error("Standard coordinator bash tool is unavailable");
     const shell = coordinatorShellTools(bash);
@@ -850,11 +857,16 @@ export async function openDurableProject(input: {
     const callerOf = async (
       api: ToolExecutionApi,
       context: Context,
-    ): Promise<{ role: SkillRole; cwd: string; skills?: readonly string[]; binaries: BinaryScope } | null> => {
+    ): Promise<{ role: SkillRole; cwd: string; cache?: string; skills?: readonly string[]; binaries: BinaryScope } | null> => {
       // Binary results (MCP images) land in the caller's artifacts folder: the Job's for an agent, the project's for a coordinator.
       if (isCoordinator(api.conversationId)) {
         const target = await coordinatorTarget(api, context);
-        return { role: "coordinator", cwd: target.cwd, binaries: { controlRoot: dir, scope: target.scope } };
+        return {
+          role: "coordinator",
+          cwd: target.cwd,
+          cache: await caches.forCwd(target.cwd),
+          binaries: { controlRoot: dir, scope: target.scope },
+        };
       }
       const state = await api.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
       const agent = Object.values(state?.agents ?? {}).find((item) => Number(item.conversationId) === Number(api.conversationId));
@@ -874,9 +886,10 @@ export async function openDurableProject(input: {
       const cwd = taskTarget?.cwd ?? (await api.agent(context)).cwd ?? project.cwd,
         binaries = { controlRoot: dir, scope: agent?.id ?? jobId! };
       // A recorded verifier reads exactly the verification skill; it has no MCP tools bound, so its stand-in role only keys the (empty) default.
+      const cache = await caches.forCwd(cwd);
       return role === "verifier"
-        ? { role: "reviewer", cwd, binaries, skills: [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) }
-        : { role, cwd, binaries };
+        ? { role: "reviewer", cwd, cache, binaries, skills: [loadProject(project.id).verification?.skill ?? ""].filter(Boolean) }
+        : { role, cwd, cache, binaries };
     };
     const skillFiles = coordinatorSkillTool({
       skill: lookupSkill,
@@ -1014,6 +1027,7 @@ export async function openDurableProject(input: {
       commands,
       isClosed: () => closed,
       environment: { leases: hostLeases, background },
+      caches,
       conversation: () => {
         if (!rootReference) throw new Error("Durable root is unavailable for workspace allocation");
         return rootReference;
@@ -1029,6 +1043,7 @@ export async function openDurableProject(input: {
       coordinator: workspaces,
       controlRoot: dir,
       environment: { leases: hostLeases, background },
+      caches,
       isClosed: () => closed,
       source: async (conversationId) => {
         const chat =
@@ -1076,6 +1091,7 @@ export async function openDurableProject(input: {
       leases: hostLeases,
       shell: (job, cwd) => verifierShell(loadProject(project.id), job.scopeId ?? "", cwd, job.branch),
       isClosed: () => closed,
+      caches,
     });
     const verifyLine = () => {
       const checks = loadProject(project.id).verification;
@@ -1127,10 +1143,16 @@ export async function openDurableProject(input: {
     const reframed = (stored: PromptFrame | null, rebuilt: PromptFrame, target: ProjectPromptTarget, behavior: string) => {
       if (stored) return framed(stored, behavior);
       const built = framed(rebuilt, behavior);
-      const proofs = legacyBehaviors(loadProject(project.id), target).map((text) => ({
-        instructions: composePrompt(rebuilt, text),
-        behavior: text,
-      }));
+      // Agents from before workspace caches started without the cache line; they keep that frame.
+      const older = { ...rebuilt, before: withoutCacheInstructions(rebuilt.before), after: withoutCacheInstructions(rebuilt.after) };
+      const frames = composePrompt(older, "") === composePrompt(rebuilt, "") ? [rebuilt] : [rebuilt, older];
+      const proofs = frames.flatMap((frame) =>
+        legacyBehaviors(loadProject(project.id), target).map((text) => ({
+          instructions: composePrompt(frame, text),
+          behavior: text,
+          frame,
+        })),
+      );
       return { ...built, prompt: { ...built.prompt, proofs } };
     };
     const roleFrame = (role: AgentProfile, repositoryStanding = standing.text, suffix = ""): PromptFrame =>
@@ -1617,13 +1639,16 @@ export async function openDurableProject(input: {
       (cleaning ??= (async () => {
         try {
           return await worktreeMutex.run(async () => {
-            return cleanupWorktrees({
+            const result = await cleanupWorktrees({
               project: loadProject(project.id),
               root,
               controlRoot: dir,
               stillAllowed: () => !closed,
               untouched: untouchedThread,
             });
+            // A cache outlives its workspace by at most one cleanup, whatever removed the workspace.
+            if (!closed) await caches.sweep();
+            return result;
           });
         } finally {
           cleaning = undefined;
@@ -3390,7 +3415,7 @@ function coordinatorPromptSections(project: Project, repositoryStanding: string,
       "Host contract",
       "pi-projects host and this project's grants",
       false,
-      `You are the persistent coordinator for ${project.name}, project ${project.id}.\n${SHARED_ROLE_RULES}\n${COORDINATOR_CONTEXT_RULES}${github}${ghNote}${decisions}${library}${plugin}`,
+      `You are the persistent coordinator for ${project.name}, project ${project.id}.\n${SHARED_ROLE_RULES}\n${COORDINATOR_CONTEXT_RULES}\n${COORDINATOR_CACHE_RULE}${github}${ghNote}${decisions}${library}${plugin}`,
     ),
     repository: repositoryPromptSection(repositoryStanding, "the checkout's AGENTS.md and related files; workers get the same"),
     project: projectPromptSection(project),

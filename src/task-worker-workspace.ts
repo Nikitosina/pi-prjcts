@@ -16,6 +16,7 @@ import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { plugins } from "./plugins.ts";
 import { cli } from "./vcs.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
+import { CACHE_VARIABLE, workspaceCacheInstructions, type WorkspaceCaches } from "./workspace-cache.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
@@ -44,6 +45,7 @@ export function taskWorkerWorkspaces(input: {
   controlRoot: string;
   environment: { background: BackgroundCommands; leases: ResourceLeases };
   isClosed(): boolean;
+  caches?: WorkspaceCaches;
 }) {
   let closed = false;
   const attachments = new Map<string, TaskAttachment>();
@@ -283,6 +285,7 @@ export function taskWorkerWorkspaces(input: {
         const resolved = await target(request, binding);
         const execution = coordinatorExecutionTools({
           controlRoot: input.controlRoot,
+          cache: input.caches?.forCwd,
           name: `projects.task-execution.${request.conversationId}`,
           target: async (api, context) => {
             context.abortSignal?.throwIfAborted();
@@ -291,6 +294,7 @@ export function taskWorkerWorkspaces(input: {
           },
         });
         const artifacts = ensureArtifactDir(input.controlRoot, request.threadId);
+        const cache = input.caches?.forIntent(binding.kind === "shared" ? binding.source.intentId : binding.intent.id);
         const environment = workerEnvironmentTools({
           projectId: input.project().id,
           ...input.environment,
@@ -302,10 +306,12 @@ export function taskWorkerWorkspaces(input: {
           target: async (api, context) => {
             context.abortSignal?.throwIfAborted();
             if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
+            const cwd = (await target(request, binding)).cwd,
+              cache = await input.caches?.forCwd(cwd);
             return {
               threadId: request.threadId,
-              cwd: (await target(request, binding)).cwd,
-              env: { ...process.env, PI_ARTIFACTS_DIR: artifacts },
+              cwd,
+              env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
               guard: (command) => command,
             };
           },
@@ -319,7 +325,7 @@ export function taskWorkerWorkspaces(input: {
           tools,
           extension,
           bindingRevision: hash(JSON.stringify(binding)),
-          workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to Coordinator; no push, PR or Ready report is required. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}\n${notes}`,
+          workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to Coordinator; no push, PR or Ready report is required. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}\n${notes}`,
         };
       });
     queues.set(request.threadId, operation);

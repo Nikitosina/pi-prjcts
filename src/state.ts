@@ -593,6 +593,15 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("web") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("ui-get") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("ui-set"), revision: sha256, patch: UiPatch }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("storage-get") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("storage-set"),
+      revision: sha256,
+      patch: Type.Object({ cacheRoot: Type.Optional(Type.Union([Type.String(), Type.Null()])) }, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("tiers-get") }, { additionalProperties: false }),
   Type.Object(
     { action: Type.Literal("tiers-set"), revision: sha256, tiers: Type.Array(Tier, { maxItems: 64 }) },

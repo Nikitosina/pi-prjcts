@@ -13,6 +13,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@earendil-works/pi-mcp";
+import { CACHE_VARIABLE, mcpEnvWithCache } from "./workspace-cache.ts";
 
 /** The owner's MCP servers (pi's `mcp.json`), owned by the host: one lazy connection per server and working directory. */
 export type McpStatus = "ready" | "disabled" | "needs-sign-in" | "invalid";
@@ -51,9 +52,12 @@ export const mcpConfigPath = () => process.env.PI_PROJECTS_MCP_CONFIG || join(ge
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const strings = (value: unknown): Record<string, string> | null =>
   isRecord(value) && Object.values(value).every((item) => typeof item === "string") ? (value as Record<string, string>) : null;
-/** `${VAR}` reads the host environment. `!command` values are never executed: the server is marked invalid instead. */
+/** `${VAR}` reads the host environment, except `${PI_WORKSPACE_CACHE}`, which each connection fills with its caller's workspace cache.
+ * `!command` values are never executed: the server is marked invalid instead. */
 const resolveValue = (value: string): string | null =>
-  value.startsWith("!") ? null : value.replace(/\$\{(\w+)\}/g, (_, name: string) => process.env[name] ?? "");
+  value.startsWith("!")
+    ? null
+    : value.replace(/\$\{(\w+)\}/g, (match, name: string) => (name === CACHE_VARIABLE ? match : (process.env[name] ?? "")));
 function resolveAll(values: Record<string, string>): Record<string, string> | null {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(values)) {
@@ -235,12 +239,12 @@ export function createMcpPool() {
       await value.client.close().catch(() => undefined);
     }
   };
-  function open(key: string, cfg: Config, cwd: string): Promise<Entry> {
+  function open(key: string, cfg: Config, cwd: string, cache: string | undefined): Promise<Entry> {
     const present = entries.get(key);
     if (present) {
       const reopen = () => {
         forget(key, present);
-        return open(key, cfg, cwd);
+        return open(key, cfg, cwd, cache);
       };
       return present.then((value) => (value.client.connectionState === "connected" ? value : reopen()), reopen);
     }
@@ -256,7 +260,7 @@ export function createMcpPool() {
               command: cfg.command!,
               args: cfg.args,
               cwd: cfg.cwd ?? cwd,
-              env: cfg.env,
+              env: mcpEnvWithCache(cfg.env, cache),
               inheritEnv: true,
               stderr: "pipe",
             })
@@ -279,11 +283,11 @@ export function createMcpPool() {
     entry.catch(() => forget(key, entry));
     return entry;
   }
-  /** One connection per server and cwd (XcodeBuildMCP reads its config from the cwd). Idle connections close. */
-  async function use<T>(server: string, cwd: string, run: (entry: Entry) => Promise<T>): Promise<T> {
+  /** One connection per server, cwd (XcodeBuildMCP reads its config from the cwd) and workspace cache. Idle connections close. */
+  async function use<T>(server: string, cwd: string, cache: string | undefined, run: (entry: Entry) => Promise<T>): Promise<T> {
     const cfg = config(server),
-      key = `${server}\0${cfg.cwd ?? cwd}`;
-    const pending = open(key, cfg, cwd);
+      key = `${server}\0${cfg.cwd ?? cwd}\0${cache ?? ""}`;
+    const pending = open(key, cfg, cwd, cache);
     let entry: Entry;
     try {
       entry = await pending;
@@ -306,18 +310,26 @@ export function createMcpPool() {
     }
   }
   return {
-    tools: (server: string, cwd: string): Promise<Tool[]> =>
+    tools: (server: string, cwd: string, cache?: string): Promise<Tool[]> =>
       use(
         server,
         cwd,
+        cache,
         (entry) =>
           (entry.tools ??= entry.client.listTools({ timeoutMs: entry.config.timeoutMs }).catch((error) => {
             entry.tools = undefined;
             throw error;
           })),
       ),
-    call: (server: string, cwd: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<CallToolResult> =>
-      use(server, cwd, (entry) => entry.client.callTool(tool, args, { signal, timeoutMs: entry.config.timeoutMs })),
+    call: (
+      server: string,
+      cwd: string,
+      cache: string | undefined,
+      tool: string,
+      args: Record<string, unknown>,
+      signal?: AbortSignal,
+    ): Promise<CallToolResult> =>
+      use(server, cwd, cache, (entry) => entry.client.callTool(tool, args, { signal, timeoutMs: entry.config.timeoutMs })),
     async close() {
       await Promise.allSettled([...entries].map(([key, entry]) => drop(key, entry)));
     },

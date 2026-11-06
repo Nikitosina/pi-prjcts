@@ -49,6 +49,8 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
         command: [
           'echo "DIR=$PI_ARTIFACTS_DIR"',
           'echo "PWD=$(pwd)"',
+          'echo "CACHE=$PI_WORKSPACE_CACHE"',
+          'test -d "$PI_WORKSPACE_CACHE" && echo "CACHE-EXISTS"',
           'cd "$PI_ARTIFACTS_DIR"',
           "mkdir -p logs",
           `cp ${root}/shot.png shot.png`,
@@ -138,7 +140,21 @@ try {
     result.paths,
   );
   check("A1 folder is private (0700)", (lstatSync(workerDir).mode & 0o777) === 0o700);
+  const workerCache = /CACHE=(\S*)/.exec(bashOut)?.[1] ?? "";
+  result.paths.workerCache = workerCache;
+  check(
+    "C1 the worker's bash names an existing workspace cache folder in the project home, outside the worktree",
+    new RegExp(`^${k.home}/${id}/workspace-cache/[0-9a-f-]{36}$`).test(workerCache) &&
+      /CACHE-EXISTS/.test(bashOut) &&
+      !workerCache.startsWith(workerPwd),
+    result.paths,
+  );
   const system = brain.workerSystem[0] ?? "";
+  check(
+    "C2 the worker instructions name the cache folder and $PI_WORKSPACE_CACHE",
+    system.includes(workerCache) && system.includes("PI_WORKSPACE_CACHE"),
+    system.slice(-1500),
+  );
   check(
     "A2 the path and $PI_ARTIFACTS_DIR are in the worker instructions",
     system.includes(workerDir) && system.includes("PI_ARTIFACTS_DIR"),

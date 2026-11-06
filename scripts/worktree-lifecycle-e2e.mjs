@@ -5,7 +5,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -572,8 +572,20 @@ try {
     w2Path = i2.path,
     w3Path = i3.path,
     headPath = heads[0].path;
+  // Workspace caches: W1's goes with its worktree, a cache whose workspace is gone goes too, live ones and other folders stay.
+  const caches = join(home, id, "workspace-cache"),
+    cacheOf = (path) => join(caches, inv.items.find((e) => e.path === path).intentId),
+    orphanCache = join(caches, randomUUID()),
+    notCache = join(caches, "keep-me");
+  for (const dir of [cacheOf(w1Path), cacheOf(w2Path), orphanCache, notCache]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(cacheOf(w1Path), "DerivedData.bin"), "x");
   const cleanup = await rpc({ action: "worktrees-cleanup", id, confirm: id });
   await eventually(async () => !existsSync(w1Path) && !existsSync(headPath), "cleanup did not remove W1 and the snapshot", 300);
+  check(
+    "C6/C7/C8 cleanup removed W1's cache and an orphaned cache, and kept W2's cache and a folder that is not a cache",
+    !existsSync(cacheOf(w1Path)) && !existsSync(orphanCache) && existsSync(cacheOf(w2Path)) && existsSync(notCache),
+    { caches: existsSync(caches) ? readdirSync(caches) : null },
+  );
   check("C9 cleanup reports two removed worktrees", cleanup.removed?.length === 2, cleanup);
   check(
     "C9 manual cleanup removed W1 and the PR-head snapshot; W2 and W3 stay",

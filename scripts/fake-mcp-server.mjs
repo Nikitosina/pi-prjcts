@@ -75,7 +75,8 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
   if (name === "launches") return reply(id, { content: [], structuredContent: { launches: [{ id: "L9", status: "PASSED" }] } });
   if (name === "launch_failed") return reply(id, { ...text("launch broke"), structuredContent: { code: "E1" }, isError: true });
   if (name === "launch_status") return reply(id, text(`launch ${args.id}: PASSED`));
-  if (name === "whoami") return reply(id, text(`cwd=${process.cwd()} tag=${tag} pid=${process.pid}`));
+  if (name === "whoami")
+    return reply(id, text(`cwd=${process.cwd()} tag=${tag} pid=${process.pid} cache=${process.env.FAKE_MCP_CACHE ?? "unset"}`));
   if (tools.some((tool) => tool.name === name)) return reply(id, text(`${name} ok`));
   fail(id, -32602, `Unknown tool ${name}`);
 });

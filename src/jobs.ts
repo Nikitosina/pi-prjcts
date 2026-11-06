@@ -32,7 +32,7 @@ import {
   unansweredReason,
 } from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
-import { behaviorKey, type PromptFrame } from "./prompt-blocks.ts";
+import { behaviorKey, composePrompt, type PromptFrame } from "./prompt-blocks.ts";
 import { busyIn } from "./durable-idle-configure.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -181,7 +181,7 @@ export type PreparedPrompt = {
   frame: PromptFrame;
   behavior: string;
   /** For an agent prepared before frames: the whole instructions `frame` gives with each behavior it could have started with. */
-  proofs?: { instructions: string; behavior: string }[];
+  proofs?: { instructions: string; behavior: string; frame: PromptFrame }[];
 };
 const UNPROVEN =
   "Started before prompt blocks, and its stored prompt does not match one rebuilt from the current host contract, repository instructions, project settings, skills and workspace, so it keeps the prompt it started with.";
@@ -434,14 +434,16 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
             if (change) {
-              const { prompt, ...setup } = change;
+              const { prompt, ...built } = change;
+              let setup = built;
               const saved = await tx.doc(AgentPrompt, conversationId);
               // An agent prepared before frames gets one only when a rebuilt prompt equals its stored one exactly; nothing is parsed out of it.
               if (agent.prepared && !saved.frame && prompt?.proofs) {
                 const stored = (await tx.doc(AgentDoc, conversationId)).instructions;
                 const proof = prompt.proofs.find((item) => item.instructions === stored);
                 if (proof) {
-                  saved.frame = prompt.frame;
+                  saved.frame = proof.frame;
+                  setup = { ...setup, instructions: composePrompt(proof.frame, prompt.behavior) };
                   saved.behavior = behaviorKey(proof.behavior);
                   delete saved.unproven;
                 } else saved.unproven = UNPROVEN;

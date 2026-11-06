@@ -129,6 +129,7 @@ function hostOwned(name: string): boolean {
       "PI_CODING_AGENT_SESSION_DIR",
       "PI_PACKAGE_DIR",
       "PI_ARTIFACTS_DIR",
+      "PI_WORKSPACE_CACHE",
       "NODE_OPTIONS",
       "NODE_PATH",
       "NODE_CHANNEL_FD",

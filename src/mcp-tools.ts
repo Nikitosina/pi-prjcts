@@ -9,7 +9,7 @@ import { binaryResult, decodeBase64, type BinaryScope } from "./binary-results.t
 const TEXT_LIMIT = 64 * 1024,
   PAGE = 20;
 /** `binaries` is where the caller's image results are stored; without it images are dropped rather than written into the transcript. */
-export type McpCaller = { role: SkillRole; cwd: string; binaries?: BinaryScope };
+export type McpCaller = { role: SkillRole; cwd: string; cache?: string; binaries?: BinaryScope };
 type Block = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 const text = (value: string): Block[] => [{ type: "text", text: value }];
 const json = (value: unknown) => ({ output: text(JSON.stringify(value)) });
@@ -61,7 +61,7 @@ export function mcpGatewayTools(input: {
         });
       }
       need(servers, args.server);
-      const available = await input.pool.tools(args.server, caller.cwd);
+      const available = await input.pool.tools(args.server, caller.cwd, caller.cache);
       if (args.tool) {
         const tool = available.find((item) => item.name === args.tool);
         if (!tool) throw new Error(`MCP server ${args.server} has no tool ${args.tool}`);
@@ -110,11 +110,11 @@ export function mcpGatewayTools(input: {
     async execute(args, api: ToolExecutionApi, context) {
       const { caller, servers } = await enabled(api, context);
       need(servers, args.server);
-      const tool = (await input.pool.tools(args.server, caller.cwd)).find((item) => item.name === args.tool);
+      const tool = (await input.pool.tools(args.server, caller.cwd, caller.cache)).find((item) => item.name === args.tool);
       if (!tool) throw new Error(`MCP server ${args.server} has no tool ${args.tool}; list its tools with projects_mcp_tools`);
       let result;
       try {
-        result = await input.pool.call(args.server, caller.cwd, args.tool, args.arguments ?? {}, context.abortSignal);
+        result = await input.pool.call(args.server, caller.cwd, caller.cache, args.tool, args.arguments ?? {}, context.abortSignal);
       } catch (error) {
         throw new Error(`MCP ${args.server}/${args.tool} failed: ${error instanceof Error ? error.message : String(error)}`);
       }

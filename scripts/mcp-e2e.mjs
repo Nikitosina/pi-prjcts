@@ -36,7 +36,7 @@ const calls = join(root, "mcp-calls.jsonl"),
 const server = (tag) => ({
   command: process.execPath,
   args: [join(kit.repo, "scripts/fake-mcp-server.mjs")],
-  env: { FAKE_MCP_TAG: tag, FAKE_MCP_CALLS: calls, FAKE_MCP_SECRET: SECRET },
+  env: { FAKE_MCP_TAG: tag, FAKE_MCP_CALLS: calls, FAKE_MCP_SECRET: SECRET, FAKE_MCP_CACHE: "${PI_WORKSPACE_CACHE}/DerivedData" },
   timeout: 2,
   description: `Fake ${tag} server`,
 });
@@ -256,6 +256,15 @@ await kit.run(async () => {
     "F10 a worker call runs the server in the worker worktree",
     cwd.includes("/worktrees/") && cwd.startsWith(root) && cwd !== kit.workspace,
     { whoami },
+  );
+  const workerCache = /cache=(\S+)/.exec(whoami)?.[1] ?? "";
+  const coordinatorCache = /cache=(\S+)/.exec(await coord("MCP-CALL fake-ci whoami"))?.[1] ?? "";
+  check(
+    "C4 each workspace's server gets its own cache folder in ${PI_WORKSPACE_CACHE}",
+    /\/workspace-cache\/[0-9a-f-]{36}\/DerivedData$/.test(workerCache) &&
+      /\/workspace-cache\/[0-9a-f-]{36}\/DerivedData$/.test(coordinatorCache) &&
+      workerCache !== coordinatorCache,
+    { workerCache, coordinatorCache },
   );
   const workerList = await worker("MCP-TOOLS");
   check("F2 the worker lists only its own server", /fake-xcode/.test(workerList) && !/fake-ci/.test(workerList), workerList);
