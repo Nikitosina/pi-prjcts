@@ -3212,6 +3212,55 @@ table.hotkeys tr.clash td {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.sl-disk:hover,
+.sl-disk[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--line);
+}
+/* Disk use by project (web/disk-detail.js): above the free-disk readout, kept inside the screen by the script. */
+#disk-detail {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 4px;
+  min-width: min(280px, calc(100vw - 16px));
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: var(--r-m);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+#disk-detail[hidden] {
+  display: none;
+}
+#disk-detail p {
+  margin: 0 0 4px;
+}
+#disk-detail .dd-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 12px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r-s);
+  text-align: left;
+}
+#disk-detail .dd-row:hover {
+  background: var(--line);
+}
+#disk-detail .dd-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+#disk-detail .dd-error {
+  color: var(--bad);
+}
+#disk-detail .dd-foot {
+  margin-top: 4px;
+  font-size: 11px;
+}
 .sl-limit {
   padding-left: 10px;
   border-left: 1px solid var(--line);

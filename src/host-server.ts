@@ -92,6 +92,7 @@ import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlock
 import { estimateTokens, promptSection } from "./prompt-sections.ts";
 import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
+import { storageTotal, type StorageTotal, type StorageUsage } from "./storage-usage.ts";
 import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
 
 process.env.PI_PROJECTS_HOST = "1";
@@ -236,6 +237,37 @@ async function withDefaultGithub(id: string): Promise<void> {
     if (project.githubAuthorization?.length || authorizationFingerprint(project) !== authorizationFingerprint(before)) return;
     saveProject({ ...project, githubAuthorization: [authorization] });
   });
+}
+
+// Storage is measured outside the project lock: `du` may take minutes and only reads (U10). The disk readout's breakdown reuses
+// the last totals for 10 minutes; a project's own measurement refreshes its total (U11).
+const STORAGE_TOTAL_TTL_MS = 10 * 60_000;
+const storageTotals = new Map<string, StorageTotal>();
+async function measureStorage(id: string): Promise<StorageUsage> {
+  ownedProjectDir(id);
+  const usage = await (await durable(id)).storageUsage();
+  storageTotals.set(id, storageTotal(usage));
+  return usage;
+}
+async function storageSummary(fresh: boolean) {
+  const projects = listProjects().filter((project) => !project.deleted && !project.archived);
+  const totals: Array<{ id: string; name: string } & (StorageTotal | { error: string })> = [];
+  // Two projects at a time: each one already measures its rows in parallel.
+  for (let at = 0; at < projects.length; at += 2)
+    totals.push(
+      ...(await Promise.all(
+        projects.slice(at, at + 2).map(async ({ id, name }) => {
+          const cached = storageTotals.get(id);
+          if (!fresh && cached && Date.now() - cached.measuredAt < STORAGE_TOTAL_TTL_MS) return { id, name, ...cached };
+          try {
+            return { id, name, ...storageTotal(await measureStorage(id)) };
+          } catch (error) {
+            return { id, name, error: error instanceof Error ? error.message : String(error) };
+          }
+        }),
+      )),
+    );
+  return { projects: totals };
 }
 
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
@@ -868,7 +900,9 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "worktrees-snapshot":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.worktrees() });
     case "storage-usage":
-      return withDurableOwner({ id: input.id, operation: (owner) => owner.storageUsage() });
+      return measureStorage(input.id);
+    case "storage-summary":
+      return storageSummary(input.fresh === true);
     case "worktrees-cleanup":
       if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id");
       return withDurableOwner({ id: input.id, operation: (owner) => owner.cleanupWorktrees() });

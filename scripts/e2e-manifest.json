@@ -21,6 +21,7 @@
     "src/usage-limits.ts": ["usage-limits-unit", "usage-limits-recovery-unit", "status-dots-e2e", "ui2-limits-e2e"],
     "web/limits.js": ["ui2-limits-e2e"],
     "web/statusline.js": ["ui2-limits-e2e"],
+    "web/disk-detail.js": ["ui2-limits-e2e"],
     "src/coordinator-gh.ts": ["coordinator-gh*"],
     "src/coordinator-workspace*.ts": ["coordinator-workspace-e2e"],
     "src/mcp-*.ts": ["mcp-e2e"],

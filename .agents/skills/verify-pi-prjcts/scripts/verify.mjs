@@ -2008,6 +2008,30 @@ const journeys = {
       "Storage: rows for worktrees, caches, disposable paths and Job videos with sizes; Clean up ran the Workspace cleanup routine once (its history grew by one) and showed its summary, then measured again",
     );
     await page.press("Escape", { keyCode: 27 });
+    // The free-disk readout opens disk use by project; a project row opens its Settings → Storage.
+    await page.waitFor(`!!document.querySelector('#statusline [data-disk-detail]')`, "disk readout button", 30000);
+    await page.click("#statusline [data-disk-detail]");
+    await page.waitFor(
+      `!!document.querySelector('#disk-detail:not([hidden]) [data-storage-project="${projectId}"]') && !!document.querySelector('#disk-detail [data-disk-measure]:not([disabled])')`,
+      "disk use by project",
+      120000,
+    );
+    const diskText = await page.evaluate(`document.querySelector('#disk-detail').innerText`);
+    if (!/GB free/.test(diskText) || !/\d+(\.\d)? (B|KB|MB|GB)/.test(diskText) || !/measured/.test(diskText))
+      throw Error(`disk detail: ${diskText}`);
+    await delay(300);
+    await page.shot(dir, "15d-disk-by-project");
+    await page.click(`#disk-detail [data-storage-project="${projectId}"]`);
+    await page.waitFor(
+      `document.querySelector('#settings')?.open && document.querySelector('#settings')?.dataset.section === 'storage' && document.querySelector('#disk-detail').hidden`,
+      "storage from disk detail",
+      30000,
+    );
+    record(
+      "side-effect",
+      "Disk readout: pressing it listed disk use per project with sizes and when measured; a project row opened its Settings → Storage",
+    );
+    await page.press("Escape", { keyCode: 27 });
     // Stop is a real coordinator abort, not a contract placeholder; history stays and a follow-up can run.
     await page.click("#composer textarea");
     await page.cdp("Input.insertText", { text: "VERIFY-STOP hold this turn" });

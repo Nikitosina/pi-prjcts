@@ -6,6 +6,7 @@ import { on, state } from "./state.js";
 import { DEFAULT_UI } from "./ui.js";
 import { limitShown, refreshLimits } from "./limits.js";
 import { drawLimitDetail, limitDetailFor, limitSummary } from "./limit-detail.js";
+import { drawDiskDetail } from "./disk-detail.js";
 
 /** Owner-facing names and one-line hints, in the built-in order; the ids are the host's fixed `statusItems` ids. */
 export const STATUS_ITEMS = [
@@ -103,15 +104,17 @@ function machineHtml() {
     items.push([
       "ssd",
       free === null ? `disk ${pct(m.ssd)}` : `${Math.round(free)} GB free`,
-      `Disk: ${pct(m.ssd)} used${low ? `, less than ${LOW_DISK_GB} GB free` : ""}`,
+      `Disk: ${pct(m.ssd)} used${low ? `, less than ${LOW_DISK_GB} GB free` : ""}. Press for use by project`,
       low,
+      true,
     ]);
   }
   if ("battery" in m) items.push(["battery", `bat ${pct(m.battery)}`, "Battery charge"]);
   return items
-    .map(
-      ([kind, text, what, low]) =>
-        `<span class="sl-mach${low ? " t-needs" : ""}" data-kind="${kind}" title="${esc(what)}" aria-label="${esc(`${what}: ${text}`)}">${esc(text)}</span>`,
+    .map(([kind, text, what, low, detail]) =>
+      detail
+        ? `<button type="button" class="sl-mach sl-disk${low ? " t-needs" : ""}" data-kind="${kind}" data-disk-detail aria-controls="disk-detail" aria-expanded="false" title="${esc(what)}" aria-label="${esc(`${what}: ${text}`)}">${esc(text)}</button>`
+        : `<span class="sl-mach${low ? " t-needs" : ""}" data-kind="${kind}" title="${esc(what)}" aria-label="${esc(`${what}: ${text}`)}">${esc(text)}</span>`,
     )
     .join("");
 }
@@ -122,6 +125,7 @@ function fillMachine() {
     slot.innerHTML = html;
     slot.dataset.html = html;
   }
+  drawDiskDetail(typeof machineStatus?.ssdFreeGb === "number" ? machineStatus.ssdFreeGb : null);
 }
 async function loadMachine() {
   if (document.hidden) return;

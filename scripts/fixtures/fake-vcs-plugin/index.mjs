@@ -293,6 +293,7 @@ export default {
       },
       usage: async ({ projectId, unusedDays }) => {
         if (data().usageFails) throw new Error("fake usage failed");
+        if (data().usageDelayMs) await new Promise((done) => setTimeout(done, data().usageDelayMs));
         return {
           label: "Fake devices",
           count: 2,

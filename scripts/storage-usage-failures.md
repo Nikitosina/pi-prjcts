@@ -3,7 +3,7 @@
 Written before implementation. `storage-usage` answers one row per kind: worktrees, workspace caches, disposable paths, Job videos,
 and one row per plugin that keeps files for the project (simulator clones). Each row has a count, its size and what the cleanup
 routine would free with its current settings. Clean up runs the cleanup routine now. Proof: `scripts/storage-usage-unit.mjs` (U1-U3),
-`scripts/worktree-lifecycle-e2e.mjs` (U4-U6), `scripts/vcs-plugins-e2e.mjs` and `scripts/workspace-cleanup-unit.mjs` (U8) and the verify skill's ui2 drive (U7, U9).
+`scripts/worktree-lifecycle-e2e.mjs` (U4-U6), `scripts/vcs-plugins-e2e.mjs` and `scripts/workspace-cleanup-unit.mjs` (U8, U10, U11) and the verify skill's ui2 drive (U7, U9, U12).
 
 ## Measuring
 - U1 A size counts files outside the project (the owner checkout, another project's caches) or follows a symlink out of the folder.
@@ -19,5 +19,11 @@ routine would free with its current settings. Clean up runs the cleanup routine 
 ## Plugins
 - U8 A plugin's row is missing, or a plugin's usage that throws hides the other rows.
 
+- U10 A slow measurement holds the project lock, so messages, settings and worktree actions of that project wait for `du` (up to two minutes).
+
+## Host breakdown
+- U11 `storage-summary` (the disk readout's breakdown) disagrees with the project's own rows, measures every project again on each open (minutes on a big machine), includes deleted or archived projects, or fails as a whole when one project fails. A total is the sum of the known rows; unknown rows are counted, not guessed; the last totals are kept 10 minutes unless `fresh` asks again.
+
 ## UI
 - U9 Settings shows no Storage section, sizes without units, no unknown state, or a Clean up button that gives no outcome.
+- U12 The disk readout in the status line opens no breakdown, or the breakdown gives no way to reach a project's Storage section.

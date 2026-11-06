@@ -77,6 +77,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "chat-reset": allow("Start a new context in a chat; history stays."),
   "artifacts-list": allow("Artifacts saved by a project's agents."),
   "worktrees-snapshot": allow("A project's worktrees."),
+  "storage-summary": allow("Disk use per active project (sum of its storage rows), reused for 10 minutes unless fresh."),
   "storage-usage": allow(
     "What a project keeps on disk per kind (worktrees, caches, disposable paths, Job videos, plugin rows) and what cleanup would free.",
   ),

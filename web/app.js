@@ -8,6 +8,7 @@ import { loadUi, setUi } from "./ui.js";
 import { paintStatusLine } from "./statusline.js";
 import { loadLimits } from "./limits.js";
 import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
+import { closeDiskDetail, diskDetailOpen } from "./disk-detail.js";
 import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
@@ -261,6 +262,7 @@ renderRemoteHost();
 
 function leaveTop() {
   if (limitDetailOpen()) return closeLimitDetail();
+  if (diskDetailOpen()) return closeDiskDetail();
   if (slashMenuOpen()) return closeSlashMenu();
   if (paletteOpen()) return closePalette();
   if (app.dataset.sheet) return void (app.dataset.sheet = "");

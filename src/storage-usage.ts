@@ -35,6 +35,18 @@ export async function diskBytes(paths: readonly string[], timeoutMs = MEASURE_TI
 }
 
 /** Measures every row; one that throws or outlasts `timeoutMs` is unknown with the reason, the others still answer. */
+export type StorageTotal = { bytes: number; reclaimableBytes: number; unknown: number; measuredAt: number };
+/** A project's total: the sum of its known rows; unknown rows are counted, not guessed. */
+export function storageTotal(usage: StorageUsage): StorageTotal {
+  const known = usage.rows.filter((row) => row.bytes !== null);
+  return {
+    bytes: known.reduce((sum, row) => sum + row.bytes!, 0),
+    reclaimableBytes: known.reduce((sum, row) => sum + (row.reclaimableBytes ?? 0), 0),
+    unknown: usage.rows.length - known.length,
+    measuredAt: usage.measuredAt,
+  };
+}
+
 export async function measureRows(
   sources: readonly {
     id: string;

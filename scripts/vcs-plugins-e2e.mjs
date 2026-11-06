@@ -235,6 +235,41 @@ await kit.run(async () => {
       storageRows.some((row) => row.id === "worktrees"),
     storageRows,
   );
+  // U10: a slow measurement does not hold the project lock.
+  patchData((value) => (value.usageDelayMs = 4000));
+  const slow = rpc({ action: "storage-usage", id });
+  await new Promise((done) => setTimeout(done, 300));
+  const lockedAt = Date.now();
+  await rpc({ action: "worktrees-snapshot", id });
+  const lockedMs = Date.now() - lockedAt;
+  await slow;
+  patchData((value) => (value.usageDelayMs = 0));
+  check("U10 a project action is not held up by a slow storage measurement", lockedMs < 2500, { lockedMs });
+  // U11: the host breakdown sums each active project's known rows, keeps the totals, and measures again when asked.
+  const summary = await rpc({ action: "storage-summary" });
+  const own = summary.projects.find((item) => item.id === id);
+  const again = await rpc({ action: "storage-summary" });
+  const measured = await rpc({ action: "storage-usage", id });
+  const known = measured.rows.filter((row) => row.bytes !== null);
+  const afterProject = await rpc({ action: "storage-summary" });
+  const fresh = await rpc({ action: "storage-summary", fresh: true });
+  const totalOf = (answer) => answer.projects.find((item) => item.id === id);
+  check(
+    "U11 the breakdown has one total per active project, equal to the sum of its known rows",
+    own?.name === "FakeProj" &&
+      summary.projects.some((item) => item.id === gitId) &&
+      totalOf(afterProject).bytes === known.reduce((sum, row) => sum + row.bytes, 0) &&
+      totalOf(afterProject).reclaimableBytes === known.reduce((sum, row) => sum + (row.reclaimableBytes ?? 0), 0) &&
+      totalOf(afterProject).unknown === 0,
+    { own, known, afterProject },
+  );
+  check(
+    "U11 a second open reuses the last totals, a project's own measurement updates them, fresh measures again",
+    totalOf(again).measuredAt === own.measuredAt &&
+      totalOf(afterProject).measuredAt === measured.measuredAt &&
+      totalOf(fresh).measuredAt > measured.measuredAt,
+    { own: own?.measuredAt, again: totalOf(again)?.measuredAt, measured: measured.measuredAt, fresh: totalOf(fresh)?.measuredAt },
+  );
   await rpc({ action: "plugin", plugin: "fake", method: "connect", id, params: { confirm: id } });
   check(
     "10 connect (mutateIdle) stored the provider record verbatim in project.json",
