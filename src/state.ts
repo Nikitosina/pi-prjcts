@@ -27,7 +27,7 @@ export const PromptOverrides = Type.Object(
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
-/** Host-wide "deploy when idle" opt-in: hours of the local day, end exclusive (see deploy.ts). */
+/** Host-wide nightly deploy opt-in (`idle` keeps its stored name): hours of the local day, end exclusive (see deploy.ts). */
 export const DeploySettings = Type.Object(
   { idle: Type.Boolean(), startHour: Type.Integer({ minimum: 0, maximum: 23 }), endHour: Type.Integer({ minimum: 0, maximum: 23 }) },
   { additionalProperties: false },
@@ -58,9 +58,10 @@ const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const PromptTargetSchema = Type.Union([
   Type.Literal("coordinator"),
   Type.Literal("worker"),
-  Type.Literal("taskHelper"),
   Type.Literal("scout"),
   Type.Literal("reviewer"),
+  Type.Literal("contract"),
+  Type.Literal("integrations"),
   Type.Literal("host"),
 ]);
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);

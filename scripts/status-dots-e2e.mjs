@@ -532,6 +532,12 @@ try {
   releaseHold2();
   await waitFor(`!document.querySelector('${headDot(other.id)}.working')`, s, "A stops working after finishing while B is open");
   result.checks.push("S2c ...and stops working when its work finishes while you are elsewhere");
+  await rpc({ action: "pause", id: other.id });
+  await waitFor(`document.querySelector('${headDot(other.id)}')?.getAttribute('aria-label') === 'paused'`, s, "A shows paused");
+  await shot("03-other-project-paused", s);
+  result.checks.push("S2e ...shows a paused dot, not working or idle, while it is paused");
+  await rpc({ action: "resume", id: other.id, confirm: other.id });
+  await waitFor(`!document.querySelector('${headDot(other.id)}.paused')`, s, "A no longer paused");
   await rpc({ action: "message", id: other.id, text: "MARK-COORDFAIL" });
   await waitFor(`!!document.querySelector('${headDot(other.id)}.needs')`, s, "A turns red after a failed turn while B is open");
   result.checks.push("S2d ...and turns red when a coordinator turn fails while you are elsewhere");

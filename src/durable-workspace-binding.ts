@@ -546,6 +546,22 @@ export function guardWorkerGitCommand(
   const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; --force-with-lease is allowed there, plain --force, +refs, deletes, mirror/all/tags, pushes to ${[...guarded].filter((name) => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
+/** Task helpers return commits to their Coordinator, which publishes: no git push and no gh PR or release writes. Best-effort, not a sandbox. */
+export function guardHelperGitCommand(command: string): string {
+  const blocked = command
+    .split(/[;&|\n]+/)
+    .map((part) => part.trim())
+    .find(
+      (chunk) =>
+        /(?:^|\s)git\s+(?:-[Cc]\s+\S+\s+)*push(?:\s|$)/.test(chunk) ||
+        /(?:^|\s)gh\s+(?:pr\s+(?!(?:view|list|diff|checks|status)\b)\S|release\s+(?!(?:view|list)\b)\S|api\b.*(?:-X|--method)\s*(?:POST|PUT|PATCH|DELETE))/i.test(
+          chunk,
+        ),
+    );
+  if (blocked === undefined) return command;
+  const message = `Blocked by task helper policy at: ${blocked.slice(0, 200)} -- a task helper never pushes or changes PRs. Commit locally and return your commits to the Coordinator; it integrates and publishes. Nothing in this command ran.`;
+  return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
+}
 /** Real and given spellings of the owner checkout; empty when the worktree itself sits inside it (nothing to separate). */
 /**
  * Projects carried over from the previous host still name its worktree folder as their approved root. Changing the stored value would change the

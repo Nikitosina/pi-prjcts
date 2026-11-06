@@ -270,7 +270,7 @@ await kit.run(async () => {
   // Prompt render.
   const prompt = await rpc({ action: "prompt-render", projectId: id, profile: "coordinator" });
   const ids = prompt.sections.map((section) => section.id);
-  const order = ["host", "instance", "repository", "project", "role", "preferences", "memory", "skills"];
+  const order = ["host", "instance", "repository", "project", "role", "preferences", "skills"];
   check(
     "R2 sections come in contract order",
     JSON.stringify(ids.filter((s) => order.includes(s))) === JSON.stringify(order.filter((s) => ids.includes(s))),
@@ -282,7 +282,12 @@ await kit.run(async () => {
     projectSection.editable && projectSection.text.includes("Disposable ui2-settings fixture"),
     projectSection,
   );
-  check("R2 the host contract is locked", prompt.sections.find((section) => section.id === "host").editable === false);
+  const hostSection = prompt.sections.find((section) => section.id === "host");
+  check(
+    "R2 the host contract is editable through its contract and integration blocks",
+    hostSection.editable === true && /contract blocks, integration blocks/.test(hostSection.source),
+    hostSection,
+  );
   check(
     "R4 tokens are labelled as estimates",
     prompt.sections.every((section) => /estimate/i.test(section.source)) && prompt.totalTokens > 0,

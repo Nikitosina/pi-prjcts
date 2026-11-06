@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
-// Failure cases recorded before execution: Unicode index admission; prompt leakage (the generated memory index and the preferences
-// brief replaced the injected MEMORY.md, docs/ui2-contract.md "Memory");
+// Failure cases recorded before execution: Unicode index admission; prompt leakage (only the preferences brief reaches a prompt:
+// no memory index and no MEMORY.md, docs/ui2-contract.md "Memory");
 // unsafe path/symlink traversal; read-only coordinator write; stale/concurrent CAS; history
 // byte loss; migration overwrite; restart loss; and SQLite contention/SIGKILL release.
 const root = resolve("artifacts", `durable-knowledge-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
@@ -245,8 +245,8 @@ try {
   const masterId = (await runtime.snapshot()).identities.coordinatorConversationId;
   const firstMaster = requests.slice(initialRequestOffset).find((request) => request.conversationId === masterId)?.messages ?? [];
   pass(
-    "coordinator initial prepared request carries the generated index and preferences, not topics or MEMORY.md",
-    has(firstMaster, indexMarker) && has(firstMaster, preference) && ![topic, legacyText, marker].some((value) => has(firstMaster, value)),
+    "coordinator initial prepared request carries the preferences, not the index, topics or MEMORY.md",
+    has(firstMaster, preference) && ![indexMarker, topic, legacyText, marker].some((value) => has(firstMaster, value)),
   );
   await runtime.say(
     'Use projects_knowledge_read on research/topic.md and reply with its exact contents. FAKE-CALL projects_knowledge_read {"path":"research/topic.md"}',
@@ -281,10 +281,9 @@ try {
   const workerRequests = requests.slice(workerRequestAt).filter((request) => request.conversationId !== masterId),
     firstWorker = workerRequests[0]?.messages ?? [];
   pass(
-    "UUID worker retrieves topic and its first prepared prompt carries only the index and preferences",
-    has(firstWorker, indexMarker) &&
-      has(firstWorker, preference) &&
-      ![topic, legacyText, marker].some((value) => has(firstWorker, value)) &&
+    "UUID worker retrieves topic and its first prepared prompt carries only the preferences",
+    has(firstWorker, preference) &&
+      ![indexMarker, topic, legacyText, marker].some((value) => has(firstWorker, value)) &&
       workerRequests.some((request) => has(request.messages, topic)),
   );
   document = await writeKnowledge({

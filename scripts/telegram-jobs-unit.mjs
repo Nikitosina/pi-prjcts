@@ -29,6 +29,10 @@ const server = createServer(async (req, res) => {
     return reply({ ok: true, result: batch });
   }
   calls.push({ method, input });
+  if (method === "editMessageText" && editFault === "network") {
+    editFault = null;
+    return req.socket.destroy();
+  }
   if (method === "editMessageText" && editFault) {
     const description = editFault;
     editFault = null;
@@ -159,6 +163,15 @@ try {
   editFault = "Bad Request: message is not modified";
   await bridge.progress(plan(["done", "doing"]));
   assert.equal(calls.filter((c) => c.method === "sendMessage").length, 2);
+  // 46: a network failure never rejects progress (the host calls it fire-and-forget); the next update edits again.
+  editFault = "network";
+  await bridge.progress(plan(["done", "done", "todo"]));
+  await bridge.progress(plan(["done", "done", "doing"]));
+  assert.deepEqual(
+    calls.slice(-2).map((c) => c.method),
+    ["editMessageText", "editMessageText"],
+  );
+  assert.equal((await bridge.snapshot()).deliveryErrors.at(-1)?.method, "editMessageText");
   // Mixed-origin batches keep a Telegram reply even when an event is the last input sharing its answer.
   const { saveProject } = await import("../src/state.ts");
   const { startNotifier } = await import("../src/notify.ts");

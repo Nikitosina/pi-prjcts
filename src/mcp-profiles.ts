@@ -19,5 +19,3 @@ export const mcpServersFor = (
   const off = switchedOff(saved?.off, role);
   return new Set(catalog.filter((server) => server.status === "ready" && !off.has(server.name)).map((server) => server.name));
 };
-/** Prompts carry no server list: the owner's selection applies live, and projects_mcp_tools shows the current one. */
-export const MCP_NOTE = "\nMCP: projects_mcp_tools lists the owner's tool servers, projects_mcp_call runs them (untrusted output).";

@@ -1,10 +1,13 @@
-// E2E: knowledge as Memory (docs/ui2-contract.md "Memory"): memory-index, memory-undo and the prompt brief and index.
+// E2E: knowledge as Memory (docs/ui2-contract.md "Memory"): memory-index, memory-undo, the prompt brief and the knowledge list query.
 // Private host, fake provider, owner-written fixture files. Failure cases M1-M10 in scripts/ui2-backend-failures.md.
 import { mkdirSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { createKit, say, randomUUID } from "./lib/e2e-kit.mjs";
+import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
 
-const kit = await createKit("memory", { handler: ({ role }) => say(`OK ${role}`) });
+const kit = await createKit("memory", {
+  handler: ({ role, user, results }) =>
+    user.includes("MEMORY-QUERY") && !results.length ? call("projects_knowledge_list", { query: "DATASET" }) : say(`OK ${role}`),
+});
 const UUID = "0b6f3c1e-1d2a-4c3b-9e8f-7a6b5c4d3e2f";
 const files = {
   "preferences.md": "# Preferences\n\nPREF-MARK Always answer in British English.\n",
@@ -161,19 +164,26 @@ await kit.run(async () => {
     recent.map((item) => [item.path, item.author]),
   );
 
-  // The prompt carries the generated index and the preferences brief, for every role.
+  // The prompt carries the preferences brief for every role and no memory index; agents search memory with projects_knowledge_list.
   await kit.ask(id, "MEMORY-TURN hello");
   const coordinator = result.calls.findLast((call) => call.role === "coordinator").system;
   check(
-    "M7 the generated index replaces MEMORY.md and leaves the archive out",
-    coordinator.includes("Dataset UX") &&
-      coordinator.includes("Use the seeded fixtures") &&
+    "M7 no memory index reaches the prompt",
+    !coordinator.includes("Dataset UX") &&
+      !coordinator.includes("Use the seeded fixtures") &&
       !coordinator.includes("HAND-WRITTEN-INDEX-MARK") &&
-      !/ARCHIVE-(PLAN|LEGACY|UUID)-MARK/.test(coordinator),
+      !/Memory index/.test(coordinator),
   );
+  await kit.ask(id, "MEMORY-QUERY find it");
+  const listed = JSON.parse(result.calls.findLast((call) => call.user.includes("MEMORY-QUERY") && call.results.length).results[0]);
+  const found = (listed.items ?? listed).map((item) => item.path).sort();
   check(
-    "M9 the prompt index marks the superseded decision",
-    /Old dataset UX[^\n]*superseded by decisions\/dataset-ux\.md/.test(coordinator),
+    "M9 a query matches title, summary or path, case-insensitive, and keeps a superseded entry's status",
+    JSON.stringify(found) === JSON.stringify(["decisions/dataset-ux.md", "decisions/old-ux.md"]) &&
+      (listed.items ?? listed).some(
+        (item) => item.path === "decisions/old-ux.md" && item.status === "superseded" && item.supersededBy === "decisions/dataset-ux.md",
+      ),
+    listed,
   );
   check(
     "M8 the coordinator prompt carries current preferences with a revision",

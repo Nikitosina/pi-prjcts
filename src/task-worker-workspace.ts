@@ -10,7 +10,7 @@ import type { AllocationPlan, TaskAttachment, TaskPlanContext } from "./plugin-t
 import { CoordinatorWorkspaceBindings, type CoordinatorWorkspaceRequest } from "./coordinator-workspace-state.ts";
 import type { coordinatorWorkspaces } from "./coordinator-workspace.ts";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
-import { currentWorktreeRoot } from "./durable-workspace-binding.ts";
+import { currentWorktreeRoot, guardHelperGitCommand } from "./durable-workspace-binding.ts";
 import { command, workspaceIsolation } from "./workspace-isolation.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { plugins } from "./plugins.ts";
@@ -89,6 +89,13 @@ export function taskWorkerWorkspaces(input: {
     const plug = provider === "git" ? undefined : plugins.workspaceProvider(provider);
     if (provider !== "git" && !plug?.task) throw new Error(`Isolated task workspace unsupported by provider "${provider}"`);
     return { project, authorization, scope, repository, revision, provider, plug };
+  }
+  /** Helpers never publish: the workspace plugin's helper policy, else core's Git one. */
+  function helperGuard(): (command: string) => string {
+    const provider = input.project().workspaceAuthorization?.provider;
+    const kind = provider ? isolationProvider(provider) : "git";
+    const plug = kind === "git" ? undefined : plugins.workspaceProvider(kind);
+    return plug?.helperGuard ? (command) => plug.helperGuard!(command) : guardHelperGitCommand;
   }
   function isolation(binding: Extract<Binding, { kind: "isolated" }>) {
     const selected = grant(binding);
@@ -222,7 +229,7 @@ export function taskWorkerWorkspaces(input: {
       if (source.chatId !== binding.source.chatId) throw new Error("Source chat identity changed");
       const ready = await input.coordinator.borrow(binding.source);
       await active(request);
-      return { cwd: ready.cwd, branch: ready.branch, scope: request.threadId };
+      return { cwd: ready.cwd, branch: ready.branch, scope: request.threadId, guard: helperGuard() };
     }
     const owned = isolation(binding),
       attachment = attachments.get(request.threadId);
@@ -235,6 +242,7 @@ export function taskWorkerWorkspaces(input: {
       cwd: attachment ? realpathSync(attachment.workDir) : binding.intent.scope.workspacePath,
       branch: binding.intent.scope.branch,
       scope: request.threadId,
+      guard: helperGuard(),
     };
   }
   /** Serialized per thread and aborted by closeThread. */
@@ -352,7 +360,7 @@ export function taskWorkerWorkspaces(input: {
             threadId: request.threadId,
             cwd,
             env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
-            guard: (command) => command,
+            guard: helperGuard(),
           };
         },
       });
@@ -365,7 +373,7 @@ export function taskWorkerWorkspaces(input: {
         tools,
         extension,
         bindingRevision: hash(JSON.stringify(binding)),
-        workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to Coordinator; no push, PR or Ready report is required. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}\n${notes}`,
+        workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to the Coordinator, which integrates and publishes. Never push or update a PR, and send no Ready report. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}\n${notes}`,
       };
     });
   }

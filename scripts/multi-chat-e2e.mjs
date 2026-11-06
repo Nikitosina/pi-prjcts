@@ -531,6 +531,19 @@ try {
   if (paused.state !== "interrupted") throw Error("Pause did not stop chat two: " + paused.state);
   await rejects({ action: "message", id, chatId, text: "MARK-NOPE" }, /paused/i, "paused chat message");
   result.checks.push("F17/F18 project pause interrupts a running non-Main chat and blocks its messages");
+  // A6 (jobs-failures.md): a paused project reports paused, not working.
+  let listedActivity;
+  await eventually(
+    async () => {
+      listedActivity = (await rpc({ action: "list" })).find((project) => project.id === id)?.activity;
+      return listedActivity?.paused === true && listedActivity.working === false;
+    },
+    "List does not show the project paused and idle",
+    100,
+  ).catch((error) => {
+    throw Error(`${error.message}: ${JSON.stringify(listedActivity)}`);
+  });
+  result.checks.push("A6 a paused project is listed as paused, not working");
 
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/live"));
   if (result.errors.length || result.httpErrors.length)

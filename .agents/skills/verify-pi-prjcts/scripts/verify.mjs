@@ -817,13 +817,15 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     await page.waitFor(`document.querySelector('#settings')?.open === true`, "settings open");
     if ((await page.evaluate(`document.querySelector('#settings').dataset.section`)) !== "prompt")
       await page.click('#settings nav [data-section="prompt"]');
-    await page.click(`#settings .profiles [data-profile="${target === "taskHelper" ? "worker" : target}"]`);
-    if (target === "taskHelper" || target === "worker") {
+    // "taskHelper" is the Worker tab in task helper mode: the same worker blocks, the helper's preview.
+    const profile = target === "taskHelper" ? "worker" : target;
+    await page.click(`#settings .profiles [data-profile="${profile}"]`);
+    if (profile === "worker") {
       await page.waitFor(`!!document.querySelector('#settings .pb-bar [data-kind]')`, "worker kind switch");
       await page.click(`#settings .pb-bar [data-kind="${target === "worker" ? "job" : "task"}"]`);
     }
     await page.waitFor(
-      `document.querySelector('#settings .pb')?.dataset.target === ${q(target)} && document.querySelectorAll('#settings .pb-row').length > 0`,
+      `document.querySelector('#settings .pb')?.dataset.target === ${q(profile)} && document.querySelectorAll('#settings .pb-row').length > 0`,
       `prompt blocks of ${target}`,
     );
   };
@@ -860,7 +862,7 @@ async function ui2Prompts(run, page, record, dir, sinks) {
     const rows = [...document.querySelectorAll('#settings .pb-row')];
     const own = rows.filter(r => !r.matches('[data-generated]')), gen = rows.filter(r => r.matches('[data-generated]'));
     return {
-      own: own.map(r => ({ id: r.dataset.block, project: r.dataset.block === 'objective', toggle: !!r.querySelector('input.pb-toggle[type=checkbox]'), name: r.querySelector('.pb-name')?.innerText.trim(),
+      own: own.map(r => ({ id: r.dataset.block, project: r.dataset.block === 'objective', toggle: !!r.querySelector('input.pb-toggle[type=checkbox]'), lock: !!r.querySelector('.pb-lead.lock'), name: r.querySelector('.pb-name')?.innerText.trim(),
         src: r.querySelector('.pb-src')?.innerText.trim(), tok: r.querySelector('.pb-tok')?.innerText.trim(), h: r.getBoundingClientRect().height })),
       gen: gen.map(r => ({ id: r.dataset.block, toggle: !!r.querySelector('input'), name: r.querySelector('.pb-name')?.innerText.trim() })),
       textareas: document.querySelectorAll('#settings textarea').length,
@@ -870,7 +872,12 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   if (
     !shape.own.length ||
     shape.own.some(
-      (r) => (!r.toggle && !r.project) || !r.name || !/^(Built-in|Edited|Custom|Project)$/.test(r.src) || !/\d/.test(r.tok) || r.h > 48,
+      (r) =>
+        (!r.toggle && !r.project && !r.lock) ||
+        !r.name ||
+        !/^(Built-in|Edited|Custom|Project)$/.test(r.src) ||
+        !/\d/.test(r.tok) ||
+        r.h > 48,
     )
   )
     throw Error(`E2 block rows: ${JSON.stringify(shape.own)}`);
@@ -883,7 +890,12 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   await page.shot(dir, "01-blocks");
   if (shape.own[0]?.id !== "objective" || shape.own[0].toggle || shape.own[0].src !== "Project")
     throw Error(`E19 Project instructions row: ${JSON.stringify(shape.own[0])}`);
-  const first = shape.own.find((r) => r.src === "Built-in").id;
+  // Rows of the shared contract and integration groups are keyed `<target>~<id>`; the first coordinator-owned one is the subject.
+  const first = shape.own.find((r) => r.src === "Built-in" && r.toggle && !r.id.includes("~")).id;
+  const shared = ["contract~authority", "contract~evidence", "integrations~questions"];
+  if (shared.some((id) => !shape.own.some((r) => r.id === id)) || !shape.own.find((r) => r.id === "contract~authority").lock)
+    throw Error(`E24 contract and integration groups: ${JSON.stringify(shape.own.map((r) => r.id))}`);
+  record("visible", "E24 the coordinator tab lists the contract group (Authority locked) and its integration blocks");
 
   // E5: Space on a focused row switches the block off; the host stores it and the preview leaves it out.
   await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
@@ -902,6 +914,8 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   await page.evaluate(`document.querySelector(${q(row(first))}).focus()`);
   await page.press(" ", { code: "Space", keyCode: 32 });
   await until(async () => (await blocks("coordinator")).blocks.find((b) => b.id === first)?.enabled === true, `E5 ${first} stored on`);
+  // The redraw after this write focuses the row, which can scroll the list: wait for it before clicking anything.
+  await saved("E5 switch back", `${firstName} on · saved`);
 
   // E6: editing a built-in stores an override on that block (badge Edited); Restore default removes it (badge Built-in).
   await select(first);
@@ -924,6 +938,27 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   );
   record("side-effect", `E6 ${first} edited (override stored, badge Edited), then restored (override removed, default text back)`);
 
+  // E24: a contract block edited on the coordinator tab is stored on the contract target and reaches the worker's preview.
+  await select("contract~evidence");
+  await type("VERIFY contract: cite evidence for {project}.");
+  await page.click("#settings #pb-save");
+  await saved("E24 contract", "Evidence saved");
+  const contractEvidence = (await blocks("contract")).blocks.find((b) => b.id === "evidence");
+  if (!contractEvidence?.edited || !contractEvidence.text.includes("VERIFY contract"))
+    throw Error(`E24 contract: ${JSON.stringify(contractEvidence)}`);
+  if ((await blocks("coordinator")).blocks.some((b) => JSON.stringify(b).includes("VERIFY contract")))
+    throw Error("E24 a contract edit was stored on the coordinator");
+  const workerView = await rpc(run, { action: "prompt-render", projectId, profile: "worker" });
+  if (!workerView.sections.find((section) => section.id === "host").text.includes("VERIFY contract: cite evidence for Verify seed."))
+    throw Error("E24 the worker's host contract lacks the edit");
+  await page.shot(dir, "03b-contract");
+  await page.click("#settings #pb-restore");
+  await saved("E24 contract restore", "Evidence restored to default");
+  record(
+    "side-effect",
+    "E24 Evidence edited on the coordinator tab: stored on contract, filled {project} in the worker's contract; restored",
+  );
+
   // E7/E16: a new custom block for the coordinator; text with markup stays text.
   const marked = 'VERIFY custom: <b>bold?</b><img src=x onerror="window.__pwned=1">';
   await page.click("#settings #pb-new");
@@ -944,6 +979,19 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   if (await page.evaluate(`!!document.querySelector(${q(customRow)})`)) throw Error("E7 a coordinator block shows for the worker");
   if ((await blocks("worker")).blocks.some((b) => b.id === custom.id)) throw Error("E7 a coordinator block was stored for the worker");
   record("side-effect", `E7 custom block ${custom.id} stored for the coordinator only, with its name and text; markup inert`);
+
+  // E2: a required block (a worker's delivery) shows a lock instead of a switch, and Space leaves it on.
+  const delivery = row("delivery-pr");
+  const lockShape = await page.evaluate(
+    `(() => { const r = document.querySelector(${q(delivery)}); return r && { lock: !!r.querySelector('.pb-lead.lock'), toggle: !!r.querySelector('input.pb-toggle'), mode: r.querySelector('.pb-mode')?.innerText.trim() }; })()`,
+  );
+  if (!lockShape?.lock || lockShape.toggle || lockShape.mode !== "Job only")
+    throw Error(`E2 required delivery row: ${JSON.stringify(lockShape)}`);
+  await page.evaluate(`document.querySelector(${q(delivery)}).focus()`);
+  await page.press(" ", { code: "Space", keyCode: 32 });
+  await delay(300);
+  if (!(await blocks("worker")).blocks.find((b) => b.id === "delivery-pr")?.enabled) throw Error("E2 Space turned a required block off");
+  record("side-effect", "E2 the Job delivery block shows a lock and a Job only tag; Space leaves it on in the stored list");
 
   // E8: Alt+↑ moves the focused row up; the saved order follows and focus stays on the moved row.
   await open("coordinator");
@@ -1110,7 +1158,7 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   }
   record(
     "visible",
-    "E23 in a side chat, all six Prompt tabs (coordinator, Job worker, task helper, scout, reviewer, Host agent) show blocks and a preview, no error",
+    "E23 in a side chat, all six Prompt views (coordinator, Job worker, task helper, scout, reviewer, Host agent) show blocks and a preview, no error",
   );
 }
 

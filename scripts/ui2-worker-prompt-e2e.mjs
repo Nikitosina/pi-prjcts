@@ -1,6 +1,6 @@
 // Browser E2E: UI2 worker details say which prompt a running agent has (jobs-snapshot `agents[].prompt`), for agents a host from
 // before prompt blocks (base commit 9f4ee13) prepared: still to be checked, then frozen on its original prompt with the backend's
-// reason, or current with no line at all. Fakes only; the upgrade flow follows scripts/prompt-blocks-legacy-e2e.mjs.
+// reason; a worker this host prepared is current, with no line at all. Fakes only; the upgrade flow follows scripts/prompt-blocks-legacy-e2e.mjs.
 // Failure cases: scripts/ui2-prompt-editor-failures.md (E20-E22).
 import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -33,11 +33,9 @@ try {
     const { rpc, check } = kit;
     kit.initRepo();
     const id = await kit.createProject("Worker prompt");
-    // Two workers prepared by the old host with different legacy overrides: only the newer one rebuilds exactly later.
+    // A worker prepared by the old host. Its frame (the host contract before contract blocks) no longer rebuilds, so it freezes.
     await kit.updateSettings(id, { prompts: { worker: "OLD-OVERRIDE: one" } });
     await kit.ask(id, "MARK-WORKER unproven");
-    await kit.updateSettings(id, { prompts: { worker: "NEWER-OVERRIDE: two" } });
-    await kit.ask(id, "MARK-WORKER proven");
 
     // Upgrade: the same home, now on this branch's code (backend and the inbox).
     await kit.stopHost();
@@ -48,12 +46,8 @@ try {
     kit.startHost();
     await kit.waitHost();
     const agent = async (marker) => (await rpc({ action: "jobs-snapshot", id })).agents.find((item) => item.brief.includes(marker));
-    const unproven = await agent("TASK-WORKER unproven"),
-      proven = await agent("TASK-WORKER proven");
-    check(
-      "setup: both agents are legacy-unchecked",
-      unproven.prompt?.state === "legacy-unchecked" && proven.prompt?.state === "legacy-unchecked",
-    );
+    const unproven = await agent("TASK-WORKER unproven");
+    check("setup: the old agent is legacy-unchecked", unproven.prompt?.state === "legacy-unchecked", unproven.prompt);
     // The focus id the worker list opens: the Job for a Job worker, the agent otherwise.
     const focusId = (item) => item.jobId ?? item.id;
 
@@ -110,12 +104,13 @@ try {
     check("E20 no rebuild or restart control next to it", await page.evaluate(`!(${line}).querySelector('button, a')`));
     await page.shot("02-frozen", { force: true });
 
-    // The other worker rebuilds exactly and adopts the saved behavior: current, so no line.
-    await follow(proven, "FOLLOW-PROVEN");
-    check("setup: the proven worker is current", (await agent("TASK-WORKER proven")).prompt?.state === "current");
+    // A worker this host prepared runs the saved behavior: current, so no line.
+    await kit.ask(id, "MARK-WORKER fresh");
+    const fresh = await agent("TASK-WORKER fresh");
+    check("setup: the fresh worker is current", !fresh.prompt || fresh.prompt.state === "current", fresh.prompt);
     await page.evaluate(`document.querySelector('#center [data-cmd="leave-focus"]')?.click()`);
-    await open(proven);
-    await page.waitFor(`document.querySelector('#center .focus-head h1')?.innerText.includes("proven")`, "proven worker details");
+    await open(fresh);
+    await page.waitFor(`document.querySelector('#center .focus-head h1')?.innerText.includes("fresh")`, "fresh worker details");
     check("E21 a current worker has no prompt line", (await shown()) === null);
     // A phone opens the page at its width (a live resize keeps the desktop panels open).
     await page.viewport(390, 844, true);

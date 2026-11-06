@@ -519,6 +519,10 @@ a {
   border-color: var(--work);
   animation: pulse 1.4s ease-in-out infinite;
 }
+.dot.paused {
+  border-color: var(--muted);
+  background: linear-gradient(90deg, var(--muted) 0 30%, transparent 30% 70%, var(--muted) 70%);
+}
 .dot.needs {
   background: var(--needs);
   border-color: var(--needs);
@@ -2375,6 +2379,7 @@ details.small-field select {
   color: var(--faint);
 }
 .pb-off,
+.pb-mode,
 .pb-draft {
   flex: none;
   font: 10.5px var(--mono);
@@ -2395,12 +2400,21 @@ details.small-field select {
   flex: none;
   width: 26px;
 }
+.pb-lead.lock {
+  font-size: 11px;
+  text-align: center;
+}
 .pb-group {
   margin: 8px 8px 2px;
   font: 600 10.5px var(--font);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--faint);
+}
+.pb-group .muted {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
 }
 .pb-src.project,
 .pv-src.project {

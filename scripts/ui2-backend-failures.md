@@ -44,7 +44,7 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 ## Prompt render (`prompt-render`)
 
 - R1 Sections are the real assembled text: joining the instruction sections equals the instructions the agent is configured with.
-- R2 Order: host contract (locked), instance AGENTS.md, repository instructions, project instructions (editable, the old objective), role instructions (editable), preferences brief, memory index, skills list (locked).
+- R2 Order: host contract (contract and integration blocks editable, the rest generated), instance AGENTS.md, repository instructions, project instructions (editable, the old objective), role instructions (editable), preferences brief, skills list (locked).
 - R3 Missing instance or repository instructions produce an empty or absent section, never an error.
 - R4 Token counts are labelled as estimates.
 
@@ -85,9 +85,9 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - M4 Archive entries are excluded unless `includeArchive`.
 - M5 Broken links: a link or `supersededBy` to a missing entry is listed; links outside knowledge are ignored.
 - M6 Undo restores the exact previous text of a revision and removes a just-created entry; a stale revision is refused; undo is itself a revision in history.
-- M7 The prompt index replaces the hand-written MEMORY.md injection, excludes archive and stays bounded.
+- M7 A memory index (generated or the hand-written MEMORY.md) reaches a prompt; agents find memory with tools instead.
 - M8 The preferences brief reaches every role prompt (coordinator, worker, scout, reviewer), is bounded (4,000 chars) with its revision, and only lists current preferences.
-- M9 A superseded decision is marked in the index with its replacement.
+- M9 `projects_knowledge_list` with `query` misses an entry whose title, summary or path matches (case-insensitive), lists one that does not, or drops a superseded entry's status and replacement.
 - M10 The coordinator prompt states the auto-remember rules and that memory grants no execution authority.
 
 ## Round 2

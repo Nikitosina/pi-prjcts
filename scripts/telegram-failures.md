@@ -71,3 +71,8 @@ moves to the new client's Settings → Notifications; host behaviour is unchange
 44. Pairing finished in Telegram leaves an open Settings page on "not paired" until it is reopened, or the page learns it by polling
     instead of a host topic.
 45. Remove bot works on one press, the typed token stays in the field after Save, or a redraw drops what the owner is typing.
+
+## Job progress over a broken network, added before the change (2026-11-06)
+46. A network failure while sending or editing a Job progress message rejects the fire-and-forget `progress()` call, and the
+    unhandled rejection exits the host. Each restart cuts off running work, until durable tasks are parked. Progress is best-effort:
+    the failure is recorded as a delivery error, and the next progress update for that Job tries again.

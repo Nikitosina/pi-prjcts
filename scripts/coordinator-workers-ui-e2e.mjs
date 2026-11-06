@@ -78,6 +78,7 @@ const model = createServer((req, res) => {
         "MARK-FAIL": { role: "worker", task: "MARK-FAILTASK will fail" },
         "MARK-HOLD": { role: "worker", task: "MARK-HOLDTASK waits" },
         "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", scopeId: randomUUID() },
+        "MARK-WEBSCOUT": { role: "scout", task: "MARK-WEBSCOUTTASK search" },
       }[marker];
       if (delegate && stage === 0)
         return reply(
@@ -91,6 +92,7 @@ const model = createServer((req, res) => {
             requestId: randomUUID(),
           }),
         );
+      if (marker === "MARK-WEB" && stage === 0) return reply(call("web_search", { query: "pi release" }));
       if (marker === "MARK-SLOW") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write(chunk({ role: "assistant", content: "" }, null));
@@ -102,6 +104,10 @@ const model = createServer((req, res) => {
         return;
       }
       return reply(say(`Answer ${marker} RESULT: ${after.slice(0, 800)}`));
+    }
+    if (marker === "MARK-WEBSCOUTTASK") {
+      if (stage === 0) return reply(call("web_search", { query: "pi release" }));
+      return reply(say(`WEB-SCOUT ${after}`));
     }
     if (marker === "MARK-SCOUTTASK") {
       if (stage === 0) return reply(call("code_read", { path: "SECRET.txt" }));
@@ -385,6 +391,18 @@ try {
   const workerTools = toolsSeen["MARK-FAILTASK"] ?? [];
   if (workerTools.some((name) => name.startsWith("code_"))) throw Error("Worker gained read-only code tools: " + workerTools);
   result.checks.push("R4 worker role tools unchanged (no code_* tools)");
+
+  // web_search resolves for the coordinator and a scout; this home has no openai-codex login, so it answers how to connect.
+  const webAnswer = await ask("MARK-WEB");
+  if (!/openai-codex login/.test(webAnswer)) throw Error("Coordinator web_search did not run: " + String(webAnswer).slice(0, 400));
+  await ask("MARK-WEBSCOUT");
+  await terminal(id, "MARK-WEBSCOUTTASK", "completed");
+  const webScout = await eventually(
+    async () => (await rpc({ action: "show", id })).messages.find((m) => m.role === "user" && m.text.includes("WEB-SCOUT"))?.text,
+    "web scout report missing",
+  );
+  if (!/openai-codex login/.test(webScout)) throw Error("Scout web_search did not run: " + webScout.slice(0, 400));
+  result.checks.push("W9 the coordinator and a scout can call web_search");
 
   await ask("MARK-SCOPED");
   const scopedScout = await terminal(id, "MARK-SCOPEDTASK", "completed");

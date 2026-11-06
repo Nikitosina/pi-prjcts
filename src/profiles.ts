@@ -69,7 +69,8 @@ export const DEFAULT_THINKING: ThinkingLevel = "medium";
 export const thinkingOf = (project: Pick<Project, "profiles">, profile: ProfileId): ModelThinkingLevel =>
   project.profiles?.[profile]?.thinking ?? DEFAULT_THINKING;
 
-export type ToolGroupId = "core" | "delegation" | "job" | "knowledge" | "github" | "archive" | "library" | "skills" | "mcp" | "routines";
+export type ToolGroupId =
+  "core" | "delegation" | "job" | "knowledge" | "github" | "archive" | "library" | "skills" | "mcp" | "routines" | "web";
 export const GROUP_LABELS: Record<ToolGroupId, string> = {
   core: "Core",
   delegation: "Delegation",
@@ -81,6 +82,7 @@ export const GROUP_LABELS: Record<ToolGroupId, string> = {
   skills: "Skills",
   mcp: "MCP gateway",
   routines: "Routines",
+  web: "Web",
 };
 /** The group a built-in tool belongs to, by name; plugin tools are grouped by their provider instead. */
 export function toolGroup(name: string): ToolGroupId {
@@ -94,6 +96,7 @@ export function toolGroup(name: string): ToolGroupId {
   if (name === "projects_skill_file") return "skills";
   if (name.startsWith("projects_mcp_")) return "mcp";
   if (name === "projects_routines") return "routines";
+  if (name === "web_search") return "web";
   return "core";
 }
 

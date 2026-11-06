@@ -215,6 +215,8 @@ export type WorkspaceProvider = {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
     attach(context: CoordinatorAttachContext): Promise<CoordinatorAttachment>;
   };
+  /** Shell policy of task helpers (shared and isolated), which never publish; core's Git helper policy applies when absent. */
+  helperGuard?(command: string): string;
   /** Chosen-commit task allocation without independent publication policy. */
   task?: {
     plan(context: TaskPlanContext): Promise<AllocationPlan>;
@@ -419,7 +421,12 @@ export type CoordinatorToolsProvider = {
     extension: Extension;
   };
   applies(project: Project): boolean;
-  /** Appended to the coordinator instructions of matching projects. */
+  /**
+   * The coordinator's rules for these tools as an editable integration block (`plugin:<plugin name>`, Settings → Prompt): shown
+   * while `applies` and `on` hold. `text` may use `{project}`, `{projectId}` and `{githubRepos}`. Replaces `instructions`.
+   */
+  prompt?: { name: string; text: string; on?(project: Project): boolean };
+  /** Older form: appended to the coordinator instructions of matching projects as locked text. Ignored when `prompt` is set. */
   instructions?(project: Project): string;
 };
 export type PluginRpcContext = {
