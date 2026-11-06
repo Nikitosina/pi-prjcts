@@ -60,6 +60,12 @@ The coordinator has ordinary Pi `read`, `edit`, `write` and unrestricted `bash` 
 
 Every workspace (a chat's worktree, a worker's, a task helper's) has a cache folder outside its worktree, named in `$PI_WORKSPACE_CACHE`, for DerivedData, test results, browser profiles and logs. It lives in the project folder (`workspace-cache/<id>`), or under the host's cache root (`storage-set` `cacheRoot`, an absolute folder) as `<root>/<project>/<id>`, and is removed by the worktree cleanup once its workspace is gone.
 
+A web project's `node_modules` (about 1 GB each) need not be installed once per worktree. On APFS the worktree setup command can clone the owner checkout's copy, which takes no space until a file changes, and install only when the lockfile differs:
+
+```sh
+src=/path/to/owner/checkout; cd "$PI_WORKTREE" && { cmp -s package-lock.json "$src/package-lock.json" && [ ! -e node_modules ] && cp -cR "$src/node_modules" node_modules || npm ci; }
+```
+
 Every project has a Workspace cleanup routine (Settings → Automations), on by default, daily, and once more right after Approve. It removes settled worktrees by the safe rule, caches of removed workspaces, caches of live workspaces unused for 7 days or over 20 GB and idle for an hour, disposable paths, and videos of Jobs approved or dismissed 14 days ago (screenshots, logs and reports stay). Disposable paths are globs relative to each worktree (`schedule-update` `cleanup.disposable`, e.g. `verification-results`); a match is removed only when git ignores it, it holds no tracked file and it was not written for a day. The routine can be turned off or retimed but not deleted.
 
 A routine can also run one shell command (`routine-script-create`, `routine-script-set`): stored exactly, run with `/bin/zsh -lc` in the project folder with `PI_OWNER_CHECKOUT` and `PI_WORKSPACE_CACHE_ROOT` set, a 10-minute default timeout, never two runs at once and never while the project is paused. The last 50 runs keep their exit code, duration and last 64 KB of output (`schedule-output`); a failed run sends the output tail to the routine's chat (default Main). The Host agent needs your approval to create a script routine or change its command; timing and on/off are free.
