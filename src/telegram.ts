@@ -1020,7 +1020,8 @@ export function startTelegram(options: {
         : `${done}/${view.steps.length} done`,
     ].join("\n");
   }
-  /** Sends the Job's progress message once, then edits it in place; a deleted message is replaced. Updates for one Job run in order. */
+  /** Sends the Job's progress message once, then edits it in place; a deleted message is replaced. Updates for one Job run in order.
+   *  Best-effort: never rejects, because the host calls it fire-and-forget; `call` records the delivery error. */
   function progress(view: JobProgress): Promise<void> {
     const run = async () => {
       if (!state.owner || !view.steps.length) return;
@@ -1049,9 +1050,11 @@ export function startTelegram(options: {
     };
     const next = (progressLocks.get(view.jobId) ?? Promise.resolve()).then(run, run);
     progressLocks.set(view.jobId, next);
-    return next.finally(() => {
-      if (progressLocks.get(view.jobId) === next) progressLocks.delete(view.jobId);
-    });
+    return next
+      .catch(() => undefined)
+      .finally(() => {
+        if (progressLocks.get(view.jobId) === next) progressLocks.delete(view.jobId);
+      });
   }
 
   async function snapshot() {
