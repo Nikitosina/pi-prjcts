@@ -41,6 +41,13 @@ assert.equal(
 assert.equal(workerBehavior(project(), "helper"), TASK_HELPER_PROMPT, "B1 task helper default");
 for (const target of PROMPT_TARGETS) assert.equal(resolvePromptBlocks(target).customized, false, `B1 ${target} not customized`);
 
+// H6/H7 (task-worker-failures.md): helpers never publish; the Coordinator publishes and rebases for real.
+const coordinatorText = DEFAULT_ROLE_PROMPTS.coordinator;
+assert.match(coordinatorText, /Task helpers never push, rebase a pushed branch or update a PR/, "H6 helpers never publish");
+assert.match(coordinatorText, /independent Job's worker/, "H6 events go to an independent Job's worker, not a helper");
+assert.match(coordinatorText, /no dry run/, "H7 rebase has no dry run");
+assert.match(coordinatorText, /backup branch/, "H7 rebase starts from a backup branch");
+
 // B2: a legacy override is the exact old text plus the mode's delivery block, marked legacy, and reaches task helpers too.
 const delivery = (id) => ROLE_BLOCKS.worker.find((block) => block.id === id).text;
 const legacy = project({ prompts: { worker: "OWNER WORKER TEXT", scout: "S" } });
