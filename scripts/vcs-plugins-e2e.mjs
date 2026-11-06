@@ -180,6 +180,37 @@ await kit.run(async () => {
     "18 a plugin RPC can reach the project root conversation",
     Number.isInteger((await rpc({ action: "plugin", plugin: "fake", method: "with-root", id })).rootId),
   );
+  // R15: the cleanup routine runs plugin steps with the project and unused window; a failing step fails the run by name.
+  const cleanupRun = async () => {
+    const runs = async () =>
+      (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === "workspace-cleanup");
+    const before = (await runs()).length;
+    await rpc({ action: "schedule-run", id, scheduleId: "workspace-cleanup" });
+    return kit.eventually(
+      async () => {
+        const items = await runs();
+        return items.length > before && items.at(-1).outcome !== null && items.at(-1);
+      },
+      "a finished cleanup run",
+      200,
+    );
+  };
+  const routineRun = await cleanupRun();
+  check(
+    "R15 a plugin cleanup step runs with the project and the unused window, and its summary joins the run's",
+    routineRun.outcome === "completed" &&
+      /fake: erased 1 idle device/.test(routineRun.summary) &&
+      JSON.stringify(readData().cleanups) === JSON.stringify([{ projectId: id, unusedDays: 7 }]),
+    { routineRun, cleanups: readData().cleanups },
+  );
+  patchData((value) => (value.cleanupFails = true));
+  const failed = await cleanupRun();
+  patchData((value) => (value.cleanupFails = false));
+  check(
+    "R15 a failing plugin step fails the run and names the plugin",
+    failed.status === "failed" && /fake/.test(failed.outcome) && /fake cleanup step failed/.test(failed.outcome),
+    failed,
+  );
   await rpc({ action: "plugin", plugin: "fake", method: "connect", id, params: { confirm: id } });
   check(
     "10 connect (mutateIdle) stored the provider record verbatim in project.json",

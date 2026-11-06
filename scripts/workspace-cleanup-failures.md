@@ -26,3 +26,10 @@ Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9), `scripts/worktree-lifecycle
 - R13 A run that dies with the host stays in flight forever and blocks every later run; or a host restart reports a cleanup as an
   uncertain prompt submission.
 - R14 Approve does not start a cleanup, so a merged Job's worktree and cache wait a whole day.
+
+## Plugin steps
+- R15 A plugin cannot add a cleanup step (simulator clones keep their data forever), or a step that throws stops the core steps or
+  is reported as a successful run; or the step does not learn the project and the unused window
+  (`scripts/vcs-plugins-e2e.mjs`).
+- R16 The simulator step erases a clone that is booted, leased, used within the unused window, or not owned by the project
+  (`plugins/simulator/idle.ts` checks in `scripts/workspace-cleanup-unit.mjs`; the real erase is unscripted).

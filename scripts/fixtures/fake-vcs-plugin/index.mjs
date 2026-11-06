@@ -294,6 +294,13 @@ export default {
         },
       },
       uncertainWrites: async () => Boolean(data().uncertainWrites),
+      cleanup: async ({ projectId, unusedDays }) => {
+        const value = data();
+        value.cleanups = [...(value.cleanups ?? []), { projectId, unusedDays }];
+        writeFileSync(dataFile(), JSON.stringify(value));
+        if (value.cleanupFails) throw new Error("fake cleanup step failed");
+        return "fake: erased 1 idle device";
+      },
       rpc: {
         echo: async (context) => ({ params: context.params, projectId: context.projectId, stateDir: api.stateDir }),
         "touch-state": async () => {

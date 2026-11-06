@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi } from "../../src/plugin-types.ts";
+import { idleClones } from "./idle.ts";
 
 /** Clones one project may own at once (for example an iPhone and an iPad). */
 export const MAX_OWNED = 4;
@@ -51,6 +52,9 @@ export function createSimulators(api: HostPluginApi) {
     Type.Literal("delete"),
   ]);
   type SimulatorAction = Static<typeof SimulatorAction>;
+  // Erase is the cleanup routine's own operation (no boot afterwards); agents and the owner use reset.
+  const Operation = Type.Union([SimulatorAction, Type.Literal("erase")]);
+  type Operation = Static<typeof Operation>;
   const Orientation = Type.Union([
     Type.Literal("portrait"),
     Type.Literal("portrait-upside-down"),
@@ -84,7 +88,7 @@ export function createSimulators(api: HostPluginApi) {
     { additionalProperties: false },
   );
   const Pending = Type.Object(
-    { requestId: Uuid, operation: SimulatorAction, udid: Type.Union([Uuid, Type.Null()]), sourceUdid: Type.Union([Uuid, Type.Null()]) },
+    { requestId: Uuid, operation: Operation, udid: Type.Union([Uuid, Type.Null()]), sourceUdid: Type.Union([Uuid, Type.Null()]) },
     { additionalProperties: false },
   );
   const Store = Type.Object(
@@ -189,7 +193,7 @@ export function createSimulators(api: HostPluginApi) {
   }
 
   /** Accept once, persist the intent, then run outside the host request. Unknown outcomes never replay. */
-  async function actOnSimulator(id: string, operation: SimulatorAction, requestId: string, target: SimulatorTarget = {}) {
+  async function actOnSimulator(id: string, operation: Operation, requestId: string, target: SimulatorTarget = {}) {
     await locked(id, async () => {
       activeProject(id);
       const store = readStore(id),
@@ -447,6 +451,11 @@ export function createSimulators(api: HostPluginApi) {
             await command(simslim(), ["on", device.udid], signal, 660000);
             await confirmedSlim(device.udid, signal);
             break;
+          case "erase":
+            if (device.state !== "Shutdown") throw Error("Only a shut-down clone is erased");
+            await command(simslim(), ["erase", device.udid, "--json"], signal, 180000);
+            await ownedDevice(owned, await inventory(signal));
+            break;
           case "delete":
             if (device.state !== "Shutdown") await command(simslim(), ["shutdown", device.udid, "--json"], signal, 120000);
             await ownedDevice(owned, await inventory(signal));
@@ -650,6 +659,29 @@ export function createSimulators(api: HostPluginApi) {
   function message(error: unknown) {
     return error instanceof Error ? error.message : String(error);
   }
+  /** Cleanup routine step: erases owned clones that are shut down, unleased and unused for `unusedDays`, one at a time. */
+  async function eraseIdleSimulators(id: string, unusedDays: number, signal: AbortSignal): Promise<string> {
+    const store = readStore(id);
+    if (!store.enabled || !store.owned.length) return "";
+    if (store.uncertain || store.pending || tasks.has(id)) return "Simulators: management is busy or uncertain; nothing erased.";
+    const states = new Map((await inventory(signal)).map((device) => [device.udid, device.state]));
+    const idle = idleClones({
+      owned: store.owned,
+      states,
+      leased: (owned) => aliasesHeld(owned).length > 0,
+      now: Date.now(),
+      unusedMs: unusedDays * 86_400_000,
+    });
+    let erased = 0;
+    for (const owned of idle) {
+      if (signal.aborted) break;
+      await actOnSimulator(id, "erase", randomUUID(), { udid: owned.udid });
+      await tasks.get(id)?.promise;
+      if (readStore(id).uncertain) throw Error(`Erasing simulator ${owned.udid} left an unknown outcome; inspect it in Settings`);
+      erased++;
+    }
+    return `Simulators: erased ${erased} idle clone(s).`;
+  }
   return {
     SimulatorAction,
     Orientation,
@@ -663,5 +695,6 @@ export function createSimulators(api: HostPluginApi) {
     frame: simulatorFrame,
     pause: pauseSimulatorManagement,
     close: closeSimulators,
+    eraseIdle: eraseIdleSimulators,
   };
 }

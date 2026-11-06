@@ -87,6 +87,9 @@ export const plugins = {
     }
     return resumeAll;
   },
+  /** Cleanup routine steps of loaded plugins, by plugin name. */
+  cleanupSteps: () =>
+    loaded.flatMap((item) => (item.capabilities.cleanup ? [{ plugin: item.plugin, run: item.capabilities.cleanup }] : [])),
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
@@ -230,6 +233,7 @@ function validate(caps: PluginCapabilities): void {
     throw new Error("uncertainWrites must be a function");
   if (caps.workerTools) requireFunctions("workerTools", caps.workerTools, ["offered", "create"]);
   if (caps.leaseName !== undefined && typeof caps.leaseName !== "function") throw new Error("leaseName must be a function");
+  if (caps.cleanup !== undefined && typeof caps.cleanup !== "function") throw new Error("cleanup must be a function");
   for (const hook of ["pause", "close"] as const)
     if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function")
       throw new Error(`lifecycle.${hook} must be a function`);

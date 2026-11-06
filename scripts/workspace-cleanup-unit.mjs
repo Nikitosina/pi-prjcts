@@ -14,6 +14,7 @@ import {
   oldJobVideos,
 } from "../src/workspace-cleanup.ts";
 import { workspaceCaches } from "../src/workspace-cache.ts";
+import { deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -130,6 +131,40 @@ try {
   );
   assert.deepEqual(oldJobVideos({ controlRoot: join(root, "none"), jobs, now, days: 14 }), [], "no artifacts folder, nothing to remove");
   assert.ok(existsSync(join(artifacts, "old-approved", "shot.png")));
+
+  // R16 simulator clones: only owned, shut-down, unleased clones unused past the window are idle. device.plist changes on boot and shutdown.
+  const devices = join(root, "Devices");
+  const device = (udid, plistAgo, dataAgo) => {
+    const directory = join(devices, udid);
+    mkdirSync(join(directory, "data"), { recursive: true });
+    writeFileSync(join(directory, "device.plist"), "plist");
+    ago(join(directory, "device.plist"), plistAgo);
+    ago(join(directory, "data"), dataAgo);
+    return { udid, directory };
+  };
+  const idle = device("IDLE", 9 * DAY, 8 * DAY),
+    booted = device("BOOTED", 9 * DAY, 9 * DAY),
+    leased = device("LEASED", 9 * DAY, 9 * DAY),
+    recentData = device("RECENT", 9 * DAY, DAY),
+    missing = device("MISSING", 9 * DAY, 9 * DAY);
+  assert.equal(Math.round((now - deviceLastUse(idle.directory)) / DAY), 8, "the newest of device.plist and data counts");
+  assert.equal(deviceLastUse(join(devices, "absent")), Number.POSITIVE_INFINITY, "an unreadable device is never idle");
+  const states = new Map([
+    ["IDLE", "Shutdown"],
+    ["BOOTED", "Booted"],
+    ["LEASED", "Shutdown"],
+    ["RECENT", "Shutdown"],
+  ]);
+  assert.deepEqual(
+    idleClones({
+      owned: [idle, booted, leased, recentData, missing],
+      states,
+      leased: (owned) => owned.udid === "LEASED",
+      now,
+      unusedMs: 7 * DAY,
+    }).map((owned) => owned.udid),
+    ["IDLE"],
+  );
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

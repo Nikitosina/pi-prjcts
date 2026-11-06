@@ -30,6 +30,7 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - workerTools  tools (and an instruction snippet) for whole-repository workers; frozen per thread like every worker tool.
  *  - leaseName  canonical name for host lease resources the plugin owns (aliases share one lease).
  *  - lifecycle  pause around project lifecycle changes; close at host shutdown.
+ *  - cleanup    a step of each project's Workspace cleanup routine (for example erasing idle devices the plugin owns).
  *  - web        browser script/style for the project screen and authenticated GET routes.
  */
 
@@ -478,6 +479,9 @@ export type PluginCapabilities = {
   /** Canonical lease name for a resource the plugin owns, or undefined to leave it to others. */
   leaseName?: (resource: string) => string | undefined;
   lifecycle?: LifecycleHooks;
+  /** One step of a project's Workspace cleanup routine, after the core steps. Resolves with a one-line summary; throws when it failed.
+   * Remove only what the plugin owns and nobody uses now, and nothing used within `unusedDays`. */
+  cleanup?: (input: { projectId: string; unusedDays: number; signal: AbortSignal }) => Promise<string>;
   web?: WebContribution;
 };
 export type LeaseHolder = { projectId: string; threadId: string };

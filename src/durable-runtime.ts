@@ -1672,6 +1672,7 @@ export async function openDurableProject(input: {
         }
       })());
     // The cleanup routine (scripts/workspace-cleanup-failures.md): the safe worktree rule and cache sweep, then the routine's own steps.
+    const cleanupAbort = new AbortController();
     async function cleanupRoutine(settings: CleanupSettings): Promise<string> {
       // Test seam: a run the host dies in.
       const hold = Date.now() + (Number(process.env.PI_PROJECTS_CLEANUP_START_DELAY_MS) || 0);
@@ -1690,7 +1691,21 @@ export async function openDurableProject(input: {
           disposable.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
       const videos = oldJobVideos({ controlRoot: dir, jobs: (await jobs.snapshot(openedHarness)).jobs, days: settings.videoDays });
       for (const path of [...trimmed, ...disposable, ...videos]) if (!closed) rmSync(path, { recursive: true, force: true });
-      return `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`;
+      const notes = [
+        `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
+      ];
+      const failures: string[] = [];
+      for (const step of plugins.cleanupSteps()) {
+        if (closed) break;
+        try {
+          notes.push(await step.run({ projectId: project.id, unusedDays: settings.unusedDays, signal: cleanupAbort.signal }));
+        } catch (error) {
+          failures.push(`${step.plugin}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      const summary = notes.filter(Boolean).join(" ");
+      if (failures.length) throw new Error(`Cleanup step failed (${failures.join("; ")}). ${summary}`);
+      return summary;
     }
     /** Threads whose leases stay: running Jobs and open scouts or reviewers. */
     async function retainedLeaseThreads(): Promise<Set<string>> {
@@ -1721,6 +1736,7 @@ export async function openDurableProject(input: {
     leaseWake.unref();
     stopMonitors = async () => {
       clearInterval(leaseWake);
+      cleanupAbort.abort();
       await schedules.drain();
       await cleaning?.catch(() => {});
       clearInterval(followWake);
