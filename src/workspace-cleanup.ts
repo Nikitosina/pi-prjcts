@@ -103,15 +103,8 @@ export async function cachesToTrim(input: {
   return trimmed;
 }
 
-/** Video files in the artifacts of Jobs approved or dismissed more than `days` ago. */
-export function oldJobVideos(input: {
-  controlRoot: string;
-  jobs: readonly { id: string; status: string; endedAt: number | null; dismissedAt?: number }[];
-  now?: number;
-  days: number;
-}): string[] {
-  const now = input.now ?? Date.now(),
-    windowMs = input.days * DAY_MS;
+/** Video files in the artifacts of these Jobs. */
+export function jobVideos(controlRoot: string, jobIds: readonly string[]): string[] {
   const videos: string[] = [];
   const walk = (dir: string) => {
     let entries;
@@ -126,10 +119,26 @@ export function oldJobVideos(input: {
       else if (entry.isFile() && VIDEO.test(entry.name)) videos.push(path);
     }
   };
-  for (const job of input.jobs) {
-    const approved = job.status === "approved" && job.endedAt !== null && now - job.endedAt > windowMs;
-    const dismissed = job.dismissedAt !== undefined && now - job.dismissedAt > windowMs;
-    if ((approved || dismissed) && !job.id.includes(sep) && job.id !== "..") walk(join(input.controlRoot, "artifacts", job.id));
-  }
+  for (const id of jobIds) if (!id.includes(sep) && id !== ".." && id !== ".") walk(join(controlRoot, "artifacts", id));
   return videos;
+}
+
+/** Video files in the artifacts of Jobs approved or dismissed more than `days` ago. */
+export function oldJobVideos(input: {
+  controlRoot: string;
+  jobs: readonly { id: string; status: string; endedAt: number | null; dismissedAt?: number }[];
+  now?: number;
+  days: number;
+}): string[] {
+  const now = input.now ?? Date.now(),
+    windowMs = input.days * DAY_MS;
+  const old = input.jobs.filter(
+    (job) =>
+      (job.status === "approved" && job.endedAt !== null && now - job.endedAt > windowMs) ||
+      (job.dismissedAt !== undefined && now - job.dismissedAt > windowMs),
+  );
+  return jobVideos(
+    input.controlRoot,
+    old.map((job) => job.id),
+  );
 }

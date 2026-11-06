@@ -867,6 +867,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({ id: input.id, operation: (owner) => owner.reset(input.chatId) });
     case "worktrees-snapshot":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.worktrees() });
+    case "storage-usage":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.storageUsage() });
     case "worktrees-cleanup":
       if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id");
       return withDurableOwner({ id: input.id, operation: (owner) => owner.cleanupWorktrees() });

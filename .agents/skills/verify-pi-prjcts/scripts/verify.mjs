@@ -1975,6 +1975,38 @@ const journeys = {
       "side-effect",
       "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule; the cleanup routine card shows its settings with Run now and the switch only; a script card shows its command with Delete and no prompt Edit",
     );
+    // Storage: one row per kind with sizes; Clean up runs the cleanup routine and shows its outcome, then measures again.
+    await page.click('#settings nav [data-section="storage"]');
+    await page.waitFor(`!!document.querySelector('#settings table.storage tfoot')`, "storage table", 60000);
+    const storageRows = await page.evaluate(
+      `[...document.querySelectorAll('#settings table.storage tbody tr')].map((row) => ({ id: row.dataset.row, text: row.innerText }))`,
+    );
+    if (
+      !["worktrees", "caches", "disposable", "videos"].every((key) => storageRows.some((row) => row.id === key)) ||
+      !storageRows.every((row) => /\d+(\.\d)? (B|KB|MB|GB)|unknown/.test(row.text))
+    )
+      throw Error(`storage rows: ${JSON.stringify(storageRows)}`);
+    const cleanupRunsBefore = (await rpc(run, { action: "schedule-history", id: projectId, kind: "intents" })).items.filter(
+      (item) => item.stableId === "workspace-cleanup",
+    ).length;
+    await page.click("#settings [data-storage-clean]");
+    await page.waitFor(
+      `!!document.querySelector('#settings .storage-outcome') && !!document.querySelector('#settings table.storage tfoot')`,
+      "cleanup outcome",
+      120000,
+    );
+    const storageOutcome = await page.evaluate(`document.querySelector('#settings .storage-outcome').innerText`);
+    const cleanupRuns = (await rpc(run, { action: "schedule-history", id: projectId, kind: "intents" })).items.filter(
+      (item) => item.stableId === "workspace-cleanup",
+    );
+    if (cleanupRuns.length !== cleanupRunsBefore + 1 || !/Removed \d+ worktree/.test(storageOutcome))
+      throw Error(`storage clean up: ${storageOutcome} runs ${cleanupRunsBefore} -> ${cleanupRuns.length}`);
+    await delay(300);
+    await page.shot(dir, "15c-settings-storage");
+    record(
+      "side-effect",
+      "Storage: rows for worktrees, caches, disposable paths and Job videos with sizes; Clean up ran the Workspace cleanup routine once (its history grew by one) and showed its summary, then measured again",
+    );
     await page.press("Escape", { keyCode: 27 });
     // Stop is a real coordinator abort, not a contract placeholder; history stays and a follow-up can run.
     await page.click("#composer textarea");

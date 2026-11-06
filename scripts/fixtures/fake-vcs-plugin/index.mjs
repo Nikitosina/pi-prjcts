@@ -291,6 +291,16 @@ export default {
         if (value.cleanupFails) throw new Error("fake cleanup step failed");
         return "fake: erased 1 idle device";
       },
+      usage: async ({ projectId, unusedDays }) => {
+        if (data().usageFails) throw new Error("fake usage failed");
+        return {
+          label: "Fake devices",
+          count: 2,
+          bytes: 3 * 1024 ** 3,
+          reclaimableBytes: 1024 ** 3,
+          note: `${projectId.slice(0, 8)} ${unusedDays}d`,
+        };
+      },
       rpc: {
         echo: async (context) => ({ params: context.params, projectId: context.projectId, stateDir: api.stateDir }),
         "touch-state": async () => {

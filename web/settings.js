@@ -1,7 +1,7 @@
 // Settings overlay (⌘,): left nav with a letter hotkey and a Project/Host scope label per item; the core four (Context, Model,
 // Prompt, Tools) per profile; Automations as cards; Host sections. Every section reads and writes the host directly.
 import { call } from "./api.js";
-import { ago, clip, esc, oneLine, shortModel, tokens, usd } from "./format.js";
+import { ago, clip, esc, oneLine, shortModel, size, tokens, usd } from "./format.js";
 import { bindings, captureNext, conflicts, display, paintHints, DEFAULTS } from "./hotkeys.js";
 import { emit, inline, on, stale, state, toast } from "./state.js";
 import { setUi } from "./ui.js";
@@ -24,6 +24,7 @@ export const SECTIONS = [
   { id: "prompt", label: "Prompt", scope: "project", group: "Core four", profile: true, render: prompt },
   { id: "tools", label: "Tools", scope: "project", group: "Core four", profile: true, render: tools },
   { id: "automations", label: "Automations", scope: "project", group: "Project", render: automations },
+  { id: "storage", label: "Storage", scope: "project", group: "Project", render: storage },
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
   { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
   { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
@@ -409,6 +410,71 @@ async function tools(body, alive) {
       { tools: { disabled: [...disabled] } },
       `${box.dataset.toolName} ${box.checked ? "on" : "off"} for ${profile}`,
     );
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------- Storage
+
+const CLEANUP_ID = "workspace-cleanup";
+async function storage(body, alive) {
+  let usage = null,
+    failure = null,
+    outcome = null,
+    cleaning = false;
+  const measure = async () => {
+    try {
+      usage = await call("storage-usage", { id: state.projectId });
+      failure = null;
+    } catch (error) {
+      failure = error.message;
+    }
+    if (alive()) draw();
+  };
+  const row = (item) =>
+    `<tr data-row="${esc(item.id)}"><td>${esc(item.label)}</td><td class="right">${item.count ?? "–"}</td><td class="right">${item.bytes === null ? `<span class="muted">unknown</span>` : esc(size(item.bytes))}</td><td class="right">${item.reclaimableBytes === null ? "–" : esc(size(item.reclaimableBytes))}</td><td class="muted small">${esc(item.note ?? "")}</td></tr>`;
+  const draw = () => {
+    const rows = usage?.rows ?? [];
+    const total = (key) => rows.reduce((sum, item) => sum + (item[key] ?? 0), 0);
+    body.innerHTML = `${line("What this project keeps on disk, and what the Workspace cleanup routine would free now.", "Sizes come from du; a worktree on a virtual mount is not measured. Clean up runs the Workspace cleanup routine now; each run is in its History under Automations.")}${
+      usage
+        ? `<table class="storage"><thead><tr><th>Kind</th><th class="right">Count</th><th class="right">Size</th><th class="right">Cleanup frees</th><th></th></tr></thead><tbody>${rows.map(row).join("")}</tbody><tfoot><tr><td>Total</td><td></td><td class="right">${esc(size(total("bytes")))}</td><td class="right">${esc(size(total("reclaimableBytes")))}</td><td class="muted small">Measured ${esc(ago(usage.measuredAt))}</td></tr></tfoot></table>`
+        : failure
+          ? `<p class="error-line">${esc(failure)}</p>`
+          : `<p class="loading-line">Measuring…</p>`
+    }<div class="row"><button type="button" class="primary small" data-storage-clean ${cleaning ? "disabled" : ""}>${cleaning ? "Cleaning up…" : "Clean up"}</button><button type="button" class="ghost-btn small" data-storage-measure ${cleaning ? "disabled" : ""}>Measure again</button></div>${outcome ? `<p class="storage-outcome ${outcome.ok ? "muted" : "error-line"}" role="status">${esc(outcome.text)}</p>` : ""}`;
+  };
+  draw();
+  await measure();
+  body.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-storage-measure]")) {
+      usage = null;
+      draw();
+      return measure();
+    }
+    if (!event.target.closest("[data-storage-clean]") || cleaning) return;
+    const runs = async () =>
+      (await call("schedule-history", { id: state.projectId, kind: "intents" })).items.filter((item) => item.stableId === CLEANUP_ID);
+    cleaning = true;
+    outcome = null;
+    draw();
+    try {
+      const before = (await runs()).length;
+      await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
+      let done = null;
+      while (alive() && !done) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const items = await runs();
+        if (items.length > before && items.at(-1).outcome !== null) done = items.at(-1);
+      }
+      if (done) outcome = { ok: done.outcome === "completed", text: done.summary || done.outcome };
+    } catch (error) {
+      outcome = { ok: false, text: error.message };
+    }
+    cleaning = false;
+    if (!alive()) return;
+    usage = null;
+    draw();
+    await measure();
   });
 }
 

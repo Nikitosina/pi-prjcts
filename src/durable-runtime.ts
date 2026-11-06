@@ -106,9 +106,11 @@ import {
   cachesToTrim,
   disposableCandidates,
   gitIgnored,
+  jobVideos,
   oldJobVideos,
   type CleanupSettings,
 } from "./workspace-cleanup.ts";
+import { diskBytes, measureRows, type StorageUsage } from "./storage-usage.ts";
 import type { ProfileToolGroup } from "./profiles.ts";
 import { mcpCatalog } from "./mcp-servers.ts";
 import {
@@ -383,6 +385,8 @@ export type DurableProjectRuntime = {
   pause(): Promise<{ paused: boolean }>;
   resume(): Promise<{ paused: boolean }>;
   worktrees(): Promise<WorktreeInventory>;
+  /** What the project keeps on disk, per kind, and what the cleanup routine would free now. */
+  storageUsage(): Promise<StorageUsage>;
   /** Live context/compaction settings (read on every generation; no reopen). */
   applyContext(settings: ContextSettings | undefined): void;
   /** Coordinator, role-model and explicit quota-fallback selection, live. Existing threads change model only through audited quota recovery. */
@@ -1785,6 +1789,95 @@ export async function openDurableProject(input: {
       if (failures.length) throw new Error(`Cleanup step failed (${failures.join("; ")}). ${summary}`);
       return summary;
     }
+    // Storage (scripts/storage-usage-failures.md): each row measured on its own, reclaimable under the cleanup routine's current settings.
+    async function storageUsage(): Promise<StorageUsage> {
+      const routine = (await schedules.snapshot({ includeHistory: false })).schedules.find((item) => item.id === CLEANUP_ROUTINE.id);
+      const settings = routine?.action.kind === "cleanup" ? routine.action.settings : DEFAULT_CLEANUP_SETTINGS;
+      const live = (await caches.live()).filter((item) => existsSync(item.workspacePath));
+      const rows = await measureRows([
+        {
+          id: "worktrees",
+          kind: "worktrees",
+          label: "Worktrees",
+          measure: async () => {
+            const inventory = await worktreeInventory({
+              project: loadProject(project.id),
+              root,
+              controlRoot: dir,
+              untouched: untouchedThread,
+            });
+            const sizes = await Promise.all(
+              inventory.items.map((item) =>
+                item.sizeKb >= 0
+                  ? item.sizeKb * 1024
+                  : item.provider && plugins.workspaceProvider(item.provider)?.virtualMount
+                    ? null
+                    : diskBytes([item.path]),
+              ),
+            );
+            const unmeasured = sizes.filter((size) => size === null).length;
+            return {
+              count: inventory.items.length,
+              bytes: sizes.reduce<number>((sum, size) => sum + (size ?? 0), 0),
+              reclaimableBytes: inventory.reclaimableKb * 1024,
+              ...(unmeasured ? { note: `${unmeasured} on a virtual mount, not measured` } : {}),
+            };
+          },
+        },
+        {
+          id: "caches",
+          kind: "caches",
+          label: "Workspace caches",
+          measure: async () => {
+            const dirs = live.map((item) => item.cache).filter((path) => existsSync(path));
+            const trimmed = await cachesToTrim({
+              dirs,
+              capBytes: settings.cacheCapGb * 1024 ** 3,
+              unusedMs: settings.unusedDays * 86_400_000,
+            });
+            return { count: dirs.length, bytes: await diskBytes(dirs), reclaimableBytes: await diskBytes(trimmed) };
+          },
+        },
+        {
+          id: "disposable",
+          kind: "disposable",
+          label: "Disposable paths",
+          measure: async () => {
+            if (!settings.disposable.length)
+              return { count: 0, bytes: 0, reclaimableBytes: 0, note: "No disposable paths are set in the Workspace cleanup routine" };
+            const paths: string[] = [];
+            for (const item of live)
+              paths.push(...(await gitIgnored(item.workspacePath, disposableCandidates(item.workspacePath, settings.disposable))));
+            const bytes = await diskBytes(paths);
+            return { count: paths.length, bytes, reclaimableBytes: bytes };
+          },
+        },
+        {
+          id: "videos",
+          kind: "videos",
+          label: "Job videos",
+          measure: async () => {
+            const view = (await jobs.snapshot(openedHarness)).jobs;
+            const all = jobVideos(
+              dir,
+              view.map((job) => job.id),
+            );
+            return {
+              count: all.length,
+              bytes: await diskBytes(all),
+              reclaimableBytes: await diskBytes(oldJobVideos({ controlRoot: dir, jobs: view, days: settings.videoDays })),
+            };
+          },
+        },
+        ...plugins.usageSources().map((source) => ({
+          id: `plugin:${source.plugin}`,
+          kind: "plugin" as const,
+          label: source.plugin,
+          measure: () => source.measure({ projectId: project.id, unusedDays: settings.unusedDays, signal: cleanupAbort.signal }),
+        })),
+      ]);
+      return { measuredAt: Date.now(), rows };
+    }
     /** Threads whose leases stay: running Jobs and open scouts or reviewers. */
     async function retainedLeaseThreads(): Promise<Set<string>> {
       const view = await jobs.snapshot(openedHarness);
@@ -2445,6 +2538,7 @@ export async function openDurableProject(input: {
         return schedules.ingest(value, undefined, undefined, { target: await eventTarget(), automation: true });
       },
       worktrees: () => worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir }),
+      storageUsage,
       cleanupWorktrees: () => cleanup(),
       applyContext: (value) => {
         contextSettings = value;

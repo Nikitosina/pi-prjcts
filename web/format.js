@@ -36,6 +36,17 @@ export function tokens(n) {
   if (!Number.isFinite(n)) return "–";
   return n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
+export function size(bytes) {
+  if (!Number.isFinite(bytes)) return "–";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes,
+    unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${unit && value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
 export function usd(n) {
   return Number.isFinite(n) ? `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}` : "–";
 }

@@ -626,6 +626,65 @@ try {
     notCache = join(caches, "keep-me");
   for (const dir of [cacheOf(w1Path), cacheOf(w2Path), orphanCache, notCache]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(cacheOf(w1Path), "DerivedData.bin"), "x");
+
+  // U4-U6: storage usage, one row per kind, with what the cleanup routine would free under its current settings.
+  const duBytes = (path) => Number(execFileSync("du", ["-sk", path], { encoding: "utf8" }).split("\t")[0]) * 1024;
+  const eightDays = (Date.now() - 8 * 86_400_000) / 1000;
+  utimesSync(cacheOf(w1Path), eightDays, eightDays);
+  mkdirSync(join(home, id, "artifacts", w1.threadId), { recursive: true });
+  writeFileSync(join(home, id, "artifacts", w1.threadId, "run.mp4"), Buffer.alloc(4096));
+  const usage = async () => Object.fromEntries((await rpc({ action: "storage-usage", id })).rows.map((row) => [row.id, row]));
+  let rows = await usage();
+  check(
+    "U4 storage usage has a row for each kind",
+    ["worktrees", "caches", "disposable", "videos"].every((key) => rows[key]),
+    rows,
+  );
+  check(
+    "U4 the worktree row counts the inventory's worktrees and their reclaimable space",
+    rows.worktrees.count === inv.items.length && rows.worktrees.bytes > 0 && rows.worktrees.reclaimableBytes > 0,
+    { row: rows.worktrees, items: inv.items.length },
+  );
+  check(
+    "U5 the cache row frees exactly the cache unused past the window (W1's), not the live ones",
+    rows.caches.count >= 2 &&
+      rows.caches.bytes >= rows.caches.reclaimableBytes &&
+      rows.caches.reclaimableBytes === duBytes(cacheOf(w1Path)),
+    { row: rows.caches, w1: duBytes(cacheOf(w1Path)) },
+  );
+  check(
+    "U4 the video row counts Job videos; a running or unapproved Job's video is not freed",
+    rows.videos.count === 1 && rows.videos.bytes >= 4096 && rows.videos.reclaimableBytes === 0,
+    rows.videos,
+  );
+  check(
+    "U6 without disposable globs the disposable row is empty and says why",
+    rows.disposable.count === 0 && /no disposable/i.test(rows.disposable.note ?? ""),
+    rows.disposable,
+  );
+  const routineNow = (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules.find(
+    (item) => item.action?.kind === "cleanup",
+  );
+  const setDisposable = async (disposable) => {
+    const current = (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules.find(
+      (item) => item.id === routineNow.id,
+    );
+    await rpc({ action: "schedule-update", id, scheduleId: current.id, revision: current.revision, cleanup: { disposable } });
+  };
+  const twoDaysAgo = (Date.now() - 2 * 86_400_000) / 1000;
+  utimesSync(join(w2Path, "node_modules"), twoDaysAgo, twoDaysAgo);
+  utimesSync(join(w2Path, "wip-note.txt"), twoDaysAgo, twoDaysAgo);
+  await setDisposable(["node_modules", "wip-note.txt"]);
+  rows = await usage();
+  check(
+    "U5/U6 the disposable row holds only old, git-ignored matches (W2's node_modules, not its untracked note)",
+    rows.disposable.count === 1 &&
+      rows.disposable.reclaimableBytes === duBytes(join(w2Path, "node_modules")) &&
+      rows.disposable.bytes === rows.disposable.reclaimableBytes,
+    rows.disposable,
+  );
+  await setDisposable([]);
+
   const cleanup = await rpc({ action: "worktrees-cleanup", id, confirm: id });
   await eventually(
     async () => !existsSync(w1Path) && !existsSync(headPath) && !existsSync(readerPath),

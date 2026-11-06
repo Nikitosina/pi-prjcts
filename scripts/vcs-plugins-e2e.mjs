@@ -211,6 +211,30 @@ await kit.run(async () => {
     failed.status === "failed" && /fake/.test(failed.outcome) && /fake cleanup step failed/.test(failed.outcome),
     failed,
   );
+  // U8: each plugin adds its own storage row; one that throws is unknown and the others still answer.
+  const pluginRow = async () => (await rpc({ action: "storage-usage", id })).rows;
+  let storageRows = await pluginRow();
+  const fakeRow = storageRows.find((row) => row.id === "plugin:fake");
+  check(
+    "U8 a plugin's storage row carries its label, sizes and the cleanup window",
+    fakeRow?.kind === "plugin" &&
+      fakeRow.label === "Fake devices" &&
+      fakeRow.count === 2 &&
+      fakeRow.bytes === 3 * 1024 ** 3 &&
+      fakeRow.reclaimableBytes === 1024 ** 3 &&
+      fakeRow.note === `${id.slice(0, 8)} 7d`,
+    storageRows,
+  );
+  patchData((value) => (value.usageFails = true));
+  storageRows = await pluginRow();
+  patchData((value) => (value.usageFails = false));
+  check(
+    "U8 a plugin whose usage throws shows unknown with the reason; core rows still answer",
+    storageRows.find((row) => row.id === "plugin:fake")?.bytes === null &&
+      /fake usage failed/.test(storageRows.find((row) => row.id === "plugin:fake")?.note ?? "") &&
+      storageRows.some((row) => row.id === "worktrees"),
+    storageRows,
+  );
   await rpc({ action: "plugin", plugin: "fake", method: "connect", id, params: { confirm: id } });
   check(
     "10 connect (mutateIdle) stored the provider record verbatim in project.json",

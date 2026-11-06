@@ -39,6 +39,7 @@ export default {
       leaseName,
       lifecycle: { pause: simulators.pause, close: simulators.close },
       cleanup: (input) => simulators.eraseIdle(input.projectId, input.unusedDays, input.signal),
+      usage: (input) => simulators.usage(input.projectId, input.unusedDays, input.signal),
       rpc: {
         snapshot: async (context) => simulators.snapshot(project(context)),
         configure: async (context) => simulators.configure(project(context), params(Configure, context.params)),

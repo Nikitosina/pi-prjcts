@@ -14,7 +14,7 @@ import {
   oldJobVideos,
 } from "../src/workspace-cleanup.ts";
 import { workspaceCaches } from "../src/workspace-cache.ts";
-import { deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
+import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
 
 const DAY = 86_400_000,
   now = Date.now(),
@@ -165,6 +165,15 @@ try {
     }).map((owned) => owned.udid),
     ["IDLE"],
   );
+  // U8 (scripts/storage-usage-failures.md): the Storage row counts every owned clone; erasing frees the idle ones' data.
+  writeFileSync(join(idle.directory, "data", "disk.img"), Buffer.alloc(64 * 1024));
+  writeFileSync(join(booted.directory, "data", "disk.img"), Buffer.alloc(128 * 1024));
+  const du = (path) => Number(execFileSync("du", ["-sk", path], { encoding: "utf8" }).split("\t")[0]) * 1024;
+  const usage = await cloneUsage({ owned: [idle, booted], idle: [idle] });
+  assert.equal(usage.count, 2);
+  assert.equal(usage.bytes, du(idle.directory) + du(booted.directory));
+  assert.equal(usage.reclaimableBytes, du(join(idle.directory, "data")));
+  assert.deepEqual(await cloneUsage({ owned: [], idle: [] }), { count: 0, bytes: 0, reclaimableBytes: 0 });
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

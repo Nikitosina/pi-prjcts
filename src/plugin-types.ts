@@ -479,6 +479,12 @@ export type PluginCapabilities = {
   /** One step of a project's Workspace cleanup routine, after the core steps. Resolves with a one-line summary; throws when it failed.
    * Remove only what the plugin owns and nobody uses now, and nothing used within `unusedDays`. */
   cleanup?: (input: { projectId: string; unusedDays: number; signal: AbortSignal }) => Promise<string>;
+  /** The plugin's row in a project's Storage: what it keeps on disk for the project and what its cleanup step would free; null when nothing. */
+  usage?: (input: {
+    projectId: string;
+    unusedDays: number;
+    signal: AbortSignal;
+  }) => Promise<(Omit<import("./storage-usage.ts").StorageMeasure, "note"> & { label: string; note?: string }) | null>;
   web?: WebContribution;
 };
 export type LeaseHolder = { projectId: string; threadId: string };

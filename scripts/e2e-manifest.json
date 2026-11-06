@@ -41,6 +41,7 @@
     "src/routine-script.ts": ["routine-script-unit", "routine-script-e2e"],
     "src/routine-tools.ts": ["routine-script-e2e"],
     "src/workspace-cleanup.ts": ["workspace-cleanup-unit", "worktree-lifecycle-e2e"],
+    "src/storage-usage.ts": ["storage-usage-unit", "worktree-lifecycle-e2e", "vcs-plugins-e2e"],
     "src/workspace-cache.ts": ["workspace-cache-unit", "artifacts-e2e", "codemode-native-tools-e2e", "mcp-e2e", "worktree-lifecycle-e2e"],
     "src/machine-status.ts": ["machine-status-unit", "status-dots-e2e", "ui2-limits-e2e"],
     "src/host-agent*.ts": ["host-agent-e2e"],

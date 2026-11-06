@@ -19,6 +19,7 @@ export const DEFAULTS = {
   "settings-prompt": "P",
   "settings-tools": "T",
   "settings-automations": "R",
+  "settings-storage": "U",
   "settings-tiers": "I",
   "settings-theme": "H",
   "settings-animations": "A",

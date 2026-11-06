@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi } from "../../src/plugin-types.ts";
-import { idleClones } from "./idle.ts";
+import { cloneUsage, idleClones } from "./idle.ts";
 
 /** Clones one project may own at once (for example an iPhone and an iPad). */
 export const MAX_OWNED = 4;
@@ -682,6 +682,20 @@ export function createSimulators(api: HostPluginApi) {
     }
     return `Simulators: erased ${erased} idle clone(s).`;
   }
+  /** Settings → Storage: this project's clones and what the cleanup step would erase now. */
+  async function simulatorUsage(id: string, unusedDays: number, signal: AbortSignal) {
+    const store = readStore(id);
+    if (!store.enabled || !store.owned.length) return null;
+    const states = new Map((await inventory(signal)).map((device) => [device.udid, device.state]));
+    const idle = idleClones({
+      owned: store.owned,
+      states,
+      leased: (owned) => aliasesHeld(owned).length > 0,
+      now: Date.now(),
+      unusedMs: unusedDays * 86_400_000,
+    });
+    return { label: "Simulator clones", ...(await cloneUsage({ owned: store.owned, idle })) };
+  }
   return {
     SimulatorAction,
     Orientation,
@@ -696,5 +710,6 @@ export function createSimulators(api: HostPluginApi) {
     pause: pauseSimulatorManagement,
     close: closeSimulators,
     eraseIdle: eraseIdleSimulators,
+    usage: simulatorUsage,
   };
 }

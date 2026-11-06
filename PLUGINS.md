@@ -33,6 +33,7 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 | `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |
 | `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
 | `cleanup` | `({ projectId, unusedDays, signal })` runs as a step of the project's Workspace cleanup routine, after the core steps; resolves with a one-line summary (empty for nothing to say), throws to fail the run. Remove only what the plugin owns and nobody uses now. The simulator plugin erases owned clones that are shut down, unleased and unused for `unusedDays` |
+| `usage` | `({ projectId, unusedDays, signal })` resolves with the plugin's row in Settings → Storage, `{ label, count, bytes, reclaimableBytes, note? }`, or null when it keeps nothing for the project. `reclaimableBytes` is what its `cleanup` step would free now. A throw shows the row as unknown with the message; other rows still answer |
 | `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
 
 Since 2026-11-06 readers get their own worktree through `workspace.task`, so `vcs.readHeads`, `vcs.readHeadMarker` and `workspace.readHeadEntry` are no longer part of the contract; the host ignores them. A provider whose old snapshots still sit on disk removes them in its `cleanup` step.

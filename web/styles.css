@@ -2826,6 +2826,34 @@ table.hotkeys td {
   padding: 6px 4px;
   border-bottom: 1px solid var(--line);
 }
+table.storage {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+table.storage th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 4px;
+}
+table.storage td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--line);
+}
+table.storage th.right,
+table.storage td.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table.storage tfoot td {
+  border-bottom: 0;
+  font-weight: 500;
+}
+.storage-outcome {
+  margin-top: 8px;
+}
 table.hotkeys tr.clash td {
   background: color-mix(in srgb, var(--bad) 8%, transparent);
 }

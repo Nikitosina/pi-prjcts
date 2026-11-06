@@ -49,3 +49,4 @@ Written before the rotation code. Rotation sends the GSEvent device-orientation 
 - Screenshots: the cached frame of the rotated clone is dropped, so the next screenshot shows the new orientation.
 - Worker binding: worker threads bound before rotation existed keep exactly their bound simulator tools; only new threads get the rotate tool.
 - Known limit: an iPhone home screen stays portrait; apps that support landscape rotate.
+- Storage: the Settings → Storage row counts only this project's owned clones; what it calls freeable is the data of exactly the clones the cleanup step would erase now (shut down, unleased, unused past the window). A failing inventory makes the row unknown, never zero.

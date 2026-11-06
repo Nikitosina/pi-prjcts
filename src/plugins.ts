@@ -90,6 +90,8 @@ export const plugins = {
   /** Cleanup routine steps of loaded plugins, by plugin name. */
   cleanupSteps: () =>
     loaded.flatMap((item) => (item.capabilities.cleanup ? [{ plugin: item.plugin, run: item.capabilities.cleanup }] : [])),
+  usageSources: () =>
+    loaded.flatMap((item) => (item.capabilities.usage ? [{ plugin: item.plugin, measure: item.capabilities.usage }] : [])),
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
@@ -234,6 +236,7 @@ function validate(caps: PluginCapabilities): void {
   if (caps.workerTools) requireFunctions("workerTools", caps.workerTools, ["offered", "create"]);
   if (caps.leaseName !== undefined && typeof caps.leaseName !== "function") throw new Error("leaseName must be a function");
   if (caps.cleanup !== undefined && typeof caps.cleanup !== "function") throw new Error("cleanup must be a function");
+  if (caps.usage !== undefined && typeof caps.usage !== "function") throw new Error("usage must be a function");
   for (const hook of ["pause", "close"] as const)
     if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function")
       throw new Error(`lifecycle.${hook} must be a function`);
