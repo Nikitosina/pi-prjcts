@@ -14,6 +14,7 @@ Written before implementation. E2E: `scripts/worktree-lifecycle-e2e.mjs`; guard 
 - G9 `gh pr merge` / `gh api …/merge` becomes allowed.
 - G10 YOLO text still says "After pushing, call open_draft_pr" unconditionally (C11g) or still forbids merge/rebase.
 - G11 coordinator still told nothing about continuing an existing PR branch from another thread → transfer-commit threads.
+- G12 a shell redirection on a push (`git push origin HEAD:pi/x 2>&1`, seen live on 2026-11-06) is split at `&` and `2>` is read as a push target, so a legitimate push or `--force-with-lease` to a project branch is refused. Redirections are not arguments; a redirected push to `main` is still blocked.
 
 ## C3 Scouts/reviewers read a pinned commit
 Since 2026-11-06 there are no shared read-head snapshots. `readRef` is an agent id or a full commit SHA. A SHA gets the reader its own

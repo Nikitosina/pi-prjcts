@@ -207,9 +207,9 @@ const model = createServer((req, res) => {
         const steps = [
           `git fetch -q origin && git checkout -q -B cont origin/${b} && git merge --no-edit origin/main; echo MERGE-EXIT=$?`,
           `printf 'v1+main\\n' > feature.txt && git add feature.txt && git -c core.editor=true merge --continue >/dev/null && git log --oneline -1 && git merge-base HEAD origin/main && git push -q origin HEAD:${b} && echo PUSHED-MERGE`,
-          `git push origin HEAD:main`,
+          `git push origin HEAD:main 2>&1`,
           `git push --force origin HEAD:${b}`,
-          `git log --oneline -1 >/dev/null && git checkout -q -B rb origin/${b} && git rebase -X theirs origin/main >/dev/null 2>&1; git log --format=%s -3 && git push -q --force-with-lease origin HEAD:${b} && echo PUSHED-REBASE && git rev-parse HEAD`,
+          `git log --oneline -1 >/dev/null && git checkout -q -B rb origin/${b} && git rebase -X theirs origin/main >/dev/null 2>&1; git log --format=%s -3 && git push -q --force-with-lease origin HEAD:${b} 2>&1 && echo PUSHED-REBASE && git rev-parse HEAD`,
           `printf 'wip\\n' > wip-note.txt && echo WIP-WRITTEN`,
         ];
         if (n < steps.length) return res.end(call("bash", { command: steps[n] }));
@@ -486,6 +486,11 @@ try {
     out(2),
   );
   check("G4 plain --force to a project branch is blocked", /Blocked by worker Git policy at: git push --force/.test(out(3)), out(3));
+  check(
+    "G12 a redirected --force-with-lease push to the project branch is not refused",
+    !/Blocked by worker Git policy/.test(out(4)),
+    out(4),
+  );
   const rebased = git(bare, "rev-parse", `refs/heads/${brain.b1}`);
   check(
     "G3 rebase onto main + --force-with-lease to the project PR branch succeeds (linear on top of main)",

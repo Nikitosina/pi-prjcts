@@ -500,7 +500,11 @@ export function guardWorkerGitCommand(
       (name === branch || (prefix !== undefined && name.startsWith(prefix) && name.length > prefix.length && !name.includes("..")))
     );
   };
-  const chunks = command.split(/[;&|\n]+/).map((part) => part.trim());
+  // Redirections are not arguments: `2>&1` would otherwise split at `&` and leave `2>` as a push target.
+  const chunks = command
+    .replace(/(?:^|(?<=\s))(?:\d*|&)(?:>>?|<)(?:&-|&\d+|\s*[^\s;&|<>]+)/g, " ")
+    .split(/[;&|\n]+/)
+    .map((part) => part.trim());
   const blocked = chunks.find((chunk) => {
     const git = chunk
       .match(/(?:^|\s)git\s+(.*)$/)?.[1]
