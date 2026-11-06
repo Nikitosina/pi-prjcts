@@ -338,6 +338,8 @@ export type JobsHost = {
   checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
   approver?: { approve(job: AcceptJob): Promise<AcceptanceOutcome> };
+  /** Called once when a Job becomes approved (its worktree can usually go now). */
+  afterApproved?(jobId: string): void;
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
   quotaRetryBaseMs?: number;
@@ -1469,16 +1471,19 @@ export function createJobs(host: JobsHost) {
 
   async function markApproved(harness: Harness, jobId: string, outcome: AcceptanceOutcome | null): Promise<void> {
     if (outcome?.kind !== "accepted" && outcome?.kind !== "merged-pull-skipped") return;
-    await harness.commit(async (tx) => {
+    const approved = await harness.commit(async (tx) => {
       const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
       if (
-        current &&
-        !current.workspace &&
-        current.candidate === outcome.head &&
-        (current.status === "ready" || current.status === "ready-with-gaps")
+        !current ||
+        current.workspace ||
+        current.candidate !== outcome.head ||
+        (current.status !== "ready" && current.status !== "ready-with-gaps")
       )
-        current.status = "approved";
+        return false;
+      current.status = "approved";
+      return true;
     }, context);
+    if (approved) host.afterApproved?.(jobId);
   }
 
   /** An Approve that answered `auto-merge-pending` ended later: record the merge and tell the Job's chat. */

@@ -1353,7 +1353,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         operation: (owner) =>
-          owner.scheduleUpdate(input.scheduleId, input.revision, { name: input.name, text: input.text, schedule: input.schedule }),
+          owner.scheduleUpdate(input.scheduleId, input.revision, {
+            name: input.name,
+            text: input.text,
+            schedule: input.schedule,
+            cleanup: input.cleanup,
+          }),
       });
     case "schedule-delete":
       return {

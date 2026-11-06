@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { workspaceReceipts } from "./workspace-isolation.ts";
@@ -89,6 +89,9 @@ export function workspaceCaches(input: {
   function forIntent(intentId: string): string {
     const dir = workspaceCacheDir({ ...input, intentId, cacheRoot: input.cacheRoot() });
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // The folder's mtime is its last use: cleanup removes caches unused for days (src/workspace-cleanup.ts).
+    const now = new Date();
+    utimesSync(dir, now, now);
     return dir;
   }
   /** The cache of the workspace `cwd` is in; none outside a workspace. */
@@ -104,6 +107,11 @@ export function workspaceCaches(input: {
       live,
     });
   }
-  return { forIntent, forCwd, sweep };
+  /** Workspaces that still exist with their cache folder under the current root (which may not exist yet). */
+  async function live(): Promise<{ intentId: string; workspacePath: string; cache: string }[]> {
+    const cacheRoot = input.cacheRoot();
+    return (await existing()).map((item) => ({ ...item, cache: workspaceCacheDir({ ...input, intentId: item.intentId, cacheRoot }) }));
+  }
+  return { forIntent, forCwd, sweep, live };
 }
 export type WorkspaceCaches = ReturnType<typeof workspaceCaches>;

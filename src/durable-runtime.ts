@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { join, parse as parsePath, resolve } from "node:path";
 import { type ModelRuntime, calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -96,6 +97,15 @@ import {
 } from "./profiles.ts";
 import { readStorage, tiersFor } from "./host-documents.ts";
 import { COORDINATOR_CACHE_RULE, withoutCacheInstructions, workspaceCaches } from "./workspace-cache.ts";
+import {
+  CLEANUP_ROUTINE,
+  DEFAULT_CLEANUP_SETTINGS,
+  cachesToTrim,
+  disposableCandidates,
+  gitIgnored,
+  oldJobVideos,
+  type CleanupSettings,
+} from "./workspace-cleanup.ts";
 import type { ProfileToolGroup } from "./profiles.ts";
 import { mcpCatalog } from "./mcp-servers.ts";
 import {
@@ -1362,6 +1372,12 @@ export async function openDurableProject(input: {
           return approver.approve(job, mergeFlows.signal);
         },
       },
+      afterApproved: () => {
+        void (async () => {
+          const routine = (await schedules.snapshot({ includeHistory: false })).schedules.find((item) => item.id === CLEANUP_ROUTINE.id);
+          if (routine?.enabled && !closed) await schedules.runNow(CLEANUP_ROUTINE.id);
+        })().catch((error) => report(input.onReport, project.id, error));
+      },
     });
     registry.install(policy);
     registry.install(libraryPolicy);
@@ -1539,6 +1555,7 @@ export async function openDurableProject(input: {
     const schedules = scheduleRuntime(root, project.id, () => closed, {
       afterScheduleIntentRecorded: input.afterScheduleIntentRecorded,
       beforeScheduleReceiptCommit: input.beforeScheduleReceiptCommit,
+      runAction: (action) => cleanupRoutine(action.settings),
     });
     const worktreeMutex = new AdmissionMutex();
     // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
@@ -1654,16 +1671,27 @@ export async function openDurableProject(input: {
           cleaning = undefined;
         }
       })());
-    const cleanupWake = setInterval(
-      () => {
-        void (async () => {
-          if (closed || (await jobs.snapshot(openedHarness)).paused) return;
-          await cleanup();
-        })().catch((error) => report(input.onReport, project.id, error));
-      },
-      Number(process.env.PI_PROJECTS_WORKTREE_CLEANUP_MS) || 1_800_000,
-    );
-    cleanupWake.unref();
+    // The cleanup routine (scripts/workspace-cleanup-failures.md): the safe worktree rule and cache sweep, then the routine's own steps.
+    async function cleanupRoutine(settings: CleanupSettings): Promise<string> {
+      // Test seam: a run the host dies in.
+      const hold = Date.now() + (Number(process.env.PI_PROJECTS_CLEANUP_START_DELAY_MS) || 0);
+      while (!closed && Date.now() < hold) await sleep(100);
+      if (closed) throw new Error("Project closed");
+      const worktrees = await cleanup();
+      const live = await caches.live();
+      const trimmed = await cachesToTrim({
+        dirs: live.map((item) => item.cache),
+        capBytes: settings.cacheCapGb * 1024 ** 3,
+        unusedMs: settings.unusedDays * 86_400_000,
+      });
+      const disposable: string[] = [];
+      for (const worktree of settings.disposable.length ? live.map((item) => item.workspacePath) : [])
+        if (!closed && existsSync(worktree))
+          disposable.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
+      const videos = oldJobVideos({ controlRoot: dir, jobs: (await jobs.snapshot(openedHarness)).jobs, days: settings.videoDays });
+      for (const path of [...trimmed, ...disposable, ...videos]) if (!closed) rmSync(path, { recursive: true, force: true });
+      return `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`;
+    }
     /** Threads whose leases stay: running Jobs and open scouts or reviewers. */
     async function retainedLeaseThreads(): Promise<Set<string>> {
       const view = await jobs.snapshot(openedHarness);
@@ -1693,7 +1721,7 @@ export async function openDurableProject(input: {
     leaseWake.unref();
     stopMonitors = async () => {
       clearInterval(leaseWake);
-      clearInterval(cleanupWake);
+      await schedules.drain();
       await cleaning?.catch(() => {});
       clearInterval(followWake);
       follow.abort();
@@ -1724,6 +1752,13 @@ export async function openDurableProject(input: {
       }, delay);
     };
     await schedules.reconcile();
+    await schedules.ensureRoutine({
+      id: CLEANUP_ROUTINE.id,
+      name: CLEANUP_ROUTINE.name,
+      action: { kind: "cleanup", settings: DEFAULT_CLEANUP_SETTINGS },
+      everyMs: CLEANUP_ROUTINE.everyMs,
+      firstAtMs: Date.now() + CLEANUP_ROUTINE.firstDelayMs,
+    });
     await jobs.recover(openedHarness);
     const rootWorkspace = await workspaces.inspect({ chatId: MAIN_CHAT, conversationId: Number(root.id) });
     const rootCwd = rootWorkspace.status === "ready" ? rootWorkspace.cwd : dir;

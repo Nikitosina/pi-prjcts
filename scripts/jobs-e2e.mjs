@@ -269,6 +269,7 @@ const faux = fauxProvider({ models: [{ id: "faux-1" }, { id: "faux-2" }] });
 models.setProvider(faux.provider);
 faux.setResponses(Array.from({ length: 600 }, () => route));
 
+const approvedHooks = [];
 async function open() {
   const killed = [];
   const jobs = createJobs({
@@ -293,6 +294,7 @@ async function open() {
       while (prepareHeld.has(agent.title) || (first && prepareFirstHeld.has(agent.title))) await delay(20);
     },
     approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
+    afterApproved: (id) => approvedHooks.push(id),
     backgroundSilence: () => backgroundSilenceMs,
     stallMinutes: () => 20,
   });
@@ -665,8 +667,10 @@ assert.equal((await jobsOf(harness)).find((item) => item.id === prep.id).dismiss
 const outcome = await jobs.approve(harness, job.id);
 assert.deepEqual(outcome, { outcome: { kind: "auto-merge-pending" } });
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "ready");
+assert.deepEqual(approvedHooks, [], "R14 no cleanup before the Job is approved");
 await jobs.finishApproval(harness, job.id, { kind: "accepted", head: sha }, "Merged aaaaaaaa.");
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "approved");
+assert.deepEqual(approvedHooks, [job.id], "R14 an approved Job starts the cleanup once");
 await until(async () => (await chatText(root)).some((line) => line.startsWith(`[worker ${job.id} approve`)), "approve notice in chat");
 
 assert.equal(

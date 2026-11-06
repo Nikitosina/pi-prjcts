@@ -5,7 +5,17 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  utimesSync,
+  writeFileSync,
+  createWriteStream,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -616,19 +626,90 @@ try {
       .filter((line) => line === `worktree ${w1Path}`).length === 1,
   );
 
-  // K8: automatic cleanup. Publish W3's commit, restart with a short interval; W3 goes, dirty W2 stays.
+  // R10-R13: the cleanup routine. One per project, daily, enabled; it cannot be deleted; settings change freely within bounds.
+  const routines = async () => (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules;
+  const cleanupRoutine = async () => (await routines()).filter((item) => item.action?.kind === "cleanup");
+  let [routine] = await cleanupRoutine();
+  check(
+    "R10 every project has one enabled daily cleanup routine",
+    (await cleanupRoutine()).length === 1 && routine.enabled && routine.kind === "interval" && routine.everyMs === 86_400_000,
+    await routines(),
+  );
+  const refusedDelete = await rpc({ action: "schedule-delete", id, scheduleId: routine.id, revision: routine.revision }).catch(
+    (error) => error,
+  );
+  check(
+    "R11 the cleanup routine cannot be deleted, only turned off",
+    /turn it off/i.test(String(refusedDelete?.message)),
+    String(refusedDelete),
+  );
+  const badGlob = await rpc({
+    action: "schedule-update",
+    id,
+    scheduleId: routine.id,
+    revision: routine.revision,
+    cleanup: { disposable: ["/tmp"] },
+  }).catch((error) => error);
+  check("R1 an absolute disposable path is refused", /relative/i.test(String(badGlob?.message)), String(badGlob));
+  routine = await rpc({
+    action: "schedule-update",
+    id,
+    scheduleId: routine.id,
+    revision: routine.revision,
+    cleanup: { disposable: ["e2e-results"] },
+  });
+  check(
+    "R11 cleanup settings change without the owner and keep the defaults they do not name",
+    JSON.stringify(routine.action) ===
+      JSON.stringify({ kind: "cleanup", settings: { cacheCapGb: 20, unusedDays: 7, videoDays: 14, disposable: ["e2e-results"] } }),
+    routine.action,
+  );
+
+  // R12: publish W3's commit and give dirty W2 an ignored, two-day-old e2e-results; a run removes W3 and that folder, and keeps W2's work.
   const w3Branch = git(w3Path, "rev-parse", "--abbrev-ref", "HEAD");
   git(w3Path, "push", "-q", "origin", `HEAD:refs/heads/${w3Branch}`);
+  const exclude = join(git(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir"), "info", "exclude");
+  mkdirSync(join(exclude, ".."), { recursive: true });
+  writeFileSync(exclude, `${existsSync(exclude) ? readFileSync(exclude, "utf8") : ""}\ne2e-results/\n`);
+  const results = join(w2Path, "e2e-results");
+  mkdirSync(join(results, "run-1"), { recursive: true });
+  writeFileSync(join(results, "run-1", "video.mp4"), "x");
+  const twoDays = new Date(Date.now() - 2 * 86_400_000);
+  utimesSync(results, twoDays, twoDays);
+  // R13: a run that dies with the host is recorded as interrupted and does not block the next one.
   await stopHost();
-  env.PI_PROJECTS_WORKTREE_CLEANUP_MS = "1500";
+  env.PI_PROJECTS_CLEANUP_START_DELAY_MS = "60000";
   startHost();
   await waitHost();
   await rpc({ action: "show", id });
-  await eventually(async () => !existsSync(w3Path), "automatic cleanup did not remove W3", 600);
-  await delay(2000);
+  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  host.kill("SIGKILL");
+  await stopHost().catch(() => {});
+  delete env.PI_PROJECTS_CLEANUP_START_DELAY_MS;
+  startHost();
+  await waitHost();
+  await rpc({ action: "show", id });
+  check("R10 a restart adds no second cleanup routine", (await cleanupRoutine()).length === 1, await routines());
+  const interrupted = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);
   check(
-    "K8 automatic cleanup removed the now-pushed W3 and kept dirty W2",
-    !existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
+    "R13 the run the host died in is interrupted, not an uncertain submission",
+    interrupted.length === 1 && interrupted[0].status === "interrupted",
+    interrupted,
+  );
+  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  await eventually(async () => !existsSync(w3Path) && !existsSync(results), "the cleanup routine did not remove W3 and e2e-results", 600);
+  const runs = await eventually(
+    async () => {
+      const items = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);
+      return items.some((item) => item.outcome === "completed") && items;
+    },
+    "the cleanup run never completed",
+    300,
+  );
+  check(
+    "R12 running the cleanup routine removed the pushed W3 and W2's old ignored e2e-results, and kept dirty W2's work",
+    !existsSync(w3Path) && !existsSync(results) && existsSync(join(w2Path, "wip-note.txt")),
+    runs,
   );
 
   // K12: after the restart, a follow-up to the finished W2 keeps its worktree, branch and tools (bash is how the fake model sees a worker).

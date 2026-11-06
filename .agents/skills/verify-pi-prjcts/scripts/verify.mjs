@@ -1937,11 +1937,26 @@ const journeys = {
       return item?.name === "UI2 edited check" && item.revision === scheduled.revision + 1 && item.enabled === scheduled.enabled;
     }, "Undo restores the exact schedule tombstone");
     await page.waitFor(`!!document.querySelector(${JSON.stringify(autoCard)})`, "restored schedule card");
+    // The built-in cleanup routine describes its settings and can only be run or turned off.
+    const cleanupCard = await page.evaluate(`(() => {
+      const card = document.querySelector('#settings .auto-card[data-kind="schedule"][data-id="workspace-cleanup"]');
+      return card && { text: card.innerText, run: !!card.querySelector('[data-auto-run]'), toggle: !!card.querySelector('[data-auto-toggle]'), edit: !!card.querySelector('[data-auto-edit]'), remove: !!card.querySelector('[data-auto-delete]') };
+    })()`);
+    if (
+      !cleanupCard ||
+      !/Workspace cleanup/.test(cleanupCard.text) ||
+      !/over 20 GB or unused for 7 days/.test(cleanupCard.text) ||
+      !cleanupCard.run ||
+      !cleanupCard.toggle ||
+      cleanupCard.edit ||
+      cleanupCard.remove
+    )
+      throw Error(`cleanup routine card: ${JSON.stringify(cleanupCard)}`);
     await delay(300);
     await page.shot(dir, "15b-settings-automations");
     record(
       "side-effect",
-      "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule",
+      "Automations: Run now recorded history; Edit saved name/prompt/two-hour cadence; confirmed Delete then Undo restored the exact schedule; the cleanup routine card shows its settings with Run now and the switch only",
     );
     await page.press("Escape", { keyCode: 27 });
     // Stop is a real coordinator abort, not a contract placeholder; history stays and a follow-up can run.

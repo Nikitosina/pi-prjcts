@@ -6,6 +6,10 @@ import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
+import { cleanupSettingsError, type CleanupSettings } from "./workspace-cleanup.ts";
+/** What a routine does when it fires: send its text to a chat, or a built-in host action that runs without a model. */
+export type RoutineAction = { kind: "prompt" } | { kind: "cleanup"; settings: CleanupSettings };
+export type HostAction = Exclude<RoutineAction, { kind: "prompt" }>;
 type Schedule = {
   id: string;
   projectId: string;
@@ -17,13 +21,16 @@ type Schedule = {
   /** Absent on records saved before names and revisions existed. */
   name?: string;
   revision?: number;
+  /** Absent on prompt routines and records saved before actions existed. */
+  action?: HostAction;
 } & (
   { kind: "once" } | { kind: "interval"; everyMs: number; nextAtMs: number } | { kind: "calendar"; rule: CalendarRule; nextAtMs: number }
 );
 /** A schedule as reads return it: name null when unnamed, revision 0 for records saved before revisions. */
-export type ScheduleView = (Schedule extends infer T ? (T extends unknown ? Omit<T, "name" | "revision"> : never) : never) & {
+export type ScheduleView = (Schedule extends infer T ? (T extends unknown ? Omit<T, "name" | "revision" | "action"> : never) : never) & {
   name: string | null;
   revision: number;
+  action: RoutineAction;
 };
 export type ScheduleTiming = { atMs: number; everyMs?: number; calendar?: CalendarRule };
 type Event = { eventId: string; projectId: string; kind: string; payload: string; createdAtMs: number; requestId: string };
@@ -37,6 +44,10 @@ export type ScheduleIntent = {
   submissionId: number | null;
   recordedAtMs: number;
   outcome: string | null;
+  /** A host action run instead of a chat submission: it has no SDK receipt; its result is `summary`. */
+  action?: HostAction["kind"];
+  durationMs?: number;
+  summary?: string;
 };
 export type DurableScheduleSnapshot = {
   automaticAdmissionBlocker: "uncertain-provider-write" | "uncertain-command" | null;
@@ -72,12 +83,17 @@ type ScheduleState = {
 function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
+const actionCopy = (action: HostAction): HostAction => ({
+  kind: action.kind,
+  settings: { ...action.settings, disposable: [...action.settings.disposable] },
+});
 function scheduleCopy(value: Schedule): ScheduleView {
-  const copy = value.kind === "calendar" ? { ...value, rule: copyCalendarRule(value.rule) } : { ...value };
-  return { ...copy, name: value.name ?? null, revision: value.revision ?? 0 };
+  const copy = storedCopy(value);
+  return { ...copy, name: value.name ?? null, revision: value.revision ?? 0, action: copy.action ?? { kind: "prompt" } };
 }
 function storedCopy(value: Schedule): Schedule {
-  return value.kind === "calendar" ? { ...value, rule: copyCalendarRule(value.rule) } : { ...value };
+  const copy = value.kind === "calendar" ? { ...value, rule: copyCalendarRule(value.rule) } : { ...value };
+  return value.action ? { ...copy, action: actionCopy(value.action) } : copy;
 }
 const RESTORE_MS = Number(process.env.PI_PROJECTS_SCHEDULE_RESTORE_MS) || 10 * 60_000;
 /** Checks a timing and returns the fields it sets; the first calendar occurrence is at or after `atMs`. */
@@ -181,9 +197,14 @@ export function scheduleRuntime(
       value: Readonly<{ requestId: string; stableId: string; kind: "schedule" | "event"; submissionId: null }>,
     ) => Promise<void>;
     beforeScheduleReceiptCommit?: (value: Readonly<{ requestId: string; submissionId: number }>) => Promise<void>;
+    /** Runs a host action; resolves with a one-line summary, throws when it failed. */
+    runAction?: (action: HostAction) => Promise<string>;
   } = {},
 ) {
   const mutex = new AdmissionMutex();
+  // Host actions running in this process; one recorded in flight but missing here died with an earlier host.
+  const running = new Set<string>();
+  const actionRuns = new Set<Promise<void>>();
   const automaticBlocker = async (tx: Tx): Promise<DurableScheduleSnapshot["automaticAdmissionBlocker"]> =>
     (await hasUncertainGithubWrites(tx, root.id)) || (await plugins.anyUncertainWrites(tx, root.id))
       ? "uncertain-provider-write"
@@ -236,7 +257,7 @@ export function scheduleRuntime(
                   : null;
         if (outcome === null) continue;
         const runs = routines.get(intent.stableId) ?? [];
-        runs.push({ at: intent.recordedAtMs, outcome, durationMs: null });
+        runs.push({ at: intent.recordedAtMs, outcome, durationMs: intent.durationMs ?? null });
         routines.set(intent.stableId, runs);
       }
       return {
@@ -322,7 +343,11 @@ export function scheduleRuntime(
     return schedule;
   };
   /** Name, prompt and timing, replaced as given; timing replaces kind and next run together. */
-  const update = (id: string, revision: number, change: { name?: string | null; text?: string; schedule?: ScheduleTiming }) =>
+  const update = (
+    id: string,
+    revision: number,
+    change: { name?: string | null; text?: string; schedule?: ScheduleTiming; cleanup?: Partial<CleanupSettings> },
+  ) =>
     mutex.run(async () => {
       if (change.text !== undefined && (!change.text || change.text.length > 32000)) throw new Error("Invalid schedule");
       const timing = change.schedule ? timingFields(change.schedule) : undefined;
@@ -330,6 +355,14 @@ export function scheduleRuntime(
       return root.commit(async (tx) => {
         const state = await tx.doc(DurableSchedule, root.id);
         const current = withRevision(own(state.schedules, id), revision);
+        if (current.action && change.text !== undefined) throw new Error("A built-in routine has no prompt text");
+        if (change.cleanup && current.action?.kind !== "cleanup") throw new Error("Only the cleanup routine has cleanup settings");
+        const action =
+          change.cleanup && current.action
+            ? { kind: current.action.kind, settings: { ...current.action.settings, ...change.cleanup } }
+            : undefined;
+        const refused = action && cleanupSettingsError(action.settings);
+        if (refused) throw new Error(refused);
         if (change.schedule && current.kind === "once" && consumed(state, id))
           throw new Error("This one-shot schedule already ran; create a new one instead of rescheduling it");
         const { name: _name, ...kept } = current;
@@ -340,6 +373,7 @@ export function scheduleRuntime(
           text: change.text ?? current.text,
           updatedAtMs: Date.now(),
           revision: revision + 1,
+          ...(action ? { action: actionCopy(action) } : {}),
         };
         const next: Schedule =
           change.schedule && timing
@@ -371,27 +405,107 @@ export function scheduleRuntime(
         const requestId = `schedule:${id}:run:${now}`;
         if (own(state.intents, requestId)) throw new Error("Schedule run already recorded");
         if (schedule.kind === "once") schedule.enabled = false;
-        state.intents[requestId] = {
-          requestId,
-          kind: "schedule",
-          stableId: id,
-          text: schedule.text,
-          status: "recorded",
-          submissionId: null,
-          recordedAtMs: now,
-          outcome: null,
-        };
-        return intentCopy(state.intents[requestId]);
+        state.intents[requestId] = runIntent(schedule, requestId, now);
+        return { intent: intentCopy(state.intents[requestId]), action: schedule.action && actionCopy(schedule.action) };
       }, BACKGROUND_CONTEXT);
-      await hooks.afterScheduleIntentRecorded?.({ requestId: due.requestId, stableId: due.stableId, kind: due.kind, submissionId: null });
-      return submitIntent(due);
+      return dispatch(due.intent, due.action);
     });
+  function runIntent(schedule: Schedule, requestId: string, now: number): ScheduleIntent {
+    return {
+      requestId,
+      kind: "schedule",
+      stableId: schedule.id,
+      text: schedule.action ? (schedule.name ?? schedule.action.kind) : schedule.text,
+      status: "recorded",
+      submissionId: null,
+      recordedAtMs: now,
+      outcome: null,
+      ...(schedule.action ? { action: schedule.action.kind } : {}),
+    };
+  }
+  async function dispatch(intent: ScheduleIntent, action: HostAction | undefined): Promise<ScheduleIntent> {
+    await hooks.afterScheduleIntentRecorded?.({
+      requestId: intent.requestId,
+      stableId: intent.stableId,
+      kind: intent.kind,
+      submissionId: null,
+    });
+    return action ? startAction(intent, action) : submitIntent(intent);
+  }
+  /** Starts a host action in the background; the intent stays submitted without an outcome until it ends, so runs never overlap. */
+  async function startAction(intent: ScheduleIntent, action: HostAction): Promise<ScheduleIntent> {
+    const runAction = hooks.runAction;
+    if (!runAction) return mark(intent.requestId, "failed", "This host cannot run the routine's action");
+    if (isClosed()) return mark(intent.requestId, "interrupted", "Project closed");
+    const started = await root.commit(async (tx) => {
+      const planning = await tx.doc(Jobs, root.id);
+      const current = own((await tx.doc(DurableSchedule, root.id)).intents, intent.requestId);
+      if (!current || current.status !== "recorded" || planning.paused) return null;
+      current.status = "submitted";
+      return intentCopy(current);
+    }, BACKGROUND_CONTEXT);
+    if (!started) return mark(intent.requestId, "interrupted", "Project paused");
+    running.add(intent.requestId);
+    const startedAt = Date.now();
+    const finish = (status: ScheduleIntent["status"], outcome: string, summary: string) =>
+      root.commit(async (tx) => {
+        const current = own((await tx.doc(DurableSchedule, root.id)).intents, intent.requestId);
+        if (current) Object.assign(current, { status, outcome, summary, durationMs: Date.now() - startedAt });
+      }, BACKGROUND_CONTEXT);
+    const work = runAction(action)
+      .then(
+        (summary) => finish("submitted", "completed", summary),
+        (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return finish("failed", message, message);
+        },
+      )
+      .catch(() => {})
+      .finally(() => {
+        running.delete(intent.requestId);
+        actionRuns.delete(work);
+      });
+    actionRuns.add(work);
+    return started;
+  }
+  /** Creates a built-in routine once, enabled; an existing one (perhaps turned off or retimed by the owner) is left as it is. */
+  const ensureRoutine = (input: { id: string; name: string; action: HostAction; everyMs: number; firstAtMs: number }) =>
+    mutex.run(async () =>
+      root.commit(async (tx) => {
+        const state = await tx.doc(DurableSchedule, root.id);
+        const prior = own(state.schedules, input.id);
+        if (prior) return scheduleCopy(prior);
+        const now = Date.now();
+        const value: Schedule = {
+          id: input.id,
+          projectId,
+          enabled: true,
+          atMs: input.firstAtMs,
+          text: "",
+          createdAtMs: now,
+          updatedAtMs: now,
+          name: input.name,
+          revision: 0,
+          action: actionCopy(input.action),
+          kind: "interval",
+          everyMs: input.everyMs,
+          nextAtMs: input.firstAtMs,
+        };
+        state.schedules = { ...state.schedules, [input.id]: value };
+        return scheduleCopy(value);
+      }, BACKGROUND_CONTEXT),
+    );
+  /** Waits for host actions started by this runtime, for a clean close. */
+  const drain = async () => {
+    await Promise.allSettled([...actionRuns]);
+  };
   /** Deletes a schedule and keeps it restorable for the restore window; returns the deleted record. */
   const remove = (id: string, revision: number) =>
     mutex.run(async () =>
       root.commit(async (tx) => {
         const state = await tx.doc(DurableSchedule, root.id);
         const schedule = withRevision(own(state.schedules, id), revision);
+        if (schedule.action) throw new Error("A built-in routine cannot be deleted; turn it off instead");
         const now = Date.now();
         const { [id]: _removed, ...rest } = state.schedules;
         state.schedules = rest;
@@ -584,21 +698,10 @@ export function scheduleRuntime(
         else if (schedule.kind === "interval") schedule.nextAtMs = atMs + schedule.everyMs;
         else schedule.enabled = false;
         schedule.updatedAtMs = now;
-        state.intents[requestId] = {
-          requestId,
-          kind: "schedule",
-          stableId: schedule.id,
-          text: schedule.text,
-          status: "recorded",
-          submissionId: null,
-          recordedAtMs: now,
-          outcome: null,
-        };
-        return intentCopy(state.intents[requestId]);
+        state.intents[requestId] = runIntent(schedule, requestId, now);
+        return { intent: intentCopy(state.intents[requestId]), action: schedule.action && actionCopy(schedule.action) };
       }, BACKGROUND_CONTEXT);
-      if (due)
-        await hooks.afterScheduleIntentRecorded?.({ requestId: due.requestId, stableId: due.stableId, kind: due.kind, submissionId: null });
-      return due ? submitIntent(due) : null;
+      return due ? dispatch(due.intent, due.action) : null;
     });
   const reconcile = async (): Promise<void> =>
     mutex.run(async () => {
@@ -606,6 +709,12 @@ export function scheduleRuntime(
         const state = await tx.doc(DurableSchedule, root.id);
         const result: Array<{ requestId: string; status: ScheduleIntent["status"]; submissionId?: number; outcome?: string | null }> = [];
         for (const intent of Object.values(state.intents)) {
+          if (intent.action) {
+            const open = intent.status === "recorded" || (intent.status === "submitted" && intent.outcome === null);
+            if (open && !running.has(intent.requestId))
+              result.push({ requestId: intent.requestId, status: "interrupted", outcome: "The host stopped during the run" });
+            continue;
+          }
           const receipt = await tx.submissionByRequest((intent.conversationId ?? root.id) as Conversation["id"], intent.requestId);
           if (!receipt) {
             if (intent.status === "recorded")
@@ -654,6 +763,8 @@ export function scheduleRuntime(
     fireDue,
     nextDeadline,
     reconcile,
+    ensureRoutine,
+    drain,
     mutex,
   };
 }
