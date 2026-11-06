@@ -43,13 +43,14 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
 import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
-import { Jobs, createJobs, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import { FULL_COMMIT, Jobs, createJobs, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
+import { changedFiles } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
-import { cleanupWorktrees, readHeads, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
+import { cleanupWorktrees, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
 import { coordinatorArtifactTools } from "./artifacts.ts";
 import { approvals } from "./approvals.ts";
 import { ownerApprovalTool } from "./host-agent-tools.ts";
@@ -1085,6 +1086,12 @@ export async function openDurableProject(input: {
           const state = await tx.doc(Jobs, rootReference!.id),
             job = state.jobs[request.workId],
             agent = state.agents[request.threadId];
+          // A reader's own worktree at a commit (readRef) lives as long as the reader.
+          if (agent && agent.role !== "worker" && agent.readRef && request.workId === agent.id) {
+            if (state.paused || agent.endedAt !== null || Number(agent.conversationId) !== request.conversationId)
+              throw new Error("Reader is no longer active");
+            return;
+          }
           if (
             state.paused ||
             !job?.workspace ||
@@ -1099,8 +1106,7 @@ export async function openDurableProject(input: {
       },
     });
     stopTaskWorkspaces = taskWorkspaces.close;
-    const heads = readHeads(project.cwd, dir, { projectId: project.id, project: () => loadProject(project.id) });
-    // Scouts and reviewers read the cwd they were configured with: a PR head snapshot, a worker's worktree or the checkout.
+    // Scouts and reviewers read the cwd they were configured with: their own worktree at a commit, a worker's worktree or the checkout.
     const readOnlyCode = readOnlyCodeTools(project.cwd, async (api, context) => {
       const cwd = (await api.agent(context)).cwd;
       return cwd && existsSync(cwd) ? cwd : project.cwd;
@@ -1259,7 +1265,7 @@ export async function openDurableProject(input: {
           threadSkills.set(conversation, new Set(delegatedSkills[agent.role].map((skill) => skill.name)));
         if (agent.role !== "worker") {
           const reader = reframed(frame, roleFrame(agent.role), agent.role, behaviorOf(agent.role));
-          // A scout or reviewer reads a PR head, commit or branch (`readRef`), or another agent's worktree (its id).
+          // A scout or reviewer reads a full commit in its own worktree, or another agent's clean worktree (`readRef`: its id).
           if (!agent.readRef) return reader;
           const state = harness ? await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context) : undefined;
           const target = state?.agents[agent.readRef];
@@ -1271,16 +1277,24 @@ export async function openDurableProject(input: {
             const cwd = (await (await harness!.conversation(target.conversationId, context))?.agent(context))?.cwd;
             if (!cwd || !existsSync(cwd))
               throw new Error(`Agent ${agent.readRef} has no worktree to read (it never started or was cleaned up)`);
+            const dirty = await changedFiles(cwd);
+            if (dirty === null || dirty.length)
+              throw new Error(
+                `Agent ${agent.readRef}'s worktree ${dirty === null ? "status is unreadable" : "has uncommitted changes"}. Ask it to commit, then spawn the reader with that full commit SHA.`,
+              );
             return { cwd, ...reader };
           }
-          if (/^[a-f0-9]{40,64}$/.test(agent.readRef)) {
-            try {
-              return { cwd: await heads.restore(agent.readRef), ...reader };
-            } catch {
-              /* A missing local commit may still be available from the provider. */
-            }
-          }
-          return { cwd: (await heads.ensure(agent.readRef)).root, ...reader };
+          if (!FULL_COMMIT.test(agent.readRef))
+            throw new Error(`readRef ${JSON.stringify(agent.readRef)} is not an agent id or a full commit SHA`);
+          const { cwd } = await taskWorkspaces.prepareReader({
+            threadId: agent.id,
+            conversationId: conversation,
+            workId: agent.id,
+            taskText: agent.brief,
+            chat: Number(agent.chat),
+            baseCommit: agent.readRef,
+          });
+          return { cwd, ...reader };
         }
         if (job?.workspace) {
           const environment = await taskWorkspaces.prepare({

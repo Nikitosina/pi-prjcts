@@ -205,13 +205,13 @@ function dropRetired(name: string, caps: PluginCapabilities): void {
 }
 function validate(caps: PluginCapabilities): void {
   if (caps.vcs) {
-    requireStrings("vcs", caps.vcs, ["kind", "readHeadMarker"]);
-    requireFunctions("vcs", caps.vcs, ["isRoot", "changedFiles", "codeDiff", "workerState", "readHeads", "resolveContinuation"]);
+    requireStrings("vcs", caps.vcs, ["kind"]);
+    requireFunctions("vcs", caps.vcs, ["isRoot", "changedFiles", "codeDiff", "workerState", "resolveContinuation"]);
     if (caps.vcs.kind === "git") throw new Error('vcs.kind "git" is built in');
   }
   if (caps.workspace) {
     requireStrings("workspace", caps.workspace, ["id"]);
-    requireFunctions("workspace", caps.workspace, ["quickPreview", "plan", "attach", "workerFacts", "remove", "readHeadEntry"]);
+    requireFunctions("workspace", caps.workspace, ["quickPreview", "plan", "attach", "workerFacts", "remove"]);
     requireFunctions("workspace.isolation", caps.workspace.isolation, ["preflight", "add", "entry", "exact", "statusCommand", "release"]);
     if (caps.workspace.id === "github" || caps.workspace.id === "git") throw new Error(`workspace.id "${caps.workspace.id}" is built in`);
   }

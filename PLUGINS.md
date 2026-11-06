@@ -20,8 +20,8 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 
 | capability | purpose |
 |---|---|
-| `vcs` | checkout kind: root marker, status, diffs, PR-head snapshots, branch continuation, private dirs, worker rule |
-| `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts, setup cards |
+| `vcs` | checkout kind: root marker, status, diffs, branch continuation, private dirs, worker rule |
+| `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts and removal (`atBase` for a settled reader's worktree), setup cards |
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it; without it a Job of this kind cannot be approved |
@@ -34,6 +34,8 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 | `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
 | `cleanup` | `({ projectId, unusedDays, signal })` runs as a step of the project's Workspace cleanup routine, after the core steps; resolves with a one-line summary (empty for nothing to say), throws to fail the run. Remove only what the plugin owns and nobody uses now. The simulator plugin erases owned clones that are shut down, unleased and unused for `unusedDays` |
 | `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
+
+Since 2026-11-06 readers get their own worktree through `workspace.task`, so `vcs.readHeads`, `vcs.readHeadMarker` and `workspace.readHeadEntry` are no longer part of the contract; the host ignores them. A provider whose old snapshots still sit on disk removes them in its `cleanup` step.
 
 Merge contract (`src/plugin-types.ts`, used by `src/result-acceptance.ts`): `merge` must refuse when the PR head differs from `head`, and return `{ ok: false, refused }` when the provider answered and nothing merged. A throw means the outcome is unknown; Approve then reads the PR through `inspect` before deciding and reports `merge-uncertain` if it cannot confirm. `enableAutoMerge` returns `waiting: false` when the PR is already mergeable and nothing was armed. `pullMain` fast-forwards only a clean checkout on `base` and returns `{ pulled: false, reason }` for an expected skip instead of throwing. The host resolves the provider with `plugins.mergeProvider(kind)`.
 

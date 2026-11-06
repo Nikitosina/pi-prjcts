@@ -35,6 +35,8 @@ import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 import { behaviorKey, composePrompt, type PromptFrame } from "./prompt-blocks.ts";
 import { busyIn } from "./durable-idle-configure.ts";
 
+export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
 const context = BACKGROUND_CONTEXT;
 
 // "verifier" remains only so recorded verifier subagents still read; new turns cannot start one.
@@ -821,6 +823,12 @@ export function createJobs(host: JobsHost) {
         const borrower = args.workspace.kind === "shared" ? sharedHandoff(doc, chat) : undefined;
         if (borrower) return { text: `Shared workspace is still handed to ${borrower.id}; wait for it to settle.` };
       }
+      const readRef = args.readRef?.trim() || null;
+      // Readers read a pinned commit or a live agent's worktree; refs are never resolved here (scripts/worktree-lifecycle-failures.md R2, R6).
+      if (readRef && role !== "worker" && !doc.agents[readRef] && !FULL_COMMIT.test(readRef))
+        return {
+          text: "readRef must be an agent id or a full lowercase commit SHA. Resolve a branch or PR to its commit first (fetch it in your worktree, then rev-parse) and pass that SHA.",
+        };
       if (doc.paused) return { text: "The project is paused; spawn again after it resumes." };
       const agentId = uuidOf(seed);
       const title = args.title?.trim() || clip(args.brief, 80);
@@ -845,7 +853,7 @@ export function createJobs(host: JobsHost) {
         endedAt: null,
         reported: [],
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
-        readRef: args.readRef?.trim() || null,
+        readRef,
         prepared: false,
         brief: "",
         briefed: false,
@@ -894,7 +902,7 @@ export function createJobs(host: JobsHost) {
   const agentsTool = defineTool({
     name: "agents",
     description:
-      "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. " +
+      "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. A scout or reviewer reads the project checkout, or with readRef an agent's worktree (its id; refused while it has uncommitted changes) or a full commit SHA (read in its own worktree at that commit). " +
       "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
       "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Ready reports arrive as concise handbacks; read report for detailed evidence.",
     parameters: Type.Object({

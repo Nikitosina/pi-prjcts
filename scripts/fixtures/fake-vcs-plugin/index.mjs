@@ -89,19 +89,10 @@ export default {
         isRoot: (dir) => existsSync(join(dir, ".fakevcs")),
         privateDirs: [".fakevcs"],
         executables: ["fakectl"],
-        readHeadMarker: ".fakevcs",
         workerRule: "Fake VCS rule: use fakectl, never git.",
         changedFiles: async () => [],
         codeDiff: async () => ({ mergeBase: HEAD, changed: "", diff: "", untracked: [] }),
         workerState: async () => ({ branch: "fake-branch", head: HEAD, status: "" }),
-        readHeads: () => ({
-          ensure: async () => {
-            throw new Error("fake: no read heads");
-          },
-          restore: async () => {
-            throw new Error("fake: no read heads");
-          },
-        }),
         resolveContinuation: async () => {
           throw new Error("fake: no continuation");
         },
@@ -152,7 +143,6 @@ export default {
           rmSync(join(data().worktreeRoot, entry), { recursive: true, force: true });
           return { ok: true };
         },
-        readHeadEntry: (project, path) => ({ leaseOwner: `fake:${project.id}`, entry: path }),
         setupCards: (project) => {
           if (!isFake(project)) return [];
           const record = api.projects.record(project, RECORD),

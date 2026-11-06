@@ -123,12 +123,14 @@ export function taskWorkerWorkspaces(input: {
       taskText: () => Promise.resolve(request.taskText),
     };
   }
-  async function freeze(request: Request, chat: number, choice: TaskWorkspace): Promise<Binding> {
+  async function freeze(request: Request, chat: number, choice: TaskWorkspace, reader = false): Promise<Binding> {
     const stored = await read(request.threadId);
     if (stored) return stored;
     await active(request);
     const source = await input.source(chat);
-    const ready = await input.coordinator.ready(source);
+    // A reader may be the chat's first use of its workspace; a helper only borrows one the chat already prepared.
+    const ready = reader ? await input.coordinator.ensure(source) : await input.coordinator.ready(source);
+
     let proposed: Binding;
     if (choice.kind === "shared") proposed = { kind: "shared", source: { ...source, intentId: ready.intentId } };
     else {
@@ -154,7 +156,17 @@ export function taskWorkerWorkspaces(input: {
         const owner = selected.repository.ownerCheckout;
         const common = async (cwd: string) => realpathSync(await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
         if ((await common(owner)) !== (await common(ready.cwd))) throw new Error("Task source belongs to another Git repository");
-        const commit = await git(ready.cwd, ["rev-parse", "--verify", "--end-of-options", `${choice.baseCommit}^{commit}`]);
+        const commit = await git(ready.cwd, [
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          "--end-of-options",
+          `${choice.baseCommit}^{commit}`,
+        ]).catch(() => {
+          throw new Error(
+            `Commit ${choice.baseCommit} is not in the local repository; fetch it first (git fetch origin <branch or pull/N/head>)`,
+          );
+        });
         if (commit !== choice.baseCommit) throw new Error("Task base must be an existing full commit in the source repository");
         const name = `task-${id.slice(0, 12)}`;
         plan = {
@@ -225,119 +237,137 @@ export function taskWorkerWorkspaces(input: {
       scope: request.threadId,
     };
   }
-  async function prepare(
-    request: Request & { chat: number; choice: TaskWorkspace },
-  ): Promise<DurablePreparedWorkerEnvironment & { branch: string }> {
-    const previous = queues.get(request.threadId) ?? Promise.resolve();
+  /** Serialized per thread and aborted by closeThread. */
+  async function queued<T>(threadId: string, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const previous = queues.get(threadId) ?? Promise.resolve();
     const controller = new AbortController();
-    const pending = controllers.get(request.threadId) ?? new Set<AbortController>();
+    const pending = controllers.get(threadId) ?? new Set<AbortController>();
     pending.add(controller);
-    controllers.set(request.threadId, pending);
+    controllers.set(threadId, pending);
     const operation = previous
       .catch(() => {})
-      .then(async () => {
+      .then(() => {
         controller.signal.throwIfAborted();
-        const binding = await freeze(request, request.chat, request.choice);
-        let notes = "";
-        if (binding.kind === "isolated") {
-          const owned = isolation(binding),
-            selected = grant(binding),
-            intent = binding.intent;
-          let receipt = (await owned.snapshot()).receipts.find((item) => item.intentId === intent.id);
-          if (!receipt || receipt.state === "prepared") {
-            receipt = await owned.allocate(intent);
-            await active(request);
-            if (receipt.state !== "allocated") receipt = await owned.reconcile(intent);
-          }
-          if (!receipt || receipt.state !== "allocated" || JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope))
-            throw new Error(`Task allocation unavailable: ${receipt?.state ?? "missing"}; retaining frozen binding`);
-          if (selected.plug && !attachments.has(request.threadId)) {
-            const plan: AllocationPlan = {
-              name: intent.scope.workspaceName,
-              branch: intent.scope.branch,
-              baseRevision: intent.scope.baseRevision,
-              headRevision: intent.scope.headRevision,
-              leaseReason: intent.scope.leaseReason,
-              sharedObjectStore: intent.scope.sharedObjectStore,
-            };
-            const attachment = await selected.plug.task!.attach({
-              ...context(request, binding),
-              receipt,
-              receipts: (await owned.snapshot()).receipts,
-              plan,
-            });
-            attachments.set(request.threadId, attachment);
-            await active(request);
-            await attachment.checkOwned();
-            await attachment.start();
-          }
-          const resolved = await target(request, binding);
-          notes = await worktreeSetup({
-            command: selected.project.worktreeSetup,
-            controlRoot: input.controlRoot,
-            intentId: intent.id,
-            workspacePath: intent.scope.workspacePath,
-            cwd: resolved.cwd,
-            signal: controller.signal,
-          });
-          notes += attachments.get(request.threadId)?.instructions ?? "";
-        }
-        const resolved = await target(request, binding);
-        const execution = coordinatorExecutionTools({
-          controlRoot: input.controlRoot,
-          cache: input.caches?.forCwd,
-          name: `projects.task-execution.${request.conversationId}`,
-          target: async (api, context) => {
-            context.abortSignal?.throwIfAborted();
-            if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
-            return target(request, binding);
-          },
-        });
-        const artifacts = ensureArtifactDir(input.controlRoot, request.threadId);
-        const cache = input.caches?.forIntent(binding.kind === "shared" ? binding.source.intentId : binding.intent.id);
-        const environment = workerEnvironmentTools({
-          projectId: input.project().id,
-          ...input.environment,
-          owner: async (api) => {
-            if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
-            await active(request);
-            return request.threadId;
-          },
-          target: async (api, context) => {
-            context.abortSignal?.throwIfAborted();
-            if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
-            const cwd = (await target(request, binding)).cwd,
-              cache = await input.caches?.forCwd(cwd);
-            return {
-              threadId: request.threadId,
-              cwd,
-              env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
-              guard: (command) => command,
-            };
-          },
-        });
-        const tools = [...execution.tools, ...environment];
-        const extension = defineExtension({ name: `projects.task-workspace.${request.conversationId}`, tools });
-        await active(request);
-        return {
-          cwd: resolved.cwd,
-          branch: resolved.branch,
-          tools,
-          extension,
-          bindingRevision: hash(JSON.stringify(binding)),
-          workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to Coordinator; no push, PR or Ready report is required. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}\n${notes}`,
-        };
+        return work(controller.signal);
       });
-    queues.set(request.threadId, operation);
+    queues.set(threadId, operation);
     operations.add(operation);
     try {
       return await operation;
     } finally {
       pending.delete(controller);
-      if (!pending.size) controllers.delete(request.threadId);
+      if (!pending.size) controllers.delete(threadId);
       operations.delete(operation);
-      if (queues.get(request.threadId) === operation) queues.delete(request.threadId);
+      if (queues.get(threadId) === operation) queues.delete(threadId);
     }
+  }
+  async function allocate(request: Request, binding: Extract<Binding, { kind: "isolated" }>) {
+    const owned = isolation(binding),
+      selected = grant(binding),
+      intent = binding.intent;
+    let receipt = (await owned.snapshot()).receipts.find((item) => item.intentId === intent.id);
+    if (!receipt || receipt.state === "prepared") {
+      receipt = await owned.allocate(intent);
+      await active(request);
+      if (receipt.state !== "allocated") receipt = await owned.reconcile(intent);
+    }
+    if (!receipt || receipt.state !== "allocated" || JSON.stringify(receipt.scope) !== JSON.stringify(intent.scope))
+      throw new Error(`Task allocation unavailable: ${receipt?.state ?? "missing"}; retaining frozen binding`);
+    if (selected.plug && !attachments.has(request.threadId)) {
+      const plan: AllocationPlan = {
+        name: intent.scope.workspaceName,
+        branch: intent.scope.branch,
+        baseRevision: intent.scope.baseRevision,
+        headRevision: intent.scope.headRevision,
+        leaseReason: intent.scope.leaseReason,
+        sharedObjectStore: intent.scope.sharedObjectStore,
+      };
+      const attachment = await selected.plug.task!.attach({
+        ...context(request, binding),
+        receipt,
+        receipts: (await owned.snapshot()).receipts,
+        plan,
+      });
+      attachments.set(request.threadId, attachment);
+      await active(request);
+      await attachment.checkOwned();
+      await attachment.start();
+    }
+  }
+  /** A scout's or reviewer's own worktree at a full commit: the task allocation without setup command or execution tools. */
+  function prepareReader(request: Request & { chat: number; baseCommit: string }): Promise<{ cwd: string }> {
+    return queued(request.threadId, async () => {
+      const binding = await freeze(request, request.chat, { kind: "isolated", baseCommit: request.baseCommit }, true);
+      if (binding.kind !== "isolated") throw new Error("Reader workspace must be isolated");
+      await allocate(request, binding);
+      return { cwd: (await target(request, binding)).cwd };
+    });
+  }
+  function prepare(
+    request: Request & { chat: number; choice: TaskWorkspace },
+  ): Promise<DurablePreparedWorkerEnvironment & { branch: string }> {
+    return queued(request.threadId, async (signal) => {
+      const binding = await freeze(request, request.chat, request.choice);
+      let notes = "";
+      if (binding.kind === "isolated") {
+        await allocate(request, binding);
+        const resolved = await target(request, binding);
+        notes = await worktreeSetup({
+          command: grant(binding).project.worktreeSetup,
+          controlRoot: input.controlRoot,
+          intentId: binding.intent.id,
+          workspacePath: binding.intent.scope.workspacePath,
+          cwd: resolved.cwd,
+          signal,
+        });
+        notes += attachments.get(request.threadId)?.instructions ?? "";
+      }
+      const resolved = await target(request, binding);
+      const execution = coordinatorExecutionTools({
+        controlRoot: input.controlRoot,
+        cache: input.caches?.forCwd,
+        name: `projects.task-execution.${request.conversationId}`,
+        target: async (api, context) => {
+          context.abortSignal?.throwIfAborted();
+          if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
+          return target(request, binding);
+        },
+      });
+      const artifacts = ensureArtifactDir(input.controlRoot, request.threadId);
+      const cache = input.caches?.forIntent(binding.kind === "shared" ? binding.source.intentId : binding.intent.id);
+      const environment = workerEnvironmentTools({
+        projectId: input.project().id,
+        ...input.environment,
+        owner: async (api) => {
+          if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
+          await active(request);
+          return request.threadId;
+        },
+        target: async (api, context) => {
+          context.abortSignal?.throwIfAborted();
+          if (Number(api.conversationId) !== request.conversationId) throw new Error("Wrong task conversation");
+          const cwd = (await target(request, binding)).cwd,
+            cache = await input.caches?.forCwd(cwd);
+          return {
+            threadId: request.threadId,
+            cwd,
+            env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
+            guard: (command) => command,
+          };
+        },
+      });
+      const tools = [...execution.tools, ...environment];
+      const extension = defineExtension({ name: `projects.task-workspace.${request.conversationId}`, tools });
+      await active(request);
+      return {
+        cwd: resolved.cwd,
+        branch: resolved.branch,
+        tools,
+        extension,
+        bindingRevision: hash(JSON.stringify(binding)),
+        workerInstructions: `\nTask workspace (${binding.kind}): ${resolved.cwd}, branch ${resolved.branch}. Make edits and run commands here. Keep this branch. Return your changes, checks and remaining risks to Coordinator; no push, PR or Ready report is required. Final PR merge, deployment and destructive operations still need owner approval.\n${artifactInstructions(artifacts, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}\n${notes}`,
+      };
+    });
   }
   async function validate(request: Request) {
     const binding = await read(request.threadId);
@@ -361,7 +391,7 @@ export function taskWorkerWorkspaces(input: {
     const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
     if (errors.length) throw new AggregateError(errors, "Task workspace detach failed");
   }
-  return { prepare, validate, closeThread, close };
+  return { prepare, prepareReader, validate, closeThread, close };
 }
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");

@@ -68,7 +68,7 @@ const contentText = (content) =>
       ? content.map((part) => part.text ?? "").join("")
       : JSON.stringify(content ?? "");
 // The fake "brain" remembers W1's branch from its push output.
-const brain = { b1: null };
+const brain = { b1: null, sha1: null };
 const model = createServer((req, res) => {
   req.setEncoding("utf8");
   let body = "";
@@ -121,11 +121,11 @@ const model = createServer((req, res) => {
             task: `W2-TASK continue the open PR branch ${brain.b1}: merge main into it, resolve conflicts, then rebase it onto main and push it back`,
           }),
         );
-      if (/MARK-REVIEW (\S+)/.test(userText)) {
-        const scope = /MARK-REVIEW (\S+)/.exec(userText)[1];
+      if (/MARK-REVIEW (\S+) (\S+)/.test(userText)) {
+        const [, scope, dirtyWorker] = /MARK-REVIEW (\S+) (\S+)/.exec(userText);
         if (n === 0)
           return res.end(
-            call("projects_delegate", { role: "reviewer", ref: brain.b1, task: "REVIEW-HEAD review feature.txt on the PR head" }),
+            call("projects_delegate", { role: "reviewer", ref: brain.sha1, task: "REVIEW-HEAD review feature.txt on the PR head" }),
           );
         if (n === 1)
           return res.end(call("projects_delegate", { role: "scout", workspaceScopeId: scope, task: "SCOUT-SCOPED read README.md" }));
@@ -137,7 +137,9 @@ const model = createServer((req, res) => {
               task: "BAD-REF",
             }),
           );
-        if (n === 3) return res.end(call("projects_delegate", { role: "reviewer", ref: "pi/does-not-exist", task: "MISSING-REF" }));
+        if (n === 3) return res.end(call("projects_delegate", { role: "reviewer", ref: brain.b1, task: "BRANCH-REF" }));
+        if (n === 4) return res.end(call("projects_delegate", { role: "reviewer", ref: dirtyWorker, task: "DIRTY-READ" }));
+        if (n === 5) return res.end(call("projects_delegate", { role: "reviewer", ref: "f".repeat(40), task: "UNKNOWN-COMMIT" }));
         return res.end(say("Review dispatched."));
       }
       if (/MARK-LOCAL/.test(userText) && n === 0)
@@ -182,6 +184,7 @@ const model = createServer((req, res) => {
           );
         if (n === 1) {
           brain.b1 = /(pi\/durable-[0-9a-f-]+)/.exec(results[0])?.[1];
+          brain.sha1 = /[a-f0-9]{40}/.exec(results[0])?.[0];
           return res.end(
             call(tool("_open_draft_pr"), {
               expectedHead: /[a-f0-9]{40}/.exec(results[0])?.[0],
@@ -493,22 +496,42 @@ try {
     seen("CHILD-REVIEW", "reviewer"),
   );
 
-  // Step 3: reviewer with ref reads the PR head; scout reads the checkout; a bad ref never reaches a shell.
-  await ask(`MARK-REVIEW ${scopeId}`);
+  // Step 3: a reviewer of a full SHA reads it in its own worktree; scout reads the checkout; refs other than an agent id or a full SHA are refused at spawn.
+  await ask(`MARK-REVIEW ${scopeId} ${w2.threadId}`);
   work = await plan();
   await eventually(async () => seen("REVIEW-HEAD", "reviewer") && seen("SCOUT-SCOPED", "scout"), "reviewer and scout did not read", 300);
   const reviewSaw = seen("REVIEW-HEAD", "reviewer");
+  const reviewer = (await rpc({ action: "jobs-snapshot", id })).agents.find((agent) => agent.readRef === brain.sha1);
+  const reviewerCwd = /SAW\[feature.txt\]/.test(reviewSaw) ? git(workspace, "worktree", "list", "--porcelain") : "";
   check(
-    "R1 a reviewer delegated with ref reads the PR head (feature.txt v1), not the owner checkout (no feature.txt)",
-    /v1/.test(reviewSaw) && !existsSync(join(workspace, "feature.txt")),
-    reviewSaw,
+    "R1 a reviewer given a full SHA reads that commit (feature.txt v1) in a worktree of its own, not the owner checkout",
+    /v1/.test(reviewSaw) && !existsSync(join(workspace, "feature.txt")) && !!reviewer && !/read-heads/.test(reviewerCwd),
+    { reviewSaw, reviewer: reviewer?.id, worktrees: reviewerCwd },
   );
   check("S1 a scout reads the project checkout", /base readme/.test(seen("SCOUT-SCOPED", "scout")), seen("SCOUT-SCOPED", "scout"));
   check("R2 an option-like ref never reaches git", !existsSync(`/tmp/pwned-lifecycle-${process.pid}`));
   const reports = (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n");
+  const spawns =
+    result.calls.findLast((c) => c.role === "coordinator" && /MARK-REVIEW/.test(c.user) && c.results.length >= 5)?.results ?? [];
   check(
-    "R6 an unknown or invalid ref fails the reviewer's start clearly",
-    /failed to start/.test(reports) && /pi\/does-not-exist|Invalid ref/.test(reports),
+    "R2/R6 an option-like ref and a branch name are refused at spawn with how to pin a commit",
+    [spawns[2], spawns[3]].every((text) => /full lowercase commit SHA/.test(text ?? "") && /Resolve a branch or PR/.test(text ?? "")),
+    spawns,
+  );
+  await eventually(
+    async () => /failed to start: UNKNOWN-COMMIT/.test((await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n")),
+    "unknown commit not reported",
+    300,
+  );
+  check(
+    "R6 a full SHA that is not in the repository fails the reader's start clearly",
+    /failed to start: UNKNOWN-COMMIT\] Commit f{40} is not in the local repository; fetch it first/.test(
+      (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n"),
+    ),
+  );
+  check(
+    "R8 a reader of a worker's worktree with uncommitted changes fails to start and says to commit first",
+    /failed to start/.test(reports) && /uncommitted changes/.test(reports) && /commit/.test(reports),
     reports.slice(-1500),
   );
 
@@ -537,7 +560,10 @@ try {
     work.map((w) => [w.status, w.text.slice(0, 30)]),
   );
 
-  // Step 5: inventory before the PR is merged.
+  // Step 5: inventory before the PR is merged, with one snapshot left over from before readers got their own worktrees.
+  const legacyHead = join(home, id, "read-heads", mainHead);
+  mkdirSync(join(home, id, "read-heads"), { recursive: true });
+  git(workspace, "worktree", "add", "--detach", "--quiet", legacyHead, mainHead);
   let inv = await inventory();
   result.inventoryBefore = inv;
   const item = (branchName) => inv.items.find((entry) => entry.kind === "worker" && entry.threadId === branchName);
@@ -555,7 +581,17 @@ try {
     { s1: i1.setup, s3: i3.setup },
   );
   const heads = inv.items.filter((entry) => entry.kind === "read-head");
-  check("K10 the settled reviewer's PR-head snapshot is removable", heads.length === 1 && heads[0].removable, heads);
+  check(
+    "K10 a leftover read-head snapshot is removable",
+    heads.length === 1 && heads[0].removable && heads[0].path.endsWith(mainHead),
+    heads,
+  );
+  const readerItem = inv.items.find((entry) => entry.threadId === reviewer.id);
+  check(
+    "R3 the ended reviewer's worktree is removable although its commit is on no remote any more",
+    readerItem?.removable === true && git(workspace, "branch", "-r", "--contains", brain.sha1) === "",
+    readerItem,
+  );
   check(
     "K7 reclaimable size is reported",
     inv.reclaimableKb > 0 && inv.reclaimableKb === inv.items.filter((e) => e.removable).reduce((a, e) => a + e.sizeKb, 0),
@@ -581,7 +617,8 @@ try {
   const w1Path = inv.items.find((e) => e.threadId === w1.threadId).path,
     w2Path = i2.path,
     w3Path = i3.path,
-    headPath = heads[0].path;
+    headPath = heads[0].path,
+    readerPath = readerItem.path;
   // Workspace caches: W1's goes with its worktree, a cache whose workspace is gone goes too, live ones and other folders stay.
   const caches = join(home, id, "workspace-cache"),
     cacheOf = (path) => join(caches, inv.items.find((e) => e.path === path).intentId),
@@ -590,15 +627,19 @@ try {
   for (const dir of [cacheOf(w1Path), cacheOf(w2Path), orphanCache, notCache]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(cacheOf(w1Path), "DerivedData.bin"), "x");
   const cleanup = await rpc({ action: "worktrees-cleanup", id, confirm: id });
-  await eventually(async () => !existsSync(w1Path) && !existsSync(headPath), "cleanup did not remove W1 and the snapshot", 300);
+  await eventually(
+    async () => !existsSync(w1Path) && !existsSync(headPath) && !existsSync(readerPath),
+    "cleanup did not remove W1, the snapshot and the reader's worktree",
+    300,
+  );
   check(
     "C6/C7/C8 cleanup removed W1's cache and an orphaned cache, and kept W2's cache and a folder that is not a cache",
     !existsSync(cacheOf(w1Path)) && !existsSync(orphanCache) && existsSync(cacheOf(w2Path)) && existsSync(notCache),
     { caches: existsSync(caches) ? readdirSync(caches) : null },
   );
-  check("C9 cleanup reports two removed worktrees", cleanup.removed?.length === 2, cleanup);
+  check("C9 cleanup reports three removed worktrees", cleanup.removed?.length === 3, cleanup);
   check(
-    "C9 manual cleanup removed W1 and the PR-head snapshot; W2 and W3 stay",
+    "C9 manual cleanup removed W1, the snapshot and the reader's worktree; W2 and W3 stay",
     !existsSync(w1Path) && !existsSync(headPath) && existsSync(w2Path) && existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
   );
   check(

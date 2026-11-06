@@ -47,7 +47,6 @@ export type PrId = string;
 
 // ---- vcs ----
 export type CodeDiffParts = { mergeBase: string; changed: string; diff: string; untracked: string[] };
-export type ReadHeads = { ensure(ref: string): Promise<{ root: string; sha: string }>; restore(sha: string): Promise<string> };
 export type ContinuationBranch = { name: string; sha: string };
 export type VcsProvider = {
   /** Checkout kind reported by findVcsRoot; also the workspace grant provider id. */
@@ -66,10 +65,6 @@ export type VcsProvider = {
   ): Promise<CodeDiffParts>;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
-  /** Read-only snapshots of PR heads for scouts and reviewers. */
-  readHeads(input: { checkout: string; controlRoot: string; projectId: string; project: () => Project }): ReadHeads;
-  /** Entry inside a read-head snapshot that marks it as this kind. */
-  readHeadMarker: string;
   /** Resolves and authorizes an existing branch (or PR) for a new worker thread to continue. */
   resolveContinuation(project: Project, ref: string, checkout: string): Promise<ContinuationBranch>;
   /** Extra worker rules (one sentence) added to every worker/scout/reviewer role text. */
@@ -250,9 +245,11 @@ export type WorkspaceProvider = {
     receipt: WorkspaceReceipt;
     state: string;
   }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
-  /** Removes a worker worktree or read-head snapshot (unforced, fenced). */
-  remove(input: { entry: string; leaseOwner: string }): Promise<{ ok: true } | { ok: false; error: string }>;
-  readHeadEntry(project: Project, path: string): { leaseOwner: string; entry: string };
+  /**
+   * Removes a worker worktree (unforced, fenced). `atBase`: a scout's or reviewer's worktree the host saw clean at its base commit after
+   * the reader ended; the provider rechecks that and may then remove it although that commit or its branch is on no remote.
+   */
+  remove(input: { entry: string; leaseOwner: string; atBase?: true }): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Worktrees that are not plain directories (size is never measured). */
   virtualMount: boolean;
   mountLabel?: string;
