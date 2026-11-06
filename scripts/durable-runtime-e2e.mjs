@@ -99,7 +99,7 @@ try {
   assert.equal(answer.status, "done");
   assert.match(answer.text, /ADAPTER_READY/);
   pass("Fake-model coordinator answers");
-  assert.ok(modelRequests.some((request) => request.includes("After asking for an owner decision, end your turn")));
+  assert.ok(modelRequests.some((request) => request.includes("After asking the owner for a decision, end the turn")));
   assert.ok(modelRequests.some((request) => request.includes("agents report")));
   pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();
@@ -172,7 +172,7 @@ try {
   assert.ok(workerContextSawSecret, "worker tool result was not present in a subsequent actual model request");
   pass("Worker reads topic on demand and receives its tool result in context");
   const workerRequest = modelRequests.findLast(
-    (request) => request.includes("Role profile: worker.") && request.includes(secretForWorkerContext),
+    (request) => request.includes("You are a worker for") && request.includes(secretForWorkerContext),
   );
   assert.ok(workerRequest.includes("job checkpoint"));
   assert.ok(workerRequest.includes("End with one short acknowledgment"));

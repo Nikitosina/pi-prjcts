@@ -19,7 +19,7 @@ Branch `lean-runtime`, worktree `~/Projects/pi-prjcts-next`. Goal: move pi-prjct
 4. **Tests and docs**: delete what covers removed code or is known-failing; fix the rest to green; remove `knownFailing`. Replace DURABLE.md with a short architecture doc and add AGENTS.md.
 5. **Verification**: the worker spawns a fresh verifier (project verify skill) after finishing, repairs, and repeats up to N rounds (default 3, per project). After N it returns "Ready with gaps" with proof to the coordinator. No host-owned cycle, no `blocked` state.
 6. **Approve**: merges the PR and pulls main automatically. Redeploying pi-prjcts is separate: a Deploy button plus a "deploy when idle" toggle with a time window; restart only when no project has running work; auto-rollback on failed smoke test. Superseded on 2026-11-05, see "Live deploy" below.
-7. **Roles**: keep coordinator, worker, scout, reviewer, verifier. One review per PR plus at most one re-check after fixes; three-axis review only on request.
+7. **Roles**: keep coordinator, worker, scout, reviewer, verifier. One review per PR plus at most one re-check after fixes. Superseded 2026-11-05 by the owner: the worker runs the review itself, one reviewer under 1000 changed lines and the three-axis `pr-review` at 1000 or more.
 8. **Watchdog**: code detects only hard stalls (no new transcript entries for N minutes, identical call with identical result 5+ times, hung process). The coordinator gets a notice with the last steps and decides freely; leaving the worker alone is the default. Never stops automatically.
 9. **Jev / TypeSafe**: out of scope for now.
 10. **Architecture**: run improve-codebase-architecture on this branch before the rewrite; its findings shape the module split.

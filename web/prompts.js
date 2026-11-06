@@ -1,4 +1,5 @@
-// Settings → Prompt: the behavior blocks of one target (a project role, the task helper or the Host agent) as a compact list, one
+// Settings → Prompt: the behavior blocks of one target (a project role or the Host agent) as a compact list, with the project's
+// shared contract blocks (and, for the coordinator, its integration blocks) as their own groups, one
 // selected editor and the assembled preview. Project instructions keep their own row (the project's objective); the other generated
 // sections are listed read-only. Unsaved text is kept per block in localStorage until it is saved, so a reload or a refused stale
 // write never loses it. The host owns the data: `prompt-blocks-get`/`-set`, `prompt-render`, `settings-snapshot`/`-update`.
@@ -9,7 +10,7 @@ import { state } from "./state.js";
 const estimate = (text) => Math.ceil(text.length / 4);
 const narrow = matchMedia("(max-width: 760px)");
 const OBJECTIVE = "objective"; // the Project instructions row; never a block id (built-ins are named, customs are `custom:<slug>`)
-let workerMode = "job"; // Worker tab: an independent Job worker or a task helper (target `taskHelper`); kept across repaints
+let workerMode = "job"; // Worker tab preview: an independent Job worker or a task helper (one block list, a delivery block per mode)
 
 // ---------------------------------------------------------------------------------------------------------------- host
 
@@ -40,7 +41,16 @@ const ADOPTS = {
   "next-message": "Applies from your next message; a running turn is not interrupted.",
   "next-turn-per-agent": "Each agent picks it up on its next turn; running turns are not interrupted.",
   "next-turn": "Applies from the Host agent's next turn; a running turn is not interrupted.",
+  "next-message-and-new-agents":
+    "Applies to coordinator chats from your next message and to agents started after saving; running agents keep theirs.",
 };
+/** Shared groups shown with a profile's behavior: the contract for every project role, integrations for the coordinator. */
+const SIDES = { coordinator: ["contract", "integrations"], worker: ["contract"], scout: ["contract"], reviewer: ["contract"], host: [] };
+const SIDE_LABELS = {
+  contract: ["Contract", "every role of this project"],
+  integrations: ["Integrations", "shown while their grant is on"],
+};
+const PLACEHOLDER_NOTE = "Placeholders: {project}, {projectId}, {githubRepos}.";
 const slug = (name) =>
   name
     .toLowerCase()
@@ -76,21 +86,33 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
     model,
     rendered,
     settings,
+    others = [], // the contract and integration models: blocks keyed `<target>~<id>`
     reads = 0;
+  const tag = (view, owner) => ({
+    ...view,
+    blocks: view.blocks.map((item) => ({ ...item, target: owner, key: owner === profile ? item.id : `${owner}~${item.id}` })),
+  });
+  const firstKey = () => model.blocks[0]?.key ?? null;
+  const modelOf = (owner) => (owner === target ? model : others.find((item) => item.target === owner));
   // Reads overlap (a save re-reads while the change feed asks for one too): only the newest one started may land.
   const fetchAll = async () => {
     const mine = ++reads,
-      next = profile === "worker" && workerMode === "task" ? "taskHelper" : profile;
+      next = profile,
+      sides = SIDES[next] ?? [];
     const result = await Promise.all([
       call("prompt-blocks-get", { ...where(next), target: next }),
       render(profile),
       next === "host" ? null : call("settings-snapshot", { id: state.projectId }),
+      ...sides.map((side) => call("prompt-blocks-get", { ...where(side), target: side })),
     ]);
-    if (mine === reads) [target, [model, rendered, settings]] = [next, result];
+    if (mine !== reads) return;
+    target = next;
+    [model, rendered, settings] = [tag(result[0], next), result[1], result[2]];
+    others = sides.map((side, n) => tag(result[3 + n], side));
   };
   await fetchAll();
   if (!alive()) return null;
-  let selected = model.blocks[0]?.id ?? null,
+  let selected = firstKey(),
     pane = "blocks",
     view = "list", // narrow screens show the list or the editor
     conflict = false,
@@ -98,17 +120,22 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
 
   const objective = () =>
     settings && { id: OBJECTIVE, kind: "project", name: "Project instructions", text: settings.values.objective ?? "", enabled: true };
-  const block = (id = selected) =>
-    id === "new"
-      ? { id: "new", kind: "custom", name: "", text: "", enabled: true }
-      : id === OBJECTIVE
+  const block = (key = selected) =>
+    key === "new"
+      ? { id: "new", key: "new", target, kind: "custom", name: "", text: "", enabled: true }
+      : key === OBJECTIVE
         ? objective()
-        : model.blocks.find((item) => item.id === id);
+        : [model, ...others].flatMap((view) => view.blocks).find((item) => item.key === key);
+  /** Where a row's draft is kept: its own target and id (project instructions and new blocks: the profile's). */
+  const slot = (key = selected) => {
+    const item = key === OBJECTIVE || key === "new" ? null : block(key);
+    return [item?.target ?? target, item?.id ?? key];
+  };
   /** What the editor shows: the saved block with its draft on top. */
-  const current = (id = selected) => {
-    const saved = block(id);
+  const current = (key = selected) => {
+    const saved = block(key);
     if (!saved) return null;
-    const draft = readDraft(target, id);
+    const draft = readDraft(...slot(key));
     return { saved, draft, name: draft?.name ?? saved.name, text: draft?.text ?? saved.text };
   };
   const source = (item) =>
@@ -127,12 +154,16 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
   const sourceLine = (item) => item.source.replace(/; tokens are an estimate \(chars\/4\)$/, "");
 
   const row = (item) => {
-    const on = item.enabled !== false;
+    const on = item.enabled !== false,
+      key = item.key ?? item.id;
     const lead =
       item.kind === "project"
         ? `<span class="pb-lead" aria-hidden="true"></span>`
-        : `<label class="pb-switch"><input class="pb-toggle" type="checkbox" tabindex="-1" ${on ? "checked" : ""} aria-label="${esc(item.name)} ${on ? "on" : "off"}"/><span class="track"></span></label>`;
-    return `<li class="pb-row" role="option" tabindex="${item.id === selected ? 0 : -1}" data-block="${esc(item.id)}" data-enabled="${on}" aria-selected="${item.id === selected}">${lead}<span class="pb-name">${esc(item.name)}</span>${on ? "" : `<span class="pb-off">off</span>`}${readDraft(target, item.id) ? `<span class="pb-draft">draft</span>` : ""}${badge(item)}<span class="pb-tok mono">${tokens(item.tokens ?? estimate(item.text))}</span></li>`;
+        : item.required
+          ? `<span class="pb-lead lock" aria-label="${esc(item.name)} is required">🔒</span>`
+          : `<label class="pb-switch"><input class="pb-toggle" type="checkbox" tabindex="-1" ${on ? "checked" : ""} aria-label="${esc(item.name)} ${on ? "on" : "off"}"/><span class="track"></span></label>`;
+    const idle = item.active === false ? `<span class="pb-off" title="${esc(item.grant)} is off for this project">grant off</span>` : "";
+    return `<li class="pb-row" role="option" tabindex="${key === selected ? 0 : -1}" data-block="${esc(key)}" data-enabled="${on}" data-active="${item.active !== false}" aria-selected="${key === selected}">${lead}<span class="pb-name">${esc(item.name)}</span>${item.mode ? `<span class="pb-mode small muted">${item.mode === "job" ? "Job only" : "Helper only"}</span>` : ""}${on ? idle : `<span class="pb-off">off</span>`}${readDraft(...slot(key)) ? `<span class="pb-draft">draft</span>` : ""}${badge(item)}<span class="pb-tok mono">${tokens(item.tokens ?? estimate(item.text))}</span></li>`;
   };
   const generatedRow = (item) =>
     `<li class="pb-row" data-generated data-block="${esc(item.id)}" title="${esc(sourceLine(item))}"><span class="pb-lead" aria-hidden="true"></span><span class="pb-name">${esc(item.label)}</span><span class="pb-tok mono">${tokens(item.tokens)}</span></li>`;
@@ -142,12 +173,15 @@ export async function promptSection(body, alive, { profile, say, sayFail }) {
     if (!now) return `<section class="pb-editor empty" aria-label="Block editor"><p class="muted">Pick a block, or add one.</p></section>`;
     const { saved, draft } = now;
     const custom = saved.kind === "custom";
+    const shared = saved.target && saved.target !== target;
     const note = draft
       ? "Unsaved · kept if you leave or reload."
       : saved.kind === "project"
         ? "Shared by every role of this project."
-        : (ADOPTS[model.application?.adopts] ?? "");
-    return `<section class="pb-editor" aria-label="Block editor" data-block="${esc(saved.id)}">
+        : saved.active === false
+          ? `Hidden from the agent while ${saved.grant} is off.`
+          : `${ADOPTS[modelOf(saved.target ?? target)?.application?.adopts] ?? ""}${shared ? ` ${PLACEHOLDER_NOTE}` : ""}`;
+    return `<section class="pb-editor" aria-label="Block editor" data-block="${esc(saved.key ?? saved.id)}">
 <header class="pb-editor-head"><button type="button" class="icon-btn small pb-back" aria-label="Back to blocks">←</button>${
       custom
         ? `<input class="pb-title" aria-label="Block name" maxlength="${model.limits.maxNameChars}" placeholder="Block name" value="${esc(now.name)}"/>`
@@ -177,7 +211,10 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     const parts = rendered.sections.flatMap((item) =>
       item.id === "role"
         ? model.blocks
-            .filter((entry) => entry.enabled !== false && entry.text.trim())
+            .filter(
+              (entry) =>
+                entry.enabled !== false && entry.text.trim() && (!entry.mode || entry.mode === (workerMode === "task" ? "helper" : "job")),
+            )
             .map((entry) => own(source(entry), entry.id, entry.name, entry.id, entry.text, entry.tokens ?? estimate(entry.text)))
         : item.id === "project" && settings
           ? [own("Project", item.id, item.label, sourceLine(item), item.text, item.tokens)]
@@ -197,7 +234,11 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     const customs = model.blocks.filter((item) => item.kind === "custom").length;
     const full = customs >= model.limits.maxCustom || model.blocks.length >= model.limits.maxBlocks;
     const project = objective();
-    const list = `<div class="pb-list">${project ? `<ul role="listbox" aria-label="Project instructions" class="pb-project">${row(project)}</ul>` : ""}<p class="pb-group">Behavior</p><ul role="listbox" aria-label="Behavior blocks">${model.blocks.map(row).join("")}</ul><button type="button" class="ghost-btn small pb-new" id="pb-new" ${full ? `disabled title="At most ${model.limits.maxCustom} custom blocks"` : ""}>+ New block</button>${
+    const group = (view) => {
+      const [label, hint] = SIDE_LABELS[view.target];
+      return `<p class="pb-group">${label} <span class="muted small">${hint}</span></p><ul role="listbox" aria-label="${label} blocks" data-group="${view.target}">${view.blocks.map(row).join("")}</ul>`;
+    };
+    const list = `<div class="pb-list">${project ? `<ul role="listbox" aria-label="Project instructions" class="pb-project">${row(project)}</ul>` : ""}${others.map(group).join("")}<p class="pb-group">Behavior</p><ul role="listbox" aria-label="Behavior blocks">${model.blocks.map(row).join("")}</ul><button type="button" class="ghost-btn small pb-new" id="pb-new" ${full ? `disabled title="At most ${model.limits.maxCustom} custom blocks"` : ""}>+ New block</button>${
       generated().length
         ? `<details class="pb-generated"><summary>Generated · read-only <span class="muted">${generated().length}</span></summary><ul>${generated().map(generatedRow).join("")}</ul></details>`
         : ""
@@ -220,7 +261,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
 
   const reload = async () => {
     await fetchAll();
-    if (selected !== "new" && !block()) selected = model.blocks[0]?.id ?? null;
+    if (selected !== "new" && !block()) selected = firstKey();
   };
   /** Runs one host write, then re-reads. A stale revision keeps the draft and shows the conflict. True when stored. */
   const commit = async (write, message, { focus } = {}) => {
@@ -240,19 +281,22 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
       draw({ focus });
     }
   };
-  const writeBlocks = (blocks, message, options) => commit(() => saveBlocks(target, model.revision, blocks), message, options);
+  const writeBlocks = (blocks, message, options, owner = target) =>
+    commit(() => saveBlocks(owner, modelOf(owner).revision, blocks), message, options);
   // One change at a time, each computed from the model the previous one left (a second Space must not reuse the old revision).
   let queue = Promise.resolve();
   const queued =
     (action) =>
     (...args) =>
       (queue = queue.then(() => action(...args)).catch(sayFail));
-  const replace = (id, next) => model.blocks.map((item) => (item.id === id ? { ...item, ...next } : item));
+  /** The owning target's whole list with one block changed. */
+  const replace = (key, next) => modelOf(block(key).target).blocks.map((item) => (item.key === key ? { ...item, ...next } : item));
 
   const store = queued(async () => {
     const now = current();
     if (!now || conflict) return; // Load latest first, so a save never lands on text the owner has not seen
-    const id = now.saved.id;
+    const id = now.saved.key ?? now.saved.id,
+      owner = now.saved.target ?? target;
     let ok;
     if (id === OBJECTIVE)
       ok = await commit(
@@ -274,38 +318,48 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
         [...model.blocks, { id: fresh, kind: "custom", name, text: now.text, enabled: true }],
         `${name} added · saved`,
       );
-      if (ok) selected = fresh;
+      if (ok) selected = fresh; // behavior blocks are keyed by their id
     } else {
       const next =
         now.saved.kind === "custom"
           ? { name: now.name.trim() || now.saved.name, text: now.text }
           : { text: now.text, edited: now.text !== now.saved.defaultText };
-      ok = await writeBlocks(replace(id, next), `${next.name ?? now.saved.name} saved`);
+      ok = await writeBlocks(replace(id, next), `${next.name ?? now.saved.name} saved`, {}, owner);
     }
     if (ok) {
-      writeDraft(target, id, null);
+      writeDraft(owner, now.saved.id, null);
       draw();
     }
   });
   const toggle = queued((id) => {
     const item = block(id);
-    if (!item || item.kind === "project" || id === "new") return;
+    if (!item || item.kind === "project" || item.required || id === "new") return;
     const on = item.enabled === false;
-    return writeBlocks(replace(id, { enabled: on }), `${item.name} ${on ? "on" : "off"} · saved`, { focus: "row" });
+    return writeBlocks(replace(id, { enabled: on }), `${item.name} ${on ? "on" : "off"} · saved`, { focus: "row" }, item.target);
   });
-  const move = queued((id, step) => {
-    const from = model.blocks.findIndex((item) => item.id === id),
+  const move = queued((key, step) => {
+    const owner = block(key)?.target;
+    if (!owner) return;
+    const list = modelOf(owner).blocks,
+      from = list.findIndex((item) => item.key === key),
       to = from + step;
-    if (from < 0 || to < 0 || to >= model.blocks.length) return;
-    const next = [...model.blocks];
+    if (from < 0 || to < 0 || to >= list.length) return;
+    const next = [...list];
     next.splice(to, 0, ...next.splice(from, 1));
-    return writeBlocks(next, `${next[to].name} moved ${step < 0 ? "up" : "down"} · saved`, { focus: "row" });
+    return writeBlocks(next, `${next[to].name} moved ${step < 0 ? "up" : "down"} · saved`, { focus: "row" }, owner);
   });
   const restore = queued(async () => {
     const item = block();
     if (item?.kind !== "builtin") return;
-    if (await writeBlocks(replace(item.id, { edited: false, text: item.defaultText ?? "" }), `${item.name} restored to default`)) {
-      writeDraft(target, item.id, null);
+    if (
+      await writeBlocks(
+        replace(item.key, { edited: false, text: item.defaultText ?? "" }),
+        `${item.name} restored to default`,
+        {},
+        item.target,
+      )
+    ) {
+      writeDraft(item.target, item.id, null);
       draw();
     }
   });
@@ -313,12 +367,14 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     const item = block();
     if (item?.kind !== "custom" || item.id === "new") return;
     const ok = await writeBlocks(
-      model.blocks.filter((entry) => entry.id !== item.id),
+      modelOf(item.target).blocks.filter((entry) => entry.key !== item.key),
       `${item.name} deleted`,
+      {},
+      item.target,
     );
     if (ok) {
-      writeDraft(target, item.id, null);
-      selected = model.blocks[0]?.id ?? null;
+      writeDraft(item.target, item.id, null);
+      selected = firstKey();
       view = "list";
       draw();
     }
@@ -339,7 +395,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     if (t.closest("button[data-kind]")) {
       workerMode = t.closest("[data-kind]").dataset.kind;
       await reload().catch(sayFail);
-      if (selected !== OBJECTIVE) selected = model.blocks[0]?.id ?? null;
+      if (selected !== OBJECTIVE) selected = firstKey();
       return draw();
     }
     const toggleBox = t.closest(".pb-switch");
@@ -356,7 +412,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     }
     if (t.closest("#pb-save")) return void store();
     if (t.closest("#pb-revert")) {
-      writeDraft(target, selected, null);
+      writeDraft(...slot(), null);
       conflict = false;
       return draw();
     }
@@ -371,8 +427,8 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     }
     if (t.closest('[data-conflict="reload"]')) {
       await reload().catch(sayFail);
-      const draft = readDraft(target, selected);
-      if (draft && block()) writeDraft(target, selected, { ...draft, base: block().text });
+      const draft = readDraft(...slot());
+      if (draft && block()) writeDraft(...slot(), { ...draft, base: block().text });
       conflict = false;
       return draw({ focus: "text" });
     }
@@ -385,7 +441,7 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
       name = body.querySelector("input.pb-title")?.value ?? now.name;
     const same = selected !== "new" && text === now.saved.text && name === now.saved.name;
     // `base` is the saved text the draft started from: a newer saved text under it is a conflict, not a silent overwrite.
-    writeDraft(target, selected, same ? null : { name, text, base: now.draft?.base ?? now.saved.text });
+    writeDraft(...slot(), same ? null : { name, text, base: now.draft?.base ?? now.saved.text });
     body.querySelector("[data-live-tokens]").textContent = `${tokens(estimate(text))} tokens`;
     body.querySelector("#pb-save").disabled = same;
     body.querySelector("#pb-revert").disabled = same;
@@ -431,10 +487,10 @@ ${conflict ? `<div class="pb-conflict" role="alert"><span>Changed elsewhere sinc
     /** A write from elsewhere: re-read and redraw, keeping the caret. A draft whose block changed under it shows the conflict. */
     async refresh() {
       // Our own saves come back through the feed too; redrawing for nothing would swap a button out from under a click.
-      const before = JSON.stringify([model, rendered, settings]);
+      const before = JSON.stringify([model, rendered, settings, others]);
       await reload();
-      if (JSON.stringify([model, rendered, settings]) === before) return;
-      const draft = readDraft(target, selected);
+      if (JSON.stringify([model, rendered, settings, others]) === before) return;
+      const draft = readDraft(...slot());
       if (draft && block() && draft.base !== block().text) conflict = true;
       const field = document.activeElement?.closest?.(".pb-text, input.pb-title");
       const caret = field &&

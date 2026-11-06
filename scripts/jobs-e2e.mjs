@@ -136,6 +136,8 @@ function route(request) {
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
     if (user === "Hold helper response") return call("gate", {});
+    if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER")) return call("subagent", { role: "reviewer", task: "REVIEW" });
+    if (tag === "BRIEF-HELPER" && result.startsWith("Task helpers cannot")) return say("Helper could not get a review.");
     if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
     if (tag === "BRIEF-CHECKPOINT" && (user.includes("BRIEF-CHECKPOINT") || result.startsWith("Checkpoint recorded"))) {
       if (result.startsWith("Checkpoint recorded")) return say("Checkpoint details retained in my transcript.");
@@ -688,6 +690,11 @@ const helperSpawn = await jobs.spawn(root, root.id, {
 await quiet(harness);
 let helper = (await jobsOf(harness)).find((item) => item.id === helperSpawn.id);
 assert.equal(helper.status, "completed", "a task helper's ordinary answer completes execution without Ready or PR");
+assert.deepEqual(
+  helper.children.map((child) => child.role),
+  ["reviewer"],
+  "a task helper starts its own reviewer with subagent",
+);
 assert.deepEqual(helper.workspace, { kind: "shared" });
 assert.equal(helper.pr, null);
 assert.equal(helper.ready, null);

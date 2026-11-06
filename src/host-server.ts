@@ -751,7 +751,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         projectId: id,
         revision,
         resolved: projectBehavior(loadProject(id), target),
-        application: { adopts: target === "coordinator" ? "next-message" : "next-turn-per-agent" },
+        application: {
+          adopts:
+            target === "coordinator" || target === "integrations"
+              ? "next-message"
+              : target === "contract"
+                ? "next-message-and-new-agents"
+                : "next-turn-per-agent",
+        },
       });
     }
     case "memory-index":
