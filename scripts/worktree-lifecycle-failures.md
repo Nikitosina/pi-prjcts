@@ -6,7 +6,7 @@ Written before implementation. E2E: `scripts/worktree-lifecycle-e2e.mjs`; guard 
 - G1 `git merge-base`, `git merge-tree`, `git log … && git merge-base …` still blocked by a `merge\b` prefix match.
 - G2 `git merge origin/main` (and conflict resolution + commit) still blocked.
 - G3 `git rebase origin/main` works locally but the result cannot be published: `--force-with-lease` to the worker's own branch blocked.
-- G4 `--force-with-lease` allowed to a non-project branch (main, the base branch, `feature/x`) or a bare `--force`/`-f`/`+ref` slips through once lease is allowed.
+- G4 a force push (`--force`, `-f`, `+ref`, `--force-with-lease`) allowed to a non-project branch (main, the base branch, `feature/x`), or refused to the worker's own project branch. Since 2026-11-06 the owner allows plain force pushes there: a live worker told to "resolve conflicts, then force push" was refused.
 - G5 push to another thread's project branch (`HEAD:pi/durable-other`) still blocked, so a second thread must do a "transfer commit".
 - G6 push to the default/base branch, `main`, `master`, branch delete (`:pi/x`, `--delete`), `--mirror`, `--all`, `--tags` becomes allowed.
 - G7 an empty/short branch prefix ("" or no publication) widens pushes to every branch.

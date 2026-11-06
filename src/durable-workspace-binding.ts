@@ -517,9 +517,7 @@ export function guardWorkerGitCommand(
         .split(/\s+/)
         .filter(Boolean);
       if (
-        args.some(
-          (value) => /^--(?:force|mirror|all|tags|delete|prune)$/.test(value) || (/^-[a-zA-Z]*[fd]/.test(value) && !value.startsWith("--")),
-        )
+        args.some((value) => /^--(?:mirror|all|tags|delete|prune)$/.test(value) || (/^-[a-zA-Z]*d/.test(value) && !value.startsWith("--")))
       )
         return true;
       const positional = args.filter((value) => !value.startsWith("-"));
@@ -529,10 +527,11 @@ export function guardWorkerGitCommand(
           : positional;
       if (!refs.length) return true;
       for (const ref of refs) {
-        if (ref.startsWith("+") || ref.startsWith(":")) return true;
-        const target = ref.includes(":") ? ref.split(":").at(-1)! : ref;
+        if (ref.startsWith(":")) return true;
+        // A force push (+ref, -f, --force) is allowed like any push: only project branches are targets.
+        const target = (ref.includes(":") ? ref.split(":").at(-1)! : ref).replace(/^\+/, "");
         // A bare HEAD pushes the checked-out branch to its own name; best-effort as before.
-        if (!(ref === "HEAD" || project(target))) return true;
+        if (!(ref.replace(/^\+/, "") === "HEAD" || project(target))) return true;
       }
       const lease = args.find((value) => value.startsWith("--force-with-lease"));
       if (lease?.includes("=") && !project(lease.slice(lease.indexOf("=") + 1).split(":")[0])) return true;
@@ -543,7 +542,7 @@ export function guardWorkerGitCommand(
     return false;
   });
   if (blocked === undefined) return command;
-  const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; --force-with-lease is allowed there, plain --force, +refs, deletes, mirror/all/tags, pushes to ${[...guarded].filter((name) => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
+  const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; force pushes are allowed there; deletes, mirror/all/tags, pushes to ${[...guarded].filter((name) => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
 /** Task helpers return commits to their Coordinator, which publishes: no git push and no gh PR or release writes. Best-effort, not a sandbox. */
