@@ -29,7 +29,13 @@ const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
 /** Host-wide nightly deploy opt-in (`idle` keeps its stored name): hours of the local day, end exclusive (see deploy.ts). */
 export const DeploySettings = Type.Object(
-  { idle: Type.Boolean(), startHour: Type.Integer({ minimum: 0, maximum: 23 }), endHour: Type.Integer({ minimum: 0, maximum: 23 }) },
+  {
+    idle: Type.Boolean(),
+    startHour: Type.Integer({ minimum: 0, maximum: 23 }),
+    endHour: Type.Integer({ minimum: 0, maximum: 23 }),
+    /** Deploys ship the newest origin/<branch> (fetched, checked, then fast-forwarded); unset ships the checkout's HEAD. */
+    branch: Type.Optional(Type.String({ pattern: "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$" })),
+  },
   { additionalProperties: false },
 );
 export type DeploySettings = Static<typeof DeploySettings>;

@@ -14,3 +14,14 @@ Deploy no longer waits for idle projects: it gives running tool calls a short wi
 - A rollback leaves `projects_redeploy` without an answer, or reports success.
 - A coordinator of another project gets `projects_redeploy`, or the pi-prjcts Coordinator still asks the owner to approve a deploy.
 - A checkout change during preparation is silently deployed, or requeued forever; it must fail the deploy and say so.
+
+## Following a branch
+
+With the deploy setting `branch` (e.g. `main`), a deploy ships the newest `origin/<branch>`, so a merged PR deploys without anyone pulling the owner checkout by hand. Proof: `deploy-e2e.mjs` step 6 (B1-B5).
+
+- B1 A deploy with a branch set builds the checkout's current HEAD instead of a freshly fetched `origin/<branch>`, so merged work never ships.
+- B2 The checkout moves before the check passes, so a commit that fails `npm run check` lands in the running host's files, or a failed check leaves the checkout moved.
+- B3 A checkout on another branch, with local commits not on `origin/<branch>`, or with uncommitted changes, is switched, merged or reset; it must be refused with the reason and left as it was.
+- B4 The nightly trigger compares only the local HEAD, so new commits on `origin/<branch>` never deploy at night; or a failed fetch counts as new code.
+- B5 Without a branch set, a deploy fetches anything or behaves differently from before.
+

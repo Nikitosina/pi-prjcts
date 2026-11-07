@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
 import { ensureHost, health, request } from "./client.ts";
-import { errorText, home, listProjects, parse, saveJson } from "./state.ts";
+import { errorText, home, listProjects, loadDeploySettings, parse, saveJson } from "./state.ts";
 import { sendOwnerMessage } from "./telegram.ts";
 
 const exec = promisify(execFile);
@@ -121,6 +121,8 @@ const defaultRun: RunCommand = async (command, args, cwd) =>
 /** Everything a deploy does to the outside world, so a test can drive it against a temporary checkout and home. */
 export type DeployDeps = {
   repo: string;
+  /** Deploy the newest `origin/<branch>`: fetched, checked apart, then fast-forwarded into the checkout. Unset: the checkout's HEAD. */
+  branch?: string;
   run?: RunCommand;
   stopHost(): Promise<void>;
   /** Drain admitted requests, give running tool calls the window, then stop only if still clean at sha; false fails the deploy. */
@@ -170,7 +172,8 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
         throw new Error("The sha the running host started from is unknown; deploy refused (restart the host once to record it)");
       if (await git("status", "--porcelain", "--untracked-files=no"))
         throw new Error("The pi-prjcts checkout has uncommitted changes; deploy refused");
-      const sha = await git("rev-parse", "HEAD");
+      const head = await git("rev-parse", "HEAD");
+      const sha = deps.branch ? await branchTarget(git, deps.branch, head) : head;
       const lockfileChanged = async (from: string, to: string) =>
         Boolean(await git("diff", "--name-only", from, to, "--", "package-lock.json")) || !existsSync(join(deps.repo, "node_modules"));
       const fail = async (result: DeployResult & { ok: false }) => {
@@ -210,6 +213,11 @@ export async function deploy(deps: DeployDeps): Promise<DeployResult> {
       const changedDuringPreparation = () =>
         fail({ ok: false, sha, rolledBack: false, reason: "the checkout changed during preparation; nothing was stopped, deploy again" });
       try {
+        // The checked commit reaches the checkout only now; --ff-only refuses anything that moved meanwhile.
+        if (sha !== head) {
+          if ((await git("rev-parse", "HEAD")) !== head) return changedDuringPreparation();
+          await git("merge", "--ff-only", "-q", sha);
+        }
         if ((await git("rev-parse", "HEAD")) !== sha || (await git("status", "--porcelain", "--untracked-files=no")))
           return changedDuringPreparation();
       } catch (error) {
@@ -286,6 +294,7 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
   const smokeMs = options.smokeMs ?? 30_000;
   return {
     repo,
+    branch: loadDeploySettings().branch,
     async stopForDeploy(sha) {
       try {
         const pid = Number(readFileSync(join(home(), "host.lock"), "utf8").trim());
@@ -370,8 +379,23 @@ export async function idleDeployTick(options: {
   return "started";
 }
 
-/** True when the checkout HEAD differs from the sha the host started from. */
-export async function deployPending(repo: string, run: RunCommand = defaultRun): Promise<boolean> {
+/** The fetched `origin/<branch>` a deploy ships; refuses a checkout on another branch or with commits that are not on origin. */
+async function branchTarget(git: (...args: string[]) => Promise<string>, branch: string, head: string): Promise<string> {
+  const current = await git("branch", "--show-current");
+  if (current !== branch)
+    throw new Error(`The pi-prjcts checkout is on ${current || "a detached HEAD"}; deploys follow ${branch}: switch it to ${branch} first`);
+  await git("fetch", "-q", "origin", branch);
+  const target = await git("rev-parse", `refs/remotes/origin/${branch}`);
+  const local = await git("rev-list", "--count", `${target}..${head}`);
+  if (local !== "0")
+    throw new Error(`The pi-prjcts checkout has ${local} commit(s) not on origin/${branch}; push or drop them, then deploy again`);
+  return target;
+}
+
+/** True when the commit a deploy would ship differs from the sha the host started from; with a branch, after fetching it. */
+export async function deployPending(repo: string, run: RunCommand = defaultRun, branch?: string): Promise<boolean> {
   const running = readHostSha();
-  return !running || running !== (await run("git", ["rev-parse", "HEAD"], repo));
+  if (!branch) return !running || running !== (await run("git", ["rev-parse", "HEAD"], repo));
+  await run("git", ["fetch", "-q", "origin", branch], repo);
+  return !running || running !== (await run("git", ["rev-parse", `refs/remotes/origin/${branch}`], repo));
 }

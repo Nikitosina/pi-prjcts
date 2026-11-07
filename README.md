@@ -42,7 +42,7 @@ Without `--no-start` before the command, an API command starts the local host. B
 - Threads: `thread-send`, `thread-steer`, `thread-stop` (needs `--confirm`) and `thread-history` take project, thread and request UUIDs.
 - Routines: `schedules`, `schedule-history`, `schedule-once|interval|daily|weekly`, `schedule-enable`, `event-opt-in`.
 - Owner setup: `owner-setup <project-id>` shows workspace and GitHub bindings; the other `owner-*` commands authorize, inspect and revoke them. Writes need same-project confirmation.
-- `deploy` restarts the host from its main checkout with a smoke test and rollback. See "Deploy" in `ARCHITECTURE.md`.
+- `deploy` restarts the host from its main checkout with a smoke test and rollback. With the deploy setting `branch` (e.g. `main`) it first fetches `origin/<branch>`, checks it and fast-forwards the checkout, so a merged PR ships without a manual pull. See "Deploy" in `ARCHITECTURE.md`.
 
 ## Knowledge
 

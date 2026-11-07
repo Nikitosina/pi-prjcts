@@ -1923,7 +1923,7 @@ const idleDeployTimer = setInterval(
     idleDeployTick({
       now: new Date(),
       window: settings,
-      pending: () => deployPending(repoRoot),
+      pending: () => deployPending(repoRoot, undefined, settings.branch),
       start() {
         startDeploy();
         recordHostEvent("deploy", "deploy started: new code inside the nightly deploy window");

@@ -197,6 +197,72 @@ try {
   assert.equal(await tick(3), "started");
   assert.equal(await tick(4), "already-tried");
   assert.equal(started, 1);
+
+  // 6. Following a branch (B1-B5): the deploy fetches origin/<branch>, checks it apart, and only then fast-forwards the checkout.
+  // The rollback above left the checkout detached, as it does for the owner.
+  const branch = "follow";
+  git("checkout", "-q", "-B", branch);
+  const upstream = join(base, "origin.git"),
+    pusher = join(base, "pusher");
+  execFileSync("git", ["clone", "-q", "--bare", clone, upstream]);
+  git("remote", "set-url", "origin", upstream);
+  git("fetch", "-q", "origin");
+  git("branch", "-q", "--set-upstream-to", `origin/${branch}`);
+  execFileSync("git", ["clone", "-q", "-b", branch, upstream, pusher]);
+  const push = (file, text, message) => {
+    writeFileSync(join(pusher, file), text);
+    execFileSync("git", ["-C", pusher, "add", file]);
+    execFileSync("git", ["-C", pusher, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", message]);
+    execFileSync("git", ["-C", pusher, "push", "-q", "origin", branch]);
+    return execFileSync("git", ["-C", pusher, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  };
+  const following = { ...deps, branch };
+  const before = git("rev-parse", "HEAD");
+  // B4: the nightly check sees the commit waiting on origin, which the local HEAD does not show.
+  const merged = push("MERGED.md", "merged\n", "merged on origin");
+  assert.equal(await deployPending(clone, undefined, branch), true);
+  assert.equal(git("rev-parse", "HEAD"), before, "checking for new code does not move the checkout");
+  // B5: without a branch nothing is fetched, so the local HEAD is all there is.
+  assert.equal(await deployPending(clone), false);
+  // B2: a commit that fails the check leaves the checkout and the host as they were.
+  pid = (await health()).pid;
+  const broken = push("src/broken-check.ts", "export const value: number = 'text';\n", "fails the check");
+  result = await deploy(following);
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.sha, broken);
+  assert.match(result.reason, /preparation failed/);
+  assert.equal(git("rev-parse", "HEAD"), before);
+  assert.equal((await health()).pid, pid);
+  execFileSync("git", ["-C", pusher, "revert", "--no-edit", "HEAD"], {
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    },
+  });
+  execFileSync("git", ["-C", pusher, "push", "-q", "origin", branch]);
+  const fixed = execFileSync("git", ["-C", pusher, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  // B3: local commits not on origin, another branch, or a dirty checkout are refused and left alone.
+  appendFileSync(join(clone, "README.md"), "local only\n");
+  commit("local only");
+  const local = git("rev-parse", "HEAD");
+  await assert.rejects(deploy(following), /not on origin/);
+  assert.equal(git("rev-parse", "HEAD"), local);
+  git("reset", "-q", "--hard", before);
+  git("checkout", "-q", "-b", "side");
+  await assert.rejects(deploy(following), new RegExp(`on side; deploys follow ${branch}`));
+  git("checkout", "-q", branch);
+  git("branch", "-q", "-D", "side");
+  // B1: the newest origin commit is checked, the checkout fast-forwards to it and the host restarts on it.
+  result = await deploy(following);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.sha, fixed);
+  assert.equal(git("rev-parse", "HEAD"), fixed);
+  assert.ok(existsSync(join(clone, "MERGED.md")) && git("merge-base", "--is-ancestor", merged, "HEAD") === "");
+  assert.notEqual((await health()).pid, pid);
+  assert.equal(await deployPending(clone, undefined, branch), false);
   console.log("deploy-e2e ok");
 } finally {
   await request({ action: "shutdown" }, false).catch(() => {});
