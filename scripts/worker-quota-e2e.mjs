@@ -12,8 +12,16 @@ const QUOTA = {
   status: 429,
   body: { error: { message: "Quota exceeded: session limit reached", type: "insufficient_quota", code: "insufficient_quota" } },
 };
+// Retryable for Durable ("rate limit"), quota for the host ("session limit"): the live Claude bridge wording.
+const SESSION_LIMIT = {
+  status: 429,
+  body: {
+    error: { message: "Rate limit reached: You've hit your session limit", type: "rate_limit_exceeded", code: "rate_limit_exceeded" },
+  },
+};
 const requests = [],
   coordinator = [];
+const callsFor = (marker) => requests.filter((call) => call.marker === marker);
 const kit = await createKit("worker-quota", {
   env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60" },
   handler: ({ role, model, user, msgs }) => {
@@ -25,11 +33,15 @@ const kit = await createKit("worker-quota", {
       return say(marker === "COQUOTA" ? "Coordinator recovered." : "Noted.");
     }
     if (role !== "worker") return say("Noted.");
-    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE"].find((value) => user.includes(value));
+    const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE", "EMPTY"].find((value) => user.includes(value));
     requests.push({ marker, model, at: Date.now() });
     if (marker === "FALLBACK" && model === "fallback-model") return say("Finished on the fallback model.");
     if (marker === "CHAIN" && model === "third-model") return say("Finished on the third model.");
     if (marker === "RATE") return model === "fake-model" ? RATE : say("Finished after the rate limit.");
+    if (marker === "EMPTY") {
+      if (model !== "fake-model") return say("Finished after the empty retry.");
+      return callsFor("EMPTY").length === 1 ? SESSION_LIMIT : say("");
+    }
     return QUOTA;
   },
 });
@@ -61,7 +73,6 @@ await kit.run(async () => {
       `Job ${jobId} did not settle`,
       1200,
     );
-  const callsFor = (marker) => requests.filter((call) => call.marker === marker);
 
   await kit.updateSettings(id, { fallbackModels: { worker: "fake/fallback-model" } });
   const fallback = await settled(await submit("FALLBACK finish after quota"));
@@ -154,6 +165,13 @@ await kit.run(async () => {
     "F4 a rate limit moves a tiered worker to the next model",
     rate.modelMoves.length === 1 && callsFor("RATE").at(-1).model === "fallback-model",
     { rate, calls: callsFor("RATE").map((call) => call.model) },
+  );
+  const empty = await settled(await submit("EMPTY reply to the retry"));
+  kit.check(
+    "F6 an empty answer to the retry of a quota failure moves a tiered worker to the next model",
+    JSON.stringify(empty.modelMoves.map((move) => move.to)) === JSON.stringify(["fake/fallback-model"]) &&
+      callsFor("EMPTY").at(-1).model === "fallback-model",
+    { empty, calls: callsFor("EMPTY").map((call) => call.model) },
   );
   // F5: the snapshot names the model each agent runs on, not the project's legacy role model.
   const snapshot = await kit.rpc({ action: "jobs-snapshot", id });

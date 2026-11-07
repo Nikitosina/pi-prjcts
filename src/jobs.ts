@@ -24,6 +24,7 @@ import {
   UsageDoc,
 } from "@earendil-works/pi-durable";
 import {
+  emptyAnswerFailure,
   providerFailure,
   type ProviderFailure,
   QUOTA_RETRY_BASE_MS,
@@ -547,7 +548,14 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           taskContext,
         );
         const settled = await submission.wait(taskContext);
-        const failure = settled.status === "unanswered" && settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
+        const failure =
+          settled.status === "unanswered"
+            ? settled.reason !== "aborted"
+              ? unansweredReason(settled)
+              : undefined
+            : settled.type === "input"
+              ? emptyAnswerFailure((await runtime.context(conversationId, taskContext, { at: settled.answer })).entries)
+              : undefined;
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
         const kind = failure ? providerFailure(failure) : undefined;
         if (failure && kind) {
@@ -598,7 +606,8 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             return { status: "running", checkpoint: { phase: "settle", report } } as const;
           };
           if (job?.workspace?.kind === "shared" && job.status === "stopped") return next();
-          if (settled.status === "unanswered") {
+          // A done turn with a failure is an empty answer to a retried quota or rate-limit error: it failed the same way.
+          if (settled.status === "unanswered" || failure) {
             if (!failure) return next();
             if (job && isLive(job.status))
               Object.assign(job, { status: "failed", reason: `The worker failed: ${failure}`, endedAt: Date.now() });

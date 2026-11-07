@@ -33,6 +33,7 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - F3 Without a tier the legacy single `fallbackModels` move is unchanged.
 - F4 A rate limit (after Durable's own retries) moves on only when the profile has a tier.
 - F5 `jobs-snapshot` names each Job's and agent's own current model (its conversation's agent model), so a tier move or a tier that differs from the legacy `models.worker` is not hidden behind the project setting.
+- F6 A provider can answer Durable's retry of a failed turn with an empty reply (the Claude bridge did, on a five-hour limit at a tool boundary): the turn settles done, the worker reports nothing and the tier never moves. An empty answer right after a quota or rate-limit error is that failure: a tiered worker moves to the next model.
 
 ## Profile tools (`profile-tools`)
 
