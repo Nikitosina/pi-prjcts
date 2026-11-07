@@ -21,3 +21,9 @@ Recorded before the change. Covered by `codemode-native-tools-e2e.mjs`, which us
 ## Live status of a script
 
 - N13 While a code mode script runs, the chat's live status reads only "codemode…", never which nested tool runs or how many finished or failed, so a long script looks stuck. The live frame must carry the running nested tool names and the done and failed counts, and the live status must name them in text.
+
+## UI 2.0 policy through nested calls
+
+- N14 A tool switched off in the conversation's profile is hidden from direct model calls but remains available as `tools.<name>` inside `codemode`, bypassing the owner's tool selection.
+- N15 A script invokes a dangerous host action directly instead of `owner_approval_request`, or a nested approval request executes before the owner approves it.
+- N16 A nested dangerous request changes its target while its approval is still pending.

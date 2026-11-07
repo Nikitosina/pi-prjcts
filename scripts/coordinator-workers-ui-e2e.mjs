@@ -78,6 +78,7 @@ const model = createServer((req, res) => {
         "MARK-FAIL": { role: "worker", task: "MARK-FAILTASK will fail" },
         "MARK-HOLD": { role: "worker", task: "MARK-HOLDTASK waits" },
         "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", scopeId: randomUUID() },
+        "MARK-WEBSCOUT": { role: "scout", task: "MARK-WEBSCOUTTASK search" },
       }[marker];
       if (delegate && stage === 0)
         return reply(
@@ -91,6 +92,7 @@ const model = createServer((req, res) => {
             requestId: randomUUID(),
           }),
         );
+      if (marker === "MARK-WEB" && stage === 0) return reply(call("web_search", { query: "pi release" }));
       if (marker === "MARK-SLOW") {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write(chunk({ role: "assistant", content: "" }, null));
@@ -102,6 +104,10 @@ const model = createServer((req, res) => {
         return;
       }
       return reply(say(`Answer ${marker} RESULT: ${after.slice(0, 800)}`));
+    }
+    if (marker === "MARK-WEBSCOUTTASK") {
+      if (stage === 0) return reply(call("web_search", { query: "pi release" }));
+      return reply(say(`WEB-SCOUT ${after}`));
     }
     if (marker === "MARK-SCOUTTASK") {
       if (stage === 0) return reply(call("code_read", { path: "SECRET.txt" }));
@@ -316,7 +322,7 @@ const terminal = async (id, task, status) =>
   }, `work ${task} not ${status}`);
 const scrollInfo = (s) =>
   evaluate(
-    `(() => { const t = document.querySelector('#transcript'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
+    `(() => { const t = document.querySelector('#feed'); return { top: t.scrollTop, gap: t.scrollHeight - t.scrollTop - t.clientHeight, height: t.scrollHeight }; })()`,
     s,
   );
 let chromeSession;
@@ -386,6 +392,18 @@ try {
   if (workerTools.some((name) => name.startsWith("code_"))) throw Error("Worker gained read-only code tools: " + workerTools);
   result.checks.push("R4 worker role tools unchanged (no code_* tools)");
 
+  // web_search resolves for the coordinator and a scout; this home has no openai-codex login, so it answers how to connect.
+  const webAnswer = await ask("MARK-WEB");
+  if (!/openai-codex login/.test(webAnswer)) throw Error("Coordinator web_search did not run: " + String(webAnswer).slice(0, 400));
+  await ask("MARK-WEBSCOUT");
+  await terminal(id, "MARK-WEBSCOUTTASK", "completed");
+  const webScout = await eventually(
+    async () => (await rpc({ action: "show", id })).messages.find((m) => m.role === "user" && m.text.includes("WEB-SCOUT"))?.text,
+    "web scout report missing",
+  );
+  if (!/openai-codex login/.test(webScout)) throw Error("Scout web_search did not run: " + webScout.slice(0, 400));
+  result.checks.push("W9 the coordinator and a scout can call web_search");
+
   await ask("MARK-SCOPED");
   const scopedScout = await terminal(id, "MARK-SCOPEDTASK", "completed");
   if (scopedScout.workspaceScopeId != null || !(toolsSeen["MARK-SCOPEDTASK"] ?? []).includes("code_read"))
@@ -396,7 +414,6 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -404,64 +421,62 @@ try {
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `document.querySelector('#title')?.innerText === 'Workers UI' && document.querySelector('#job-tree').innerText.includes('MARK-FAILTASK')`,
-    s,
-    "project loaded",
-  );
+  const workers = `(document.querySelector('#workers')?.innerText ?? '')`;
+  await waitFor(`document.body.dataset.ready === "1" && ${workers}.includes('MARK-FAILTASK')`, s, "project loaded");
   await ask("MARK-HOLD");
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status === "running", "hold not running");
-  await waitFor(`document.querySelector('#job-tree').innerText.includes('MARK-HOLDTASK')`, s, "running Job in the tree");
+  await waitFor(`${workers}.includes('MARK-HOLDTASK')`, s, "running Job in the list");
   releaseHold();
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status !== "running", "held Job did not finish");
-  result.checks.push("A1 the Jobs tree lists failed and running Jobs; a held Job finishes");
+  result.checks.push("A1 the chat's Workers list shows failed and running Jobs; a held Job finishes");
   await shot("01-jobs-tree", s);
-  await evaluate(
-    `[...document.querySelectorAll('.job-dismiss')].find((b) => b.getAttribute('aria-label').includes('MARK-FAILTASK')).click()`,
-    s,
-  );
-  await waitFor(`!document.querySelector('#job-tree').innerText.includes('MARK-FAILTASK')`, s, "dismissed Job leaves the tree");
-  result.checks.push("A2 Dismiss clears an ended Job from the Workers card");
+  // Dismiss (the classic row button was retired 2026-11-04; the call stays): a dismissed Job leaves the list by push.
+  const jobs = await rpc({ action: "jobs-snapshot", id });
+  const failedJob = jobs.jobs.find((job) => job.title.startsWith("MARK-FAILTASK"));
+  const thread = jobs.agents.find((agent) => agent.jobId === failedJob.id)?.id;
+  if (!thread) throw Error("No thread for the failed Job: " + JSON.stringify(failedJob));
+  await rpc({ action: "thread-dismiss", id, threadId: thread });
+  await waitFor(`!${workers}.includes('MARK-FAILTASK')`, s, "dismissed Job leaves the list");
+  result.checks.push("A2 a dismissed Job leaves the Workers list");
 
   // Inline streaming with sticky auto-scroll.
-  await waitFor(`!document.querySelector('#compose textarea').disabled`, s, "composer ready");
+  await waitFor(`!document.querySelector('#composer-input').disabled`, s, "composer ready");
+  const live = `(document.querySelector('#live-turn')?.innerText ?? '')`;
   const slow = await rpc({ action: "message", id, text: "MARK-SLOW" });
-  await waitFor(`(document.querySelector('#live-reply')?.innerText ?? '').includes('STREAM-LINE-2')`, s, "stream started", 60);
-  const inside = await evaluate(
-    `(() => { const live = document.querySelector('#live-reply'), t = document.querySelector('#transcript'); return t.contains(live) && t.contains(document.querySelector('#messages')) && live.previousElementSibling === document.querySelector('#messages'); })()`,
-    s,
-  );
-  if (!inside) throw Error("Live bubble is not inside the transcript scroll");
+  await waitFor(`${live}.includes('STREAM-LINE-2')`, s, "stream started", 60);
+  if (!(await evaluate(`document.querySelector('#feed').contains(document.querySelector('#live-turn'))`, s)))
+    throw Error("Live turn is not inside the transcript scroll");
   const atBottom = await scrollInfo(s);
   if (atBottom.gap > 40) throw Error("Not following stream at bottom: " + JSON.stringify(atBottom));
-  result.checks.push("S1 live bubble streams inside transcript and follows the bottom");
+  result.checks.push("S1 the live turn streams inside the transcript and follows the bottom");
   await shot("02-inline-stream", s);
   const box = await evaluate(
-    `(() => { const r = document.querySelector('#transcript').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    `(() => { const r = document.querySelector('#feed').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
     s,
   );
   await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: box.x, y: box.y, deltaX: 0, deltaY: -5000 }, s);
   await delay(300);
   const up = await scrollInfo(s);
-  await waitFor(`(document.querySelector('#live-reply')?.innerText ?? '').includes('STREAM-LINE-8')`, s, "more chunks", 60);
+  await waitFor(`${live}.includes('STREAM-LINE-8')`, s, "more chunks", 60);
   const stillUp = await scrollInfo(s);
   if (stillUp.top > up.top + 5 || stillUp.gap < 100) throw Error("Scrolled-up reader was yanked: " + JSON.stringify({ up, stillUp }));
   result.checks.push("S2 user scroll-up is respected while chunks arrive");
-  await evaluate(`document.querySelector('[data-action="jump-latest"]').click()`, s);
-  await waitFor(`(document.querySelector('#live-reply')?.innerText ?? '').includes('STREAM-LINE-12')`, s, "later chunks", 60);
+  // Back to the bottom (the new client has no Jump to latest button; End or scrolling down re-pins).
+  await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: box.x, y: box.y, deltaX: 0, deltaY: 100000 }, s);
+  await waitFor(`${live}.includes('STREAM-LINE-12')`, s, "later chunks", 60);
   const resumed = await scrollInfo(s);
   if (resumed.gap > 40) throw Error("Auto-scroll did not resume: " + JSON.stringify(resumed));
-  result.checks.push("S3 auto-scroll resumes after Jump to latest");
+  result.checks.push("S3 auto-scroll resumes after scrolling back to the bottom");
   await settle(id, slow);
   await waitFor(
-    `document.querySelector('#messages').innerText.includes('STREAM-LINE-15') && document.querySelector('#live-reply').hidden`,
+    `document.querySelector('#feed').innerText.includes('STREAM-LINE-15') && !document.querySelector('#feed .msg.agent.streaming')`,
     s,
     "final message",
     40,
   );
   const final = await scrollInfo(s);
   if (final.gap > 40) throw Error("Final message not at bottom: " + JSON.stringify(final));
-  result.checks.push("S4 final message replaces bubble at bottom");
+  result.checks.push("S4 the final message replaces the live turn at the bottom");
   if (result.errors.length || result.httpErrors.length) throw Error("Browser errors captured");
   result.status = "passed";
 } catch (error) {
@@ -469,7 +484,7 @@ try {
   result.failure = redact(error?.stack ?? error);
   try {
     result.diagnostic = await evaluate(
-      `JSON.stringify({ live: document.querySelector('#live-reply')?.hidden, tail: document.querySelector('#messages').innerText.slice(-300) })`,
+      `JSON.stringify({ live: document.querySelector('#live-turn')?.innerText.slice(-200), tail: document.querySelector('#feed').innerText.slice(-300) })`,
       chromeSession,
     );
   } catch {}

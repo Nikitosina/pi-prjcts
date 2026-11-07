@@ -1,5 +1,6 @@
 // Browser E2E for the generic webhook: isolated host, local fake model. Deliveries are plain HTTP to the loopback listener. No real providers.
-// Failure cases recorded in webhook-failures.md before implementation.
+// Failure cases recorded in webhook-failures.md before implementation. The classic inbox's webhook card (masked secret, Reveal, Rotate,
+// event chat) was retired on 2026-11-04: those settings are set here through the same RPCs, and the chat check uses the inbox at `/`.
 import { spawn } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, createHmac, randomUUID } from "node:crypto";
@@ -338,43 +339,14 @@ try {
     throw Error("Disabled webhook answered: " + JSON.stringify({ disabled, unknown }));
   result.checks.push("W4 a disabled webhook answers 404, the same as an unknown project");
 
-  // UI: enable, route to Hooks, reveal the secret (W14).
+  // Opt in and route deliveries to Hooks through the same RPC the Settings card used.
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "settings");
-  startChrome();
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
-  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `!!document.querySelector('#webhook-enabled') && [...document.querySelectorAll('#event-chat option')].some(o => o.textContent === 'Hooks')`,
-    s,
-    "events card",
-  );
-  const masked = await evaluate(
-    `({ url: document.querySelector('#webhook-url').innerText, secret: document.querySelector('#webhook-secret').innerText })`,
-    s,
-  );
-  if (masked.url !== url || masked.secret.includes(initial.webhook.secret) || !/^•+$/.test(masked.secret))
-    throw Error("Secret not masked or URL missing: " + JSON.stringify(masked));
-  await evaluate(
-    `(() => { document.querySelector('#event-chat').value = ${JSON.stringify(hooks.id)}; document.querySelector('#webhook-enabled').checked = true; document.querySelector('[data-action="automation-save"]').click(); })()`,
-    s,
-  );
-  await eventually(async () => {
-    const v = await snap();
-    return v.webhook.enabled && v.eventChat === hooks.id;
-  }, "webhook opt-in not saved");
-  await waitFor(`document.querySelector('#webhook-enabled')?.checked === true`, s, "rerender");
-  // Save leaves the card busy for a moment (buttons disabled); click Reveal once it is enabled.
-  await waitFor(`!document.querySelector('[data-action="webhook-reveal"]').disabled`, s, "reveal enabled");
-  await evaluate(`document.querySelector('[data-action="webhook-reveal"]').click()`, s);
-  await waitFor(`document.querySelector('#webhook-secret').innerText === ${JSON.stringify(initial.webhook.secret)}`, s, "revealed secret");
-  result.checks.push("W14 Settings shows the URL, masks the secret until Reveal, and saves enable + chat");
-  await shot("01-settings-webhook", s);
+  await rpc({ action: "automation-update", id, change: { eventChat: hooks.id, webhook: { enabled: true } } });
+  const opted = await snap();
+  if (!opted.webhook.enabled || opted.eventChat !== hooks.id || opted.webhook.secret !== initial.webhook.secret)
+    throw Error("Webhook opt-in not saved: " + JSON.stringify({ enabled: opted.webhook.enabled, eventChat: opted.eventChat }));
   const secret = initial.webhook.secret;
 
   // W1/W5: authentication.
@@ -489,14 +461,18 @@ try {
   result.checks.push("W9/W11 a binary body arrives as text with replacement characters; a 2 MiB body gets 413 and the host keeps running");
   await idle();
 
-  // W15: only coordinator replies appear; delivery evidence remains stored.
+  // W15: only coordinator replies appear in the inbox; delivery evidence remains stored.
+  startChrome();
+  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
+  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
   const chatUrl = new URL(launch);
-  chatUrl.searchParams.set("tab", "coordinator");
   chatUrl.searchParams.set("chat", hooks.id);
   await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(`!!document.querySelector('#messages .msg.them')`, s, "webhook coordinator replies");
-  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .msg.you')`, s))
-    throw Error("Internal webhook event appeared as a chat bubble");
+  await waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#feed .msg.agent')`, s, "webhook coordinator replies");
+  if (await evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some((n) => /MARK-HOOK|webhook\\./.test(n.innerText))`, s))
+    throw Error("Internal webhook event appeared as an owner bubble");
   const retained = (await rpc({ action: "show", id, chatId: hooks.id })).messages;
   if (
     !retained.some((message) => message.text?.includes("deploy.finished")) ||
@@ -506,23 +482,23 @@ try {
   result.checks.push("W15 coordinator replies remain visible without raw event bubbles; delivery evidence is retained");
   await shot("02-hooks-chat", s);
 
-  // W3: rotate from the UI (two clicks), old secret refused, new accepted.
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('[data-action="webhook-rotate"]')`, s, "rotate button");
-  await evaluate(`document.querySelector('[data-action="webhook-rotate"]').click()`, s);
-  await waitFor(`document.querySelector('[data-action="webhook-rotate"]').innerText.startsWith('Confirm')`, s, "rotate armed");
-  if ((await snap()).webhook.secret !== secret) throw Error("One click rotated the secret");
-  await evaluate(`document.querySelector('[data-action="webhook-rotate"]').click()`, s);
-  const rotated = await eventually(async () => {
-    const v = await snap();
-    return v.webhook.secret !== secret && v.webhook.secret;
-  }, "secret not rotated");
-  await waitFor(`document.querySelector('#webhook-secret').innerText === ${JSON.stringify(rotated)}`, s, "new secret shown");
+  // W3: rotating needs the project id as confirmation; afterwards the old secret is refused and the new one accepted.
+  await rpc({ action: "webhook-rotate", id, confirm: otherId }).then(
+    () => {
+      throw Error("Rotate without a matching confirmation went through");
+    },
+    (error) => {
+      if (!/confirmation/.test(error.message)) throw error;
+    },
+  );
+  if ((await snap()).webhook.secret !== secret) throw Error("A refused rotate changed the secret");
+  const rotated = (await rpc({ action: "webhook-rotate", id, confirm: id })).webhook.secret;
+  if (!/^[a-f0-9]{64}$/.test(rotated) || rotated === secret) throw Error("Secret not rotated");
   const oldSecret = await post(url, '{"n":3}', { authorization: `Bearer ${secret}`, "x-event-id": "d3" });
   const newSecret = await post(url, '{"n":3}', { authorization: `Bearer ${rotated}`, "x-event-id": "d3" });
   if (oldSecret.status !== 401 || newSecret.status !== 202)
     throw Error("Rotation wrong: " + JSON.stringify({ old: oldSecret.status, new: newSecret.status }));
-  result.checks.push("W3 Rotate needs a confirming second click; afterwards the old secret gets 401 and the new one 202");
+  result.checks.push("W3 Rotate needs the project id as confirmation; afterwards the old secret gets 401 and the new one 202");
   await idle();
 
   // W13: same URL after a restart.
@@ -548,19 +524,6 @@ try {
     `W10 a burst is cut off with 429 after ${limited + 1} deliveries in a minute (20 per minute, counting the post-restart one)`,
   );
   await idle();
-
-  // Mobile layout of the card.
-  const web2 = new URL((await rpc({ action: "web" })).url);
-  web2.searchParams.set("project", id);
-  web2.searchParams.set("tab", "settings");
-  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
-  await send("Page.navigate", { url: web2.toString() }, s);
-  await waitFor(`!!document.querySelector('#webhook-url')`, s, "mobile card");
-  await waitFor(`!!document.querySelector('#events-in-card')`, s, "#events-in-card");
-  await evaluate(`document.querySelector('#events-in-card').scrollIntoView()`, s);
-  if (!(await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s))) throw Error("Webhook card overflows at 390px");
-  await shot("03-settings-mobile", s);
-  result.checks.push("W14 the webhook card fits a 390 px screen");
 
   result.errors = result.errors.filter((e) => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/api"));

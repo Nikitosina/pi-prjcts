@@ -1,5 +1,6 @@
-// Jobs engine on a bare Pi Durable Harness with a scripted faux model: spawn, plan, verifier and reviewer, full report,
-// restart without duplicates, stop draining the whole tree, and the stall detector's active-verifier rule.
+// Jobs engine on a bare Pi Durable Harness with a scripted faux model: spawn, plan, a checking child and a reviewer, full report,
+// restart without duplicates, stop draining the whole tree, and the stall detector's active-child rule.
+// The verifier role was retired (2026-11-03): the checking child is a scout running the test tools.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,8 @@ const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
 const longAnswer = "Full exact retained evidence. ".repeat(300) + "END-OF-EXACT-ANSWER";
+// Tasks a worker gives its checking scout; other scout tasks answer normally.
+const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
 assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
 
 // The ETA counts down inside the step in progress and keeps a minute for an overrun one.
@@ -88,6 +91,12 @@ function route(request) {
         gaps: [],
       });
     if (tag === "BRIEF-LONGHELPER" || tag === "BRIEF-LONGFAIL") return say(longAnswer);
+    // Ready first, then a last reply held at the gate (the live A1 sequence).
+    if (tag === "BRIEF-READYHOLD") {
+      if (result.startsWith("Ready recorded")) return call("gate", {});
+      if (result === "gate open") return say("Recorded.");
+      return call("job", { action: "ready", summary: "Held", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK" });
+    }
     if (tag === "BRIEF-LONGREADY" || tag === "BRIEF-LONGCHECKPOINT") {
       if (result.startsWith("Ready recorded") || result.startsWith("Checkpoint recorded")) return say("Recorded.");
       return call(
@@ -133,6 +142,8 @@ function route(request) {
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
     if (user === "Hold helper response") return call("gate", {});
+    if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER")) return call("subagent", { role: "reviewer", task: "REVIEW" });
+    if (tag === "BRIEF-HELPER" && result.startsWith("Task helpers cannot")) return say("Helper could not get a review.");
     if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
     if (tag === "BRIEF-CHECKPOINT" && (user.includes("BRIEF-CHECKPOINT") || result.startsWith("Checkpoint recorded"))) {
       if (result.startsWith("Checkpoint recorded")) return say("Checkpoint details retained in my transcript.");
@@ -184,17 +195,17 @@ function route(request) {
       });
     if (result.startsWith("Plan saved"))
       return call("subagent", {
-        role: "verifier",
-        task: { SLOW: "SLOW-VERIFY", SILENT: "SILENT", QUEUEDSILENT: "SILENT", BUSY: "BUSY" }[tag.slice(6)] ?? "VERIFY",
+        role: "scout",
+        task: { SLOW: "SLOW-CHECK", SILENT: "SILENT", QUEUEDSILENT: "SILENT", BUSY: "BUSY" }[tag.slice(6)] ?? "CHECK",
       });
     if (result === "PASS") return call("subagent", { role: "reviewer", task: "REVIEW" });
     if (result === "REVIEW-OK")
-      return call("job", { action: "ready", summary: "Built it", pr: "12", candidate: sha, proof: ["verifier PASS"], review: "REVIEW-OK" });
+      return call("job", { action: "ready", summary: "Built it", pr: "12", candidate: sha, proof: ["checks PASS"], review: "REVIEW-OK" });
     if (tag === "BRIEF-RACE" && result.startsWith("Ready recorded")) return call("gate", {});
     return say("Done.");
   }
-  if (role === "verifier") {
-    if (user === "SLOW-VERIFY" || user === "SILENT") return call("slow", {});
+  if (role === "scout" && CHECKS.has(text(messages.find((message) => message.role === "user").content))) {
+    if (user === "SLOW-CHECK" || user === "SILENT") return call("slow", {});
     if (user === "BUSY") return call("step", { n: 1 });
     if (result === "process advanced") return finishSlow ? say("PASS") : call("slow", {});
     if (result.startsWith("step ")) return Number(result.slice(5)) < 12 ? call("step", { n: Number(result.slice(5)) + 1 }) : say("PASS");
@@ -266,16 +277,18 @@ const faux = fauxProvider({ models: [{ id: "faux-1" }, { id: "faux-2" }] });
 models.setProvider(faux.provider);
 faux.setResponses(Array.from({ length: 600 }, () => route));
 
+const approvedHooks = [];
 async function open() {
   const killed = [];
   const jobs = createJobs({
     boot: bootId,
     quotaRetryBaseMs: 60,
-    fallbackModel: () => ({ change: { model: { provider: "faux", modelId: "faux-2" } }, label: "faux/faux-2" }),
+    fallbackModel: ({ failure }) =>
+      failure === "quota_exceeded" ? { change: { model: { provider: "faux", modelId: "faux-2" } }, label: "faux/faux-2" } : null,
     agentChange: ({ role }) => ({
       model,
       instructions: `ROLE:${role}`,
-      extensions: role === "verifier" ? [TestTools] : role === "worker" ? [TestTools] : [],
+      extensions: role === "scout" || role === "worker" ? [TestTools] : [],
     }),
     killProcesses: async (ids) => {
       killed.push(...ids);
@@ -289,6 +302,7 @@ async function open() {
       while (prepareHeld.has(agent.title) || (first && prepareFirstHeld.has(agent.title))) await delay(20);
     },
     approver: { approve: async () => ({ kind: "auto-merge-pending" }) },
+    afterApproved: (id) => approvedHooks.push(id),
     backgroundSilence: () => backgroundSilenceMs,
     stallMinutes: () => 20,
   });
@@ -352,7 +366,7 @@ await quiet(harness);
 gateOpen = false;
 gateEntered = false;
 
-// 1. Spawn, plan, verifier + reviewer, full Ready report; a retried spawn returns the same agent.
+// 1. Spawn, plan, checking scout + reviewer, full Ready report; a retried spawn returns the same agent.
 await say_(root, "Start A");
 await say_(root, "Start A");
 await quiet(harness);
@@ -372,13 +386,13 @@ assert.equal(
 );
 for (const part of ["Candidate: " + sha, "PR: 12", "Summary: Built it", "Gaps: none", "agents report"])
   assert.ok(report[0].includes(part), `concise handback carries ${part}`);
-for (const part of ["verifier PASS", "REVIEW-OK", "Done.", "Worker's closing message:"])
+for (const part of ["checks PASS", "REVIEW-OK", "Done.", "Worker's closing message:"])
   assert.ok(!report[0].includes(part), `wakeup does not repeat detailed evidence or closing text: ${part}`);
 const workerCallsBeforeReport = requests.filter((item) => item.role === "worker").length;
 await say_(root, `Report ${job.id}`);
 await quiet(harness);
-const fullReady = requests.findLast((item) => item.role === "coordinator" && item.result.includes("verifier PASS"))?.result;
-for (const part of ["verifier PASS", "Review: REVIEW-OK", "Done.", "Cumulative time:", "Cumulative cost:", "Answer ref:"])
+const fullReady = requests.findLast((item) => item.role === "coordinator" && item.result.includes("checks PASS"))?.result;
+for (const part of ["checks PASS", "Review: REVIEW-OK", "Done.", "Cumulative time:", "Cumulative cost:", "Answer ref:"])
   assert.ok(
     fullReady?.includes(part),
     `on-demand report retains ${part}: ${requests.filter((item) => item.role === "coordinator").at(-1)?.result}`,
@@ -386,7 +400,7 @@ for (const part of ["verifier PASS", "Review: REVIEW-OK", "Done.", "Cumulative t
 assert.equal(requests.filter((item) => item.role === "worker").length, workerCallsBeforeReport, "reading a report never wakes the worker");
 const snapshot = await jobs.snapshot(harness);
 assert.equal(snapshot.jobs[0].working, false);
-assert.equal(requests.filter((item) => item.role === "verifier").length, 1);
+assert.equal(requests.filter((item) => item.role === "scout" && CHECKS.has(item.user)).length, 1);
 assert.equal(requests.filter((item) => item.role === "reviewer").length, 1);
 
 // 2. A scout answers its brief; the answer reaches the chat.
@@ -434,15 +448,15 @@ assert.equal(
 );
 assert.equal(requests.filter((item) => item.role === "worker" && item.user.includes("host restarted")).length, 1, "told once to continue");
 
-// 4. A worker waiting on its active verifier is not stalled; a silent one is, once.
+// 4. A worker waiting on its active child is not stalled; a silent one is, once.
 const before = (await chatText(root)).length;
 await say_(root, "Start BUSY");
-await until(() => requests.some((item) => item.role === "verifier" && item.user === "BUSY"), "busy verifier started");
+await until(() => requests.some((item) => item.role === "scout" && item.user === "BUSY"), "busy checking scout started");
 const T = 1_000_000_000;
 backgroundSilenceMs = 30 * 60_000;
 assert.deepEqual(await jobs.stallTick(harness, T), [], "a quiet service alone does not wake the coordinator");
 await delay(300);
-assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [], "verifier progress wins over an old quiet service");
+assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [], "child progress wins over an old quiet service");
 backgroundSilenceMs = null;
 await quiet(harness);
 await say_(root, "Start SILENT");
@@ -474,11 +488,11 @@ assert.equal(
 );
 const previousCycle = slowCycle;
 releasedSlowCycle = previousCycle;
-await until(() => slowCycle > previousCycle, "verifier makes real progress and starts another bounded operation");
+await until(() => slowCycle > previousCycle, "the child makes real progress and starts another bounded operation");
 assert.deepEqual(await jobs.stallTick(harness, T + 100 * 60_000), [], "real progress clears the old episode");
 assert.deepEqual(await jobs.stallTick(harness, T + 121 * 60_000), [silent.id], "a genuinely new stall is reported after recovery");
 
-// 5. Stop drains the worker and its verifier, kills the process, and reports nothing.
+// 5. Stop drains the worker and its child, kills the process, and reports nothing.
 await assert.rejects(async () => jobs.stop(harness, silent.id, " "), /reason/);
 const sizeBefore = (await chatText(root)).length;
 await jobs.stop(harness, silent.id, "owner asked");
@@ -486,7 +500,7 @@ const stopped = (await jobsOf(harness)).find((item) => item.id === silent.id);
 assert.equal(stopped.status, "stopped");
 assert.equal(stopped.reason, "owner asked");
 assert.equal(processes.size, 0, "the background process was killed");
-assert.ok(killed.length >= 2, "the worker and its verifier were passed to the process killer");
+assert.ok(killed.length >= 2, "the worker and its child were passed to the process killer");
 await quiet(harness);
 assert.ok(
   !(await chatText(root)).slice(sizeBefore).some((line) => line.includes(silent.id) && !line.includes("stalled")),
@@ -661,8 +675,10 @@ assert.equal((await jobsOf(harness)).find((item) => item.id === prep.id).dismiss
 const outcome = await jobs.approve(harness, job.id);
 assert.deepEqual(outcome, { outcome: { kind: "auto-merge-pending" } });
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "ready");
+assert.deepEqual(approvedHooks, [], "R14 no cleanup before the Job is approved");
 await jobs.finishApproval(harness, job.id, { kind: "accepted", head: sha }, "Merged aaaaaaaa.");
 assert.equal((await jobsOf(harness)).find((item) => item.id === job.id).status, "approved");
+assert.deepEqual(approvedHooks, [job.id], "R14 an approved Job starts the cleanup once");
 await until(async () => (await chatText(root)).some((line) => line.startsWith(`[worker ${job.id} approve`)), "approve notice in chat");
 
 assert.equal(
@@ -684,6 +700,11 @@ const helperSpawn = await jobs.spawn(root, root.id, {
 await quiet(harness);
 let helper = (await jobsOf(harness)).find((item) => item.id === helperSpawn.id);
 assert.equal(helper.status, "completed", "a task helper's ordinary answer completes execution without Ready or PR");
+assert.deepEqual(
+  helper.children.map((child) => child.role),
+  ["reviewer"],
+  "a task helper starts its own reviewer with subagent",
+);
 assert.deepEqual(helper.workspace, { kind: "shared" });
 assert.equal(helper.pr, null);
 assert.equal(helper.ready, null);
@@ -808,7 +829,7 @@ assert.equal(deliveredCheckpoint.checkpoint, undefined, "a Ready delivery replac
 await say_(root, "Start QUEUEDSILENT");
 const queuedWorker = await until(
   async () => (await jobsOf(harness)).find((item) => item.title === "Job QUEUEDSILENT" && item.children.length),
-  "queued-stall verifier started",
+  "queued-stall child started",
 );
 await until(() => processes.size === 1, "queued-stall process started");
 gateOpen = false;
@@ -876,6 +897,52 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   await second.wait(context).catch(() => {});
   assert.equal((await h.snapshot(LiveDoc, conversation.id, context))?.run, undefined, "the stopped conversation is no longer working");
   await h.close(context);
+}
+
+// A1-A5 (jobs-failures.md "Activity reflects what runs"): work is what can still run, not an agent without an end time.
+{
+  const agentOf = async (id) => (await jobs.snapshot(harness)).agents.find((item) => item.id === id);
+  gateOpen = false;
+  gateEntered = false;
+  await say_(root, "Start READYHOLD");
+  await until(() => gateEntered, "READYHOLD worker holds its last reply after Ready");
+  const held = (await jobsOf(harness)).find((item) => item.title === "Job READYHOLD");
+  assert.equal(held.status, "ready");
+  // A project pause: jobs pause, then every chat aborts with its background tasks (the worker's reporter among them).
+  await jobs.pause(harness);
+  await root.abort(context, { background: true });
+  gateOpen = true;
+  await quiet(harness);
+  assert.notEqual((await agentOf(held.id)).endedAt, null, "A1 a reporter aborted after Ready ends its agent");
+  assert.equal(await jobs.busy(harness), false, "A1 a paused project whose Ready worker was cut off is idle");
+  await jobs.resume(harness);
+  await quiet(harness);
+
+  // A2/A3: a ghost left by an older host (Ready Job, no end time, no reporter) is not work and is ended on open.
+  await harness.commit(async (tx) => {
+    (await tx.doc(Jobs, root.id)).agents[held.id].endedAt = null;
+  }, context);
+  assert.equal(await jobs.busy(harness), false, "A3 an agent without an end time but with nothing to run is not work");
+  await harness.close(context);
+  ({ harness, root, jobs, killed } = await open());
+  await jobs.recover(harness);
+  assert.notEqual((await agentOf(held.id)).endedAt, null, "A2 opening the project ends an agent whose Job already ended");
+
+  // A4/A5: a queued passive write and a blocked task run nothing; queued input and a runnable task are work.
+  const fake = (tasks, submissions) => ({
+    snapshot: async () => ({ paused: false, jobs: {}, agents: {}, subagents: {}, requests: {} }),
+    inspect: async () => ({ scheduling: "running", tasks, submissions }),
+  });
+  const write = { id: 1, conversationId: 9, requestId: "compaction:8", type: "write", status: "queued" };
+  const blocked = { record: { id: 2, kind: "x" }, state: { kind: "blocked", reason: "restart_limit" } };
+  assert.equal(await jobs.busy(fake([], [write])), false, "A4 a queued passive write is not work");
+  assert.equal(await jobs.busy(fake([blocked], [])), false, "A5 a blocked task is not work");
+  assert.equal(await jobs.busy(fake([], [{ ...write, type: "input" }])), true, "queued input is work");
+  assert.equal(
+    await jobs.busy(fake([{ record: { id: 3, kind: "x" }, state: { kind: "sleeping", until: 1 } }], [])),
+    true,
+    "a sleeping task is work",
+  );
 }
 
 await harness.close(context);

@@ -41,3 +41,9 @@ Verified by `scripts/uploads-search-e2e.mjs` (fake model, headless Chrome, priva
 
 ## Leftovers
 - L1 Observability health "Failed jobs" counts only the viewed chat; "Project" ignores a failing other chat.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The new client has no uploads UI and no composer attachments yet. The script uploads through `POST /upload` with the browser token,
+sends attachments with `message`, and deletes with `upload-delete`; every storage, search, vision and restart case stays. Retired with
+the classic layout: K1 (upload viewer), K2 (Knowledge drop zone and picker), K4 (uploads list at 390 px), C1/C6 (composer picker, drop
+and transcript chips) and the human labels of search tool rows. Known gap: no way to upload, attach, view or delete files in the new client.

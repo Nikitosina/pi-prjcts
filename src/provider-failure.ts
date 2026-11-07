@@ -20,6 +20,26 @@ export function unansweredReason(answer: { reason: string; detail?: unknown }): 
     : answer.reason;
 }
 
+type TurnEntry = { readonly model?: readonly unknown[] };
+type AssistantShape = { role?: string; content?: readonly { type: string; text?: string }[]; stopReason?: string; errorMessage?: string };
+
+/**
+ * A turn that ended done with an empty answer right after a quota or rate-limit error, as a `model_error` reason; else undefined.
+ * A provider can answer Durable's retry of the failed request with nothing, which settles the turn instead of failing it.
+ */
+export function emptyAnswerFailure(entries: readonly TurnEntry[]): string | undefined {
+  const [failed, answer] = entries.slice(-2).map((entry) => entry.model?.[0] as AssistantShape | undefined);
+  if (
+    answer?.role !== "assistant" ||
+    answer.stopReason !== "stop" ||
+    answer.content?.some((part) => part.type !== "text" || part.text?.trim())
+  )
+    return undefined;
+  if (failed?.role !== "assistant" || failed.stopReason !== "error" || !failed.errorMessage) return undefined;
+  const reason = `model_error: ${failed.errorMessage.slice(0, 2000)}`;
+  return providerFailure(reason) ? reason : undefined;
+}
+
 export const QUOTA_RETRY_LIMIT = 8;
 export const QUOTA_RETRY_BASE_MS = 15 * 60_000;
 export const quotaRetryDelay = (attempt: number, base: number) => Math.min(6 * 60 * 60_000, base * 2 ** Math.min(attempt - 1, 8));

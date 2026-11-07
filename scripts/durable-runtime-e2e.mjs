@@ -99,7 +99,7 @@ try {
   assert.equal(answer.status, "done");
   assert.match(answer.text, /ADAPTER_READY/);
   pass("Fake-model coordinator answers");
-  assert.ok(modelRequests.some((request) => request.includes("After asking for an owner decision, end your turn")));
+  assert.ok(modelRequests.some((request) => request.includes("After asking the owner for a decision, end the turn")));
   assert.ok(modelRequests.some((request) => request.includes("agents report")));
   pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();
@@ -172,7 +172,7 @@ try {
   assert.ok(workerContextSawSecret, "worker tool result was not present in a subsequent actual model request");
   pass("Worker reads topic on demand and receives its tool result in context");
   const workerRequest = modelRequests.findLast(
-    (request) => request.includes("Role profile: worker.") && request.includes(secretForWorkerContext),
+    (request) => request.includes("You are a worker for") && request.includes(secretForWorkerContext),
   );
   assert.ok(workerRequest.includes("job checkpoint"));
   assert.ok(workerRequest.includes("End with one short acknowledgment"));
@@ -213,9 +213,10 @@ try {
   pass("Read-only worker note mutation denied");
   const memory = await readKnowledge(dir, "MEMORY.md");
   writeFileSync(join(dir, "knowledge", "MEMORY.md"), "x".repeat(3001));
-  const invalid = await runtime.say("Reply INVALID_SHOULD_NOT_RUN.", { requestId: "invalid" });
-  assert.ok(invalid.status === "unanswered" || invalid.text?.includes("3000"));
-  pass("Oversized memory blocks actual model request");
+  // The generated memory index replaced MEMORY.md in the prompt (docs/ui2-contract.md "Memory"), so a damaged file no longer blocks a turn.
+  const oversized = await runtime.say("Reply exactly OVERSIZED_STILL_RUNS.", { requestId: "oversized" });
+  assert.match(oversized.text ?? "", /OVERSIZED_STILL_RUNS/);
+  pass("Oversized MEMORY.md is not injected and does not block a request");
   const damaged = await readKnowledge(dir, "MEMORY.md");
   await writeKnowledge({ dir, path: "MEMORY.md", text: memory.text, expectedRevision: damaged.revision, author: "owner" });
   assert.match((await runtime.say("Reply exactly REPAIRED.", { requestId: "repair" })).text, /REPAIRED/);

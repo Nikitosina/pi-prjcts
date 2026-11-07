@@ -7,8 +7,11 @@ import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
 import { McpSettings } from "./mcp-profiles.ts";
+import { ProfileIdSchema, ProfileSettings, Profiles, Tier } from "./profiles.ts";
+import { UiPatch } from "./ui-settings.ts";
 import { ThreadReference } from "./transcript-reader.ts";
-export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer", "verifier"] as const;
+import { PROJECT_PROMPT_TARGETS, ProjectPromptBlocks, PromptBlockList } from "./prompt-blocks.ts";
+export const PROMPT_ROLES = ["coordinator", "worker", "scout", "reviewer"] as const;
 const promptText = Type.String({ minLength: 1, maxLength: 24000 });
 export const PromptOverrides = Type.Object(
   {
@@ -16,6 +19,7 @@ export const PromptOverrides = Type.Object(
     worker: Type.Optional(promptText),
     scout: Type.Optional(promptText),
     reviewer: Type.Optional(promptText),
+    /** Retired with the verifier role; kept so older project files still load. */
     verifier: Type.Optional(promptText),
   },
   { additionalProperties: false },
@@ -23,9 +27,15 @@ export const PromptOverrides = Type.Object(
 
 const text = Type.String({ minLength: 1, maxLength: 32000 });
 export const DEFAULT_VERIFY_ROUNDS = 3;
-/** Host-wide "deploy when idle" opt-in: hours of the local day, end exclusive (see deploy.ts). */
+/** Host-wide nightly deploy opt-in (`idle` keeps its stored name): hours of the local day, end exclusive (see deploy.ts). */
 export const DeploySettings = Type.Object(
-  { idle: Type.Boolean(), startHour: Type.Integer({ minimum: 0, maximum: 23 }), endHour: Type.Integer({ minimum: 0, maximum: 23 }) },
+  {
+    idle: Type.Boolean(),
+    startHour: Type.Integer({ minimum: 0, maximum: 23 }),
+    endHour: Type.Integer({ minimum: 0, maximum: 23 }),
+    /** Deploys ship the newest origin/<branch> (fetched, checked, then fast-forwarded); unset ships the checkout's HEAD. */
+    branch: Type.Optional(Type.String({ pattern: "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$" })),
+  },
   { additionalProperties: false },
 );
 export type DeploySettings = Static<typeof DeploySettings>;
@@ -50,9 +60,39 @@ export const ContextSettings = Type.Object(
 export type ContextSettings = Static<typeof ContextSettings>;
 const knowledgePath = Type.String({ minLength: 1, maxLength: 1024 });
 const revision = Type.String({ minLength: 1, maxLength: 128 });
+const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const PromptTargetSchema = Type.Union([
+  Type.Literal("coordinator"),
+  Type.Literal("worker"),
+  Type.Literal("scout"),
+  Type.Literal("reviewer"),
+  Type.Literal("contract"),
+  Type.Literal("integrations"),
+  Type.Literal("host"),
+]);
 export const Role = Type.Union([Type.Literal("worker"), Type.Literal("scout"), Type.Literal("reviewer")]);
 export type Role = Static<typeof Role>;
 export const Id = Type.String({ pattern: "^[a-f0-9-]{36}$" });
+/** UI 2.0 thinking levels; "max" is the provider's highest. */
+export const ThinkingLevel = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("max"),
+]);
+export type ThinkingLevel = Static<typeof ThinkingLevel>;
+/** A change to the Host agent's settings; `model` is a plain "provider/model" ref until tiers decide it. */
+export const HostAgentSettingsPatch = Type.Object(
+  {
+    /** null clears the pin so the tier (or the newest project's model) applies. */
+    model: Type.Optional(Type.Union([Type.String({ pattern: "^[^/\\s]+/\\S+$", maxLength: 200 }), Type.Null()])),
+    tier: Type.Optional(Type.Union([Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }), Type.Null()])),
+    thinking: Type.Optional(ThinkingLevel),
+    disabledTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
+  },
+  { additionalProperties: false },
+);
 /** "github" or the id of a provider plugin. */
 export const Provider = Type.String({ minLength: 1, maxLength: 64 });
 export const WorkspaceRepositoryAuthorization = Type.Object(
@@ -153,10 +193,14 @@ export const Project = Type.Object(
     commandProfiles: Type.Optional(Type.Array(CommandProfile, { maxItems: 32 })),
     /** Skill names per profile; absent = repository skills for every profile (skill-profiles.ts). */
     skillProfiles: Type.Optional(SkillProfiles),
-    /** MCP servers per profile and the servers whose write tools are allowed; absent = none (mcp-profiles.ts). */
+    /** Per-profile tier, thinking level and switched-off tools; an absent profile keeps the legacy model fields and medium thinking. */
+    profiles: Type.Optional(Profiles),
+    /** MCP servers per profile; absent enables every ready server (mcp-profiles.ts). */
     mcp: Type.Optional(McpSettings),
     /** Owner overrides of the editable role instructions, per role (this project only). Absent = the built-in text. */
     prompts: Type.Optional(PromptOverrides),
+    /** Ordered behavior blocks per prompt target (prompt-blocks.ts); a target saved here replaces its legacy `prompts` override. */
+    promptBlocks: Type.Optional(ProjectPromptBlocks),
     /** Shell command run once in each fresh whole-repository worktree (e.g. `bun run worktree:setup`). */
     worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
     contextSettings: Type.Optional(ContextSettings),
@@ -167,9 +211,10 @@ export const Project = Type.Object(
       worker: Type.Optional(text),
       scout: Type.Optional(text),
       reviewer: Type.Optional(text),
+      /** Retired with the verifier role; kept so older project files still load. */
       verifier: Type.Optional(text),
     }),
-    /** Opt-in verification loop: a fresh verifier runs this skill against each finished worker task. Needs models.verifier; neither has a default. */
+    /** Opt-in verification: the worker runs this skill itself and records each run with projects_verify_run. */
     verification: Type.Optional(VerificationSettings),
     /** Explicit quota fallback per role; absent means wait for the selected model's quota to reset. */
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
@@ -459,6 +504,35 @@ export const Snapshot = Type.Object({
   ),
 });
 export type Snapshot = Static<typeof Snapshot>;
+const scheduleId = Type.Optional(Type.String({ minLength: 1, maxLength: 256 }));
+const scheduleName = Type.String({ minLength: 1, maxLength: 120 });
+const scheduleRevision = Type.Integer({ minimum: 0 });
+/** When a schedule runs: once at `atMs`, every `everyMs` from it, or on a calendar rule. */
+const scheduleTiming = {
+  atMs: Type.Integer({ minimum: 0 }),
+  everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })),
+  calendar: Type.Optional(
+    Type.Union([
+      Type.Object(
+        {
+          kind: Type.Literal("daily"),
+          timezone: Type.String({ minLength: 1, maxLength: 256 }),
+          time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
+        },
+        { additionalProperties: false },
+      ),
+      Type.Object(
+        {
+          kind: Type.Literal("weekly"),
+          timezone: Type.String({ minLength: 1, maxLength: 256 }),
+          time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
+          days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }),
+        },
+        { additionalProperties: false },
+      ),
+    ]),
+  ),
+};
 export const Request = Type.Union([
   Type.Object({ action: Type.Literal("remote-reload") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("remote-status") }, { additionalProperties: false }),
@@ -524,7 +598,75 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("web") }, { additionalProperties: false }),
-  Type.Object({ action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ui-get") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("ui-set"), revision: sha256, patch: UiPatch }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("storage-get") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("storage-set"),
+      revision: sha256,
+      patch: Type.Object({ cacheRoot: Type.Optional(Type.Union([Type.String(), Type.Null()])) }, { additionalProperties: false }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("tiers-get") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("tiers-set"), revision: sha256, tiers: Type.Array(Tier, { maxItems: 64 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("profiles-get"), projectId: Id }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("profiles-set"), projectId: Id, revision: sha256, profile: ProfileIdSchema, patch: ProfileSettings },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("profile-tools"), projectId: Id, profile: ProfileIdSchema }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("prompt-render"),
+      /** Absent only for the Host agent's own prompt (`profile: "host"`). */
+      projectId: Type.Optional(Id),
+      profile: Type.Union([ProfileIdSchema, Type.Literal("host")]),
+      chatId: Type.Optional(ChatId),
+      /** A worker as a task helper of a chat instead of an independent Job worker. */
+      workerMode: Type.Optional(Type.Union([Type.Literal("job"), Type.Literal("task")])),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("prompt-blocks-get"), projectId: Type.Optional(Id), target: PromptTargetSchema },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("prompt-blocks-set"),
+      projectId: Type.Optional(Id),
+      target: PromptTargetSchema,
+      revision,
+      /** The whole ordered list; null returns the target to its built-in blocks. */
+      blocks: Type.Union([PromptBlockList, Type.Null()]),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("memory-index"), projectId: Id, includeArchive: Type.Optional(Type.Boolean()) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("memory-undo"), projectId: Id, path: knowledgePath, revision }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("memory-recent"), projectId: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("chat-stop"),
+      projectId: Id,
+      chatId: Type.Optional(ChatId),
+      reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    // `requestId` admits the turn the answer wakes, so a replayed Telegram update cannot wake the chat twice.
+    { action: Type.Literal("answer"), id: Id, entry: Id, text, origin: messageOrigin, requestId: Type.Optional(Id) },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("list") }, { additionalProperties: false }),
   Type.Object(
     {
@@ -663,6 +805,27 @@ export const Request = Type.Union([
               { additionalProperties: false },
             ),
           ),
+          /** A whole ordered list per target; null returns the target to its built-in blocks and drops its legacy override. */
+          promptBlocks: Type.Optional(
+            Type.Object(
+              Object.fromEntries(
+                PROJECT_PROMPT_TARGETS.map((target) => [target, Type.Optional(Type.Union([PromptBlockList, Type.Null()]))]),
+              ),
+              { additionalProperties: false },
+            ),
+          ),
+          /** A profile set to null returns to the legacy model fields and medium thinking. */
+          profiles: Type.Optional(
+            Type.Object(
+              {
+                coordinator: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                worker: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                scout: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+                reviewer: Type.Optional(Type.Union([ProfileSettings, Type.Null()])),
+              },
+              { additionalProperties: false },
+            ),
+          ),
           /** "" removes the worktree setup command. */
           worktreeSetup: Type.Optional(Type.String({ maxLength: 4000 })),
           /** null restores the defaults (catalog window, pi-durable compaction policy). */
@@ -678,6 +841,8 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("chat-reset"), id: Id, chatId: Type.Optional(ChatId) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("artifacts-list"), id: Id, threadId: Type.Optional(Id) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-snapshot"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("storage-usage"), id: Id }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("storage-summary"), fresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("worktrees-cleanup"), id: Id, confirm: Id }, { additionalProperties: false }),
   Type.Object(
     {
@@ -981,6 +1146,7 @@ export const Request = Type.Union([
     { action: Type.Literal("worker-contexts"), id: Id, threadIds: Type.Array(Id, { maxItems: 40, uniqueItems: true }) },
     { additionalProperties: false },
   ),
+  // `visit` is still accepted from older pages; a read never polls either way.
   Type.Object({ action: Type.Literal("limits-snapshot"), visit: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("limits-refresh") }, { additionalProperties: false }),
   Type.Object(
@@ -1027,36 +1193,89 @@ export const Request = Type.Union([
     {
       action: Type.Literal("schedule-create"),
       id: Id,
-      scheduleId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-      atMs: Type.Integer({ minimum: 0 }),
-      everyMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 31536000000 })),
-      calendar: Type.Optional(
-        Type.Union([
-          Type.Object(
-            {
-              kind: Type.Literal("daily"),
-              timezone: Type.String({ minLength: 1, maxLength: 256 }),
-              time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
-            },
-            { additionalProperties: false },
-          ),
-          Type.Object(
-            {
-              kind: Type.Literal("weekly"),
-              timezone: Type.String({ minLength: 1, maxLength: 256 }),
-              time: Type.String({ pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }),
-              days: Type.Array(Type.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7, uniqueItems: true }),
-            },
-            { additionalProperties: false },
-          ),
-        ]),
-      ),
+      scheduleId,
+      ...scheduleTiming,
+      name: Type.Optional(scheduleName),
       text,
     },
     { additionalProperties: false },
   ),
   Type.Object(
+    {
+      action: Type.Literal("routine-script-create"),
+      id: Id,
+      scheduleId,
+      ...scheduleTiming,
+      name: Type.Optional(scheduleName),
+      command: Type.String({ minLength: 1, maxLength: 32000 }),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 7200000 })),
+      chatId: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("routine-script-set"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+      command: Type.Optional(Type.String({ minLength: 1, maxLength: 32000 })),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 60000, maximum: 7200000 })),
+      chatId: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 256 }), Type.Null()])),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-output"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      requestId: Type.String({ minLength: 1, maxLength: 512 }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
     { action: Type.Literal("schedule-enable"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("schedule-run"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-update"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+      name: Type.Optional(Type.Union([scheduleName, Type.Null()])),
+      text: Type.Optional(text),
+      schedule: Type.Optional(Type.Object(scheduleTiming, { additionalProperties: false })),
+      cleanup: Type.Optional(
+        Type.Object(
+          {
+            cacheCapGb: Type.Optional(Type.Integer()),
+            unusedDays: Type.Optional(Type.Integer()),
+            videoDays: Type.Optional(Type.Integer()),
+            disposable: Type.Optional(Type.Array(Type.String({ maxLength: 256 }), { maxItems: 64 })),
+          },
+          { additionalProperties: false },
+        ),
+      ),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("schedule-delete"),
+      id: Id,
+      scheduleId: Type.String({ minLength: 1, maxLength: 256 }),
+      revision: scheduleRevision,
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: Type.Literal("schedule-restore"), id: Id, scheduleId: Type.String({ minLength: 1, maxLength: 256 }) },
     { additionalProperties: false },
   ),
   Type.Object(
@@ -1157,6 +1376,31 @@ export const Request = Type.Union([
   Type.Object({ action: Type.Literal("telegram-pair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-unpair") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("telegram-remove"), confirm: Type.Literal("remove") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("host-agent-send"), requestId: Id, text }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("host-agent-stop") }, { additionalProperties: false }),
+  Type.Object({ action: Type.Literal("host-agent-reset") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("host-agent-settings"),
+      revision: Type.Optional(Type.Integer({ minimum: 0 })),
+      patch: Type.Optional(HostAgentSettingsPatch),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("approvals-list") }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("approval-decide"),
+      id: Id,
+      decision: Type.Union([Type.Literal("approve"), Type.Literal("deny")]),
+      note: Type.Optional(Type.String({ maxLength: 2000 })),
+    },
+    { additionalProperties: false },
+  ),
 ]);
 export type Request = Static<typeof Request>;
 export const Reply = Type.Union([

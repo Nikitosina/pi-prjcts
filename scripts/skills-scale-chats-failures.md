@@ -16,3 +16,9 @@ Written before code. `scripts/skills-scale-chats-e2e.mjs` checks these with a fa
 
 ## Regressions
 20. multi-chat, live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+F17 is the Broken chat's "needs you" dot in the tree while Main is open (the classic Main warning banner with Open chat is retired).
+F6 reads the `coordinator-skills` catalog over the host API: the classic Settings skills picker is retired and the new client has no
+skills picker yet (gap: per-role skill profiles are editable only over `settings-update` or the Host agent). F10-F13 and L1 keep the
+usage data checks over `usage-snapshot`; the classic Observability tab is retired. F18 checks the tree at 390 px.

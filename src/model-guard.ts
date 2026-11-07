@@ -91,3 +91,40 @@ export function guardedStream(
   })();
   return out;
 }
+
+/**
+ * `guardedStream` for a Pi Durable model request. Durable aborts every invocation's signal when the invocation ends, even
+ * after a normal response. A provider that keeps a query open across tool rounds (claude-bridge parks its Claude Code query
+ * at the tool boundary) would be killed by that routine end, so once the stream has settled only real aborts (stop/abort,
+ * no "invocation has ended") pass through.
+ */
+export function durableGuardedStream(
+  dispatch: Dispatch,
+  model: Parameters<Dispatch>[0],
+  request: Parameters<Dispatch>[1],
+  options: Parameters<Dispatch>[2],
+): AssistantMessageEventStream {
+  let settled = false,
+    signal = options?.signal;
+  if (signal) {
+    const outer = signal,
+      controller = new AbortController();
+    const routineEnd = () => settled && outer.reason instanceof Error && /^Task \S+ invocation has ended$/.test(outer.reason.message);
+    if (outer.aborted) controller.abort(outer.reason);
+    else
+      outer.addEventListener(
+        "abort",
+        () => {
+          if (!routineEnd()) controller.abort(outer.reason);
+        },
+        { once: true },
+      );
+    signal = controller.signal;
+  }
+  const stream = guardedStream(dispatch, model, request, options, signal);
+  const settle = () => {
+    settled = true;
+  };
+  void stream.result().then(settle, settle);
+  return stream;
+}

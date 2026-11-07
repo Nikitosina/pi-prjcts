@@ -25,10 +25,12 @@ import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
  *  - merge      result acceptance for the checkout kind: inspect a PR, merge at the approved head, auto-merge, pull the main checkout.
  *  - coordinatorTools  tools (and an instruction snippet) offered to the coordinator for matching projects.
  *  - rpc        namespaced host RPCs, called as { action: "plugin", plugin, method, id?, params? }.
+ *  - rpcPolicy  per rpc method: "read" | "write" | "dangerous" or a function of params; agents need approval for unclassified methods.
  *  - uncertainWrites  durable "an outcome is unknown" check that blocks automatic admission.
  *  - workerTools  tools (and an instruction snippet) for whole-repository workers; frozen per thread like every worker tool.
  *  - leaseName  canonical name for host lease resources the plugin owns (aliases share one lease).
  *  - lifecycle  pause around project lifecycle changes; close at host shutdown.
+ *  - cleanup    a step of each project's Workspace cleanup routine (for example erasing idle devices the plugin owns).
  *  - web        browser script/style for the project screen and authenticated GET routes.
  */
 
@@ -45,7 +47,6 @@ export type PrId = string;
 
 // ---- vcs ----
 export type CodeDiffParts = { mergeBase: string; changed: string; diff: string; untracked: string[] };
-export type ReadHeads = { ensure(ref: string): Promise<{ root: string; sha: string }>; restore(sha: string): Promise<string> };
 export type ContinuationBranch = { name: string; sha: string };
 export type VcsProvider = {
   /** Checkout kind reported by findVcsRoot; also the workspace grant provider id. */
@@ -64,10 +65,6 @@ export type VcsProvider = {
   ): Promise<CodeDiffParts>;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
-  /** Read-only snapshots of PR heads for scouts and reviewers. */
-  readHeads(input: { checkout: string; controlRoot: string; projectId: string; project: () => Project }): ReadHeads;
-  /** Entry inside a read-head snapshot that marks it as this kind. */
-  readHeadMarker: string;
   /** Resolves and authorizes an existing branch (or PR) for a new worker thread to continue. */
   resolveContinuation(project: Project, ref: string, checkout: string): Promise<ContinuationBranch>;
   /** Extra worker rules (one sentence) added to every worker/scout/reviewer role text. */
@@ -218,6 +215,8 @@ export type WorkspaceProvider = {
     plan(context: CoordinatorBindContext): Promise<AllocationPlan>;
     attach(context: CoordinatorAttachContext): Promise<CoordinatorAttachment>;
   };
+  /** Shell policy of task helpers (shared and isolated), which never publish; core's Git helper policy applies when absent. */
+  helperGuard?(command: string): string;
   /** Chosen-commit task allocation without independent publication policy. */
   task?: {
     plan(context: TaskPlanContext): Promise<AllocationPlan>;
@@ -248,9 +247,11 @@ export type WorkspaceProvider = {
     receipt: WorkspaceReceipt;
     state: string;
   }): Promise<{ ok: true; started: true } | { ok: false; started: boolean; error: string }>;
-  /** Removes a worker worktree or read-head snapshot (unforced, fenced). */
-  remove(input: { entry: string; leaseOwner: string }): Promise<{ ok: true } | { ok: false; error: string }>;
-  readHeadEntry(project: Project, path: string): { leaseOwner: string; entry: string };
+  /**
+   * Removes a worker worktree (unforced, fenced). `atBase`: a scout's or reviewer's worktree the host saw clean at its base commit after
+   * the reader ended; the provider rechecks that and may then remove it although that commit or its branch is on no remote.
+   */
+  remove(input: { entry: string; leaseOwner: string; atBase?: true }): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Worktrees that are not plain directories (size is never measured). */
   virtualMount: boolean;
   mountLabel?: string;
@@ -420,7 +421,12 @@ export type CoordinatorToolsProvider = {
     extension: Extension;
   };
   applies(project: Project): boolean;
-  /** Appended to the coordinator instructions of matching projects. */
+  /**
+   * The coordinator's rules for these tools as an editable integration block (`plugin:<plugin name>`, Settings → Prompt): shown
+   * while `applies` and `on` hold. `text` may use `{project}`, `{projectId}` and `{githubRepos}`. Replaces `instructions`.
+   */
+  prompt?: { name: string; text: string; on?(project: Project): boolean };
+  /** Older form: appended to the coordinator instructions of matching projects as locked text. Ignored when `prompt` is set. */
   instructions?(project: Project): string;
 };
 export type PluginRpcContext = {
@@ -435,6 +441,10 @@ export type PluginRpcContext = {
   mutateIdle(projectId: string, change: { validate(project: Project): void; apply(project: Project): Project }): Promise<void>;
 };
 export type PluginRpcHandler = (context: PluginRpcContext) => Promise<unknown>;
+/** What an RPC call does, for agents: reads and safe writes run; `dangerous` calls need the owner's approval. */
+export type PluginRpcKind = "read" | "write" | "dangerous";
+/** Per method, or per call from its params; a method without one is treated as dangerous when an agent calls it. */
+export type PluginRpcPolicy = PluginRpcKind | ((params: unknown) => PluginRpcKind);
 
 export type WorkerToolsProvider = {
   /** Whether a new thread of this project gets the tools. Threads keep the tool set they were first bound with. */
@@ -466,11 +476,22 @@ export type PluginCapabilities = {
   merge?: MergeProvider;
   coordinatorTools?: CoordinatorToolsProvider;
   rpc?: Record<string, PluginRpcHandler>;
+  /** Agent policy of the `rpc` methods (Host agent `host_call`); unclassified methods need the owner's approval. */
+  rpcPolicy?: Record<string, PluginRpcPolicy>;
   uncertainWrites?: (tx: Tx, root: Conversation["id"]) => Promise<boolean>;
   workerTools?: WorkerToolsProvider;
   /** Canonical lease name for a resource the plugin owns, or undefined to leave it to others. */
   leaseName?: (resource: string) => string | undefined;
   lifecycle?: LifecycleHooks;
+  /** One step of a project's Workspace cleanup routine, after the core steps. Resolves with a one-line summary; throws when it failed.
+   * Remove only what the plugin owns and nobody uses now, and nothing used within `unusedDays`. */
+  cleanup?: (input: { projectId: string; unusedDays: number; signal: AbortSignal }) => Promise<string>;
+  /** The plugin's row in a project's Storage: what it keeps on disk for the project and what its cleanup step would free; null when nothing. */
+  usage?: (input: {
+    projectId: string;
+    unusedDays: number;
+    signal: AbortSignal;
+  }) => Promise<(Omit<import("./storage-usage.ts").StorageMeasure, "note"> & { label: string; note?: string }) | null>;
   web?: WebContribution;
 };
 export type LeaseHolder = { projectId: string; threadId: string };

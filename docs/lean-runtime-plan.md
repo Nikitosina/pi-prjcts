@@ -18,8 +18,8 @@ Branch `lean-runtime`, worktree `~/Projects/pi-prjcts-next`. Goal: move pi-prjct
 3. **Builder**: built from an outside Pi session with subagents, not by the pi-prjcts coordinator.
 4. **Tests and docs**: delete what covers removed code or is known-failing; fix the rest to green; remove `knownFailing`. Replace DURABLE.md with a short architecture doc and add AGENTS.md.
 5. **Verification**: the worker spawns a fresh verifier (project verify skill) after finishing, repairs, and repeats up to N rounds (default 3, per project). After N it returns "Ready with gaps" with proof to the coordinator. No host-owned cycle, no `blocked` state.
-6. **Approve**: merges the PR and pulls main automatically. Redeploying pi-prjcts is separate: a Deploy button plus a "deploy when idle" toggle with a time window; restart only when no project has running work; auto-rollback on failed smoke test.
-7. **Roles**: keep coordinator, worker, scout, reviewer, verifier. One review per PR plus at most one re-check after fixes; three-axis review only on request.
+6. **Approve**: merges the PR and pulls main automatically. Redeploying pi-prjcts is separate: a Deploy button plus a "deploy when idle" toggle with a time window; restart only when no project has running work; auto-rollback on failed smoke test. Superseded on 2026-11-05, see "Live deploy" below.
+7. **Roles**: keep coordinator, worker, scout, reviewer, verifier. One review per PR plus at most one re-check after fixes. Superseded 2026-11-05 by the owner: the worker runs the review itself, one reviewer under 1000 changed lines and the three-axis `pr-review` at 1000 or more.
 8. **Watchdog**: code detects only hard stalls (no new transcript entries for N minutes, identical call with identical result 5+ times, hung process). The coordinator gets a notice with the last steps and decides freely; leaving the worker alone is the default. Never stops automatically.
 9. **Jev / TypeSafe**: out of scope for now.
 10. **Architecture**: run improve-codebase-architecture on this branch before the rewrite; its findings shape the module split.
@@ -94,6 +94,14 @@ After PR33 was opened, the owner clarified that one Coordinator chat owns a larg
 - Missing grants, invalid ownership and unsupported isolated provider capabilities fail visibly. There is no fallback to the owner's checkout or provider trunk.
 - This decision does not authorize merging PR33, deploying it, restarting the live host or publishing the private Arc plugin.
 
+## Verifier retired (owner decision, 2026-11-03)
+
+The owner accepted removing the verifier role and Owner setup as part of UI 2.0 (`docs/ui2-plan.md`, Decisions 1). This replaces decision 5's "spawns a fresh verifier" and decision 7's verifier role.
+
+- The independent worker runs the project's verify skill itself and records every check with `projects_verify_run` on the candidate commit, repairing up to `verification.rounds`. `checkProofRefs` still rejects Ready proof that names missing, failed or other-commit runs.
+- New turns cannot start a verifier subagent; recorded verifier conversations still read. Turning verification on no longer needs a verifier model.
+- One automatic reviewer and one re-check stay as before; its brief carries the run ids instead of the verifier's proof.
+
 ## Quiet coordinator chat (2026-11-02)
 
 The owner approved removing service chatter from the main conversation and reducing unnecessary Coordinator invocations.
@@ -104,3 +112,9 @@ The owner approved removing service chatter from the main conversation and reduc
 - After asking for an owner decision, end the turn without sending acknowledgment-only wait messages. New actionable results and failures must still reach the Coordinator.
 - The owner explicitly chose a separate `job checkpoint` action for an independent worker's unfinished stage. It retains the branch and evidence, notifies the Coordinator once, offers no Approve action, and continues through new instructions to the same worker. It is not a host-owned blocked workflow.
 - Changes and verification run privately. This decision does not authorize deploying or restarting the running host.
+
+## Live deploy (2026-11-05)
+
+- Deploy no longer waits for idle projects. Preparation runs while work continues; then running tool calls get 10 s, the rest is cut off, and Pi Durable continues every agent after the start. There is one mode: the CLI, the agents and the nightly window all deploy this way.
+- `projects_redeploy` deploys without owner approval and returns after the restart with the outcome. Only the Host agent and the Coordinator of the project whose `cwd` is the host's own checkout get it.
+- A normal deploy takes no backup of the home. A backup stays part of a manual Pi Durable schema upgrade only.

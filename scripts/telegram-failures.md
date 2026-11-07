@@ -47,3 +47,32 @@ Owner decision: one bot per host, token supplied in Settings. Long-polling `getU
 30. A multi-part message re-sends earlier parts after a mid-way send failure (duplicates), or reply-to on a later part does not route.
 31. Telegram still refuses the HTML (400 "can't parse entities"): the notice is stuck retrying forever instead of falling back to plain text.
 32. Bot command replies (help, /projects with names containing `<`) break because they are now parsed as HTML.
+
+## `/status` with subscription limits, added before the change
+Owner decision: limits refresh only on an explicit owner request (`scripts/limits-manual-failures.md`). `/status` is one, so it sends one `limits-refresh` through the normal dispatch and reports what that returns. Proof: `scripts/telegram-jobs-unit.mjs` (fake Bot API, fake dispatch).
+33. `/status` loses the route line, or fails without a picked project instead of still reporting host-wide limits.
+34. `/status` polls providers itself, polls more than once per command, or starts a timer; or it skips the refresh and only reads the cache.
+35. A provider with no reading shows a fabricated `0%` or `$0` instead of "no data", "unavailable" or its reason.
+36. A cached reading kept after a failed or rate-limited refresh is shown as fresh: its age, the failure reason and the Retry-After wait are missing.
+37. Providers hidden in Settings are listed, or all hidden gives an empty reply.
+38. A failed `limits-refresh` gives no reply; the last cached snapshot must be shown with the error, or the error alone if there is none.
+39. A long provider reason makes the reply exceed Telegram's limit, or the plain-text reply is sent with a `parse_mode`.
+
+## Questions answered from Telegram, added before the change
+40. A question answered in Telegram stays open in an open UI2 tab: the card stays until a reload, or reappears after one.
+41. Answering by button in one chat resolves or hides another chat's question, or a paused project (waking the chat deferred) leaves the card up until a reload.
+42. Ordinary text to a chat with an open question resolves it (only a button or a reply to the question's own message answers), or a replayed answer update wakes the chat twice.
+
+## Telegram setup in Settings → Notifications, added before the change
+Owner decision (2026-11-04): the classic inbox is retired, and it was the only place to save the bot token and pair. The same card
+moves to the new client's Settings → Notifications; host behaviour is unchanged. Proof: `scripts/telegram-e2e.mjs` (T1/T2/T5/T6/T22, 43-45).
+43. Settings → Notifications only says whether Telegram is paired: no token field, no Pair, Unpair or Remove, or a refused token is
+    not said in place.
+44. Pairing finished in Telegram leaves an open Settings page on "not paired" until it is reopened, or the page learns it by polling
+    instead of a host topic.
+45. Remove bot works on one press, the typed token stays in the field after Save, or a redraw drops what the owner is typing.
+
+## Job progress over a broken network, added before the change (2026-11-06)
+46. A network failure while sending or editing a Job progress message rejects the fire-and-forget `progress()` call, and the
+    unhandled rejection exits the host. Each restart cuts off running work, until durable tasks are parked. Progress is best-effort:
+    the failure is recorded as a delivery error, and the next progress update for that Job tries again.

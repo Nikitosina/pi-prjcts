@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { createKit, call, say, randomUUID } from "./lib/e2e-kit.mjs";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-const where = `await tools.bash({ command: 'pwd; echo "ART=$PI_ARTIFACTS_DIR"' })`;
+const where = `await tools.bash({ command: 'pwd; echo "ART=$PI_ARTIFACTS_DIR"; echo "CACHE=$PI_WORKSPACE_CACHE"' })`;
 let owner = "",
   root = "",
+  approvalTarget = "",
   coordinatorResults = [];
 const scripts = {
   coordinator: () => `const ok = ${where};
@@ -60,6 +61,24 @@ const k = await createKit("codemode-native-tools", {
 try { await tools.read({ path: "missing-file.txt" }); } catch {}
 await tools.bash({ command: ${JSON.stringify(`touch ${root}/nested-started; sleep 4`)} });`,
             });
+      if (user === "MARK-DISABLED")
+        return results.length
+          ? say("disabled done")
+          : call("codemode", {
+              code: `let outcome;
+try { await tools["projects_knowledge_write"]({ path: "preferences/forbidden.md", text: "must not run", expectedRevision: null }); outcome = "ran"; }
+catch (error) { outcome = String(error.message ?? error); }
+console.log(JSON.stringify({ outcome, exposed: ALL_TOOLS.includes("projects_knowledge_write") }));`,
+            });
+      if (user === "MARK-APPROVAL")
+        return results.length
+          ? say("approval done")
+          : call("codemode", {
+              code: `let direct = "not exposed";
+try { await tools.archive({ id: ${JSON.stringify(approvalTarget)} }); direct = "ran"; } catch {}
+const gate = await tools.owner_approval_request({ action: "archive", input: { id: ${JSON.stringify(approvalTarget)} }, summary: "Archive the nested-code-mode target" });
+console.log(JSON.stringify({ direct, state: gate.state, action: gate.action }));`,
+            });
       for (const [marker, kind] of [
         ["MARK-WORKER", "WORKER-CODE"],
         ["MARK-SCOUT", "SCOUT-CODE"],
@@ -110,6 +129,15 @@ await k.run(async () => {
     worktree.startsWith(k.root) && worktree !== k.workspace && /ART=\S*\/artifacts\//.test(coordinator?.ok?.output ?? ""),
     coordinator?.ok,
   );
+  const cacheOf = (output) => /CACHE=(\S*)/.exec(output ?? "")?.[1] ?? "";
+  const coordinatorCache = cacheOf(coordinator?.ok?.output);
+  k.check(
+    "C3 a coordinator's bash names its chat workspace's cache folder, outside the worktree",
+    /\/workspace-cache\/[0-9a-f-]{36}$/.test(coordinatorCache) &&
+      coordinatorCache.startsWith(k.home) &&
+      !coordinatorCache.startsWith(worktree),
+    coordinator?.ok,
+  );
   k.check("N7 scripts get no models global", coordinator?.models === "undefined", coordinator);
   k.check(
     "N9 output past the budget keeps its full text in a file",
@@ -128,26 +156,36 @@ await k.run(async () => {
     results[3],
   );
 
-  const page = await k.openPage(await k.webUrl(id, "coordinator"));
-  await page.waitFor(`!!document.querySelector("#composer, #compose")`, "chat page");
+  const page = await k.openPage(await k.webUrl(id));
+  await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector("#composer")`, "chat page");
   await k.rpc({ action: "message", id, text: "MARK-NESTED" });
   await k.eventually(() => existsSync(join(k.root, "nested-started")), "nested bash started");
-  await page.waitFor(
-    `/now Ran a command/.test(document.querySelector("#live-reply .live-status")?.textContent ?? "")`,
-    "nested live status",
-    60,
-  );
-  const live = await page.evaluate(
-    `({ frame: window.liveFrame?.nested, status: document.querySelector("#live-reply .live-status").textContent })`,
-  );
+  const nested = `document.querySelector('#feed .tool-row.live[data-tool="codemode"] [data-nested]')?.textContent ?? ""`;
+  await page.waitFor(`/now .*bash/.test(${nested}) && /2 calls done, 1 failed/.test(${nested})`, "nested live status", 60000);
+  const live = await page.evaluate(nested);
   await page.shot("nested-live-status");
-  k.check(
-    "N13 the live frame and status name the running nested tool and count finished and failed calls in text",
-    live.frame?.running?.includes("bash") && live.frame.done === 2 && live.frame.failed === 1 && /2 calls done, 1 failed/.test(live.status),
-    live,
-  );
+  k.check("N13 the live codemode row names the running nested tool and counts finished and failed calls in text", true, live);
   await k.settle(id);
 
+  // Cache root setting: absolute only, revision-checked; a set root holds each project's caches in its own folder.
+  const storage = await k.rpc({ action: "storage-get" });
+  const refused = async (input, pattern) => {
+    try {
+      await k.rpc({ action: "storage-set", ...input });
+      return false;
+    } catch (error) {
+      return pattern.test(String(error.message ?? error));
+    }
+  };
+  k.check(
+    "C12 a relative cache root and a stale revision are refused",
+    storage.storage.cacheRoot === null &&
+      (await refused({ revision: storage.revision, patch: { cacheRoot: "caches" } }, /absolute/i)) &&
+      (await refused({ revision: "0".repeat(64), patch: { cacheRoot: "/tmp/x" } }, /revision/i)),
+    storage,
+  );
+  const cacheRoot = join(k.root, "custom-cache");
+  await k.rpc({ action: "storage-set", revision: storage.revision, patch: { cacheRoot } });
   await k.ask(id, "MARK-WORKER");
   k.check(
     "N1 a scoped worker is offered codemode",
@@ -161,6 +199,11 @@ await k.run(async () => {
       !worker.at.output.startsWith(k.workspace) &&
       worker.at.output.split("\n")[0] !== worktree &&
       /ART=\S*\/artifacts\//.test(worker.at.output),
+    worker?.at,
+  );
+  k.check(
+    "C3/C13 a worker's cache folder is its own, under the set cache root in the project's folder",
+    new RegExp(`^${cacheRoot}/${id}/[0-9a-f-]{36}$`).test(cacheOf(worker?.at?.output)),
     worker?.at,
   );
   k.check(
@@ -192,4 +235,36 @@ await k.run(async () => {
   await k.settle(id);
   await k.delay(9000);
   k.check("N8 stopping a worker stops its script's nested bash", !existsSync(join(k.root, "finished")), { job, agent });
+
+  const profiles = await k.rpc({ action: "profiles-get", projectId: id });
+  await k.rpc({
+    action: "profiles-set",
+    projectId: id,
+    revision: profiles.revision,
+    profile: "coordinator",
+    patch: { tools: { disabled: ["projects_knowledge_write"] } },
+  });
+  await k.ask(id, "MARK-DISABLED");
+  const disabled = parse(k.toolResult("coordinator", "MARK-DISABLED"));
+  k.check(
+    "N14 codemode cannot invoke a tool disabled for the conversation profile",
+    disabled?.exposed === false && /does not exist|not available|unknown/i.test(disabled?.outcome ?? "") && disabled?.outcome !== "ran",
+    disabled ?? k.toolResult("coordinator", "MARK-DISABLED"),
+  );
+
+  approvalTarget = await k.createProject("Nested approval target", { grant: false });
+  await k.ask(id, "MARK-APPROVAL");
+  const gate = parse(k.toolResult("coordinator", "MARK-APPROVAL"));
+  const pending = (await k.rpc({ action: "approvals-list" })).approvals.find(
+    (item) => item.action === "archive" && item.input.id === approvalTarget,
+  );
+  k.check(
+    "N15 a nested dangerous action only files an owner approval and does not run directly",
+    gate?.direct === "not exposed" && pending?.state === "pending" && pending?.requestedBy.kind === "coordinator",
+    { gate, pending },
+  );
+  k.check(
+    "N16 the dangerous nested request has not changed its target before approval",
+    (await k.rpc({ action: "list" })).find((item) => item.id === approvalTarget)?.archived !== true,
+  );
 });

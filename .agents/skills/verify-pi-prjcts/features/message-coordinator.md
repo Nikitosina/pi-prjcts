@@ -1,42 +1,27 @@
 # Message the coordinator
 
-The user types in the Coordinator tab's composer, sends, and sees their message and the coordinator's reply in the Main chat. The turn is stored by the host.
+The owner types in the composer of a project's Main chat, sends, and sees their message and the coordinator's reply in the feed. The host stores the turn.
 
 ## Sub-features
 
-- `send` — Send button posts the draft and clears the composer.
-- `reply` — the coordinator's streamed reply lands in `#messages`.
-- `persist` — both turns survive reload and appear in the host's `show` view.
-- `shortcut` — Enter in the composer sends; Shift+Enter inserts a newline.
+- `send`: Enter posts the draft and clears the composer.
+- `reply`: the coordinator's streamed reply lands in `#feed` as an agent message.
+- `persist`: both turns survive a reload and appear in the host's `show` view.
+- `shortcut`: Shift+Enter inserts a newline; `/` outside a text field focuses the composer.
 
 ## How to get to it (user POV)
 
-- Open the project, Coordinator tab, type in "Message the coordinator…", click "Send ↵".
-- Press Enter in the composer.
-- Press `/` outside a text field to focus the composer (per README).
+- Open the inbox, select the project's Main chat in the tree, type in "Message the coordinator…" (❯) and press Enter, or click the send button.
 
 ## Driving it with browser CDP
 
 Preconditions: launch succeeded, doctor `ok: true`, project `Verify seed` exists (seeded).
 
-- `send` + `reply` + `persist`, scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> message-coordinator`. It opens `webUrl`, waits for `#title` to read `Verify seed`, pointer-clicks `textarea[aria-label="Message coordinator"]` (hit-tested, `Input.dispatchMouseEvent`), inserts `VERIFY-PING <run id>` with `Input.insertText`, pointer-clicks `#compose button[type=submit]`. Asserts: exactly one `#messages article.msg.you` bubble with the prompt, the composer is empty, exactly one `article.msg.them` bubble `VERIFY-FAKE-REPLY: VERIFY-PING <run id>`, both bubbles again after `Page.reload`, the host's `show` lists both turns, `model-requests.jsonl` has the prompt. Screenshots `01-before-send`, `02-typed`, `03-reply`, `04-after-reload` land in the drive's own folder.
-- `shortcut` — Enter in the composer sends; Shift+Enter inserts a newline.
-
-## How to get to it (user POV)
-
-- Open the project, Coordinator tab, type in "Message the coordinator…", click "Send ↵".
-- Press Enter in the composer.
-- Press `/` outside a text field to focus the composer (per README).
-
-## Driving it with browser CDP
-
-Preconditions: launch succeeded, doctor `ok: true`, project `Verify seed` exists (seeded).
-
-- `send` + `reply` + `persist`, scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> message-coordinator`. It opens `webUrl`, waits for `#title` to read `Verify seed`, focuses `textarea[aria-label="Message coordinator"]`, inserts `VERIFY-PING <run id>` with `Input.insertText`, clicks `#compose button[type=submit]`. Proof: `#messages` contains `VERIFY-FAKE-REPLY: VERIFY-PING <run id>`, `host-show-messages.json` lists both turns, `model-requests.jsonl` has the prompt, screenshots `01-before-send`, `02-typed`, `03-reply`.
-- `shortcut`, manual recipe: same setup, but dispatch `Input.dispatchKeyEvent` Enter instead of the click; expect the same reply. Not scripted.
+- `send` + `reply` + `persist`, scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> message-coordinator`. It opens `webUrl` (the inbox at `/`), waits for `body[data-ready="1"]` with `Verify seed` and Main in `#tree`, pointer-clicks `#composer textarea`, inserts `VERIFY-PING <run id>` with `Input.insertText` and presses Enter. Asserts: exactly one `#feed .msg.owner` with the prompt, the composer is empty, exactly one `#feed .msg.agent` with `VERIFY-FAKE-REPLY: VERIFY-PING <run id>`, both again after `Page.reload`, the host's `show` lists both turns, `model-requests.jsonl` has the prompt. Screenshots `01-before-send`, `02-typed`, `03-reply`, `04-after-reload`.
+- `shortcut`, manual recipe: Shift+Enter in `#composer-input` adds a line and sends nothing. Not scripted.
 
 ## Gotchas
 
-- The reply is the fake provider's echo. It proves the host-to-model seam and the UI wiring, not real model behavior, prompts, or tool use.
+- The reply is the fake provider's echo. It proves the host-to-model seam and the UI wiring, not real model behavior, prompts or tool use.
 - The turn needs `PI_OFFLINE=1` and the pinned `fake/fake-model`; a project created without pinning tries a real provider and hangs or errors.
-- The sign-in dialog (`#sign-in`) appears if the page is opened without the `#token=` fragment.
+- Opened without the `#token=` fragment (and nothing stored), the page shows the sign-in dialog (`#signin`).

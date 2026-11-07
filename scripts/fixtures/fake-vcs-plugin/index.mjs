@@ -89,19 +89,10 @@ export default {
         isRoot: (dir) => existsSync(join(dir, ".fakevcs")),
         privateDirs: [".fakevcs"],
         executables: ["fakectl"],
-        readHeadMarker: ".fakevcs",
         workerRule: "Fake VCS rule: use fakectl, never git.",
         changedFiles: async () => [],
         codeDiff: async () => ({ mergeBase: HEAD, changed: "", diff: "", untracked: [] }),
         workerState: async () => ({ branch: "fake-branch", head: HEAD, status: "" }),
-        readHeads: () => ({
-          ensure: async () => {
-            throw new Error("fake: no read heads");
-          },
-          restore: async () => {
-            throw new Error("fake: no read heads");
-          },
-        }),
         resolveContinuation: async () => {
           throw new Error("fake: no continuation");
         },
@@ -152,7 +143,6 @@ export default {
           rmSync(join(data().worktreeRoot, entry), { recursive: true, force: true });
           return { ok: true };
         },
-        readHeadEntry: (project, path) => ({ leaseOwner: `fake:${project.id}`, entry: path }),
         setupCards: (project) => {
           if (!isFake(project)) return [];
           const record = api.projects.record(project, RECORD),
@@ -294,6 +284,24 @@ export default {
         },
       },
       uncertainWrites: async () => Boolean(data().uncertainWrites),
+      cleanup: async ({ projectId, unusedDays }) => {
+        const value = data();
+        value.cleanups = [...(value.cleanups ?? []), { projectId, unusedDays }];
+        writeFileSync(dataFile(), JSON.stringify(value));
+        if (value.cleanupFails) throw new Error("fake cleanup step failed");
+        return "fake: erased 1 idle device";
+      },
+      usage: async ({ projectId, unusedDays }) => {
+        if (data().usageFails) throw new Error("fake usage failed");
+        if (data().usageDelayMs) await new Promise((done) => setTimeout(done, data().usageDelayMs));
+        return {
+          label: "Fake devices",
+          count: 2,
+          bytes: 3 * 1024 ** 3,
+          reclaimableBytes: 1024 ** 3,
+          note: `${projectId.slice(0, 8)} ${unusedDays}d`,
+        };
+      },
       rpc: {
         echo: async (context) => ({ params: context.params, projectId: context.projectId, stateDir: api.stateDir }),
         "touch-state": async () => {

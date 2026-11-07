@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { codeDiff } from "./code-diff.ts";
 import { clipLines, RESPONSE_LIMIT } from "./response-limit.ts";
 
+// Not pi's plain names: a scout or reviewer composes every installed extension but the coordinator's, and the coordinator and worker execution tools already own read.
 export const READ_ONLY_CODE_TOOL_NAMES = ["code_read", "code_grep", "code_find", "code_ls", "code_diff"] as const;
 type Built = ReturnType<typeof createReadOnlyTools>;
 

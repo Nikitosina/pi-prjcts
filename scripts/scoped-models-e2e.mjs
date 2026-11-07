@@ -148,198 +148,26 @@ try {
   await k.ask(id, "main", "MARK-PLAIN after restart");
   check("S12 the restarted coordinator requests the saved model", modelsOf("coordinator").at(-1) === "fake-two", modelsOf("coordinator"));
 
-  // Browser: the model button cycles the scope; Settings offers inherit and a scope editor.
+  // S15 over RPC: the classic composer model button and Settings dialog were retired on 2026-11-04 (docs/classic-retirement.md);
+  // the saves they made keep their meaning.
   await update({ models: { scout: null }, scopedModels: ["fake/fake-model", "fake/fake-two", "fake/fake-three"] });
-  await rpc({
-    action: "settings-update",
-    id,
-    confirm: id,
-    expectedRevision: (await settings()).revision,
-    changes: { model: "fake/fake-three" },
-  });
-  const web = await rpc({ action: "web" }),
-    url = new URL(web.url);
-  url.searchParams.set("project", id);
-  const { openPage, waitFor, evaluate, shot } = k;
-  const page = await openPage(url.toString());
-  await waitFor(`!!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`, page, "model button");
-  check(
-    "S14 the composer shows the coordinator model as a button",
-    /fake-three/.test(await evaluate(`document.querySelector('#model-cycle').textContent`, page)),
-  );
-  await evaluate(`document.querySelector('#model-cycle').click()`, page);
-  await eventually(async () => (await settings()).values.model === "fake/fake-model", "button did not cycle forward with wrap-around");
-  check("S14 the button cycles forward through the scope and wraps", true);
-  await waitFor(`/fake-model/.test(document.querySelector('#model-cycle').textContent)`, page, "button label");
-  await evaluate(
-    `(() => { const textarea = document.querySelector('#compose textarea'); textarea.value = 'keep this draft'; textarea.focus(); textarea.setSelectionRange(3, 7); document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'P', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); })()`,
-    page,
-  );
-  await eventually(async () => (await settings()).values.model === "fake/fake-three", "Shift+Ctrl+P did not cycle backward");
-  await waitFor(
-    `/fake-three/.test(document.querySelector('#model-cycle').textContent) && !document.querySelector('#compose textarea').disabled`,
-    page,
-    "backward cycle rendered",
-  );
-  check(
-    "S14 cycling retains composer focus, draft and selection",
-    await evaluate(
-      `(() => { const t = document.querySelector('#compose textarea'); return document.activeElement === t && t.value === 'keep this draft' && t.selectionStart === 3 && t.selectionEnd === 7; })()`,
-      page,
-    ),
-  );
-  await evaluate(
-    `document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`,
-    page,
-  );
-  await eventually(async () => (await settings()).values.model === "fake/fake-model", "Ctrl+P did not cycle forward");
-  await waitFor(
-    `/fake-model/.test(document.querySelector('#model-cycle').textContent) && !document.querySelector('#compose textarea').disabled`,
-    page,
-    "forward cycle rendered",
-  );
-  check(
-    "S14 repeated Ctrl+P retains composer focus",
-    await evaluate(`document.activeElement === document.querySelector('#compose textarea')`, page),
-  );
-  await evaluate(
-    `document.activeElement.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`,
-    page,
-  );
-  await eventually(async () => (await settings()).values.model === "fake/fake-two", "Ctrl+P outside composer did not cycle forward");
-  check("S14 Ctrl+P cycles without composer focus", true);
-  // A configured scope that resolves to nothing usable blocks cycling; it never widens to every configured model.
-  const dead = (await rpc({ action: "model-picker-snapshot" })).items.find((model) => !model.configured)?.reference;
-  check("S18 fixture has an installed model without credentials", !!dead, dead);
-  const cycleOutcome = async () => {
-    const before = (await settings()).values.model;
-    await evaluate(
-      `document.querySelector('#error').hidden = true; document.querySelector('#error').innerHTML = ''; document.querySelector('#model-cycle').click()`,
-      page,
-    );
-    const read = async () => ({
-      before,
-      after: (await settings()).values.model,
-      error: await evaluate(`document.querySelector('#error').hidden ? '' : document.querySelector('#error').innerText`, page),
-    });
-    // The cycle is a host round trip; poll for its visible effect (a new model or the blocking message) instead of a fixed pause.
-    for (let tries = 0; tries < 40; tries += 1) {
-      await delay(250);
-      const outcome = await read();
-      if (outcome.after !== before || outcome.error) return outcome;
-    }
-    return read();
-  };
-  await update({ scopedModels: [dead] });
-  let outcome = await cycleOutcome();
-  check(
-    "S18 a project scope with no usable model blocks cycling with a clear message",
-    outcome.after === outcome.before && /scoped/i.test(outcome.error),
-    outcome,
-  );
-  await update({ scopedModels: null });
-  mkdirSync(join(k.workspace, ".pi"), { recursive: true });
-  writeFileSync(join(k.workspace, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["zzz/none"] }));
-  let oldPage = await evaluate("performance.timeOrigin", page);
-  await evaluate(`location.reload()`, page);
-  await waitFor(
-    `performance.timeOrigin !== ${oldPage} && !!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
-    page,
-    "model button after reload",
-  );
-  outcome = await cycleOutcome();
-  check(
-    "S18 a Pi scope that resolves to nothing blocks cycling too",
-    outcome.after === outcome.before && /scoped/i.test(outcome.error),
-    outcome,
-  );
-  rmSync(join(k.workspace, ".pi"), { recursive: true });
-  await update({ scopedModels: ["fake/fake-model", "fake/fake-two", "fake/fake-three"] });
-  oldPage = await evaluate("performance.timeOrigin", page);
-  await evaluate(`location.reload()`, page);
-  await waitFor(
-    `performance.timeOrigin !== ${oldPage} && !!document.querySelector('#model-cycle') && !document.querySelector('#model-cycle').hidden`,
-    page,
-    "model button restored",
-  );
-  outcome = await cycleOutcome();
-  check("S18 a usable scope cycles again", outcome.after !== outcome.before && outcome.error === "", outcome);
-  await rpc({
-    action: "settings-update",
-    id,
-    confirm: id,
-    expectedRevision: (await settings()).revision,
-    changes: { model: "fake/fake-model" },
-  });
-  check(
-    "S14 the model button sits inside the composer and is visible",
-    await evaluate(
-      `(() => { const b = document.querySelector('#model-cycle').getBoundingClientRect(), c = document.querySelector('#compose').getBoundingClientRect(); return b.width > 20 && b.height > 10 && b.left >= c.left && b.right <= c.right && b.top >= c.top && b.bottom <= c.bottom; })()`,
-      page,
-    ),
-  );
-  await evaluate(`document.querySelector('#proto-bar')?.remove()`, page); // throwaway Activity prototype overlay covers the composer
-  await shot("01-composer-model-button", page);
-
-  await evaluate(`document.querySelector('#settings-button').click()`, page);
-  await waitFor(`!!document.querySelector('[data-settings-form]')`, page, "settings form");
-  await evaluate(
-    `document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, bubbles: true, cancelable: true }))`,
-    page,
-  );
-  await delay(300);
-  check("S14 Ctrl+P leaves the project model unchanged inside a dialog", (await settings()).values.model === "fake/fake-model");
-  await shot("02-settings-models", page);
-  check(
-    "S15 worker, scout and reviewer default to inherit the coordinator",
-    JSON.parse(
-      await evaluate(
-        `JSON.stringify(['worker','scout','reviewer'].map(role => { const mp = document.querySelector('.mp[data-role="' + role + '"]'); return [mp.dataset.value, /Inherit coordinator/.test(mp.innerText)]; }))`,
-        page,
-      ),
-    ).every(([value, label]) => value === "" && label),
-  );
-  check(
-    "S15 the scope editor lists the project scope as checked",
-    JSON.parse(
-      await evaluate(
-        `JSON.stringify([...document.querySelectorAll('[data-scope-ref]')].filter(box => box.checked).map(box => box.dataset.scopeRef))`,
-        page,
-      ),
-    ).length === 3,
-  );
-  await evaluate(
-    `(() => { const box = document.querySelector('[data-scope-ref="fake/fake-two"]'); box.checked = false; box.dispatchEvent(new Event('change', { bubbles: true })); })()`,
-    page,
-  );
-  await shot("03-settings-scope-editor", page);
-  await evaluate(`document.querySelector('.mp[data-role="worker"] .mp-current').click()`, page);
-  await waitFor(`!!document.querySelector('.mp[data-role="worker"] .mp-row[data-ref="fake/fake-two"]')`, page, "worker rows");
-  check(
-    "S15 the role list starts with Inherit coordinator",
-    /Inherit coordinator/.test(await evaluate(`document.querySelector('.mp[data-role="worker"] .mp-row').innerText`, page)),
-  );
-  await evaluate(`document.querySelector('.mp[data-role="worker"] .mp-row[data-ref="fake/fake-two"]').click()`, page);
-  await evaluate(`document.querySelector('[data-settings-form]').requestSubmit()`, page);
-  await waitFor(`!!document.querySelector('[data-settings-confirm]')`, page, "review dialog");
-  await evaluate(`document.querySelector('[data-settings-confirm]').requestSubmit()`, page);
-  await eventually(async () => (await settings()).values.models.worker === "fake/fake-two", "worker model not saved from the dialog");
   values = (await settings()).values;
   check(
-    "S15 the dialog saves an explicit worker model and a narrowed scope",
-    JSON.stringify(values.scopedModels) === JSON.stringify(["fake/fake-model", "fake/fake-three"]) && values.models.scout === undefined,
+    "S15 worker, scout and reviewer default to inherit the coordinator",
+    ["worker", "scout", "reviewer"].every((role) => values.models[role] === undefined),
+    values.models,
+  );
+  await update({ models: { worker: "fake/fake-two" }, scopedModels: ["fake/fake-model", "fake/fake-three"] });
+  values = (await settings()).values;
+  check(
+    "S15 an explicit worker model and a narrowed scope are saved",
+    values.models.worker === "fake/fake-two" &&
+      JSON.stringify(values.scopedModels) === JSON.stringify(["fake/fake-model", "fake/fake-three"]) &&
+      values.models.scout === undefined,
     values,
   );
-  await evaluate(`document.querySelector('#settings-button').click()`, page);
-  await waitFor(`!!document.querySelector('[data-settings-form]')`, page, "settings form again");
-  await evaluate(`document.querySelector('.mp[data-role="worker"] .mp-current').click()`, page);
-  await waitFor(`!!document.querySelector('.mp[data-role="worker"] .mp-row[data-ref=""]')`, page, "inherit row");
-  await evaluate(`document.querySelector('.mp[data-role="worker"] .mp-row[data-ref=""]').click()`, page);
-  await evaluate(`document.querySelector('[data-settings-form]').requestSubmit()`, page);
-  await waitFor(`!!document.querySelector('[data-settings-confirm]')`, page, "review dialog 2");
-  await evaluate(`document.querySelector('[data-settings-confirm]').requestSubmit()`, page);
-  await eventually(async () => (await settings()).values.models.worker === undefined, "worker did not return to inherit");
-  check("S15 choosing Inherit coordinator removes the explicit model", true);
+  await update({ models: { worker: null } });
+  check("S15 inheriting again removes the explicit model", (await settings()).values.models.worker === undefined);
 
   result.status = "passed";
 } catch (error) {

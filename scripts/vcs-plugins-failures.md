@@ -33,3 +33,10 @@ Persistence without the plugin
 Regression guards
 23. GitHub-only projects behave as before: no provider group, no provider cards, no `#` menu; the generic `prs`/`pr-watch`/`pr-hide` RPCs refuse them.
 24. The core source tree contains no plugin-specific provider names, CLIs, env seams or hosts (checked by grep in this E2E).
+
+## After the classic inbox (2026-11-04)
+
+The browser step drives the inbox at `/`: case 11 checks that its Pull requests panel lists both providers' PRs with titles escaped.
+Retired with the classic client, so no longer checked in a browser: the grouped card's per-provider actions and the `#` PR menu
+(11/23), the failed-plugin banner (9; the `plugins` RPC still reports failures), the Owner setup plugin step (10; Owner setup was
+removed) and the "plugin is not loaded" note in the PR card (20; `automation-snapshot` still flags `unloadedProviders`).

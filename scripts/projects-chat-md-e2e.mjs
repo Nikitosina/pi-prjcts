@@ -1,4 +1,5 @@
-// Startup + browser render check for the project-home UI. Fresh isolated home. No model submissions, grants or provider operations.
+// Startup + browser render and sign-in check for the inbox at `/`. Fresh isolated home. No model submissions, grants or provider operations.
+// The classic tabs (Knowledge, Observability, Settings panels) and Owner setup dialog were retired on 2026-11-04 (docs/classic-retirement.md).
 import { spawn } from "node:child_process";
 import { request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
@@ -229,7 +230,6 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", project.id);
-  launch.searchParams.set("e2e", "1");
   result.browserOrigin = launch.origin;
 
   startChrome();
@@ -239,13 +239,16 @@ try {
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
+  const ready = `document.body.dataset.ready === "1"`;
+  const crumb = `(document.querySelector('#crumb, header .crumb, .crumbs')?.innerText ?? document.title)`;
   await waitFor(
-    `document.querySelector('#title')?.textContent === 'UI Review Alpha' && document.querySelector('#lifecycle') && !document.querySelector('#lifecycle').hidden`,
+    `${ready} && document.querySelector('#tree .tree-project.selected')?.innerText.includes('UI Review Alpha')`,
     s,
     "project render",
   );
   await waitFor(`location.hash === ''`, s, "token fragment removed");
-  result.checks.push("project rendered in headless Chrome; token fragment stripped from address bar");
+  if (!(await evaluate(`location.pathname === '/'`, s))) throw new Error("The inbox is not at /");
+  result.checks.push("project rendered at / in headless Chrome; token fragment stripped from address bar");
   // A browser that re-creates the tab (e.g. a browser moving a tab into a new window) loads the stripped URL in a fresh tab.
   const strippedUrl = await evaluate("location.href", s);
   const { targetId: tab2 } = await send("Target.createTarget", { url: "about:blank" });
@@ -253,116 +256,81 @@ try {
   await send("Runtime.enable", {}, s2);
   await send("Page.navigate", { url: strippedUrl }, s2);
   await waitFor(
-    `document.querySelector('#title')?.textContent === 'UI Review Alpha' && document.querySelector('#error').hidden`,
+    `${ready} && !document.querySelector('#signin')?.open && !!document.querySelector('#tree .tree-project.selected')`,
     s2,
     "fresh tab without #token stays authenticated",
   );
   await send("Target.closeTarget", { targetId: tab2 });
   result.checks.push("fresh tab on the token-less URL stays authenticated (re-created tab case)");
-  const sidebar = await evaluate(`[...document.querySelectorAll('#project-list .proj')].map(n => n.textContent.trim())`, s);
-  if (!sidebar.some((t) => t.includes("UI Review Alpha")) || !sidebar.some((t) => t.includes("UI Review Beta")))
-    throw new Error("Sidebar projects missing: " + JSON.stringify(sidebar));
-  result.checks.push("sidebar lists both projects");
-  await waitFor(
-    `[...document.querySelectorAll('[data-panel]')].filter(n => getComputedStyle(n).display !== 'none').map(n => n.dataset.panel).join() === 'coordinator' && !!document.querySelector('#messages .empty-chat') && !document.querySelector('#compose textarea').disabled`,
-    s,
-    "coordinator default view with enabled composer",
+  // A browser that never had the token (another profile) gets the sign-in dialog and no project data; a wrong token is refused.
+  const { browserContextId } = await send("Target.createBrowserContext", {});
+  const { targetId: tab3 } = await send("Target.createTarget", { url: "about:blank", browserContextId });
+  const { sessionId: s3 } = await send("Target.attachToTarget", { targetId: tab3, flatten: true });
+  await send("Runtime.enable", {}, s3);
+  await send("Page.navigate", { url: strippedUrl }, s3);
+  await waitFor(`document.querySelector('#signin')?.open === true`, s3, "sign-in dialog without a token");
+  const outsider = await evaluate(
+    `({ tree: document.querySelector('#tree').innerText, feed: document.querySelector('#feed').innerText })`,
+    s3,
   );
-  result.checks.push("coordinator chat is the default tab; composer enabled");
+  if (/UI Review/.test(outsider.tree + outsider.feed)) throw new Error("Project data shown without a token: " + JSON.stringify(outsider));
+  const wrong = new URL(strippedUrl);
+  wrong.hash = "token=" + "0".repeat(64);
+  await send("Page.navigate", { url: "about:blank" }, s3); // a hash-only change would not reload the page
+  await waitFor(`location.href === 'about:blank'`, s3, "blank");
+  await send("Page.navigate", { url: wrong.toString() }, s3);
+  await waitFor(
+    `document.querySelector('#signin')?.open === true && /no longer valid/.test(document.querySelector('#signin').innerText)`,
+    s3,
+    "wrong token refused",
+  );
+  if (!(await evaluate(`location.hash === ''`, s3))) throw new Error("A wrong token stayed in the address bar");
+  await send("Target.closeTarget", { targetId: tab3 });
+  await send("Target.disposeBrowserContext", { browserContextId });
+  result.checks.push("a browser without the token gets the sign-in dialog and no project data; a wrong token is refused and stripped");
+  const sidebar = await evaluate(`[...document.querySelectorAll('#tree .tree-head[data-project]')].map(n => n.textContent.trim())`, s);
+  if (!sidebar.some((t) => t.includes("UI Review Alpha")) || !sidebar.some((t) => t.includes("UI Review Beta")))
+    throw new Error("Tree projects missing: " + JSON.stringify(sidebar));
+  result.checks.push("the tree lists both projects");
+  await waitFor(
+    `!!document.querySelector('#feed .empty-chat') && !document.querySelector('#composer-input').disabled`,
+    s,
+    "empty chat with an enabled composer",
+  );
+  result.checks.push("the Main chat opens by default with starters and an enabled composer");
   await shot("01-coordinator", s);
 
-  for (const [n, name] of [
-    ["02", "knowledge"],
-    ["03", "observability"],
-    ["04", "settings"],
-  ]) {
-    await evaluate(`document.querySelector('.tabs [data-tab=${name}]').click()`, s);
-    await waitFor(
-      `!document.querySelector('[data-panel=${name}]').hidden && [...document.querySelectorAll('[data-panel]')].filter(n => getComputedStyle(n).display !== 'none').map(n => n.dataset.panel).join() === '${name}' && new URL(location.href).searchParams.get('tab') === '${name}'`,
-      s,
-      `${name} tab`,
-    );
-    if (name === "observability")
-      await waitFor(`!document.querySelector('#obs-usage').textContent.includes('Reading')`, s, "usage counters loaded");
-    await delay(400);
-    await shot(`${n}-${name}`, s, true);
-    result.checks.push(`${name} tab is the only visible panel (computed style); URL tab param updated`);
-  }
-  result.observabilityText = await evaluate(`document.querySelector('[data-panel=observability]').innerText.slice(0, 3000)`, s);
-  if (/Usage unavailable/.test(result.observabilityText)) throw new Error("Usage snapshot failed in observability tab");
-  const observabilityViews = await evaluate(
-    `({ events: document.querySelector('#obs-event-log').innerText, health: document.querySelector('#obs-health').innerText, time: document.querySelector('#obs-usage-time').innerText })`,
-    s,
-  );
-  if (
-    !/host-observed|paused|resumed/i.test(observabilityViews.events) ||
-    !/Uptime[\\s\\S]*[1-9]/.test(observabilityViews.health) ||
-    /not available yet|unavailable/i.test(observabilityViews.events)
-  )
-    throw new Error("Observability API content did not render: " + JSON.stringify(observabilityViews));
-  result.checks.push("event log and host health render API-backed lifecycle and uptime content");
-
-  await evaluate(`document.querySelector('#owner-setup-button').click()`, s);
+  await evaluate(`document.querySelector('#tree .tree-head[data-project="${second.id}"]').click()`, s);
   await waitFor(
-    `document.querySelector('#dialog').open && /Advanced/.test(document.querySelector('#dialog').innerText) && /not a Git repository/.test(document.querySelector('#dialog').innerText)`,
-    s,
-    "owner setup dialog",
-  );
-  await shot("06-owner-setup-dialog", s);
-  await evaluate(`document.querySelector('#dialog [data-action=close-dialog]').click()`, s);
-  result.checks.push("existing owner setup dialog opens from Settings and closes");
-
-  await evaluate(`document.querySelector('#project-list [data-select-project="${second.id}"]').click()`, s);
-  await waitFor(
-    `document.querySelector('#title').textContent === 'UI Review Beta' && new URL(location.href).searchParams.get('project') === '${second.id}' && document.querySelector('#project-list .proj.on')?.textContent.includes('UI Review Beta')`,
+    `new URL(location.href).searchParams.get('project') === '${second.id}' && document.querySelector('#tree .tree-project.selected')?.innerText.includes('UI Review Beta') && document.querySelector('#feed .empty-title')?.innerText === 'UI Review Beta'`,
     s,
     "project switch",
   );
-  result.checks.push("sidebar switches project; URL + highlighted item follow");
+  result.checks.push("the tree switches project; URL and the selected item follow");
 
-  await evaluate(`document.querySelector('.tabs [data-tab=knowledge]').click()`, s);
-  await waitFor(`!document.querySelector('#compose textarea').disabled`, s, "second project loaded (composer enabled)");
-  result.slashPrecondition = await evaluate(
-    `({ dialogOpen: document.querySelector('#dialog').open, active: document.activeElement?.tagName, tab: new URL(location.href).searchParams.get('tab') })`,
-    s,
-  );
-  await evaluate(
-    `document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }))`,
-    s,
-  );
-  await waitFor(
-    `!document.querySelector('[data-panel=coordinator]').hidden && document.activeElement === document.querySelector('#compose textarea')`,
-    s,
-    "/ shortcut",
-  );
-  result.checks.push('"/" switches to Coordinator and focuses composer');
+  await evaluate(`document.activeElement?.blur()`, s);
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "/", code: "Slash", text: "/", windowsVirtualKeyCode: 191 }, s);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "/", code: "Slash", windowsVirtualKeyCode: 191 }, s);
+  await waitFor(`document.activeElement === document.querySelector('#composer-input')`, s, "/ shortcut");
+  result.checks.push('"/" focuses the composer');
   await shot("07-second-project", s);
 
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await delay(600);
   await shot("08-mobile", s);
-  result.checks.push("narrow viewport screenshot captured");
+  if (!(await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s))) throw new Error("390 px overflows sideways");
+  result.checks.push("390 px: nothing overflows sideways");
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
 
-  const frontend = await evaluate(
-    `({ workers: !!document.querySelector('#job-tree'), automation: !!document.querySelector('#automation-history'), stepper: document.querySelectorAll('#owner-steps li').length, timeline: !!document.querySelector('#obs-timeline'), events: !!document.querySelector('#obs-event-log'), usageTime: !!document.querySelector('#obs-usage-time') })`,
-    s,
-  );
-  if (!frontend.workers || !frontend.automation || frontend.stepper < 3 || !frontend.timeline || !frontend.events || !frontend.usageTime)
-    throw new Error("Second-pass frontend panels are missing: " + JSON.stringify(frontend));
-  await evaluate(`document.querySelector('.tabs [data-tab=observability]').click()`, s);
-  await waitFor(`document.querySelector('#obs-timeline').textContent.length > 0`, s, "timeline placeholder or bars");
-  await evaluate(`document.querySelector('.tabs [data-tab=settings]').click()`, s);
-  await waitFor(`document.querySelector('#automation-history').dataset.loaded === 'true'`, s, "automation history strip");
   const keyboard = await evaluate(
-    `(() => { const area = document.querySelector('#compose textarea'); let submits=0; area.form.addEventListener('submit', e => { e.preventDefault(); e.stopImmediatePropagation(); submits++; }, { once:true }); area.value='Enter test'; const enter = new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}); area.dispatchEvent(enter); const shift = new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true,cancelable:true}); area.dispatchEvent(shift); return {enterSubmitted: submits === 1 && enter.defaultPrevented, shiftNotSubmitted: submits === 1 && !shift.defaultPrevented}; })()`,
+    `(() => { const area = document.querySelector('#composer-input'), form = document.querySelector('#composer'); let submits = 0; form.addEventListener('submit', e => { e.preventDefault(); e.stopImmediatePropagation(); submits++; }, { capture: true }); area.value = 'Enter test'; area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true })); const shiftNotSubmitted = submits === 0; area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); const enterSubmitted = submits === 1; area.value = ''; return { enterSubmitted, shiftNotSubmitted }; })()`,
     s,
   );
   if (!keyboard.enterSubmitted || !keyboard.shiftNotSubmitted)
     throw new Error("Composer keyboard behavior failed: " + JSON.stringify(keyboard));
-  result.checks.push("inline worker, automation history, owner stepper, timeline and future observability placeholders rendered");
   result.checks.push("Enter submits; Shift+Enter remains a newline");
   const markdown = await evaluate(
-    `(() => { const html = window.__projectsRenderMarkdown('# Heading\\n\\n- one\\n- **two**\\n1. ordered\\n2. item\\n> quote\\n> continuation\\n\`*literal*\` [link](https://example.test/?a=1&b=2) <img src=x onerror=alert(1)> [bad](javascript:alert(1))'); const node=document.createElement('div'); node.innerHTML=html; return {html, headings:node.querySelectorAll('h1').length, lists:node.querySelectorAll('ul').length, ordered:node.querySelectorAll('ol').length, quotes:node.querySelectorAll('blockquote').length, literal:node.querySelector('code')?.textContent, img:node.querySelector('img[onerror]') !== null, javascript:node.querySelector('a[href^=javascript]') !== null, href:node.querySelector('a')?.getAttribute('href')}; })()`,
+    `import('/format.js').then(({ markdown }) => { const html = markdown('# Heading\\n\\n- one\\n- **two**\\n\\n1. ordered\\n2. item\\n\\n> quote\\n> continuation\\n\\n\x60*literal*\x60 [link](https://example.test/?a=1&b=2) <img src=x onerror=alert(1)> [bad](javascript:alert(1))'); const node = document.createElement('div'); node.innerHTML = html; return { html, headings: node.querySelectorAll('.md-h').length, lists: node.querySelectorAll('ul').length, ordered: node.querySelectorAll('ol').length, quotes: node.querySelectorAll('blockquote').length, literal: node.querySelector('code')?.textContent, img: !!node.querySelector('img'), javascript: [...node.querySelectorAll('a')].some(a => /^javascript:/i.test(a.getAttribute('href') ?? '')), href: node.querySelector('a')?.getAttribute('href') }; })`,
     s,
   );
   if (
@@ -377,7 +345,7 @@ try {
     markdown.href !== "https://example.test/?a=1&b=2"
   )
     throw new Error("Markdown rendering or XSS check failed: " + JSON.stringify(markdown));
-  result.checks.push("Markdown headings, grouped lists, blockquotes, inline code, safe URL escaping and inert XSS payload");
+  result.checks.push("Markdown headings, lists, blockquotes, inline code, safe URL escaping and inert XSS payload");
   if (result.errors.length || result.httpErrors.length) throw new Error("Browser JS errors or HTTP failures captured");
   result.status = "passed";
 } catch (error) {
@@ -385,7 +353,7 @@ try {
   result.failure = redact(error?.stack ?? error);
   try {
     result.diagnostic = await evaluate(
-      `({ title: document.querySelector('#title').textContent, composeDisabled: document.querySelector('#compose textarea').disabled, dialogOpen: document.querySelector('#dialog').open, active: document.activeElement?.tagName, visible: [...document.querySelectorAll('[data-panel]:not([hidden])')].map(n => n.dataset.panel), error: document.querySelector('#error').hidden ? null : document.querySelector('#error').textContent })`,
+      `({ ready: document.body?.dataset.ready, signin: !!document.querySelector('#signin')?.open, composer: !!document.querySelector('#composer-input'), active: document.activeElement?.tagName, feed: document.querySelector('#feed')?.innerText.slice(0, 600) })`,
       chromeSession,
     );
   } catch {}

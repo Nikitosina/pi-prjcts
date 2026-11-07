@@ -8,7 +8,7 @@ This list was written after commit 1575f20, which shipped without it. It records
 - F2 Refreshing loses a genuine override (shows Default) or an unsaved edit in another editor.
 - F3 Saving the shown default stores it as an override.
 - F4 New coordinator, worker or reviewer requests use the old built-in text, or a new scout ignores its override.
-- F5 A follow-up on a worker started before the restart loses its frozen prompt.
+- F5 A follow-up on a worker started before the restart loses its frozen prompt. Since prompt blocks (owner decision, docs/prompt-blocks.md) only its behavior follows the current text; the rest stays frozen.
 - F6 Reset leaves an override (or a snapshot of the default) in `project.json`.
 
 ## Review findings (written before their fix)
@@ -19,3 +19,10 @@ This list was written after commit 1575f20, which shipped without it. It records
 
 ## Second review finding (written before its fix)
 - F11 Save or Reset fails (the settings-snapshot preflight or the settings-update itself) and every editor is rebuilt from the stored values, discarding unsaved drafts although nothing was saved. The error is not shown, or a later Save or Reset no longer works.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The new client shows role text as prompt blocks in Settings → Prompt and rereads them on every opening. The script now checks F1 there
+(the tab left open across the restart shows the restarted host's text after Settings is reopened, without a reload), and F4-F6 plus
+S8 (Reset removes the override) through the host. Retired with the classic per-role editor: F2's unsaved-edit survival in that editor,
+F3 (the editor sent no override when its text equalled the default; `settings-update` stores what it is given), F7-F11 (refresh and
+save races of that editor). The block editor keeps drafts in local storage; see the `ui2-prompts` verify journey.

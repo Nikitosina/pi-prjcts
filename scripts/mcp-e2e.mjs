@@ -1,4 +1,5 @@
-// Browser E2E: MCP servers per profile (Settings picker, gateway tools, write guard, pool resilience, recovery). Fakes only:
+// E2E: MCP servers per profile (saved profiles, unrestricted gateway tools, pool resilience, recovery). The classic Settings picker was
+// retired on 2026-11-04; profiles are saved through settings-update as it did. Fakes only:
 // fake stdio MCP server, temp mcp.json via PI_PROJECTS_MCP_CONFIG, fake model, private HOME. Failure cases: mcp-failures.md.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -35,7 +36,7 @@ const calls = join(root, "mcp-calls.jsonl"),
 const server = (tag) => ({
   command: process.execPath,
   args: [join(kit.repo, "scripts/fake-mcp-server.mjs")],
-  env: { FAKE_MCP_TAG: tag, FAKE_MCP_CALLS: calls, FAKE_MCP_SECRET: SECRET },
+  env: { FAKE_MCP_TAG: tag, FAKE_MCP_CALLS: calls, FAKE_MCP_SECRET: SECRET, FAKE_MCP_CACHE: "${PI_WORKSPACE_CACHE}/DerivedData" },
   timeout: 2,
   description: `Fake ${tag} server`,
 });
@@ -156,53 +157,31 @@ await kit.run(async () => {
   );
   const okDefault = await coord('MCP-CALL fake-ci launch_status {"id":"L0"}');
   check("F3 by default a call goes through", /launch L0: PASSED/.test(okDefault), okDefault);
+  const writeDefault = await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-0","status":"Closed"}');
+  check(
+    "F7 an enabled server allows every tool without a write setting",
+    /ChangeIssueStatus ok/.test(writeDefault) &&
+      serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.args?.key === "K-0"),
+    writeDefault,
+  );
   check(
     "F22 the coordinator prompt carries the MCP note, not tool schemas",
     /projects_mcp_tools/.test(kit.lastCall("coordinator", "#1").system) && !/launch_status/.test(kit.lastCall("coordinator", "#1").system),
   );
 
-  // Picker.
-  const page = await kit.openPage(await kit.webUrl(id));
-  await page.waitFor(`document.querySelectorAll('#mcp-picker [data-mcp-pick]').length === 5`, "mcp picker lists five servers");
-  const locked = await page.evaluate(
-    `[...document.querySelectorAll('#mcp-picker [data-mcp-pick]')].filter(i => i.disabled).map(i => i.dataset.mcpPick).sort().join()`,
-  );
-  check("F21 disabled and sign-in servers are locked in the picker", locked === "fake-oauth,fake-off", locked);
-  const tab = async (role) => {
-    await page.evaluate(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').click()`);
-    await page.waitFor(`document.querySelector('[data-action="mcp-tab"][data-role="${role}"]').classList.contains('on')`, `${role} tab`);
+  // Profiles: the classic inbox's MCP picker was retired on 2026-11-04 (docs/classic-retirement.md); it saved exactly this change.
+  const off = {
+    all: [],
+    coordinator: ["fake-xcode"],
+    worker: ["fake-ci", "fake-tracker"],
+    scout: ["fake-ci", "fake-tracker", "fake-xcode"],
+    reviewer: [],
   };
-  const pick = (name) => page.evaluate(`document.querySelector('[data-mcp-pick="${name}"]').click()`);
-  const checkedAll = await page.evaluate(
-    `[...document.querySelectorAll('#mcp-picker [data-mcp-pick]')].filter(i => i.checked).map(i => i.dataset.mcpPick).sort().join()`,
-  );
-  check("F21 the default picker has every ready server checked (on)", checkedAll === "fake-ci,fake-tracker,fake-xcode", checkedAll);
-  await tab("coordinator");
-  await pick("fake-xcode");
-  await tab("worker");
-  await pick("fake-ci");
-  await pick("fake-tracker");
-  await tab("scout");
-  await pick("fake-ci");
-  await pick("fake-tracker");
-  await pick("fake-xcode");
-  await tab("all");
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  await page.shot("01-mcp-picker");
-  await page.viewport(390, 844, true);
-  await delay(300);
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  const narrow = await page.evaluate(
-    `(() => { const c = document.querySelector('#mcp-card').getBoundingClientRect(); return { right: c.right, width: innerWidth, scroll: document.documentElement.scrollWidth > innerWidth + 1 }; })()`,
-  );
-  await page.shot("02-mcp-picker-390");
-  check("F21 the picker fits 390 px", !narrow.scroll && narrow.right <= narrow.width + 1, narrow);
-  await page.viewport(1440, 1000);
-  await page.evaluate(`document.querySelector('[data-action="mcp-save"]').click()`);
+  await kit.updateSettings(id, { mcp: { off } });
   await kit.eventually(async () => (await rpc({ action: "settings-snapshot", id })).values.mcp !== null, "mcp settings not saved", 100);
   const saved = (await rpc({ action: "settings-snapshot", id })).values.mcp;
   check(
-    "F21 saving the picker persists the profiles",
+    "F21 saved profiles persist exactly",
     JSON.stringify(saved) ===
       JSON.stringify({
         off: {
@@ -212,7 +191,6 @@ await kit.run(async () => {
           scout: ["fake-ci", "fake-tracker", "fake-xcode"],
           reviewer: [],
         },
-        writes: [],
       }),
     saved,
   );
@@ -235,15 +213,9 @@ await kit.run(async () => {
   );
   const tools = await coord("MCP-TOOLS fake-tracker");
   const toolInfo = JSON.parse(tools);
-  const flag = (name) => toolInfo.tools.find((item) => item.name === name)?.write;
   check(
-    "F7 tool listing marks writes by annotation and heuristic",
-    flag("ChangeIssueStatus") === true &&
-      flag("start_launch") === true &&
-      flag("purge") === true &&
-      flag("get_settings") === false &&
-      flag("list_hints") === false &&
-      flag("launch_status") === false,
+    "F8 tool listings carry no obsolete write classification",
+    toolInfo.tools.every((item) => item.write === undefined),
     toolInfo.tools.map((item) => [item.name, item.write]),
   );
   const schema = JSON.parse(await coord("MCP-TOOLS fake-tracker launch_status"));
@@ -256,7 +228,6 @@ await kit.run(async () => {
     JSON.parse((await coord(`MCP-CODE ${server} ${tool}`)).split("\n").find((line) => line.startsWith("{")) ?? "null");
   const structured = await scripted("launches"),
     failed = await scripted("launch_failed"),
-    blockedScript = await scripted("purge", "fake-tracker"),
     shown = await coord("MCP-CALL fake-ci launches");
   check(
     "N12 a script gets structuredContent as an object, the model sees its JSON instead of (no output)",
@@ -267,12 +238,9 @@ await kit.run(async () => {
     { structured, shown },
   );
   check(
-    "N12 a server error resolves with isError and its structuredContent; a blocked write still rejects",
-    failed?.value?.isError === true &&
-      failed.value.structuredContent?.code === "E1" &&
-      /launch broke/.test(failed.value.text) &&
-      /Blocked/.test(blockedScript?.error ?? ""),
-    { failed, blockedScript },
+    "N12 a server error resolves with isError and its structuredContent",
+    failed?.value?.isError === true && failed.value.structuredContent?.code === "E1" && /launch broke/.test(failed.value.text),
+    { failed },
   );
   const ok = await coord('MCP-CALL fake-ci launch_status {"id":"L1"}');
   check("coordinator reads through fake-ci", /launch L1: PASSED/.test(ok), ok);
@@ -289,6 +257,15 @@ await kit.run(async () => {
     cwd.includes("/worktrees/") && cwd.startsWith(root) && cwd !== kit.workspace,
     { whoami },
   );
+  const workerCache = /cache=(\S+)/.exec(whoami)?.[1] ?? "";
+  const coordinatorCache = /cache=(\S+)/.exec(await coord("MCP-CALL fake-ci whoami"))?.[1] ?? "";
+  check(
+    "C4 each workspace's server gets its own cache folder in ${PI_WORKSPACE_CACHE}",
+    /\/workspace-cache\/[0-9a-f-]{36}\/DerivedData$/.test(workerCache) &&
+      /\/workspace-cache\/[0-9a-f-]{36}\/DerivedData$/.test(coordinatorCache) &&
+      workerCache !== coordinatorCache,
+    { workerCache, coordinatorCache },
+  );
   const workerList = await worker("MCP-TOOLS");
   check("F2 the worker lists only its own server", /fake-xcode/.test(workerList) && !/fake-ci/.test(workerList), workerList);
   check(
@@ -300,47 +277,29 @@ await kit.run(async () => {
     /no MCP servers/i.test(await scout("MCP-TOOLS")) && /not enabled for your role/i.test(await scout("MCP-CALL fake-xcode whoami")),
   );
 
-  // Write guard.
+  // Enabled means full access, as in Pi; legacy writes settings are irrelevant.
   const before = serverLog().length;
-  const blocked = [
+  const writes = [
     await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-1","status":"Closed"}'),
     await coord('MCP-CALL fake-tracker start_launch {"id":"L3"}'),
     await coord("MCP-CALL fake-tracker purge"),
+    await coord('MCP-CALL fake-ci ChangeIssueStatus {"key":"K-1","status":"Closed"}'),
   ];
   check(
-    "F7/F8 writes are refused with guidance and never reach the server",
-    blocked.every((text) => /allow writes/i.test(text) && /owner/i.test(text)) &&
+    "F7/F9 mutating tools pass on every enabled server without a write grant",
+    writes.every((text) => / ok/.test(text)) &&
       serverLog()
         .slice(before)
-        .every((entry) => !["ChangeIssueStatus", "start_launch", "purge"].includes(entry.tool)),
-    blocked,
+        .filter((entry) => entry.event === "call")
+        .map((entry) => entry.tool)
+        .join(",") === "ChangeIssueStatus,start_launch,purge,ChangeIssueStatus",
+    writes,
   );
   check(
     "F7 reads pass: unannotated get_settings and readOnlyHint list_hints",
     /get_settings ok/.test(await coord("MCP-CALL fake-tracker get_settings")) &&
       /list_hints ok/.test(await coord("MCP-CALL fake-tracker list_hints")),
   );
-  await page.evaluate(`document.querySelector('[data-mcp-writes="fake-tracker"]').click()`);
-  await page.evaluate(`document.querySelector('[data-action="mcp-save"]').click()`);
-  await kit.eventually(
-    async () => (await rpc({ action: "settings-snapshot", id })).values.mcp.writes.includes("fake-tracker"),
-    "writes toggle not saved",
-    100,
-  );
-  await page.evaluate(`document.querySelector('#mcp-card').scrollIntoView()`);
-  await page.shot("03-mcp-writes");
-  check(
-    "F9 with writes on for fake-tracker the change goes through, live",
-    /ChangeIssueStatus ok/.test(await coord('MCP-CALL fake-tracker ChangeIssueStatus {"key":"K-1","status":"Closed"}')) &&
-      serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.tag === "tracker"),
-  );
-  const stillBlocked = await coord('MCP-CALL fake-ci ChangeIssueStatus {"key":"K-1","status":"Closed"}');
-  check(
-    "F9 the writes toggle is per server",
-    /allow writes/i.test(stillBlocked) && !serverLog().some((entry) => entry.tool === "ChangeIssueStatus" && entry.tag === "ci"),
-    stillBlocked,
-  );
-
   // Resilience.
   const pidOf = (text) => /pid=(\d+)/.exec(text)?.[1];
   const pid1 = pidOf(await coord("MCP-CALL fake-ci whoami"));
@@ -380,14 +339,13 @@ await kit.run(async () => {
         worker: ["fake-ci", "fake-tracker"],
         scout: ["fake-ci", "fake-tracker", "fake-xcode"],
       },
-      writes: ["fake-tracker"],
     },
   });
   check(
     "F4 removing a server applies to the very next call",
     /not enabled for your role/i.test(await coord('MCP-CALL fake-ci launch_status {"id":"L4"}')),
   );
-  await kit.updateSettings(id, { mcp: { off: { all: ["ghost"] }, writes: [] } });
+  await kit.updateSettings(id, { mcp: { off: { all: ["ghost"] } } });
   const unavailable = await coord("MCP-TOOLS");
   check(
     "F5/F6 unavailable servers and stale opt-out names are never offered",
@@ -405,7 +363,7 @@ await kit.run(async () => {
       id,
       confirm: id,
       expectedRevision: settings.revision,
-      changes: { mcp: { off: { admin: [] }, writes: [] } },
+      changes: { mcp: { off: { admin: [] } } },
     })) !== null,
   );
   check(
@@ -415,7 +373,7 @@ await kit.run(async () => {
       id,
       confirm: id,
       expectedRevision: settings.revision,
-      changes: { mcp: { off: { all: [42] }, writes: [] } },
+      changes: { mcp: { off: { all: [42] } } },
     })) !== null,
   );
   await kit.updateSettings(id, {
@@ -425,7 +383,6 @@ await kit.run(async () => {
         worker: ["fake-ci", "fake-tracker"],
         scout: ["fake-ci", "fake-tracker", "fake-xcode"],
       },
-      writes: [],
     },
   });
 
@@ -433,8 +390,6 @@ await kit.run(async () => {
   const probe = await rpc({ action: "mcp-probe", id, server: "fake-ci" });
   check("probe reports the tool count", probe.ok === true && probe.tools === 12, probe);
   check("probe refuses unavailable servers", (await rpc({ action: "mcp-probe", id, server: "fake-oauth" })).ok === false);
-
-  await page.navigate("about:blank");
 
   // Saved OAuth is shared with Pi, refreshed once, and never used for another named server.
   const authPath = join(kit.agentDir, "mcp-auth.json");

@@ -1,11 +1,21 @@
-// Browser E2E: worktree lifecycle (C2 git merge/rebase + any thread continues a project PR branch, C3 PR-head reads,
+// E2E: worktree lifecycle (C2 git merge/rebase + any thread continues a project PR branch, C3 PR-head reads,
 // C4 per-project setup command, C9 safe cleanup + Settings action, C11 a/c/d/f/g, attempt.toolNames).
 // Isolated host, local fake model, fake gh, local bare remote. No real providers, no network.
 // Failure cases recorded in worktree-lifecycle-failures.md before implementation.
 import { spawn, execFileSync } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, createWriteStream } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  utimesSync,
+  writeFileSync,
+  createWriteStream,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -58,7 +68,7 @@ const contentText = (content) =>
       ? content.map((part) => part.text ?? "").join("")
       : JSON.stringify(content ?? "");
 // The fake "brain" remembers W1's branch from its push output.
-const brain = { b1: null };
+const brain = { b1: null, sha1: null };
 const model = createServer((req, res) => {
   req.setEncoding("utf8");
   let body = "";
@@ -111,11 +121,11 @@ const model = createServer((req, res) => {
             task: `W2-TASK continue the open PR branch ${brain.b1}: merge main into it, resolve conflicts, then rebase it onto main and push it back`,
           }),
         );
-      if (/MARK-REVIEW (\S+)/.test(userText)) {
-        const scope = /MARK-REVIEW (\S+)/.exec(userText)[1];
+      if (/MARK-REVIEW (\S+) (\S+)/.test(userText)) {
+        const [, scope, dirtyWorker] = /MARK-REVIEW (\S+) (\S+)/.exec(userText);
         if (n === 0)
           return res.end(
-            call("projects_delegate", { role: "reviewer", ref: brain.b1, task: "REVIEW-HEAD review feature.txt on the PR head" }),
+            call("projects_delegate", { role: "reviewer", ref: brain.sha1, task: "REVIEW-HEAD review feature.txt on the PR head" }),
           );
         if (n === 1)
           return res.end(call("projects_delegate", { role: "scout", workspaceScopeId: scope, task: "SCOUT-SCOPED read README.md" }));
@@ -127,9 +137,13 @@ const model = createServer((req, res) => {
               task: "BAD-REF",
             }),
           );
-        if (n === 3) return res.end(call("projects_delegate", { role: "reviewer", ref: "pi/does-not-exist", task: "MISSING-REF" }));
+        if (n === 3) return res.end(call("projects_delegate", { role: "reviewer", ref: brain.b1, task: "BRANCH-REF" }));
+        if (n === 4) return res.end(call("projects_delegate", { role: "reviewer", ref: dirtyWorker, task: "DIRTY-READ" }));
+        if (n === 5) return res.end(call("projects_delegate", { role: "reviewer", ref: "f".repeat(40), task: "UNKNOWN-COMMIT" }));
         return res.end(say("Review dispatched."));
       }
+      if (/MARK-DRIFT (\S+)/.test(userText) && n === 0)
+        return res.end(call("projects_delegate", { role: "reviewer", ref: /MARK-DRIFT (\S+)/.exec(userText)[1], task: "DRIFT-REVIEW" }));
       if (/MARK-LOCAL/.test(userText) && n === 0)
         return res.end(call("projects_delegate", { role: "worker", task: "W3-TASK commit local.txt locally; do not push" }));
       if (/MARK-FOLLOW3 (\S+)/.test(userText) && n === 0)
@@ -172,6 +186,7 @@ const model = createServer((req, res) => {
           );
         if (n === 1) {
           brain.b1 = /(pi\/durable-[0-9a-f-]+)/.exec(results[0])?.[1];
+          brain.sha1 = /[a-f0-9]{40}/.exec(results[0])?.[0];
           return res.end(
             call(tool("_open_draft_pr"), {
               expectedHead: /[a-f0-9]{40}/.exec(results[0])?.[0],
@@ -192,9 +207,9 @@ const model = createServer((req, res) => {
         const steps = [
           `git fetch -q origin && git checkout -q -B cont origin/${b} && git merge --no-edit origin/main; echo MERGE-EXIT=$?`,
           `printf 'v1+main\\n' > feature.txt && git add feature.txt && git -c core.editor=true merge --continue >/dev/null && git log --oneline -1 && git merge-base HEAD origin/main && git push -q origin HEAD:${b} && echo PUSHED-MERGE`,
-          `git push origin HEAD:main`,
-          `git push --force origin HEAD:${b}`,
-          `git log --oneline -1 >/dev/null && git checkout -q -B rb origin/${b} && git rebase -X theirs origin/main >/dev/null 2>&1; git log --format=%s -3 && git push -q --force-with-lease origin HEAD:${b} && echo PUSHED-REBASE && git rev-parse HEAD`,
+          `git push origin HEAD:main 2>&1`,
+          `git push --force origin HEAD:${b} 2>&1 && echo FORCED-OWN; git push -f origin +HEAD:main 2>&1`,
+          `git log --oneline -1 >/dev/null && git checkout -q -B rb origin/${b} && git rebase -X theirs origin/main >/dev/null 2>&1; git log --format=%s -3 && git push -q --force-with-lease origin HEAD:${b} 2>&1 && echo PUSHED-REBASE && git rev-parse HEAD`,
           `printf 'wip\\n' > wip-note.txt && echo WIP-WRITTEN`,
         ];
         if (n < steps.length) return res.end(call("bash", { command: steps[n] }));
@@ -212,6 +227,11 @@ const model = createServer((req, res) => {
         return res.end(say("W3-DONE"));
       }
       return res.end(say("Worker done."));
+    }
+    if (role === "reviewer" && /DRIFT-REVIEW/.test(firstUser) && results.length === 0) {
+      // R9: hold the read open until the test has moved the worker's HEAD.
+      brain.driftWaiting = true;
+      await brain.driftGate;
     }
     if (role === "reviewer" || role === "scout") {
       const file = /CHILD-REVIEW/.test(firstUser) ? "wip-note.txt" : /REVIEW-HEAD/.test(firstUser) ? "feature.txt" : "README.md";
@@ -341,104 +361,6 @@ async function stopHost() {
   if (!hostEnded) host.kill("SIGKILL");
 }
 
-let chrome,
-  cdpEnded = false,
-  cdpId = 0,
-  buffer = "";
-const pending = new Map();
-function startChrome() {
-  const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "wx", mode: 0o600 });
-  chrome = spawn(
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    [
-      "--headless",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-background-networking",
-      `--user-data-dir=${join(root, "chrome-profile")}`,
-      "--remote-debugging-pipe",
-      "about:blank",
-    ],
-    { stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] },
-  );
-  chrome.stdout.pipe(clog);
-  chrome.stderr.pipe(clog);
-  chrome.once("exit", () => {
-    cdpEnded = true;
-  });
-  chrome.stdio[4].on("data", (part) => {
-    buffer += part.toString();
-    let end;
-    while ((end = buffer.indexOf("\0")) >= 0) {
-      const text = buffer.slice(0, end);
-      buffer = buffer.slice(end + 1);
-      if (!text) continue;
-      const msg = JSON.parse(text);
-      if (msg.id) {
-        const p = pending.get(msg.id);
-        if (p) {
-          pending.delete(msg.id);
-          msg.error ? p.reject(Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
-        }
-      } else if (msg.method === "Runtime.exceptionThrown")
-        result.errors.push(redact(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text));
-      else if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") result.errors.push(redact(msg.params.entry.text));
-      else if (msg.method === "Network.responseReceived" && msg.params.response.status >= 400) {
-        const u = new URL(msg.params.response.url);
-        result.httpErrors.push({ url: u.origin + u.pathname, status: msg.params.response.status });
-      }
-    }
-  });
-}
-function send(method, params = {}, sessionId) {
-  return new Promise((resolve, reject) => {
-    const key = ++cdpId;
-    const timer = setTimeout(() => {
-      pending.delete(key);
-      reject(Error(`CDP timeout: ${method}`));
-    }, 15000);
-    pending.set(key, {
-      resolve: (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      reject: (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    });
-    chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
-  });
-}
-async function evaluate(expression, session) {
-  const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, session);
-  if (r.exceptionDetails) throw Error(r.exceptionDetails.text + " " + (r.exceptionDetails.exception?.description ?? ""));
-  return r.result.value;
-}
-async function shot(name, session) {
-  if (process.env.E2E_SHOTS !== "1") return;
-  const image = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, session);
-  writeFileSync(join(artifacts, `${name}.png`), Buffer.from(image.data, "base64"), { mode: 0o600 });
-}
-async function waitFor(expression, session, label, tries = 240) {
-  for (let i = 0; i < tries * 2.5; i++) {
-    if (
-      await evaluate(expression, session).catch((error) => {
-        if (i > 100) throw error;
-        return false;
-      })
-    )
-      return;
-    await delay(100);
-  }
-  let page = "";
-  try {
-    page = await evaluate(`document.body.innerText.slice(0, 3000)`, session);
-  } catch {}
-  throw Error(`Timed out waiting for ${label}; page: ${page}`);
-}
-
 startHost();
 try {
   await waitHost();
@@ -461,8 +383,8 @@ try {
   });
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const second = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: second.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const scopeId = (await rpc({ action: "owner-setup-snapshot", id })).workspace.scopes[0].id;
   // Fetches go to the local bare remote too (set after the grants, which read the GitHub origin URL).
   git(workspace, "config", `url.${bare}.insteadOf`, "https://github.com/acme/mari.git");
@@ -492,27 +414,15 @@ try {
   const inventory = () => rpc({ action: "worktrees-snapshot", id });
 
   // UI: Settings → Worktrees card; save the setup command through the page.
-  const web = await rpc({ action: "web" });
-  const launch = new URL(web.url);
-  launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "settings");
-  startChrome();
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
-  for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
-  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#worktrees #worktree-setup')`, s, "worktrees card");
   const setupCommand = "mkdir -p node_modules/dep && echo installed > node_modules/dep/ok.txt && echo SETUP-DONE";
-  await evaluate(
-    `(() => { document.querySelector('#worktree-setup').value = ${JSON.stringify(setupCommand)}; document.querySelector('[data-action="worktree-setup-save"]').click(); })()`,
-    s,
-  );
+  // The classic Settings worktree card was retired 2026-11-04; its save is the same revision-checked settings-update.
+  const before = await rpc({ action: "settings-snapshot", id });
+  await rpc({ action: "settings-update", id, confirm: id, expectedRevision: before.revision, changes: { worktreeSetup: setupCommand } });
   await eventually(
     async () => (await rpc({ action: "settings-snapshot", id })).values.worktreeSetup === setupCommand,
-    "setup command not saved from the UI",
+    "setup command not saved",
   );
-  check("W5 the setup command is saved from Settings (revision-checked settings-update)", true);
+  check("W5 the setup command is saved (revision-checked settings-update)", true);
 
   // Step 1: W1 builds and opens a PR; setup ran in its fresh worktree.
   await ask("MARK-BUILD");
@@ -575,7 +485,16 @@ try {
     /Blocked by worker Git policy at: git push origin HEAD:main/.test(out(2)),
     out(2),
   );
-  check("G4 plain --force to a project branch is blocked", /Blocked by worker Git policy at: git push --force/.test(out(3)), out(3));
+  check(
+    "G4 plain --force to the project branch passes the policy; -f/+ref to main is blocked",
+    /Blocked by worker Git policy at: git push -f origin \+HEAD:main/.test(out(3)),
+    out(3),
+  );
+  check(
+    "G12 a redirected --force-with-lease push to the project branch is not refused",
+    !/Blocked by worker Git policy/.test(out(4)),
+    out(4),
+  );
   const rebased = git(bare, "rev-parse", `refs/heads/${brain.b1}`);
   check(
     "G3 rebase onto main + --force-with-lease to the project PR branch succeeds (linear on top of main)",
@@ -593,22 +512,42 @@ try {
     seen("CHILD-REVIEW", "reviewer"),
   );
 
-  // Step 3: reviewer with ref reads the PR head; scout reads the checkout; a bad ref never reaches a shell.
-  await ask(`MARK-REVIEW ${scopeId}`);
+  // Step 3: a reviewer of a full SHA reads it in its own worktree; scout reads the checkout; refs other than an agent id or a full SHA are refused at spawn.
+  await ask(`MARK-REVIEW ${scopeId} ${w2.threadId}`);
   work = await plan();
   await eventually(async () => seen("REVIEW-HEAD", "reviewer") && seen("SCOUT-SCOPED", "scout"), "reviewer and scout did not read", 300);
   const reviewSaw = seen("REVIEW-HEAD", "reviewer");
+  const reviewer = (await rpc({ action: "jobs-snapshot", id })).agents.find((agent) => agent.readRef === brain.sha1);
+  const reviewerCwd = /SAW\[feature.txt\]/.test(reviewSaw) ? git(workspace, "worktree", "list", "--porcelain") : "";
   check(
-    "R1 a reviewer delegated with ref reads the PR head (feature.txt v1), not the owner checkout (no feature.txt)",
-    /v1/.test(reviewSaw) && !existsSync(join(workspace, "feature.txt")),
-    reviewSaw,
+    "R1 a reviewer given a full SHA reads that commit (feature.txt v1) in a worktree of its own, not the owner checkout",
+    /v1/.test(reviewSaw) && !existsSync(join(workspace, "feature.txt")) && !!reviewer && !/read-heads/.test(reviewerCwd),
+    { reviewSaw, reviewer: reviewer?.id, worktrees: reviewerCwd },
   );
   check("S1 a scout reads the project checkout", /base readme/.test(seen("SCOUT-SCOPED", "scout")), seen("SCOUT-SCOPED", "scout"));
   check("R2 an option-like ref never reaches git", !existsSync(`/tmp/pwned-lifecycle-${process.pid}`));
   const reports = (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n");
+  const spawns =
+    result.calls.findLast((c) => c.role === "coordinator" && /MARK-REVIEW/.test(c.user) && c.results.length >= 5)?.results ?? [];
   check(
-    "R6 an unknown or invalid ref fails the reviewer's start clearly",
-    /failed to start/.test(reports) && /pi\/does-not-exist|Invalid ref/.test(reports),
+    "R2/R6 an option-like ref and a branch name are refused at spawn with how to pin a commit",
+    [spawns[2], spawns[3]].every((text) => /full lowercase commit SHA/.test(text ?? "") && /Resolve a branch or PR/.test(text ?? "")),
+    spawns,
+  );
+  await eventually(
+    async () => /failed to start: UNKNOWN-COMMIT/.test((await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n")),
+    "unknown commit not reported",
+    300,
+  );
+  check(
+    "R6 a full SHA that is not in the repository fails the reader's start clearly",
+    /failed to start: UNKNOWN-COMMIT\] Commit f{40} is not in the local repository; fetch it first/.test(
+      (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").join("\n"),
+    ),
+  );
+  check(
+    "R8 a reader of a worker's worktree with uncommitted changes fails to start and says to commit first",
+    /failed to start/.test(reports) && /uncommitted changes/.test(reports) && /commit/.test(reports),
     reports.slice(-1500),
   );
 
@@ -637,7 +576,10 @@ try {
     work.map((w) => [w.status, w.text.slice(0, 30)]),
   );
 
-  // Step 5: inventory before the PR is merged.
+  // Step 5: inventory before the PR is merged, with one snapshot left over from before readers got their own worktrees.
+  const legacyHead = join(home, id, "read-heads", mainHead);
+  mkdirSync(join(home, id, "read-heads"), { recursive: true });
+  git(workspace, "worktree", "add", "--detach", "--quiet", legacyHead, mainHead);
   let inv = await inventory();
   result.inventoryBefore = inv;
   const item = (branchName) => inv.items.find((entry) => entry.kind === "worker" && entry.threadId === branchName);
@@ -655,11 +597,60 @@ try {
     { s1: i1.setup, s3: i3.setup },
   );
   const heads = inv.items.filter((entry) => entry.kind === "read-head");
-  check("K10 the settled reviewer's PR-head snapshot is removable", heads.length === 1 && heads[0].removable, heads);
+  check(
+    "K10 a leftover read-head snapshot is removable",
+    heads.length === 1 && heads[0].removable && heads[0].path.endsWith(mainHead),
+    heads,
+  );
+  const readerItem = inv.items.find((entry) => entry.threadId === reviewer.id);
+  check(
+    "R3 the ended reviewer's worktree is removable although its commit is on no remote any more",
+    readerItem?.removable === true && git(workspace, "branch", "-r", "--contains", brain.sha1) === "",
+    readerItem,
+  );
   check(
     "K7 reclaimable size is reported",
     inv.reclaimableKb > 0 && inv.reclaimableKb === inv.items.filter((e) => e.removable).reduce((a, e) => a + e.sizeKb, 0),
     inv,
+  );
+
+  // R9: W3 commits while a reader of its worktree reads; the report says it is not valid for the current code.
+  const driftFrom = git(i3.path, "rev-parse", "HEAD");
+  let releaseDrift;
+  brain.driftGate = new Promise((ok) => (releaseDrift = ok));
+  await rpc({ action: "message", id, text: `MARK-DRIFT ${w3.threadId}` });
+  await eventually(async () => brain.driftWaiting, "the drift reader did not start", 300);
+  git(
+    i3.path,
+    "-c",
+    "user.email=e2e@example.invalid",
+    "-c",
+    "user.name=E2E",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "Moved during the read",
+  );
+  const driftTo = git(i3.path, "rev-parse", "HEAD");
+  releaseDrift();
+  await settleAll();
+  const driftReport = await eventually(
+    async () =>
+      (await rpc({ action: "show", id })).messages.map((m) => m.text ?? "").find((text) => /^\[reviewer [^\]]*DRIFT-REVIEW/.test(text)),
+    "the drift reader did not report",
+    300,
+  );
+  check(
+    "R9 a reader whose target worktree moved during the read reports first that it is not valid for the current code, with both commits",
+    /^\[reviewer [^\n]*\n.*not valid for the current code/.test(driftReport) &&
+      driftReport.includes(driftFrom) &&
+      driftReport.includes(driftTo),
+    driftReport.slice(0, 600),
+  );
+  check(
+    "R9 a reader whose target stayed put has no such line",
+    !/not valid for the current code/.test(seen("CHILD-REVIEW", "reviewer") + reports),
   );
 
   // PR #1 merged → W1 becomes removable (its old pre-rebase commit is off-remote, but the PR is merged).
@@ -673,40 +664,96 @@ try {
     inv.items.find((e) => e.threadId === w1.threadId)?.removable === true,
     inv.items.find((e) => e.threadId === w1.threadId),
   );
-  await send("Page.reload", {}, s);
-  await waitFor(
-    `!!document.querySelector('#worktree-list') && document.querySelector('[data-action="worktrees-cleanup"]') && !document.querySelector('[data-action="worktrees-cleanup"]').disabled`,
-    s,
-    "worktree list with cleanup",
-  );
-  await evaluate(`document.querySelector('#worktrees-card').scrollIntoView()`, s);
-  await delay(300);
-  await shot("01-worktrees-before-cleanup", s);
-  const uiText = await evaluate(
-    `document.querySelector('#worktrees-summary').innerText + '\\n' + document.querySelector('#worktrees-card').innerText`,
-    s,
-  ); // the summary sits in the section header since the Settings redesign
   check(
-    "K7 Settings shows sizes, kept reasons, setup failure and the reclaimable cleanup button",
-    /reclaimable/.test(uiText) &&
-      /uncommitted or untracked changes/.test(uiText) &&
-      /not on any remote/.test(uiText) &&
-      /setup failed \(exit 3\)/.test(uiText) &&
-      /#1 merged/.test(uiText) &&
-      /Clean up worktrees \(/.test(uiText),
-    uiText,
+    "K7 the inventory reports reclaimable space and the removable worktrees",
+    inv.reclaimableKb > 0 && inv.items.some((e) => e.removable) && inv.items.some((e) => !e.removable),
+    { reclaimableKb: inv.reclaimableKb },
   );
   const w1Path = inv.items.find((e) => e.threadId === w1.threadId).path,
     w2Path = i2.path,
     w3Path = i3.path,
-    headPath = heads[0].path;
-  await evaluate(`document.querySelector('[data-action="worktrees-cleanup"]').click()`, s);
-  await eventually(async () => !existsSync(w1Path) && !existsSync(headPath), "cleanup did not remove W1 and the snapshot", 300);
-  await waitFor(`/Removed 2 worktree/.test(document.querySelector('#toast')?.innerText ?? '')`, s, "cleanup toast");
-  await delay(500);
-  await shot("02-worktrees-after-cleanup", s);
+    headPath = heads[0].path,
+    readerPath = readerItem.path;
+  // Workspace caches: W1's goes with its worktree, a cache whose workspace is gone goes too, live ones and other folders stay.
+  const caches = join(home, id, "workspace-cache"),
+    cacheOf = (path) => join(caches, inv.items.find((e) => e.path === path).intentId),
+    orphanCache = join(caches, randomUUID()),
+    notCache = join(caches, "keep-me");
+  for (const dir of [cacheOf(w1Path), cacheOf(w2Path), orphanCache, notCache]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(cacheOf(w1Path), "DerivedData.bin"), "x");
+
+  // U4-U6: storage usage, one row per kind, with what the cleanup routine would free under its current settings.
+  const duBytes = (path) => Number(execFileSync("du", ["-sk", path], { encoding: "utf8" }).split("\t")[0]) * 1024;
+  const eightDays = (Date.now() - 8 * 86_400_000) / 1000;
+  utimesSync(cacheOf(w1Path), eightDays, eightDays);
+  mkdirSync(join(home, id, "artifacts", w1.threadId), { recursive: true });
+  writeFileSync(join(home, id, "artifacts", w1.threadId, "run.mp4"), Buffer.alloc(4096));
+  const usage = async () => Object.fromEntries((await rpc({ action: "storage-usage", id })).rows.map((row) => [row.id, row]));
+  let rows = await usage();
   check(
-    "C9 manual cleanup removed W1 and the PR-head snapshot; W2 and W3 stay",
+    "U4 storage usage has a row for each kind",
+    ["worktrees", "caches", "disposable", "videos"].every((key) => rows[key]),
+    rows,
+  );
+  check(
+    "U4 the worktree row counts the inventory's worktrees and their reclaimable space",
+    rows.worktrees.count === inv.items.length && rows.worktrees.bytes > 0 && rows.worktrees.reclaimableBytes > 0,
+    { row: rows.worktrees, items: inv.items.length },
+  );
+  check(
+    "U5 the cache row frees exactly the cache unused past the window (W1's), not the live ones",
+    rows.caches.count >= 2 &&
+      rows.caches.bytes >= rows.caches.reclaimableBytes &&
+      rows.caches.reclaimableBytes === duBytes(cacheOf(w1Path)),
+    { row: rows.caches, w1: duBytes(cacheOf(w1Path)) },
+  );
+  check(
+    "U4 the video row counts Job videos; a running or unapproved Job's video is not freed",
+    rows.videos.count === 1 && rows.videos.bytes >= 4096 && rows.videos.reclaimableBytes === 0,
+    rows.videos,
+  );
+  check(
+    "U6 without disposable globs the disposable row is empty and says why",
+    rows.disposable.count === 0 && /no disposable/i.test(rows.disposable.note ?? ""),
+    rows.disposable,
+  );
+  const routineNow = (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules.find(
+    (item) => item.action?.kind === "cleanup",
+  );
+  const setDisposable = async (disposable) => {
+    const current = (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules.find(
+      (item) => item.id === routineNow.id,
+    );
+    await rpc({ action: "schedule-update", id, scheduleId: current.id, revision: current.revision, cleanup: { disposable } });
+  };
+  const twoDaysAgo = (Date.now() - 2 * 86_400_000) / 1000;
+  utimesSync(join(w2Path, "node_modules"), twoDaysAgo, twoDaysAgo);
+  utimesSync(join(w2Path, "wip-note.txt"), twoDaysAgo, twoDaysAgo);
+  await setDisposable(["node_modules", "wip-note.txt"]);
+  rows = await usage();
+  check(
+    "U5/U6 the disposable row holds only old, git-ignored matches (W2's node_modules, not its untracked note)",
+    rows.disposable.count === 1 &&
+      rows.disposable.reclaimableBytes === duBytes(join(w2Path, "node_modules")) &&
+      rows.disposable.bytes === rows.disposable.reclaimableBytes,
+    rows.disposable,
+  );
+  await setDisposable([]);
+
+  const cleanup = await rpc({ action: "worktrees-cleanup", id, confirm: id });
+  await eventually(
+    async () => !existsSync(w1Path) && !existsSync(headPath) && !existsSync(readerPath),
+    "cleanup did not remove W1, the snapshot and the reader's worktree",
+    300,
+  );
+  check(
+    "C6/C7/C8 cleanup removed W1's cache and an orphaned cache, and kept W2's cache and a folder that is not a cache",
+    !existsSync(cacheOf(w1Path)) && !existsSync(orphanCache) && existsSync(cacheOf(w2Path)) && existsSync(notCache),
+    { caches: existsSync(caches) ? readdirSync(caches) : null },
+  );
+  check("C9 cleanup reports three removed worktrees", cleanup.removed?.length === 3, cleanup);
+  check(
+    "C9 manual cleanup removed W1, the snapshot and the reader's worktree; W2 and W3 stay",
     !existsSync(w1Path) && !existsSync(headPath) && existsSync(w2Path) && existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
   );
   check(
@@ -734,19 +781,90 @@ try {
       .filter((line) => line === `worktree ${w1Path}`).length === 1,
   );
 
-  // K8: automatic cleanup. Publish W3's commit, restart with a short interval; W3 goes, dirty W2 stays.
+  // R10-R13: the cleanup routine. One per project, daily, enabled; it cannot be deleted; settings change freely within bounds.
+  const routines = async () => (await rpc({ action: "schedule-snapshot", id, includeHistory: false })).schedules;
+  const cleanupRoutine = async () => (await routines()).filter((item) => item.action?.kind === "cleanup");
+  let [routine] = await cleanupRoutine();
+  check(
+    "R10 every project has one enabled daily cleanup routine",
+    (await cleanupRoutine()).length === 1 && routine.enabled && routine.kind === "interval" && routine.everyMs === 86_400_000,
+    await routines(),
+  );
+  const refusedDelete = await rpc({ action: "schedule-delete", id, scheduleId: routine.id, revision: routine.revision }).catch(
+    (error) => error,
+  );
+  check(
+    "R11 the cleanup routine cannot be deleted, only turned off",
+    /turn it off/i.test(String(refusedDelete?.message)),
+    String(refusedDelete),
+  );
+  const badGlob = await rpc({
+    action: "schedule-update",
+    id,
+    scheduleId: routine.id,
+    revision: routine.revision,
+    cleanup: { disposable: ["/tmp"] },
+  }).catch((error) => error);
+  check("R1 an absolute disposable path is refused", /relative/i.test(String(badGlob?.message)), String(badGlob));
+  routine = await rpc({
+    action: "schedule-update",
+    id,
+    scheduleId: routine.id,
+    revision: routine.revision,
+    cleanup: { disposable: ["e2e-results"] },
+  });
+  check(
+    "R11 cleanup settings change without the owner and keep the defaults they do not name",
+    JSON.stringify(routine.action) ===
+      JSON.stringify({ kind: "cleanup", settings: { cacheCapGb: 20, unusedDays: 7, videoDays: 14, disposable: ["e2e-results"] } }),
+    routine.action,
+  );
+
+  // R12: publish W3's commit and give dirty W2 an ignored, two-day-old e2e-results; a run removes W3 and that folder, and keeps W2's work.
   const w3Branch = git(w3Path, "rev-parse", "--abbrev-ref", "HEAD");
   git(w3Path, "push", "-q", "origin", `HEAD:refs/heads/${w3Branch}`);
+  const exclude = join(git(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir"), "info", "exclude");
+  mkdirSync(join(exclude, ".."), { recursive: true });
+  writeFileSync(exclude, `${existsSync(exclude) ? readFileSync(exclude, "utf8") : ""}\ne2e-results/\n`);
+  const results = join(w2Path, "e2e-results");
+  mkdirSync(join(results, "run-1"), { recursive: true });
+  writeFileSync(join(results, "run-1", "video.mp4"), "x");
+  const twoDays = new Date(Date.now() - 2 * 86_400_000);
+  utimesSync(results, twoDays, twoDays);
+  // R13: a run that dies with the host is recorded as interrupted and does not block the next one.
   await stopHost();
-  env.PI_PROJECTS_WORKTREE_CLEANUP_MS = "1500";
+  env.PI_PROJECTS_CLEANUP_START_DELAY_MS = "60000";
   startHost();
   await waitHost();
   await rpc({ action: "show", id });
-  await eventually(async () => !existsSync(w3Path), "automatic cleanup did not remove W3", 600);
-  await delay(2000);
+  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  host.kill("SIGKILL");
+  await stopHost().catch(() => {});
+  delete env.PI_PROJECTS_CLEANUP_START_DELAY_MS;
+  startHost();
+  await waitHost();
+  await rpc({ action: "show", id });
+  check("R10 a restart adds no second cleanup routine", (await cleanupRoutine()).length === 1, await routines());
+  const interrupted = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);
   check(
-    "K8 automatic cleanup removed the now-pushed W3 and kept dirty W2",
-    !existsSync(w3Path) && existsSync(join(w2Path, "wip-note.txt")),
+    "R13 the run the host died in is interrupted, not an uncertain submission",
+    interrupted.length === 1 && interrupted[0].status === "interrupted",
+    interrupted,
+  );
+  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  await eventually(async () => !existsSync(w3Path) && !existsSync(results), "the cleanup routine did not remove W3 and e2e-results", 600);
+  const runs = await eventually(
+    async () => {
+      const items = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);
+      return items.some((item) => item.outcome === "completed") && items;
+    },
+    "the cleanup run never completed",
+    300,
+  );
+  check(
+    "R12 running the cleanup routine removed the pushed W3 and W2's old ignored e2e-results, and kept dirty W2's work",
+    !existsSync(w3Path) && !existsSync(results) && existsSync(join(w2Path, "wip-note.txt")),
+    runs,
   );
 
   // K12: after the restart, a follow-up to the finished W2 keeps its worktree, branch and tools (bash is how the fake model sees a worker).
@@ -784,21 +902,11 @@ try {
     w3Reports.slice(-1200),
   );
 
-  result.errors = result.errors.filter((e) => !/Failed to load resource/.test(e));
-  result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/api"));
-  check("no browser errors", !result.errors.length && !result.httpErrors.length, result.errors.concat(result.httpErrors));
   result.status = "passed";
 } catch (error) {
   result.status = "failed";
   result.failure = redact(error?.stack ?? error);
 } finally {
-  if (chrome && !cdpEnded) {
-    try {
-      await send("Browser.close");
-    } catch {}
-    for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20);
-    if (!cdpEnded) chrome.kill("SIGTERM");
-  }
   await stopHost().catch(() => host.kill("SIGKILL"));
   model.closeAllConnections();
   model.close();

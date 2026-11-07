@@ -24,8 +24,8 @@ Verified by `scripts/scoped-models-e2e.mjs` (isolated host, local fake provider 
 - S13 `projects_worker_control` still offers `parallelism`, a second owner of the worker limit next to the project setting.
 
 ## UI
-- S14 The coordinator panel has no model control; cycling means opening Settings. Ctrl+P must also work outside the composer, and repeated cycling must preserve the focused field, draft and selection. Open dialogs must not cycle the project model.
-- S15 Settings has three always-explicit role pickers with no "inherit" choice and no scope editor.
+- S14 Retired with the classic inbox (2026-11-04): its composer model button and Ctrl+P cycling. The inbox at `/` picks models by tier and profile (Settings → Model).
+- S15 A role cannot inherit the coordinator's model, or a narrowed scope is not saved. (Checked over `settings-update`; the classic dialog is retired.)
 
 ## Review findings
 - S16 The inherited scope is read with the host's working directory instead of the selected project's workspace, so another checkout's Pi settings decide what a project cycles through.

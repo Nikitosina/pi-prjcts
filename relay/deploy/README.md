@@ -103,7 +103,7 @@ sudo -u _pirelay env RELAY_DATA=/var/db/pi-relay /opt/homebrew/bin/node relay.ts
 
 The running relay reads the file at authentication, so new hosts need no restart. Removing an online host closes its session at the next heartbeat (at most 25 seconds), and immediately refuses new authentication. Device revocation instead comes from that host's signed device list and takes effect immediately.
 
-CLI updates to the allowlist are intended for one administrator at a time. Do not run concurrent `allow`/`deny` commands. Pair phones with the QR shown in that host's local inbox. Treat the QR as a credential: it carries a ten-minute, single-use pairing code. The relay forwards binary frames opaquely, including the plaintext, signed handshake messages; it cannot decrypt the subsequent HTTP payloads.
+CLI updates to the allowlist are intended for one administrator at a time. Do not run concurrent `allow`/`deny` commands. Pair phones with the QR shown in that host's local inbox (Settings → Remote access → Pair a device). Treat the QR as a credential: it carries a ten-minute, single-use pairing code. The relay forwards binary frames opaquely, including the plaintext, signed handshake messages; it cannot decrypt the subsequent HTTP payloads.
 
 ## 7. Fingerprint and first checks
 

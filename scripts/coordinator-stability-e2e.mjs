@@ -276,20 +276,17 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", project.id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`!!document.querySelector('#compose .context-meter')`, s, "context meter before first response");
-  const empty = await evaluate(
-    `(() => { const m = document.querySelector('#compose .context-meter'); return { text: m.innerText + ' ' + m.getAttribute('aria-label'), sendSibling: m.closest('.row') === document.querySelector('#compose button[type="submit"]').closest('.row') }; })()`,
-    s,
-  );
-  if (/NaN|undefined/.test(empty.text) || !empty.sendSibling) throw Error("Empty context meter invalid: " + JSON.stringify(empty));
-  result.checks.push("S8 context meter renders next to Send before any usage without NaN");
+  const ctxItem = `document.querySelector('#statusline .sl-item[data-item="context"], .sl-item[data-item="context"]')`;
+  await waitFor(`!!${ctxItem}`, s, "context item before first response");
+  const empty = await evaluate(`${ctxItem}.innerText`, s);
+  if (/NaN|undefined/.test(empty)) throw Error("Empty context item invalid: " + empty);
+  result.checks.push("S8 the status line context item renders before any usage without NaN");
 
   const drop = await settle(await rpc({ action: "message", id: project.id, text: "MARK-DROP transient" }));
   if (drop.job.state !== "done") throw Error("Dropped request was not retried: " + JSON.stringify(drop.job));
@@ -310,90 +307,28 @@ try {
   result.checks.push(`S3 persistent error stops after ${failAttempts} attempts`);
   if (!/overloaded|503/i.test(fail.job.error ?? "") || !/overloaded|503/i.test(fail.view.project.problem ?? ""))
     throw Error("Error text lost: " + JSON.stringify(fail.job));
+  const failure = `document.querySelector('#feed .turn-failure')`;
   await waitFor(
-    `/overloaded|503/i.test(document.querySelector('#warning').innerText) && !!document.querySelector('#warning [data-action="retry-message"]')`,
+    `/overloaded|503/i.test(${failure}?.innerText ?? '') && !!${failure}.querySelector('button[data-retry-job]')`,
     s,
-    "warning with error text and Retry",
+    "failure with error text and Retry",
   );
-  result.checks.push("S4 failed turn shows provider error text and a Retry button");
+  result.checks.push("S4 a failed turn shows the provider error text and a Retry button in the transcript");
   await shot("01-failed-with-retry", s);
-
-  // Dismiss: ✕ hides the warning across polls and reload; Retry untouched (D1-D4, D6).
-  const rows = await evaluate(
-    `[...document.querySelectorAll('#warning .notice-row')].map(r => ({ text: r.innerText, close: !!r.querySelector('button.notice-close[aria-label="Dismiss"]') }))`,
-    s,
-  );
-  if (!rows.length || rows.some((r) => !r.close)) throw Error("Warning rows without ✕: " + JSON.stringify(rows));
-  await evaluate(`document.querySelector('#warning .notice-row:has([data-action="retry-message"]) .notice-close').click()`, s);
-  await waitFor(
-    `![...document.querySelectorAll('#warning .notice-row')].some(r => /overloaded|503/i.test(r.innerText))`,
-    s,
-    "failed row dismissed",
-  );
-  if ((await rpc({ action: "show", id: project.id })).jobs.length !== fail.view.jobs.length) throw Error("✕ triggered Retry");
-  await evaluate(`document.querySelector('#refresh').click()`, s);
-  await delay(1500);
-  if (
-    await evaluate(`/overloaded|503/i.test(document.querySelector('#warning').innerText) && !document.querySelector('#warning').hidden`, s)
-  )
-    throw Error("Dismissed warning came back after poll");
-  await send("Page.reload", {}, s);
-  await waitFor(
-    `!!document.querySelector('#compose .context-meter') && document.querySelector('#title').textContent === 'Coordinator stability'`,
-    s,
-    "reloaded",
-  );
-  await delay(1500);
-  if (
-    await evaluate(`!document.querySelector('#warning').hidden && /overloaded|503/i.test(document.querySelector('#warning').innerText)`, s)
-  )
-    throw Error("Dismissed warning came back after reload");
-  result.checks.push("S9 ✕ dismisses a warning row; stays hidden after poll and reload; does not Retry");
-  // A new failure with different text shows again (D5).
+  // S9-S11 (the classic warning rows' and error box's ✕) were retired with the classic inbox on 2026-11-04.
   await rpc({ action: "message", id: project.id, text: "MARK-FAIL second" }).then(settle);
+  const second = (await rpc({ action: "show", id: project.id })).jobs.at(-1);
+  if (second.text !== "MARK-FAIL second" || second.state !== "failed") throw Error("Second failure missing: " + JSON.stringify(second));
   await waitFor(
-    `!document.querySelector('#warning').hidden && /overloaded|503/i.test(document.querySelector('#warning').innerText)`,
+    `document.querySelectorAll('#feed .turn-failure').length === 1 && ${failure}.querySelector('[data-retry-job]').dataset.retryJob === ${JSON.stringify(second.id)}`,
     s,
-    "new failure shown again (not hidden by old dismissal)",
+    "the newest failure is the one offered for Retry",
   );
-  result.checks.push("S10 a later failure is shown despite an earlier dismissal");
-  // Error box ✕ (D7).
-  await evaluate(
-    `(() => { const t = document.querySelector('#compose textarea'); t.value = '/skill:nope-missing do it'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`,
-    s,
-  );
-  await waitFor(
-    `!document.querySelector('#error').hidden && /Unknown skill/.test(document.querySelector('#error').innerText)`,
-    s,
-    "error shown",
-  );
-  await shot("01b-error-with-close", s);
-  await evaluate(`document.querySelector('#error .notice-close').click()`, s);
-  await waitFor(`document.querySelector('#error').hidden`, s, "error dismissed");
-  await evaluate(
-    `(() => { const t = document.querySelector('#compose textarea'); t.value = '/skill:other-missing do it'; t.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#compose').requestSubmit(); })()`,
-    s,
-  );
-  await waitFor(
-    `!document.querySelector('#error').hidden && /other-missing/.test(document.querySelector('#error').innerText)`,
-    s,
-    "different error shown again",
-  );
-  await evaluate(
-    `(() => { document.querySelector('#error .notice-close').click(); const t = document.querySelector('#compose textarea'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-    s,
-  );
-  // The two refusals are expected 400s; anything else stays an error.
-  const expected400 = (e) => / 400 /.test(e);
-  if (result.errors.filter(expected400).length !== 2 || result.httpErrors.filter((h) => h.status === 400).length !== 2)
-    throw Error("Unexpected refusal errors");
-  result.errors = result.errors.filter((e) => !expected400(e));
-  result.httpErrors = result.httpErrors.filter((h) => h.status !== 400);
-  result.checks.push("S11 ✕ closes the error box; a different later error shows again");
+  result.checks.push("S10 a later failure replaces the earlier one");
 
   failing = false;
   const beforeJobs = (await rpc({ action: "show", id: project.id })).jobs.length;
-  await evaluate(`(() => { const b = document.querySelector('#warning [data-action="retry-message"]'); b.click(); b.click(); })()`, s);
+  await evaluate(`(() => { const b = document.querySelector('#feed .turn-failure button[data-retry-job]'); b.click(); b.click(); })()`, s);
   const retried = await eventually(async () => {
     const view = await rpc({ action: "show", id: project.id });
     const last = view.jobs.at(-1);
@@ -405,35 +340,13 @@ try {
   result.checks.push("S5 Retry resends the same text exactly once");
   if (retried.project.phase === "attention" || retried.project.problem)
     throw Error("Attention stuck after success: " + JSON.stringify({ phase: retried.project.phase, problem: retried.project.problem }));
-  await waitFor(
-    `document.querySelector('#warning').hidden || !/overloaded|503/i.test(document.querySelector('#warning').innerText)`,
-    s,
-    "warning cleared",
-  );
+  await waitFor(`!document.querySelector('#feed .turn-failure')`, s, "failure cleared");
   result.checks.push("S6 later success clears attention and the failure warning");
 
   const expected = Math.round(((PROMPT_TOKENS + 10) / WINDOW) * 100);
-  await waitFor(
-    `document.querySelector('#compose .context-meter').getAttribute('aria-label').includes('${expected}%')`,
-    s,
-    "context percentage",
-  );
-  const meter = await evaluate(
-    `(() => { const m = document.querySelector('#compose .context-meter'); m.scrollIntoView({ block: 'center' }); const r = m.getBoundingClientRect(); return { label: m.getAttribute('aria-label'), x: r.x + r.width / 2, y: r.y + r.height / 2, stroke: !!m.querySelector('svg circle[stroke-dasharray]') }; })()`,
-    s,
-  );
-  if (!meter.stroke) throw Error("Meter is not a stroked circle");
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: meter.x, y: meter.y }, s);
-  await waitFor(
-    `(() => { const t = document.querySelector('#compose .context-meter .context-popup'); return t && getComputedStyle(t).visibility === 'visible' && t.innerText.includes('${expected}%'); })()`,
-    s,
-    "hover popup",
-  );
-  result.checks.push(`S7 stroked context meter next to Send; hover popup shows ${expected}%`);
-  result.meter = meter;
-  await shot("02-context-popup", s);
-  if (await evaluate(`!document.querySelector('#error').hidden && document.querySelector('#error').innerText`, s))
-    throw Error("Error banner shown: " + (await evaluate(`document.querySelector('#error').innerText`, s)));
+  await waitFor(`${ctxItem}.innerText.includes('${expected}%')`, s, "context percentage");
+  result.checks.push(`S7 the status line context item shows ${expected}%`);
+  await shot("02-context", s);
   if (result.errors.length || result.httpErrors.length) throw Error("Browser errors captured");
   result.status = "passed";
 } catch (error) {

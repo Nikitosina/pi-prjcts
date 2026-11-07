@@ -20,18 +20,23 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 
 | capability | purpose |
 |---|---|
-| `vcs` | checkout kind: root marker, status, diffs, PR-head snapshots, branch continuation, private dirs, worker rule |
-| `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts, setup cards |
+| `vcs` | checkout kind: root marker, status, diffs, branch continuation, private dirs, worker rule |
+| `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts and removal (`atBase` for a settled reader's worktree), setup cards |
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it; without it a Job of this kind cannot be approved |
 | `coordinatorTools` | tools and an instruction snippet for matching projects |
 | `rpc` | namespaced host RPCs: `{ action: "plugin", plugin, method, id?, params? }`; context offers `withRoot`, `mutateIdle` |
+| `rpcPolicy` | per `rpc` method, what it does when an agent calls it: `"read"`, `"write"`, `"dangerous"` or `(params) => kind`. Reads and writes run; dangerous and unclassified methods need the owner's approval |
 | `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
 | `workerTools` | tools and an instruction snippet for whole-repository workers; offered to new threads, frozen with each thread's tool set |
 | `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |
 | `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
+| `cleanup` | `({ projectId, unusedDays, signal })` runs as a step of the project's Workspace cleanup routine, after the core steps; resolves with a one-line summary (empty for nothing to say), throws to fail the run. Remove only what the plugin owns and nobody uses now. The simulator plugin erases owned clones that are shut down, unleased and unused for `unusedDays` |
+| `usage` | `({ projectId, unusedDays, signal })` resolves with the plugin's row in Settings → Storage, `{ label, count, bytes, reclaimableBytes, note? }`, or null when it keeps nothing for the project. `reclaimableBytes` is what its `cleanup` step would free now. A throw shows the row as unknown with the message; other rows still answer |
 | `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
+
+Since 2026-11-06 readers get their own worktree through `workspace.task`, so `vcs.readHeads`, `vcs.readHeadMarker` and `workspace.readHeadEntry` are no longer part of the contract; the host ignores them. A provider whose old snapshots still sit on disk removes them in its `cleanup` step.
 
 Merge contract (`src/plugin-types.ts`, used by `src/result-acceptance.ts`): `merge` must refuse when the PR head differs from `head`, and return `{ ok: false, refused }` when the provider answered and nothing merged. A throw means the outcome is unknown; Approve then reads the PR through `inspect` before deciding and reports `merge-uncertain` if it cannot confirm. `enableAutoMerge` returns `waiting: false` when the PR is already mergeable and nothing was armed. `pullMain` fast-forwards only a clean checkout on `base` and returns `{ pulled: false, reason }` for an expected skip instead of throwing. The host resolves the provider with `plugins.mergeProvider(kind)`.
 
@@ -54,6 +59,8 @@ Tests: `scripts/vcs-plugins-e2e.mjs` with the fake plugin in `scripts/fixtures/`
 Shared task helpers borrow that verified chat attachment. They do not call independent worker `plan`, `attach`, `tools` or publication hooks, and they never acquire the chat's ownership identity. Their processes, artifacts and host leases remain keyed to their real worker ID.
 
 Isolated task helpers require the separate optional `workspace.task` adapter. `plan(TaskPlanContext)` receives the verified source chat workspace, actual worker identity and explicit `baseCommit`; it must return that exact base and a fresh branch, never fetch trunk as a substitute or continue another branch. Core freezes the resulting allocation intent before allocation. `attach(TaskAttachContext)` returns the same owned-attachment operations plus task instructions. Its checks must retain task-specific receipt and lease ownership, not relax Coordinator checks to accept arbitrary paths.
+
+`helperGuard(command)` is the optional shell policy of every task helper, shared or isolated. Helpers never publish, so it should keep the provider's safety rules and refuse pushes and PR writes with a message that sends the work back to the Coordinator. Without it, core's Git helper policy applies.
 
 Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
 

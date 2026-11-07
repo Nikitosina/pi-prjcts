@@ -22,10 +22,19 @@ const commands = {
   ],
 };
 const sharedMarker = "SHARED-BRANCH-PROBE";
+// H1-H3 (task-worker-failures.md): a helper reads and commits, but never publishes.
+const helperCommands = [
+  "pwd; git branch --show-current; cat dirty.txt",
+  "git push origin HEAD:refs/heads/coordinator/followup",
+  "gh pr create --title x --body y",
+  "git log -1 --format=%s; git status --short | wc -l",
+];
 const k = await createKit("coordinator-workspace", {
   handler: ({ role, user, results }) => {
     if (role === "worker" && user.includes(sharedMarker))
-      return results.length ? say("Shared helper finished") : call("bash", { command: "pwd; git branch --show-current; cat dirty.txt" });
+      return results.length < helperCommands.length
+        ? call("bash", { command: helperCommands[results.length] })
+        : say("Shared helper finished");
     if (role !== "coordinator") return;
     if (user === "MARK-SHARED")
       return results.length
@@ -72,12 +81,18 @@ await k.run(async () => {
   k.check("reopen preserves branch and dirty files", (await ask("MARK-PROBE"))[0].includes("coordinator/followup\nkeep"));
   await k.ask(id, "MARK-SHARED");
   const helper = (await k.jobs(id)).find((job) => job.title === sharedMarker);
-  const shared = k.result.calls.findLast((c) => c.role === "worker" && c.user.includes(sharedMarker) && c.results.length)?.results[0];
+  const helperResults =
+    k.result.calls.findLast((c) => c.role === "worker" && c.user.includes(sharedMarker) && c.results.length)?.results ?? [];
+  const shared = helperResults[0];
   k.check(
     "shared helper borrows changed-branch allocation",
     helper?.status === "completed" && shared?.includes(`${worktree}\ncoordinator/followup\nkeep`),
     { helper, shared },
   );
+  const blockedForHelper = (text) => /Blocked/.test(text ?? "") && /Coordinator/.test(text ?? "");
+  k.check("H1/H2 a task helper's git push is blocked and names who publishes", blockedForHelper(helperResults[1]), helperResults[1]);
+  k.check("H1/H2 a task helper's gh pr write is blocked", blockedForHelper(helperResults[2]), helperResults[2]);
+  k.check("H3 a task helper still reads git", /^base|^c1/m.test(helperResults[3] ?? ""), helperResults[3]);
   await ask("MARK-DETACH");
   await k.restartHost();
   k.check("detached HEAD stays usable after reopen", (await ask("MARK-DETACHED"))[0].includes("HEAD\nkeep"));

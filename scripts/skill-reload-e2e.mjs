@@ -253,7 +253,7 @@ try {
     await delay(300);
     await settleAll();
   };
-  const index = (system) => [...system.matchAll(/^- ([\w-]+): /gm)].map((m) => m[1]).sort();
+  const index = (system) => [...(system.split("Skills for your role")[1] ?? "").matchAll(/^- ([\w-]+): /gm)].map((m) => m[1]).sort();
   const described = (system, name) => new RegExp(`^- ${name}: (.*)$`, "m").exec(system)?.[1];
   const lastCall = (role, marker) => result.calls.findLast((c) => c.role === role && c.user.includes(marker));
   const toolResult = (role, marker) =>

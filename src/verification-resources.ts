@@ -1,6 +1,6 @@
 /**
- * Machine-wide resources other workers may be using. The verifier's shell is the worker's shell, so nothing here confines it; this is the lease
- * rule workers already follow (projects_lease_acquire on the host's lease table), applied to the commands a verifier runs.
+ * Machine-wide resources other workers may be using. Verification runs use the worker's shell, so nothing here confines them; this is the lease
+ * rule workers already follow (projects_lease_acquire on the host's lease table), applied to projects_verify_run commands.
  */
 const SHARED: readonly { name: string; uses: RegExp; lease: RegExp; hint: string }[] = [
   {

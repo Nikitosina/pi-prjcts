@@ -25,3 +25,10 @@ Worker-failure notices (src/notify.ts, open issue from the notifications slice):
 - W4 On upgrade, every historic failed work item of existing projects floods out at once.
 - W5 Stopped/interrupted (owner stop, pause) work is reported as a failure.
 - W6 Browser notifications ignore the new notice kind, or the click does not open the chat.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+Full-text hits show in the ⌘K palette (`#palette`), after the matching chats and commands, with their source as the hint. The browser
+checks keep S4 (HTML as text), S6 (empty result), S11 (⌘K from the composer, arrows, Escape), S12 (latest query wins) and S13 (390 px).
+Search itself (S1-S3, S5, S6, S15, S16) stays covered over RPC.
+Known gap: choosing a hit does nothing yet, so S7-S10 (open the chat at the old turn and highlight it, open the worker message, the
+document or the upload at the offset) and S8 (return to the tail) have no browser check.

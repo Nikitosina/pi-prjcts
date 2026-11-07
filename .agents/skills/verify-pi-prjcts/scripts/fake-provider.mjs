@@ -1,8 +1,16 @@
 // Fake OpenAI-completions provider for verification runs. Usage: node fake-provider.mjs <port-file> <request-log>
 // Ordinary messages receive `VERIFY-FAKE-REPLY: <last user message>` and appends one JSON line per call to <request-log>.
 // A message containing VERIFY-JOB scripts a Job: the coordinator spawns a worker, which plans and reports Ready with a PR and candidate.
+// VERIFY-MEMORY scripts a knowledge read and write; VERIFY-HOST scripts the Host agent (host_call list, ui_focus, a gated archive);
+// VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-HOST-STATUS reorders the status line
+// through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the coordinator file the same request through
+// owner_approval_request. VERIFY-TABLE answers (any agent) with Markdown that mixes a table, nested and numbered lists, a quote and
+// hostile HTML and links, for the chat renderers. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
+// image) and cite its artifact reference plus a missing one; VERIFY-WORKER-IMAGE has the coordinator hand that to a worker
+// (scouts read code through code_read, which returns no images).
 import { createServer } from "node:http";
 import { appendFileSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 
 const [portFile, requestLog] = process.argv.slice(2);
 if (!portFile || !requestLog) {
@@ -13,7 +21,31 @@ const text = (content) =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => part.text ?? "").join("") : "";
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const TABLE_REPLY = [
+  "Role summary:",
+  "",
+  "| Role | Model | Cost |",
+  "|:-----|:-----:|-----:|",
+  "| Coordinator | `**sol**` | $0.10 |",
+  '| Worker <img src=x onerror="window.__xss=1"> | [bad](javascript:window.__xss=2) | ~~old~~ new |',
+  "",
+  "- outer",
+  "  - nested",
+  "",
+  "3. three",
+  "4. four",
+  "",
+  "> quoted **text**",
+  "",
+  "See https://example.com/docs. and ![pic](https://example.com/p.png)",
+].join("\n");
+let failNextSummary = false;
 const server = createServer((req, res) => {
+  if (req.method === "POST" && (req.url === "/fail-next-summary" || req.url === "/allow-summary")) {
+    failNextSummary = req.url === "/fail-next-summary";
+    res.writeHead(204).end();
+    return;
+  }
   let body = "";
   req.setEncoding("utf8");
   req.on("data", (part) => {
@@ -43,7 +75,85 @@ const server = createServer((req, res) => {
     const say = (content) => chunk({ role: "assistant", content }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
     const title = "VERIFY-JOB greet the world";
     let reply;
-    if (names.includes("agents") && user.startsWith("[worker")) {
+    const uuidIn = (role) =>
+      messages
+        .filter((m) => m.role === role)
+        .map((m) => text(m.content))
+        .join(" ")
+        .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
+    if (user.includes("VERIFY-TABLE")) {
+      // The Host agent also cites an artifact, which its drawer cannot show (no project image route).
+      reply = say(
+        names.includes("host_call")
+          ? `${TABLE_REPLY}\n\n![chart](artifact:00000000-0000-4000-8000-000000000000/binary/chart.png)`
+          : TABLE_REPLY,
+      );
+    } else if (user.includes("VERIFY-WORKER-IMAGE") && names.includes("agents") && !user.startsWith("[")) {
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "worker",
+              title: "Look at the screen",
+              brief: "VERIFY-IMAGE read screen.png and show it.",
+              acceptance: ["Shows the screenshot."],
+              requestId: "verify-worker-image",
+            })
+          : say("Asked a worker to look at the screen.");
+    } else if (user.includes("VERIFY-IMAGE") && names.includes("read")) {
+      const ref = messages
+        .filter((m) => m.role === "tool")
+        .map((m) => text(m.content))
+        .join(" ")
+        .match(/artifact:([a-f0-9-]{36})\/binary\/[\w.]+/);
+      reply =
+        stage === 0
+          ? call("read", { path: "screen.png" })
+          : say(
+              ref
+                ? `Screenshot:\n\n![screen](${ref[0]})\n\n![gone](artifact:${ref[1]}/binary/missing.png)`
+                : "No artifact reference came back.",
+            );
+    } else if (names.includes("host_call") && user.startsWith("[approval ")) {
+      reply = say(/denied/i.test(user) ? "Understood, nothing was archived." : "Done as approved.");
+    } else if (names.includes("owner_approval_request") && user.includes("VERIFY-COORD-APPROVAL")) {
+      reply =
+        stage === 0
+          ? call("owner_approval_request", {
+              action: "archive",
+              input: { id: user.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0] },
+              summary: "Archive the second spare project",
+            })
+          : say("I asked you to approve archiving the second spare project.");
+    } else if (names.includes("host_call") && user.includes("VERIFY-HOST-APPROVE")) {
+      reply =
+        stage === 0
+          ? call("host_call", {
+              action: "archive",
+              input: { id: user.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0] },
+              summary: "Archive the spare project",
+            })
+          : say("Archiving the spare project waits for your approval.");
+    } else if (names.includes("ui_set") && user.includes("VERIFY-HOST-STATUS")) {
+      // Host agent: reorder the status line (Connection first, Chat cost hidden), then point the browser at its settings.
+      const order = ["connection", "activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "hints"];
+      reply =
+        stage === 0
+          ? call("ui_set", { patch: { statusItems: order.map((id) => ({ id, enabled: id !== "cost" })) } })
+          : stage === 1
+            ? call("ui_focus", { view: "settings", section: "statusline" })
+            : say("Status line updated.");
+    } else if (names.includes("host_call") && user.includes("VERIFY-HOST")) {
+      // Host agent: list projects, point the browser at Memory, then ask to archive the first project (gated by an approval).
+      reply =
+        stage === 0
+          ? call("host_call", { action: "list", input: {} })
+          : stage === 1
+            ? call("ui_focus", { view: "memory" })
+            : stage === 2
+              ? call("host_call", { action: "archive", input: { id: uuidIn("tool") }, summary: "Archive the Verify seed project" })
+              : say("Archiving Verify seed waits for your approval.");
+    } else if (names.includes("agents") && user.startsWith("[worker")) {
       reply = say(
         user.includes(" checkpoint:")
           ? "The intermediate result needs your decision."
@@ -83,6 +193,25 @@ const server = createServer((req, res) => {
               requestId: "verify-job",
             })
           : say("Started the Job.");
+    } else if (user.includes("VERIFY-CODEMODE") && names.includes("codemode")) {
+      reply =
+        stage === 0
+          ? call("codemode", {
+              code: `try { await tools.read({ path: "missing-ui2.txt" }); } catch {}\nconst nested = await tools.bash({ command: "sleep 2; printf nested-ok" });\nconsole.log(nested.output);`,
+            })
+          : say("Nested codemode finished.");
+    } else if (user.includes("VERIFY-MEMORY") && names.includes("projects_knowledge_write")) {
+      // Memory rows: the coordinator reads the preferences, then records a decision.
+      reply =
+        stage === 0
+          ? call("projects_knowledge_read", { path: "preferences.md" })
+          : stage === 1
+            ? call("projects_knowledge_write", {
+                path: "decisions/greeting-style.md",
+                text: "# Greeting style\n\nGreet in one short line, no emoji.\n",
+                expectedRevision: null,
+              })
+            : say("Remembered the greeting style.");
     } else if (user.includes("VERIFY-JOB") && names.includes("job")) {
       const steps = (done) => [
         { title: "Write the greeting", status: done ? "done" : "doing", estimateMin: 5 },
@@ -103,7 +232,19 @@ const server = createServer((req, res) => {
                 })
               : say("Done.");
     }
+    if (/conversation to summarize/.test(user) && failNextSummary) {
+      res.writeHead(500, { "content-type": "text/plain" }).end("UI2-SUMMARY-FAIL scripted");
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (user.includes("VERIFY-STOP") && names.includes("agents") && stage === 0) {
+      // The provider tail stays pending; Stop must abort it instead of waiting for the provider.
+      res.write(chunk({ role: "assistant", content: "working" }, null));
+      void delay(60000).then(() => {
+        if (!res.destroyed && !res.writableEnded) res.end(chunk({}, "stop") + "data: [DONE]\n\n");
+      });
+      return;
+    }
     res.end(
       reply ??
         chunk({ role: "assistant", content: `VERIFY-FAKE-REPLY: ${user.slice(0, 200)}` }, null) + chunk({}, "stop") + "data: [DONE]\n\n",

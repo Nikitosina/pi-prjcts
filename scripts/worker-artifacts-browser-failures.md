@@ -17,3 +17,10 @@ Scope: Activity panel = workers list | worker chat | artifact browser (folder tr
 - F13 Responsive (<1200 px): the browser still takes a column (squeezing the chat) or cannot be reached; no toggle; drawer does not close. At 390 px the single-column layout breaks.
 - F14 Hostile names: a file named `<img src=x onerror=...>.txt`, spaces, unicode, deep nesting break the tree or inject markup.
 - F15 Regressions: existing worker chat / workers card / coordinator workers UI / artifacts / ui-polish E2Es fail; browser console errors or unexpected HTTP errors.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The new client has no artifact browser and no image lightbox. Kept: the per-worker listing over `artifacts-list` (setup, F9 a file
+written later is listed after the worker's next commit, F11 per-worker listings, F12 an empty worker), and in the worker view
+(`#focus-view`) F10 inline images and artifact open buttons, F7 hostile names never run, F13 390 px. Retired with the classic layout:
+F1-F6, F8 (tree, filter, sort, previews, download, open in tab), the rest of F10-F12 (selection, chat link selects the file, Back
+removes the browser) and V1-V9 (lightbox). Known gap: no artifact browser, no inline video player, no image viewer.

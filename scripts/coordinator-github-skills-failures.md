@@ -23,3 +23,9 @@ Found on the owner's live Mari project: the coordinator could not read or create
 
 ## Regressions to keep
 16. live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui and projects-chat-md keep passing.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+G7's human tool labels ("Read GitHub #95") were classic presentation; the new transcript shows each call as a terminal-style row
+(tool name, first string argument, outcome). The check now asserts every GitHub tool appears with its ok/error outcome after
+Show earlier and opening the folded runs. S10 keeps the global "/" shortcut on `#composer-input` with an empty value (the skill menu, `#slash-menu` in the new client, opens only when "/" is typed in the composer).
+Known: a numeric-only call (issue read `#95`) shows no argument in its row.

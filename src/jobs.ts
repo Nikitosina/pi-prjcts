@@ -23,11 +23,24 @@ import {
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
-import { providerFailure, QUOTA_RETRY_BASE_MS, QUOTA_RETRY_LIMIT, quotaRetryDelay, unansweredReason } from "./provider-failure.ts";
+import {
+  emptyAnswerFailure,
+  providerFailure,
+  type ProviderFailure,
+  QUOTA_RETRY_BASE_MS,
+  QUOTA_RETRY_LIMIT,
+  quotaRetryDelay,
+  unansweredReason,
+} from "./provider-failure.ts";
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
+import { behaviorKey, composePrompt, type PromptFrame } from "./prompt-blocks.ts";
+import { busyIn } from "./durable-idle-configure.ts";
+
+export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 const context = BACKGROUND_CONTEXT;
 
+// "verifier" remains only so recorded verifier subagents still read; new turns cannot start one.
 export type AgentRole = "worker" | "scout" | "reviewer" | "verifier";
 export const TaskWorkspaceSchema = Type.Union([
   Type.Object({ kind: Type.Literal("shared") }, { additionalProperties: false }),
@@ -125,6 +138,8 @@ export type Agent = {
   /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
   scopeId: string | null;
   readRef: string | null;
+  /** The commit of the agent worktree this reader reads, recorded when its current message started. */
+  readHead?: string;
   /** The host prepared this agent's environment (workspace, tools). */
   prepared: boolean;
   /** Messages sent to it since it was created; a reporter that finishes while a newer message is queued does not settle the Job. */
@@ -146,6 +161,35 @@ export type JobsState = {
   /** Spawn request id -> agent id, so a retried spawn returns the same agent. */
   requests: Record<string, string>;
 };
+
+/**
+ * An agent's prompt as built: the frozen frame (repository, workspace, skills, host contract) and the key of the behavior
+ * it runs. Written when the agent is first prepared; a later idle turn recomposes the frame with the saved behavior.
+ */
+export type AgentPromptState = { frame: PromptFrame | null; behavior: string | null; unproven?: string };
+export const AgentPrompt = defineDoc<AgentPromptState>({
+  kind: "projects.agent-prompt",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  checkpointWhen: () => false,
+  initial: () => ({ frame: null, behavior: null }),
+});
+/** Whether an agent runs the saved behavior: `pending` adopts on its next idle continued or retried turn. */
+export type AgentPromptStatus = {
+  state: "current" | "pending" | "legacy-unchecked" | "frozen";
+  reason: string | null;
+};
+/** What `prepare` built an agent's instructions from: the frame (stored on first preparation, given back after) and the behavior text. */
+export type PreparedPrompt = {
+  frame: PromptFrame;
+  behavior: string;
+  /** For an agent prepared before frames: the whole instructions `frame` gives with each behavior it could have started with. */
+  proofs?: { instructions: string; behavior: string; frame: PromptFrame }[];
+};
+const UNPROVEN =
+  "Started before prompt blocks, and its stored prompt does not match one rebuilt from the current host contract, repository instructions, project settings, skills and workspace, so it keeps the prompt it started with.";
 
 /** The project's Jobs, on the root conversation. */
 export const Jobs = defineDoc<JobsState>({
@@ -187,6 +231,29 @@ export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, 
       state.jobs[agent.jobId]?.workspace?.kind === "shared",
   );
 const isLive = (status: JobStatus) => status === "running";
+
+/** An agent whose independent Job already ended (Ready, checkpoint, failed, stopped) but that was never marked ended. Helpers settle on their own. */
+const endedJobAgent = (doc: Readonly<JobsState>, agent: Readonly<Agent>) => {
+  const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+  return agent.endedAt === null && !!job && !job.workspace && !isLive(job.status);
+};
+/** Work that can still run: a task that is not blocked, or input waiting for a turn. A queued passive write (a compaction summary) runs nothing. */
+const runsWork = (live: Awaited<ReturnType<Harness["inspect"]>>) =>
+  live.tasks.some((task) => task.state.kind !== "blocked") || live.submissions.some((submission) => submission.type === "input");
+/** Agents an unfinished, runnable reporter task still delivers to. */
+const reportedAgents = (live: Awaited<ReturnType<Harness["inspect"]>>) =>
+  new Set(
+    live.tasks.flatMap((task) => {
+      const input = task.record.input;
+      return task.record.kind === "projects.agent-reporter" &&
+        task.state.kind !== "blocked" &&
+        input &&
+        typeof input === "object" &&
+        !Array.isArray(input)
+        ? [String(input.agentId)]
+        : [];
+    }),
+  );
 
 /** A step in progress counts down from its start; one that overran its estimate still has a minute left. */
 const remaining = (step: PlanStep, accuracy: number, now: number) =>
@@ -279,19 +346,34 @@ export type JobsHost = {
    * Runs before an agent's first message: allocates its workspace, builds its tools. Returns the change to apply, or nothing.
    * It must be idempotent: a restart prepares again. Throwing fails the Job with the message.
    */
-  prepare?(spec: { agent: Agent; job: Job | null }): Promise<AgentChange | void>;
+  prepare?(spec: {
+    agent: Agent;
+    job: Job | null;
+    frame: PromptFrame | null;
+  }): Promise<(AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void>;
+  /** For a reader of another agent's worktree: why its report does not match that worktree now, or null when it still does. */
+  readDrift?(agent: Agent): Promise<string | null>;
+  /** The behavior text this agent would get now, or null when its prompt is not built from blocks. */
+  promptBehavior?(agent: Agent, job: Job | null): string | null;
   /** Stops the background processes and releases the leases of these conversations. */
   killProcesses?(conversationIds: readonly ConversationId[]): Promise<void>;
   /** Longest silence in ms of a live background process of these conversations; null without one. */
   backgroundSilence?(conversationIds: readonly ConversationId[]): Promise<number | null> | number | null;
-  /** The owner-configured quota fallback model for a role, if any. */
-  fallbackModel?(role: AgentRole): { label: string; change: AgentChange } | null;
+  /** The next owner-configured fallback model after `from` (`moves` already made), if any; a rate limit only moves along a tier. */
+  fallbackModel?(at: {
+    role: AgentRole;
+    from: string;
+    moves: number;
+    failure: ProviderFailure;
+  }): { label: string; change: AgentChange } | null;
   /** Cached provider reset time for a model label, if known. */
   quotaResetAt?(model: string, now: number): number | undefined;
   /** Why these proof references cannot back a Ready report, or null. */
   checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
   approver?: { approve(job: AcceptJob): Promise<AcceptanceOutcome> };
+  /** Called once when a Job becomes approved (its worktree can usually go now). */
+  afterApproved?(jobId: string): void;
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
   quotaRetryBaseMs?: number;
@@ -365,7 +447,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
     phases: {
       prepare: async (reporter, runtime, taskContext) => {
         const { agentId, conversationId } = reporter.input;
-        let change: AgentChange | void = undefined;
+        let change: (AgentChange & { prompt?: PreparedPrompt; readHead?: string }) | void = undefined;
         let failure: string | null = null;
         try {
           const state = await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext);
@@ -374,6 +456,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             change = await host.prepare?.({
               agent: agent as Agent,
               job: agent.jobId ? ((state!.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+              frame: agent.prepared ? ((await runtime.snapshot(AgentPrompt, conversationId, taskContext))?.frame ?? null) : null,
             });
         } catch (error) {
           if (runtime.signal.aborted) throw error;
@@ -386,8 +469,31 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (!agent || state.paused || agent.endedAt !== null || (job && job.status !== "running"))
             return { status: "running", checkpoint: { phase: "report" } } as const;
           if (!failure) {
-            // A prepared agent keeps its frozen prompt; preparing again only restores its workspace, tools and extensions.
-            if (change) await configure(tx, conversationId, agent.prepared ? { ...change, instructions: undefined } : change);
+            if (change?.readHead) agent.readHead = change.readHead;
+            if (change) {
+              const { prompt, readHead: _readHead, ...built } = change;
+              let setup = built;
+              const saved = await tx.doc(AgentPrompt, conversationId);
+              // An agent prepared before frames gets one only when a rebuilt prompt equals its stored one exactly; nothing is parsed out of it.
+              if (agent.prepared && !saved.frame && prompt?.proofs) {
+                const stored = (await tx.doc(AgentDoc, conversationId)).instructions;
+                const proof = prompt.proofs.find((item) => item.instructions === stored);
+                if (proof) {
+                  saved.frame = proof.frame;
+                  setup = { ...setup, instructions: composePrompt(proof.frame, prompt.behavior) };
+                  saved.behavior = behaviorKey(proof.behavior);
+                  delete saved.unproven;
+                } else saved.unproven = UNPROVEN;
+              }
+              // A prepared agent keeps its frame; it adopts the saved behavior only between turns, never inside a running one.
+              const adopt =
+                !agent.prepared || (prompt !== undefined && saved.frame !== null && (await busyIn(tx, conversationId)) === null);
+              await configure(tx, conversationId, adopt ? setup : { ...setup, instructions: undefined });
+              if (adopt && prompt) {
+                if (!agent.prepared) saved.frame = prompt.frame;
+                saved.behavior = behaviorKey(prompt.behavior);
+              }
+            }
             agent.prepared = true;
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
@@ -442,16 +548,27 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           taskContext,
         );
         const settled = await submission.wait(taskContext);
-        const failure = settled.status === "unanswered" && settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
-        // Quota: switch once to the owner's fallback model, otherwise wait for the allowance to recover and resend.
-        if (failure && providerFailure(failure) === "quota_exceeded") {
+        const failure =
+          settled.status === "unanswered"
+            ? settled.reason !== "aborted"
+              ? unansweredReason(settled)
+              : undefined
+            : settled.type === "input"
+              ? emptyAnswerFailure((await runtime.context(conversationId, taskContext, { at: settled.answer })).entries)
+              : undefined;
+        // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
+        const kind = failure ? providerFailure(failure) : undefined;
+        if (failure && kind) {
           const record = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId];
-          const switched = record && record.modelMoves.length === 0 ? host.fallbackModel?.(record.role) : null;
+          const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
+          const from = current ? `${current.provider}/${current.modelId}` : "";
+          const offered = record ? host.fallbackModel?.({ role: record.role, from, moves: record.modelMoves.length, failure: kind }) : null;
+          // Never back to a model this agent already left, so a chain ends instead of cycling.
+          const switched =
+            offered && offered.label !== from && !record?.modelMoves.some((move) => move.from === offered.label) ? offered : null;
           const previous = record?.quota?.attempts ?? 0;
-          if (record && (switched || previous < QUOTA_RETRY_LIMIT)) {
+          if (record && (switched || (kind === "quota_exceeded" && previous < QUOTA_RETRY_LIMIT))) {
             const now = runtime.now();
-            const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
-            const from = current ? `${current.provider}/${current.modelId}` : "";
             const retryAt = switched
               ? now
               : (host.quotaResetAt?.(from, now) ?? now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
@@ -489,7 +606,8 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             return { status: "running", checkpoint: { phase: "settle", report } } as const;
           };
           if (job?.workspace?.kind === "shared" && job.status === "stopped") return next();
-          if (settled.status === "unanswered") {
+          // A done turn with a failure is an empty answer to a retried quota or rate-limit error: it failed the same way.
+          if (settled.status === "unanswered" || failure) {
             if (!failure) return next();
             if (job && isLive(job.status))
               Object.assign(job, { status: "failed", reason: `The worker failed: ${failure}`, endedAt: Date.now() });
@@ -596,12 +714,17 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           return;
         }
         if (report !== undefined && reportRef === undefined) {
+          const agent = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[reporter.input.agentId];
+          const drift = agent?.readHead ? await host.readDrift?.(agent as Agent) : null;
+          // The warning goes right under the report's first line, so a clipped preview still shows it.
+          const flagged = (text: string) =>
+            drift ? text.replace(/^([^\n]*)(?:\n|$)/, (_, first: string) => `${first}\n${drift}\n`) : text;
           await runtime.commit(async (tx) => {
             const entry = await tx.appendEntry(reporter.input.conversationId, {
               kind: "projects.agent-report",
-              data: { text: details ?? report, at: runtime.now() },
+              data: { text: flagged(details ?? report), at: runtime.now() },
             });
-            return { status: "running", checkpoint: { phase: "report", report, reportRef: entry.id } } as const;
+            return { status: "running", checkpoint: { phase: "report", report: flagged(report), reportRef: entry.id } } as const;
           }, taskContext);
           return;
         }
@@ -622,7 +745,14 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
         await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), taskContext);
       },
     },
-    abort: (_reporter, runtime, taskContext) => runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), taskContext),
+    // An abort (a project pause aborts every chat with its background tasks) skips the report, so end an agent whose Job already ended here.
+    abort: (reporter, runtime, taskContext) =>
+      runtime.commit(async (tx) => {
+        const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+        const agent = state.agents[reporter.input.agentId];
+        if (agent && endedJobAgent(state, agent) && (agent.sends ?? 0) <= (reporter.input.seq ?? 0)) agent.endedAt = Date.now();
+        return { status: "terminal", outcome: { status: "aborted" } };
+      }, taskContext),
   });
 
 const acceptanceText = (criteria: readonly string[]) =>
@@ -644,8 +774,11 @@ export type JobsSnapshot = {
     children: (Job["children"][number] & { working: boolean })[];
     quota: Agent["quota"];
     modelMoves: Agent["modelMoves"];
+    /** The model the worker's conversation runs on now (`provider/model`): its tier's model or where a quota move left it. */
+    model: string | null;
   })[];
-  agents: (Agent & { working: boolean })[];
+  /** `working`: its conversation runs now; `active`: a runnable reporter task still delivers to it (preparing, running or reporting). */
+  agents: (Agent & { working: boolean; active: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
 };
 
 export type SpawnArgs = {
@@ -682,6 +815,10 @@ export function createJobs(host: JobsHost) {
   });
   const clock = () => host.now?.() ?? Date.now();
 
+  const agentModel = async (reader: Pick<Session, "snapshot">, id: ConversationId) => {
+    const model = (await reader.snapshot(AgentDoc, id, context))?.model;
+    return model ? `${model.provider}/${model.modelId}` : null;
+  };
   const working = async (reader: Pick<Session, "snapshot">, id: ConversationId) =>
     (await reader.snapshot(LiveDoc, id, context))?.run !== undefined;
 
@@ -740,6 +877,12 @@ export function createJobs(host: JobsHost) {
         const borrower = args.workspace.kind === "shared" ? sharedHandoff(doc, chat) : undefined;
         if (borrower) return { text: `Shared workspace is still handed to ${borrower.id}; wait for it to settle.` };
       }
+      const readRef = args.readRef?.trim() || null;
+      // Readers read a pinned commit or a live agent's worktree; refs are never resolved here (scripts/worktree-lifecycle-failures.md R2, R6).
+      if (readRef && role !== "worker" && !doc.agents[readRef] && !FULL_COMMIT.test(readRef))
+        return {
+          text: "readRef must be an agent id or a full lowercase commit SHA. Resolve a branch or PR to its commit first (fetch it in your worktree, then rev-parse) and pass that SHA.",
+        };
       if (doc.paused) return { text: "The project is paused; spawn again after it resumes." };
       const agentId = uuidOf(seed);
       const title = args.title?.trim() || clip(args.brief, 80);
@@ -764,7 +907,7 @@ export function createJobs(host: JobsHost) {
         endedAt: null,
         reported: [],
         scopeId: (role === "worker" ? args.scopeId?.trim() || host.defaultScope?.() : args.scopeId?.trim()) || null,
-        readRef: args.readRef?.trim() || null,
+        readRef,
         prepared: false,
         brief: "",
         briefed: false,
@@ -813,7 +956,7 @@ export function createJobs(host: JobsHost) {
   const agentsTool = defineTool({
     name: "agents",
     description:
-      "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. " +
+      "Run background agents. spawn: role worker (needs title, acceptance criteria; optional branch to continue), scout or reviewer, with a brief; give a fresh requestId so a retry returns the same agent. A scout or reviewer reads the project checkout, or with readRef an agent's worktree (its id; refused while it has uncommitted changes) or a full commit SHA (read in its own worktree at that commit). " +
       "send: steer id with a message (followUp queues it after its current answer). stop: id and a reason. dismiss: clear an ended agent or Job from the list (not running; history and files stay). send to a failed or stopped worker retries it in the same Job. report: full Ready evidence and the latest closing answer for id, without waking it. status: live agents, or one id (also dismissed ones). wait: block up to timeoutSec until id is idle. " +
       "Choose workspace {kind:'shared'} for the chat's prepared workspace or {kind:'isolated',baseCommit:<full SHA>} for a task helper. Explicit workspace rejects branch/scopeId/readRef. Shared allows one live helper per chat. Omit workspace for the independent Job/PR workflow. Helpers return normally, not Ready; completed is not accepted delivery. Ready reports arrive as concise handbacks; read report for detailed evidence.",
     parameters: Type.Object({
@@ -971,7 +1114,7 @@ export function createJobs(host: JobsHost) {
     name: "job",
     description:
       "Your Job's record. plan: replace the plan with steps (title, status todo|doing|done, estimateMin). " +
-      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that verifier runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps. checkpoint: end an independent Job's current stage with a concise summary, proof and gaps when delivery is not ready; preserve its workspace and wait for a new instruction, without Ready or approval.",
+      "Task helpers may plan or record a local candidate SHA without branch/PR; return normally instead of ready. Independent Jobs: candidate: record the pushed commit (sha, branch, PR) that your projects_verify_run runs are tied to. ready: report the finished work once the candidate is built and checked: summary, pr, candidate sha, proof refs, review result, anything not fixed with the reason, and gaps (unproven acceptance criteria). Gaps make it Ready with gaps. checkpoint: end an independent Job's current stage with a concise summary, proof and gaps when delivery is not ready; preserve its workspace and wait for a new instruction, without Ready or approval.",
     parameters: objectUnion([
       Type.Object({
         action: Type.Literal("plan"),
@@ -1087,20 +1230,13 @@ export function createJobs(host: JobsHost) {
 
   const subagentTool = defineTool({
     name: "subagent",
-    description: "Run a fresh verifier, reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers.",
+    description: "Run a fresh reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers.",
     parameters: Type.Object({
-      role: Type.Union([Type.Literal("verifier"), Type.Literal("reviewer"), Type.Literal("scout")]),
+      role: Type.Union([Type.Literal("reviewer"), Type.Literal("scout")]),
       task: Type.String(),
     }),
     replay: "safe",
     execute: async (args, api, callContext) => {
-      const current = Object.values((await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.jobs ?? {}).find(
-        (item) => item.workerConversation === api.conversationId,
-      );
-      if (current?.workspace)
-        return reply(
-          "Task helpers cannot spawn subagents. Return findings and ask the Coordinator to spawn a static reviewer against a committed full SHA.",
-        );
       const cwd = (await api.agent(callContext)).cwd;
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
@@ -1302,11 +1438,22 @@ export function createJobs(host: JobsHost) {
 
   /** After a reopen, before the scheduler runs: let the host rebuild what live agents need (workspace tools). */
   async function recover(harness: Harness): Promise<void> {
+    // An older host could abort a reporter after its Job ended without ending the agent; nothing would ever end it.
+    const reported = reportedAgents(await harness.inspect(context));
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
+      for (const agent of Object.values(state.agents))
+        if (endedJobAgent(state, agent) && !reported.has(agent.id)) agent.endedAt = Date.now();
+    }, context);
     const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
     if (!doc) return;
     for (const agent of liveAgents(doc))
       if (agent.prepared && !(doc.paused && agent.jobId && doc.jobs[agent.jobId]?.workspace))
-        await host.prepare?.({ agent: agent as Agent, job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null });
+        await host.prepare?.({
+          agent: agent as Agent,
+          job: agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null,
+          frame: (await harness.snapshot(AgentPrompt, agent.conversationId, context))?.frame ?? null,
+        });
   }
 
   async function snapshot(harness: Harness): Promise<JobsSnapshot> {
@@ -1329,21 +1476,45 @@ export function createJobs(host: JobsHost) {
           children: await Promise.all(job.children.map(async (child) => ({ ...child, working: await working(harness, child.id) }))),
           quota: doc.agents[job.id]?.quota ?? null,
           modelMoves: doc.agents[job.id]?.modelMoves ?? [],
+          model: await agentModel(harness, job.workerConversation),
         };
       }),
     );
+    const reported = reportedAgents(await harness.inspect(context));
     const agents = await Promise.all(
-      Object.values(doc.agents).map(async (agent) => ({ ...agent, working: await working(harness, agent.conversationId) })),
+      Object.values(doc.agents).map(async (agent) => ({
+        ...agent,
+        working: await working(harness, agent.conversationId),
+        active: reported.has(agent.id),
+        model: await agentModel(harness, agent.conversationId),
+        prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
+      })),
     );
     return { paused: doc.paused, jobs, agents };
   }
 
-  async function busy(harness: Harness): Promise<boolean> {
-    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
-    if (doc && !doc.paused && Object.values(doc.agents).some((agent) => agent.endedAt === null)) return true;
-    const active = await harness.inspect(context);
-    // Pause retains identities, but every owned task (including abort cleanup) must actually drain.
-    return active.tasks.length > 0 || active.submissions.length > 0;
+  async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {
+    const behavior = host.promptBehavior?.(agent, job);
+    if (behavior == null) return null;
+    // An agent not prepared yet starts with the saved behavior.
+    if (!agent.prepared) return { state: "current", reason: null };
+    const saved = await harness.snapshot(AgentPrompt, agent.conversationId, context);
+    if (!saved?.frame)
+      return saved?.unproven
+        ? { state: "frozen", reason: saved.unproven }
+        : {
+            state: "legacy-unchecked",
+            reason:
+              "Started before prompt blocks: its next continued or retried turn checks whether its stored prompt can be rebuilt exactly.",
+          };
+    return saved.behavior === behaviorKey(behavior)
+      ? { state: "current", reason: null }
+      : { state: "pending", reason: "Adopts the saved behavior on its next continued or retried turn while it is idle." };
+  }
+
+  /** Something can still run. Every live agent has a reporter task, so identities alone (paused or ended without a report) are not work. */
+  async function busy(harness: Pick<Harness, "inspect">): Promise<boolean> {
+    return runsWork(await harness.inspect(context));
   }
 
   async function approve(harness: Harness, jobId: string): Promise<{ outcome: AcceptanceOutcome } | { refused: string }> {
@@ -1361,16 +1532,19 @@ export function createJobs(host: JobsHost) {
 
   async function markApproved(harness: Harness, jobId: string, outcome: AcceptanceOutcome | null): Promise<void> {
     if (outcome?.kind !== "accepted" && outcome?.kind !== "merged-pull-skipped") return;
-    await harness.commit(async (tx) => {
+    const approved = await harness.commit(async (tx) => {
       const current = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).jobs[jobId];
       if (
-        current &&
-        !current.workspace &&
-        current.candidate === outcome.head &&
-        (current.status === "ready" || current.status === "ready-with-gaps")
+        !current ||
+        current.workspace ||
+        current.candidate !== outcome.head ||
+        (current.status !== "ready" && current.status !== "ready-with-gaps")
       )
-        current.status = "approved";
+        return false;
+      current.status = "approved";
+      return true;
     }, context);
+    if (approved) host.afterApproved?.(jobId);
   }
 
   /** An Approve that answered `auto-merge-pending` ended later: record the merge and tell the Job's chat. */

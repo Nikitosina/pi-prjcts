@@ -1,24 +1,24 @@
 # Create a project
 
-The user opens the New project dialog, names a project, picks a folder, confirms trust, and gets a new selected project.
+The owner creates a project from the Host agent or the CLI. The inbox has no New project form: its New project button only says where to go.
 
 ## Sub-features
 
-- `create` — name, folder and trust checkbox create the project.
-- `trust-required` — the dialog refuses to submit without the trust checkbox.
-- `listed` — the project appears in the sidebar `#project-list` and in `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> list`.
+- `hint`: the tree's "＋ New project" button shows a toast naming the Host agent (`\`) and `npm run projects -- create <name> <workspace>`; nothing is created.
+- `host-agent`: asking the Host agent to create a project runs `create` as one of its host calls; the new project appears in the tree.
+- `listed`: the project appears in `#tree` and in `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> list`.
 
 ## How to get to it (user POV)
 
-- Sidebar button `#create` ("New project").
+- Tree button "＋ New project" (`[data-cmd="new-project"]`), then `\` for the Host agent drawer.
 
 ## Driving it with browser CDP
 
-Preconditions: launch succeeded, doctor `ok: true`, a second empty folder inside the scratch dir (the helper's `workspace` folder is already used by the seed project).
+Preconditions: launch succeeded, doctor `ok: true`, a second empty folder inside the scratch dir (the seed project already uses the helper's `workspace` folder).
 
-- Recipe only, not scripted: click `#create`; in `dialog form[data-create]` fill `input[name=name]`, `input[name=cwd]`, tick `input[name=trusted]`, click `button[type=submit]`. Proof: sidebar lists the new name, `#title` shows it, `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc --run <scratch> list` shows two projects, screenshots before and after.
+- Recipe only, not scripted: click `[data-cmd="new-project"]` and expect the toast (`#toasts .toast`). The fake provider does not script a Host agent `create`, so creating through the drawer is not driveable here; report `host-agent` as not verified rather than creating the project over RPC.
 
 ## Gotchas
 
-- The folder must exist; use a new directory under the run's scratch dir, never a path from the owner's checkout.
-- Creating through the host's `create` call skips the dialog and does not prove this feature (launch does that for seeding).
+- `create` grants the whole-repository workspace and GitHub access in the same step (`docs/ui2-contract.md`).
+- Retired with the classic inbox (2026-11-04): the New project dialog with its folder trust checkbox (`docs/classic-retirement.md`).

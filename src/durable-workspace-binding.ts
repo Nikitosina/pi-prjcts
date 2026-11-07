@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
@@ -8,7 +8,7 @@ import type { ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
 import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-types.ts";
 import { loadProject, projectDir, type Project } from "./state.ts";
-import { archiveHome } from "./archive-host.ts";
+import { archiveHome, currentWorktreeRoot } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
 import { Jobs } from "./jobs.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
@@ -21,6 +21,7 @@ import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts
 import { worktreeSetup } from "./worktree-maintenance.ts";
 import { verificationProviderProblem } from "./project-settings.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
+import { CACHE_VARIABLE, workspaceCacheInstructions, type WorkspaceCaches } from "./workspace-cache.ts";
 import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
@@ -52,6 +53,7 @@ export function durableWorkspaceBinding(input: {
     leases: ResourceLeases;
     background: BackgroundCommands;
   };
+  caches?: WorkspaceCaches;
 }): DurablePrepareWorkerEnvironment | undefined {
   const authorization = input.project.workspaceAuthorization;
   if (!authorization) return undefined;
@@ -328,6 +330,7 @@ export function durableWorkspaceBinding(input: {
     if (attachment) tools.push(...(await attachment.tools(authority)));
     // Evidence folder per thread, in the project home (survives worktree cleanup); path in the instructions and $PI_ARTIFACTS_DIR.
     const artifacts = whole ? ensureArtifactDir(input.controlRoot, request.threadId) : undefined;
+    const cache = whole ? input.caches?.forIntent(intentId) : undefined;
     let pluginNotes = "";
     if (whole) {
       // Plugin worker tools freeze with the thread: a bound thread keeps exactly what it had; only new threads follow the plugin's offer.
@@ -357,6 +360,7 @@ export function durableWorkspaceBinding(input: {
       });
       const builtins = coordinatorExecutionTools({
         controlRoot: input.controlRoot,
+        cache: input.caches?.forCwd,
         target: async () => ({
           cwd: workDir,
           scope: request.threadId,
@@ -380,7 +384,12 @@ export function durableWorkspaceBinding(input: {
           ...workerEnvironmentTools({
             projectId: input.project.id,
             ...input.environment,
-            target: () => ({ threadId: request.threadId, cwd: workDir, env: { ...process.env, PI_ARTIFACTS_DIR: artifacts! }, guard }),
+            target: () => ({
+              threadId: request.threadId,
+              cwd: workDir,
+              env: { ...process.env, PI_ARTIFACTS_DIR: artifacts!, ...(cache ? { [CACHE_VARIABLE]: cache } : {}) },
+              guard,
+            }),
           }),
         );
     }
@@ -411,7 +420,7 @@ export function durableWorkspaceBinding(input: {
       tools,
       extension,
       repositoryStanding,
-      workerInstructions: `${whole ? `\n\nWorktree ${workDir} (branch ${branch}): run commands and make every edit here. Never cd into, run git against or write to the owner's checkout ${repository.ownerCheckout}; reading it is fine.` : ""}${handover}${whole ? `${attachment ? `\n${attachment.instructions}` : `\nPush to your branch or another project branch (${gitPolicy.prefix}*): git push origin HEAD:<branch>. You may fetch, merge, rebase and cherry-pick; after a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other branches, force-push plainly, delete branches or merge PRs.${publication ? ` Open or update a draft PR (open_draft_pr, against ${publication.baseBranch}) only when your task asks for a PR; pushing to an existing PR branch updates it.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`,
+      workerInstructions: `${whole ? `\n\nWorktree ${workDir} (branch ${branch}): run commands and make every edit here. Never cd into, run git against or write to the owner's checkout ${repository.ownerCheckout}; reading it is fine.` : ""}${handover}${whole ? `${attachment ? `\n${attachment.instructions}` : `\nPush to your branch or another project branch (${gitPolicy.prefix}*): git push origin HEAD:<branch>. You may fetch, merge, rebase and cherry-pick; after a rebase use --force-with-lease, only on project branches. Never push to ${[publication?.baseBranch, "main", "master"].filter((value, index, all) => value && all.indexOf(value) === index).join(", ")} or other branches, force-push plainly, delete branches or merge PRs.${publication ? ` Open or update a draft PR (open_draft_pr, against ${publication.baseBranch}) only when your task asks for a PR; pushing to an existing PR branch updates it.` : ""}`}\n${artifactInstructions(artifacts!, request.threadId)}${cache ? workspaceCacheInstructions(cache) : ""}${pluginNotes}` : ""}${setup ? `\n${setup}\n` : ""}`,
       bindingRevision: hash(
         JSON.stringify({
           receipt: receipt.providerFacts,
@@ -450,8 +459,8 @@ export function workerShellGuard(input: {
     );
 }
 /**
- * The shell policy a verifier's commands pass through: the one of the worker whose scope it verifies. Plugin workspace providers keep that policy
- * inside the plugin, which verifiers cannot reach, so those scopes are refused rather than run under a weaker one.
+ * The shell policy projects_verify_run commands pass through: the one of the worker whose scope they verify. Plugin workspace providers keep that
+ * policy inside the plugin, which these runs cannot reach, so those scopes are refused rather than run under a weaker one.
  */
 export function verifierShell(
   project: Project,
@@ -491,7 +500,11 @@ export function guardWorkerGitCommand(
       (name === branch || (prefix !== undefined && name.startsWith(prefix) && name.length > prefix.length && !name.includes("..")))
     );
   };
-  const chunks = command.split(/[;&|\n]+/).map((part) => part.trim());
+  // Redirections are not arguments: `2>&1` would otherwise split at `&` and leave `2>` as a push target.
+  const chunks = command
+    .replace(/(?:^|(?<=\s))(?:\d*|&)(?:>>?|<)(?:&-|&\d+|\s*[^\s;&|<>]+)/g, " ")
+    .split(/[;&|\n]+/)
+    .map((part) => part.trim());
   const blocked = chunks.find((chunk) => {
     const git = chunk
       .match(/(?:^|\s)git\s+(.*)$/)?.[1]
@@ -504,9 +517,7 @@ export function guardWorkerGitCommand(
         .split(/\s+/)
         .filter(Boolean);
       if (
-        args.some(
-          (value) => /^--(?:force|mirror|all|tags|delete|prune)$/.test(value) || (/^-[a-zA-Z]*[fd]/.test(value) && !value.startsWith("--")),
-        )
+        args.some((value) => /^--(?:mirror|all|tags|delete|prune)$/.test(value) || (/^-[a-zA-Z]*d/.test(value) && !value.startsWith("--")))
       )
         return true;
       const positional = args.filter((value) => !value.startsWith("-"));
@@ -516,10 +527,11 @@ export function guardWorkerGitCommand(
           : positional;
       if (!refs.length) return true;
       for (const ref of refs) {
-        if (ref.startsWith("+") || ref.startsWith(":")) return true;
-        const target = ref.includes(":") ? ref.split(":").at(-1)! : ref;
+        if (ref.startsWith(":")) return true;
+        // A force push (+ref, -f, --force) is allowed like any push: only project branches are targets.
+        const target = (ref.includes(":") ? ref.split(":").at(-1)! : ref).replace(/^\+/, "");
         // A bare HEAD pushes the checked-out branch to its own name; best-effort as before.
-        if (!(ref === "HEAD" || project(target))) return true;
+        if (!(ref.replace(/^\+/, "") === "HEAD" || project(target))) return true;
       }
       const lease = args.find((value) => value.startsWith("--force-with-lease"));
       if (lease?.includes("=") && !project(lease.slice(lease.indexOf("=") + 1).split(":")[0])) return true;
@@ -530,20 +542,26 @@ export function guardWorkerGitCommand(
     return false;
   });
   if (blocked === undefined) return command;
-  const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; --force-with-lease is allowed there, plain --force, +refs, deletes, mirror/all/tags, pushes to ${[...guarded].filter((name) => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
+  const message = `Blocked by worker Git policy at: ${blocked.slice(0, 200)} -- push only to project branches${prefix ? ` (${prefix}*)` : ` (${branch})`}; force pushes are allowed there; deletes, mirror/all/tags, pushes to ${[...guarded].filter((name) => name !== "HEAD").join("/")} and PR merges are not. Nothing in this command ran. This check is best-effort.`;
+  return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
+}
+/** Task helpers return commits to their Coordinator, which publishes: no git push and no gh PR or release writes. Best-effort, not a sandbox. */
+export function guardHelperGitCommand(command: string): string {
+  const blocked = command
+    .split(/[;&|\n]+/)
+    .map((part) => part.trim())
+    .find(
+      (chunk) =>
+        /(?:^|\s)git\s+(?:-[Cc]\s+\S+\s+)*push(?:\s|$)/.test(chunk) ||
+        /(?:^|\s)gh\s+(?:pr\s+(?!(?:view|list|diff|checks|status)\b)\S|release\s+(?!(?:view|list)\b)\S|api\b.*(?:-X|--method)\s*(?:POST|PUT|PATCH|DELETE))/i.test(
+          chunk,
+        ),
+    );
+  if (blocked === undefined) return command;
+  const message = `Blocked by task helper policy at: ${blocked.slice(0, 200)} -- a task helper never pushes or changes PRs. Commit locally and return your commits to the Coordinator; it integrates and publishes. Nothing in this command ran.`;
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
 /** Real and given spellings of the owner checkout; empty when the worktree itself sits inside it (nothing to separate). */
-/**
- * Projects carried over from the previous host still name its worktree folder as their approved root. Changing the stored value would change the
- * authorization fingerprint, so new worktrees go under this host's own project folder and the stored grant stays as it is.
- */
-export function currentWorktreeRoot(projectId: string, approvedRoot: string): string {
-  if (resolve(approvedRoot) !== resolve(archiveHome(), projectId, "worktrees")) return approvedRoot;
-  const root = join(projectDir(projectId), "worktrees");
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  return realpathSync(root);
-}
 function ownerRoots(checkout: string, workDir: string): string[] {
   const roots = [...new Set([resolve(checkout), realpathSync(checkout)])];
   return roots.some((root) => inside(root, resolve(workDir)) || inside(root, realpathSync(workDir))) ? [] : roots;

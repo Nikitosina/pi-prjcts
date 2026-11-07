@@ -16,3 +16,16 @@
 
 - Deployment mistakes a paused helper's retained running identity for execution, or ignores its still-draining owned tasks; resume must reuse the same helper and workspace intent.
 - The old host's `afterFailedRun: keep` queue cannot be recovered via a new public owner input without dropping or duplicating the parked message; verify that ordinary admission advances both inputs exactly once.
+
+## Activity reflects what runs (2026-11-05, owner: "the display bugs should be resolved, and the host should identify it correctly")
+
+Live cause: a project pause aborted every chat with its background tasks, including the reporter of a worker that had just called `job ready` and was writing its last reply. The aborted reporter never ended the agent, so the project and its chat showed "working" for two days with nothing running. In another project a compaction summary queued for a worker's next turn stayed queued after that worker ended, and kept the project "working", paused or not.
+
+- A1 A reporter aborted after its Job already ended (Ready, checkpoint, failed or stopped) leaves the agent with no end time, so the agent counts as live forever.
+- A2 Agents left that way by an older host stay live after a restart; opening the project must end them, and must not end an agent whose Job is still running or a helper still settling.
+- A3 `busy()` counts an agent as work from its bookkeeping alone (`endedAt === null`) instead of from tasks that can still run; a Ready Job's worker, or a scout whose reporter is gone, keeps the project busy.
+- A4 A queued passive write (a compaction summary waiting for the next turn of an ended agent) counts as work; only unfinished runnable tasks and queued or placed input do.
+- A5 A blocked task (missing definition or restart limit) counts as work; it runs nothing and needs the owner, not a spinner.
+- A6 Project activity has no `paused` state: a paused project shows "working" or "idle" and the tree cannot tell it apart.
+- A7 A chat counts as working because one of its agents has no end time while nothing of that agent runs.
+- A8 The tree shows a paused project with the working dot, or with no sign that it is paused.
