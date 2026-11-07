@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineExtension, defineTool, hook, ToolTask, type Conversation, type ToolRegistration } from "@earendil-works/pi-durable";
@@ -8,7 +8,7 @@ import type { ResourceLoader } from "@earendil-works/pi-coding-agent";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
 import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-types.ts";
 import { loadProject, projectDir, type Project } from "./state.ts";
-import { archiveHome } from "./archive-host.ts";
+import { archiveHome, currentWorktreeRoot } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
 import { Jobs } from "./jobs.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
@@ -562,16 +562,6 @@ export function guardHelperGitCommand(command: string): string {
   return `printf '%s\\n' '${message.replaceAll("'", "'\\''")}' >&2; exit 126`;
 }
 /** Real and given spellings of the owner checkout; empty when the worktree itself sits inside it (nothing to separate). */
-/**
- * Projects carried over from the previous host still name its worktree folder as their approved root. Changing the stored value would change the
- * authorization fingerprint, so new worktrees go under this host's own project folder and the stored grant stays as it is.
- */
-export function currentWorktreeRoot(projectId: string, approvedRoot: string): string {
-  if (resolve(approvedRoot) !== resolve(archiveHome(), projectId, "worktrees")) return approvedRoot;
-  const root = join(projectDir(projectId), "worktrees");
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  return realpathSync(root);
-}
 function ownerRoots(checkout: string, workDir: string): string[] {
   const roots = [...new Set([resolve(checkout), realpathSync(checkout)])];
   return roots.some((root) => inside(root, resolve(workDir)) || inside(root, realpathSync(workDir))) ? [] : roots;

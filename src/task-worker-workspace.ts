@@ -10,7 +10,8 @@ import type { AllocationPlan, TaskAttachment, TaskPlanContext } from "./plugin-t
 import { CoordinatorWorkspaceBindings, type CoordinatorWorkspaceRequest } from "./coordinator-workspace-state.ts";
 import type { coordinatorWorkspaces } from "./coordinator-workspace.ts";
 import { coordinatorExecutionTools } from "./coordinator-execution.ts";
-import { currentWorktreeRoot, guardHelperGitCommand } from "./durable-workspace-binding.ts";
+import { guardHelperGitCommand } from "./durable-workspace-binding.ts";
+import { currentWorktreeRoot } from "./archive-host.ts";
 import { command, workspaceIsolation } from "./workspace-isolation.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { plugins } from "./plugins.ts";

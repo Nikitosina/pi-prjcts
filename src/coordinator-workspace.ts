@@ -6,7 +6,7 @@ import type { Conversation } from "@earendil-works/pi-durable";
 import type { Project } from "./state.ts";
 import type { AllocationPlan, CoordinatorAttachment, CoordinatorBindContext } from "./plugin-types.ts";
 import { plugins } from "./plugins.ts";
-import { currentWorktreeRoot } from "./durable-workspace-binding.ts";
+import { currentWorktreeRoot } from "./archive-host.ts";
 import { command, workspaceIsolation, workspaceReceipts } from "./workspace-isolation.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { worktreeSetup } from "./worktree-maintenance.ts";

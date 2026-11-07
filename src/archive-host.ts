@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { listArchiveProjects, openArchiveProject, type ArchiveProjectReader } from "./archive-reader.ts";
-import { home, saveJson } from "./state.ts";
+import { home, projectDir, saveJson } from "./state.ts";
 import type { PageOptions } from "./transcript-reader.ts";
 
 /** Host side of the Archive: where the old host's data lives (`archive.json` in the host home) and a few open read-only readers. */
@@ -91,3 +91,14 @@ export const archiveHistory = (projectId: string, conversationId: number, option
 export const archiveText = (projectId: string, conversationId: number, ref: string, range: { offset?: number; limit?: number }) =>
   reader(projectId).text(conversationId, ref, range);
 export const archiveImage = (projectId: string, conversationId: number, ref: string) => reader(projectId).image(conversationId, ref);
+
+/**
+ * Projects carried over from the previous host still name its worktree folder as their approved root. Changing the stored value would change the
+ * authorization fingerprint, so new worktrees go under this host's own project folder and the stored grant stays as it is.
+ */
+export function currentWorktreeRoot(projectId: string, approvedRoot: string): string {
+  if (resolve(approvedRoot) !== resolve(archiveHome(), projectId, "worktrees")) return approvedRoot;
+  const root = join(projectDir(projectId), "worktrees");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  return realpathSync(root);
+}
