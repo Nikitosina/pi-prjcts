@@ -1,5 +1,5 @@
 // Browser E2E with an isolated host and local fake model. No real providers.
-// Failure cases recorded in status-dots-failures.md before implementation.
+// Failure cases: status-dots-failures.md.
 import { spawn } from "node:child_process";
 import { createServer, request } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
@@ -396,7 +396,7 @@ const box = (sel, s) =>
   );
 const states = (s) =>
   evaluate(
-    `Object.fromEntries([...document.querySelectorAll('#chat-list .chat')].map(n => [n.querySelector('.chat-title').innerText, n.querySelector('.chat-dot').dataset.state]))`,
+    `Object.fromEntries([...document.querySelectorAll('#tree .tree-project.selected [data-chat]')].map(n => [n.querySelector('.name').innerText, n.querySelector('.unread') ? 'done' : (n.querySelector('.dot').className.match(/working|needs|idle/) ?? ['?'])[0]]))`,
     s,
   );
 let s;
@@ -466,520 +466,123 @@ try {
     "coordinator failure not flagged",
   );
 
+  // The inbox at `/` (classic chat tabs, sidebar and limits bar retired 2026-11-04): dots live in `#tree`.
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   ({ sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true }));
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4`, s, "chats loaded");
-  await waitFor(`document.querySelector('#chat-list .chat .chat-dot[data-state="needs"]')`, s, "red dot");
+  const chatRow = (chat) => `#tree .tree-project.selected .tree-chat[data-chat="${chat}"]`;
+  const headDot = (project) => `#tree .tree-head[data-project="${project}"] .dot`;
+  await waitFor(`document.querySelectorAll('#tree .tree-project.selected [data-chat]').length === 4`, s, "chats loaded");
+  await waitFor(`!!document.querySelector('${chatRow(failChat.id)} .dot.needs')`, s, "red dot");
 
-  // Scout finishes while this browser is looking at Main: its dot turns green.
+  // Scout finishes while this browser is looking at Main: it is marked unread.
   await rpc({ action: "message", id, chatId: scoutChat.id, text: "MARK-SCOUT" });
-  await waitFor(
-    `document.querySelector('#chat-list .chat[data-chat="${scoutChat.id}"] .chat-dot')?.dataset.state === 'done'`,
-    s,
-    "green dot after the scout chat finished",
-  );
+  await waitFor(`!!document.querySelector('${chatRow(scoutChat.id)} .unread')`, s, "unread mark after the scout chat finished");
   // Main starts a worker that keeps running (the scout finished first: workers of other roles queue behind it).
   await settle(id, await rpc({ action: "message", id, text: "MARK-HOLD" }));
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status === "running", "hold not running");
-  await waitFor(`document.querySelector('#chat-list .chat[data-chat="main"] .chat-dot')?.dataset.state === 'working'`, s, "working dot");
+  await waitFor(`!!document.querySelector('${chatRow("main")} .dot.working')`, s, "working dot");
   const dots = await states(s);
   const expected = { Main: "working", Scout: "done", Failing: "needs", Idle: "idle" };
   if (JSON.stringify(dots) !== JSON.stringify(expected)) throw Error("Chat dot states wrong: " + JSON.stringify(dots));
-  result.checks.push("D1 one dot per chat tab: working (Main), done (Scout), needs you (Failing), idle (Idle)");
+  result.checks.push("D1 one dot per chat: working (Main), unread (Scout), needs you (Failing), idle (Idle)");
   const labels = await evaluate(
-    `[...document.querySelectorAll('#chat-list .chat-dot')].map(n => ({ state: n.dataset.state, label: n.getAttribute('aria-label'), title: n.title, role: n.getAttribute('role') }))`,
+    `[...document.querySelectorAll('#tree .tree-project.selected [data-chat] .dot:not(.idle)')].map(n => ({ cls: n.className, label: n.getAttribute('aria-label') }))`,
     s,
   );
-  const wanted = { working: /^Working: coordinator|^Working: .*(worker|Job)/, done: /^Done/, needs: /^Needs you: /, idle: /^Idle$/ };
-  if (labels.some((item) => !item.label || item.label !== item.title || item.role !== "img" || !wanted[item.state].test(item.label)))
+  if (labels.length !== 2 || labels.some((item) => !/^(working|needs you)$/.test(item.label ?? "")))
     throw Error("Dot labels wrong: " + JSON.stringify(labels));
-  result.checks.push("D2 every dot says its state in words (aria-label and title)");
-  const bubbles = await evaluate(
-    `({ badges: document.querySelectorAll('.work-badge, #chat-list .count, .proj .count').length, digits: [...document.querySelectorAll('#chat-list .chat, .proj')].some(n => /\\d/.test(n.innerText)) })`,
-    s,
-  );
-  if (bubbles.badges || bubbles.digits) throw Error("Number bubbles remain: " + JSON.stringify(bubbles));
-  result.checks.push("D3 no number bubbles or check pills on chat tabs or project rows");
-  const pulse = await evaluate(`getComputedStyle(document.querySelector('.chat-dot[data-state="working"]')).animationName`, s);
-  if (pulse !== "live-pulse") throw Error("Working dot does not pulse: " + pulse);
+  result.checks.push("D2 working and needs-you dots say their state in words (aria-label); unread says so too");
+  const pulse = await evaluate(`getComputedStyle(document.querySelector('${chatRow("main")} .dot.working')).animationName`, s);
+  if (!pulse || pulse === "none") throw Error("Working dot does not pulse: " + pulse);
   result.checks.push("D4 the working dot pulses");
-  await shot("01-chat-tabs-dots", s);
+  await shot("01-tree-dots", s);
 
-  // Sidebar: the open project folds its chats (red wins); another project's row comes from the list summary.
-  const open = await evaluate(
-    `({ state: document.querySelector('.proj.on .state-dot')?.dataset.state, label: document.querySelector('.proj.on .state-dot')?.getAttribute('aria-label') })`,
-    s,
-  );
-  if (open.state !== "needs" || !/^Needs you/.test(open.label)) throw Error("Open project row dot wrong: " + JSON.stringify(open));
+  // The open project's head folds its chats (red wins); another project's head comes from the list summary.
+  await waitFor(`!!document.querySelector('${headDot(id)}.needs')`, s, "open project head red");
   result.checks.push("S1 the open project row shows red when any chat needs you");
-  await shot("02-sidebar-expanded", s);
-  await click(".proj:not(.on)", s);
-  await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, "switched project");
+  await click(`#tree .tree-head[data-project="${other.id}"]`, s);
   await waitFor(
-    `document.querySelector('.proj:not(.on) .state-dot')?.dataset.state === 'needs'`,
+    `document.querySelector('#tree .tree-project.selected .tree-head')?.dataset.project === '${other.id}'`,
     s,
-    "list-summary dot on the other project",
+    "switched project",
   );
+  await waitFor(`!!document.querySelector('${headDot(id)}.needs')`, s, "list-summary dot on the other project");
   result.checks.push("S2 a project that is not open gets its dot from the list summary (no runtime opened)");
-  // Live state survives leaving a project: start work in Other Project (A), go back to Polish UI (B), A keeps pulsing, then turns green when it finishes, or red when a turn fails.
-  const rowOf = `.proj[data-select-project="${other.id}"] .state-dot`;
+  // Live state survives leaving a project: start work in Other Project (A), go back to Polish UI (B); A keeps working, then turns red when a turn fails.
   await rpc({ action: "message", id: other.id, text: "MARK-HOLDTWO" });
   await eventually(
     async () => (await workOf(other.id)).find((w) => w.text.startsWith("MARK-HOLDTWOTASK"))?.status === "running",
     "second hold not running",
   );
-  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'working'`, s, "A working while open");
-  await click(`.proj[data-select-project="${id}"]`, s);
-  await waitFor(`document.querySelector('#title').innerText === 'Polish UI'`, s, "switched to B");
+  await waitFor(`!!document.querySelector('${headDot(other.id)}.working')`, s, "A working while open");
+  await click(`#tree .tree-head[data-project="${id}"]`, s);
+  await waitFor(`document.querySelector('#tree .tree-project.selected .tree-head')?.dataset.project === '${id}'`, s, "switched to B");
   await delay(1500);
-  const left = await evaluate(
-    `(() => { const d = document.querySelector('${rowOf}'); return { state: d?.dataset.state, label: d?.getAttribute('aria-label'), pulse: d && getComputedStyle(d).animationName }; })()`,
-    s,
-  );
-  if (left.state !== "working" || left.pulse !== "live-pulse" || !/^Working/.test(left.label))
-    throw Error("Row of the project left behind lost its working state: " + JSON.stringify(left));
-  await shot("02b-other-project-working-while-away", s);
-  result.checks.push("S2b a project you left keeps its own pulsing working dot while another project is open");
+  if (!(await evaluate(`!!document.querySelector('${headDot(other.id)}.working')`, s)))
+    throw Error("Row of the project left behind lost its working state");
+  await shot("02-other-project-working-while-away", s);
+  result.checks.push("S2b a project you left keeps its working dot while another project is open");
   releaseHold2();
-  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'done'`, s, "A turns green after finishing while B is open");
-  result.checks.push("S2c ...and turns green (done, not yet checked) when its work finishes while you are elsewhere");
+  await waitFor(`!document.querySelector('${headDot(other.id)}.working')`, s, "A stops working after finishing while B is open");
+  result.checks.push("S2c ...and stops working when its work finishes while you are elsewhere");
+  await rpc({ action: "pause", id: other.id });
+  await waitFor(`document.querySelector('${headDot(other.id)}')?.getAttribute('aria-label') === 'paused'`, s, "A shows paused");
+  await shot("03-other-project-paused", s);
+  result.checks.push("S2e ...shows a paused dot, not working or idle, while it is paused");
+  await rpc({ action: "resume", id: other.id, confirm: other.id });
+  await waitFor(`!document.querySelector('${headDot(other.id)}.paused')`, s, "A no longer paused");
   await rpc({ action: "message", id: other.id, text: "MARK-COORDFAIL" });
-  await waitFor(`document.querySelector('${rowOf}')?.dataset.state === 'needs'`, s, "A turns red after a failed turn while B is open");
+  await waitFor(`!!document.querySelector('${headDot(other.id)}.needs')`, s, "A turns red after a failed turn while B is open");
   result.checks.push("S2d ...and turns red when a coordinator turn fails while you are elsewhere");
-  await click(`.proj[data-select-project="${other.id}"]`, s);
-  await waitFor(`document.querySelector('#title').innerText === 'Other Project'`, s, "back on A");
-  await click(".proj:not(.on)", s);
-  await waitFor(
-    `document.querySelector('#title').innerText === 'Polish UI' && document.querySelectorAll('#chat-list .chat').length === 4`,
-    s,
-    "back on first project",
-  );
-  await click("#side-toggle", s);
-  await delay(500);
-  const collapsed = await evaluate(
-    `(() => { const d = document.querySelector('.app.side-collapsed .proj.on .state-dot'); if (!d) return null; const r = d.getBoundingClientRect(), p = d.closest('.proj').getBoundingClientRect(); return { position: getComputedStyle(d).position, onAvatar: r.left >= p.left && r.right <= p.right && r.top >= p.top && r.bottom <= p.bottom, state: d.dataset.state }; })()`,
-    s,
-  );
-  if (!collapsed || collapsed.position !== "absolute" || !collapsed.onAvatar || collapsed.state !== "needs")
-    throw Error("Collapsed sidebar dot wrong: " + JSON.stringify(collapsed));
-  result.checks.push("S3 the collapsed sidebar keeps the dot on the project avatar");
-  await shot("03-sidebar-collapsed", s);
-  await click("#side-toggle", s);
-  await delay(400);
 
-  // Opening a chat clears its green dot.
-  await click(`#chat-list .chat[data-chat="${scoutChat.id}"]`, s);
-  await waitFor(`document.querySelector('#chat-list .chat.on .chat-title')?.innerText === 'Scout'`, s, "scout chat open");
-  await click(`#chat-list .chat[data-chat="main"]`, s);
+  // Opening a chat clears its unread mark.
+  await click(chatRow(scoutChat.id), s);
+  await waitFor(`document.querySelector('#tree .tree-chat.current')?.dataset.chat === '${scoutChat.id}'`, s, "scout chat open");
+  await click(chatRow("main"), s);
   await waitFor(
-    `document.querySelector('#chat-list .chat[data-chat="${scoutChat.id}"] .chat-dot')?.dataset.state === 'idle'`,
+    `document.querySelector('#tree .tree-chat.current')?.dataset.chat === 'main' && !document.querySelector('${chatRow(scoutChat.id)} .unread')`,
     s,
-    "green cleared after opening",
+    "unread cleared after opening",
   );
-  result.checks.push("D5 opening a chat clears its green dot (stays idle after leaving)");
+  result.checks.push("D5 opening a chat clears its unread mark (stays clear after leaving)");
 
-  // Compact worker rows.
+  // Worker view: the Workers list opens the worker in the center; Back returns to the chat.
+  await waitFor(`!!document.querySelector('#workers .worker.working [data-open-worker]')`, s, "running worker row");
+  await click("#workers .worker.working [data-open-worker]", s);
   await waitFor(
-    `/^(\\d+%|window unknown)$/.test(document.querySelector('#job-tree .job-children .job-row .ctx-ring')?.innerText.trim() ?? '')`,
+    `!!document.querySelector('#focus-view #worker-feed') && !!document.querySelector('#focus-view .worker-send')`,
     s,
-    "row context ring",
+    "worker view",
   );
-  const row = await evaluate(
-    `(() => { const n = document.querySelector('#job-tree .job-children .job-row'); const r = n.getBoundingClientRect(); return { height: r.height, text: n.innerText, expanded: !!document.querySelector('#job-tree #worker-messages, #job-tree form'), activityTab: !!document.querySelector('[data-tab="activity"]') }; })()`,
-    s,
-  );
-  if (row.height > 56 || row.expanded || row.activityTab || !/^worker .*working/i.test(row.text.replace(/\s+/g, " ")))
-    throw Error("Worker row not compact: " + JSON.stringify(row));
-  result.checks.push(
-    "W1 a worker row is at most two lines (title; status · plan progress) with a context ring; no inline expansion; no Activity tab",
-  );
-  await shot("04-workers-card-compact", s);
-
-  // Worker view.
-  const thread = (await workFor(id, "MARK-HOLDTASK")).threadId;
-  await click("#job-tree .job-children .job-open", s);
-  await waitFor(`!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`, s, "worker view");
   const view = await evaluate(
-    `(() => { const v = document.querySelector('#inline-thread'); return { chatHidden: document.querySelector('[data-panel="coordinator"]').hidden, link: new URL(location.href).searchParams.get('worker'), project: new URL(location.href).searchParams.get('project'), status: !!v.querySelector('.worker-head .badge'), model: v.querySelector('.worker-head small').innerText, ring: !!v.querySelector('.worker-head .ctx-ring'), back: !!v.querySelector('[data-action="thread-close"]'), steer: !!v.querySelector('[data-action="thread-steer"]'), stop: !!v.querySelector('[data-action="thread-stop"]'), composer: !!v.querySelector('[data-inline-thread-send]'), artifacts: !!v.querySelector('#artifact-pane'), evidence: !!v.querySelector('#worker-evidence') }; })()`,
+    `(() => { const v = document.querySelector('#focus-view'); return { back: !!v.querySelector('[data-cmd="leave-focus"]'), composer: !!v.querySelector('.worker-send textarea'), title: v.querySelector('h1')?.innerText ?? '' }; })()`,
     s,
   );
-  if (
-    !view.chatHidden ||
-    view.link !== thread ||
-    view.project !== id ||
-    !view.status ||
-    !view.ring ||
-    !view.back ||
-    !view.steer ||
-    !view.stop ||
-    !view.composer ||
-    !view.artifacts ||
-    !view.evidence
-  )
-    throw Error("Worker view incomplete: " + JSON.stringify(view));
-  result.checks.push(
-    "V1 clicking a row opens the worker view: status, context ring, Back, Steer/Stop, conversation, composer, artifacts, evidence; URL carries ?worker=",
-  );
+  if (!view.back || !view.composer || !view.title.includes("MARK-HOLDTASK")) throw Error("Worker view incomplete: " + JSON.stringify(view));
+  result.checks.push("V1 clicking a worker opens the worker view: title, Back, conversation and composer");
   await shot("05-worker-view", s);
-  await click('#inline-thread [data-action="thread-close"]', s);
-  await waitFor(
-    `document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden && !new URL(location.href).searchParams.has('worker')`,
-    s,
-    "Back to the chat",
-  );
+  await click('#focus-view [data-cmd="leave-focus"]', s);
+  await waitFor(`!document.querySelector('#focus-view #worker-feed') && !!document.querySelector('#feed .turn')`, s, "Back to the chat");
   result.checks.push("V2 Back returns to the coordinator chat");
-  await click("#job-tree .job-children .job-open", s);
-  await waitFor(`!document.querySelector('#inline-thread').hidden`, s, "reopen worker view");
-  await evaluate(`history.back()`, s);
-  await waitFor(
-    `document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden && !new URL(location.href).searchParams.has('worker')`,
-    s,
-    "browser Back to the chat",
-  );
-  result.checks.push("V2b the browser Back button also returns to the chat");
-  const deep = new URL(launch);
-  deep.searchParams.set("worker", thread);
-  await send("Page.navigate", { url: deep.toString() }, s);
-  await waitFor(
-    `!document.querySelector('#inline-thread')?.hidden && !!document.querySelector('#worker-messages') && new URL(location.href).searchParams.get('worker') === '${thread}'`,
-    s,
-    "deep link opens the worker view",
-  );
-  result.checks.push("V3 ?worker=<threadId> deep-links straight to the worker view");
-  await click('#inline-thread [data-action="thread-close"]', s);
-  await waitFor(`document.querySelector('#inline-thread').hidden`, s, "deep-link Back");
-
-  // Limits bar (fixture data; the host never contacted a provider).
-  await waitFor(
-    `document.querySelectorAll('#limits-bar .lim').length === 5 && /42%/.test(document.querySelector('#limits-bar').innerText)`,
-    s,
-    "limits bar",
-  );
-  const bar = await evaluate(
-    `Object.fromEntries([...document.querySelectorAll('#limits-bar .lim')].map(n => [n.dataset.provider, { text: n.innerText.replace(/\\s+/g, ' ').trim(), label: n.getAttribute('aria-label') }]))`,
-    s,
-  );
-  if (
-    !/5h.*42%.*7d.*24%/.test(bar.claude.text) ||
-    !/^Claude: 5h/.test(bar.claude.label) ||
-    /5h/.test(bar.codex.text) ||
-    !/7d.*3%/.test(bar.codex.text) ||
-    !/^Codex: 7d/.test(bar.codex.label) ||
-    !/—/.test(bar.cursor.text) ||
-    !/^Cursor/.test(bar.cursor.label) ||
-    !/not connected/i.test(bar.cursor.label) ||
-    bar.eliza.text !== "Eliza $12.35" ||
-    !/^Eliza: \$12.35 month to date/.test(bar.eliza.label) ||
-    !/5h.*48%.*month.*27%/.test(bar.kimi.text) ||
-    !/^Kimi: 5h/.test(bar.kimi.label) ||
-    /Claude|Codex|Cursor/.test(bar.claude.text + bar.codex.text.replace(/Connect/, ""))
-  )
-    throw Error("Limits bar content wrong: " + JSON.stringify(bar));
-  const providerOrder = await evaluate(`[...document.querySelectorAll('#limits-bar .lim')].map(n => n.dataset.provider).join(',')`, s);
-  if (providerOrder !== "claude,codex,cursor,eliza,kimi") throw Error("Provider order wrong: " + providerOrder);
-  result.checks.push(
-    "B1 bottom bar with fixture data: Claude 5h/7d, Codex 7d, Cursor unavailable, Eliza month-to-date cost, Kimi 5h 48% / month 27%",
-  );
-
-  // Provider visibility is durable, independent, and reversible even when every provider is hidden.
-  await click("#limits-bar .lim-providers-toggle", s);
-  await waitFor(
-    `!document.querySelector('#limits-providers').hidden && document.querySelectorAll('#limits-providers input').length === 5`,
-    s,
-    "provider menu",
-  );
-  await evaluate(
-    `document.querySelector('.lim-providers-toggle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`,
-    s,
-  );
-  await waitFor(
-    `document.querySelector('#limits-providers').hidden && document.activeElement === document.querySelector('.lim-providers-toggle')`,
-    s,
-    "Escape closes provider menu and restores focus",
-  );
-  await click("#limits-bar .lim-providers-toggle", s);
-  await click('#limits-providers input[data-provider="claude"]', s);
-  await waitFor(
-    `!document.querySelector('#limits-bar .lim[data-provider="claude"]') && document.querySelectorAll('#limits-bar .lim').length === 4`,
-    s,
-    "hide Claude only",
-  );
-  const visibilityNavigation = await evaluate(`performance.timeOrigin`, s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `performance.timeOrigin !== ${visibilityNavigation} && document.querySelectorAll('#limits-bar .lim').length === 4 && !document.querySelector('#limits-bar .lim[data-provider="claude"]') && !!document.querySelector('#limits-bar .lim[data-provider="kimi"]')`,
-    s,
-    "visibility survives reload",
-  );
-  await click("#limits-bar .lim-providers-toggle", s);
-  await waitFor(`!document.querySelector('#limits-providers').hidden`, s, "provider menu after reload");
-  for (const provider of ["codex", "cursor", "eliza", "kimi"]) {
-    await click(`#limits-providers input[data-provider="${provider}"]`, s);
-    await waitFor(`!document.querySelector('#limits-bar .lim[data-provider="${provider}"]')`, s, `hide ${provider}`);
-  }
-  await waitFor(
-    `document.querySelectorAll('#limits-bar .lim').length === 0 && !!document.querySelector('#limits-bar .lim-providers-toggle') && !!document.querySelector('#limits-bar .lim-refresh') && !!document.querySelector('#limits-bar .mach')`,
-    s,
-    "all providers hidden leaves controls and machine status",
-  );
-  await shot("06a-provider-visibility-all-hidden", s);
-  let invalidVisibility = false;
-  try {
-    await rpc({ action: "limits-visibility", provider: "bogus", visible: false });
-  } catch {
-    invalidVisibility = true;
-  }
-  if (!invalidVisibility) throw Error("Unknown visibility provider was accepted");
-  for (const provider of ["claude", "codex", "cursor", "eliza", "kimi"]) {
-    await click(`#limits-providers input[data-provider="${provider}"]`, s);
-    await waitFor(`!!document.querySelector('#limits-bar .lim[data-provider="${provider}"]')`, s, `show ${provider}`);
-  }
-  result.checks.push(
-    "B1c provider menu: five named checkboxes, Escape/focus, independent hide/show, reload persistence, all-hidden recovery, unknown provider rejected",
-  );
-  const elizaBox = await box('#limits-bar .lim[data-provider="eliza"]', s);
-  await send(
-    "Input.dispatchMouseEvent",
-    { type: "mouseMoved", x: Math.round((elizaBox.left + elizaBox.right) / 2), y: Math.round((elizaBox.top + elizaBox.bottom) / 2) },
-    s,
-  );
-  await waitFor(
-    `getComputedStyle(document.querySelector('.lim[data-provider="eliza"] .lim-pop')).visibility === 'visible'`,
-    s,
-    "Eliza details",
-  );
-  const elizaPop = await evaluate(`document.querySelector('.lim[data-provider="eliza"] .lim-pop').innerText`, s);
-  if (
-    !/\$12.35 month to date/.test(elizaPop) ||
-    !/USD · all usage buckets/.test(elizaPop) ||
-    !/Account fixture-account/.test(elizaPop) ||
-    !/00:00 UTC/.test(elizaPop) ||
-    !/GET \/v2\/usage/.test(elizaPop)
-  )
-    throw Error("Eliza details wrong: " + elizaPop);
-  await shot("06a-eliza-fixture-tooltip", s);
-  result.checks.push("B1b Eliza fixture tooltip explains USD, month-to-date period, account scope, reset and actual usage endpoint");
-  const at = await box('#limits-bar .lim[data-provider="claude"]', s);
-  await send(
-    "Input.dispatchMouseEvent",
-    { type: "mouseMoved", x: Math.round((at.left + at.right) / 2), y: Math.round((at.top + at.bottom) / 2) },
-    s,
-  );
-  await waitFor(
-    `getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`,
-    s,
-    "hover details",
-  );
-  const pop = await evaluate(`document.querySelector('.lim[data-provider="claude"] .lim-pop').innerText`, s);
-  if (
-    !/resets in 2h \d+m/.test(pop) ||
-    !/resets in (2d 2\d|3d)/.test(pop) ||
-    !/42% used/.test(pop) ||
-    !/observed .* via usage endpoint/.test(pop)
-  )
-    throw Error("Hover details wrong: " + pop);
-  result.checks.push("B2 hover details: used percent, reset countdown and time, observed time and source per window");
-  await shot("06-limits-bar-hover", s);
-  const cursor = await box('#limits-bar .lim[data-provider="cursor"]', s);
-  await send(
-    "Input.dispatchMouseEvent",
-    { type: "mouseMoved", x: Math.round((cursor.left + cursor.right) / 2), y: Math.round((cursor.top + cursor.bottom) / 2) },
-    s,
-  );
-  await waitFor(
-    `getComputedStyle(document.querySelector('.lim[data-provider="cursor"] .lim-pop')).visibility === 'visible'`,
-    s,
-    "cursor details",
-  );
-  await shot("07-limits-bar-unavailable", s);
-  // Refresh button: refetches now (fixture changed on disk), disabled while running, cooldown on repeated clicks.
-  const refreshInfo = await evaluate(
-    `(() => { const b = document.querySelector('#limits-bar .lim-refresh'); return { label: b?.getAttribute('aria-label'), title: b?.title, last: b.previousElementSibling?.classList.contains('lim-settings'), margin: getComputedStyle(b).marginLeft }; })()`,
-    s,
-  );
-  if (refreshInfo.label !== "Refresh limits" || !refreshInfo.title || !refreshInfo.last || refreshInfo.margin !== "0px")
-    throw Error("Refresh button wrong: " + JSON.stringify(refreshInfo));
-  await shot("06b-limits-bar-refresh-icon", s);
-  await waitFor(`document.querySelectorAll('#limits-bar .mach-item').length >= 2`, s, "machine status");
-  const mach = await evaluate(
-    `[...document.querySelectorAll('#limits-bar .mach-item')].map(n => [n.dataset.kind, n.innerText.replace(/\\s+/g, ' ').trim()])`,
-    s,
-  );
-  const machFormat = { ram: /^\d+\.\d GB \/ \d+\.\d GB|^—/, cpu: /^(\d+%|—)/, ssd: /^(\d+%|—)/, battery: /^(\d+%|—)/ };
-  if (!mach.every(([kind, text]) => machFormat[kind].test(text)) || !mach.some(([kind]) => kind === "cpu"))
-    throw Error("Machine status wrong: " + JSON.stringify(mach));
-  if (
-    !(await evaluate(
-      `document.querySelector('#limits-bar .lim-refresh').nextElementSibling === document.querySelector('#limits-bar .mach')`,
-      s,
-    ))
-  )
-    throw Error("Machine status is not on the right after the refresh button");
-  result.checks.push("B2b machine status renders after the refresh button in the documented formats: " + JSON.stringify(mach));
-  const cpuBox = await box('#limits-bar .mach-item[data-kind="cpu"]', s);
-  await send(
-    "Input.dispatchMouseEvent",
-    { type: "mouseMoved", x: Math.round((cpuBox.left + cpuBox.right) / 2), y: Math.round((cpuBox.top + cpuBox.bottom) / 2) },
-    s,
-  );
-  await waitFor(
-    `getComputedStyle(document.querySelector('.mach-item[data-kind="cpu"] .mach-tip')).visibility === 'visible'`,
-    s,
-    "machine tooltip",
-  );
-  await shot("06c-machine-hover", s);
-  const barBox = await box("#limits-bar", s);
-  const crop = await send(
-    "Page.captureScreenshot",
-    { format: "png", clip: { x: 0, y: barBox.top, width: 700, height: barBox.bottom - barBox.top, scale: 2 } },
-    s,
-  );
-  writeFileSync(join(artifacts, "06d-eliza-fixture-after-cursor-2x.png"), Buffer.from(crop.data, "base64"), { mode: 0o600 });
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 }, s);
-  writeFileSync(
-    join(root, "limits.json"),
-    JSON.stringify({
-      claude: [
-        { window: "5h", usedPercent: 61, resetsAt: fixtureAt + 2 * 3600e3 },
-        { window: "7d", usedPercent: 24, resetsAt: fixtureAt + 3 * 86400e3 },
-      ],
-      codex: [{ window: "7d", usedPercent: 3, resetsAt: fixtureAt + 5 * 86400e3 }],
-      eliza: elizaFixture,
-      kimi: kimiFixture,
-    }),
-  );
-  await click("#limits-bar .lim-refresh", s);
-  await waitFor(
-    `/61%/.test(document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText) && !document.querySelector('#limits-bar .lim-refresh').disabled`,
-    s,
-    "refreshed numbers",
-  );
-  result.checks.push(
-    "B3 refresh icon: aria-label and tooltip beside the provider menu; clicking refetches now (42% -> 61%) and re-enables the button",
-  );
-  writeFileSync(
-    join(root, "limits.json"),
-    JSON.stringify({ claude: [{ window: "5h", usedPercent: 70, resetsAt: fixtureAt + 2 * 3600e3 }], codex: [], eliza: elizaFixture }),
-  );
-  await click("#limits-bar .lim-refresh", s);
-  await new Promise((ok) => setTimeout(ok, 800));
-  if (!/61%/.test(await evaluate(`document.querySelector('#limits-bar .lim[data-provider="claude"]').innerText`, s)))
-    throw Error("Cooldown did not hold: second refresh inside 15 s refetched");
-  result.checks.push("B4 a second refresh click inside the 15 s host cooldown does not refetch");
-  // Connect Cursor from the page: the app builds the login link, the host polls Cursor and keeps the tokens.
-  await evaluate(`(window.__opened = [], window.open = url => { window.__opened.push(String(url)); return null; })`, s);
-  await waitFor(`!!document.querySelector('.lim[data-provider="cursor"] [data-action="cursor-connect"]')`, s, "Connect Cursor button");
-  await shot("07b-cursor-connect", s);
-  await click('.lim[data-provider="cursor"] [data-action="cursor-connect"]', s);
-  await waitFor(`window.__opened.length === 1`, s, "login page opened");
-  const login = new URL(await evaluate(`window.__opened[0]`, s));
-  if (
-    !login.pathname.endsWith("/loginDeepControl") ||
-    !login.searchParams.get("challenge") ||
-    !login.searchParams.get("uuid") ||
-    login.searchParams.get("verifier")
-  )
-    throw Error("Login URL wrong: " + login);
-  await waitFor(
-    `/Waiting/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '') || /6\\d%/.test(document.querySelector('.lim[data-provider="cursor"]')?.innerText ?? '')`,
-    s,
-    "waiting state",
-  );
-  await waitFor(
-    `/61\.?5?%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText) || /62%/.test(document.querySelector('.lim[data-provider="cursor"]').innerText)`,
-    s,
-    "Cursor usage after login",
-  );
-  const poll = cursorSeen.polls.at(-1);
-  if (
-    createHash("sha256").update(poll.verifier).digest("base64url") !== login.searchParams.get("challenge") ||
-    poll.uuid !== login.searchParams.get("uuid")
-  )
-    throw Error("PKCE verifier does not match the challenge: " + JSON.stringify(poll));
-  const stored = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"));
-  if (stored.cursor?.access !== cursorJwt || (statSync(join(agentDir, "auth.json")).mode & 0o777) !== 0o600)
-    throw Error("Cursor login not stored in auth.json at 0600");
-  if (!cursorSeen.summary.at(-1)?.startsWith("WorkosCursorSessionToken=auth0%7Ce2e%3A%3A"))
-    throw Error("Usage request lacked the session cookie");
-  const afterBar = await evaluate(`document.querySelector('.lim[data-provider="cursor"]').innerText.replace(/\s+/g, ' ')`, s);
-  if (!/month/.test(afterBar) && !/mo/.test(afterBar)) throw Error("Cursor window label missing: " + afterBar);
-  const page = await evaluate(`document.documentElement.outerHTML`, s);
-  if (page.includes(cursorJwt) || page.includes("refresh-e2e")) throw Error("A Cursor token reached the page");
-  await shot("07c-cursor-connected", s);
-  result.checks.push(
-    "C1 Connect Cursor: PKCE login link opened, host polled with the matching verifier, tokens stored in auth.json at 0600, usage appears as a monthly percentage, no token reaches the page",
-  );
-  const raw = JSON.stringify(await rpc({ action: "limits-snapshot" }));
-  if (/token|bearer|access|authorization|cookie/i.test(raw)) throw Error("Limits snapshot leaks credential-like fields: " + raw);
-  result.checks.push("B3 the browser payload is normalized samples only; no tokens or raw provider responses");
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 }, s);
-
-  // Network outage: the item says it could not reach the provider (never "sign-in expired"), keeps the last numbers, and recovers after a refresh.
-  await delay(16000);
-  const fixtureNow = JSON.parse(readFileSync(join(root, "limits.json"), "utf8"));
-  writeFileSync(join(root, "limits.json"), JSON.stringify({ ...fixtureNow, claudeFail: "unreachable" }));
-  await click("#limits-bar .lim-refresh", s);
-  await waitFor(
-    `/Couldn.t reach Claude, will retry/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`,
-    s,
-    "unreachable message",
-  );
-  const outage = await evaluate(`document.querySelector('.lim[data-provider="claude"] .lim-pop').textContent`, s);
-  if (/sign-in|expired/i.test(outage) || !/Last refresh failed/.test(outage)) throw Error("Outage message wrong: " + outage);
-  const claudeBox = await box('#limits-bar .lim[data-provider="claude"]', s);
-  await send(
-    "Input.dispatchMouseEvent",
-    { type: "mouseMoved", x: Math.round((claudeBox.left + claudeBox.right) / 2), y: Math.round((claudeBox.top + claudeBox.bottom) / 2) },
-    s,
-  );
-  await waitFor(
-    `getComputedStyle(document.querySelector('.lim[data-provider="claude"] .lim-pop')).visibility === 'visible'`,
-    s,
-    "outage details",
-  );
-  await shot("10-limits-unreachable", s);
-  result.checks.push('B5 a network failure reads "Couldn\'t reach Claude, will retry" (not sign-in expired) and keeps the last numbers');
-  await delay(16000);
-  writeFileSync(join(root, "limits.json"), JSON.stringify(fixtureNow));
-  await click("#limits-bar .lim-refresh", s);
-  await waitFor(
-    `!/Last refresh failed/.test(document.querySelector('.lim[data-provider="claude"] .lim-pop')?.textContent ?? '')`,
-    s,
-    "recovered",
-  );
-  result.checks.push("B6 once the network is back a refresh clears the message");
-  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 }, s);
 
   // Narrow.
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `document.querySelectorAll('#chat-list .chat').length === 4 && document.querySelectorAll('#limits-bar .lim').length === 5`,
-    s,
-    "narrow load",
-  );
+  await waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#feed .turn')`, s, "narrow load");
   await delay(500);
-  const narrow = await evaluate(
-    `({ width: document.scrollingElement.scrollWidth, bar: document.querySelector('#limits-bar').getBoundingClientRect().height > 0, barOverflow: document.querySelector('#limits-bar').scrollWidth > document.querySelector('#limits-bar').clientWidth })`,
-    s,
-  );
-  if (narrow.width > 391 || !narrow.bar || narrow.barOverflow) throw Error("Narrow view broken: " + JSON.stringify(narrow));
-  result.checks.push("N1 390px: no horizontal overflow, chat dots and the limits bar present");
+  if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Narrow view overflows");
+  result.checks.push("N1 390px: no horizontal overflow");
   await shot("08-narrow-390", s);
-  await click("#job-tree .job-children .job-open", s);
-  await waitFor(
-    `!document.querySelector('#inline-thread').hidden && !!document.querySelector('#worker-messages')`,
-    s,
-    "narrow worker view",
-  );
+  await waitFor(`!!document.querySelector('#workers .worker.working [data-open-worker]')`, s, "narrow worker row");
+  await evaluate(`document.querySelector('#workers .worker.working [data-open-worker]').click()`, s);
+  await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "narrow worker view");
   if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Narrow worker view overflows");
   await shot("09-narrow-worker-view", s);
   result.checks.push("N2 390px worker view fits the screen");

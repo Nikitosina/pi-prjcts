@@ -1,23 +1,22 @@
-# Search a project
+# Search
 
-The user opens the search dialog and finds words from chats, worker threads, knowledge and uploads, then jumps to the hit.
+The owner presses ⌘K and finds chats, projects, commands and full-text hits from the selected project's chats, worker threads, knowledge and uploads in one list.
 
 ## Sub-features
 
-- `chat-hit` — a word said in a chat is listed with its chat and role.
-- `empty` — an unknown word shows an empty result list.
-- `jump` — Enter on a hit opens its location.
+- `chat-hit`: a word said in a chat is listed with its source (`.muted` hint on the row).
+- `empty`: an unknown word shows "Nothing found".
+- `jump`: not available yet. Choosing a full-text hit does nothing (`docs/classic-retirement.md`, gaps); report it as unverified.
 
 ## How to get to it (user POV)
 
-- Toolbar button `#search-button`.
-- Cmd+K (macOS) or Ctrl+K.
+- Top bar "Search" (`[data-cmd="palette"]`), or Cmd+K (macOS) / Ctrl+K.
 
 ## Driving it with browser CDP
 
 Preconditions: launch, doctor `ok: true`, and one earlier message in Main containing a unique word. Run `drive message-coordinator` first and search for `VERIFY-PING`. Without that message, report failure `no chat history to search`.
 
-- Recipe only, not scripted: click `#search-button`; in `#search-input` insert `VERIFY-PING`; rows appear in `#search-results .search-row` (`data-source="chat"`); press Enter on the first row. Empty case: insert `nonexistentwordzz`, expect no rows.
+- Recipe only, not scripted: open the palette, insert `VERIFY-PING` into `#palette[open] input`; rows appear as `#palette li[data-index]`. Empty case: insert `nonexistentwordzz`, expect "Nothing found". `scripts/search-ui-e2e.mjs` scripts the same checks.
 
 ## Gotchas
 

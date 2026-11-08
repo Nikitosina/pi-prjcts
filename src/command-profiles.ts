@@ -5,6 +5,7 @@ import { basename, isAbsolute, relative, sep } from "node:path";
 import { parse, type Project, type Request } from "./state.ts";
 import { CommandProfileInput, type CommandProfile, type CommandProgram } from "./command-profile-types.ts";
 import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
+import { currentWorktreeRoot } from "./archive-host.ts";
 import { plugins } from "./plugins.ts";
 
 type Update = Extract<Request, { action: "command-profile-set" }>;
@@ -186,7 +187,7 @@ export async function prepareCommandProfile(project: Project, input: Update): Pr
     throw new Error("Command executable does not match the selected VCS provider");
   const roots = await Promise.all([
     realpath(project.cwd),
-    ...grant.repositories.flatMap((item) => [realpath(item.ownerCheckout), realpath(item.approvedRoot)]),
+    ...grant.repositories.flatMap((item) => [realpath(item.ownerCheckout), realpath(currentWorktreeRoot(project.id, item.approvedRoot))]),
   ]);
   if (roots.some((root) => within(root, program.path)))
     throw new Error("Command executable cannot reside in a mutable repository or workspace root");

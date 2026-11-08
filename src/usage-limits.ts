@@ -48,7 +48,7 @@ const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex"
 export type LimitVisibility = Record<LimitProvider, boolean>;
 const DEFAULT_VISIBILITY: LimitVisibility = { claude: true, codex: true, cursor: true, eliza: true, kimi: true };
 const visibilityPath = () => join(home(), "limits-visibility.json");
-/** Display only: hidden providers keep polling so quota recovery and a later re-enable retain their normal behavior. */
+/** Display only: hidden providers are refreshed with the others, so a later re-enable shows the same numbers. */
 export function limitsVisibility(): LimitVisibility {
   try {
     const saved = JSON.parse(readFileSync(visibilityPath(), "utf8"));
@@ -64,13 +64,11 @@ export function setLimitVisibility(provider: LimitProvider, visible: boolean): L
   saveJson(visibilityPath(), next);
   return next;
 }
-/** Never poll an endpoint more often than this, and back off on failure. */
-export const MIN_POLL_MS = 5 * 60_000,
-  MANUAL_COOLDOWN_MS = 15_000,
-  MAX_BACKOFF_MS = 15 * 60_000,
+/** Endpoints are polled only by the owner's refresh, at most once per provider per cooldown. */
+export const MANUAL_COOLDOWN_MS = 15_000,
   REQUEST_TIMEOUT_MS = 10_000;
-/** A passive header sample keeps the poll away while it is this fresh. */
-const PASSIVE_FRESH_MS = MIN_POLL_MS;
+/** An exhausted window counts as a known quota reset only while its reading is this fresh. */
+export const QUOTA_SAMPLE_FRESH_MS = 5 * 60_000;
 const WINDOW_SECONDS = { "5h": 5 * 3600, "7d": 7 * 86400 };
 
 type Polled = Array<Omit<LimitSample, "provider" | "observedAt">>;
@@ -84,8 +82,6 @@ type OwnState = {
   unavailable: boolean;
   lastAttemptAt: number | null;
   lastManualAt: number;
-  nextAttemptAt: number;
-  failures: number;
   holdUntil: number;
   inflight?: Promise<void>;
 };
@@ -101,9 +97,7 @@ const entry = (provider: LimitProvider) => {
         reason: null,
         unavailable: false,
         lastAttemptAt: null,
-        lastManualAt: 0,
-        nextAttemptAt: 0,
-        failures: 0,
+        lastManualAt: -Infinity,
         holdUntil: 0,
       }),
     );
@@ -180,7 +174,7 @@ export function quotaResetAt(model: string, now = Date.now()): number | undefine
     sample.resetsAt !== null &&
     Number.isFinite(new Date(sample.resetsAt).getTime()) &&
     sample.resetsAt > now &&
-    now - sample.observedAt <= MIN_POLL_MS
+    now - sample.observedAt <= QUOTA_SAMPLE_FRESH_MS
       ? [sample.resetsAt]
       : [],
   );
@@ -211,7 +205,7 @@ async function currentToken(providerId: string, what: string, fromDisk: () => Pr
       const text = error instanceof Error ? `${error.message} ${error.cause instanceof Error ? error.cause.message : ""}` : "";
       if (/invalid_grant|invalid_client|unauthorized|\b40[013]\b/i.test(text))
         throw new Retry(`${what} sign-in was rejected when renewing it. Sign in again`, null, true);
-      throw new Retry(`Couldn't renew the ${what} sign-in right now, will retry`);
+      throw new Retry(`Couldn't renew the ${what} sign-in right now`);
     }
     if (renewed) return renewed;
   }
@@ -254,7 +248,7 @@ class Retry extends Error {
     this.signedOut = signedOut;
   }
 }
-const unreachable = (what: string) => new Retry(`Couldn't reach ${what}, will retry`);
+const unreachable = (what: string) => new Retry(`Couldn't reach ${what}`);
 const retryAfter = (response: Response, now = Date.now()) => {
   const value = response.headers.get("retry-after")?.trim();
   if (!value) return null;
@@ -278,11 +272,11 @@ async function getJson(
   }
   if (response.status === 429) {
     await response.body?.cancel();
-    throw new Retry(`${what} rate limited the usage request, will retry`, retryAfter(response));
+    throw new Retry(`${what} rate limited the usage request`, retryAfter(response));
   }
   if (response.status >= 500) {
     await response.body?.cancel();
-    throw new Retry(`${what} is having trouble (HTTP ${response.status}), will retry`, retryAfter(response));
+    throw new Retry(`${what} is having trouble (HTTP ${response.status})`, retryAfter(response));
   }
   if (!response.ok) {
     await response.body?.cancel();
@@ -482,7 +476,7 @@ export function parseElizaUsage(data: unknown, startedAt = Date.now(), finishedA
     buckets++;
   }
   const [periodStartAt, periodEndAt] = utcMonth(startedAt);
-  if (utcMonth(finishedAt)[0] !== periodStartAt) throw new Retry("Eliza usage crossed the UTC month boundary, will retry");
+  if (utcMonth(finishedAt)[0] !== periodStartAt) throw new Retry("Eliza usage crossed the UTC month boundary");
   if (!buckets) return null;
   if (!Number.isFinite(amountUsd)) throw new Retry("Eliza returned an unreadable usage response");
   return { amountUsd, periodStartAt, periodEndAt, account, pool: pool || null };
@@ -524,27 +518,13 @@ const POLLERS: Record<LimitProvider, () => Promise<PollResult>> = {
 };
 const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) => fixture(provider) ?? POLLERS[provider];
 
-/**
- * Every mode waits out the provider's Retry-After. `manual` (the refresh button) otherwise skips the minimum interval, failure backoff
- * and passive-sample shortcut, but is rate-limited per provider. `visit` retries a provider in a failure state before the backoff ends,
- * subject to the per-provider cooldown. Otherwise only the normal schedule applies.
- */
-type RefreshMode = "auto" | "manual" | "visit";
-function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode = "auto"): Promise<void> {
+/** The refresh button: waits out the provider's Retry-After, shares a request in flight, and is rate-limited per provider. */
+function refreshProvider(provider: LimitProvider, now: number): Promise<void> {
   const own = entry(provider);
   if (own.inflight) return own.inflight;
-  if (now < own.holdUntil) return Promise.resolve();
-  if (mode === "manual") {
-    if (now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
-    own.lastManualAt = now;
-  } else if (mode === "visit" && own.failures > 0) {
-    if (now - (own.lastAttemptAt ?? 0) < MANUAL_COOLDOWN_MS) return Promise.resolve();
-  } else {
-    const fresh = [...own.samples.values()].some((sample) => sample.source === "headers" && now - sample.observedAt < PASSIVE_FRESH_MS);
-    if (now < own.nextAttemptAt || fresh) return Promise.resolve();
-  }
+  if (now < own.holdUntil || now - own.lastManualAt < MANUAL_COOLDOWN_MS) return Promise.resolve();
+  own.lastManualAt = now;
   own.lastAttemptAt = now;
-  own.nextAttemptAt = now + MIN_POLL_MS;
   const startedAt = Date.now();
   own.inflight = pollerOf(provider)()
     .then(
@@ -552,19 +532,15 @@ function refreshProvider(provider: LimitProvider, now: number, mode: RefreshMode
         record(provider, "endpoint", result.samples);
         if (provider === "eliza") own.usage = result.usage ? { ...result.usage, observedAt: Date.now() } : null;
         const hasData = result.samples.length > 0 || own.usage !== null;
-        own.failures = 0;
         own.holdUntil = 0;
         own.reason = hasData ? null : provider === "eliza" ? "Eliza returned no usage data" : "The provider returned no usage windows";
         own.unavailable = false;
       },
       (error) => {
-        own.failures++;
         own.reason = error instanceof Error ? error.message : "Usage request failed";
         own.unavailable = error instanceof Retry && error.signedOut;
         const afterMs = error instanceof Retry ? error.afterMs : null;
-        const failedAt = now + Date.now() - startedAt;
-        own.holdUntil = afterMs !== null ? failedAt + afterMs : 0;
-        own.nextAttemptAt = Math.max(own.holdUntil, failedAt + Math.min(MAX_BACKOFF_MS, MIN_POLL_MS * 2 ** Math.min(own.failures, 5)));
+        own.holdUntil = afterMs !== null ? now + Date.now() - startedAt + afterMs : 0;
       },
     )
     .finally(() => {
@@ -593,7 +569,8 @@ async function storeCursorLogin(credential: { type: "oauth"; access: string; ref
 }
 const LOGIN_WINDOW_MS = 5 * 60_000;
 let connect: CursorConnect & { startedAt: number } = { state: "idle", loginUrl: null, error: null, startedAt: 0 };
-export function startCursorLogin(now = Date.now()): CursorConnect {
+/** `changed` runs when the flow ends (signed in and read once, failed or timed out), so open pages reread without polling. */
+export function startCursorLogin(now = Date.now(), changed: () => void = () => {}): CursorConnect {
   if (connect.state === "waiting" && now - connect.startedAt < LOGIN_WINDOW_MS) return connect;
   const verifier = randomBytes(96).toString("base64url"),
     challenge = createHash("sha256").update(verifier).digest("base64url"),
@@ -623,35 +600,37 @@ export function startCursorLogin(now = Date.now()): CursorConnect {
         expires: (session.expiresAt ?? Date.now() + 3600_000) - 300_000,
       });
       connect = { state: "idle", loginUrl: null, error: null, startedAt: 0 };
-      const own = entry("cursor");
-      own.nextAttemptAt = 0;
-      own.failures = 0;
+      // The owner pressed Connect: read the new sign-in's usage once, outside the refresh cooldown.
+      entry("cursor").lastManualAt = -Infinity;
+      await refreshProvider("cursor", Date.now()).catch(() => {});
+      changed();
       return;
     }
-    if (connect === flow)
+    if (connect === flow) {
       connect = { state: "failed", loginUrl: null, error: "The Cursor sign-in was not completed in time", startedAt: flow.startedAt };
+      changed();
+    }
   })().catch((error) => {
-    if (connect === flow)
+    if (connect === flow) {
       connect = {
         state: "failed",
         loginUrl: null,
         error: error instanceof Error ? error.message : "Cursor sign-in failed",
         startedAt: flow.startedAt,
       };
+      changed();
+    }
   });
   return connect;
 }
 
 /** Normalized state for the browser. Triggers at most one poll per provider per 5 minutes (plus backoff after failures); `refresh` polls now. */
+/** A read returns what was last observed and never contacts a provider; `refresh` is the owner's refresh button. */
 export async function limitsSnapshot(
   now = Date.now(),
-  refresh: boolean | "visit" = false,
+  refresh = false,
 ): Promise<{ providers: ProviderLimits[]; visibility: LimitVisibility; observedAt: number }> {
-  await Promise.all(
-    (Object.keys(LABELS) as LimitProvider[]).map((provider) =>
-      refreshProvider(provider, now, refresh === true ? "manual" : refresh === "visit" ? "visit" : "auto"),
-    ),
-  );
+  if (refresh) await Promise.all((Object.keys(LABELS) as LimitProvider[]).map((provider) => refreshProvider(provider, now)));
   const providers = (Object.keys(LABELS) as LimitProvider[]).map((provider): ProviderLimits => {
     const own = entry(provider),
       samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window)),
@@ -663,7 +642,7 @@ export async function limitsSnapshot(
       status: hasData ? "ok" : own.unavailable ? "unavailable" : "no-data",
       reason: own.reason,
       lastAttemptAt: own.lastAttemptAt,
-      nextAttemptAt: own.nextAttemptAt || null,
+      nextAttemptAt: own.holdUntil > now ? own.holdUntil : null,
       ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}),
       ...(provider === "eliza" ? { usage: own.usage } : {}),
     };

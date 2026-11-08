@@ -61,7 +61,13 @@ type Channel = {
   stopped: boolean;
 };
 type PushJob = { deviceId: string; endpoint: string; body: string; urgency: string; retried: boolean; readyAt: number };
-type Options = { webUrl: string; report: (detail: string) => void; summary: () => Promise<{ hostName?: string; needs: number }> };
+type Options = {
+  webUrl: string;
+  report: (detail: string) => void;
+  summary: () => Promise<{ hostName?: string; needs: number }>;
+  /** Status, devices or pairing changed; the host publishes topic `remote` so open pages reread instead of polling. */
+  changed?: () => void;
+};
 const directory = () => join(home(), "remote");
 const configPath = () => join(directory(), "config.json");
 const REQUEST_LIMIT = 20 * 1024 * 1024,
@@ -186,14 +192,24 @@ export function createRemote(options: Options) {
     pendingPushes = new Map<string, { job: PushJob; timer: NodeJS.Timeout }>();
   const pushQueue: PushJob[] = [];
   let pushRetry: NodeJS.Timeout | null = null;
-  const persist = () => saveJson(join(directory(), "devices.json"), registry);
+  const persist = () => {
+    saveJson(join(directory(), "devices.json"), registry);
+    options.changed?.();
+  };
+  const setConnection = (next: typeof connection) => {
+    if (next === connection) return;
+    connection = next;
+    options.changed?.();
+  };
   const deviceActive = (id: string) => !stopped && !!registry.devices.find((device) => device.id === id && !device.revokedAt);
   const control = (value: unknown) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
   };
   const fail = (detail: string) => {
+    const changed = lastError !== detail;
     lastError = detail;
     options.report(detail);
+    if (changed) options.changed?.();
   };
   const stopChannel = (channel: Channel, notify = true) => {
     if (channel.stopped) return;
@@ -273,6 +289,7 @@ export function createRemote(options: Options) {
     pairGeneration++;
     if (pairing) clearTimeout(pairing.timer);
     pairing = null;
+    options.changed?.();
     await sendList();
   };
 
@@ -512,7 +529,7 @@ export function createRemote(options: Options) {
 
   function connect(current: number) {
     if (stopped || current !== generation || !config || !identity) return;
-    connection = "connecting";
+    setConnection("connecting");
     const url = new URL("/ws", config.relay);
     url.protocol = "wss:";
     const ws = new WebSocket(url);
@@ -557,8 +574,8 @@ export function createRemote(options: Options) {
             ws.send(JSON.stringify({ t: "host", hostId: identity.id, sig: await sign(identity.privateKey, hostAuthText(message.nonce)) }));
           } else if (message.t === "ready") {
             clearTimeout(deadline);
-            connection = "connected";
             lastError = null;
+            setConnection("connected");
             backoff = 1000;
             await sendList();
           } else if (message.t === "open") {
@@ -611,7 +628,7 @@ export function createRemote(options: Options) {
     };
     ws.onerror = () => {
       if (ws === socket && !stopped) {
-        connection = "error";
+        setConnection("error");
         fail("Relay connection failed");
       }
     };
@@ -622,7 +639,7 @@ export function createRemote(options: Options) {
       clearChannels();
       clearPushes();
       if (stopped || current !== generation) return;
-      connection = "connecting";
+      setConnection("connecting");
       reconnect = setTimeout(() => connect(current), backoff + Math.random() * Math.min(backoff / 4, 1000));
       backoff = Math.min(backoff * 2, 60000);
     };
@@ -631,7 +648,7 @@ export function createRemote(options: Options) {
   async function stop() {
     stopped = true;
     generation++;
-    connection = "off";
+    setConnection("off");
     clearTimeout(reconnect ?? undefined);
     reconnect = null;
     pairGeneration++;
@@ -687,6 +704,8 @@ export function createRemote(options: Options) {
         hostName: config?.hostName ?? hostname(),
         connection,
         lastError,
+        // When the open pairing ends (not its code): a page showing the QR drops it once this is null.
+        pairing: pairing && pairing.expiresAt > Date.now() ? { expiresAt: pairing.expiresAt } : null,
         fingerprint: bootstrapFingerprint(),
       };
     },
@@ -715,6 +734,7 @@ export function createRemote(options: Options) {
           if (pairing?.id === id) void pairCancel();
         }, PAIR_MS),
       };
+      options.changed?.();
       await sendList();
       const link = pairLink(config.relay, identity.id, code, config.hostName),
         qr = qrcode(0, "L");

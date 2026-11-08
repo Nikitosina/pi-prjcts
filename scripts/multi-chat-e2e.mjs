@@ -328,12 +328,12 @@ const turns = (marker) => result.calls.filter((call) => call.coordinator && call
 const transcript = async (id, chatId) => (await rpc({ action: "show", id, chatId })).messages.map((m) => m.text).join("\n");
 const chatButtons = (s) =>
   evaluate(
-    `[...document.querySelectorAll('#chat-list .chat')].map(n => ({ id: n.dataset.chat, title: n.querySelector('.chat-title')?.innerText ?? '', on: n.classList.contains('on') }))`,
+    `[...document.querySelectorAll('#tree .tree-project.selected [data-chat]')].map(n => ({ id: n.dataset.chat, title: n.querySelector('.name')?.innerText ?? '', on: n.classList.contains('current') }))`,
     s,
   );
 const setComposer = (s, value) =>
   evaluate(
-    `(() => { const t = document.querySelector('#compose textarea'); t.value = ${JSON.stringify(value)}; t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    `(() => { const t = document.querySelector('#composer-input'); t.value = ${JSON.stringify(value)}; t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
     s,
   );
 const click = (s, selector) =>
@@ -381,38 +381,33 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `document.querySelector('#title')?.innerText === 'Chats fixture' && document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`,
-    s,
-    "project loaded",
-  );
+  const feed = `document.querySelector('#feed').innerText`,
+    chats = `document.querySelectorAll('#tree .tree-project.selected [data-chat]')`,
+    current = `document.querySelector('#tree .tree-project.selected [data-chat].current')`,
+    live = `(document.querySelector('#live-turn')?.innerText.trim() ?? '')`;
+  await waitFor(`document.body.dataset.ready === "1" && ${feed}.includes('Done MARK-MAIN')`, s, "project loaded");
   const initial = await chatButtons(s);
   if (initial.length !== 1 || initial[0].title !== "Main" || !initial[0].on) throw Error("Chat list wrong: " + JSON.stringify(initial));
 
   // F2/F12: a new chat is its own conversation, selected, with an empty transcript; the URL carries it.
-  await click(s, '[data-action="chat-new"]');
-  await waitFor(
-    `document.querySelectorAll('#chat-list .chat').length === 2 && document.querySelector('#chat-list .chat.on')?.dataset.chat !== 'main'`,
-    s,
-    "new chat selected",
-  );
-  const chatId = await evaluate(`document.querySelector('#chat-list .chat.on').dataset.chat`, s);
-  await waitFor(`!document.querySelector('#messages').innerText.includes('MARK-MAIN')`, s, "empty new chat");
+  await click(s, "#tree [data-new-chat]");
+  await waitFor(`${chats}.length === 2 && ${current}?.dataset.chat !== 'main'`, s, "new chat selected");
+  const chatId = await evaluate(`${current}.dataset.chat`, s);
+  await waitFor(`!${feed}.includes('MARK-MAIN') && !!document.querySelector('#feed .empty-chat')`, s, "empty new chat");
   if (new URL(await evaluate("location.href", s)).searchParams.get("chat") !== chatId) throw Error("URL does not carry the chat");
   result.checks.push("F2/F12/F15 New chat creates and selects an empty chat; the URL names it");
   await shot("01-new-chat", s);
 
   // F5/F6/F8: delegate from the new chat; the report returns there and only there; coordinator-only tools work there.
   await setComposer(s, "MARK-DELEG please scout");
-  await evaluate(`document.querySelector('#compose').requestSubmit()`, s);
-  await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "report in chat two", 400);
+  await evaluate(`document.querySelector('#composer').requestSubmit()`, s);
+  await waitFor(`${feed}.includes('REPORT-ACK')`, s, "report in chat two", 400);
   const deleg = turns("MARK-DELEG").at(-1),
     mainTurn = turns("MARK-MAIN")[0];
   if (JSON.stringify([...deleg.tools].sort()) !== JSON.stringify([...mainTurn.tools].sort()))
@@ -425,16 +420,18 @@ try {
   const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .job-msg')`, s))
-    throw Error("Internal scout report leaked into chat two");
-  await click(s, '#job-tree [data-action="thread"]');
-  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('SCOUT-RESULT-42')`, s, "scout evidence in thread details");
-  await click(s, '[data-action="thread-close"]');
+  await waitFor(`!!document.querySelector('#workers [data-open-worker]')`, s, "the scout in chat two's Workers list");
+  await click(s, "#workers [data-open-worker]");
+  await waitFor(
+    `(document.querySelector('#focus-view')?.innerText ?? '').includes('SCOUT-RESULT-42')`,
+    s,
+    "scout evidence in the worker view",
+  );
+  await click(s, '#focus-view [data-cmd="leave-focus"]');
+  await waitFor(`${feed}.includes('REPORT-ACK')`, s, "back to chat two");
   const mainText = await transcript(id, "main");
   if (/\[(worker|scout|reviewer) [0-9a-f-]{36} /.test(mainText) || mainText.includes("REPORT-ACK")) throw Error("Report also went to Main");
-  result.checks.push(
-    "F8 the worker report goes to the delegating chat only while its details remain reachable outside the coordinator transcript",
-  );
+  result.checks.push("F8 the worker report goes to the delegating chat only while its details remain reachable in the worker view");
   await shot("02-report-in-chat", s);
 
   // F6/F16: the shared pool of agents is one list for the project.
@@ -443,71 +440,39 @@ try {
     throw Error("Agents wrong: " + JSON.stringify(snap.agents));
   result.checks.push("F6/F16 work delegated from a chat lands in the one shared Jobs snapshot");
 
-  // F12: drafts are per chat.
-  await setComposer(s, "draft-for-chat-two");
-  await click(s, '#chat-list .chat[data-chat="main"]');
-  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main selected");
-  if ((await evaluate(`document.querySelector('#compose textarea').value`, s)) !== "") throw Error("Draft leaked to Main");
-  await click(s, `#chat-list .chat[data-chat="${chatId}"]`);
-  await waitFor(
-    `document.querySelector('#messages').innerText.includes('REPORT-ACK') && !document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`,
-    s,
-    "chat two selected",
-  );
-  if ((await evaluate(`document.querySelector('#compose textarea').value`, s)) !== "draft-for-chat-two") throw Error("Chat draft lost");
-  await setComposer(s, "");
-  result.checks.push("F12 switching chats swaps transcript and keeps a draft per chat");
-
-  // Tabs: one per opened chat, the active one follows the chat, closing the active tab opens its neighbour, and the Workers card shows only the open chat.
-  const tabNames = () =>
-    evaluate(
-      `[...document.querySelectorAll('#tab-strip .chat-tab')].map(n => (n.classList.contains('on') ? '*' : '') + n.querySelector('.chat-tab-title').innerText).join('|')`,
-      s,
-    );
-  const tabs = await tabNames();
-  if (!/^Main\|\*/.test(tabs) || (await evaluate(`document.querySelector('#tab-strip').hidden`, s))) throw Error("Tabs wrong: " + tabs);
-  await click(s, '#tab-strip .chat-tab-open[data-index="0"]');
-  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main tab opened");
-  if (!(await tabNames()).startsWith("*Main")) throw Error("Active tab did not follow: " + (await tabNames()));
-  if ((await evaluate(`document.querySelector('#job-tree').innerText`, s)).includes("MARK-SCOUTJOB"))
-    throw Error("Main card shows chat two's work");
-  await click(s, '#tab-strip .chat-tab-close[data-index="0"]');
-  await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "closing the active tab opened its neighbour");
-  if ((await tabNames()).split("|").length !== 1) throw Error("Tab not closed: " + (await tabNames()));
-  await click(s, '#chat-list .chat[data-chat="main"]');
-  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main reopened");
-  await click(s, `#chat-list .chat[data-chat="${chatId}"]`);
-  await waitFor(`document.querySelector('#messages').innerText.includes('REPORT-ACK')`, s, "chat two reopened");
-  result.checks.push("Tabs follow the open chat, close to their neighbour, and the Workers card shows only that chat's work");
-  // A tab of another project is drawn from the host's list: it must carry each chat's own activity, not only the project's.
+  // F12: switching chats swaps the transcript and the Workers list (per-chat drafts and the classic tab strip are retired).
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${feed}.includes('Done MARK-MAIN') && !${feed}.includes('REPORT-ACK')`, s, "main selected");
+  await waitFor(`!(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "Main's Workers list");
+  await click(s, `#tree [data-chat="${chatId}"]`);
+  await waitFor(`${feed}.includes('REPORT-ACK') && !${feed}.includes('Done MARK-MAIN')`, s, "chat two selected");
+  await waitFor(`(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "chat two's Workers list");
+  result.checks.push("F12 switching chats swaps the transcript and the Workers list shows only that chat's work");
+  // Other projects' rows in the tree are drawn from the host's list: it must carry each chat's own activity.
   await new Promise((done) => setTimeout(done, 1700));
   const listed = (await rpc({ action: "list" })).find((project) => project.id === id);
   const perChat = listed?.activity?.chats;
   if (!perChat || !perChat.main || !perChat[chatId] || typeof perChat[chatId].working !== "boolean")
     throw Error("List lacks per-chat activity: " + JSON.stringify(listed?.activity));
-  result.checks.push("The project list carries each chat's own activity, so background tabs show their chat's state");
+  result.checks.push("The project list carries each chat's own activity, so the tree shows each chat's state");
 
-  // F13: the live bubble belongs to its chat.
+  // F13: the live turn belongs to its chat.
   const slow = await rpc({ action: "message", id, chatId, text: "MARK-SLOW stream please" });
-  await waitFor(
-    `!document.querySelector('#live-reply').hidden && document.querySelector('#live-reply').innerText.includes('STREAM-LINE')`,
-    s,
-    "live bubble in chat two",
-  );
-  await click(s, '#chat-list .chat[data-chat="main"]');
-  await waitFor(`document.querySelector('#messages').innerText.includes('Done MARK-MAIN')`, s, "main selected during stream");
+  await waitFor(`${live}.includes('STREAM-LINE')`, s, "live turn in chat two");
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${feed}.includes('Done MARK-MAIN')`, s, "main selected during stream");
   for (let i = 0; i < 6; i++) {
-    if (!(await evaluate(`document.querySelector('#live-reply').hidden`, s))) throw Error("Chat two stream shown in Main");
+    if (await evaluate(live, s)) throw Error("Chat two stream shown in Main");
     await delay(250);
   }
   const busyList = (await rpc({ action: "show", id })).chats;
   if (!busyList.find((c) => c.id === chatId)?.busy || busyList.find((c) => c.id === "main").busy)
     throw Error("Chat busy flags wrong: " + JSON.stringify(busyList));
   await shot("03-main-while-chat-streams", s);
-  result.checks.push("F13 the live stream of one chat never shows in another; the chat list marks the busy chat");
+  result.checks.push("F13 the live stream of one chat never shows in another; the host marks the busy chat");
   await settle(id, chatId, slow);
-  await click(s, `#chat-list .chat[data-chat="${chatId}"]`);
-  await waitFor(`document.querySelector('#messages').innerText.includes('STREAM-END')`, s, "stream committed");
+  await click(s, `#tree [data-chat="${chatId}"]`);
+  await waitFor(`${feed}.includes('STREAM-END')`, s, "stream committed");
 
   // F10: an answer to a question asked in chat two wakes chat two.
   await ask(id, chatId, "MARK-ASK need a decision");
@@ -517,30 +482,24 @@ try {
   if ((await transcript(id, "main")).includes("Owner answered")) throw Error("Answer went to Main");
   result.checks.push("F10 an owner answer wakes the chat that asked");
 
-  // F14: rename persists and shows; reload keeps chat and title (F15).
-  await click(s, '[data-action="chat-rename"]');
-  await waitFor(`!!document.querySelector('#dialog form[data-chat-rename] input[name="title"]')`, s, "rename dialog");
-  await evaluate(
-    `(() => { const f = document.querySelector('#dialog form[data-chat-rename]'); f.querySelector('input[name="title"]').value = 'Research'; f.requestSubmit(); })()`,
-    s,
-  );
-  await waitFor(`document.querySelector('#chat-list .chat.on .chat-title')?.innerText === 'Research'`, s, "renamed");
+  // F14: rename with /name persists and shows; reload keeps chat and title (F15).
+  await setComposer(s, "/name Research");
+  await evaluate(`document.querySelector('#composer').requestSubmit()`, s);
+  await waitFor(`${current}?.innerText.includes('Research')`, s, "renamed");
   await send("Page.reload", {}, s);
   await waitFor(
-    `document.querySelector('#chat-list .chat.on')?.dataset.chat === ${JSON.stringify(chatId)} && document.querySelector('#chat-list .chat.on .chat-title')?.innerText === 'Research' && document.querySelector('#messages').innerText.includes('ANSWER-ACK')`,
+    `document.body.dataset.ready === "1" && ${current}?.dataset.chat === ${JSON.stringify(chatId)} && ${current}.innerText.includes('Research') && ${feed}.includes('ANSWER-ACK')`,
     s,
     "reload keeps chat",
   );
-  result.checks.push("F14/F15 rename persists; reload keeps the selected chat");
+  result.checks.push("F14/F15 /name renames; reload keeps the selected chat");
   await shot("04-renamed", s);
 
-  // F14/F18: archive hides the chat, returns to Main and refuses messages; Main cannot be archived.
-  await click(s, '[data-action="chat-archive"]');
-  await waitFor(
-    `document.querySelectorAll('#chat-list .chat').length === 1 && document.querySelector('#chat-list .chat.on')?.dataset.chat === 'main' && document.querySelector('#chat-archived')?.textContent.includes('Research')`,
-    s,
-    "archived",
-  );
+  // F14/F18: archive (host API; the new client has no archive control) hides the chat and refuses messages; Main cannot be archived.
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${feed}.includes('Done MARK-MAIN')`, s, "main before archive");
+  await rpc({ action: "chat-update", id, chatId, archived: true });
+  await waitFor(`${chats}.length === 1 && ${current}?.dataset.chat === 'main'`, s, "archived chat leaves the tree");
   await rejects({ action: "message", id, chatId, text: "MARK-NOPE" }, /archived/i, "archived chat message");
   await rejects({ action: "chat-update", id, chatId: "main", archived: true }, /Main/, "archive main");
   result.checks.push("F14/F18 archive hides the chat and refuses its messages; Main cannot be archived");
@@ -572,6 +531,19 @@ try {
   if (paused.state !== "interrupted") throw Error("Pause did not stop chat two: " + paused.state);
   await rejects({ action: "message", id, chatId, text: "MARK-NOPE" }, /paused/i, "paused chat message");
   result.checks.push("F17/F18 project pause interrupts a running non-Main chat and blocks its messages");
+  // A6 (jobs-failures.md): a paused project reports paused, not working.
+  let listedActivity;
+  await eventually(
+    async () => {
+      listedActivity = (await rpc({ action: "list" })).find((project) => project.id === id)?.activity;
+      return listedActivity?.paused === true && listedActivity.working === false;
+    },
+    "List does not show the project paused and idle",
+    100,
+  ).catch((error) => {
+    throw Error(`${error.message}: ${JSON.stringify(listedActivity)}`);
+  });
+  result.checks.push("A6 a paused project is listed as paused, not working");
 
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/live"));
   if (result.errors.length || result.httpErrors.length)

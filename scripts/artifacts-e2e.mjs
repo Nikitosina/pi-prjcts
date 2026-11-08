@@ -1,4 +1,4 @@
-// Browser E2E: per-thread worker artifacts folder, coordinator list/read tools, authenticated route, inline images/videos (C7).
+// Browser E2E: per-thread worker artifacts folder, coordinator list/read tools, authenticated route, inline images and download buttons in the inbox at `/`.
 // Isolated host, local fake model, headless Chrome. Failure cases: scripts/artifacts-failures.md.
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,6 +49,8 @@ const respond = async ({ coordinator, userText, results, tools, say, call, msgs 
         command: [
           'echo "DIR=$PI_ARTIFACTS_DIR"',
           'echo "PWD=$(pwd)"',
+          'echo "CACHE=$PI_WORKSPACE_CACHE"',
+          'test -d "$PI_WORKSPACE_CACHE" && echo "CACHE-EXISTS"',
           'cd "$PI_ARTIFACTS_DIR"',
           "mkdir -p logs",
           `cp ${root}/shot.png shot.png`,
@@ -138,7 +140,21 @@ try {
     result.paths,
   );
   check("A1 folder is private (0700)", (lstatSync(workerDir).mode & 0o777) === 0o700);
+  const workerCache = /CACHE=(\S*)/.exec(bashOut)?.[1] ?? "";
+  result.paths.workerCache = workerCache;
+  check(
+    "C1 the worker's bash names an existing workspace cache folder in the project home, outside the worktree",
+    new RegExp(`^${k.home}/${id}/workspace-cache/[0-9a-f-]{36}$`).test(workerCache) &&
+      /CACHE-EXISTS/.test(bashOut) &&
+      !workerCache.startsWith(workerPwd),
+    result.paths,
+  );
   const system = brain.workerSystem[0] ?? "";
+  check(
+    "C2 the worker instructions name the cache folder and $PI_WORKSPACE_CACHE",
+    system.includes(workerCache) && system.includes("PI_WORKSPACE_CACHE"),
+    system.slice(-1500),
+  );
   check(
     "A2 the path and $PI_ARTIFACTS_DIR are in the worker instructions",
     system.includes(workerDir) && system.includes("PI_ARTIFACTS_DIR"),
@@ -240,38 +256,28 @@ try {
     statuses,
   );
 
-  // Chat rendering.
+  // Chat rendering in the inbox at `/`: images are inline slots, every other artifact is a download button fetched only on click.
   const chatUrl = new URL(web.url);
   chatUrl.searchParams.set("project", id);
   await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(
-    `[...document.querySelectorAll('#messages img.artifact-media')].some(i => i.complete && i.naturalWidth === 320)`,
-    s,
-    "inline image",
-  );
+  await waitFor(`[...document.querySelectorAll('#feed .media-img')].some(i => i.complete && i.naturalWidth === 320)`, s, "inline image");
   check("A16 the image renders inline (320 px wide)", true);
-  await waitFor(
-    `[...document.querySelectorAll('#messages video.artifact-media')].some(v => v.readyState >= 1)`,
-    s,
-    "inline video metadata",
-  );
-  check("A16/A17 the webm plays in a <video> player (metadata loaded)", true);
   check(
-    "A16 other files are links, fetched only on click",
+    "A16 the video and the log are buttons, fetched only on click",
     await evaluate(
-      `[...document.querySelectorAll('#messages .artifact-ref[data-state=link] a')].some(a => a.textContent === 'run log') && !performance.getEntriesByType('resource').some(e => e.name.includes('run.log'))`,
+      `(() => { const names = [...document.querySelectorAll('#feed [data-artifact-open]')].map(b => b.textContent); return names.includes('Demo video') && names.includes('run log') && !performance.getEntriesByType('resource').some(e => /run\\.log|demo\\.webm/.test(e.name)); })()`,
       s,
     ),
   );
   await waitFor(
-    `[...document.querySelectorAll('#messages .artifact-missing')].some(n => /missing artifact/.test(n.textContent))`,
+    `[...document.querySelectorAll('#feed [data-media][data-state=missing]')].some(n => /missing file/.test(n.textContent))`,
     s,
     "missing artifact",
   );
-  check('A18 a missing file shows "missing artifact"', true);
+  check('A18 a missing file shows "missing file"', true);
   check(
     "A20 javascript: links are not rendered as links",
-    await evaluate(`![...document.querySelectorAll('#messages a')].some(a => /^javascript:/i.test(a.getAttribute('href') ?? ''))`, s),
+    await evaluate(`![...document.querySelectorAll('#feed a')].some(a => /^javascript:/i.test(a.getAttribute('href') ?? ''))`, s),
   );
   await delay(300);
   await shot("01-chat-inline-media", s);
@@ -283,38 +289,22 @@ try {
     before,
     after: await fetches(),
   });
-
-  // Worker view (opened once the page has read the Jobs, which arrive by push after load).
-  const activity = new URL(web.url);
-  activity.searchParams.set("project", id);
-  activity.searchParams.set("tab", "coordinator");
-  const origin = await evaluate("performance.timeOrigin", s);
-  await send("Page.navigate", { url: activity.toString() }, s);
-  await waitFor(
-    `performance.timeOrigin !== ${origin} && import('/app/decisions.js').then((m) => !!m.jobsSnap?.agents?.some((agent) => agent.id === ${JSON.stringify(thread)}))`,
+  // The log button downloads through the authenticated route (one fetch, on click).
+  await evaluate(
+    `(() => { window.__saved = []; const orig = HTMLAnchorElement.prototype.click; HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__saved.push(this.download); return; } return orig.call(this); }; [...document.querySelectorAll('#feed [data-artifact-open]')].find(b => b.textContent === 'run log').click(); })()`,
     s,
-    "page knows the worker",
   );
-  await evaluate(`import('/app/workers.js').then((m) => m.inspectThread(${JSON.stringify(thread)}))`, s);
-  await waitFor(`!!document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]')`, s, "artifact browser files");
-  await evaluate(`document.querySelector('#artifact-tree .artifact-file[data-path="shot.png"]').click()`, s);
-  await waitFor(
-    `[...document.querySelectorAll('#artifact-preview img.artifact-media')].some(i => i.naturalWidth === 320)`,
-    s,
-    "artifact browser image preview",
-  );
-  const pane = await evaluate(`document.querySelector('#artifact-pane').innerText`, s);
+  await waitFor(`window.__saved?.includes('run.log')`, s, "log download");
   check(
-    "A21 the artifact browser lists files with sizes, the cap warning and skipped symlinks",
-    /run\.log/.test(pane) && /600\.0 MB/.test(pane) && /over the 500\.0 MB cap/.test(pane) && /skipped/.test(pane),
-    pane,
+    "A16 clicking the log downloads it once through the authenticated route",
+    await evaluate(`performance.getEntriesByType('resource').filter(e => /\\/artifacts\\/.*run\\.log$/.test(e.name)).length === 1`, s),
   );
+  // Owner browsing: the classic Activity artifact browser (A21) was retired with the classic inbox; the listing it showed stays.
+  const listing = await rpc({ action: "artifacts-list", id, threadId: thread });
   check(
-    "A20 HTML in a file name is escaped",
-    await evaluate(
-      `!window.__xss && !document.querySelector('#artifact-pane img[src="x"]') && document.querySelector('#artifact-pane').innerText.includes('<img src=x onerror')`,
-      s,
-    ),
+    "A21 the artifacts-list call gives files with sizes, the cap warning and skipped symlinks",
+    listing.files.some((f) => f.path === "logs/run.log" && f.size > 0) && listing.overCap === true && listing.skipped?.length >= 2,
+    { overCap: listing.overCap, skipped: listing.skipped, total: listing.totalFiles },
   );
   check(
     "A22 artifacts of a completed thread stay visible",

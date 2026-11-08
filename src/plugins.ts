@@ -18,6 +18,7 @@ import type {
   PluginModule,
   PluginRoute,
   PluginRpcHandler,
+  PluginRpcKind,
   PluginStatus,
   PrProvider,
   VcsProvider,
@@ -25,8 +26,9 @@ import type {
   WorkerToolsProvider,
   WorkspaceProvider,
 } from "./plugin-types.ts";
+import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
-import { home, loadProject, projectDir } from "./state.ts";
+import { home, loadProject, projectDir, type Project } from "./state.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
   authorizationFingerprint,
@@ -55,6 +57,22 @@ const each = <T>(pick: (capabilities: PluginCapabilities) => T | undefined): T[]
     const value = pick(item.capabilities);
     return value === undefined ? [] : [value];
   });
+// Plugin rules for the coordinator are editable integration blocks, resolved with the project's other prompt blocks.
+usePluginPromptBlocks(() =>
+  [...builtins(), ...loaded].flatMap((item) => {
+    const tools = item.capabilities.coordinatorTools,
+      prompt = tools?.prompt;
+    if (!tools || !prompt) return [];
+    return [
+      {
+        id: `plugin:${item.plugin}`,
+        name: prompt.name,
+        text: prompt.text,
+        grant: { label: prompt.name, on: (project: Project) => tools.applies(project) && (prompt.on?.(project) ?? true) },
+      },
+    ];
+  }),
+);
 export const plugins = {
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
@@ -86,6 +104,11 @@ export const plugins = {
     }
     return resumeAll;
   },
+  /** Cleanup routine steps of loaded plugins, by plugin name. */
+  cleanupSteps: () =>
+    loaded.flatMap((item) => (item.capabilities.cleanup ? [{ plugin: item.plugin, run: item.capabilities.cleanup }] : [])),
+  usageSources: () =>
+    loaded.flatMap((item) => (item.capabilities.usage ? [{ plugin: item.plugin, measure: item.capabilities.usage }] : [])),
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
@@ -111,6 +134,16 @@ export const plugins = {
   },
   rpc: (plugin: string, method: string): PluginRpcHandler | undefined =>
     loaded.find((item) => item.plugin === plugin)?.capabilities.rpc?.[method],
+  /** The declared agent policy of one call; undefined when the plugin does not classify the method (or its policy throws). */
+  rpcKind: (plugin: string, method: string, params: unknown): PluginRpcKind | undefined => {
+    const policy = loaded.find((item) => item.plugin === plugin)?.capabilities.rpcPolicy?.[method];
+    try {
+      const kind = typeof policy === "function" ? policy(params) : policy;
+      return kind === "read" || kind === "write" || kind === "dangerous" ? kind : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   /** True when any plugin reports a write whose outcome is unknown (blocks automatic admission). */
   anyUncertainWrites: async (tx: Tx, root: Conversation["id"]): Promise<boolean> => {
     for (const check of each((caps) => caps.uncertainWrites)) if (await check(tx, root)) return true;
@@ -191,13 +224,13 @@ function dropRetired(name: string, caps: PluginCapabilities): void {
 }
 function validate(caps: PluginCapabilities): void {
   if (caps.vcs) {
-    requireStrings("vcs", caps.vcs, ["kind", "readHeadMarker"]);
-    requireFunctions("vcs", caps.vcs, ["isRoot", "changedFiles", "codeDiff", "workerState", "readHeads", "resolveContinuation"]);
+    requireStrings("vcs", caps.vcs, ["kind"]);
+    requireFunctions("vcs", caps.vcs, ["isRoot", "changedFiles", "codeDiff", "workerState", "resolveContinuation"]);
     if (caps.vcs.kind === "git") throw new Error('vcs.kind "git" is built in');
   }
   if (caps.workspace) {
     requireStrings("workspace", caps.workspace, ["id"]);
-    requireFunctions("workspace", caps.workspace, ["quickPreview", "plan", "attach", "workerFacts", "remove", "readHeadEntry"]);
+    requireFunctions("workspace", caps.workspace, ["quickPreview", "plan", "attach", "workerFacts", "remove"]);
     requireFunctions("workspace.isolation", caps.workspace.isolation, ["preflight", "add", "entry", "exact", "statusCommand", "release"]);
     if (caps.workspace.id === "github" || caps.workspace.id === "git") throw new Error(`workspace.id "${caps.workspace.id}" is built in`);
   }
@@ -219,6 +252,8 @@ function validate(caps: PluginCapabilities): void {
     throw new Error("uncertainWrites must be a function");
   if (caps.workerTools) requireFunctions("workerTools", caps.workerTools, ["offered", "create"]);
   if (caps.leaseName !== undefined && typeof caps.leaseName !== "function") throw new Error("leaseName must be a function");
+  if (caps.cleanup !== undefined && typeof caps.cleanup !== "function") throw new Error("cleanup must be a function");
+  if (caps.usage !== undefined && typeof caps.usage !== "function") throw new Error("usage must be a function");
   for (const hook of ["pause", "close"] as const)
     if (caps.lifecycle?.[hook] !== undefined && typeof caps.lifecycle[hook] !== "function")
       throw new Error(`lifecycle.${hook} must be a function`);
@@ -233,6 +268,9 @@ function validate(caps: PluginCapabilities): void {
   for (const [method, handler] of Object.entries(caps.rpc ?? {}))
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(method) || typeof handler !== "function")
       throw new Error(`rpc.${method} must be a function with a kebab-case name`);
+  for (const [method, policy] of Object.entries(caps.rpcPolicy ?? {}))
+    if (!caps.rpc?.[method] || !(typeof policy === "function" || policy === "read" || policy === "write" || policy === "dangerous"))
+      throw new Error(`rpcPolicy.${method} must name an rpc method and be "read", "write", "dangerous" or a function of params`);
 }
 function conflict(name: string, caps: PluginCapabilities): string | undefined {
   if (name === "github" || loaded.some((item) => item.plugin === name)) return `a plugin named "${name}" is already loaded`;

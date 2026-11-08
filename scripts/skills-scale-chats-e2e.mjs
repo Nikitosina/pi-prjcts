@@ -408,41 +408,23 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(
-    `document.querySelector('#messages')?.innerText.includes('Done MARK-MAIN') && document.querySelectorAll('#chat-list .chat').length === 3`,
-    s,
-    "project loaded",
-  );
-  await waitFor(
-    `document.querySelector('#chat-list .chat[data-chat=${JSON.stringify(broken.id)}]').querySelector('.chat-dot')?.dataset.state === 'needs' && document.querySelector('#warning')?.innerText.includes('Chat "Broken"') && !!document.querySelector('#warning [data-action="chat-select"]')`,
-    s,
-    "attention in UI",
-  );
+  const chatRows = `document.querySelectorAll('#tree .tree-project.selected [data-chat]')`;
+  await waitFor(`document.querySelector('#feed')?.innerText.includes('Done MARK-MAIN') && ${chatRows}.length === 3`, s, "project loaded");
+  await waitFor(`!!document.querySelector('#tree [data-chat=${JSON.stringify(broken.id)}] .dot.needs')`, s, "attention in UI");
   await shot("01-main-shows-broken-chat-attention", s);
-  result.checks.push("F17 Main shows the Broken chat failure with Open chat, and the Broken chat dot shows it needs you");
+  // The classic Main warning banner with "Open chat" was retired 2026-11-04; the tree dot is the signal.
+  result.checks.push("F17 while Main is viewed, the Broken chat's tree dot shows it needs you");
 
-  // A in UI: the Settings skills picker lists all 89.
-  const settingsUrl = new URL(launch);
-  settingsUrl.searchParams.set("tab", "settings");
-  await send("Page.navigate", { url: settingsUrl.toString() }, s);
-  await waitFor(
-    `document.querySelectorAll('#skills-picker [data-skill-pick]').length === ${SKILLS}`,
-    s,
-    "skills picker lists every skill",
-    400,
-  );
-  await evaluate(`document.querySelector('#skills-card').scrollIntoView()`, s);
-  await shot("02-skills-picker-89", s);
-  await send("Page.navigate", { url: launch.toString() }, s);
-  await waitFor(`document.querySelector('#messages')?.innerText.includes('Done MARK-MAIN')`, s, "back to Main");
-  result.checks.push("F6 the Settings skills picker lists all 89 skills");
+  // A: the skills catalog lists all 89 (the classic Settings skills picker was retired 2026-11-04; the call it read stays).
+  const catalog = await rpc({ action: "coordinator-skills", id });
+  if (catalog.skills?.length !== SKILLS) throw Error(`Skills catalog lists ${catalog.skills?.length}`);
+  result.checks.push("F6 the skills catalog lists all 89 skills");
 
   // F10-F13: Observability covers every chat.
   const usagePage = await rpc({ action: "usage-snapshot", id });
@@ -465,31 +447,10 @@ try {
     chats: usagePage.chats.map((c) => ({ title: c.title, tokens: c.total.totalTokens })),
     workers: usagePage.workers.map((w) => w.total.totalTokens),
   };
-  await click(s, '[data-tab="observability"]');
-  await waitFor(
-    `document.querySelectorAll('#obs-trace .trace-chat').length === 3 && document.querySelector('#obs-usage')?.innerText.includes('Chat · Research') && document.querySelector('#obs-usage')?.innerText.includes('Chat · Main')`,
-    s,
-    "observability lists chats",
-  );
-  const trace = await evaluate(
-    `Object.fromEntries([...document.querySelectorAll('#obs-trace .trace-chat')].map(n => [n.dataset.chat, n.querySelector('summary').innerText + ' | ' + [...n.querySelectorAll(':scope > details > ul > li')].map(li => li.innerText.split('\\n')[0]).join(' / ')]))`,
-    s,
-  );
-  if (!/needs attention/.test(trace[broken.id])) throw Error("Trace grouping wrong: " + JSON.stringify(trace));
-  const usageText = await evaluate(`document.querySelector('#obs-usage').innerText`, s);
-  if (!/3\s*chats/.test(usageText)) throw Error("Usage head lacks chat count: " + usageText.slice(0, 300));
-  result.trace = trace;
-  // L1: host health aggregates failed jobs and attention across chats while Main is viewed.
-  await waitFor(
-    `(() => { const t = document.querySelector('#obs-health')?.innerText ?? ''; return /Failed jobs\\s*1\\b/.test(t) && /Project\\s*needs attention/.test(t); })()`,
-    s,
-    "health aggregates chats",
-  );
-  result.checks.push('L1 Observability health shows Failed jobs 1 and Project "needs attention" from the Broken chat while Main is viewed');
-  await shot("03-observability-all-chats", s);
-  result.checks.push(
-    "F10-F13 usage counts Main, Research and Broken with per-chat rows; the trace has one node per chat with the scout thread under Research",
-  );
+  // The classic Observability tab (trace per chat, usage rows, health) was retired 2026-11-04; its data stays in the host API.
+  const health = await rpc({ action: "host-health", id });
+  result.health = health;
+  result.checks.push("F10-F13 usage counts Main, Research and Broken with per-chat rows (usage-snapshot)");
 
   // F15: a later success in Broken clears the aggregated problem.
   await ask(id, broken.id, "MARK-OK recovered");
@@ -497,38 +458,23 @@ try {
   if (cleared.project.problem || cleared.chats.some((c) => c.attention)) throw Error("Problem not cleared: " + cleared.project.problem);
   result.checks.push("F15 a later success in the failing chat clears project attention");
 
-  // F18: chat bar at 390px.
-  await click(s, '[data-tab="coordinator"]');
+  // F18: the chat list at 390px (the tree in the new client).
   const mobile = await rpc({ action: "chat-create", id, title: "A rather long chat title for narrow screens" });
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
-  await waitFor(`document.querySelectorAll('#chat-list .chat').length === 4`, s, "four chats at 390px");
+  await waitFor(`${chatRows}.length === 4`, s, "four chats at 390px");
   await delay(500);
-  const layout = await evaluate(
-    `(() => { const r = n => { const b = n.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width }; }; const bar = document.querySelector('#chat-bar'); return { viewport: innerWidth, docWidth: document.documentElement.scrollWidth, bar: r(bar), list: r(document.querySelector('#chat-list')), newChat: r(bar.querySelector('[data-action="chat-new"]')), tools: [...bar.querySelectorAll('.chat-tools button')].map(r), pills: [...bar.querySelectorAll('#chat-list .chat')].map(r) }; })()`,
-    s,
-  );
+  const layout = await evaluate(`({ viewport: innerWidth, docWidth: document.documentElement.scrollWidth })`, s);
   result.layout390 = layout;
-  const inside = (b) => b.left >= -0.5 && b.right <= layout.viewport + 0.5;
-  if (
-    layout.docWidth > layout.viewport ||
-    !inside(layout.bar) ||
-    !inside(layout.list) ||
-    !inside(layout.newChat) ||
-    !layout.tools.every(inside)
-  )
-    throw Error("Chat bar overflows at 390px: " + JSON.stringify(layout));
-  const overlap = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
-  if (layout.tools.some((t) => overlap(t, layout.newChat) || overlap(t, layout.list)) || overlap(layout.newChat, layout.list))
-    throw Error("Chat bar controls overlap at 390px: " + JSON.stringify(layout));
-  await shot("04-chat-bar-390", s);
-  await click(s, `#chat-list .chat[data-chat="${mobile.id}"]`);
+  if (layout.docWidth > layout.viewport) throw Error("The page overflows at 390px: " + JSON.stringify(layout));
+  await shot("04-chats-390", s);
+  await click(s, `#tree [data-chat="${mobile.id}"]`);
   await waitFor(
-    `document.querySelector('#chat-list .chat.on')?.dataset.chat === ${JSON.stringify(mobile.id)}`,
+    `new URL(location.href).searchParams.get('chat') === ${JSON.stringify(mobile.id)} && !!document.querySelector('#tree [data-chat="${mobile.id}"].current')`,
     s,
     "select long chat at 390px",
   );
-  await shot("05-chat-bar-390-long-selected", s);
-  result.checks.push("F18 at 390px the chat bar stays within the viewport, no horizontal page scroll, pills/New chat/tools do not overlap");
+  await shot("05-chats-390-long-selected", s);
+  result.checks.push("F18 at 390px no horizontal page scroll and the long-titled chat can be selected");
 
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/live"));
   if (result.errors.length || result.httpErrors.length)

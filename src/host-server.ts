@@ -1,7 +1,18 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { createServer } from "node:http";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -24,6 +35,7 @@ import {
   projectDir,
   saveJob,
   saveProject,
+  type GithubAuthorization,
   type Request as RequestData,
 } from "./state.ts";
 import { ensureKnowledge, historyKnowledge, listKnowledge, readKnowledge, writeKnowledge } from "./knowledge.ts";
@@ -38,13 +50,29 @@ import { mcpCatalog, mcpPool } from "./mcp-servers.ts";
 import { resolveEntry, inbox } from "./inbox.ts";
 import { body } from "./http.ts";
 import { startWeb } from "./web.ts";
-import { feed } from "./change-feed.ts";
+import { feed, HOST_FEED, publishHost } from "./change-feed.ts";
+import { approvals } from "./approvals.ts";
+import { openHostAgent, type HostAgent } from "./host-agent.ts";
+import { profilesSnapshot, readStorage, readUi, setStorage, setTiers, setUi, tiersFor, tiersSnapshot } from "./host-documents.ts";
+import { memoryIndex, memoryRecent, undoMemory } from "./memory.ts";
+import { splitSkillToggles } from "./profiles.ts";
 import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
-import { clearQueuedDeploy, deployPending, idleDeployTick, queueDeploy, readDeployState, recordHostSha, forgetHostSha } from "./deploy.ts";
+import {
+  deployPending,
+  deployRunning,
+  idleDeployTick,
+  quietWindow,
+  readDeployState,
+  recordDeployRequest,
+  recordDeployStop,
+  recordHostSha,
+  forgetHostSha,
+  type DeployRequest,
+} from "./deploy.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
-import { startTelegram } from "./telegram.ts";
+import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
@@ -82,9 +110,12 @@ import { createModelRuntime, loadProviderExtensions } from "./provider-extension
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
-import { DEFAULT_ROLE_PROMPTS } from "./role-prompts.ts";
+import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
+import { estimateTokens, promptSection } from "./prompt-sections.ts";
 import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
+import { storageTotal, type StorageTotal, type StorageUsage } from "./storage-usage.ts";
+import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
 
 process.env.PI_PROJECTS_HOST = "1";
 initTheme("light", false);
@@ -124,6 +155,12 @@ const githubInspection = createGithubInspection();
 let closing = false;
 let shutdownOperation: Promise<void> | undefined;
 const activeRequests = new Set<Promise<unknown>>();
+// Opened after the notifier; requests before that, or after a failed open, are refused.
+let hostAgent: HostAgent | null = null;
+const requireHostAgent = (): HostAgent => {
+  if (!hostAgent) throw new Error("The Host agent is not available on this host; see the event log");
+  return hostAgent;
+};
 const hostStartedAt = Date.now();
 const hostEvents: Array<{ at: number; kind: string; detail: string }> = [];
 function recordHostEvent(kind: string, detail: string): void {
@@ -191,6 +228,70 @@ function withDefaultWorkspace(project: Project): Project {
   }
 }
 
+/** Saved tiers reach open projects whose profiles use one at their next request; a project that cannot resolve keeps its models and says why. */
+async function applyTiers(): Promise<void> {
+  for (const [id, opening] of durableRuntimes) {
+    try {
+      const project = loadProject(id);
+      if (!tiersFor(project).length) continue;
+      await withProjectLock(id, async () => (await opening).applyModels(loadProject(id)));
+    } catch (error) {
+      process.stderr.write(JSON.stringify({ event: "tiers-apply-failed", project: id, error: errorText(error) }) + "\n");
+    }
+  }
+}
+
+/** Create also connects GitHub one-click for a github.com checkout; best effort, so a missing gh or a mismatched origin leaves the usual setup step. */
+async function withDefaultGithub(id: string): Promise<void> {
+  const before = loadProject(id);
+  if (before.githubAuthorization?.length || before.githubAuthorizationHistory?.length || !before.workspaceAuthorization) return;
+  const expectedRevision = createHash("sha256")
+    .update(JSON.stringify([[], before.githubAuthorizationHistory ?? []]))
+    .digest("hex");
+  let authorization: GithubAuthorization;
+  try {
+    authorization = await authorizeGithubQuick(before, { action: "github-quick-authorize", id, confirm: id, expectedRevision });
+  } catch {
+    return;
+  }
+  await withProjectLock(id, async () => {
+    const project = loadProject(id);
+    if (project.githubAuthorization?.length || authorizationFingerprint(project) !== authorizationFingerprint(before)) return;
+    saveProject({ ...project, githubAuthorization: [authorization] });
+  });
+}
+
+// Storage is measured outside the project lock: `du` may take minutes and only reads (U10). The disk readout's breakdown reuses
+// the last totals for 10 minutes; a project's own measurement refreshes its total (U11).
+const STORAGE_TOTAL_TTL_MS = 10 * 60_000;
+const storageTotals = new Map<string, StorageTotal>();
+async function measureStorage(id: string): Promise<StorageUsage> {
+  ownedProjectDir(id);
+  const usage = await (await durable(id)).storageUsage();
+  storageTotals.set(id, storageTotal(usage));
+  return usage;
+}
+async function storageSummary(fresh: boolean) {
+  const projects = listProjects().filter((project) => !project.deleted && !project.archived);
+  const totals: Array<{ id: string; name: string } & (StorageTotal | { error: string })> = [];
+  // Two projects at a time: each one already measures its rows in parallel.
+  for (let at = 0; at < projects.length; at += 2)
+    totals.push(
+      ...(await Promise.all(
+        projects.slice(at, at + 2).map(async ({ id, name }) => {
+          const cached = storageTotals.get(id);
+          if (!fresh && cached && Date.now() - cached.measuredAt < STORAGE_TOTAL_TTL_MS) return { id, name, ...cached };
+          try {
+            return { id, name, ...storageTotal(await measureStorage(id)) };
+          } catch (error) {
+            return { id, name, error: error instanceof Error ? error.message : String(error) };
+          }
+        }),
+      )),
+    );
+  return { projects: totals };
+}
+
 function durable(id: string, duringLifecycle = false): Promise<DurableProjectRuntime> {
   if (closing) throw new Error("Host is stopping");
   if (ownerCloseFailed.has(id)) throw new Error("Project owner close failed; restart the owned host before retrying");
@@ -206,12 +307,26 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
     project = granted;
   }
   // Opening may install a configured package once, as before; later catalog lookups are passive.
-  const opening = loadProjectResourceLoader(project).then((loader) => openDurableHost(project, loader, () => configuredSkills(id)));
+  // Only the project whose repository is this host's own checkout redeploys it; the owner allowed that without approval.
+  const redeploy = isHostCheckout(project)
+    ? (requestId: string, taskId: string) => startDeploy({ requestId, projectId: id, taskId })
+    : undefined;
+  const opening = loadProjectResourceLoader(project).then((loader) =>
+    openDurableHost(project, loader, () => configuredSkills(id), redeploy),
+  );
   durableRuntimes.set(id, opening);
   opening.catch(() => {
     if (durableRuntimes.get(id) === opening) durableRuntimes.delete(id);
   });
   return opening;
+}
+
+function isHostCheckout(project: Project): boolean {
+  try {
+    return realpathSync(project.cwd) === realpathSync(repoRoot);
+  } catch {
+    return false;
+  }
 }
 
 async function lifecycle<T>(
@@ -340,10 +455,15 @@ async function knowledgeDir(id: string): Promise<string> {
   return dir;
 }
 
+/** Requests that change the project list (names, membership); the host `projects` topic tells browsers to refetch it. */
+const PROJECT_LIST_ACTIONS: ReadonlySet<RequestData["action"]> = new Set(["create", "delete", "archive", "restore", "settings-update"]);
+
 function dispatch(input: RequestData): Promise<unknown> {
   // This request closes admission itself and must not wait on its own entry in activeRequests.
   if (input.action === "deploy-shutdown") return stopForDeploy(input.sha);
-  return trackRequest(() => dispatchRequest(input));
+  const operation = trackRequest(() => dispatchRequest(input));
+  if (PROJECT_LIST_ACTIONS.has(input.action)) void operation.then(() => publishHost("projects")).catch(() => {});
+  return operation;
 }
 
 function trackRequest<T>(start: () => Promise<T>): Promise<T> {
@@ -356,7 +476,7 @@ function trackRequest<T>(start: () => Promise<T>): Promise<T> {
 
 // Live activity per project for the sidebar. Only runtimes that are already open are asked (a closed project has nothing running), and a result is reused for 1.5 s.
 const activityCache = new Map<string, { at: number; value: Promise<ProjectActivity> }>();
-const IDLE_ACTIVITY: ProjectActivity = { working: false, needs: false, finishedAt: 0, chats: {} };
+const IDLE_ACTIVITY: ProjectActivity = { working: false, paused: false, needs: false, finishedAt: 0, chats: {} };
 async function projectActivity(id: string): Promise<ProjectActivity> {
   const opening = durableRuntimes.get(id);
   if (!opening || closing || lifecycleChanging.has(id) || settingsUpdating.has(id) || ownerCloseFailed.has(id)) return IDLE_ACTIVITY;
@@ -408,12 +528,15 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       const asked = entry.native
         ? (await (await durable(input.id)).chats()).find((chat) => chat.conversationId === entry.native?.conversationId)?.id
         : undefined;
+      // The inbox is part of the chat's read model; tell browsers even when waking the chat is deferred.
+      feed.publish(input.id, { topic: "chat", chat: asked ?? "main" });
       try {
         await dispatchRequest({
           action: "message",
           id: input.id,
           text: `Owner answered your question "${entry.title}":\n${input.text}`,
           ...(input.origin ? { origin: input.origin } : {}),
+          ...(input.requestId ? { requestId: input.requestId } : {}),
           ...(asked && asked !== "main" ? { chatId: asked } : {}),
         });
       } catch (error) {
@@ -490,6 +613,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         return withScope;
       });
       if (!project.archived && !project.deleted) await ensureKnowledge(ownedProjectDir(project.id));
+      await withDefaultGithub(project.id);
       return loadProject(project.id);
     }
     case "models-snapshot":
@@ -525,16 +649,19 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "settings-snapshot":
       return settings.snapshot(input.id);
     case "prompts-snapshot": {
-      const project = loadProject(input.id),
-        defaults = DEFAULT_ROLE_PROMPTS;
+      const project = loadProject(input.id);
       return {
         scope: "project",
-        roles: PROMPT_ROLES.map((role) => ({
-          role,
-          default: defaults[role],
-          override: project.prompts?.[role] ?? null,
-          effective: project.prompts?.[role] ?? defaults[role],
-        })),
+        roles: PROMPT_ROLES.map((role) => {
+          // The per-role editor shows and saves role text without the blocks a legacy override leaves on (the coordinator's context habits).
+          const text = legacyEditorText(project, role);
+          return {
+            role,
+            default: legacyEditorText({}, role),
+            override: projectBehavior(project, role).customized ? text : null,
+            effective: text,
+          };
+        }),
       };
     }
     case "coordinator-skills":
@@ -563,6 +690,137 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.id, { topic: "settings" });
       return result;
     }
+    case "ui-get":
+      return readUi();
+    case "ui-set": {
+      const result = await setUi(input.revision, input.patch);
+      publishHost("ui");
+      return result;
+    }
+    case "storage-get":
+      return readStorage();
+    case "storage-set":
+      return setStorage(input.revision, input.patch);
+    case "tiers-get":
+      return tiersSnapshot();
+    case "tiers-set": {
+      const result = await setTiers(input.revision, input.tiers);
+      publishHost("tiers");
+      await applyTiers();
+      return result;
+    }
+    case "profiles-get":
+      return profilesSnapshot(loadProject(input.projectId), settings.snapshot(input.projectId).revision);
+    case "profiles-set": {
+      const project = loadProject(input.projectId);
+      // The patch replaces the fields it names; the others keep their saved values.
+      const merged = { ...project.profiles?.[input.profile], ...input.patch };
+      // Skill rows are the skill profile; saved once there so prompts, skill reads and both lists agree.
+      const split = input.patch.tools ? splitSkillToggles(project, input.profile, input.patch.tools.disabled) : undefined;
+      if (split) merged.tools = { disabled: split.tools };
+      const saved = await settings.update({
+        action: "settings-update",
+        id: input.projectId,
+        confirm: input.projectId,
+        expectedRevision: input.revision,
+        changes: { profiles: { [input.profile]: merged }, ...(split?.skills ? { skills: split.skills } : {}) },
+      });
+      feed.publish(input.projectId, { topic: "settings" });
+      return profilesSnapshot(loadProject(input.projectId), saved.revision);
+    }
+    case "profile-tools":
+      return (await durable(input.projectId)).profileTools(input.profile);
+    case "prompt-render": {
+      const label = "Configured for next use";
+      if (input.profile === "host") {
+        if (input.projectId || input.chatId || input.workerMode)
+          throw new Error("The host profile takes no projectId, chatId or workerMode");
+        const prompt = await requireHostAgent().prompt();
+        const tokens = estimateTokens(prompt.configured);
+        return {
+          sections: [
+            { ...promptSection("role", "Host agent instructions", "Settings: Host agent prompt blocks", true, prompt.configured), tokens },
+          ],
+          totalTokens: tokens,
+          basis: "configured",
+          label,
+          active: { chatId: null, matchesConfigured: !prompt.pending, pending: prompt.pending },
+        };
+      }
+      if (!input.projectId) throw new Error("prompt-render needs projectId for a project profile");
+      if (input.workerMode && input.profile !== "worker") throw new Error("workerMode applies to the worker profile only");
+      const rendered = await (
+        await durable(input.projectId)
+      ).promptRender(input.profile, { chatId: input.chatId, workerMode: input.workerMode });
+      return { ...rendered, label };
+    }
+    case "prompt-blocks-get":
+    case "prompt-blocks-set": {
+      if (input.target === "host") {
+        if (input.projectId) throw new Error("Prompt blocks: the host target takes no projectId");
+        const agent = requireHostAgent();
+        const prompt =
+          input.action === "prompt-blocks-set" ? await agent.setPrompt(Number(input.revision), input.blocks) : await agent.prompt();
+        return promptBlocksView({
+          projectId: null,
+          revision: String(prompt.revision),
+          resolved: resolvePromptBlocks("host", prompt.saved),
+          application: { adopts: "next-turn", pending: prompt.pending },
+        });
+      }
+      if (!input.projectId) throw new Error(`Prompt blocks: the ${input.target} target needs projectId`);
+      const target = input.target,
+        id = input.projectId;
+      const revision =
+        input.action === "prompt-blocks-set"
+          ? (
+              await settings.update({
+                action: "settings-update",
+                id,
+                confirm: id,
+                expectedRevision: input.revision,
+                changes: { promptBlocks: { [target]: input.blocks } },
+              })
+            ).revision
+          : settings.snapshot(id).revision;
+      if (input.action === "prompt-blocks-set") feed.publish(id, { topic: "settings" });
+      return promptBlocksView({
+        projectId: id,
+        revision,
+        resolved: projectBehavior(loadProject(id), target),
+        application: {
+          adopts:
+            target === "coordinator" || target === "integrations"
+              ? "next-message"
+              : target === "contract"
+                ? "next-message-and-new-agents"
+                : "next-turn-per-agent",
+        },
+      });
+    }
+    case "memory-index":
+      return memoryIndex(await knowledgeDir(input.projectId), { includeArchive: input.includeArchive });
+    case "memory-recent":
+      return memoryRecent(await knowledgeDir(input.projectId));
+    case "chat-stop": {
+      const project = loadProject(input.projectId);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no running turn to stop");
+      const result = await (await durable(input.projectId)).chatStop(input.chatId);
+      if (result.stopped)
+        process.stderr.write(
+          JSON.stringify({ event: "chat-stopped", projectId: input.projectId, chatId: result.chatId, reason: input.reason ?? null }) + "\n",
+        );
+      feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
+      return result;
+    }
+    case "memory-undo":
+      return withProjectLock(input.projectId, async () => {
+        const project = loadProject(input.projectId);
+        if (project.deleted || project.archived) throw new Error("Inactive project memory cannot be changed");
+        const result = await undoMemory(await knowledgeDir(input.projectId), input.path, input.revision);
+        feed.publish(input.projectId, { topic: "knowledge" });
+        return result;
+      });
     case "command-profiles-snapshot":
       return commandProfilesSnapshot(loadProject(input.id));
     case "command-profile-read": {
@@ -684,6 +942,10 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({ id: input.id, operation: (owner) => owner.reset(input.chatId) });
     case "worktrees-snapshot":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.worktrees() });
+    case "storage-usage":
+      return measureStorage(input.id);
+    case "storage-summary":
+      return storageSummary(input.fresh === true);
     case "worktrees-cleanup":
       if (input.confirm !== input.id) throw new Error("Worktree cleanup requires confirmation matching project id");
       return withDurableOwner({ id: input.id, operation: (owner) => owner.cleanupWorktrees() });
@@ -1162,8 +1424,55 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             text: input.text,
             everyMs: input.everyMs,
             calendar: input.calendar,
+            name: input.name,
           }),
       });
+    case "schedule-run":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleRun(input.scheduleId) });
+    case "routine-script-create":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleCreateScript({
+            id: input.scheduleId,
+            name: input.name,
+            command: input.command,
+            timeoutMs: input.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS,
+            chatId: input.chatId,
+            atMs: input.atMs,
+            everyMs: input.everyMs,
+            calendar: input.calendar,
+          }),
+      });
+    case "routine-script-set":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleSetScript(input.scheduleId, input.revision, {
+            command: input.command,
+            timeoutMs: input.timeoutMs,
+            chatId: input.chatId,
+          }),
+      });
+    case "schedule-output":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleOutput(input.scheduleId, input.requestId) });
+    case "schedule-update":
+      return withDurableOwner({
+        id: input.id,
+        operation: (owner) =>
+          owner.scheduleUpdate(input.scheduleId, input.revision, {
+            name: input.name,
+            text: input.text,
+            schedule: input.schedule,
+            cleanup: input.cleanup,
+          }),
+      });
+    case "schedule-delete":
+      return {
+        schedule: await withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleDelete(input.scheduleId, input.revision) }),
+      };
+    case "schedule-restore":
+      return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleRestore(input.scheduleId) });
     case "schedule-enable":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleSetEnabled(input.scheduleId, input.enabled) });
     case "schedule-snapshot":
@@ -1250,16 +1559,17 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "worker-contexts":
       return (await durable(input.id)).workerContexts(input.threadIds);
     case "limits-snapshot":
-      return limitsSnapshot(Date.now(), input.visit === true ? "visit" : false);
+      return limitsSnapshot();
     case "limits-refresh":
       return limitsSnapshot(Date.now(), true);
     case "limits-visibility":
       setLimitVisibility(input.provider, input.visible);
+      publishHost("limits");
       return limitsSnapshot();
     case "machine-status":
       return machineStatus();
     case "cursor-connect":
-      return startCursorLogin();
+      return startCursorLogin(Date.now(), () => publishHost("limits"));
     case "thread-history":
       return (await durable(input.id)).threadHistory(input.threadId, input);
     case "chat-history":
@@ -1406,44 +1716,47 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "telegram-token": {
       const snapshot = await telegram.setToken(input.token);
       recordHostEvent("telegram", `bot set: @${snapshot.botUsername}`);
+      publishHost("telegram");
       return snapshot;
     }
     case "telegram-pair":
       recordHostEvent("telegram", "pairing code issued");
-      return telegram.pair();
+      return telegram.pair().finally(() => publishHost("telegram"));
     case "telegram-unpair":
       recordHostEvent("telegram", "unpaired");
-      return telegram.unpair();
+      return telegram.unpair().finally(() => publishHost("telegram"));
     case "telegram-remove":
       recordHostEvent("telegram", "bot removed");
-      return telegram.remove();
+      return telegram.remove().finally(() => publishHost("telegram"));
     case "deploy-snapshot":
       return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
     case "deploy-settings":
       saveDeploySettings(input.settings);
       recordHostEvent(
         "deploy",
-        `deploy when idle ${input.settings.idle ? "on" : "off"} ${input.settings.startHour}-${input.settings.endHour}`,
+        `nightly deploy ${input.settings.idle ? "on" : "off"} ${input.settings.startHour}-${input.settings.endHour}`,
       );
       return { settings: loadDeploySettings(), state: readDeployState(), running: deployRunning() };
     case "deploy-start":
-      if (deployRunning()) throw new Error("A deploy is already running");
-      if (!(await noOwnerBusy())) {
-        queueDeploy();
-        recordHostEvent("deploy", "deploy queued: work is running");
-        return {
-          settings: loadDeploySettings(),
-          state: readDeployState(),
-          running: false,
-          queued: true,
-          line: "Work is running, so the deploy is queued. It runs at the next moment no project has work running, whatever the deploy window.",
-        };
-      }
       startDeploy();
       recordHostEvent("deploy", "deploy started by the owner");
-      return { settings: loadDeploySettings(), state: readDeployState(), running: true, queued: false };
+      return { settings: loadDeploySettings(), state: readDeployState(), running: true };
     case "deploy-shutdown":
       return stopForDeploy(input.sha);
+    case "host-agent-history":
+      return requireHostAgent().history(input.before);
+    case "host-agent-send":
+      return requireHostAgent().send(input.requestId, input.text);
+    case "host-agent-stop":
+      return requireHostAgent().stop();
+    case "host-agent-reset":
+      return requireHostAgent().reset();
+    case "host-agent-settings":
+      return requireHostAgent().settings(input.revision, input.patch);
+    case "approvals-list":
+      return { approvals: approvals.list() };
+    case "approval-decide":
+      return { approval: await approvals.decide(input.id, input.decision, input.note) };
     case "shutdown":
       closing = true;
       setTimeout(() => {
@@ -1470,7 +1783,8 @@ setLimitsTokenResolver(async (providerId) => {
 });
 const web = await startWeb(
   dispatch,
-  async (id, onFrame, onEnd, chatId) => (await durable(id)).watchLive(onFrame, onEnd, chatId),
+  async (id, onFrame, onEnd, chatId) =>
+    id === HOST_FEED ? requireHostAgent().watchLive(onFrame, onEnd) : (await durable(id)).watchLive(onFrame, onEnd, chatId),
   (id, filename, bytes) =>
     withProjectLock(id, async () => {
       const project = loadProject(id);
@@ -1484,6 +1798,7 @@ const web = await startWeb(
 remote = createRemote({
   webUrl: web.url,
   report: (detail) => recordHostEvent("remote", detail),
+  changed: () => publishHost("remote"),
   summary: async () => {
     let needs = 0;
     for (const project of listProjects().filter((project) => !project.deleted && !project.archived))
@@ -1530,6 +1845,7 @@ const telegram = startTelegram({
   chats: async (id) => (await durable(id)).chats(),
   notifier,
   report: (detail) => recordHostEvent("telegram", detail),
+  changed: () => publishHost("telegram"),
 });
 void telegram.flush();
 async function automationSnapshot(id: string) {
@@ -1549,17 +1865,10 @@ try {
   forgetHostSha();
   recordHostEvent("deploy", `could not record the sha this host started from; deploy will refuse: ${errorText(error)}`);
 }
-function deployRunning(): boolean {
-  try {
-    const pid = Number(readFileSync(join(home(), "deploy.lock"), "utf8"));
-    process.kill(pid, 0);
-    return Number.isSafeInteger(pid) && pid > 0;
-  } catch {
-    return false;
-  }
-}
-/** The deploy stops this host, so it must outlive it: detached, with its own log. */
-function startDeploy(): void {
+/** The deploy stops this host, so it must outlive it: detached, with its own log. `by` names an agent call waiting for the result. */
+function startDeploy(by?: Omit<DeployRequest, "at">): void {
+  if (deployRunning()) throw new Error("A deploy is already running");
+  recordDeployRequest({ requestId: by?.requestId ?? randomUUID(), at: Date.now(), ...by });
   const log = openSync(join(home(), "deploy.log"), "a", 0o600);
   const child = spawn(process.execPath, [join(repoRoot, "src", "cli.ts"), "deploy", repoRoot], {
     detached: true,
@@ -1571,64 +1880,85 @@ function startDeploy(): void {
   child.unref();
   closeSync(log);
 }
-/** Idle means no open project owner is busy; a project whose runtime is not open has nothing running. */
-async function noOwnerBusy(): Promise<boolean> {
-  for (const opening of durableRuntimes.values()) if (await ownerBusy(await opening)) return false;
-  return true;
+/** Tool calls running in open projects; the redeploy call that asked for this deploy (and a codemode call around it) does not count. */
+async function runningToolCalls(): Promise<number> {
+  const by = readDeployState().current;
+  let count = 0;
+  for (const [id, opening] of durableRuntimes)
+    count += await opening.then(
+      (owner) => owner.runningToolCalls(by?.projectId === id ? by.taskId : undefined),
+      () => 0,
+    );
+  return count;
 }
-/** Drain requests before checking the checkout: an admitted Approve may still pull. */
-async function stopForDeploy(sha: string): Promise<{ stopping: boolean; queued?: boolean }> {
+/** Drain requests, give running tool calls the window, then check the checkout: an admitted Approve may still pull. */
+async function stopForDeploy(sha: string): Promise<{ stopping: boolean }> {
   closing = true;
   try {
+    const started = Date.now();
     await Promise.allSettled([...activeRequests]);
-    const idle = shutdownOperation || (await noOwnerBusy());
+    const cut = await quietWindow(runningToolCalls);
     // No await between these reads and shutdown, so host requests cannot change the checked checkout.
     const git = (...args: string[]) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 10_000 }).trim();
-    if (idle && git("rev-parse", "HEAD") === sha && !git("status", "--porcelain", "--untracked-files=no")) {
+    if (git("rev-parse", "HEAD") === sha && !git("status", "--porcelain", "--untracked-files=no")) {
+      const stop = { heldMs: Date.now() - started, cutOff: cut };
+      recordDeployStop(stop);
+      recordHostEvent("deploy", `stopping for deploy after ${stop.heldMs} ms, ${cut} tool calls cut off`);
       setTimeout(() => void shutdown(), 50);
       return { stopping: true };
     }
     closing = false;
-    queueDeploy();
-    recordHostEvent("deploy", "deploy requeued: work or checkout changed during deployment preparation");
-    return { stopping: false, queued: true };
+    recordHostEvent("deploy", "deploy failed: the checkout changed during deployment preparation");
+    return { stopping: false };
   } catch (error) {
     closing = false;
-    queueDeploy();
-    recordHostEvent("deploy", `deploy requeued: preparation failed: ${errorText(error)}`);
-    return { stopping: false, queued: true };
+    recordHostEvent("deploy", `deploy failed while stopping: ${errorText(error)}`);
+    return { stopping: false };
   }
 }
 const idleDeployTimer = setInterval(
   () => {
     const settings = loadDeploySettings();
-    if (closing) return;
-    if (readDeployState().queuedAt !== undefined && !deployRunning()) {
-      void noOwnerBusy()
-        .then((idle) => {
-          if (!idle || closing) return;
-          clearQueuedDeploy();
-          startDeploy();
-          recordHostEvent("deploy", "queued deploy started: the host is idle");
-        })
-        .catch((error) => recordHostEvent("deploy", `queued deploy check failed: ${errorText(error)}`));
-      return;
-    }
-    if (!settings.idle) return;
+    if (closing || !settings.idle || deployRunning()) return;
     idleDeployTick({
       now: new Date(),
       window: settings,
-      idle: noOwnerBusy,
-      pending: () => deployPending(repoRoot),
+      pending: () => deployPending(repoRoot, undefined, settings.branch),
       start() {
         startDeploy();
-        recordHostEvent("deploy", "deploy started: host idle inside the deploy window");
+        recordHostEvent("deploy", "deploy started: new code inside the nightly deploy window");
       },
-    }).catch((error) => recordHostEvent("deploy", `idle deploy check failed: ${errorText(error)}`));
+    }).catch((error) => recordHostEvent("deploy", `nightly deploy check failed: ${errorText(error)}`));
   },
   Number(process.env.PI_PROJECTS_DEPLOY_TICK_MS ?? 5 * 60_000),
 );
 idleDeployTimer.unref();
+hostAgent = await openHostAgent({
+  tools: {
+    dispatch: (request) => dispatch(request),
+    requestApproval: ({ key, request, summary }) => approvals.request({ key, requestedBy: { kind: "host-agent" }, request, summary }),
+    focus: (target) => feed.publish(HOST_FEED, { topic: "host-agent", type: "focus", ...target }),
+    redeploy: (requestId) => startDeploy({ requestId }),
+  },
+  publish: (event) => feed.publish(HOST_FEED, event),
+  report: (detail) => recordHostEvent("host-agent", detail),
+}).catch((error: unknown) => {
+  recordHostEvent("host-agent", `The Host agent could not open: ${errorText(error)}`);
+  return null;
+});
+// Outcomes go back to whoever asked; a project that is gone has no chat to post to, so its outcome stays in the list only.
+await approvals.attach({
+  run: (request) => dispatch(request),
+  deliver: async (approval, text, requestId) => {
+    if (approval.requestedBy.kind === "host-agent") return requireHostAgent().followUp(text, requestId);
+    const target = loadProject(approval.requestedBy.projectId);
+    if (target.deleted || target.archived) return;
+    await (await durable(target.id)).followUp(approval.requestedBy.chatId, text, requestId);
+  },
+  changed: () => feed.publish(HOST_FEED, { topic: "approvals" }),
+  notify: sendOwnerMessage,
+  report: (detail) => recordHostEvent("approvals", detail),
+});
 const server = createServer(async (request, response) => {
   try {
     if (closing) throw new Error("Host is stopping");
@@ -1744,6 +2074,12 @@ function shutdown(): Promise<void> {
     }
     try {
       await mcpPool.close();
+    } catch (error) {
+      report(error);
+    }
+    approvals.detach();
+    try {
+      await hostAgent?.close();
     } catch (error) {
       report(error);
     }

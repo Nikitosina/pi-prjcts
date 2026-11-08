@@ -32,3 +32,9 @@ Verified by `scripts/artifacts-e2e.mjs` unless marked (inspection).
 ## Owner browsing
 - A21 The Activity thread pane does not show the thread's artifacts (names, sizes, inline previews).
 - A22 Artifacts of a stopped/failed/archived thread become invisible.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The chat checks run in the new client: images are inline `.media-img` slots; videos and other files are download buttons fetched
+through the authenticated `/artifacts/` route only on click (A16 inline `<video>` player retired: the new client has none, a gap);
+a missing file shows "missing file" (A18). A21 (the classic Activity artifact browser) is retired; its data stays covered over
+`artifacts-list`. Gap: no browser view of a thread's artifact folder.

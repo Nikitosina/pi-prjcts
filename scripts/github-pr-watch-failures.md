@@ -49,3 +49,9 @@ Follow PRs auto-fix brief
 Regressions
 31. Arc plugin PR card and follow suites still pass against the changed API (`list` options, `published(root, project)`, `parseRefs(..., project)`, optional card fields, optional `followCovers`/`normalizeId`).
 32. vcs-plugins, follow-prs, coordinator-github-skills, durable-worker-report, coordinator-stability, worker-chat-ui, coordinator-workers-ui unchanged.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+The browser check now reads the new client's PR list (`#prs .pr-row`): the project's PRs appear and a hostile title stays text.
+Retired with the classic card: state ordering on the card, the watch toggles, the watch-by-URL input (the call is kept over RPC:
+a PR URL is stored as its normalized id), hide/show hidden, the `#` PR menu in the composer and the card's contrast scans.
+Gaps: the new client cannot watch, unwatch or hide a PR, or insert a `#` reference from a menu.

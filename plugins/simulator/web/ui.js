@@ -103,7 +103,7 @@
         : s.status === "uncertain"
           ? "Needs inspection"
           : s.operation
-            ? ({ create: "Creating", boot: "Preparing" }[s.operation.operation] ?? "Working")
+            ? ({ create: "Creating", boot: "Preparing", erase: "Erasing" }[s.operation.operation] ?? "Working")
             : s.status === "error"
               ? "Error"
               : !d

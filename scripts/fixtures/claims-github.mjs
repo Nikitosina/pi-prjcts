@@ -19,7 +19,6 @@ export default {
         attach: async () => ({}),
         workerFacts: async () => ({}),
         remove: async () => ({}),
-        readHeadEntry: () => ({}),
         virtualMount: false,
       },
     });

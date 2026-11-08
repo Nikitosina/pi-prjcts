@@ -48,6 +48,15 @@ export async function listKnowledge(dir: string): Promise<Metadata[]> {
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
+/** Every document in one pass; the prompt's memory sections read this on each request, so the store is prepared once, not per file. */
+export async function readAllKnowledge(dir: string): Promise<Document[]> {
+  await ensureKnowledge(dir);
+  const root = knowledgeRoot(dir);
+  return paths(root)
+    .sort((left, right) => left.localeCompare(right))
+    .map((path) => parse(KnowledgeDocument, { ...metadata(root, path), text: readDocument(root, path) }));
+}
+
 export async function readKnowledge(dir: string, path: string): Promise<Document> {
   await ensureKnowledge(dir);
   const root = knowledgeRoot(dir);
@@ -94,6 +103,36 @@ export async function writeKnowledge(input: Write): Promise<Document> {
   });
 }
 
+/** Removes a document whose current revision is `expectedRevision`; the removal is kept in history as an empty revision. */
+export async function deleteKnowledge(dir: string, path: string, expectedRevision: string, author: string): Promise<void> {
+  await ensureKnowledge(dir);
+  const root = knowledgeRoot(dir);
+  const valid = parse(KnowledgePath, path);
+  if (valid === "MEMORY.md" || valid === "preferences.md") throw new Error(`${valid} cannot be removed; write it instead`);
+  await withLock(root, async () => {
+    recover(root);
+    const current = metadata(root, valid);
+    if (current.revision !== expectedRevision) throw new Error(`Knowledge revision conflict for ${valid}`);
+    const priorText = readDocument(root, valid);
+    saveRevision(
+      root,
+      parse(Journal, {
+        path: valid,
+        revision: digest(""),
+        updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1 || 0)).toISOString(),
+        author,
+        size: 0,
+        id: randomUUID(),
+        text: "",
+        priorRevision: current.revision,
+        priorText,
+      }),
+    );
+    rmSync(documentPath(root, valid));
+    rmSync(metaPath(root, valid), { force: true });
+  });
+}
+
 export async function historyKnowledge(dir: string, path: string): Promise<Revision[]> {
   await ensureKnowledge(dir);
   const root = knowledgeRoot(dir);
@@ -106,22 +145,21 @@ export async function historyKnowledge(dir: string, path: string): Promise<Revis
     .map((name) => parse(KnowledgeRevision, readJson(controlPath(root, `history/${digest(valid)}/${name}`))));
 }
 
-export async function knowledgeContext(dir: string): Promise<string> {
+/** The newest `limit` revisions across every document, newest first; history file names start with the write time. */
+export async function recentKnowledgeHistory(dir: string, limit: number): Promise<Revision[]> {
   await ensureKnowledge(dir);
-  return memoryIndex(dir);
-}
-
-export function memoryIndex(dir: string): string {
   const root = knowledgeRoot(dir);
-  const index = documentPath(root, "MEMORY.md");
-  if (statSync(index).size > memoryLimit * 4)
-    throw new Error(`MEMORY.md exceeds the ${memoryLimit} Unicode character limit; repair it before starting a model turn.`);
-  const text = readDocument(root, "MEMORY.md");
-  if ([...text].length > memoryLimit)
-    throw new Error(
-      `MEMORY.md exceeds the ${memoryLimit} Unicode character limit; repair it through knowledge-read and knowledge-write before starting a model turn.`,
-    );
-  return text;
+  const folder = controlPath(root, "history");
+  if (!existsSync(folder)) return [];
+  const files = readdirSync(folder).flatMap((digestName) =>
+    readdirSync(controlPath(root, `history/${digestName}`))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => ({ digestName, name })),
+  );
+  return files
+    .sort((a, b) => b.name.localeCompare(a.name))
+    .slice(0, limit)
+    .map(({ digestName, name }) => parse(KnowledgeRevision, readJson(controlPath(root, `history/${digestName}/${name}`))));
 }
 
 function knowledgeRoot(dir: string): string {

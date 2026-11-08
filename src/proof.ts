@@ -11,6 +11,7 @@ import { Jobs, type Job } from "./jobs.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import { missingLease } from "./verification-resources.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
+import { CACHE_VARIABLE, type WorkspaceCaches } from "./workspace-cache.ts";
 
 const exec = promisify(execFile);
 
@@ -80,11 +81,12 @@ export type ProofDeps = {
   /** The worker's shell policy for this Job, or why the host cannot apply it. */
   shell: (job: Job, cwd: string) => { guard: (command: string) => string } | { refusal: string };
   isClosed?: () => boolean;
+  caches?: WorkspaceCaches;
 };
 
 /**
- * The verifier's tools: shell commands on the candidate in the Job's worktree with their logs kept, plus the lease and background tools workers have.
- * A verifier is trusted like its worker; nothing confines its commands, and the run record only ties each result to one commit.
+ * The worker's verification tools: shell commands on the candidate in the Job's worktree with their logs kept, plus the lease and background tools.
+ * Nothing confines these commands beyond the worker's own shell policy; the run record only ties each result to one commit.
  */
 export function proofTools(deps: ProofDeps) {
   async function jobOf(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<Job> {
@@ -95,6 +97,10 @@ export function proofTools(deps: ProofDeps) {
     if (!job) throw new Error("Only a Job's worker or its subagents can use this tool");
     return job as Job;
   }
+  const cacheEnv = async (cwd: string): Promise<Record<string, string>> => {
+    const cache = await deps.caches?.forCwd(cwd);
+    return cache ? { [CACHE_VARIABLE]: cache } : {};
+  };
   const headOf = async (cwd: string) => (await exec("git", ["-C", cwd, "rev-parse", "HEAD"])).stdout.trim();
   const run = defineTool({
     name: "projects_verify_run",
@@ -143,7 +149,7 @@ export function proofTools(deps: ProofDeps) {
         command: shell.guard(args.command),
         label: `verify ${id}`,
         cwd,
-        env: { ...process.env, PI_ARTIFACTS_DIR: artifacts },
+        env: { ...process.env, PI_ARTIFACTS_DIR: artifacts, ...(await cacheEnv(cwd)) },
       });
       let timedOut = false,
         aborted = false,
@@ -214,7 +220,12 @@ export function proofTools(deps: ProofDeps) {
         if ("refusal" in shell) throw new Error(shell.refusal);
         return shell.guard(command);
       };
-      return { threadId: job.id, cwd, env: { ...process.env, PI_ARTIFACTS_DIR: ensureArtifactDir(deps.controlRoot, job.id) }, guard };
+      return {
+        threadId: job.id,
+        cwd,
+        env: { ...process.env, PI_ARTIFACTS_DIR: ensureArtifactDir(deps.controlRoot, job.id), ...(await cacheEnv(cwd)) },
+        guard,
+      };
     },
   });
   const tools = [run, ...environment];

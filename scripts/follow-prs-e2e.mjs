@@ -360,8 +360,8 @@ try {
     plainId = await setup("No GitHub", plain);
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const second = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: second.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   // C5: auto-fix eligibility is a publication receipt, so #2 is opened by a project worker; the fixture then shapes it.
   await rpc({ action: "message", id, text: "MARK-PUBLISH open the login fix" });
   await eventually(
@@ -428,26 +428,29 @@ try {
   await rpc({ action: "automation-update", id: plainId, change: { follow: { enabled: false } } });
   result.checks.push('F2 follow without a GitHub authorization reports "needs a GitHub authorization"');
 
-  // F9/F20 UI: choose the Alerts chat and opt in from Settings.
+  // F9/F20: choose the Alerts chat (host API; the classic Events form that chose it was retired 2026-11-04), then opt in from
+  // Settings → Automations in the inbox at `/`.
+  await rpc({ action: "automation-update", id, change: { eventChat: alerts.id } });
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "settings");
+  launch.searchParams.set("settings", "automations");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
+  await waitFor(`document.body.dataset.ready === "1"`, s, "inbox");
+  await evaluate(`document.querySelector('[data-cmd="settings"]').click()`, s);
+  await waitFor(`!!document.querySelector('dialog#settings[open] nav [data-section="automations"]')`, s, "settings");
+  await evaluate(`document.querySelector('dialog#settings nav [data-section="automations"]').click()`, s);
   await waitFor(
-    `!!document.querySelector('#events-in #follow-enabled') && [...document.querySelectorAll('#event-chat option')].some(o => o.textContent === 'Alerts')`,
+    `/→ Alerts/.test(document.querySelector('.auto-card[data-kind="follow"]')?.innerText ?? '') && !document.querySelector('.auto-card[data-kind="follow"] [data-auto-toggle]').checked`,
     s,
-    "events card",
+    "Follow PRs card targeting Alerts",
   );
-  await evaluate(
-    `(() => { document.querySelector('#event-chat').value = ${JSON.stringify(alerts.id)}; document.querySelector('#follow-enabled').checked = true; document.querySelector('[data-action="automation-save"]').click(); })()`,
-    s,
-  );
+  await evaluate(`document.querySelector('.auto-card[data-kind="follow"] [data-auto-toggle]').click()`, s);
   await eventually(async () => {
     const v = await snap();
     return v.follow.enabled && v.eventChat === alerts.id;
@@ -489,7 +492,7 @@ try {
     state.checks[C[0]] = [{ name: "lint", conclusion: "success" }];
     state.checks[E1] = [{ name: "lint", conclusion: "failure" }];
   });
-  await evaluate(`document.querySelector('[data-action="follow-poll"]').click()`, s);
+  await rpc({ action: "follow-poll", id }); // "Check now" (the classic button; the new client has no per-card poll)
   const both = await eventually(async () => {
     const list = await events();
     return list.length === 2 && list;
@@ -552,11 +555,13 @@ try {
 
   // F11: the coordinator response is visible; raw events remain in stored history.
   const chatUrl = new URL(launch);
-  chatUrl.searchParams.set("tab", "coordinator");
+  chatUrl.searchParams.delete("settings");
   chatUrl.searchParams.set("chat", alerts.id);
   await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(`!!document.querySelector('#messages .msg.them')`, s, "coordinator event response");
-  if (await evaluate(`!!document.querySelector('#messages .event-card, #messages .msg.you')`, s))
+  await waitFor(`!!document.querySelector('#feed .msg.agent')`, s, "coordinator event response");
+  if (
+    await evaluate(`!!document.querySelector('#feed .msg.owner') || /Owner-local event/.test(document.querySelector('#feed').innerText)`, s)
+  )
     throw Error("Internal Follow event appeared as a chat bubble");
   if (!(await rpc({ action: "show", id, chatId: alerts.id })).messages.some((message) => message.text?.startsWith("[Owner-local event")))
     throw Error("Follow event evidence missing from stored history");
@@ -711,28 +716,37 @@ try {
   );
   await settleAll();
 
-  // F20: Settings shows status and fix attempts.
+  // F20: Settings → Automations shows the Follow PRs card with its last check and target; fix attempts stay in the snapshot
+  // (the classic fix list was retired 2026-11-04).
   const settingsUrl = new URL((await rpc({ action: "web" })).url);
   settingsUrl.searchParams.set("project", id);
-  settingsUrl.searchParams.set("tab", "settings");
   await send("Page.navigate", { url: settingsUrl.toString() }, s);
-  await waitFor(`!!document.querySelector('#follow-fixes')`, s, "fix list");
+  await waitFor(`document.body.dataset.ready === "1"`, s, "inbox");
+  await evaluate(`document.querySelector('[data-cmd="settings"]').click()`, s);
+  await waitFor(`!!document.querySelector('dialog#settings[open] nav [data-section="automations"]')`, s, "settings");
+  await evaluate(`document.querySelector('dialog#settings nav [data-section="automations"]').click()`, s);
+  await waitFor(`!!document.querySelector('.auto-card[data-kind="follow"]')`, s, "Follow PRs card");
   const ui = await evaluate(
-    `({ last: document.querySelector('#follow-last').innerText, sent: document.querySelector('#follow-events').innerText, fixes: document.querySelectorAll('#follow-fixes .fix-attempt').length, pr: document.querySelector('#follow-fixes b').innerText, chat: document.querySelector('#event-chat').selectedOptions[0].textContent })`,
+    `(() => { const card = document.querySelector('.auto-card[data-kind="follow"]'); return { text: card.innerText, on: card.querySelector('[data-auto-toggle]').checked }; })()`,
     s,
   );
-  if (ui.last === "never" || Number(ui.sent) < 8 || ui.fixes !== 3 || ui.pr !== "acme/mari#2" || ui.chat !== "Alerts")
-    throw Error("Settings status wrong: " + JSON.stringify(ui));
-  result.checks.push("F20 Settings shows last check, events sent, the chosen chat and each fix attempt with its status");
-  await waitFor(`!!document.querySelector('#events-in-card')`, s, "#events-in-card");
-  await evaluate(`document.querySelector('#events-in-card').scrollIntoView()`, s);
-  await shot("02-settings-events-in", s);
+  const attempts = (await snap()).follow.fixes ?? [];
+  if (
+    !ui.on ||
+    !/Last run/.test(ui.text) ||
+    !/→ Alerts/.test(ui.text) ||
+    attempts[0]?.pr !== "acme/mari#2" ||
+    attempts[0].attempts.length !== 3
+  )
+    throw Error("Settings status wrong: " + JSON.stringify({ ui, attempts }));
+  result.checks.push("F20 Settings shows Follow PRs on, its last check and the chosen chat; the snapshot keeps each fix attempt");
+  await shot("02-settings-automations", s);
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
   await delay(300);
   const narrow = await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`, s);
-  if (!narrow) throw Error("Events card overflows at 390px");
+  if (!narrow) throw Error("Automations overflow at 390px");
   await shot("03-settings-mobile", s);
-  result.checks.push("F20 the Events card fits a 390 px screen");
+  result.checks.push("F20 Automations fits a 390 px screen");
 
   result.errors = result.errors.filter((e) => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/api"));

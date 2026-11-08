@@ -27,3 +27,13 @@ Legacy origin lookup reads at most the newest 200 submissions of this conversati
 ## Compaction failure
 
 - T12 A failed compaction leaves no trace: the context meter looks normal, so the owner does not learn that the context was not reduced and that a later turn may stop at the limit. The chat snapshot must carry the failure, and the meter must say "Last compaction failed" with the error in its label and popup, marked by text and not by color alone. It stays after a host restart and clears once a compaction produces a summary.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+
+The browser half drives the new client: `#feed` turns and `.divider` separators, chats in the tree, Show earlier, and the status
+line's "compaction failed" flag with the error as its title (T12; the classic composer meter and its popup are retired, as is T9's
+classic scroll-to-top loading and reading anchor: Show earlier opens at the top of the loaded page).
+
+- T13 Switching to another chat and back shows an empty transcript. (Red on the UI 2.0 client: a chat read still in flight when the
+  owner switched was dropped as stale and took the read queued for the newly selected chat with it;
+  artifacts/only-inbox/red-transcript-compaction-chat-switch.json.)

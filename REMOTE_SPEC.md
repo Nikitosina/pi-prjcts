@@ -209,7 +209,7 @@ Decrypted record = `[u32 BE header length][header JSON][body bytes]`.
 
 - Replace the 2 s `refresh()` interval with the `/changes` stream: refresh on `project`, poll notifications on `notices`, and fall back to a 30 s poll while the stream is down. Same behavior locally and remotely.
 - Settings → **Remote access**: relay state, host ID, bootstrap fingerprint, **Pair a device** (QR, link, countdown, cancel), device list (name, paired, last seen, rename, revoke with confirmation).
-- No other UI behavior changes. Inside the PWA, the UI runs unchanged; the inbox token is empty there, and `src/remote.ts` adds the authorization.
+- Inside the PWA, the inbox token is empty and `src/remote.ts` adds the authorization. The remote app hides pairing, rename and revoke, and the top bar shows a "← Hosts" link back to the switcher (`scripts/remote-settings-failures.md`).
 
 ## Relay deployment (owner runs it, not automated)
 

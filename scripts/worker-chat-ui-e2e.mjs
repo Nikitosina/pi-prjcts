@@ -39,13 +39,12 @@ mkdirSync(artifacts, { recursive: true, mode: 0o700 });
 mkdirSync(root, { recursive: true, mode: 0o700 });
 for (const dir of [home, workspace, agentDir]) mkdirSync(dir, { mode: 0o700 });
 
+const click = (s, selector) => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`, s);
+// The inbox at `/`: a worker opens from the Workers list into the center worker view.
 const openWorker = async (s, id) => {
-  const node = `document.querySelector('[data-action="thread"][data-thread="${id}"]')`;
-  if (!(await evaluate(`!!${node}`, s))) {
-    await evaluate(`document.querySelector('.job-toggle[data-job="${id}"]').click()`, s);
-    await waitFor(`!!${node}`, s, "job expanded");
-  }
-  await evaluate(`${node}.click()`, s);
+  await waitFor(`!!document.querySelector('#workers [data-open-worker="${id}"]')`, s, "worker listed");
+  await evaluate(`document.querySelector('#workers [data-open-worker="${id}"]').click()`, s);
+  await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "worker view");
 };
 let hold = true;
 const held = new Set();
@@ -335,102 +334,58 @@ try {
   chromeSession = s;
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
-  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] }, s); // colour assertions below are for the light theme
   await send("Page.navigate", { url: launch.toString() }, s);
+  // The inbox at `/` (classic inbox retired 2026-11-04). C9 is retired: the new client shows tool rows and thoughts on purpose.
+  const feed = `document.querySelector('#feed')`,
+    wfeed = `document.querySelector('#worker-feed')`,
+    wtext = `document.querySelector('#focus-view .worker-send textarea')`;
   await waitFor(
-    `document.querySelector('#messages')?.innerText.includes('Inspect scope then try an invalid scoped scout.') && !!document.querySelector('#messages .msg.them strong')`,
+    `${feed}?.innerText.includes('Inspect scope then try an invalid scoped scout.') && !!document.querySelector('#feed .msg.agent strong')`,
     s,
     "coordinator answer",
   );
-  if (await evaluate(`!!document.querySelector('#messages .tool-call, #messages .thought')`, s))
-    throw Error("C9 coordinator exposes internal tools or thinking");
-  result.checks.push("C9 coordinator hides tool diagnostics");
   const ownerInput = (await rpc({ action: "show", id: project.id })).messages.find(
     (message) => message.role === "user" && message.text === "MARK-COORD Inspect scope then try an invalid scoped scout.",
   );
   if (ownerInput?.origin !== "owner") throw Error("C14 real owner admission lacks owner origin: " + JSON.stringify(ownerInput));
   result.checks.push("C14 real owner API transcript carries owner origin");
-  const rendererChecks = await evaluate(
-    `(async () => {
-    const { coordinatorMessageHtml, chatMessageHtml } = await import('/app/chat.js');
-    const { displayMessages } = await import('/app/transcript.js');
-    const base = { at: 1, index: 1, images: [], role: 'user', text: '' };
-    const html = (message) => coordinatorMessageHtml({ ...base, ...message });
-    const internal = { origin: 'internal', text: 'Host recovery metadata not written by the owner' };
-    const thought = { role: 'assistant', thinking: 'PRIVATE-THOUGHT', text: 'Public answer' };
-    const reset = displayMessages([{ kind: 'reset', entryId: 1, at: 1, handoff: 'PRIVATE-HANDOFF' }])[0];
-    const ready = html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 ready: Ready fixture]\\nSummary: finished' });
-    const owner = html({ origin: 'owner', text: '[Owner-local event github.follow]\\nI actually typed this.' });
-    const earlier = html({ text: 'Legacy text [history](https://example.test/history)', images: [{ ref: '1.0.0', mime: 'image/png', bytes: 12 }] });
-    return {
-      earlier: earlier.includes('Earlier input') && !earlier.includes('>You ') && earlier.includes('Legacy text') && earlier.includes('href="https://example.test/history"') && earlier.includes('data-ref="1.0.0"'),
-      ownerLabel: html({ origin: 'owner', text: 'I wrote this' }).includes('>You '),
-      workerLabel: chatMessageHtml({ ...base, text: 'Legacy worker input' }, 'Worker').includes('>You '),
-      archiveLabel: chatMessageHtml({ ...base, text: 'Legacy archive input' }, 'Assistant').includes('>You '),
-      legacyEvent: !html({ text: '[Owner-local event github.follow]\\n- Useful change' }),
-      internal: !html(internal),
-      origin: displayMessages([{ kind: 'message', entryId: 1, at: 1, role: 'user', origin: 'internal', text: 'metadata', images: [] }])[0].origin === 'internal',
-      ownerReport: html({ origin: 'owner', text: '[worker 11111111-1111-1111-1111-111111111111 ready: I typed this]' }).includes('msg you'),
-      report: !html({ origin: 'internal', text: '[scout 11111111-1111-1111-1111-111111111111 done: Completed scout] details' }),
-      thought: html(thought).includes('Public answer') && !html(thought).includes('PRIVATE-THOUGHT'),
-      reset: !html(reset),
-      tools: !html({ kind: 'tool', name: 'bash', argsPreview: 'PRIVATE-ARGS' }),
-      owner: owner.includes('I actually typed this.') && owner.includes('msg you') && !owner.includes('event-card'),
-      image: html({ origin: 'owner', images: [{ ref: '1.0.0', mime: 'image/png', bytes: 12 }] }).includes('data-ref="1.0.0"'),
-      ready: !ready,
-      checkpoint: !html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 checkpoint: Waiting] details' }),
-      stalled: !html({ origin: 'internal', text: '[worker 11111111-1111-1111-1111-111111111111 stalled: Quiet] details' }),
-      event: !html({ origin: 'internal', text: '[Owner-local event github.follow]\\n- Useful change' }),
-      compaction: html({ kind: 'compaction' }).includes('Context compacted'),
-      workerThought: chatMessageHtml({ ...base, ...thought }, 'Worker').includes('PRIVATE-THOUGHT'),
-      archiveReset: chatMessageHtml(reset, 'Assistant').includes('PRIVATE-HANDOFF'),
-      workerTools: chatMessageHtml({ ...base, kind: 'tool', name: 'bash', argsPreview: 'PRIVATE-ARGS' }, 'Worker').includes('tool-call'),
-    };
-  })()`,
-    s,
-  );
-  if (Object.values(rendererChecks).some((ok) => !ok))
-    throw Error("C10-C13 coordinator/diagnostic renderer regressions: " + JSON.stringify(rendererChecks));
-  result.checks.push("C10-C13 internal reports stay out of coordinator chat while owner images and worker/archive diagnostics remain");
-  result.checks.push("C16 unknown coordinator inputs get a neutral label without losing text, links or attachments");
-  await shot("01-clean-coordinator", s);
+  await shot("01-coordinator", s);
   const active = await rpc({ action: "jobs-snapshot", id: project.id });
   if (active.jobs.filter((job) => job.status === "running").length !== 2) throw Error("Jobs were not concurrent");
   result.checks.push("C7 two Jobs run concurrently");
   await openWorker(s, threadId);
-  await waitFor(`!!document.querySelector('#worker-messages .tool-call[data-status="pending"]')`, s, "pending worker tool");
-  if (!(await evaluate(`document.querySelector('#worker-messages .tool-call[data-status="pending"] .tool-icon')?.innerText === '…'`, s)))
-    throw Error("Pending tool icon wrong");
-  result.checks.push("C2 pending tool background");
+  await waitFor(`!!document.querySelector('#worker-feed .tool-row')`, s, "worker tool row");
+  const pending = await evaluate(`[...document.querySelectorAll('#worker-feed .tool-row')].map(n => n.dataset.status)`, s);
+  if (!pending.includes("running"))
+    throw Error("C2 the worker's unfinished tool call does not show as running: " + JSON.stringify(pending));
+  result.checks.push("C2 the worker's unfinished tool call shows as running");
   if (
     !(await evaluate(
-      `!!document.querySelector('#worker-messages .msg.you .text') && document.querySelector('#worker-messages').compareDocumentPosition(document.querySelector('[data-inline-thread-send]')) & Node.DOCUMENT_POSITION_FOLLOWING`,
+      `!!document.querySelector('#worker-feed .msg.owner') && ${wfeed}.compareDocumentPosition(document.querySelector('#focus-view .worker-send')) & Node.DOCUMENT_POSITION_FOLLOWING`,
       s,
     ))
   )
     throw Error("Chat bubbles or composer order wrong");
-  result.checks.push("C3 worker chat layout");
-  await evaluate(
-    `document.querySelector('[data-inline-thread-send] textarea').value = 'Keep this draft'; document.querySelector('[data-inline-thread-send] textarea').dispatchEvent(new Event('input', { bubbles: true }))`,
-    s,
-  );
-  await waitFor(`!!document.querySelector('#worker-messages .msg.them strong')`, s, "live worker answer");
-  if ((await evaluate(`document.querySelector('[data-inline-thread-send] textarea').value`, s)) !== "Keep this draft")
-    throw Error("Refresh lost draft");
+  result.checks.push("C3 worker chat layout: the task above, the composer below the conversation");
+  await evaluate(`${wtext}.value = 'Keep this draft'; ${wtext}.dispatchEvent(new Event('input', { bubbles: true }))`, s);
+  await waitFor(`!!document.querySelector('#worker-feed .msg.agent strong')`, s, "live worker answer");
+  if ((await evaluate(`${wtext}.value`, s)) !== "Keep this draft") throw Error("Refresh lost draft");
   result.checks.push("C4 live refresh preserves draft");
-  const colors = await evaluate(
-    `[...document.querySelectorAll('#worker-messages .tool-call')].map(n => ({ status: n.dataset.status, color: getComputedStyle(n.querySelector('.tool-icon')).backgroundColor }))`,
-    s,
-  );
+  // A finished turn folds its run of calls into one group line; open it.
+  await evaluate(`document.querySelectorAll('#worker-feed .tool-group:not(.open) .group-head').forEach(n => n.click())`, s);
+  await waitFor(`!document.querySelector('#worker-feed .tool-group:not(.open)')`, s, "tool groups open");
+  const statuses = await evaluate(`[...document.querySelectorAll('#worker-feed .tool-row')].map(n => n.dataset.status)`, s);
+  if (!statuses.includes("ok") || !statuses.includes("error")) throw Error("Worker tool states wrong: " + JSON.stringify(statuses));
+  await evaluate(`document.querySelector('#worker-feed .tool-row[data-status="ok"] .tool-head').click()`, s);
+  await waitFor(`!!document.querySelector('#worker-feed .tool-row.open')`, s, "expanded tool row");
   if (
-    !colors.some((c) => c.status === "ok" && c.color === "rgb(220, 235, 223)") ||
-    !colors.some((c) => c.status === "error" && c.color === "rgb(246, 216, 211)")
+    !(await evaluate(
+      `document.querySelector('#worker-feed .tool-row.open').innerText.length > document.querySelector('#worker-feed .tool-row.open .tool-head').innerText.length`,
+      s,
+    ))
   )
-    throw Error("Worker tool state icon colours wrong: " + JSON.stringify(colors));
-  await evaluate(`document.querySelector('#worker-messages .tool-call summary').click()`, s);
-  if (!(await evaluate(`document.querySelector('#worker-messages .tool-call pre').innerText.includes('Result:')`, s)))
     throw Error("Missing expanded worker tool result");
-  result.checks.push("C1 worker tool colors and expandable results");
+  result.checks.push("C1 worker tool rows show ok and failed and expand to their result");
   let reportInput;
   for (let attempt = 0; attempt < 100; attempt++) {
     reportInput = (await rpc({ action: "show", id: project.id })).messages.find(
@@ -441,67 +396,23 @@ try {
   }
   if (reportInput?.origin !== "internal") throw Error("C15 real agent report lacks internal origin: " + JSON.stringify(reportInput));
   result.apiOrigins = { owner: ownerInput.origin, report: reportInput.origin };
+  await click(s, '#focus-view [data-cmd="leave-focus"]');
+  await waitFor(`!!${feed}?.offsetParent`, s, "back to the chat");
   await delay(250);
-  if (await evaluate(`!!document.querySelector('#messages [data-index="${reportInput.entryId}"]')`, s))
-    throw Error("C17 internal report leaked into coordinator chat");
-  if (await evaluate(`!!document.querySelector('#messages .msg.you[data-index="${reportInput.entryId}"]')`, s))
-    throw Error("C15 real internal report rendered as owner speech");
-  result.checks.push("C15 real agent report API carries internal origin and is not labeled You");
-  const checkpoint = await evaluate(
-    `(async () => {
-    const decisions = await import('/app/decisions.js');
-    const workers = await import('/app/workers.js');
-    const atCheckpoint = (snap) => ({ ...snap, jobs: snap.jobs.map(job => job.id === ${JSON.stringify(threadId)} ? { ...job, status: 'checkpoint', checkpoint: { summary: 'Waiting for owner decision', proof: ['artifact:checkpoint-proof'], gaps: ['Decision needed'] }, ready: null } : job) });
-    // The real worker may settle meanwhile and a live refresh would replace the injected Job: refreshes see the same checkpoint,
-    // and one already in flight (its Jobs read sent before the patch) finishes first.
-    const shell = await import('/app/shell.js');
-    const realFetch = window.fetch;
-    window.fetch = async (url, init) => {
-      const response = await realFetch(url, init);
-      if (url !== '/api' || JSON.parse(init.body).action !== 'jobs-snapshot' || !response.ok) return response;
-      return new Response(JSON.stringify(atCheckpoint(await response.json())), { status: response.status, headers: response.headers });
-    };
-    const settled = async () => {
-      for (let i = 0; shell.polling !== null; i++) {
-        if (i > 500) throw new Error('refresh did not settle');
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
-    };
-    await settled();
-    decisions.setJobsSnap(atCheckpoint(decisions.jobsSnap));
-    await workers.inspectThread(${JSON.stringify(threadId)});
-    const pane = document.querySelector('#inline-thread');
-    const answer = { intermediate: pane.innerText.includes('Intermediate checkpoint'), summary: pane.innerText.includes('Waiting for owner decision'), proof: pane.innerText.includes('checkpoint-proof'), noApprove: !pane.querySelector('[data-action="job-approve"]') };
-    window.fetch = realFetch;
-    await settled();
-    decisions.setJobsSnap(await shell.api({ action: 'jobs-snapshot', id: ${JSON.stringify(project.id)} }));
-    await workers.inspectThread(${JSON.stringify(threadId)});
-    return answer;
-  })()`,
-    s,
-  );
-  if (Object.values(checkpoint).some((value) => !value)) throw Error("C18 checkpoint details wrong: " + JSON.stringify(checkpoint));
-  result.checks.push("C18 checkpoint is intermediate with proof and no approval");
+  if (await evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some(n => n.innerText.includes('[worker ${threadId}'))`, s))
+    throw Error("C15/C17 real internal report rendered as owner speech");
+  result.checks.push("C15/C17 the agent report carries internal origin and never shows as the owner's message");
 
-  await shot("02-worker-chat", s);
-  await evaluate(`document.querySelector('[data-inline-thread-send] textarea').focus()`, s);
+  await openWorker(s, threadId);
+  await evaluate(`${wtext}.value = 'Keep this draft'; ${wtext}.focus()`, s);
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, s);
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, s);
-  await waitFor(
-    `document.querySelector('#worker-messages').innerText.includes('Keep this draft') && document.querySelector('[data-inline-thread-send] textarea').value === ''`,
-    s,
-    "follow-up",
-  );
+  await waitFor(`${wfeed}.innerText.includes('Keep this draft') && ${wtext}.value === ''`, s, "follow-up");
   result.checks.push("C6 Enter sends worker follow-up");
-  await evaluate(`document.querySelector('[data-action="thread-close"]').click()`, s);
+  await shot("02-worker-chat", s);
+  await click(s, '#focus-view [data-cmd="leave-focus"]');
   await delay(2500);
-  if (
-    !(await evaluate(
-      `document.querySelector('#inline-thread').hidden && !document.querySelector('[data-panel="coordinator"]').hidden && !new URL(location.href).searchParams.has('worker')`,
-      s,
-    ))
-  )
-    throw Error("Closed worker reopened");
+  if (!(await evaluate(`!document.querySelector('#worker-feed') && !!${feed}.offsetParent`, s))) throw Error("Closed worker reopened");
   result.checks.push("C5 close remains closed after refresh");
   for (let i = 0; i < 34; i++) {
     await rpc({ action: "thread-send", id: project.id, threadId, requestId: randomUUID(), text: "History turn " + i });
@@ -512,13 +423,12 @@ try {
     }
   }
   await openWorker(s, threadId);
-  await waitFor(`document.querySelector('#worker-messages')?.innerText.includes('History turn 33')`, s, "latest history page");
-  const shown = () => `document.querySelectorAll('#worker-messages .msg.you').length`;
-  const latestCount = await evaluate(shown(), s);
-  await evaluate(`document.querySelector('#worker-history-pages [data-action="thread-older"]').click()`, s);
-  await waitFor(`${shown()} > ${latestCount}`, s, "older history page");
-  result.checks.push("C8 opens latest page with older history accessible");
+  await waitFor(`${wfeed}?.innerText.includes('History turn 33')`, s, "latest history");
+  if (!(await evaluate(`${wfeed}.innerText.includes('History turn 0')`, s))) throw Error("Older history not shown");
+  result.checks.push("C8 the worker view shows the latest turns with the older history above");
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, s);
+  await delay(300);
+  if ((await evaluate(`document.scrollingElement.scrollWidth`, s)) > 391) throw Error("Worker view overflows at 390 px");
   await shot("03-worker-mobile", s, true);
   if (result.errors.length || result.httpErrors.length) throw Error("Browser errors captured");
   result.status = "passed";
@@ -527,7 +437,7 @@ try {
   result.failure = redact(error?.stack ?? error);
   try {
     result.diagnostic = await evaluate(
-      `document.querySelector('#job-tree').innerText + '\\n---\\n' + document.querySelector('#dialog').innerText.slice(0, 2000)`,
+      `(document.querySelector('#workers')?.innerText ?? '') + '\\n---\\n' + (document.querySelector('#focus-view')?.innerText ?? '').slice(0, 2000)`,
       chromeSession,
     );
   } catch {}

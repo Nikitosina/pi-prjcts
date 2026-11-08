@@ -1,4 +1,4 @@
-// Browser E2E: the chat keeps every stored message across compactions (newest-first transcript pages, web transcript).
+// Browser E2E: the chat keeps every stored message across compactions (newest-first transcript pages, the inbox at `/`).
 // Isolated host, local fake model, headless Chrome; no provider calls. Failure cases: scripts/transcript-compaction-failures.md.
 import { kit, delay } from "./notify-kit.mjs";
 
@@ -87,46 +87,47 @@ try {
     view.messages.map((m) => m.entryId),
   );
 
-  // Browser: reload and chat switch show the same history with dividers; the divider is understated.
+  // Browser (inbox at `/`): reload and chat switch show the same history with dividers; the divider is understated.
   const web = await rpc({ action: "web" }),
     url = new URL(web.url);
   url.searchParams.set("project", id);
   const s = await openPage(url.toString());
-  const dom = `[...document.querySelectorAll('#messages .msg, #messages .compaction-divider')].map(n => n.classList.contains('compaction-divider') ? 'C' : (n.classList.contains('you') ? 'u' : 'a') + (/FILL-\\d+/.exec(n.innerText) ?? [''])[0]).filter(x => x === 'C' || x.length > 1)`;
-  await waitFor(`document.querySelectorAll('#messages .compaction-divider').length === 2`, s, "dividers after load");
+  const dom = `[...document.querySelectorAll('#feed .msg, #feed .divider')].map(n => n.classList.contains('divider') ? 'C' : (n.classList.contains('owner') ? 'u' : 'a') + (/FILL-\\d+/.exec(n.innerText) ?? [''])[0]).filter(x => x === 'C' || x.length > 1)`;
+  const dividers = `document.querySelectorAll('#feed .divider').length`;
+  await waitFor(`document.body.dataset.ready === "1" && ${dividers} === 2`, s, "dividers after load");
   check(
     "T6 the browser shows the original messages and both dividers in order",
     JSON.stringify(await evaluate(dom, s)) === JSON.stringify(seq),
     await evaluate(dom, s),
   );
   const style = await evaluate(
-    `(() => { const d = document.querySelector('#messages .compaction-divider'); const r = d.getBoundingClientRect(); return { text: d.innerText.trim(), height: r.height, font: parseFloat(getComputedStyle(d).fontSize) }; })()`,
+    `(() => { const d = document.querySelector('#feed .divider'); const r = d.getBoundingClientRect(); return { text: d.innerText.trim(), height: r.height, font: parseFloat(getComputedStyle(d).fontSize), role: d.getAttribute('role') }; })()`,
     s,
   );
   check(
-    'T6 the divider reads "Context compacted" and stays small',
-    style.text === "Context compacted" && style.height < 40 && style.font <= 12,
+    'T6 the divider reads "Context compacted", is a separator and stays small',
+    style.text === "Context compacted" && style.role === "separator" && style.height < 40 && style.font <= 13,
     style,
   );
-  await evaluate(`document.querySelectorAll('#messages .compaction-divider')[0].scrollIntoView({ block: 'center' })`, s);
+  await evaluate(`document.querySelectorAll('#feed .divider')[0].scrollIntoView({ block: 'center' })`, s);
   await delay(300);
   await shot("01-history-across-compaction", s);
   await send("Page.reload", {}, s);
-  await waitFor(`document.querySelectorAll('#messages .compaction-divider').length === 2`, s, "dividers after reload");
+  await waitFor(`document.body.dataset.ready === "1" && ${dividers} === 2`, s, "dividers after reload");
   check("T7 a page reload keeps the history", JSON.stringify(await evaluate(dom, s)) === JSON.stringify(seq));
   const side = await rpc({ action: "chat-create", id, title: "Side" });
-  await waitFor(`!!document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]')`, s, "side chat in the rail");
-  await evaluate(`document.querySelector('[data-action="chat-select"][data-chat="${side.id}"]').click()`, s);
+  await waitFor(`!!document.querySelector('#tree [data-chat="${side.id}"]')`, s, "side chat in the tree");
+  await evaluate(`document.querySelector('#tree [data-chat="${side.id}"]').click()`, s);
   await waitFor(
-    `!document.querySelector('#messages .compaction-divider') && !/FILL-/.test(document.querySelector('#messages').innerText)`,
+    `${dividers} === 0 && !/FILL-/.test(document.querySelector('#feed').innerText)`,
     s,
     "side chat shows none of the main history",
   );
-  await evaluate(`document.querySelector('[data-action="chat-select"][data-chat="main"]').click()`, s);
-  await waitFor(`document.querySelectorAll('#messages .compaction-divider').length === 2`, s, "dividers after switching back");
+  await evaluate(`document.querySelector('#tree [data-chat="main"]').click()`, s);
+  await waitFor(`${dividers} === 2`, s, "dividers after switching back");
   check("T7 switching chats away and back keeps the history", JSON.stringify(await evaluate(dom, s)) === JSON.stringify(seq));
 
-  // A new message after a reload streams in below the dividers without duplicating anything.
+  // A new message after a reload appears below the dividers without duplicating anything.
   await k.ask(id, "main", fill(9));
   await waitFor(`(${dom}).includes('aFILL-9')`, s, "new message and its answer shown");
   const live = await evaluate(dom, s);
@@ -136,7 +137,7 @@ try {
     live,
   );
 
-  // Past 30 messages the older ones sit behind "Show earlier messages"; showing them keeps order, dividers and the reading position.
+  // Past the window the older messages sit behind "Show earlier"; showing them keeps order and dividers.
   for (let n = 10; n <= 20; n++) await k.ask(id, "main", `MARK-FILL FILL-${n} short`);
   view = await show();
   check(
@@ -144,71 +145,48 @@ try {
     view.before !== null && !sequence(view.messages).includes("uFILL-1") && view.messages.some((m) => m.kind === "compaction"),
     { before: view.before },
   );
+  const contextBefore = view.context.tokens;
   await send("Page.reload", {}, s);
-  await waitFor(`!!document.querySelector('#messages .earlier-messages')`, s, "show earlier button");
-  const position = await evaluate(
-    `(() => { const t = document.querySelector('#transcript'); t.scrollTop = 0; const first = document.querySelector('#messages .msg'); return { y: first.getBoundingClientRect().top, id: first.innerText.slice(0, 60) }; })()`,
-    s,
-  );
-  // Scrolling to the top loads the older page by itself (the button is the fallback).
-  await waitFor(`!document.querySelector('#messages .earlier-messages')`, s, "earlier messages shown");
+  await waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#feed [data-earlier]')`, s, "show earlier button");
+  await evaluate(`document.querySelector('#feed [data-earlier]').click()`, s);
+  await waitFor(`(${dom}).includes('uFILL-1')`, s, "earlier messages shown");
   const all = await evaluate(dom, s),
     shown = all.filter((x) => x !== "C");
   check(
-    "T9 Show earlier messages reveals the first message and both dividers, in order, once",
+    "T9 Show earlier reveals the first message and both dividers, in order, once",
     shown[0] === "uFILL-1" &&
       shown.at(-1) === "aFILL-20" &&
       all.filter((x) => x === "C").length === 2 &&
       new Set(shown).size === shown.length,
     all,
   );
-  const anchor = await evaluate(
-    `(() => { const t = document.querySelector('#transcript'), box = t.getBoundingClientRect(); const row = [...document.querySelectorAll('#messages .msg')].find(n => n.innerText.slice(0, 60) === ${JSON.stringify(position.id)}); return { visible: row ? row.getBoundingClientRect().bottom > box.top && row.getBoundingClientRect().top < box.bottom : false }; })()`,
-    s,
-  );
-  check("T9 the reading position stays on the message that was on top", anchor.visible, { anchor, position });
   view = await show();
-  check("T10 showing history does not change the model context", brain.summaries.length === 2 && view.context.tokens < 18000, {
+  check("T10 showing history does not change the model context", brain.summaries.length === 2 && view.context.tokens === contextBefore, {
     summaries: brain.summaries.length,
     context: view.context,
   });
 
-  // A failed compaction shows on the context meter in words, survives a restart and clears on the next summary.
+  // A failed compaction shows in the status line in words, with its error, and survives a restart; the next summary clears it.
   brain.failSummary = true;
   await rpc({ action: "compact", id });
   await eventually(async () => (await show()).context.compactionFailure, "compaction failure in the snapshot");
   const failure = (await show()).context.compactionFailure;
-  await waitFor(
-    `/Last compaction failed/.test(document.querySelector('#compose .context-meter').getAttribute('aria-label'))`,
-    s,
-    "meter label",
-  );
-  const meter = await evaluate(
-    `(() => { const m = document.querySelector('#compose .context-meter'); return { label: m.getAttribute('aria-label'), popup: m.querySelector('.context-popup').textContent, pct: m.querySelector('.context-pct').textContent }; })()`,
-    s,
-  );
+  const flag = `[...document.querySelectorAll('.sl-item[data-item="context"]')].find(n => /compaction failed/.test(n.innerText))`;
+  await waitFor(`!!${flag}`, s, "status line flag");
+  const meter = await evaluate(`(() => { const n = ${flag}; return { text: n.innerText, title: n.getAttribute('title') }; })()`, s);
   check(
-    "T12 a failed compaction is in the snapshot and the meter says so in text, with its error",
+    "T12 a failed compaction is in the snapshot and the status line says so in text, with its error",
     /SUMMARY-FAIL/.test(failure.error) &&
-      /Last compaction failed: .*SUMMARY-FAIL/.test(meter.label) &&
-      /Last compaction failed/.test(meter.popup) &&
-      /!/.test(meter.pct) &&
+      /compaction failed/.test(meter.text) &&
+      /SUMMARY-FAIL/.test(meter.title ?? "") &&
       brain.summaries.length === 2,
     { failure, meter },
   );
-  // The popup opens on hover; show it for the screenshot only.
-  await evaluate(`document.querySelector('#compose .context-popup').style.visibility = 'visible'`, s);
   await shot("02-compaction-failed", s);
-  // The same popup on a phone: it must stay on screen.
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
-  const narrow = await evaluate(
-    `(() => { const r = document.querySelector('#compose .context-popup').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: innerWidth }; })()`,
-    s,
-  );
-  check("T12 at 390px the failure popup stays on screen", narrow.left >= 0 && narrow.right <= narrow.width && narrow.top >= 0, narrow);
+  await delay(300);
   await shot("03-compaction-failed-390", s);
   await send("Emulation.clearDeviceMetricsOverride", {}, s);
-  await evaluate(`document.querySelector('#compose .context-popup').style.visibility = ''`, s);
   brain.failSummary = false;
 
   // A restart keeps the stored history.

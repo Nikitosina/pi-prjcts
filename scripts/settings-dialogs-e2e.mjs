@@ -1,10 +1,9 @@
-// Browser E2E: Settings dialogs + model picker. Isolated host, fake model, fake Pi settings.json (enabledModels), fake gh, no real providers.
-// Failure cases: settings-dialogs-failures.md. Artifacts: artifacts/settings-dialogs-*/ (light + dark screenshots, report.json).
+// E2E: Settings host contracts + model picker catalog (the classic dialogs were retired on 2026-11-04). Isolated host, fake model,
+// fake Pi settings.json (enabledModels), fake gh, no real providers. Failure cases: settings-dialogs-failures.md.
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
-import { contrastLib } from "./lib/contrast-scan.mjs";
 
 const kit = await createKit("settings-dialogs");
 const { check, rpc, root, repo } = kit;
@@ -56,8 +55,8 @@ mkdirSync(join(kit.artifacts, "shots"), { recursive: true });
 
 await kit.run(async () => {
   const id = await kit.createProject("Mari");
-  const snap = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: snap.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const bare2 = await kit.createProject("Fresh", { grant: false });
   // Projects get a whole-repository scope automatically; the owner revokes it here to exercise the re-grant dialog.
   {
@@ -92,240 +91,18 @@ await kit.run(async () => {
     JSON.stringify({ enabledModels: ["fake/fake-model", "alpha/*", "bulk/bulk-01:high", "zzz/none", "bulk/bulk-01"] }),
   );
 
-  const page = await kit.openPage(await kit.webUrl(id, "settings"));
-  const ev = page.evaluate,
-    delay = kit.delay;
-  await page.waitFor(
-    `document.querySelector('#settings-button')?.hidden === false && document.querySelector('#routines-button')?.hidden === false`,
-    "settings ready",
-  );
-  await ev(contrastLib);
-  const dlg = (expr) => ev(`(() => { const d = document.querySelector('#dialog'); return ${expr}; })()`);
-  const open = async (click, ready, label) => {
-    await ev(click);
-    await page.waitFor(ready, label);
-    await delay(200);
-  };
-  const theme = (value) => ev(`piTheme.set('${value}')`);
-  // Every dialog: sticky/visible footer, no overflow at 1440 and 420, contrast in both themes, light + dark screenshots.
-  const capture = async (name, { footer = true } = {}) => {
-    for (const [t, dark] of [
-      ["light", false],
-      ["dark", true],
-    ]) {
-      await theme(t);
-      await delay(250);
-      const scan = await ev(`window.__scan(${dark}, document.querySelector('#dialog'))`);
-      check(
-        `${name} ${t}: contrast >= 4.5${dark ? ", no light surfaces" : ""}`,
-        scan.low.length === 0 && (!dark || scan.bright.length === 0),
-        scan,
-      );
-      await page.shot(`shots/${name}-${t}`);
-    }
-    const shape = await dlg(
-      `({ title: !!d.querySelector('.dialog-head h2'), x: !!d.querySelector('.dialog-head [data-action=close-dialog]'), open: d.open, raw: [...d.querySelectorAll('pre')].filter(p => !p.closest('details') && !p.classList.contains('excerpt') && !p.closest('.dialog-body') === false && !p.closest('details')).length, footerInside: ${footer} ? (() => { const f = d.querySelector('.dialog-actions'); if (!f) return false; const a = f.getBoundingClientRect(), b = d.getBoundingClientRect(); return a.bottom <= b.bottom + 1 && a.top >= b.top; })() : true })`,
-    );
-    check(`${name}: title, X close, footer inside the dialog`, shape.title && shape.x && shape.open && shape.footerInside, shape);
-    await page.viewport(420, 900, true);
-    await delay(300);
-    check(
-      `${name}: no horizontal overflow at 420 px`,
-      await dlg(
-        `d.scrollWidth <= d.clientWidth + 1 && (d.querySelector('.dialog-body')?.scrollWidth ?? 0) <= (d.querySelector('.dialog-body')?.clientWidth ?? 0) + 1`,
-      ),
-    );
-    await page.shot(`shots/${name}-420-dark`);
-    await page.viewport(1440, 1000, false);
-    await theme("light");
-    await delay(250);
-  };
-  const jargon = /offline catalog|Review this single change|Explicit grants|Retained Durable|knowledgeAccess|Exact operation binding/;
-
-  // ---- Project settings + model picker ----
-  await open(
-    `document.querySelector('#settings-button').click()`,
-    `!!document.querySelector('#dialog [data-settings-form]') && document.querySelectorAll('#dialog .mp').length === 8`,
-    "settings form",
-  );
-  check(
-    "settings: plain title + subtitle, inline current values, no jargon, Review disabled",
-    await dlg(
-      `d.querySelector('h2').textContent === 'Project settings' && d.querySelector('.dialog-sub').textContent.length > 10 && d.querySelector('[name=name]').value === 'Mari' && d.querySelector('[name=stallMinutes]').value === '20' && !${jargon}.test(d.innerText) && d.querySelector('[type=submit]').disabled`,
-    ),
-  );
-  check(
-    "settings: current model names are shown on the picker buttons",
-    (await dlg(`[...d.querySelectorAll('.mp-current')].map(b => b.innerText).join('|')`)).includes("fake/fake-model"),
-  );
-  await capture("settings-form");
-  const pickerOf = (role) => `#dialog .mp[data-role=${role}]`;
-  await ev(`document.querySelector('${pickerOf("worker")} .mp-current').click()`);
-  await page.waitFor(
-    `!document.querySelector('${pickerOf("worker")} .mp-pop').hidden && document.activeElement.classList.contains('mp-search')`,
-    "picker open + search focused",
-  );
-  const rows = () =>
-    ev(
-      `[...document.querySelectorAll('${pickerOf("worker")} .mp-row')].map(r => r.dataset.ref + (r.getAttribute('aria-disabled') ? '!' : ''))`,
-    );
-  const groups = () => ev(`[...document.querySelectorAll('${pickerOf("worker")} .mp-group')].map(g => g.textContent)`);
-  check(
-    "picker: Inherit coordinator, then the scoped list, hint to search all",
-    (await rows())[0] === "" &&
-      JSON.stringify((await rows()).slice(1)) === JSON.stringify(expectedScoped) &&
-      (await groups())[0] === "Scoped models" &&
-      /search all \d+ configured/.test(await ev(`document.querySelector('${pickerOf("worker")} .mp-list').innerText`)),
-  );
-  check(
-    "picker: compact context windows (272k, 1M) and current marked",
-    await ev(
-      `(() => { const t = document.querySelector('${pickerOf("worker")} .mp-list').innerText; return /272k/.test(t) && /1M/.test(t) && document.querySelector('${pickerOf("worker")} .mp-row[aria-selected=true]')?.dataset.ref === 'fake/fake-model'; })()`,
-    ),
-  );
-  await capture("model-picker-scoped", { footer: false });
-  const type = async (text) => {
-    await ev(
-      `(() => { const i = document.querySelector('${pickerOf("worker")} .mp-search'); i.focus(); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-    );
-  };
-  await type("claude opus");
-  check("picker: multi-term, separator-insensitive search over name", (await rows())[0] === "alpha/a-three");
-  await type("BULK-0");
-  const bulk = await rows();
-  check(
-    'picker: case-insensitive, scoped match first then other configured models, capped with "more" note',
-    (bulk[0] === "bulk/bulk-01" &&
-      (await groups()).includes("Other configured models") &&
-      /\+\d+ more/.test(await ev(`document.querySelector('${pickerOf("worker")} .mp-list').innerText`))) ||
-      bulk.length <= 40,
-    bulk.slice(0, 3),
-  );
-  await type("anthropic");
-  const anth = await rows();
-  check(
-    "picker: unconfigured models are shown disabled at the bottom and cannot be picked",
-    anth.length > 0 && anth.length <= 5 && anth.every((r) => r.endsWith("!")) && (await groups()).includes("No credentials configured"),
-    anth,
-  );
-  await ev(`document.querySelector('${pickerOf("worker")} .mp-row[aria-disabled]').click()`);
-  await delay(150);
-  check(
-    "picker: clicking a disabled row changes nothing",
-    await ev(`document.querySelector('${pickerOf("worker")}').dataset.value === 'fake/fake-model'`),
-  );
-  await type("alpha");
-  await ev(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))`);
-  check(
-    "picker: ArrowDown moves the active row and aria-activedescendant",
-    await ev(
-      `(() => { const a = document.querySelector('${pickerOf("worker")} .mp-row.active'); return a?.dataset.ref === 'alpha/a-two' && document.activeElement.getAttribute('aria-activedescendant') === a.id; })()`,
-    ),
-  );
-  await ev(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
-  await delay(150);
-  check(
-    "picker: Esc closes only the list, dialog stays open, focus back on the button",
-    await ev(
-      `document.querySelector('${pickerOf("worker")} .mp-pop').hidden && document.querySelector('#dialog').open && document.activeElement.classList.contains('mp-current')`,
-    ),
-  );
-  await ev(`document.querySelector('${pickerOf("worker")} .mp-current').click()`);
-  await type("alpha");
-  await ev(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))`);
-  await ev(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`);
-  await delay(150);
-  check(
-    "picker: Enter selects, button shows the new model, field marked changed, Review enabled, dirty hint",
-    await dlg(
-      `d.querySelector('${pickerOf("worker")}').dataset.value === 'alpha/a-two' && /Alpha Two/.test(d.querySelector('${pickerOf("worker")} .mp-current').innerText) && d.querySelector('.field[data-field=worker]').classList.contains('changed') && !d.querySelector('[type=submit]').disabled && /1 unsaved change/.test(d.querySelector('.hint').textContent)`,
-    ),
-  );
-  // Reasoning model by mouse in the scout picker; searching an unscoped model by id.
-  await ev(`document.querySelector('${pickerOf("scout")} .mp-current').click()`);
-  await ev(
-    `(() => { const i = document.querySelector('${pickerOf("scout")} .mp-search'); i.value = 'a-one'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-  );
-  await ev(`document.querySelector('${pickerOf("scout")} .mp-row[data-ref="alpha/a-one"]').click()`);
-  await ev(
-    `(() => { const f = document.querySelector('[data-settings-form]'); f.elements.name.value = 'Mari 2'; f.elements.name.dispatchEvent(new Event('input', { bubbles: true })); f.elements.stallMinutes.value = '45'; f.elements.stallMinutes.dispatchEvent(new Event('input', { bubbles: true })); f.elements.knowledgeAccess.value = 'maintain'; f.elements.knowledgeAccess.dispatchEvent(new Event('change', { bubbles: true })); })()`,
-  );
-  check("form: 5 changes counted live", await dlg(`/5 unsaved changes/.test(d.querySelector('.hint').textContent)`));
-  await capture("settings-form-edited");
-  await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "review dialog");
-  check(
-    "review: one before -> after item per changed field, plain labels, no JSON, hidden project confirm",
-    await dlg(
-      `d.querySelectorAll('.diff-item').length === 5 && /Minutes before a stall notice/.test(d.innerText) && d.querySelector('.diff-item .diff-side.before') && d.querySelector('.diff-item .diff-side.after') && !d.querySelector('pre') && d.querySelector('form[data-settings-confirm] input[type=hidden][name=confirm]') && !${jargon}.test(d.innerText)`,
-    ),
-  );
-  await capture("settings-review");
-  await ev(`document.querySelector('#dialog [data-action=settings-back]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog [data-settings-form]')`, "back to editing");
-  check(
-    "back to editing keeps every edit (name, cap, picks)",
-    await dlg(
-      `d.querySelector('[name=name]').value === 'Mari 2' && d.querySelector('[name=stallMinutes]').value === '45' && d.querySelector('${pickerOf("worker")}').dataset.value === 'alpha/a-two' && d.querySelector('${pickerOf("scout")}').dataset.value === 'alpha/a-one'`,
-    ),
-  );
-  await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "review again");
-  await ev(
-    `document.querySelector('#dialog').dispatchEvent(new Event('cancel', { cancelable: true })); document.querySelector('#dialog').close()`,
-  );
-  await delay(300);
-  check("Esc/close on the review clears the pending proposal", await ev(`settingsConfirmation === null`));
-  await open(`document.querySelector('#settings-button').click()`, `!!document.querySelector('#dialog [data-settings-form]')`, "reopen");
-  check(
-    "unsent text edit is retained across close (draft) and offered for discard",
-    await dlg(`d.querySelector('[name=name]').value === 'Mari 2' && !!d.querySelector('[data-action=settings-discard][data-field=name]')`),
-  );
-  await ev(`document.querySelector('#dialog [data-action=settings-discard][data-field=name]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Discard your unsent edit?'`, "discard dialog");
-  check("discard dialog shows the text being discarded", await dlg(`/Mari 2/.test(d.innerText)`));
-  await capture("settings-discard");
-  await ev(`document.querySelector('#dialog [data-action=settings-confirm-discard]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog [data-settings-form]')`, "editor after discard");
-  check(
-    "discard resets the field to the saved value",
-    await dlg(`d.querySelector('[name=name]').value === 'Mari' && !d.querySelector('[data-action=settings-discard]')`),
-  );
-  // Stale revision: edit name, change settings elsewhere, save -> host rejects, draft kept, no rebase.
-  await ev(
-    `(() => { const f = document.querySelector('[data-settings-form]'); f.elements.name.value = 'Stale'; f.elements.name.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-  );
+  // The classic Settings dialogs were retired on 2026-11-04 (docs/classic-retirement.md). The host contracts they relied on stay.
+  const before = await rpc({ action: "settings-snapshot", id });
   await kit.updateSettings(id, { objective: "changed elsewhere" });
-  await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "stale review");
-  await ev(`document.querySelector('#dialog form[data-settings-confirm] [type=submit]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog .dialog-error')`, "conflict shown in the dialog");
-  const after = await rpc({ action: "settings-snapshot", id });
   check(
-    "stale save is rejected by the host, error shown inside the dialog, draft kept",
-    after.values.name === "Mari" && (await ev(`settingsDrafts.has('${id}:name')`)),
+    "stale revision: the host rejects a save made against an older revision, no rebase",
+    (await kit.rejects({ action: "settings-update", id, confirm: id, expectedRevision: before.revision, changes: { name: "Stale" } })) !==
+      null && (await rpc({ action: "settings-snapshot", id })).values.name === "Mari",
   );
-  await ev(`document.querySelector('#dialog [data-action=settings-back]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog [data-settings-form]')`, "editor");
-  check("stale draft is flagged as from an older version", await dlg(`/older version/.test(d.innerText)`));
-  await ev(`document.querySelector('#dialog [data-action=settings-discard][data-field=name]').click()`);
-  await delay(300);
-  await ev(`document.querySelector('#dialog [data-action=settings-confirm-discard]').click()`);
-  await page.waitFor(
-    `!!document.querySelector('#dialog [data-settings-form]') && !document.querySelector('#dialog [data-action=settings-discard]')`,
-    "clean editor",
-  );
-  // Real save of picks + cap + access, only changed fields.
-  await ev(
-    `(() => { const f = document.querySelector('[data-settings-form]'); f.querySelector('.mp[data-role=worker] .mp-current').click(); const i = f.querySelector('.mp[data-role=worker] .mp-search'); i.value = 'a-two'; i.dispatchEvent(new Event('input', { bubbles: true })); f.querySelector('.mp[data-role=worker] .mp-row[data-ref="alpha/a-two"]').click(); f.elements.stallMinutes.value = '45'; f.elements.stallMinutes.dispatchEvent(new Event('input', { bubbles: true })); })()`,
-  );
-  await ev(`document.querySelector('#dialog [data-settings-form] [type=submit]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Save these changes?'`, "final review");
-  await ev(`document.querySelector('#dialog form[data-settings-confirm] [type=submit]').click()`);
-  await page.waitFor(`!document.querySelector('#dialog').open`, "dialog closes after save");
+  await kit.updateSettings(id, { models: { worker: "alpha/a-two" }, stallMinutes: 45 });
   const saved = await rpc({ action: "settings-snapshot", id });
   check(
-    "save sends only changed fields: worker model + stall minutes changed, others intact",
+    "a save changes only the fields sent: worker model + stall minutes changed, others intact",
     saved.values.models.worker === "alpha/a-two" &&
       saved.values.stallMinutes === 45 &&
       saved.values.model === "fake/fake-model" &&
@@ -333,9 +110,8 @@ await kit.run(async () => {
       saved.values.objective === "changed elsewhere",
     saved.values,
   );
-  // Unconfigured models are rejected by the host as well (defence in depth).
   check(
-    "host still rejects an unconfigured model",
+    "host rejects an unconfigured model",
     (await kit.rejects({
       action: "settings-update",
       id,
@@ -343,213 +119,5 @@ await kit.run(async () => {
       expectedRevision: saved.revision,
       changes: { models: { worker: picker.items.find((m) => !m.configured).reference } },
     })) !== null,
-  );
-
-  // ---- Owner setup (fresh project: quick grant) ----
-  await page.navigate(await kit.webUrl(bare2, "settings"));
-  await page.waitFor(`document.querySelector('#owner-setup-button')?.hidden === false`, "fresh project");
-  await ev(contrastLib);
-  await open(
-    `document.querySelector('#owner-setup-button').click()`,
-    `!!document.querySelector('#dialog [data-action=workspace-quick]')`,
-    "owner setup",
-  );
-  check(
-    "owner setup: title, subtitle, advanced collapsed",
-    await dlg(
-      `d.querySelector('h2').textContent === 'Owner setup' && d.querySelector('.dialog-sub') && !d.querySelector('details.advanced').open`,
-    ),
-  );
-  await capture("owner-setup");
-  await open(
-    `document.querySelector('#dialog [data-action=workspace-quick]').click()`,
-    `!!document.querySelector('#dialog [data-action=workspace-quick-confirm]')`,
-    "workspace dialog",
-  );
-  check(
-    "workspace dialog: facts, no typed project id",
-    await dlg(`/uncommitted|Checkout/.test(d.innerText) && !d.querySelector('input[name=confirm]')`),
-  );
-  await capture("workspace-quick");
-  await ev(`document.querySelector('#dialog [data-action=workspace-quick-confirm]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog [data-kind=workspace-revoke]')`, "granted");
-  await ev(`document.querySelector('#dialog details.advanced').open = true`);
-  await capture("owner-setup-advanced");
-  await ev(`document.querySelector('#dialog [data-kind=workspace-revoke]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog form[data-owner-write][data-kind=workspace-revoke]')`, "revoke form");
-  check(
-    "revoke: plain title, summary, hidden confirm only",
-    await dlg(
-      `/Revoke this folder scope/.test(d.querySelector('h2').textContent) && !d.querySelector('input[name=confirm]:not([type=hidden])') && !d.querySelector('textarea')`,
-    ),
-  );
-  await capture("owner-revoke");
-  await ev(`document.querySelector('#dialog [data-action=owner-setup]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog details.advanced')`, "back");
-  await ev(
-    `document.querySelector('#dialog details.advanced').open = true; document.querySelector('#dialog [data-kind=github-authorize]').click()`,
-  );
-  await page.waitFor(`!!document.querySelector('#dialog form[data-owner-write][data-kind=github-authorize]')`, "authorize form");
-  check(
-    "github-authorize: labelled fields rebuild the exact typed payload",
-    (await dlg(`!d.querySelector('textarea[name=payload]') && d.querySelectorAll('.field input').length === 3`)) &&
-      (await ev(
-        `(() => { const f = document.querySelector('#dialog form[data-owner-write]'); f.querySelector('[data-path=repositoryId]').value = 'acme/mari'; f.querySelector('[data-path=expectedRepositoryId]').value = '4242'; const v = ownerFieldsValue(f); return typeof v.expectedRepositoryId === 'number' && v.repositoryId === 'acme/mari' && typeof v.expectedRevision === 'string'; })()`,
-      )),
-  );
-  await capture("owner-authorize");
-  await ev(`document.querySelector('#dialog').close()`);
-
-  // ---- Routines + history ----
-  await page.navigate(await kit.webUrl(id, "settings"));
-  await page.waitFor(`document.querySelector('#routines-button')?.hidden === false`, "project");
-  await ev(contrastLib);
-  for (const text of ["Daily summary of open PRs for the team", "Nightly dependency check"])
-    await rpc({ action: "schedule-create", id, atMs: Date.now() + 3_600_000, text });
-  const soon = await rpc({ action: "schedule-create", id, atMs: Date.now() + 1500, text: "Reply exactly HISTORY_SAMPLE" });
-  await rpc({ action: "schedule-enable", id, scheduleId: soon.id, enabled: true });
-  await kit.eventually(
-    async () =>
-      (await rpc({ action: "schedule-snapshot", id })).intents.length > 0 ||
-      (await rpc({ action: "schedule-snapshot", id, includeHistory: true })).intents.length > 0,
-    "a history intent",
-  );
-  await open(`document.querySelector('#routines-button').click()`, `!!document.querySelector('#dialog .list-row')`, "routines");
-  check(
-    "routines: plain title, tabs with counts, rows with On/Off chips, JSON only in Details",
-    await dlg(
-      `d.querySelector('h2').textContent === 'Schedules' && d.querySelectorAll('.skill-tabs button').length === 2 && d.querySelectorAll('.list-row').length >= 3 && d.querySelector('.state-chip') && ![...d.querySelectorAll('pre')].some(p => !p.closest('details')) && !${jargon}.test(d.innerText)`,
-    ),
-  );
-  await capture("routines");
-  await ev(`document.querySelector('#dialog [data-action=routine-confirm][data-kind=schedule][data-enabled=true]').click()`);
-  await page.waitFor(`/^Turn on/.test(document.querySelector('#dialog h2')?.textContent ?? '')`, "routine confirm");
-  check(
-    "routine confirm: Off -> On diff, hidden project confirm",
-    await dlg(
-      `/Off/.test(d.querySelector('.diff-side.before').innerText) && /On/.test(d.querySelector('.diff-side.after').innerText) && d.querySelector('form[data-routine-change] input[type=hidden][name=confirm]')`,
-    ),
-  );
-  await capture("routine-confirm");
-  await ev(`document.querySelector('#dialog form[data-routine-change] [type=submit]').click()`);
-  await page.waitFor(
-    `document.querySelector('#dialog h2')?.textContent === 'Schedules' || !document.querySelector('#dialog').open`,
-    "after toggle",
-  );
-  const enabledCount = (await rpc({ action: "schedule-snapshot", id })).schedules.filter(
-    (s) => s.enabled && /Daily summary|Nightly/.test(s.text),
-  ).length;
-  check("routine toggle applied only after confirmation", enabledCount === 1, enabledCount);
-  await open(
-    `(document.querySelector('#dialog').open ? 0 : document.querySelector('#routines-button').click()); document.querySelector('#dialog [data-lens=history]').click()`,
-    `document.querySelector('#dialog h2')?.textContent === 'Automation history'`,
-    "history",
-  );
-  check(
-    "history: runs/events tabs, readable rows, raw JSON collapsed",
-    await dlg(
-      `d.querySelectorAll('.skill-tabs button').length === 2 && ![...d.querySelectorAll('pre')].some(p => !p.closest('details') && !p.classList.contains('excerpt'))`,
-    ),
-  );
-  await capture("routine-history");
-  await ev(`document.querySelector('#dialog').close()`);
-
-  // ---- Lifecycle ----
-  await open(
-    `document.querySelector('[data-action=lifecycle-more]').click()`,
-    `!!document.querySelector('#dialog [data-action=lifecycle-confirm]')`,
-    "lifecycle",
-  );
-  check(
-    "lifecycle: plain choices with one-line consequences",
-    await dlg(
-      `d.querySelectorAll('.choice-card').length === 2 && /Archive/.test(d.innerText) && /Nothing in the repository/.test(d.innerText)`,
-    ),
-  );
-  await capture("lifecycle");
-  await ev(`document.querySelector('#dialog [data-operation=archive]').click()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Archive this project?'`, "archive confirm");
-  await capture("lifecycle-confirm");
-  await ev(`document.querySelector('#dialog [data-action=lifecycle-more]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog .choice-card')`, "back to choices");
-  check("lifecycle: Back keeps the project untouched", (await rpc({ action: "show", id })).project.archived !== true);
-  await ev(`document.querySelector('#dialog').close()`);
-
-  // A late Archive response cannot replace a dialog opened after it.
-  await ev(`(() => {
-    const original = window.fetch.bind(window);
-    window.__archiveFetch = original;
-    window.fetch = async (...args) => {
-      if (args[1]?.body?.includes('"archive-config"')) await new Promise(resolve => { window.__releaseArchive = resolve; });
-      return original(...args);
-    };
-    document.querySelector('[data-action=archive]').click();
-  })()`);
-  await page.waitFor(`document.querySelector('#dialog h2')?.textContent === 'Archive'`, "archive loading");
-  await open(
-    `document.querySelector('#settings-button').click()`,
-    `!!document.querySelector('#dialog [data-settings-form]')`,
-    "settings over archive",
-  );
-  await ev(`window.__releaseArchive(); window.fetch = window.__archiveFetch`);
-  await delay(200);
-  check(
-    "late Archive read leaves the newer Settings dialog alone",
-    await dlg(`!!d.querySelector('[data-settings-form]') && !d.querySelector('[data-archive-home]')`),
-  );
-  await ev(`document.querySelector('#dialog').close()`);
-
-  // ---- Usage, provider receipts, known PR ----
-  await page.navigate(await kit.webUrl(id, "observability"));
-  await page.waitFor(`!!document.querySelector('#usage-button')`, "usage button");
-  await ev(contrastLib);
-  await delay(1500);
-  await open(
-    `document.querySelector('#usage-button').click()`,
-    `document.querySelector('#dialog h2')?.textContent === 'Usage' && !!document.querySelector('#dialog .stats')`,
-    "usage",
-  );
-  check(
-    "usage: stat tiles, page-only note, raw breakdown collapsed",
-    await dlg(
-      `d.querySelectorAll('.stat').length >= 6 && /this page only/.test(d.innerText) && ![...d.querySelectorAll('pre')].some(p => !p.closest('details'))`,
-    ),
-  );
-  await capture("usage");
-  await ev(`document.querySelector('#dialog').close()`);
-  await page.navigate(await kit.webUrl(id, "settings"));
-  await page.waitFor(`!!document.querySelector('#provider-button')`, "settings");
-  await delay(1200);
-  await ev(contrastLib);
-  const key = "rec-1";
-  await ev(
-    `providerCache.set('${key}', { projectId, kind: 'reads', record: { scopeId: '22222222-2222-4222-8222-222222222222', conversationId: 1, taskId: 1, callId: 'c1', operation: 'ci', repositoryId: 'acme/mari', pullRequest: 7, head: '${"b".repeat(40)}', ci: { statusState: 'success', page: 1 } } }); providerRecord('${key}')`,
-  );
-  await delay(300);
-  await capture("provider-record");
-  await open(
-    `document.querySelector('#provider-button').click()`,
-    `document.querySelector('#dialog h2')?.textContent === 'GitHub receipts'`,
-    "provider list",
-  );
-  check(
-    "provider list: tabs with selected state, plain empty copy",
-    await dlg(`d.querySelectorAll('.skill-tabs button[aria-pressed=true]').length === 1 && /Nothing recorded yet/.test(d.innerText)`),
-  );
-  await capture("provider-list");
-  await ev(`document.querySelector('#dialog [data-action=provider-known]').click()`);
-  await page.waitFor(`!!document.querySelector('#dialog form[data-provider-known]')`, "known PR form");
-  check(
-    "known PR form: labelled fields, SHA pattern enforced",
-    await dlg(
-      `d.querySelector('h2').textContent === 'Check a specific pull request' && d.querySelector('[name=head]').pattern.length > 10`,
-    ),
-  );
-  await capture("provider-known");
-  await ev(`document.querySelector('#dialog').close()`);
-  await delay(200);
-  check(
-    "no leaked proposals after closing everything",
-    await ev(`settingsConfirmation === null && routineConfirmation === null && providerInspection === null`),
   );
 });

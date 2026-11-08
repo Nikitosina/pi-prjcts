@@ -5,12 +5,10 @@ export default {
     api.provide({
       vcs: {
         kind: "fake",
-        readHeadMarker: ".x",
         isRoot: () => false,
         changedFiles: async () => [],
         codeDiff: async () => ({}),
         workerState: async () => ({}),
-        readHeads: () => ({}),
         resolveContinuation: async () => ({}),
       },
     });

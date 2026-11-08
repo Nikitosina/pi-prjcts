@@ -41,3 +41,11 @@ Found by driving the web UI against a real coordinator (`openai-codex/gpt-6-luna
 25. The context ring looks like a loading spinner and shows no number.
 26. Rail lines wrap their time detail onto a ragged second line.
 27. The Needs-you card repeats the question title three times.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+Kept on the new client: C1-C4 (owner text stays the owner's; internal reports never render as owner messages; tool rows are shown on
+purpose, terminal-style), C5, L1 (`#feed` scrolls, composer in view), H2 (`#composer-input`; the model is in the status line), R2
+(`#workers`), R3/A1/A2/R3b (the worker view in `#focus-view`, Back and Escape), M1, L3 (composer hints on one row, the status line
+context item shows a percentage) and L2 (390 px).
+Retired with the classic layout: H1 (header Pause; lifecycle is in Settings → General), R1 (Needs-you card; questions are in the
+dock), R3's deep link, Steer and artifacts pane, K1/K2 (Knowledge tab tree and edit dialog; Memory replaced them).

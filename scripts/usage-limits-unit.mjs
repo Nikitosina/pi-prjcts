@@ -27,7 +27,6 @@ const fake = createServer((req, res) => {
 await new Promise((ok) => fake.listen(0, "127.0.0.1", ok));
 process.env.PI_PROJECTS_CURSOR_DASHBOARD = `http://127.0.0.1:${fake.address().port}`;
 const {
-  MIN_POLL_MS,
   MANUAL_COOLDOWN_MS,
   observeLimitHeaders,
   limitsSnapshot,
@@ -181,7 +180,7 @@ resetLimitsForTest();
 observeLimitHeaders("anthropic", { "anthropic-ratelimit-unified-5h-utilization": "abc" });
 observeLimitHeaders("openai", { "x-codex-primary-used-percent": "5", "x-codex-primary-window-minutes": "300" });
 observeLimitHeaders("anthropic", { "anthropic-ratelimit-unified-7d-utilization": "", "anthropic-ratelimit-unified-7d-reset": "1" });
-const none = await limitsSnapshot(3_000);
+const none = await limitsSnapshot(3_000, true);
 assert.equal(find(none, "claude").samples.length, 0);
 assert.equal(find(none, "claude").status, "no-data");
 assert.equal(find(none, "cursor").status, "unavailable");
@@ -195,7 +194,10 @@ writeFileSync(
   join(agent, "auth.json"),
   JSON.stringify({ cursor: { type: "oauth", access: jwt, refresh: "r", expires: Date.now() + 3600_000 } }),
 );
-const cursor = find(await limitsSnapshot(5_000), "cursor");
+// M1: a read never contacts Cursor, even with a sign-in on disk; only the refresh does.
+assert.equal(find(await limitsSnapshot(5_000), "cursor").samples.length, 0);
+assert.equal(seen.length, 0, "a plain read sends nothing");
+const cursor = find(await limitsSnapshot(5_000, true), "cursor");
 assert.deepEqual(
   cursor.samples.map(({ window, usedPercent, resetsAt }) => ({ window, usedPercent, resetsAt })),
   [{ window: "mo", usedPercent: 75.5, resetsAt: Date.parse("2026-11-01T00:00:00.000Z") }],
@@ -210,27 +212,28 @@ writeFileSync(
   join(agent, "auth.json"),
   JSON.stringify({ cursor: { access: `x.${Buffer.from(JSON.stringify({ sub: "s", exp: 1 })).toString("base64url")}.y` } }),
 );
-assert.equal(find(await limitsSnapshot(6_000), "cursor").status, "unavailable");
+assert.equal(find(await limitsSnapshot(6_000, true), "cursor").status, "unavailable");
 assert.equal(seen.length, 1);
 fake.close();
 
-// Poll cadence: with a failing source the endpoint is retried only after the backoff, never inside the 5-minute minimum.
+// M1/M7: reads are cache-only. Nothing is fetched by a read however much time passes, and an unread provider has no numbers.
 resetLimitsForTest();
 writeFileSync(join(dir, "fixture.json"), JSON.stringify({ claude: [{ window: "5h", usedPercent: 50, resetsAt: null }] }));
 process.env.PI_PROJECTS_LIMITS_FIXTURE = join(dir, "fixture.json");
-const first = await limitsSnapshot(10_000);
+const unread = find(await limitsSnapshot(10_000), "claude");
+assert.deepEqual([unread.samples.length, unread.status, unread.lastAttemptAt], [0, "no-data", null], "a read before any refresh is empty");
+const first = await limitsSnapshot(10_000, true);
 assert.equal(find(first, "claude").samples[0].source, "endpoint");
 writeFileSync(join(dir, "fixture.json"), JSON.stringify({ claude: [{ window: "5h", usedPercent: 80, resetsAt: null }] }));
-assert.equal(MIN_POLL_MS, 300_000);
 assert.equal(MANUAL_COOLDOWN_MS, 15_000);
-assert.equal(find(await limitsSnapshot(71_000), "claude").samples[0].usedPercent, 50, "no second poll after 60 s");
-assert.equal(find(await limitsSnapshot(309_000), "claude").samples[0].usedPercent, 50, "no second poll inside 5 min");
-assert.equal(find(await limitsSnapshot(311_000), "claude").samples[0].usedPercent, 80, "polls again after 5 min");
-// A fresh passive sample keeps the endpoint idle for the 5-minute window.
+for (const at of [71_000, 311_000, 3_600_000, 86_400_000])
+  assert.equal(find(await limitsSnapshot(at), "claude").samples[0].usedPercent, 50, `no poll from a read at ${at} ms`);
+assert.equal(find(await limitsSnapshot(86_400_000, true), "claude").samples[0].usedPercent, 80, "the refresh fetches");
+// A fresh passive sample still shows without any fetch.
 observeLimitHeaders("anthropic", { "anthropic-ratelimit-unified-5h-utilization": "0.9" }, Date.now());
 assert.equal(find(await limitsSnapshot(Date.now() + 1000), "claude").samples[0].usedPercent, 90);
 
-// Manual refresh: bypasses the minimum, the backoff and fresh header samples; rate-limited per provider; failure keeps the last numbers.
+// M4/M6 Manual refresh: fetches whenever pressed, once per click, rate-limited per provider; failure keeps the last numbers.
 resetLimitsForTest();
 let mode = "ok",
   hits = 0;
@@ -253,22 +256,25 @@ writeFileSync(
   JSON.stringify({ cursor: { type: "oauth", access: jwt, refresh: "r", expires: Date.now() + 3600_000 } }),
 );
 const T = 1_000_000_000;
-assert.equal(find(await limitsSnapshot(T), "cursor").samples[0].usedPercent, 10);
+assert.equal(find(await limitsSnapshot(T, true), "cursor").samples[0].usedPercent, 10);
 assert.equal(hits, 1);
-await limitsSnapshot(T + 60_000);
-assert.equal(hits, 1, "a normal snapshot inside 5 min does not poll");
+await limitsSnapshot(T + 3_600_000);
+assert.equal(hits, 1, "a read an hour later does not poll");
 mode = "fail";
 let refreshed = find(await limitsSnapshot(T + 60_000, true), "cursor");
-assert.equal(hits, 2, "manual refresh bypasses the 5-minute minimum");
+assert.equal(hits, 2, "manual refresh fetches a minute later");
 assert.equal(refreshed.samples[0].usedPercent, 10, "failure keeps the last numbers");
 assert.ok(refreshed.reason, "failure reason is reported");
 await limitsSnapshot(T + 61_000, true);
 assert.equal(hits, 2, "second click inside the 15 s cooldown is ignored");
-await limitsSnapshot(T + 62_000);
-assert.equal(hits, 2, "the failure backoff holds off a normal snapshot");
+await limitsSnapshot(T + 3_600_000);
+assert.equal(hits, 2, "M3 a failure never schedules a retry of its own");
 mode = "ok";
 refreshed = find(await limitsSnapshot(T + 60_000 + MANUAL_COOLDOWN_MS + 1, true), "cursor");
-assert.equal(hits, 3, "manual refresh bypasses the backoff after the cooldown");
+assert.equal(hits, 3, "manual refresh after a failure fetches once the cooldown passed");
+// Two clicks while one request is in flight share it.
+await Promise.all([limitsSnapshot(T + 120_000, true), limitsSnapshot(T + 120_000, true)]);
+assert.equal(hits, 4, "concurrent refreshes share one request");
 assert.equal(refreshed.reason, null);
 assert.equal(refreshed.samples[0].usedPercent, 10);
 flaky.close();

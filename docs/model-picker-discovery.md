@@ -37,7 +37,7 @@ Shell stdout and stderr go to `/dev/null`, including startup noise or tracing. A
 
 The launcher's values win for host identity and runtime controls, even when those values are absent:
 
-- All `PI_PROJECTS_*` controls, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_PACKAGE_DIR` and `PI_ARTIFACTS_DIR`.
+- All `PI_PROJECTS_*` controls, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_PACKAGE_DIR`, `PI_ARTIFACTS_DIR`, `PI_WORKSPACE_CACHE`, `PI_OWNER_CHECKOUT` and `PI_WORKSPACE_CACHE_ROOT`.
 - `HOME`, `USER`, `LOGNAME`, working-directory/shell bookkeeping variables, and `TMPDIR`/`TMP`/`TEMP`. In particular, shell changes cannot redirect the default project store or the Unix socket location.
 - Node preload, module lookup, IPC and debug controls: `NODE_OPTIONS`, `NODE_PATH`, `NODE_CHANNEL_FD`, `NODE_UNIQUE_ID`, `NODE_DEBUG` and `NODE_DEBUG_NATIVE`.
 

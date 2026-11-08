@@ -16,6 +16,8 @@ Owner enablement grants coordinators `projects_simulator_status`, `projects_simu
 
 Ownership and request receipts persist in the project's `simulator.json`. Disabling management keeps the clone and its data; deleting a clone keeps enablement so the coordinator can create a replacement. Uncertain or interrupted effects block further management instead of replaying operations. The owner can use **Inspect / acknowledge** after checking the simulator list. Acknowledgement retains matching recorded ownership, never adopts unknown devices or retries effects, and saves the previous receipt for inspection. Agents cannot acknowledge unknown outcomes. Project archive/deletion and host shutdown do not automatically erase simulators. Default slimming disables services that some app tests require, including push and iCloud; do not treat a slim-device run as verification of those features.
 
+The cleanup routine's plugin step erases idle owned clones, and, hourly and in that step, removes XcodeBuildMCP test products (`~/Library/Developer/XcodeBuildMCP/workspaces/*/test-products/*.xctestproducts`, 2-4 GB per simulator test run) that finished more than two hours ago, keeping each workspace's newest finished run for a rerun without building. XcodeBuildMCP alone keeps up to 100 of them for three days.
+
 ## Plugin seams
 
 - `coordinatorTools`: `projects_simulator_status`, `projects_simulator_action`, `projects_simulator_screenshot`, `projects_simulator_rotate` (extension `projects.coordinator-simulator`).

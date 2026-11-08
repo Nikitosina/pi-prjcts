@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,9 +11,9 @@ import { findVcsRoot } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
 import { coordinatorWorkspaceOwners } from "./coordinator-workspace-state.ts";
 
-/* Worktree lifecycle around the frozen isolation receipts: a per-project setup command after allocation (C4),
- * read-only PR-head snapshots for scouts/reviewers (C3), and safe cleanup of settled worktrees (C9).
- * Cleanup never forces, never deletes a branch, and keeps anything dirty, unpushed, active or with an open PR. */
+/* Worktree lifecycle around the frozen isolation receipts: a per-project setup command after allocation (C4)
+ * and safe cleanup of settled worktrees (C9). Cleanup never deletes a branch and keeps anything dirty, unpushed, active
+ * or with an open PR; a settled reader's worktree only has to be clean at the commit it was read at (C3). */
 
 type Run = { code: number; stdout: string; stderr: string };
 const PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -133,51 +132,6 @@ export async function worktreeSetup(input: {
     : `Worktree setup FAILED when this worktree was created: \`${record.command}\` exited ${record.exitCode}. Output tail:\n${record.output.slice(-1500)}\nFix or rerun it before relying on installed dependencies, and say so in your result.`;
 }
 
-// ---- C3: PR-head snapshots ----
-const REF = /^(?:pull\/[1-9][0-9]{0,8}|[0-9a-f]{7,40}|[A-Za-z0-9][A-Za-z0-9._/-]{0,199})$/;
-/** Fetches a branch, pull/<n> or SHA from origin into <controlRoot>/read-heads/<sha> (detached, deduplicated by commit). */
-export function readHeads(checkout: string, controlRoot: string, owner?: { projectId: string; project: () => Project }) {
-  // A project in a plugin checkout kind reads PR heads through that kind's snapshots instead of git fetch.
-  const kind = owner && existsSync(checkout) ? findVcsRoot(checkout)?.kind : undefined,
-    provider = kind && kind !== "git" ? plugins.vcsProvider(kind) : undefined;
-  if (owner && provider) return provider.readHeads({ checkout, controlRoot, projectId: owner.projectId, project: owner.project });
-  let queue: Promise<unknown> = Promise.resolve();
-  async function ensure(ref: string): Promise<{ root: string; sha: string }> {
-    if (!REF.test(ref) || ref.includes("..") || ref.includes("//") || ref.endsWith("/") || ref.endsWith(".lock") || ref.includes("@{"))
-      throw new Error(`Invalid ref ${JSON.stringify(ref)}: use a branch name, pull/<number> or a commit SHA`);
-    const operation = queue.then(async () => {
-      const local = `refs/pi-read/${createHash("sha256").update(ref).digest("hex").slice(0, 16)}`;
-      const source = ref.startsWith("pull/") ? `refs/${ref}/head` : /^[0-9a-f]{40}$/.test(ref) ? ref : `refs/heads/${ref}`;
-      const fetched = await git(checkout, "fetch", "--no-tags", "--quiet", "origin", `+${source}:${local}`);
-      let sha = fetched.code === 0 ? (await git(checkout, "rev-parse", "--verify", `${local}^{commit}`)).stdout.trim() : "";
-      if (!/^[0-9a-f]{40}$/.test(sha))
-        sha = (await git(checkout, "rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`)).stdout.trim();
-      if (!/^[0-9a-f]{40}$/.test(sha))
-        throw new Error(`Ref ${ref} was not found on origin or locally${fetched.stderr ? `: ${fetched.stderr.trim().slice(-300)}` : ""}`);
-      return { root: await snapshot(sha), sha };
-    });
-    queue = operation.catch(() => {});
-    return operation;
-  }
-  async function snapshot(sha: string): Promise<string> {
-    const dir = join(controlRoot, "read-heads");
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const root = join(realpathSync(dir), sha);
-    if (existsSync(join(root, ".git"))) return root;
-    const added = await git(checkout, "worktree", "add", "--detach", "--quiet", root, sha);
-    if (added.code !== 0)
-      throw new Error(`Could not create a read-only snapshot of ${sha.slice(0, 12)}: ${added.stderr.trim().slice(-300)}`);
-    return root;
-  }
-  /** Recreates a cleaned-up snapshot for a thread that is read again later. */
-  async function restore(sha: string): Promise<string> {
-    const operation = queue.then(() => snapshot(sha));
-    queue = operation.catch(() => {});
-    return operation;
-  }
-  return { ensure, restore };
-}
-
 // ---- C9: inventory and cleanup ----
 export type WorktreeItem = {
   kind: "worker" | "read-head" | "coordinator";
@@ -195,6 +149,7 @@ export type WorktreeItem = {
   leaseOwner?: string;
   entry?: string;
   mountLabel?: string;
+  /** A settled reader's worktree the provider may remove past its unpublished base commit. */ atBase?: true;
 };
 export type WorktreeInventory = { items: WorktreeItem[]; reclaimableKb: number; totalKb: number };
 
@@ -239,9 +194,18 @@ export async function worktreeInventory(input: {
 }): Promise<WorktreeInventory> {
   const { live, readers } = await input.root.commit(async (tx) => {
     const doc = await tx.doc(Jobs, input.root.id);
-    return { live: new Set(liveAgentIds(doc)), readers: liveAgentIds(doc, true).length };
+    return {
+      live: new Set(liveAgentIds(doc)),
+      readers: new Set(
+        Object.values(doc.agents)
+          .filter((agent) => agent.role !== "worker")
+          .map((agent) => agent.id),
+      ),
+    };
   }, BACKGROUND_CONTEXT);
   const busy = (threadId: string) => live.has(threadId);
+  // A reader's worktree holds no work of its own: once the reader ended, clean and at its commit is enough (R3).
+  const settledReader = (threadId: string | null) => threadId !== null && readers.has(threadId) && !busy(threadId);
   const items: WorktreeItem[] = [];
   const coordinators = await coordinatorWorkspaceOwners(input.root);
   for (const receipt of await workspaceReceipts(input.root)) {
@@ -269,8 +233,10 @@ export async function worktreeInventory(input: {
       const provider = plugins.workspaceProvider(receipt.scope.provider);
       if (!provider) continue;
       const facts = await provider.workerFacts({ project: input.project, root: input.root, receipt, busy });
-      const reasons =
-        facts.atBase && facts.threadId && input.untouched && (await input.untouched(facts.threadId))
+      const reader = settledReader(facts.threadId) && facts.atBase === true;
+      const reasons = reader
+        ? []
+        : facts.atBase && facts.threadId && input.untouched && (await input.untouched(facts.threadId))
           ? facts.reasons.filter((reason) => !reason.startsWith("open PR"))
           : facts.reasons;
       items.push({
@@ -289,6 +255,7 @@ export async function worktreeInventory(input: {
         leaseOwner: receipt.scope.owner,
         entry: receipt.scope.workspaceName,
         ...(provider.mountLabel ? { mountLabel: provider.mountLabel } : {}),
+        ...(reader ? { atBase: true } : {}),
       });
       continue;
     }
@@ -300,6 +267,24 @@ export async function worktreeInventory(input: {
     const status = await git(path, "status", "--porcelain=v1", "--untracked-files=all");
     if (status.code !== 0) reasons.push("git status failed");
     else if (status.stdout.trim()) reasons.push("uncommitted or untracked changes");
+    if (settledReader(threadId)) {
+      if ((await git(path, "rev-parse", "HEAD")).stdout.trim() !== receipt.scope.baseRevision)
+        reasons.push("moved off the commit it was read at");
+      items.push({
+        kind: "worker",
+        path,
+        threadId,
+        branch: receipt.scope.branch,
+        sizeKb: await sizeKb(path),
+        removable: reasons.length === 0,
+        reasons,
+        setup: null,
+        pullRequests: [],
+        intentId: receipt.intentId,
+        checkout: receipt.scope.ownerCheckout,
+      });
+      continue;
+    }
     const current = (await git(path, "rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
     const branches = [...new Set([receipt.scope.branch, ...(current && current !== "HEAD" ? [current] : [])])];
     const refs: string[] = [];
@@ -349,34 +334,22 @@ export async function worktreeInventory(input: {
       checkout: receipt.scope.ownerCheckout,
     });
   }
+  // Snapshots from before readers got their own worktrees (K10); a plugin's own snapshots are its cleanup step's to remove.
   const heads = join(input.controlRoot, "read-heads");
   for (const name of existsSync(heads) ? readdirSync(heads) : []) {
     const path = join(realpathSync(heads), name);
-    // Read-only agents are not tied to a path in the Jobs record: any live scout or reviewer keeps every read-head.
-    const reasons = readers ? ["a scout or reviewer reading it has queued or running work"] : [];
-    const pluginHead = plugins.vcsProviders().find((vcs) => existsSync(join(path, vcs.readHeadMarker))),
-      workspace = pluginHead && plugins.workspaceProvider(pluginHead.kind);
-    if (!workspace && !existsSync(join(path, ".git"))) continue; // a snapshot of a provider that is not loaded: kept, never measured or removed
-    const owned = workspace ? workspace.readHeadEntry(input.project, path) : undefined;
+    if (!existsSync(join(path, ".git")) || findVcsRoot(path)?.kind !== "git") continue;
     items.push({
       kind: "read-head",
       path,
       threadId: null,
       branch: null,
-      sizeKb: await sizeKb(path, Boolean(workspace?.virtualMount)),
-      removable: reasons.length === 0,
-      reasons,
+      sizeKb: await sizeKb(path),
+      removable: true,
+      reasons: [],
       setup: null,
       pullRequests: [],
       checkout: input.project.cwd,
-      ...(workspace && owned
-        ? {
-            provider: workspace.id,
-            leaseOwner: owned.leaseOwner,
-            entry: owned.entry,
-            ...(workspace.mountLabel ? { mountLabel: workspace.mountLabel } : {}),
-          }
-        : {}),
     });
   }
   return {
@@ -410,7 +383,7 @@ export async function cleanupWorktrees(input: {
     if (item.provider) {
       const provider = plugins.workspaceProvider(item.provider);
       const gone = provider
-        ? await provider.remove({ entry: item.entry!, leaseOwner: item.leaseOwner! })
+        ? await provider.remove({ entry: item.entry!, leaseOwner: item.leaseOwner!, ...(item.atBase ? { atBase: true as const } : {}) })
         : { ok: false as const, error: `workspace provider plugin "${item.provider}" is not loaded` };
       if (!gone.ok) {
         failed.push({ path: item.path, error: gone.error });

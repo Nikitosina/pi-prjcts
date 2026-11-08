@@ -22,3 +22,18 @@ Live host evidence (read-only): `notifications.json` holds 66 notices since 07:1
 15. Any other feed failure is silent too (no state, no retry message).
 16. The permission prompt was dismissed (answer `default`) or blocked quietly: the toggle flips back to "Off." with no reason.
 17. The browser has permission but the OS suppresses it (macOS notification settings for the browser, Focus): the page cannot detect this; there is no way to test delivery.
+
+## After the classic inbox (2026-11-04)
+
+The inbox at `/` does not show browser notifications (docs/classic-retirement.md lists the gap; Telegram delivers the same feed).
+`browser-notify-e2e.mjs` now checks the host feed only: 2 and 7 (each notice once, named by project and chat, clipped), 3/10/14 (a
+restart replays nothing, keeps the address and token, and the next notice follows the cursor), 9 (bounded) and 11. Cases 1, 4-6, 8,
+12, 13, 15 and 16 were about the classic page's notifications and toggle and are retired with it; 17 stays untestable.
+Known: Settings → Notifications in the new client offers to allow browser alerts, but nothing in it shows one yet.
+
+## Load failure (found 2026-11-04, full suite with 6 jobs)
+`no long result notice`: the test sent MARK-LONG to Main while the MARK-SHIP Job's worker could still be running. The notifier
+keeps a chat's results quiet while that chat has running work (`src/notify.ts`, "Background turns stay quiet while work runs"), so
+when the worker was slow the long reply was consumed without a notice, as designed. Test race, not a missed event: the script now
+waits for the Job's final-report notice (the event N7 already asserts) before sending MARK-LONG. The quiet-while-working rule is
+unchanged and the long-reply check still requires its own notice.

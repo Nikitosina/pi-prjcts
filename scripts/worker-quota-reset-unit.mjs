@@ -1,6 +1,6 @@
 // Passive reset metadata must delay recovery until every exhausted window resets.
 import assert from "node:assert/strict";
-import { observeLimitHeaders, quotaResetAt, resetLimitsForTest, MIN_POLL_MS } from "../src/usage-limits.ts";
+import { observeLimitHeaders, quotaResetAt, resetLimitsForTest, QUOTA_SAMPLE_FRESH_MS } from "../src/usage-limits.ts";
 const now = Date.now(),
   five = now + 3600_000,
   seven = now + 86400_000;
@@ -18,7 +18,7 @@ observeLimitHeaders(
 );
 assert.equal(quotaResetAt("anthropic/model", now), seven);
 assert.equal(quotaResetAt("fake/model", now), undefined);
-assert.equal(quotaResetAt("anthropic/model", now + MIN_POLL_MS + 1), undefined);
+assert.equal(quotaResetAt("anthropic/model", now + QUOTA_SAMPLE_FRESH_MS + 1), undefined);
 assert.equal(quotaResetAt("anthropic/model", seven + 1), undefined);
 resetLimitsForTest();
 observeLimitHeaders(

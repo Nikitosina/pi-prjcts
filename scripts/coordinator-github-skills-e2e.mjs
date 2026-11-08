@@ -344,11 +344,6 @@ const key = async (s, key, code, vk, extra = {}) => {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: vk }, s);
 };
 const typeText = (s, value) => send("Input.insertText", { text: value }, s);
-const menu = (s) =>
-  evaluate(
-    `(() => { const m = document.querySelector('#skill-menu'); return { open: !!m && !m.hidden, names: [...m.querySelectorAll('.skill-option .skill-name')].map(n => n.innerText), active: m.querySelector('.skill-option.active .skill-name')?.innerText ?? null, value: document.querySelector('#compose textarea').value }; })()`,
-    s,
-  );
 try {
   await eventually(async () => {
     if (hostEnded) throw Error("Host exited");
@@ -381,8 +376,8 @@ try {
     plainId = await setup("No GitHub", plain);
   const first = await rpc({ action: "owner-setup-snapshot", id });
   await rpc({ action: "workspace-quick-grant", id, confirm: id, expectedRevision: first.workspaceRevision });
-  const second = await rpc({ action: "owner-setup-snapshot", id });
-  await rpc({ action: "github-quick-authorize", id, confirm: id, expectedRevision: second.githubRevision });
+  // create connects GitHub one-click by itself (docs/ui2-contract.md, create).
+  if (!(await rpc({ action: "owner-setup-snapshot", id })).github?.length) throw Error("create did not connect GitHub");
   const ask = async (project, value) => {
     const job = await rpc({ action: "message", id: project, text: value });
     const done = await settle(project, job);
@@ -467,7 +462,6 @@ try {
   const web = await rpc({ action: "web" });
   const launch = new URL(web.url);
   launch.searchParams.set("project", id);
-  launch.searchParams.set("tab", "coordinator");
   startChrome();
   const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
@@ -475,36 +469,47 @@ try {
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   await waitFor(
-    `document.querySelector('#title')?.innerText === 'Mari GH' && document.querySelector('#messages').innerText.includes('Done MARK-GHDENY')`,
+    `document.body.dataset.ready === "1" && document.querySelector('#feed').innerText.includes('Done MARK-GHDENY')`,
     s,
     "project loaded",
   );
 
-  // Tool rows read as actions (failure 7).
-  const labels = await evaluate(`[...document.querySelectorAll('#messages .tool-label')].map(n => n.innerText)`, s);
-  for (const want of [
-    "Read GitHub #95",
-    "Searched GitHub for “generic”",
-    "Created GitHub issue “Expand generic flow sources”",
-    "Commented on GitHub #95",
-    "Updated GitHub #95",
-    "Closed GitHub #95",
-    "Reopened GitHub #95",
-  ])
-    if (!labels.includes(want)) throw Error(`Missing tool label ${want}: ` + JSON.stringify(labels));
-  if (labels.some((l) => /projects_/.test(l))) throw Error("Raw tool name shown");
-  result.checks.push("G7 GitHub tool rows show human labels with issue numbers");
+  // GitHub tool rows in the inbox at `/` (G7: the classic human labels were retired; rows show the tool and its arguments).
+  // Load every turn (Show earlier), then open the folded runs of two or more calls.
+  for (
+    let i = 0;
+    i < 20 && (await evaluate(`(b => (b ? (b.click(), true) : false))(document.querySelector('#feed [data-earlier]'))`, s)) !== false;
+    i++
+  )
+    await delay(400);
+  for (let i = 0; i < 40; i++) {
+    const closed = await evaluate(
+      `(b => (b ? (b.click(), true) : false))(document.querySelector('#feed .tool-group:not(.open) .group-head'))`,
+      s,
+    );
+    if (closed === false) break;
+    await delay(100);
+  }
+  const rows = await evaluate(
+    `[...document.querySelectorAll('#feed .tool-row')].map(n => ({ tool: n.dataset.tool, status: n.dataset.status, text: n.querySelector('.tool-head').innerText }))`,
+    s,
+  );
+  const github = rows.filter((row) => /^projects_github_/.test(row.tool));
+  for (const tool of ["projects_github_issue_read", "projects_github_issues", "projects_github_issue_write"])
+    if (!github.some((row) => row.tool === tool)) throw Error(`Missing tool row ${tool}: ` + JSON.stringify(rows));
+  if (!github.some((row) => row.status === "error") || !github.some((row) => row.status === "ok"))
+    throw Error("GitHub rows do not show both outcomes: " + JSON.stringify(github));
+  result.checks.push("G7 GitHub tool rows appear in the transcript with their outcome");
   await shot("01-github-chain", s);
 
-  // Global "/" shortcut still focuses the composer without opening the picker (failure 10).
+  // Global "/" shortcut still focuses an empty composer (failure 10).
   await evaluate(`document.activeElement?.blur()`, s);
   await key(s, "/", "Slash", 191, { text: "/" });
   const shortcut = await evaluate(
-    `({ focused: document.activeElement === document.querySelector('#compose textarea'), value: document.querySelector('#compose textarea').value })`,
+    `({ focused: document.activeElement === document.querySelector('#composer-input'), value: document.querySelector('#composer-input').value })`,
     s,
   );
-  if (!shortcut.focused || shortcut.value !== "" || (await menu(s)).open)
-    throw Error("Global / shortcut changed: " + JSON.stringify(shortcut));
+  if (!shortcut.focused || shortcut.value !== "") throw Error("Global / shortcut changed: " + JSON.stringify(shortcut));
   result.checks.push("S10 the global / shortcut still focuses an empty composer");
 
   result.httpErrors = result.httpErrors.filter((e) => (e.status !== 400 && e.status !== 500) || !e.url.endsWith("/api"));

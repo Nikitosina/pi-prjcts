@@ -25,3 +25,12 @@ Observed on Mari (2026-10-06 16:54, 16:57): two coordinator turns failed with `W
 - D6 Reload loses the dismissal (kept per tab session), or it leaks across projects.
 - D7 ✕ on #error hides it, but a different later error stays hidden.
 - D8 The ✕ glyph is low-contrast or overlaps long text.
+
+## The inbox at `/` (classic inbox retired 2026-11-04)
+- S4 A failed coordinator turn shows nothing in the new client: no error text and no Retry (the classic warning bar was the only
+  place). Expected: the transcript ends with a failure row for the newest failed or interrupted turn of this chat (after the last
+  settled one), carrying the provider error and a Retry button. (Red: artifacts/only-inbox/red-coordinator-stability-failure-row.json.)
+- S5 Retry resends the same text to the same chat exactly once (a double click must not send twice).
+- S6 A later success removes the failure row. S10 a later failure replaces it.
+- S7/S8 read the status line's context item (the classic composer meter and its popup are retired).
+- S9/S11 (✕ on the classic warning rows and error box) are retired with them.

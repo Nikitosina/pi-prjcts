@@ -6,6 +6,7 @@ import {
   cpuPercent,
   sumCpuTimes,
   statfsPercent,
+  statfsFreeGb,
   roundGb,
   parseMeminfoUsedBytes,
 } from "../src/machine-status.ts";
@@ -53,6 +54,9 @@ assert.equal(cpuPercent(after, before), null);
 assert.equal(statfsPercent({ blocks: 1000, bfree: 400, bavail: 400 }), 60);
 assert.equal(statfsPercent({ blocks: 1000, bfree: 450, bavail: 400 }), 58);
 assert.equal(statfsPercent({ blocks: 0, bfree: 0, bavail: 0 }), null);
+// Free space is what a non-root process may still write: bavail blocks of bsize bytes.
+assert.equal(statfsFreeGb({ bavail: 12_500_000, bsize: 4096 }), 47.7);
+assert.equal(statfsFreeGb({ bavail: 0, bsize: 0 }), null);
 
 assert.equal(parseMeminfoUsedBytes("MemTotal:       16000000 kB\nMemAvailable:    4000000 kB\n"), 12000000 * 1024);
 assert.equal(parseMeminfoUsedBytes("MemTotal: 1 kB\n"), null);

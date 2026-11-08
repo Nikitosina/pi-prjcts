@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import type { Project, WorkspaceAuthorization } from "./state.ts";
 import { findVcsRoot } from "./vcs.ts";
 import { plugins } from "./plugins.ts";
+import { currentWorktreeRoot } from "./archive-host.ts";
 import type { QuickWorkspacePreview } from "./plugin-types.ts";
 export type { QuickWorkspacePreview } from "./plugin-types.ts";
 
@@ -69,10 +70,14 @@ export function grantWorkspace(input: {
 }): { project: Project; scope: WorkspaceCatalogEntry } {
   if (input.provider !== "github") throw new Error("New workspace grants require the github provider");
   const checkout = realpathSync(input.ownerCheckout);
-  const root = realpathSync(input.approvedRoot);
+  // A carried project keeps its stored root inside the old home (part of the fingerprint); the folder checked is the one the host uses.
+  const stored = input.project.workspaceAuthorization?.repositories.find((item) => item.repositoryId === input.repositoryId)?.approvedRoot;
+  const carried = stored === input.approvedRoot && currentWorktreeRoot(input.project.id, stored) !== stored;
+  const root = carried ? stored : realpathSync(input.approvedRoot);
+  const used = carried ? currentWorktreeRoot(input.project.id, stored) : root;
   if (checkout !== resolve(input.project.cwd)) throw new Error("Owner checkout must equal the project workspace");
-  if (resolve(root) === resolve(checkout)) throw new Error("Approved root must be distinct from the owner checkout");
-  if (!statSync(root).isDirectory()) throw new Error("Approved root must be a directory");
+  if (resolve(used) === resolve(checkout)) throw new Error("Approved root must be distinct from the owner checkout");
+  if (!statSync(used).isDirectory()) throw new Error("Approved root must be a directory");
   const gitEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const actualRoot = execFileSync("git", ["-C", checkout, "rev-parse", "--show-toplevel"], { encoding: "utf8", env: gitEnv }).trim();
   if (resolve(actualRoot) !== checkout) throw new Error("Owner checkout is not a Git repository");

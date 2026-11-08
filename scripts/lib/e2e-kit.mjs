@@ -122,10 +122,10 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         ? "coordinator"
         : systemText.includes("Review the pinned candidate")
           ? "reviewer"
-          : tools.includes("projects_verify_run")
-            ? "verifier"
-            : tools.includes("job")
-              ? "worker"
+          : tools.includes("job")
+            ? "worker"
+            : tools.includes("projects_verify_run")
+              ? "verifier"
               : tools.includes("code_read")
                 ? "scout"
                 : tools.includes("bash")
@@ -149,8 +149,9 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         userLength: user.length,
         tools,
         system,
+        reasoning: input.reasoning_effort ?? null,
       });
-      const out = await handler({ role, model: input.model, user, results, tools, system, msgs });
+      const out = await handler({ role, model: input.model, user, results, tools, system, msgs, request: input });
       // Async iterables let browser tests hold a stream open until an interaction finishes.
       if (out?.[Symbol.asyncIterator]) {
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -436,13 +437,12 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     };
     return page;
   };
-  /** Settings tab URL of a project in the owned host's browser UI. */
-  kit.webUrl = async (id, tab = "settings") => {
+  /** The inbox at `/` with a project selected (optionally one of its chats), in the owned host's browser UI. */
+  kit.webUrl = async (id, chatId) => {
     const web = await kit.rpc({ action: "web" });
     const url = new URL(web.url);
     url.searchParams.set("project", id);
-    url.searchParams.set("tab", tab);
-    url.searchParams.set("e2e", "1");
+    if (chatId && chatId !== "main") url.searchParams.set("chat", chatId);
     return url.toString();
   };
 

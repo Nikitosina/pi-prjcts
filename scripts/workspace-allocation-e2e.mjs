@@ -9,8 +9,9 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceIsolation } from "../src/workspace-isolation.ts";
-import { currentWorktreeRoot } from "../src/durable-workspace-binding.ts";
-import { archiveHome } from "../src/archive-host.ts";
+import { archiveHome, currentWorktreeRoot } from "../src/archive-host.ts";
+import { grantWorkspace, trustedOwner } from "../src/workspace-authorization.ts";
+import { commandProfilesSnapshot, prepareCommandProfile } from "../src/command-profiles.ts";
 import { projectDir } from "../src/state.ts";
 
 const id = randomUUID(),
@@ -192,6 +193,65 @@ try {
     "an approved root in the old home maps to this host's folder",
   );
   check(currentWorktreeRoot(gitProject, fixture) === fixture, "any other approved root is used as granted");
+  // H1: the old home is gone; a carried grant still takes a new scope and keeps its stored root.
+  writeFileSync(join(process.env.PI_PROJECTS_HOME, "archive.json"), JSON.stringify({ home: join(fixture, "removed-old-home") }));
+  const gone = join(archiveHome(), gitProject, "worktrees");
+  check(!existsSync(gone), "the old home does not exist");
+  const carriedProject = {
+    id: gitProject,
+    name: "Carried",
+    cwd: owner,
+    workspaceAuthorization: {
+      version: 1,
+      provider: "github",
+      owner: trustedOwner(),
+      repositories: [
+        {
+          repositoryId: "carried/repo",
+          provider: "github",
+          ownerCheckout: owner,
+          approvedRoot: gone,
+          fileOwnershipPrefix: "src",
+          sharedObjectStore: null,
+        },
+      ],
+      scopes: [],
+    },
+  };
+  const regranted = grantWorkspace({
+    project: carriedProject,
+    repositoryId: "carried/repo",
+    provider: "github",
+    ownerCheckout: owner,
+    approvedRoot: gone,
+    fileOwnershipPrefix: "src",
+    files: ["src/a.ts"],
+    baseRevision: run("/usr/bin/git", ["rev-parse", "HEAD"], owner).trim(),
+  });
+  check(
+    regranted.project.workspaceAuthorization.repositories[0].approvedRoot === gone &&
+      regranted.project.workspaceAuthorization.scopes.length === 1,
+    "H1 a carried grant takes a new scope after the old home is removed and keeps its stored root",
+  );
+  // H2: a command profile of that project is checked against the folder the host uses, not the removed one.
+  const profiled = await prepareCommandProfile(regranted.project, {
+    id: gitProject,
+    confirm: gitProject,
+    expectedRevision: commandProfilesSnapshot(regranted.project).revision,
+    profile: {
+      id: randomUUID(),
+      label: "List",
+      repositoryId: "carried/repo",
+      scopeIds: [regranted.scope.id],
+      executable: "/bin/ls",
+      arguments: [],
+      effect: "workspace",
+      timeoutMs: 5000,
+      maxOutputBytes: 4096,
+      enabled: true,
+    },
+  });
+  check(profiled.program.path === "/bin/ls", "H2 a command profile is accepted after the old home is removed");
   await h.close(BACKGROUND_CONTEXT);
   save(); // Provider-plugin backends are tested in their own repositories.
 } catch (error) {

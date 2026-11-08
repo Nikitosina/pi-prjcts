@@ -1,4 +1,4 @@
-// Browser E2E: per-project context window / auto-compaction settings and "Compact now" (C8).
+// Browser E2E: per-project context window / auto-compaction settings and "Compact now" (C8), in Settings → Context of the inbox at `/`.
 // Isolated host, local fake model (128k catalog window), headless Chrome. Failure cases: scripts/context-settings-failures.md.
 import { kit, delay } from "./notify-kit.mjs";
 
@@ -47,15 +47,39 @@ try {
     view.context,
   );
 
-  // X1/X6/X7: set the settings through the Settings card.
+  // X1/X6/X7: set the settings in Settings → Context of the inbox at `/`: the auto mark by keyboard, window and keep under Advanced.
   const web = await rpc({ action: "web" }),
     url = new URL(web.url);
   url.searchParams.set("project", id);
-  url.searchParams.set("tab", "settings");
   const s = await openPage(url.toString());
-  await waitFor(`!!document.querySelector('#context-settings #context-window')`, s, "context card");
+  await waitFor(`document.body.dataset.ready === "1"`, s, "inbox");
+  await evaluate(`document.querySelector('[data-cmd="settings"]').click()`, s);
+  await waitFor(
+    `document.querySelector('#settings').open && !!document.querySelector('#settings nav [data-section="context"]')`,
+    s,
+    "settings",
+  );
+  await evaluate(`document.querySelector('#settings nav [data-section="context"]').click()`, s);
+  await waitFor(`!!document.querySelector('#settings .mark.auto') && !!document.querySelector('#ctx-window')`, s, "context section");
+  for (let i = 0; i < 6; i++) {
+    await evaluate(`document.querySelector('#settings .mark.auto').focus()`, s);
+    await send(
+      "Input.dispatchKeyEvent",
+      { type: "keyDown", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37, modifiers: 8 },
+      s,
+    );
+    await send(
+      "Input.dispatchKeyEvent",
+      { type: "keyUp", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37, modifiers: 8 },
+      s,
+    );
+  }
+  await eventually(
+    async () => (await rpc({ action: "settings-snapshot", id })).values.context?.thresholdPercent === 50,
+    "threshold not saved from the auto mark",
+  );
   await evaluate(
-    `(() => { const set = (q, v) => { document.querySelector(q).value = v; }; set('#context-window', '30000'); set('#context-threshold', '50'); document.querySelector('#context-threshold').dispatchEvent(new Event('input', { bubbles: true })); set('#context-keep', '2000'); document.querySelector('#context-auto').checked = true; document.querySelector('[data-action="context-save"]').click(); })()`,
+    `(() => { document.querySelector('#settings details.small-field').open = true; document.querySelector('#ctx-window').value = '30000'; document.querySelector('#ctx-keep').value = '2000'; document.querySelector('#ctx-save').click(); })()`,
     s,
   );
   await eventually(
@@ -64,8 +88,8 @@ try {
   );
   const saved = (await rpc({ action: "settings-snapshot", id })).values.context;
   check(
-    "X1 Settings card saves window, auto-compact, threshold and keep-recent",
-    JSON.stringify(saved) === JSON.stringify({ autoCompact: true, contextWindow: 30000, thresholdPercent: 50, keepRecentTokens: 2000 }),
+    "X1 Settings → Context saves window, auto-compact, threshold and keep-recent",
+    saved.autoCompact === true && saved.contextWindow === 30000 && saved.thresholdPercent === 50 && saved.keepRecentTokens === 2000,
     saved,
   );
   view = await show();
@@ -75,14 +99,8 @@ try {
     view.context,
   );
   check("X8 another project keeps the catalog window", (await rpc({ action: "show", id: other })).context.window === 128000);
-  await delay(400);
-  await evaluate(`document.querySelector('#context-card').scrollIntoView()`, s);
-  await delay(200);
+  await waitFor(`/auto 50%/.test(document.querySelector('#settings .mark.auto')?.innerText ?? '')`, s, "mark at 50%");
   await shot("01-context-settings", s);
-  check(
-    "X1 card summary shows window and threshold",
-    /30,000 tokens · compacts at 50%/.test(await evaluate(`document.querySelector('#context-summary').innerText`, s)),
-  );
 
   // X2: invalid values refused.
   const rev = async () => (await rpc({ action: "settings-snapshot", id })).revision;
@@ -206,22 +224,16 @@ try {
     context: view.context,
   });
 
-  // X14/X16/X17: Compact now from the context ring in the chat.
-  const chatUrl = new URL(web.url);
-  chatUrl.searchParams.set("project", id);
-  await send("Page.navigate", { url: chatUrl.toString() }, s);
-  await waitFor(`!!document.querySelector('#compose .context-popup [data-action="compact-now"]')`, s, "compact button in the ring");
-  await evaluate(`(() => { const meter = document.querySelector('#compose .context-meter'); meter.focus(); })()`, s);
-  await delay(300);
-  await shot("02-context-ring-compact", s);
+  // X14/X16/X17: Compact now from Settings → Context.
+  await waitFor(`!!document.querySelector('#compact-now')`, s, "compact button");
   let open;
   brain.hold = new Promise((ok) => {
     open = ok;
   });
-  await evaluate(`document.querySelector('#compose .context-popup [data-action="compact-now"]').click()`, s);
+  await evaluate(`document.querySelector('#compact-now').click()`, s);
   await eventually(async () => brain.summaries.length === 2, "Compact now did not start a summary");
   check("X17 a second Compact now while compacting is refused", await fails(() => rpc({ action: "compact", id }), /already compacting/));
-  await waitFor(`/compacting/i.test(document.querySelector('#compose .context-popup').innerText)`, s, "ring shows compacting");
+  await shot("02-compacting", s);
   open();
   brain.hold = null;
   await eventually(async () => {
@@ -229,11 +241,10 @@ try {
     return !c.compacting && c.tokens < 15000;
   }, "context did not drop after Compact now");
   check(
-    "X14/X16 Compact now (ring) summarizes the chat while auto-compact is off; the meter drops",
+    "X14/X16 Compact now (Settings → Context) summarizes the chat while auto-compact is off; the meter drops",
     brain.summaries.length === 2,
     (await show()).context,
   );
-  await waitFor(`!/compacting/i.test(document.querySelector('#compose .context-popup').innerText)`, s, "ring idle again");
 
   // X15: paused project and archived/short chats.
   const chat = await rpc({ action: "chat-create", id, title: "Short" });
