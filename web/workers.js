@@ -133,7 +133,9 @@ async function loadLastTools(gen) {
     .filter((worker) => worker.working)
     .slice(0, 4);
   for (const worker of running) {
-    const page = await call("thread-history", { id: state.projectId, threadId: worker.id, limit: 8 }).catch(() => null);
+    const page = await call("thread-history", { id: state.projectId, threadId: worker.id, limit: 8, messageText: "full" }).catch(
+      () => null,
+    );
     if (stale(gen) || !page) return;
     const last = page.items.findLast((item) => item.kind === "tool-call");
     if (last) lastTools.set(worker.id, { name: last.name, args: oneLine(last.argsPreview) });
@@ -242,7 +244,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     node.scrollTop = node.scrollHeight;
   };
   const load = async () => {
-    const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200 }).catch((error) => {
+    const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }).catch((error) => {
       if (alive()) node.innerHTML = `<p class="muted">${esc(error.message)}</p>`;
       return null;
     });

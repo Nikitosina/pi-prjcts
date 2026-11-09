@@ -37,7 +37,7 @@ export async function loadChat() {
           id = state.projectId,
           entries = state.live?.entries ?? 0;
         if (!id) return;
-        const [view] = await Promise.all([call("show", { id, ...chatArgs() }), loadRecentMemory().catch(fail)]);
+        const [view] = await Promise.all([call("show", { id, ...chatArgs(), messageText: "full" }), loadRecentMemory().catch(fail)]);
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
@@ -287,7 +287,7 @@ function itemHtml(item, who = "Coordinator") {
   if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
   if (item.kind !== "message") return "";
   const text = item.text?.trim() ? `<div class="prose">${markdown(item.text)}</div>` : "";
-  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}${item.truncated ? `<p class="muted small">Message shortened in this view.</p>` : ""}</article>` : ""}`;
+  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
 }
 function thinkingHtml(text, key, running = false) {
   const open = expanded.has(key);
@@ -637,7 +637,7 @@ feed.addEventListener("click", async (event) => {
     const gen = state.generation,
       before = older.length ? olderBefore : state.view.before;
     if (!before) return;
-    const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100 }).catch(fail);
+    const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100, messageText: "full" }).catch(fail);
     if (stale(gen) || !page) return;
     older = [...page.items, ...older];
     olderBefore = page.before;

@@ -5,7 +5,7 @@
 // VERIFY-HOST-APPROVE <id> asks the Host agent to archive that project, for an Approve; VERIFY-HOST-STATUS reorders the status line
 // through ui_set and points at its settings; VERIFY-COORD-APPROVAL <id> has the coordinator file the same request through
 // owner_approval_request. VERIFY-TABLE answers (any agent) with Markdown that mixes a table, nested and numbered lists, a quote and
-// hostile HTML and links, for the chat renderers. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
+// hostile HTML and links, for the chat renderers. VERIFY-LONG answers with about 8500 characters ending in VERIFY-LONG-END. VERIFY-IMAGE has the coordinator read the seeded screen.png (a tool result with an
 // image) and cite its artifact reference plus a missing one; VERIFY-WORKER-IMAGE has the coordinator hand that to a worker
 // (scouts read code through code_read, which returns no images).
 import { createServer } from "node:http";
@@ -81,7 +81,9 @@ const server = createServer((req, res) => {
         .map((m) => text(m.content))
         .join(" ")
         .match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/)?.[0];
-    if (user.includes("VERIFY-TABLE")) {
+    if (user.includes("VERIFY-LONG")) {
+      reply = say(`VERIFY-LONG-START ${"long answer text ".repeat(500)}VERIFY-LONG-END`);
+    } else if (user.includes("VERIFY-TABLE")) {
       // The Host agent also cites an artifact, which its drawer cannot show (no project image route).
       reply = say(
         names.includes("host_call")

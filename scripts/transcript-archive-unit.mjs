@@ -84,6 +84,18 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
   assert.deepEqual((await readTranscriptPage({ ...source, newest: () => [{ ...row, data: { text: 42 } }] }, 7)).items, []);
 }
 
+// Owner views read whole messages; agent reads keep the bounded preview.
+{
+  const long = `ANSWER-START ${"word ".repeat(2000)}ANSWER-END`;
+  const rows = [{ id: 70, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: long }] }] }];
+  const source = { newest: () => rows, entry: () => undefined };
+  const [preview] = (await readTranscriptPage(source, 7)).items;
+  assert.ok(preview.truncated && preview.text.length <= 4000, "agent pages stay bounded");
+  const [full] = (await readTranscriptPage(source, 7, { messageText: "full" })).items;
+  assert.equal(full.text, long, "owner pages carry the whole answer");
+  assert.equal(full.truncated, false);
+}
+
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const home = mkdtempSync(join(tmpdir(), "archive-"));
 const project = "11111111-1111-4111-8111-111111111111";

@@ -2,7 +2,6 @@ import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import { Type, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { Request, errorText, type Request as RequestData } from "./state.ts";
-import { fitJson } from "./response-limit.ts";
 import type { FocusTarget } from "./change-feed.ts";
 import { plugins } from "./plugins.ts";
 import { redactForAgent } from "./agent-redaction.ts";
@@ -255,8 +254,12 @@ export function agentActions(): { name: string; description: string; dangerous: 
 }
 
 export const RESULT_CHARS = 12_000;
+const bounded = (json: string) =>
+  json.length <= RESULT_CHARS
+    ? json
+    : `${json.slice(0, RESULT_CHARS)}\n[cut: ${json.length - RESULT_CHARS} more characters; narrow the request, for example with a smaller limit]`;
 const text = (value: unknown) => ({
-  output: [{ type: "text" as const, text: typeof value === "string" ? value : fitJson(RESULT_CHARS, () => value) }],
+  output: [{ type: "text" as const, text: typeof value === "string" ? value : bounded(JSON.stringify(value)) }],
 });
 
 /** What the tools need from the host; approvals are keyed by the tool task so a replayed call finds the same one. */

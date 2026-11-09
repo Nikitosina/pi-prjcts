@@ -22,7 +22,7 @@ Recorded before the code. `host-agent-e2e` covers the ones marked (e2e); the res
 - The agent drives itself through `host-agent-send`/`-stop`/`-reset`, recursing into its own conversation. These are excluded.
 - Secrets reach the transcript: `web` returns the bearer token URL, `telegram-token` sets the bot token. Excluded.
 - An invalid `host_call` input runs anyway, or opens a project runtime before validation. Input is parsed against `Request` first; an excluded or unknown action is refused before dispatch (e2e: unknown action refused).
-- A huge result floods the context. Results are fitted to a bound.
+- A huge result floods the context. Results are cut to a bound and say so (e2e: a 50,000-character result).
 - `ui_set` before the `ui-set` action exists throws. It answers "not available".
 
 ## Approvals

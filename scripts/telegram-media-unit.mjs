@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { startTelegram, TelegramRequestNotSentError, redactTelegramError } from "../src/telegram.ts";
 import { loadTelegramMedia, extractTelegramMedia, telegramAlbumForm } from "../src/telegram-media.ts";
 import { image, video } from "./telegram-media-fixtures.mjs";
-import { htmlToPlain, splitTelegramCaption } from "../src/telegram-html.ts";
+import { htmlToPlain, splitTelegramCaption, splitTelegramHtml } from "../src/telegram-html.ts";
 
 const root = mkdtempSync(join(tmpdir(), "telegram-media-"));
 process.env.PI_PROJECTS_HOME = root;
@@ -440,6 +440,18 @@ try {
   assert.equal(Array.from(htmlToPlain(unicode[0])).length, 1024);
   assert.equal(unicode.map(htmlToPlain).join(""), "x".repeat(1023) + "🟦&");
   assert.equal(splitTelegramCaption("<b>" + "&amp;".repeat(1024) + "</b>").length, 1);
+  // A text part never cuts an emoji in half.
+  for (const pad of [0, 1]) {
+    const line = "x".repeat(pad) + "🟦".repeat(3000),
+      parts = splitTelegramHtml(line);
+    assert(parts.length > 1 && parts.every((part) => part.length <= 4096 && part.isWellFormed()));
+    assert.equal(parts.join(""), line);
+  }
+  // One code unit of room left before a long emoji line.
+  const tight = splitTelegramHtml("x".repeat(4088) + "<b>" + "🟦".repeat(3000) + "</b>");
+  assert(tight.every((part) => part.length <= 4096 && part.isWellFormed()));
+  assert.equal(tight.map(htmlToPlain).join(""), "x".repeat(4088) + "🟦".repeat(3000));
+  assert(splitTelegramHtml("\n".repeat(4096) + "🟦".repeat(3000)).every((part) => part.length <= 4096 && part.isWellFormed()));
 
   reset(`${"a".repeat(1800)} ![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")}) end`);
   start();

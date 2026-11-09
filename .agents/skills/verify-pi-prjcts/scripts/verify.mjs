@@ -2563,6 +2563,17 @@ const journeys = {
       "side-effect",
       `host \`show\` lists both turns; fake provider logged ${calls.length - before} new call(s) containing the prompt`,
     );
+    // A long answer is shown whole, live and after a reload, with no "shortened" note.
+    const whole = `${bubbles("agent")}.some(t => t.includes('VERIFY-LONG-START') && t.includes('VERIFY-LONG-END')) && !document.querySelector('#feed').innerText.includes('shortened')`;
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: "VERIFY-LONG answer at length" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    await page.waitFor(whole, "long reply rendered whole", 60000);
+    await page.reload();
+    await page.waitFor(whole, "long reply whole after reload");
+    await page.evaluate(`[...document.querySelectorAll('#feed .msg.agent')].at(-1).scrollIntoView({ block: "end" })`);
+    await page.shot(dir, "05-long-reply-end");
+    record("visible", "an 8500-character reply shows its end marker after a reload, with no shortened note");
   },
 };
 
