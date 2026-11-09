@@ -447,6 +447,10 @@ try {
     assert(parts.length > 1 && parts.every((part) => part.length <= 4096 && part.isWellFormed()));
     assert.equal(parts.join(""), line);
   }
+  // One code unit of room left before a long emoji line.
+  const tight = splitTelegramHtml("x".repeat(4088) + "<b>" + "🟦".repeat(3000) + "</b>");
+  assert(tight.every((part) => part.length <= 4096 && part.isWellFormed()));
+  assert.equal(tight.map(htmlToPlain).join(""), "x".repeat(4088) + "🟦".repeat(3000));
 
   reset(`${"a".repeat(1800)} ![Photo](${ref("demo.png")}) ![Video](${ref("demo.mp4")}) end`);
   start();

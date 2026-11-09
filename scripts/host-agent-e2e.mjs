@@ -3,8 +3,15 @@
 import { request as httpRequest } from "node:http";
 import { createKit } from "./lib/e2e-kit.mjs";
 import { Request } from "../src/state.ts";
-import { ACTION_POLICY, DANGEROUS_MINIMUM } from "../src/host-agent-tools.ts";
+import { ACTION_POLICY, DANGEROUS_MINIMUM, RESULT_CHARS, hostAgentTools } from "../src/host-agent-tools.ts";
 import { redactForAgent } from "../src/agent-redaction.ts";
+
+// A huge host_call result (a page of whole messages, the notice feed) reaches the agent cut to the bound, saying so.
+{
+  const call = hostAgentTools({ dispatch: async () => ({ text: "y".repeat(50_000) }) }).find((tool) => tool.name === "host_call");
+  const answer = (await call.execute({ action: "list" }, { conversationId: "1", taskId: "t" })).output[0].text;
+  if (answer.length > RESULT_CHARS + 200 || !/cut/.test(answer)) throw Error(`host_call result not bounded: ${answer.length}`);
+}
 
 let releaseHold;
 const hold = new Promise((ok) => (releaseHold = ok));
