@@ -10,7 +10,8 @@ import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-ty
 import { loadProject, projectDir, type Project } from "./state.ts";
 import { archiveHome, currentWorktreeRoot } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
-import { Jobs } from "./jobs.ts";
+import { Jobs, workerActivity } from "./jobs.ts";
+import { busyIn } from "./durable-idle-configure.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
 import { workspaceCapabilities, workspacePhysicalLockPath, type WorkspaceAuthority } from "./workspace-capabilities.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
@@ -117,6 +118,14 @@ export function durableWorkspaceBinding(input: {
       conversation: input.conversation(),
       authority: { projectId: input.project.id, owner: leaseOwner },
       oldHome: archiveHome(),
+      workerState: (threadId) => {
+        const root = input.conversation();
+        return root.commit(async (tx) => {
+          const doc = await tx.doc(Jobs, root.id),
+            agent = doc.agents[threadId];
+          return workerActivity(doc, threadId, agent ? (await busyIn(tx, agent.conversationId)) !== null : false);
+        }, BACKGROUND_CONTEXT);
+      },
       authorizedRepositories: [
         {
           repositoryId: repository.repositoryId,

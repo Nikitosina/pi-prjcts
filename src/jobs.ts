@@ -250,6 +250,13 @@ export const liveAgentIds = (doc: Readonly<JobsState>, readOnly?: boolean): stri
       return (agent.endedAt === null || retained) && (readOnly === undefined || (agent.role !== "worker") === readOnly);
     })
     .map((agent) => agent.id);
+/** Whether a worker may still change its worktree: its Job is running (or, without a Job, it has not ended) or its conversation has a turn or queued input. Null: no worker has that id. */
+export const workerActivity = (doc: Readonly<JobsState>, id: string, busy: boolean): "running" | "ended" | null => {
+  const agent = doc.agents[id];
+  if (agent?.role !== "worker") return null;
+  const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
+  return busy || (job ? job.status === "running" : agent.endedAt === null) ? "running" : "ended";
+};
 /** A chat lends its shared workspace until the borrowing agent actually settles. */
 export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, exceptAgentId?: string): Agent | undefined =>
   Object.values(state.agents).find(
