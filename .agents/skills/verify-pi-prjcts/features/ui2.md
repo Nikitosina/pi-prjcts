@@ -5,6 +5,7 @@ The owner opens the inbox at `/` (the UI 2.0 client; the classic inbox was retir
 ## Sub-features
 
 - `serve`: `/` serves this client with the CSP, nosniff, `no-cache` and ETag headers; classic files are gone; an old `/ui2/` launch link 308s to `/` and still signs in; nested and unknown paths are refused (`scripts/ui2-web-failures.md` S1–S11).
+- `chat-archive`: a chat other than Main shows an archive icon button beside its row on hover, keyboard focus and touch screens; it and ⌘⇧E (Ctrl+Shift+E elsewhere; Settings → Hotkeys) open one confirmation naming the chat. Archive selects the next chat and offers Undo; a busy chat is refused. Scripted in `scripts/multi-chat-e2e.mjs` (F20–F30), not in this drive.
 - `empty`: a chat with no messages offers three starter prompts. One click fills the composer and focuses it; nothing is sent.
 - `chat`: a sent message shows one owner bubble, a mono `agents` tool row with a `worker ↗` link, a worker report row and the reply. Clicking the row head shows params and the result.
 - `worker`: the Workers card shows plan progress and Approve. A spawn row opens the worker transcript in the center, and Esc returns to the chat.

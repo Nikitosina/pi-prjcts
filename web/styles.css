@@ -494,6 +494,53 @@ a {
 #tree:focus-within .tree-chat kbd {
   opacity: 1;
 }
+.tree-row {
+  position: relative;
+}
+.tree-row .tree-chat {
+  padding-right: 32px;
+}
+.tree-archive {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  border-radius: var(--r-s);
+  color: var(--faint);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast),
+    background var(--t-fast),
+    color var(--t-fast);
+}
+.tree-row:hover .tree-archive,
+.tree-row:focus-within .tree-archive {
+  opacity: 1;
+}
+.tree-archive:hover,
+.tree-archive:focus-visible {
+  background: var(--line);
+  color: var(--text);
+}
+.tree-archive:disabled {
+  cursor: progress;
+}
+/* Touch screens have no hover: the button stays visible, with a finger-sized target. */
+@media (hover: none) {
+  .tree-row .tree-chat {
+    min-height: 36px;
+    padding-right: 40px;
+  }
+  .tree-archive {
+    opacity: 1;
+    width: 34px;
+    height: 32px;
+  }
+}
 .tree-memory .node-icon {
   color: var(--accent);
   font-size: 10px;
@@ -2955,6 +3002,29 @@ table.hotkeys tr.clash td {
 }
 #signin {
   width: min(460px, calc(100vw - 24px));
+}
+#archive-chat {
+  width: min(420px, calc(100vw - 24px));
+}
+.confirm {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.confirm h2 {
+  margin: 0;
+  font: 600 17px var(--serif);
+  overflow-wrap: anywhere;
+}
+.confirm p {
+  margin: 0;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
 }
 .signin {
   padding: 22px;
