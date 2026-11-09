@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
@@ -59,14 +60,14 @@ export function readOnlyCodeTools(
   const tools: ToolRegistration[] = built(fallback).map((template) =>
     defineTool({
       name: `code_${template.name}`,
-      description: `${template.description} Read-only and limited to this thread's code root: the PR head or worker worktree it was given, otherwise the project checkout ${fallback}. Without limit the answer is at most ${RESPONSE_LIMIT / 1024} KiB and ends with a note on how to continue.`,
+      description: `${template.description} Read-only and limited to this thread's code root (the PR head or worker worktree it was given, otherwise the project checkout ${fallback}) and /tmp. Without limit the answer is at most ${RESPONSE_LIMIT / 1024} KiB and ends with a note on how to continue.`,
       parameters: template.parameters,
       replay: "safe",
       async execute(args, api, context) {
         const root = await rootOf(api, context);
         const tool = built(root).find((item) => item.name === template.name)!;
         const path = (args as { path?: unknown }).path;
-        if (typeof path === "string") assertInside(root, path);
+        if (typeof path === "string") assertReadable(root, path);
         const { content, ...result } = clipped(
           template.name,
           args as { limit?: unknown; offset?: unknown },
@@ -113,18 +114,35 @@ export function readOnlyCodeTools(
   return { tools, extension: defineExtension({ name: "projects.readonly-code", tools }) };
 }
 
-function assertInside(root: string, path: string): void {
-  const denied = new Error(`Path ${path} is outside this thread's code root ${root}; read-only code tools cannot escape it.`);
-  if (path.startsWith("~")) throw denied;
-  const target = resolve(root, path);
-  let real = target;
+// Every reader may read under /tmp (owner decision 2026-11-09); on macOS it is a symlink to /private/tmp.
+const SHARED_READ_ROOTS = [...new Set(["/tmp", realOr("/tmp")])];
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+function realOr(path: string): string {
   try {
-    real = realpathSync(target);
+    return realpathSync(path);
   } catch {
-    /* missing paths fail in the tool itself; the lexical check still applies */
+    return path;
   }
-  for (const candidate of [target, real]) {
-    const rel = relative(root, candidate);
-    if (rel.startsWith("..") || isAbsolute(rel)) throw denied;
-  }
+}
+
+/** Both the path and its real path must be under the code root or /tmp, so a symlink cannot lead out of either. */
+function assertReadable(root: string, path: string): void {
+  const denied = new Error(`Path ${path} is outside this thread's code root ${root} and /tmp; read-only code tools cannot escape them.`);
+  // Pi's read tools strip a leading @ and open file:// URLs as paths, so the guard checks the path they open.
+  let opened = path.replace(UNICODE_SPACES, " ");
+  if (opened.startsWith("@")) opened = opened.slice(1);
+  if (opened.startsWith("~")) throw denied;
+  if (opened.startsWith("file://"))
+    try {
+      opened = fileURLToPath(opened);
+    } catch {
+      throw denied;
+    }
+  const target = resolve(root, opened);
+  const inside = (dir: string, candidate: string) => {
+    const rel = relative(dir, candidate);
+    return !rel.startsWith("..") && !isAbsolute(rel);
+  };
+  for (const candidate of [target, realOr(target)]) if (![root, ...SHARED_READ_ROOTS].some((dir) => inside(dir, candidate))) throw denied;
 }
