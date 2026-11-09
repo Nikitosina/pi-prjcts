@@ -28,6 +28,7 @@ import type {
 } from "./plugin-types.ts";
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
+import { webFile, type WebFile } from "./web-file.ts";
 import { home, loadProject, projectDir, type Project } from "./state.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
@@ -45,7 +46,8 @@ import { command } from "./workspace-isolation.ts";
  * A plugin that fails to import, has the wrong shape, throws in register, conflicts with another plugin or times out is recorded
  * (status(), the `plugins` RPC, the UI) and contributes nothing; the host keeps running.
  */
-type Loaded = { plugin: string; capabilities: PluginCapabilities };
+/** `web` holds the declared browser files as they were at load, so a later change on disk waits for the restart like the plugin's code. */
+type Loaded = { plugin: string; capabilities: PluginCapabilities; web?: { "ui.js"?: WebFile; "ui.css"?: WebFile } };
 const loaded: Loaded[] = [];
 const statuses: PluginStatus[] = [];
 let loading: Promise<PluginStatus[]> | undefined;
@@ -122,11 +124,9 @@ export const plugins = {
         style: item.capabilities.web?.style ? `/plugins/${item.plugin}/ui.css` : null,
       })),
   /** The declared browser file for /plugins/<name>/ui.js|ui.css; nothing else below a plugin is served. */
-  webAsset: (plugin: string, file: string): { path: string; mime: string } | undefined => {
-    const web: WebContribution | undefined = loaded.find((item) => item.plugin === plugin)?.capabilities.web;
-    if (file === "ui.js" && web?.script) return { path: web.script, mime: "text/javascript; charset=utf-8" };
-    if (file === "ui.css" && web?.style) return { path: web.style, mime: "text/css; charset=utf-8" };
-    return undefined;
+  webAsset: (plugin: string, file: string): WebFile | undefined => {
+    const web = loaded.find((item) => item.plugin === plugin)?.web;
+    return file === "ui.js" || file === "ui.css" ? web?.[file] : undefined;
   },
   route: (plugin: string, name: string): PluginRoute | undefined => {
     const routes = loaded.find((item) => item.plugin === plugin)?.capabilities.web?.routes;
@@ -362,6 +362,19 @@ async function withTimeout<T>(work: Promise<T>, label: string): Promise<T> {
   }
 }
 
+/** A declared file that cannot be read is not served (404), as before; it does not fail the plugin. */
+function webFiles(web: WebContribution | undefined): Loaded["web"] {
+  const read = (path: string | undefined, mime: string) => {
+    if (!path) return undefined;
+    try {
+      return webFile(readFileSync(path), mime);
+    } catch {
+      return undefined;
+    }
+  };
+  return { "ui.js": read(web?.script, "text/javascript; charset=utf-8"), "ui.css": read(web?.style, "text/css; charset=utf-8") };
+}
+
 async function loadOne(source: string, path: string): Promise<PluginStatus> {
   const status: PluginStatus = { source, name: null, state: "failed", provides: [], loadedAtMs: Date.now() };
   try {
@@ -380,7 +393,7 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
     validate(stage);
     const clash = conflict(module.name, stage);
     if (clash) throw new Error(clash);
-    loaded.push({ plugin: module.name, capabilities: stage });
+    loaded.push({ plugin: module.name, capabilities: stage, web: webFiles(stage.web) });
     if (stage.leaseName) hostLeases.addNaming(stage.leaseName);
     status.state = "loaded";
     status.provides = provides(stage);

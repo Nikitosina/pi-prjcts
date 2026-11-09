@@ -35,6 +35,9 @@ const kit = await createKit("vcs-plugins", {
   handler,
   env: { FAKE_PLUGIN_DATA: "", PI_PROJECTS_FOLLOW_TICK_MS: "86400000", PI_PROJECTS_PLUGINS: `${secondPath}:${fakePath}` },
 });
+const pluginUi = join(kit.root, "fake-ui.js");
+writeFileSync(pluginUi, "// fake plugin ui, as loaded\n");
+kit.hostEnv.FAKE_PLUGIN_UI = pluginUi;
 const { check, rpc, result } = kit;
 const dataPath = join(kit.root, "fake-plugin-data.json");
 kit.hostEnv.FAKE_PLUGIN_DATA = dataPath;
@@ -136,6 +139,26 @@ await kit.run(async () => {
     "17 the plugin state dir exists and holds the plugin file",
     existsSync(join(kit.home, "plugins", "fake", "registered.json")) && (statSync(join(kit.home, "plugins", "fake")).mode & 0o077) === 0,
   );
+
+  // 26: the plugin's browser script is the one it loaded with; a change on disk waits for the restart.
+  {
+    const origin = new URL((await rpc({ action: "web" })).url).origin;
+    const ui = async () => {
+      const answer = await fetch(`${origin}/plugins/fake/ui.js`);
+      return { status: answer.status, etag: answer.headers.get("etag"), text: await answer.text() };
+    };
+    const loadedUi = await ui();
+    writeFileSync(pluginUi, "// fake plugin ui, changed on disk\n");
+    const changedUi = await ui();
+    check(
+      "26 a plugin's browser script changed on disk is not served before the restart",
+      loadedUi.status === 200 &&
+        loadedUi.text === "// fake plugin ui, as loaded\n" &&
+        changedUi.text === loadedUi.text &&
+        changedUi.etag === loadedUi.etag,
+      { loadedUi, changedUi },
+    );
+  }
 
   // ---- Project in a fake checkout ----
   const id = await kit.createProject("FakeProj", { grant: false, cwd: checkout });

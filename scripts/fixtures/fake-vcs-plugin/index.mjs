@@ -84,6 +84,8 @@ export default {
     });
 
     api.provide({
+      // $FAKE_PLUGIN_UI: a browser script outside the repository, so the E2E can change it on disk after load.
+      ...(process.env.FAKE_PLUGIN_UI ? { web: { script: process.env.FAKE_PLUGIN_UI } } : {}),
       vcs: {
         kind: "fake",
         isRoot: (dir) => existsSync(join(dir, ".fakevcs")),

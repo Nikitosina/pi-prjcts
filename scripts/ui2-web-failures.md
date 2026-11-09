@@ -19,6 +19,7 @@ The owner retired the classic inbox (2026-11-04): this client is the only one an
 - S10 A media route at the root (`/artifacts/…`, `/uploads/…`, `/evidence/…`, `/live`, `/changes`) answers without the token, or with it
   serves something for an unknown project or a traversal path.
 - S11 `projects ui-url [<project>]` (`src/client.ts` `inboxUrl`) prints a link that is not this host's root with the token.
+- S12 A file in `web/` changed on disk after the host started (a pull without a deploy) is served before the host restarts, so the browser runs code the host cannot answer. Proof: `deploy-e2e.mjs` step 7 (W1).
 - The token from the launch link (`/#token=…`) is not stored, or stays in the URL bar after load.
 - No token: the page throws instead of showing the sign-in prompt.
 - An inline script or inline event handler is blocked by the CSP and a feature silently does nothing (console error).

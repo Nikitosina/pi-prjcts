@@ -1,6 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { body, bytes } from "./http.ts";
@@ -11,6 +10,7 @@ import { closeSync, createReadStream } from "node:fs";
 import { errorText, home, loadProject, parse, projectDir, Request, saveJson, type Request as RequestData } from "./state.ts";
 import { join } from "node:path";
 import { plugins } from "./plugins.ts";
+import { webFile, type WebFile } from "./web-file.ts";
 import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
 
@@ -119,21 +119,21 @@ export async function startWeb(
   const previous = new URLSearchParams(saved?.hash.slice(1) ?? "").get("token");
   const token = previous && /^[a-f0-9]{64}$/.test(previous) ? previous : randomBytes(32).toString("hex");
   let origin = "";
-  // The inbox: the flat files and bundled font present in web/ at start; never a path from the request.
-  const assets = new Map<string, { path: string; mime: string }>();
+  // The inbox: the flat files and bundled font in web/, read once at start (about 0.4 MB); never a path from the request.
+  // A pull without a deploy must not hand browsers code the running host cannot answer, so nothing is read from disk later.
+  const assets = new Map<string, WebFile>();
   const webDir = fileURLToPath(new URL("../web/", import.meta.url));
   for (const file of readdirSync(webDir))
-    if (/^[a-z0-9-]+\.(js|css|html|woff2)$/.test(file))
-      assets.set(file === "index.html" ? "/" : `/${file}`, {
-        path: join(webDir, file),
-        mime: file.endsWith(".css")
-          ? "text/css; charset=utf-8"
-          : file.endsWith(".html")
-            ? "text/html; charset=utf-8"
-            : file.endsWith(".woff2")
-              ? "font/woff2"
-              : "text/javascript; charset=utf-8",
-      });
+    if (/^[a-z0-9-]+\.(js|css|html|woff2)$/.test(file)) {
+      const mime = file.endsWith(".css")
+        ? "text/css; charset=utf-8"
+        : file.endsWith(".html")
+          ? "text/html; charset=utf-8"
+          : file.endsWith(".woff2")
+            ? "font/woff2"
+            : "text/javascript; charset=utf-8";
+      assets.set(file === "index.html" ? "/" : `/${file}`, webFile(readFileSync(join(webDir, file)), mime));
+    }
   /** Where an old `/ui2/` link or cached asset lives now (the inbox moved to `/` on 2026-11-04); only known targets, never the request path. */
   const movedFromUi2 = (path: string) => {
     if (path === "/ui2" || path === "/ui2/") return "/";
@@ -160,9 +160,7 @@ export async function startWeb(
         throw new Error("Cross-origin request denied");
       }
       const url = new URL(request.url ?? "/", origin);
-      const sendAsset = async (path: string, mime: string) => {
-        const content = await readFile(path),
-          etag = `"${createHash("sha256").update(content).digest("hex")}"`;
+      const sendAsset = ({ content, etag, mime }: WebFile) => {
         const assetHeaders = { ...headers, "cache-control": "no-cache", "content-type": mime, etag };
         const matches = request.headers["if-none-match"]
           ?.split(",")
@@ -172,7 +170,7 @@ export async function startWeb(
       };
       const asset = assets.get(url.pathname);
       if (request.method === "GET" && asset) {
-        await sendAsset(asset.path, asset.mime);
+        sendAsset(asset);
         return;
       }
       const moved = request.method === "GET" ? movedFromUi2(url.pathname) : undefined;
@@ -189,7 +187,7 @@ export async function startWeb(
       const pluginFile = request.method === "GET" ? /^\/plugins\/([a-z][a-z0-9-]{0,39})\/(ui\.js|ui\.css)$/.exec(url.pathname) : null;
       const pluginAsset = pluginFile ? plugins.webAsset(pluginFile[1]!, pluginFile[2]!) : undefined;
       if (pluginAsset) {
-        await sendAsset(pluginAsset.path, pluginAsset.mime);
+        sendAsset(pluginAsset);
         return;
       }
       if (url.pathname === "/favicon.ico") {
