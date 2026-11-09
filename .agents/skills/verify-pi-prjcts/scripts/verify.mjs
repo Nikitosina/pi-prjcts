@@ -1164,6 +1164,9 @@ async function ui2Prompts(run, page, record, dir, sinks) {
   );
 }
 
+// Ended workers sit in a collapsed history under the active ones (web/workers.js); this opens it when it is closed.
+const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
+
 const journeys = {
   // Feature: features/ui2-prompts.md; failure list: scripts/ui2-prompt-editor-failures.md (E1-E23).
   async "ui2-prompts"(run, page, record, dir, sinks) {
@@ -1185,8 +1188,29 @@ const journeys = {
     await page.press("Enter", { code: "Enter", keyCode: 13 });
     record("action", `typed ${JSON.stringify(prompt)} and pressed Enter`);
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
-    await page.waitFor(`document.querySelector('#workers .worker')?.innerText.includes('VERIFY-JOB')`, "Job in the Workers panel", 60000);
+    await page.waitFor(
+      `document.querySelector('#workers .worker')?.innerText.includes('VERIFY-JOB') || !!document.querySelector('#workers [data-worker-history]')`,
+      "Job in the Workers panel",
+      60000,
+    );
     await page.shot(dir, "01-job-in-panel");
+    // Once Ready the Job has ended: it leaves the active list for the collapsed history, whose toggle counts it as ready.
+    await page.waitFor(
+      `/1 ready/.test(document.querySelector('#workers [data-worker-history]')?.innerText ?? '')`,
+      "Ready Job in the history",
+      90000,
+    );
+    const collapsed = await page.evaluate(
+      `({ toggle: document.querySelector('#workers [data-worker-history]').innerText, expanded: document.querySelector('#workers [data-worker-history]').getAttribute('aria-expanded'), cards: document.querySelectorAll('#workers .worker').length })`,
+    );
+    if (collapsed.expanded !== "false" || collapsed.cards !== 0 || !/Ended\s*1/.test(collapsed.toggle))
+      throw Error(`Ended Job not collapsed: ${JSON.stringify(collapsed)}`);
+    await page.shot(dir, "01b-history-collapsed");
+    record(
+      "visible",
+      `the Ready Job left the active list; the collapsed history reads ${JSON.stringify(collapsed.toggle.replace(/\s+/g, " "))}`,
+    );
+    await page.click(`#workers [data-worker-history]`);
     await page.waitFor(`!!document.querySelector('${worker("ready")}')`, "Ready worker", 90000);
     if (await page.evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some(n => n.innerText.includes('[worker '))`))
       throw Error("Internal report leaked into coordinator chat");
@@ -1431,7 +1455,11 @@ const journeys = {
     await page.waitFor(`document.querySelector(${JSON.stringify(composer)}).value === ''`, "composer cleared");
     await page.waitFor(`${bubbles} === ${before + 1}`, "exactly one new owner bubble");
     await page.waitFor(`!!document.querySelector('#feed .tool-row[data-tool="agents"]')`, "agents tool row", 60000);
-    await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "Ready worker in the context panel", 90000);
+    await page.waitFor(
+      `(${EXPAND_HISTORY}, !!document.querySelector('#workers .worker[data-status="ready"]'))`,
+      "Ready worker in the context panel",
+      90000,
+    );
     await page.waitFor(`document.querySelector('#feed').innerText.includes('The work is ready')`, "coordinator reply", 60000);
     if (await page.evaluate(`[...document.querySelectorAll('#feed .msg.owner')].some(n => n.innerText.includes('[worker '))`))
       throw Error("internal worker report rendered as an owner bubble");
@@ -1573,7 +1601,11 @@ const journeys = {
       "midnight and system sans from the host survive reload over a stale local cache",
     );
     record("verified", "after reload with a stale local cache (light/system mono), ui-get restores midnight and system sans");
-    await page.waitFor(`!!document.querySelector('#workers .worker[data-status="ready"]')`, "worker after reload", 30000);
+    await page.waitFor(
+      `(${EXPAND_HISTORY}, !!document.querySelector('#workers .worker[data-status="ready"]'))`,
+      "worker after reload",
+      30000,
+    );
     await page.shot(dir, "07-chat-midnight");
     // Host agent drawer from anywhere with \.
     await page.press("\\", { code: "Backslash", keyCode: 220 });

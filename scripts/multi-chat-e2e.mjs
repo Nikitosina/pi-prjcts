@@ -422,7 +422,12 @@ try {
   const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  await waitFor(`!!document.querySelector('#workers [data-open-worker]')`, s, "the scout in chat two's Workers list");
+  // Ended workers sit in the collapsed history; open it first.
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker]'))`,
+    s,
+    "the scout in chat two's Workers list",
+  );
   await click(s, "#workers [data-open-worker]");
   await waitFor(
     `(document.querySelector('#focus-view')?.innerText ?? '').includes('SCOUT-RESULT-42')`,
@@ -448,7 +453,11 @@ try {
   await waitFor(`!(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "Main's Workers list");
   await click(s, `#tree [data-chat="${chatId}"]`);
   await waitFor(`${feed}.includes('REPORT-ACK') && !${feed}.includes('Done MARK-MAIN')`, s, "chat two selected");
-  await waitFor(`(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "chat two's Workers list");
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), (document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB'))`,
+    s,
+    "chat two's Workers list",
+  );
   result.checks.push("F12 switching chats swaps the transcript and the Workers list shows only that chat's work");
   // Other projects' rows in the tree are drawn from the host's list: it must carry each chat's own activity.
   await new Promise((done) => setTimeout(done, 1700));
@@ -624,6 +633,11 @@ try {
   await evaluate(`document.activeElement.blur()`, s);
   await press("e", "KeyE", MOD);
   await stays("on Mod+E");
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker]'))`,
+    s,
+    "worker in the list",
+  );
   await click(s, "#workers [data-open-worker]");
   await waitFor(`document.querySelector('#center').dataset.focus === 'worker'`, s, "worker view");
   await archiveKey();

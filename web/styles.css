@@ -1492,6 +1492,71 @@ pre.code,
   gap: 8px;
   margin-top: 2px;
 }
+.w-history {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 4px;
+  border-radius: var(--r-s);
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: left;
+}
+.w-history:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.w-history-tally {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+}
+.w-history-tally [data-tone="ready"] {
+  color: var(--ready);
+}
+.w-history-tally [data-tone="needs"] {
+  color: var(--needs);
+}
+.w-history-tally [data-tone="bad"] {
+  color: var(--bad);
+}
+#workers-history {
+  margin-top: 6px;
+}
+.ctx-ring {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+}
+.ctx-ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.ctx-ring circle {
+  fill: none;
+  stroke-width: 3;
+}
+.ctx-ring .track {
+  stroke: color-mix(in srgb, var(--faint) 45%, transparent);
+}
+.ctx-ring[data-state="unknown"] .track {
+  stroke: var(--faint);
+  stroke-dasharray: 4 6;
+}
+.ctx-ring .fill {
+  stroke: var(--accent);
+  transition: stroke-dasharray var(--t-med) var(--ease);
+}
+.ctx-ring[data-tone="needs"] .fill {
+  stroke: var(--needs);
+}
 .pr-row {
   display: flex;
   gap: 8px;
@@ -1499,12 +1564,29 @@ pre.code,
   font-size: 12.5px;
   padding: 4px 2px;
 }
+.pr-link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: inherit;
+  text-decoration: none;
+}
+a.pr-link:hover .pr-title {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
 .pr-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.pr-row .ghost-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .plugin-card {
   border: 1px solid var(--line);
@@ -3005,6 +3087,19 @@ table.hotkeys tr.clash td {
 }
 #archive-chat {
   width: min(420px, calc(100vw - 24px));
+}
+#merge-pr {
+  width: min(520px, calc(100vw - 24px));
+}
+.merge-text {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--raised);
+  font: 12px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .confirm {
   padding: 20px;

@@ -133,7 +133,11 @@ try {
   await send("Page.navigate", { url: url.toString() }, s);
   await waitFor(`performance.timeOrigin !== ${origin} && document.body?.dataset.ready === "1"`, s, "new document");
   const openWorker = async (thread) => {
-    await waitFor(`!!document.querySelector('#workers [data-open-worker=${q(thread)}]')`, s, `worker ${thread} listed`);
+    await waitFor(
+      `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker=${q(thread)}]'))`,
+      s,
+      `worker ${thread} listed`,
+    );
     await click(`#workers [data-open-worker=${q(thread)}]`, s);
     await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "worker view");
   };

@@ -154,7 +154,7 @@ if (method === "POST" && parts[0] === "graphql") {
     const node = (item, rich) => ({
       number: item.number,
       title: item.title,
-      url: "https://github.com/" + repo.full_name + "/pull/" + item.number,
+      url: item.url ?? "https://github.com/" + repo.full_name + "/pull/" + item.number,
       state: item.merged ? "MERGED" : (item.state ?? "open") === "closed" ? "CLOSED" : "OPEN",
       merged: item.merged === true,
       isDraft: item.draft === true,
