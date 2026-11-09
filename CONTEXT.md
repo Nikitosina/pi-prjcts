@@ -24,7 +24,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Stop**: an explicit abort of an agent with a stated reason. Aborting drains everything the agent owns.
 - **Candidate**: the exact commit the worker's verification runs and the reviewer judge.
 - **Proof**: `projects_verify_run` runs, logs, screenshots and videos tied to a candidate, kept in the Job's artifacts.
-- **Checkpoint**: an independent worker's intermediate handback while work is unfinished or needs a decision. It preserves the workspace and evidence for continuation, without offering Approve.
+- **Checkpoint**: an independent worker's intermediate handback while work is unfinished or needs a decision. It preserves the workspace and evidence for continuation, without offering Approve. A worker that ends its turn without a report gets one automatically.
 - **Ready report**: an independent worker's delivery report, distinct from an unfinished Checkpoint. It includes the PR, summary, proof, review findings, gaps and cumulative Job time and cost.
 - **Approve**: the owner's one consequential action on a Job: merge the PR when mergeable, then pull the project's main checkout if it is clean.
 - **Deploy**: restart the pi-prjcts host from its main checkout, with a smoke test and rollback. Separate from Approve. It does not wait for idle projects: running tool calls get 10 s, then the work continues after the start. No owner approval: the owner, the Host agent and the pi-prjcts Coordinator (`projects_redeploy`) may start it.

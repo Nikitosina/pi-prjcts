@@ -31,7 +31,14 @@ const modern = (name, args) =>
     : name === "projects_worker_control"
       ? ["agents", { action: "send", id: args.threadId, message: args.text, followUp: true }]
       : name === "projects_delegate_child"
-        ? ["subagent", { role: args.role === "worker" ? "verifier" : args.role, task: args.task }]
+        ? [
+            "subagent",
+            {
+              role: args.role === "worker" ? "verifier" : args.role,
+              ...(args.role === "reviewer" ? { kind: "full" } : {}),
+              task: args.task,
+            },
+          ]
         : [name, args];
 export const call = (name, args) =>
   ([name, args] = modern(name, args)) &&

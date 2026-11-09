@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
+import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, type Project, type Request } from "./state.ts";
 import { PROFILE_IDS } from "./profiles.ts";
 import { normalizePromptBlocks, PROJECT_PROMPT_TARGETS, type ProjectPromptBlocks } from "./prompt-blocks.ts";
 
@@ -24,6 +24,7 @@ export function projectSettings(project: Project) {
     worktreeSetup: project.worktreeSetup ?? "",
     context: project.contextSettings ?? null,
     verification: project.verification ?? null,
+    review: { rechecks: project.review?.rechecks ?? DEFAULT_REVIEW_RECHECKS },
     profiles: project.profiles ?? null,
   };
   return {
@@ -53,6 +54,7 @@ export function updateProjectSettings(project: Project, input: Update): Project 
     prompts,
     promptBlocks,
     verification,
+    review,
     fallbackModels,
     profiles,
     ...rest
@@ -94,6 +96,7 @@ export function updateProjectSettings(project: Project, input: Update): Project 
   if (checks?.enabled && !checks.skill.trim()) throw new Error("Verification needs a verification skill");
   const unsupported = patch.verification?.enabled ? verificationProviderProblem(project) : null;
   if (unsupported) throw new Error(`Verification cannot be turned on: ${unsupported}`);
+  const reviewBudget = patch.review === undefined ? review : (patch.review ?? undefined);
   const setup = (patch.worktreeSetup ?? worktreeSetup ?? "").trim();
   const nextProfiles: NonNullable<Project["profiles"]> = { ...profiles };
   for (const id of PROFILE_IDS) {
@@ -110,6 +113,7 @@ export function updateProjectSettings(project: Project, input: Update): Project 
     ...(setup ? { worktreeSetup: setup } : {}),
     ...(context ? { contextSettings: structuredClone(context) } : {}),
     ...(checks ? { verification: { ...checks } } : {}),
+    ...(reviewBudget ? { review: { ...reviewBudget } } : {}),
     ...(Object.keys(nextProfiles).length ? { profiles: nextProfiles } : {}),
     name: patch.name ?? project.name,
     objective: patch.objective ?? project.objective,

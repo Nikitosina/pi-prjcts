@@ -24,7 +24,11 @@ const k = await createKit("model-refresh", {
     if (role === "coordinator" && user === "INSTANCE-PROFILES" && !results.length)
       return call("projects_delegate", { role: "worker", task: "INSTANCE-WORKER" });
     if (role === "worker" && user.includes("INSTANCE-WORKER") && results.length < 2)
-      return call("subagent", { role: ["reviewer", "scout"][results.length], task: "INSTANCE-CHILD" });
+      return call("subagent", {
+        role: ["reviewer", "scout"][results.length],
+        ...(results.length ? {} : { kind: "full" }),
+        task: "INSTANCE-CHILD",
+      });
     if (role === "worker" && user.includes("INSTANCE-HELD") && !results.length) {
       await heldInstructions;
       return call("projects_knowledge_list", {});

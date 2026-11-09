@@ -46,6 +46,10 @@ export const VerificationSettings = Type.Object(
   { additionalProperties: false },
 );
 export type VerificationSettings = Static<typeof VerificationSettings>;
+export const DEFAULT_REVIEW_RECHECKS = 2;
+/** Review budget: one full review, then at most `rechecks` re-checks of the fix diff and the open findings (enforced at the worker's subagent tool). */
+export const ReviewSettings = Type.Object({ rechecks: Type.Integer({ minimum: 0, maximum: 5 }) }, { additionalProperties: false });
+export type ReviewSettings = Static<typeof ReviewSettings>;
 /** Per-project context/compaction settings; absent fields use the model catalog window and pi-durable's default policy. */
 export const ContextSettings = Type.Object(
   {
@@ -216,6 +220,8 @@ export const Project = Type.Object(
     }),
     /** Opt-in verification: the worker runs this skill itself and records each run with projects_verify_run. */
     verification: Type.Optional(VerificationSettings),
+    /** Absent = DEFAULT_REVIEW_RECHECKS. */
+    review: Type.Optional(ReviewSettings),
     /** Explicit quota fallback per role; absent means wait for the selected model's quota to reset. */
     fallbackModels: Type.Optional(Type.Object({ worker: Type.Optional(text), scout: Type.Optional(text), reviewer: Type.Optional(text) })),
     /** Exact provider/model references the owner cycles through; absent = Pi's enabledModels. */
@@ -770,6 +776,8 @@ export const Request = Type.Union([
           ),
           /** null turns the verification loop off and forgets its skill. */
           verification: Type.Optional(Type.Union([VerificationSettings, Type.Null()])),
+          /** null restores the default review budget. */
+          review: Type.Optional(Type.Union([ReviewSettings, Type.Null()])),
           /** Explicit quota fallback per role; null removes it and restores reset waiting. */
           fallbackModels: Type.Optional(
             Type.Object(

@@ -34,6 +34,7 @@ const EFFECTS: Partial<Record<keyof Changes, Effect>> = {
   context: "context",
   mcp: "saved",
   verification: "saved",
+  review: "saved",
   stallMinutes: "saved",
   scopedModels: "saved",
   worktreeSetup: "saved",

@@ -113,6 +113,13 @@ The owner approved removing service chatter from the main conversation and reduc
 - The owner explicitly chose a separate `job checkpoint` action for an independent worker's unfinished stage. It retains the branch and evidence, notifies the Coordinator once, offers no Approve action, and continues through new instructions to the same worker. It is not a host-owned blocked workflow.
 - Changes and verification run privately. This decision does not authorize deploying or restarting the running host.
 
+## Review budget and acceptance (retro, 2026-11-09)
+
+- One full review, then at most `review.rechecks` re-checks (per project, 0-5, default 2), each on the fix diff and the still-open findings. The host enforces it at the worker's `subagent` tool (`kind: full | recheck`, counted per Job; a pr-review round's three reviewers are one full round). Only P0/P1 block Ready; P2/P3 go under Not fixed; when the budget is spent the open findings go to the Ready report's gaps. Supersedes "one re-check" in decision 7, the round-1 grilling and the verifier decision.
+- The Coordinator sends a ready-with-gaps result back at most once, only for a concrete P0/P1 or a failed check; otherwise it goes to the owner. After Ready a new owner request goes to a fresh worker (same branch with a handoff for a small change to the PR, a new Job for a new task); steering before Ready stays.
+- Workers do not wait for CI: they report Ready, and Follow PR wakes the Coordinator, which restarts a worker when CI fails.
+- An independent worker that ends its turn without a report becomes a checkpoint automatically (not failed). A preparation failure reads "did not start: <cause>", apart from a run failure.
+
 ## Live deploy (2026-11-05)
 
 - Deploy no longer waits for idle projects. Preparation runs while work continues; then running tool calls get 10 s, the rest is cut off, and Pi Durable continues every agent after the start. There is one mode: the CLI, the agents and the nightly window all deploy this way.

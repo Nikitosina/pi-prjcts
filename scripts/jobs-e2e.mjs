@@ -21,6 +21,21 @@ const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
 const sha = "a".repeat(40);
 const longAnswer = "Full exact retained evidence. ".repeat(300) + "END-OF-EXACT-ANSWER";
+const review = (kind) => ["subagent", { role: "reviewer", kind, task: "REVIEW" }];
+// A recheck before any full review, three axis reviewers, a fourth, a scout, two rechecks, a third, a full after rechecks, Ready.
+const BUDGET_STEPS = [
+  review("recheck"),
+  review("full"),
+  review("full"),
+  review("full"),
+  review("full"),
+  ["subagent", { role: "scout", task: "Look around" }],
+  review("recheck"),
+  review("recheck"),
+  review("recheck"),
+  review("full"),
+  ["job", { action: "ready", summary: "Within budget", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK", gaps: ["open P1"] }],
+];
 // Tasks a worker gives its checking scout; other scout tasks answer normally.
 const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
 assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
@@ -141,8 +156,18 @@ function route(request) {
       return say("Recovered once.");
     }
     if (tag === "BRIEF-BATCHOK" && messages.some((message) => message.role === "toolResult")) return say("Shared answer.");
+    // R1-R7: the review budget, step by step; each step's tool answer is the next request's result.
+    if (tag === "BRIEF-BUDGET") {
+      if (user === "Recheck once more") return call("subagent", { role: "reviewer", kind: "recheck", task: "REVIEW" });
+      const lastUser = text(messages.findLast((message) => message.role === "user").content);
+      if (lastUser === "Recheck once more") return say("Reported the open findings.");
+      const step = BUDGET_STEPS[messages.filter((message) => message.role === "toolResult").length];
+      return step ? call(...step) : say("Budget spent.");
+    }
+    if (tag === "BRIEF-NOREPORT" && user.includes("BRIEF-NOREPORT")) return say("Should I keep the old API or remove it?");
     if (user === "Hold helper response") return call("gate", {});
-    if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER")) return call("subagent", { role: "reviewer", task: "REVIEW" });
+    if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER"))
+      return call("subagent", { role: "reviewer", kind: "full", task: "REVIEW" });
     if (tag === "BRIEF-HELPER" && result.startsWith("Task helpers cannot")) return say("Helper could not get a review.");
     if (tag === "BRIEF-HELPER") return say("Helper changed files, checked them, and returned findings.");
     if (tag === "BRIEF-CHECKPOINT" && (user.includes("BRIEF-CHECKPOINT") || result.startsWith("Checkpoint recorded"))) {
@@ -198,7 +223,7 @@ function route(request) {
         role: "scout",
         task: { SLOW: "SLOW-CHECK", SILENT: "SILENT", QUEUEDSILENT: "SILENT", BUSY: "BUSY" }[tag.slice(6)] ?? "CHECK",
       });
-    if (result === "PASS") return call("subagent", { role: "reviewer", task: "REVIEW" });
+    if (result === "PASS") return call("subagent", { role: "reviewer", kind: "full", task: "REVIEW" });
     if (result === "REVIEW-OK")
       return call("job", { action: "ready", summary: "Built it", pr: "12", candidate: sha, proof: ["checks PASS"], review: "REVIEW-OK" });
     if (tag === "BRIEF-RACE" && result.startsWith("Ready recorded")) return call("gate", {});
@@ -296,6 +321,10 @@ async function open() {
     },
     prepare: async ({ agent }) => {
       if (agent.title === "LONGPREPFAIL") throw new Error(longAnswer);
+      if (agent.title === "Job STARTFAIL") {
+        while (prepareHeld.has(agent.title)) await delay(20);
+        throw new Error("Workspace grant is missing");
+      }
       prepareEntered.add(agent.title);
       const first = !prepareRuns.includes(agent.id);
       prepareRuns.push(agent.id);
@@ -305,6 +334,7 @@ async function open() {
     afterApproved: (id) => approvedHooks.push(id),
     backgroundSilence: () => backgroundSilenceMs,
     stallMinutes: () => 20,
+    reviewRechecks: () => 2,
   });
   const registry = createRegistry();
   registry.install(TestTools);
@@ -570,7 +600,11 @@ for (const name of ["BATCHFAIL", "BATCHOK", "BATCHQUOTA"]) {
   const ended = (await jobsOf(harness)).find((item) => item.id === batch.id);
   assert.equal(reports.length, 1, `${name}: one report for a shared turn`);
   assert.notEqual(record.endedAt, null, `${name}: the shared answer settles the latest send`);
-  assert.equal(ended.status, "failed", `${name}: an ended worker without Ready is settled`);
+  assert.equal(
+    ended.status,
+    name === "BATCHFAIL" ? "failed" : "checkpoint",
+    `${name}: a model failure fails; an answer without Ready is settled as a checkpoint`,
+  );
   if (name === "BATCHQUOTA") {
     assert.equal(record.quota, null, "quota recovery ended");
     assert.equal(record.modelMoves.length, 1, "one fallback move for the shared failure");
@@ -749,7 +783,7 @@ for (const [name, role, workspace, status] of [
   ["LONGHELPER", "worker", { kind: "shared" }, "completed"],
   ["LONGSCOUT", "scout", undefined, "answered"],
   ["LONGPREPFAIL", "scout", undefined, "failed to start"],
-  ["LONGFAIL", "worker", undefined, "failed"],
+  ["LONGFAIL", "worker", undefined, "checkpoint"],
   ["LONGREADY", "worker", undefined, "ready-with-gaps"],
   ["LONGCHECKPOINT", "worker", undefined, "checkpoint"],
 ]) {
@@ -824,6 +858,79 @@ await quiet(harness);
 const deliveredCheckpoint = (await jobsOf(harness)).find((item) => item.id === checkpoint.id);
 assert.equal(deliveredCheckpoint.status, "ready", "an explicit instruction resumes the same worker to delivery");
 assert.equal(deliveredCheckpoint.checkpoint, undefined, "a Ready delivery replaces the prior checkpoint");
+
+// R1-R7 (jobs-failures.md): one full review round (up to three axis reviewers), then at most N re-checks, counted on the Job.
+{
+  await say_(root, "Start BUDGET");
+  await quiet(harness);
+  const budget = (await jobsOf(harness)).find((item) => item.title === "Job BUDGET");
+  const results = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-BUDGET").map((item) => item.result);
+  const after = (step) => results[step + 1];
+  assert.match(after(0), /full review/i, "R3 a re-check needs a full review first");
+  for (const step of [1, 2, 3]) assert.equal(after(step), "REVIEW-OK", `R1 axis reviewer ${step} of the full round runs`);
+  assert.match(after(4), /full review round already/i, "R2 a fourth full reviewer is refused");
+  assert.match(after(4), /job ready/, "R6 a refusal says how to finish");
+  assert.equal(after(5), "Scouted.", "R7 a scout does not count");
+  for (const step of [6, 7]) assert.equal(after(step), "REVIEW-OK", `R1 re-check ${step - 5} runs`);
+  assert.match(after(8), /2 re-checks/, "R1 the third re-check is over the budget of 2");
+  assert.match(after(8), /gaps/, "R6 the refusal sends the remaining findings to the Ready gaps");
+  assert.match(after(9), /re-checks have started/i, "R2 no full review after the re-checks started");
+  assert.equal(budget.status, "ready-with-gaps");
+  assert.deepEqual(budget.reviews, { full: 3, rechecks: 2 }, "R1 one full round of three reviewers and two re-checks");
+  assert.equal(budget.children.filter((child) => child.role === "reviewer").length, 5, "refused reviewers never start");
+  await harness.close(context);
+  ({ harness, root, jobs, killed } = await open());
+  await jobs.steer(harness, budget.id, "Recheck once more");
+  await quiet(harness);
+  const refusal = requests.findLast((item) => item.role === "worker" && item.tag === "BRIEF-BUDGET").result;
+  assert.match(refusal, /2 re-checks/, "R4 the spent budget survives a restart and a follow-up");
+  assert.deepEqual((await jobsOf(harness)).find((item) => item.id === budget.id).reviews, { full: 3, rechecks: 2 });
+}
+
+// C1-C3: a worker that ends its turn without a report becomes a checkpoint automatically, once, keeping its workspace.
+{
+  await say_(root, "Start NOREPORT");
+  await quiet(harness);
+  const held = (await jobsOf(harness)).find((item) => item.title === "Job NOREPORT");
+  assert.equal(held.status, "checkpoint", "C1 no report is a checkpoint, not a failure");
+  assert.equal(held.reason, null);
+  assert.equal(held.checkpoint.auto, true, "C2 the checkpoint is marked automatic");
+  assert.equal(held.checkpoint.summary, "Should I keep the old API or remove it?", "C2 the summary is the worker's final answer");
+  assert.ok(liveAgentIds(await harness.snapshot(Jobs, root.id, context)).includes(held.id), "C2 the workspace stays owned");
+  assert.match((await jobs.approve(harness, held.id)).refused, /checkpoint.*not ready/, "C2 no Approve");
+  const notices = (await chatText(root)).filter((line) => line.startsWith(`[worker ${held.id} checkpoint:`));
+  assert.equal(notices.length, 1, "C3 the Coordinator is notified once");
+  assert.match(
+    notices[0],
+    /stopped without a Ready report.*waiting for a decision/s,
+    "C2 the notice says the worker stopped without a report",
+  );
+  assert.ok(notices[0].includes("Should I keep the old API"), "C2 the notice carries the question");
+  await jobs.steer(harness, held.id, "Continue checkpoint");
+  await quiet(harness);
+  assert.equal((await jobsOf(harness)).find((item) => item.id === held.id).status, "ready", "an answer resumes the same worker");
+}
+
+// S1: a failure while preparing the worker reads "did not start", apart from a model failure.
+{
+  await say_(root, "Start STARTFAIL");
+  await quiet(harness);
+  const notStarted = (await jobsOf(harness)).find((item) => item.title === "Job STARTFAIL");
+  assert.equal(notStarted.status, "failed");
+  assert.equal(notStarted.failure, "start", "S1 a preparation failure has its own kind");
+  assert.equal(notStarted.reason, "Did not start: Workspace grant is missing");
+  assert.ok(
+    (await chatText(root)).some((line) => line.startsWith(`[worker ${notStarted.id} failed to start:`) && line.includes("Did not start")),
+    "S1 the report says it did not start",
+  );
+  const runFailure = (await jobsOf(harness)).find((item) => item.title === "Job BATCHFAIL");
+  assert.equal(runFailure.failure, "run", "S1 a model failure is a run failure");
+  prepareHeld.add("Job STARTFAIL");
+  await jobs.steer(harness, notStarted.id, "Try again");
+  assert.equal((await jobsOf(harness)).find((item) => item.id === notStarted.id).failure, undefined, "S1 a retry clears the failure kind");
+  prepareHeld.delete("Job STARTFAIL");
+  await quiet(harness);
+}
 
 // A queued stall is obsolete once the worker returns a result, even while the coordinator is busy.
 await say_(root, "Start QUEUEDSILENT");

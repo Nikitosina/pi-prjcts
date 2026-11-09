@@ -42,7 +42,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { Type } from "typebox";
 import type { Context } from "@earendil-works/chord";
-import { DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
+import { DEFAULT_REVIEW_RECHECKS, DEFAULT_STALL_MINUTES, DEFAULT_VERIFY_ROUNDS } from "./state.ts";
 import { FULL_COMMIT, Jobs, createJobs, sharedHandoff, type JobsRuntime, type JobsSnapshot, type SpawnArgs } from "./jobs.ts";
 import { changedFiles, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
@@ -1141,6 +1141,8 @@ export async function openDurableProject(input: {
         ? `Verification: the project's verify skill is "${checks.skill}"; run it with projects_verify_run for up to ${checks.rounds ?? DEFAULT_VERIFY_ROUNDS} repair rounds, then report with the unproven criteria as gaps.`
         : "";
     };
+    const reviewLine = () =>
+      `Review budget: one full review, then at most ${loadProject(project.id).review?.rechecks ?? DEFAULT_REVIEW_RECHECKS} re-checks (subagent kind full, then recheck).`;
     type AgentProfile = Exclude<ProfileId, "coordinator">;
     // A task helper (`mode` "helper") has a worker's sections with the return-to-Coordinator delivery.
     const roleSections = (role: AgentProfile, repositoryStanding = standing.text, mode: WorkerMode = "job"): InstructionSections =>
@@ -1149,7 +1151,7 @@ export async function openDurableProject(input: {
         knowledgeAccess(),
         repositoryStanding,
         role,
-        role === "worker" ? verifyLine() : "",
+        role === "worker" ? [verifyLine(), reviewLine()].filter(Boolean).join("\n") : "",
         roleIndex(role),
         mode,
       );
@@ -1390,6 +1392,7 @@ export async function openDurableProject(input: {
       quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined,
       checkProof: (job, refs) => checkProofRefs(dir, job, refs),
       stallMinutes: () => loadProject(project.id).stallMinutes ?? DEFAULT_STALL_MINUTES,
+      reviewRechecks: () => loadProject(project.id).review?.rechecks ?? DEFAULT_REVIEW_RECHECKS,
       approver: {
         approve: async (job) => {
           const current = loadProject(project.id),

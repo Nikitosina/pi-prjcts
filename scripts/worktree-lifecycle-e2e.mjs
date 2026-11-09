@@ -195,6 +195,8 @@ const model = createServer((req, res) => {
             }),
           );
         }
+        // A worker that ends without a report becomes a checkpoint and keeps its worktree; W1 delivers.
+        if (n === 2) return res.end(call("job", { action: "ready", summary: "W1 feature", pr: "1", candidate: brain.sha1 }));
         return res.end(say(`W1-DONE branch ${brain.b1}`));
       }
       if (/W2-TASK/.test(firstUser) && /W2-AGAIN/.test(userText)) {
@@ -822,6 +824,8 @@ try {
 
   // R12: publish W3's commit and give dirty W2 an ignored, two-day-old e2e-results; a run removes W3 and that folder, and keeps W2's work.
   const w3Branch = git(w3Path, "rev-parse", "--abbrev-ref", "HEAD");
+  // W3 ended without a report, so it is a checkpoint that keeps its worktree until the owner dismisses it.
+  await rpc({ action: "thread-dismiss", id, threadId: w3.threadId });
   git(w3Path, "push", "-q", "origin", `HEAD:refs/heads/${w3Branch}`);
   const exclude = join(git(workspace, "rev-parse", "--path-format=absolute", "--git-common-dir"), "info", "exclude");
   mkdirSync(join(exclude, ".."), { recursive: true });

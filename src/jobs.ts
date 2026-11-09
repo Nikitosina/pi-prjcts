@@ -35,6 +35,7 @@ import {
 import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 import { behaviorKey, composePrompt, type PromptFrame } from "./prompt-blocks.ts";
 import { busyIn } from "./durable-idle-configure.ts";
+import { DEFAULT_REVIEW_RECHECKS } from "./state.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
@@ -63,7 +64,29 @@ export type CheckpointReport = {
   proof: string[];
   gaps: string[];
   at: number;
+  /** Recorded by the host when the worker ended its turn without job ready or job checkpoint; the summary is its final answer. */
+  auto?: true;
 };
+/** Why a Job failed: its worker never started (preparation), or its run failed. */
+export type JobFailure = "start" | "run";
+/** A reviewer the worker starts: the one full review round, or a re-check of the fix diff and the open findings. */
+export const ReviewKindSchema = Type.Union([Type.Literal("full"), Type.Literal("recheck")]);
+export type ReviewKind = Static<typeof ReviewKindSchema>;
+/** Reviewers a Job has started: those of its full round, and its re-checks. */
+export type ReviewSpend = { full: number; rechecks: number };
+/** The three-axis pr-review round starts one reviewer per axis. */
+export const FULL_REVIEW_REVIEWERS = 3;
+/** Why the review budget refuses this reviewer, or null: one full round (up to three reviewers, closed by the first re-check), then `rechecks` re-checks. */
+export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: number): string | null {
+  if (kind === "full") {
+    if (spent.rechecks > 0) return "The full review already ran and its re-checks have started.";
+    if (spent.full >= FULL_REVIEW_REVIEWERS) return `The full review round already has its ${FULL_REVIEW_REVIEWERS} reviewers.`;
+    return null;
+  }
+  if (spent.full === 0) return "Start with one full review (kind full); a re-check covers the fixes to its findings.";
+  if (spent.rechecks >= rechecks) return `All ${rechecks} re-checks of this Job are spent.`;
+  return null;
+}
 export type ReadyReport = {
   summary: string;
   proof: string[];
@@ -92,6 +115,10 @@ type JobFacts = {
   plan: PlanStep[];
   /** Why the Job stopped or failed. */
   reason: string | null;
+  /** Set with status failed: whether the worker never started or its run failed. Absent on records from before 2026-11-09. */
+  failure?: JobFailure;
+  /** Reviewers the worker started, against the project's review budget. */
+  reviews?: ReviewSpend;
   createdAt: number;
   endedAt: number | null;
   /** Stall notices sent so far, and when the current one was raised (null: not stalled). */
@@ -281,6 +308,7 @@ export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: nu
   };
 }
 
+const AUTO_CHECKPOINT = "The worker stopped without a Ready report or checkpoint; it may be waiting for a decision.";
 const reportList = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
 const notificationPreview = (report: string, agentId: string, ref: EntryId): string => {
   const pointer = `Report ref: ${ref}; read agents report id=${agentId} ref=${ref}.`;
@@ -306,7 +334,12 @@ const jobReportDetails = (job: Job, answer: string, cost: number | null, answerI
         ]
       : []),
     ...(checkpoint
-      ? [`Checkpoint: ${checkpoint.summary}`, `Proof:${reportList(checkpoint.proof)}`, `Gaps:${reportList(checkpoint.gaps)}`]
+      ? [
+          ...(checkpoint.auto ? [AUTO_CHECKPOINT] : []),
+          `Checkpoint: ${checkpoint.summary}`,
+          `Proof:${reportList(checkpoint.proof)}`,
+          `Gaps:${reportList(checkpoint.gaps)}`,
+        ]
       : []),
     `Cumulative time: ${minutes((job.endedAt ?? ready?.at ?? checkpoint?.at ?? job.createdAt) - job.createdAt)}`,
     `Cumulative cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
@@ -376,6 +409,8 @@ export type JobsHost = {
   afterApproved?(jobId: string): void;
   /** Minutes without progress before a stall notice. Default 20. */
   stallMinutes?: () => number;
+  /** Re-checks a Job may run after its full review. Default DEFAULT_REVIEW_RECHECKS. */
+  reviewRechecks?: () => number;
   quotaRetryBaseMs?: number;
   /** Why this agent cannot take a message (e.g. a worker that never got a workspace), or null. */
   refuseSend?(agent: Agent): string | null;
@@ -498,13 +533,13 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             return { status: "running", checkpoint: { phase: "deliver", attempt: 0 } } as const;
           }
           if (job && job.status === "running")
-            Object.assign(job, { status: "failed", reason: `The worker could not start: ${failure}`, endedAt: Date.now() });
+            Object.assign(job, { status: "failed", failure: "start", reason: `Did not start: ${failure}`, endedAt: Date.now() });
           agent.endedAt = job?.workspace ? null : Date.now();
           return {
             status: "running",
             checkpoint: {
               phase: job?.workspace ? "settle" : "report",
-              report: `[${agent.role} ${agent.id} failed to start: ${agent.title}] ${failure}`,
+              report: `[${agent.role} ${agent.id} failed to start: ${agent.title}] ${job ? `Did not start: ${failure}` : failure}`,
             },
           } as const;
         }, taskContext);
@@ -610,7 +645,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           if (settled.status === "unanswered" || failure) {
             if (!failure) return next();
             if (job && isLive(job.status))
-              Object.assign(job, { status: "failed", reason: `The worker failed: ${failure}`, endedAt: Date.now() });
+              Object.assign(job, { status: "failed", failure: "run", reason: `The worker failed: ${failure}`, endedAt: Date.now() });
             record.endedAt = Date.now();
             return finished(`[${record.role} ${record.id} failed: ${record.title}] ${failure}`);
           }
@@ -670,20 +705,29 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               ].join("\n"),
             );
           }
+          if (isLive(job.status)) {
+            // No report is not a crash: the worker may be asking something, so keep its workspace and hand back like a checkpoint.
+            const summary = answer.trim() || "The worker gave no final answer.";
+            job.checkpoint = {
+              summary: summary.length > 2000 ? `${summary.slice(0, 1999)}…` : summary,
+              proof: [],
+              gaps: [],
+              at: Date.now(),
+              auto: true,
+            };
+            Object.assign(job, { status: "checkpoint", ready: null, resume: null, endedAt: Date.now(), stalledAt: null });
+          }
           if (job.status === "checkpoint" && job.checkpoint)
             return next(
               [
                 `[worker ${job.id} checkpoint: ${job.title}]`,
+                ...(job.checkpoint.auto ? [AUTO_CHECKPOINT] : []),
                 `Summary: ${job.checkpoint.summary}`,
                 `Gaps:${reportList(job.checkpoint.gaps)}`,
                 `Details: agents report id=${job.id}; this is not delivery or owner-testing readiness. Resume only with a new instruction.`,
               ].join("\n"),
               jobReportDetails(job, answer, cost, settled.answer),
             );
-          if (isLive(job.status)) {
-            Object.assign(job, { status: "failed", reason: "The worker ended without a Ready report", endedAt: Date.now() });
-            return next(`[worker ${job.id} failed: ${job.title}]\nThe worker ended its turn without a Ready report.\n\n${answer.trim()}`);
-          }
           if (job.status === "failed") return next();
           return next(readyText(job), jobReportDetails(job, answer, cost, settled.answer));
         }, taskContext);
@@ -1068,7 +1112,12 @@ export function createJobs(host: JobsHost) {
                 ]
               : []),
             ...(checkpoint
-              ? [`Checkpoint: ${checkpoint.summary}`, `Proof:${reportList(checkpoint.proof)}`, `Gaps:${reportList(checkpoint.gaps)}`]
+              ? [
+                  ...(checkpoint.auto ? [AUTO_CHECKPOINT] : []),
+                  `Checkpoint: ${checkpoint.summary}`,
+                  `Proof:${reportList(checkpoint.proof)}`,
+                  `Gaps:${reportList(checkpoint.gaps)}`,
+                ]
               : []),
             `Cumulative time: ${minutes((record.endedAt ?? clock()) - record.createdAt)}`,
             `Cumulative cost: ${cost == null ? "unknown" : `$${cost.toFixed(2)}`}`,
@@ -1230,11 +1279,13 @@ export function createJobs(host: JobsHost) {
 
   const subagentTool = defineTool({
     name: "subagent",
-    description: "Run a fresh reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers.",
-    parameters: Type.Object({
-      role: Type.Union([Type.Literal("reviewer"), Type.Literal("scout")]),
-      task: Type.String(),
-    }),
+    description:
+      "Run a fresh reviewer or scout on a task and get its answer. It cannot spawn agents and ends when it answers. " +
+      "A reviewer is kind full (the one full review: one reviewer, or one per pr-review axis) or kind recheck (the fix diff and the still-open findings); the project limits re-checks.",
+    parameters: objectUnion([
+      Type.Object({ role: Type.Literal("reviewer"), kind: ReviewKindSchema, task: Type.String() }),
+      Type.Object({ role: Type.Literal("scout"), task: Type.String() }),
+    ]),
     replay: "safe",
     execute: async (args, api, callContext) => {
       const cwd = (await api.agent(callContext)).cwd;
@@ -1244,6 +1295,15 @@ export function createJobs(host: JobsHost) {
         const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
         const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
         if (!job) throw new Error("subagent belongs to a worker's Job");
+        if (args.role === "reviewer") {
+          const spent = job.reviews ?? { full: 0, rechecks: 0 };
+          const refusal = reviewRefusal(spent, args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
+          if (refusal)
+            throw new Error(
+              `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
+            );
+          job.reviews = args.kind === "full" ? { ...spent, full: spent.full + 1 } : { ...spent, rechecks: spent.rechecks + 1 };
+        }
         const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
         job.children.push({ id: created.id, role: args.role, title: clip(args.task, 80) });
         doc.subagents[String(created.id)] = job.id;
@@ -1295,6 +1355,7 @@ export function createJobs(host: JobsHost) {
         job.ready = null;
         job.endedAt = null;
         job.reason = null;
+        delete job.failure;
       }
       // An explicit retry adopts current role settings; steering a running agent keeps its model and frozen prompt.
       if (agent.endedAt !== null) {

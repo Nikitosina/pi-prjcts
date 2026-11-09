@@ -29,3 +29,20 @@ Live cause: a project pause aborted every chat with its background tasks, includ
 - A6 Project activity has no `paused` state: a paused project shows "working" or "idle" and the tree cannot tell it apart.
 - A7 A chat counts as working because one of its agents has no end time while nothing of that agent runs.
 - A8 The tree shows a paused project with the working dot, or with no sign that it is paused.
+
+## Review budget, auto-checkpoint, did not start (retro 2026-11-09)
+
+Owner rule: one full review, then at most `review.rechecks` re-checks (project setting, 0-5, default 2), each on the fix diff and the still-open findings. The host enforces it at the worker's `subagent` tool, not only in the prompt.
+
+- R1 The three axis reviewers of a `pr-review` round count as three rounds, so the re-checks are spent before the first fix.
+- R2 A fourth `full` reviewer, or a `full` reviewer after the first re-check, is admitted: a worker restarts the review from scratch instead of re-checking.
+- R3 A re-check without a full review first is admitted.
+- R4 The count lives in memory or in the conversation only: a host restart or a follow-up to the same Job resets it.
+- R5 A replayed `subagent` call (restart mid-review) counts twice and refuses the reviewer it already started.
+- R6 A refusal says only "refused": the worker loops or stops without a report instead of reporting Ready with the remaining findings as gaps.
+- R7 Scouts count against the review budget.
+- R8 The project setting is ignored, or accepts a value outside 0-5, or a settings save needs a host restart to apply.
+- C1 A worker that ends its turn without `job ready` or `job checkpoint` fails the Job; its question or partial work looks like a crash.
+- C2 The automatic checkpoint is indistinguishable from one the worker recorded, or offers Approve, or drops the worker's workspace.
+- C3 The automatic checkpoint notifies the Coordinator twice, or not at all.
+- S1 A failure in workspace preparation reads like a model failure ("failed"); the Job card and report must say "did not start" with the cause.

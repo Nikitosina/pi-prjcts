@@ -460,6 +460,24 @@ await kit.run(async () => {
   const verification = await kit.updateSettings(id, { verification: { enabled: true, skill: "verify-demo" } });
   check("V3 verification turns on without a verifier model", verification.values.verification.enabled === true, verification);
 
+  // R8 (jobs-failures.md): the review budget is a project setting, 0-5 re-checks, default 2, read by the worker's host contract.
+  check("R8 the review budget defaults to two re-checks", verification.values.review?.rechecks === 2, verification.values);
+  const budget = await kit.updateSettings(id, { review: { rechecks: 5 } });
+  check("R8 the review budget saves", budget.values.review?.rechecks === 5, budget.values);
+  check(
+    "R8 more than five re-checks is refused",
+    (await fails(
+      { action: "settings-update", id, confirm: id, expectedRevision: budget.revision, changes: { review: { rechecks: 6 } } },
+      /Invalid data/,
+    )) && (await rpc({ action: "settings-snapshot", id })).values.review.rechecks === 5,
+  );
+  const workerHost =
+    (await rpc({ action: "prompt-render", projectId: id, profile: "worker" })).sections.find((section) => section.id === "host")?.text ??
+    "";
+  check("R8 the worker's host contract carries the budget", workerHost.includes("at most 5 re-checks"), workerHost);
+  const reset = await kit.updateSettings(id, { review: null });
+  check("R8 null restores the default", reset.values.review?.rechecks === 2, reset.values);
+
   // Skill toggles in a profile's tools are the skill profile: one source of truth for prompt, skill reads and the lists.
   await rpc({ action: "chat-reload", id });
   const skillOff = await setProfile("worker", { tools: { disabled: ["group:knowledge", "skill:verify-demo"] } });
