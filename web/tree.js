@@ -4,7 +4,7 @@
 import { call } from "./api.js";
 import { esc, clip } from "./format.js";
 import { binding, display, onBindingsChange } from "./hotkeys.js";
-import { emit, fail, state, toast } from "./state.js";
+import { emit, fail, stale, state, toast } from "./state.js";
 
 const tree = document.querySelector("#tree");
 const archiveDialog = document.querySelector("#archive-chat");
@@ -105,6 +105,7 @@ onBindingsChange(() => {
   for (const button of tree.querySelectorAll("[data-archive-chat]")) button.title = archiveTitle();
 });
 
+let asked = 0; // which confirmation is showing, so a late answer closes only its own
 export const archiveDialogOpen = () => archiveDialog.open;
 export function closeArchiveDialog() {
   if (archiveDialog.open) archiveDialog.close();
@@ -114,13 +115,14 @@ export function requestArchive(projectId, chatId) {
   if (chatId === "main") return toast("Main cannot be archived.");
   const chat = chatsByProject.get(projectId)?.find((item) => item.id === chatId);
   if (!chat || archiveDialog.open || archiving.has(`${projectId}:${chatId}`)) return;
-  const opener = document.activeElement;
+  const opener = document.activeElement,
+    ask = ++asked;
   archiveDialog.innerHTML = `<form method="dialog" class="confirm"><h2 id="archive-chat-title">Archive “${esc(clip(chat.title, 60))}”?</h2><p class="muted">It leaves the list. Its transcript is kept, and Undo brings it back.</p><div class="confirm-actions"><button type="button" class="ghost-btn" data-archive-cancel>Cancel</button><button type="button" class="primary" data-archive-confirm>Archive</button></div></form>`;
   archiveDialog.querySelector("[data-archive-cancel]").addEventListener("click", closeArchiveDialog);
   const confirm = archiveDialog.querySelector("[data-archive-confirm]");
   confirm.addEventListener("click", () => {
     confirm.disabled = true;
-    void archive(projectId, chat);
+    void archive(projectId, chat, () => ask === asked && closeArchiveDialog());
   });
   archiveDialog.addEventListener(
     "close",
@@ -136,27 +138,29 @@ export function requestArchive(projectId, chatId) {
   archiveDialog.showModal();
   confirm.focus();
 }
-async function archive(projectId, chat) {
+async function archive(projectId, chat, done) {
   const key = `${projectId}:${chat.id}`;
   if (archiving.has(key)) return;
   archiving.add(key);
   renderTree();
+  // The order as the owner saw it: a host refresh during the request may already have dropped the chat.
+  const before = chatsByProject.get(projectId) ?? [],
+    index = before.findIndex((item) => item.id === chat.id);
   try {
     // Archiving aborts a running turn in the runtime; refuse instead of stopping it behind the owner's back.
     const view = await call("show", { id: projectId, chatId: chat.id });
     if (view.chats?.find((item) => item.id === chat.id)?.busy)
       throw new Error(`“${clip(chat.title, 40)}” is answering. Open it and stop the turn (${display(binding("stop"))}) before archiving.`);
     await call("chat-update", { id: projectId, chatId: chat.id, archived: true });
-    closeArchiveDialog();
-    const chats = chatsByProject.get(projectId) ?? [],
-      index = chats.findIndex((item) => item.id === chat.id),
-      rest = chats.filter((item) => item.id !== chat.id);
+    done();
+    const rest = (chatsByProject.get(projectId) ?? []).filter((item) => item.id !== chat.id),
+      left = (id) => rest.some((item) => item.id === id),
+      next = [...before.slice(index + 1), ...before.slice(0, Math.max(0, index)).reverse()].find((item) => left(item.id));
     storeChats(projectId, rest);
-    if (state.projectId === projectId && state.chatId === chat.id)
-      emit("select-request", { projectId, chatId: (rest[index] ?? rest[index - 1])?.id ?? "main" });
+    if (state.projectId === projectId && state.chatId === chat.id) emit("select-request", { projectId, chatId: next?.id ?? "main" });
     toast(`Archived “${clip(chat.title, 40)}”.`, { action: "Undo", onAction: () => void unarchive(projectId, chat, index), ms: 8000 });
   } catch (error) {
-    closeArchiveDialog();
+    done();
     fail(error);
   } finally {
     archiving.delete(key);
@@ -164,12 +168,14 @@ async function archive(projectId, chat) {
   }
 }
 async function unarchive(projectId, chat, index) {
+  const gen = state.generation;
   try {
     await call("chat-update", { id: projectId, chatId: chat.id, archived: false });
     const chats = (chatsByProject.get(projectId) ?? []).filter((item) => item.id !== chat.id);
     chats.splice(Math.max(0, index), 0, chat);
     storeChats(projectId, chats);
-    emit("select-request", { projectId, chatId: chat.id });
+    if (stale(gen)) renderTree();
+    else emit("select-request", { projectId, chatId: chat.id });
   } catch (error) {
     fail(error);
   }
