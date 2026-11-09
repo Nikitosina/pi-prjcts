@@ -35,7 +35,8 @@ The **round key** is the head revision (Arcanum: diff-set merge revision) plus b
 
 - Identical key with all reviewers complete: reuse that round's reports; launch nothing.
 - Same head with a different key (new or changed spec, new standards, other axes) or any earlier reviewer incomplete, failed, or truncated: run a fresh round in a new `<round>` covering every axis again.
-- Different head: fresh round.
+- Different head after your own fixes: a re-check, not a fresh round. One reviewer gets the fix diff (old head to new head) and the findings still open, within the host's re-check limit. Findings below P1 that remain go to the report as not fixed.
+- Different head for any other reason: fresh round.
 
 ## 4. Review in parallel
 
@@ -51,10 +52,10 @@ These are independent threads on the configured reviewer model, not a multi-mode
 
 For Standards, also read the installed codebase-design, ponytail-review and simplify skills by name through the role's skill reader. If one is unavailable, report that coverage limitation rather than inventing its contents. Apply their review criteria only, without edits or extra reviewers. Cover leaking interfaces, wrong ownership, unnecessary abstractions, unused compatibility code, misleading names, and narrating comments. Repository standards override these heuristics. Separate documented violations from judgement calls; skip tooling-enforced rules.
 
-Build and save `prompt-<reviewer>.md` in `<round>` for each reviewer. Each is a complete handoff, without assuming reviewers inherit skills, `AGENTS.md`, or conversation:
+Build and save `prompt-<reviewer>.md` in `<round>` for each reviewer as a record, and pass its full text as the brief; do not ask the reviewer to read the file. Each is a complete handoff, without assuming reviewers inherit skills, `AGENTS.md`, or conversation:
 
 - the pinned revisions, diff command, commit list, and absolute `<snapshot>` paths, which stay unchanged for the round;
-- the full contents or readable paths of its inputs: standards sources, the full smell baseline pasted in Standards, the full spec text in Spec, `references/bugs-performance.md` in Bugs/performance;
+- the full contents of its inputs, pasted into the brief: standards sources, the full smell baseline in Standards, the full spec text in Spec, `references/bugs-performance.md` in Bugs/performance;
 - the PR description from `pr.json` with any verification evidence it links (run IDs, manifests, proof directories) by path;
 - the rules: read only, no edits, builds, or execution; evidence it cannot read is reported as `evidence unavailable`, separately from findings and never as a violation;
 - the report format: each finding cites new-side `path:line`, evidence, and consequence. Standards and Spec reports stay under 400 words each; Bugs/performance follows its reference.
