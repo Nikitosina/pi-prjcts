@@ -16,7 +16,7 @@ import { projectDir } from "../src/state.ts";
 
 const id = randomUUID(),
   stamp = new Date().toISOString().replaceAll(":", "-");
-const evidence = join(join(process.cwd(), "artifacts"), `workspace-allocation-${stamp}-${id}`);
+const evidence = join(process.env.PI_ARTIFACTS_DIR ?? join(process.cwd(), "artifacts"), `workspace-allocation-${stamp}-${id}`);
 mkdirSync(evidence, { recursive: true, mode: 0o700 });
 const report = {
   failuresRecordedBeforeEffects: [
@@ -161,9 +161,10 @@ try {
   };
   // Current-host recovery must preserve ignored files even with a missing archive home and no remote branch.
   const sameHost = async (name, refusal = null, prepare = () => {}) => {
+    const { continueBranch: _continued, ...sourceScope } = continueIntent(name).scope;
     const source = {
       ...continueIntent(name),
-      scope: { ...continueIntent(name).scope, continueBranch: false, workspacePath: join(currentRoot, name) },
+      scope: { ...sourceScope, workspacePath: join(currentRoot, name) },
     };
     const allocator = workspaceIsolation(isoOptions);
     check((await allocator.allocate(source)).state === "allocated", `${name}: source allocated`);
