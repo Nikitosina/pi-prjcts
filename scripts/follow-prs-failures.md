@@ -37,3 +37,12 @@ Opt-in is now the Follow PRs switch in Settings → Automations (F9); the card n
 fits 390 px (F20). The Alerts transcript in `#feed` shows the coordinator's answer and never the internal event (F11). Retired with
 the classic Events form: choosing the event chat, cadence, auto-fix and fix cap in the browser (kept over `automation-update`), the
 "Check now" button (kept over `follow-poll`) and the per-fix list (kept in `automation-snapshot`). Gaps: those controls in the new client.
+
+## Pull the main checkout on merged (owner request 2026-11-09)
+When Follow PRs sees a PR become merged (whoever merged it), the host fast-forwards the project's main checkout through the merge provider's `pullMain` and says the outcome in the event line.
+21. A merged PR leaves a clean main checkout on the PR's base behind (the Coordinator only reports the merge).
+22. A dirty checkout or a checkout on another branch is changed, or the skip is silent instead of "main checkout not pulled: <reason>" in the event.
+23. A failing or hanging pull fails the follow poll, loses the event, or blocks the poll past its timeout; host shutdown waits for it.
+24. One merge pulls more than once: on the next poll, on a replayed pending batch, or once per item instead of once per transition.
+25. Two pulls of the same checkout run at once (two merges, or Follow PRs and Approve together), so one fails on git's lock.
+26. A provider whose follow state has no base branch (the Arc plugin) pulls nothing or the wrong branch: the base comes from the merge provider's `inspect`.

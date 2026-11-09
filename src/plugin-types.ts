@@ -351,6 +351,8 @@ export type FollowPrState = {
   state: "open" | "closed" | "merged";
   head: string;
   ref: string;
+  /** Branch the PR merges into, when the provider knows it; without it Follow PRs reads it through the merge provider's `inspect`. */
+  base?: string;
   title: string;
   updatedAt: string;
   ci: { sha: string; result: "failed" | "passed" } | null;

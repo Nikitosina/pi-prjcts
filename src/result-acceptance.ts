@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { githubCli } from "./github-authorization.ts";
 import { errorText, parse, saveJson } from "./state.ts";
 import type { MergeAnswer, MergeFacts, MergeProvider, MergeTarget } from "./plugin-types.ts";
+import { pullMainCheckout } from "./main-pull.ts";
 
 /** What Approve needs from a Job record; core's Job carries more. `pr` is the provider's PR id (a number for GitHub). */
 export type AcceptJob = { id: string; pr: string; candidateSha: string };
@@ -156,10 +157,8 @@ export function createApprover(options: {
       }
     }
     options.log.write(job.id, { head, state: "merged" });
-    const pulled = await provider.pullMain({ checkout: target.checkout, base: facts.base, signal }).catch((error) => ({
-      pulled: false as const,
-      reason: errorText(error),
-    }));
+    // Shares the per-checkout queue with Follow PRs, which pulls the same checkout when it sees the merge.
+    const pulled = await pullMainCheckout({ provider, checkout: target.checkout, base: facts.base, signal });
     return pulled.pulled ? { kind: "accepted", head } : { kind: "merged-pull-skipped", head, reason: pulled.reason };
   }
 

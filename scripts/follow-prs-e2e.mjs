@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { call } from "./lib/e2e-kit.mjs";
+import { describeMainPull, pullMainCheckout } from "../src/main-pull.ts";
 
 const repo = process.cwd();
 const artifacts = join(repo, "artifacts", `follow-prs-${new Date().toISOString().replaceAll(":", "-")}`);
@@ -31,6 +32,13 @@ const bare = join(root, "remote.git"),
   ghCalls = join(root, "fake-gh-calls.jsonl");
 writeFileSync(fakeGh, `#!/bin/sh\nexec "${process.execPath}" "${join(repo, "scripts/fake-gh.mjs")}" "$@"\n`);
 chmodSync(fakeGh, 0o755);
+// GIT_TRACE logs the host's git commands (the host replaces PATH with the login shell's, so a wrapper would not be seen); pulls are counted from it.
+const pullLog = join(root, "git-trace.log");
+writeFileSync(pullLog, "");
+const pulls = () =>
+  readFileSync(pullLog, "utf8")
+    .split("\n")
+    .filter((line) => /built-in: git pull\b/.test(line));
 const A = ["A1", "A2", "A3", "A4", "A5"].map(sha);
 writeFileSync(
   ghState,
@@ -151,6 +159,7 @@ const env = {
   FAKE_GH_BARE: bare,
   FAKE_GH_CALLS: ghCalls,
   PI_PROJECTS_FOLLOW_TICK_MS: "300",
+  GIT_TRACE: pullLog,
 };
 for (const key of Object.keys(env)) if (key.startsWith("PI_SUBAGENT") || key === "PI_SESSION_FILE") delete env[key];
 const git = (dir, ...args) => execFileSync("/usr/bin/git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
@@ -164,6 +173,7 @@ writeFileSync(join(workspace, "README.md"), "base\n");
 git(workspace, "add", ".");
 git(workspace, "commit", "-qm", "c1");
 git(workspace, "push", "-q", "origin", "main");
+git(workspace, "branch", "-q", "--set-upstream-to=origin/main", "main");
 
 let host,
   hostEnded = false,
@@ -334,6 +344,89 @@ async function waitFor(expression, session, label, tries = 240) {
   throw Error(`Timed out waiting for ${label}`);
 }
 
+// P0: the main-checkout pull itself, with fake merge providers: one pull per checkout at a time, bounded, never throws.
+{
+  const quiet = new AbortController().signal;
+  let active = 0,
+    most = 0;
+  const slow = {
+    pullMain: async () => {
+      most = Math.max(most, ++active);
+      await delay(80);
+      active--;
+      return { pulled: true };
+    },
+  };
+  const [one, two] = await Promise.all([
+    pullMainCheckout({ provider: slow, checkout: workspace, base: "main", signal: quiet }),
+    pullMainCheckout({ provider: slow, checkout: join(workspace, "."), base: "main", signal: quiet }),
+  ]);
+  if (most !== 1 || !one.pulled || !two.pulled) throw Error("Pulls of one checkout overlapped: " + JSON.stringify({ most, one, two }));
+  const started = Date.now(),
+    hung = await pullMainCheckout({
+      provider: { pullMain: () => new Promise(() => {}) },
+      checkout: plain,
+      base: "main",
+      signal: quiet,
+      timeoutMs: 100,
+    });
+  if (hung.pulled || !/timed out/.test(hung.reason) || Date.now() - started > 2000)
+    throw Error("A hung pull was not bounded: " + JSON.stringify(hung));
+  const stop = new AbortController();
+  setTimeout(() => stop.abort(), 50);
+  const stopped = await pullMainCheckout({
+    provider: { pullMain: () => new Promise(() => {}) },
+    checkout: userHome,
+    base: "main",
+    signal: stop.signal,
+  });
+  if (stopped.pulled || !/shutting down/.test(stopped.reason)) throw Error("Shutdown did not end a pull: " + JSON.stringify(stopped));
+  const thrown = await pullMainCheckout({
+    provider: {
+      pullMain: async () => {
+        throw new Error("index.lock exists");
+      },
+    },
+    checkout: agentDir,
+    base: "main",
+    signal: quiet,
+  });
+  if (thrown.pulled || !/index\.lock exists/.test(thrown.reason))
+    throw Error("A throwing pull was not a reason: " + JSON.stringify(thrown));
+  const asked = [];
+  const viaInspect = await pullMainCheckout({
+    provider: {
+      inspect: async (target) => (asked.push(target.pr), { base: "trunk" }),
+      pullMain: async (input) => (asked.push(input.base), { pulled: true }),
+    },
+    checkout: agentDir,
+    pr: "42",
+    signal: quiet,
+  });
+  if (!viaInspect.pulled || asked.join() !== "42,trunk") throw Error("Base not read through inspect: " + JSON.stringify(asked));
+  const unread = await pullMainCheckout({
+    provider: {
+      inspect: async () => {
+        throw new Error("401");
+      },
+      pullMain: async () => ({ pulled: true }),
+    },
+    checkout: agentDir,
+    pr: "42",
+    signal: quiet,
+  });
+  if (unread.pulled || !/could not read the PR's base branch: 401/.test(unread.reason))
+    throw Error("Unread base pulled: " + JSON.stringify(unread));
+  if (
+    describeMainPull({ pulled: true }) !== "main checkout pulled" ||
+    describeMainPull({ pulled: false, reason: "x" }) !== "main checkout not pulled: x"
+  )
+    throw Error("Pull line wording changed");
+  result.checks.push(
+    "P0 pulls of one checkout never overlap; a hung pull ends at its timeout or at shutdown; a throw or an unreadable base becomes a reason; a missing base comes from inspect",
+  );
+}
+
 startHost();
 try {
   await waitHost();
@@ -468,6 +561,24 @@ try {
     "F3/F4 the timer runs the first poll after opt-in; it records a silent baseline (old PRs, comments, pending CI) and reads only acme/mari",
   );
 
+  // The owner checkout fetches from the fake remote and origin/HEAD names main, so the GitHub pullMain can fast-forward it.
+  git(workspace, "config", `url.${bare}.insteadOf`, "https://github.com/acme/mari.git");
+  git(workspace, "fetch", "-q", "origin");
+  git(workspace, "remote", "set-head", "origin", "main");
+  const other = join(root, "other");
+  execFileSync("/usr/bin/git", ["clone", "-q", bare, other]);
+  git(other, "config", "user.email", "e2e@example.invalid");
+  git(other, "config", "user.name", "E2E");
+  // A merge lands on the remote main: the commit the main checkout should reach.
+  const land = (name) => {
+    git(other, "pull", "-q", "--ff-only", "origin", "main");
+    writeFileSync(join(other, `${name}.txt`), `${name}\n`);
+    git(other, "add", ".");
+    git(other, "commit", "-qm", name);
+    git(other, "push", "-q", "origin", "HEAD:main");
+    return git(other, "rev-parse", "HEAD");
+  };
+  const merged3 = land("merge-3");
   // A burst of changes: #4 opened by the project (CI passes), #3 merged, #2 CI fails + review + bot comment, #5 external with failing CI.
   const C = ["C1", "C2"].map(sha),
     E1 = sha("E1"),
@@ -521,6 +632,15 @@ try {
   ])
     if (!own.text.includes(want)) throw Error(`Job chat event lacks "${want}": ${own.text}`);
   if (text.includes("PR #2")) throw Error("A Job's PR leaked into the event chat: " + text);
+  if (
+    !text.includes("PR #3 “Docs tweak” merged — main checkout pulled") ||
+    git(workspace, "rev-parse", "HEAD") !== merged3 ||
+    pulls().length !== 1
+  )
+    throw Error(
+      "Merged #3 did not pull the main checkout: " + JSON.stringify({ text, head: git(workspace, "rev-parse", "HEAD"), pulls: pulls() }),
+    );
+  result.checks.push("P1 a merged PR fast-forwards the clean main checkout on its base once, and the event line says so");
   if (/OLD-COMMENT|OLD-REVIEW|Old work/.test(text + own.text)) throw Error("Baseline items re-delivered: " + text);
   result.checks.push(
     "F8 activity on a Job's PR (#2) is one event for the chat that started the Job; the rest is one event in the Settings chat; baseline items stay out",
@@ -570,8 +690,8 @@ try {
 
   // F5/F7/F13: nothing new, no repeat.
   const again = await poll();
-  if (again.result.events !== 0 || (await events()).length !== 2 || (await fixWork()).length !== 1)
-    throw Error("Second poll repeated something: " + JSON.stringify(again.result));
+  if (again.result.events !== 0 || (await events()).length !== 2 || (await fixWork()).length !== 1 || pulls().length !== 1)
+    throw Error("Second poll repeated something: " + JSON.stringify({ result: again.result, pulls: pulls() }));
   result.checks.push("F5/F7/F13 a second poll with no changes sends nothing and dispatches nothing");
 
   // F15: a new failing head while the previous fix still runs.
@@ -633,6 +753,81 @@ try {
   if ((await fixWork()).length !== 3 || !/PR #2 .*CI failed.*auto-fix is off/.test((await events()).at(-1).text))
     throw Error("Auto-fix off not respected");
   result.checks.push("F17 auto-fix can be turned off while following continues");
+  await settleAll();
+
+  // P2-P6: merges the main checkout cannot take are skipped with their reason, and the poll goes on; two merges in one poll pull once.
+  ghSet((state) => {
+    for (const [number, title] of [
+      [9, "Dirty merge"],
+      [10, "Side merge"],
+      [11, "Offline merge"],
+      [12, "Pair one"],
+      [13, "Pair two"],
+    ])
+      state.pulls.push({ number, title, head: `erin/p${number}`, base: "main", sha: sha(`P${number}`), user: "erin" });
+  });
+  await poll();
+  await settleAll();
+  const lastLine = async () => (await events()).at(-1).text;
+  const pullsBefore = pulls().length,
+    headBefore = git(workspace, "rev-parse", "HEAD");
+  land("merge-9");
+  writeFileSync(join(workspace, "scratch.txt"), "owner work\n");
+  ghSet((state) => Object.assign(pull(state, 9), { state: "closed", merged: true }));
+  await poll();
+  const dirty = await lastLine();
+  if (
+    !dirty.includes("PR #9 “Dirty merge” merged — main checkout not pulled: the checkout has uncommitted changes") ||
+    git(workspace, "rev-parse", "HEAD") !== headBefore
+  )
+    throw Error("Dirty checkout not skipped: " + dirty);
+  execFileSync("/bin/rm", [join(workspace, "scratch.txt")]);
+  await settleAll();
+  git(workspace, "checkout", "-q", "-b", "side");
+  ghSet((state) => Object.assign(pull(state, 10), { state: "closed", merged: true }));
+  await poll();
+  const side = await lastLine();
+  if (
+    !side.includes("PR #10 “Side merge” merged — main checkout not pulled: the checkout is on side, not main") ||
+    git(workspace, "rev-parse", "HEAD") !== headBefore
+  )
+    throw Error("Other branch not skipped: " + side);
+  git(workspace, "checkout", "-q", "main");
+  result.checks.push("P2/P3 a dirty checkout or one on another branch stays as it is; the event says why it was not pulled");
+  await settleAll();
+  git(workspace, "config", "--unset", `url.${bare}.insteadOf`);
+  git(workspace, "config", `url.${join(root, "missing.git")}.insteadOf`, "https://github.com/acme/mari.git");
+  ghSet((state) => Object.assign(pull(state, 11), { state: "closed", merged: true }));
+  const offline = await poll();
+  const failedPull = await lastLine();
+  if (
+    !offline.result.events ||
+    (await snap()).follow.lastError ||
+    !failedPull.includes("PR #11 “Offline merge” merged — main checkout not pulled: git pull failed") ||
+    pulls().length !== pullsBefore + 1
+  )
+    throw Error("A failing pull broke the poll: " + JSON.stringify({ offline, failedPull, pulls: pulls().length - pullsBefore }));
+  result.checks.push("P5 a failing pull is a reason in the event; the poll succeeds and nothing is lost");
+  await settleAll();
+  git(workspace, "config", "--unset", `url.${join(root, "missing.git")}.insteadOf`);
+  git(workspace, "config", `url.${bare}.insteadOf`, "https://github.com/acme/mari.git");
+  const pair = land("merge-12-13");
+  ghSet((state) => {
+    Object.assign(pull(state, 12), { state: "closed", merged: true });
+    Object.assign(pull(state, 13), { state: "closed", merged: true });
+  });
+  await poll();
+  const both2 = await lastLine();
+  if (
+    !both2.includes("PR #12 “Pair one” merged — main checkout pulled") ||
+    !both2.includes("PR #13 “Pair two” merged — main checkout pulled") ||
+    git(workspace, "rev-parse", "HEAD") !== pair ||
+    pulls().length !== pullsBefore + 2
+  )
+    throw Error("Two merges in one poll: " + JSON.stringify({ both2, pulls: pulls().length - pullsBefore }));
+  await poll();
+  if (pulls().length !== pullsBefore + 2) throw Error("A later poll pulled again");
+  result.checks.push("P4/P6 two merges in one poll pull the checkout once; a later poll does not pull again");
   await settleAll();
 
   // F18: gh failure keeps the change for the next poll.

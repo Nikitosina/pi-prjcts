@@ -33,6 +33,7 @@ Persistence without the plugin
 Regression guards
 23. GitHub-only projects behave as before: no provider group, no provider cards, no `#` menu; the generic `prs`/`pr-watch`/`pr-hide` RPCs refuse them.
 24. The core source tree contains no plugin-specific provider names, CLIs, env seams or hosts (checked by grep in this E2E).
+25. A followed PR of a provider whose follow state has no base branch merges, and the main checkout is not pulled, or is pulled on a guessed branch instead of the base its merge provider's `inspect` reports, or more than once.
 
 ## After the classic inbox (2026-11-04)
 

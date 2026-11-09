@@ -210,6 +210,28 @@ export default {
         },
         published: async () => (data().published ?? []).map((item) => String(item.number)),
       },
+      // Result acceptance for Follow PRs' pull after a merge: the base comes only from `inspect`, as for the Arc plugin; nothing merges.
+      merge: {
+        kind: "fake",
+        inspect: async ({ pr }) => {
+          const item = data().prs.find((entry) => String(entry.id) === pr);
+          return {
+            state: item?.merged ? "merged" : "open",
+            draft: false,
+            head: item?.head ?? "a".repeat(40),
+            base: "fake-main",
+            mergeable: "no",
+          };
+        },
+        merge: async () => ({ ok: false, refused: "the fake service does not merge" }),
+        enableAutoMerge: async () => ({ ok: false, refused: "the fake service does not merge" }),
+        pullMain: async ({ checkout, base }) => {
+          const value = data();
+          value.mainPulls = [...(value.mainPulls ?? []), { checkout, base }];
+          writeFileSync(dataFile(), JSON.stringify(value));
+          return { pulled: true };
+        },
+      },
       follow: {
         id: "fake",
         eventKind: "fake.follow",
