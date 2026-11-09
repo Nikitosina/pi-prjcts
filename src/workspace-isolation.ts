@@ -85,9 +85,10 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     authorize(intent, allowed, authority);
     const old = await get(intent.id);
     if (old) {
-      if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption");
-      // A start blocked before any provider effect is tried again: its cause (a held branch, a dirty owner) may be gone. Preflight still refuses an existing target.
-      if (old.state !== "blocked" || old.workspacePath !== null) return old;
+      // A start blocked before any provider effect froze nothing: it is tried again, on the caller's current scope (owner HEAD may have moved). Preflight still refuses an existing target.
+      const retry = old.state === "blocked" && old.workspacePath === null && old.attemptId === intent.attemptId;
+      if (!retry && !sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption");
+      if (!retry) return old;
     }
     await put(receipt(intent, "prepared", {}, null, null, null)); // Durable intent precedes unsafe CLI.
     const missing = pluginMissing(intent.scope.provider);

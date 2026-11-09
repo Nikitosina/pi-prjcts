@@ -320,6 +320,31 @@ try {
       !/that folder/.test(taken.reason),
     "T1/T2 a holder outside both homes is untouched, and a missing old home is named as such",
   );
+  // R3: the owner checkout moves between a blocked start and the resume; the resume computes a fresh scope (runs last: it moves owner HEAD).
+  holder = await holderOf("handoff-moved", "running");
+  const frozen = continueIntent("handoff-moved");
+  check((await iso.allocate(frozen)).state === "blocked", "R3 the first start is blocked by the running holder");
+  writeFileSync(join(owner, "moved.txt"), "moved\n");
+  git(owner, "add", "moved.txt");
+  git(owner, "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-m", "owner moved");
+  const movedHead = git(owner, "rev-parse", "HEAD");
+  workers.set(holder.thread, "ended");
+  taken = await iso.allocate(frozen);
+  check(taken.state === "blocked" && /drifted/.test(taken.reason), "R3 the old frozen scope cannot start after the owner moved");
+  const fresh = { ...frozen, scope: { ...frozen.scope, headRevision: movedHead } };
+  taken = await iso.allocate(fresh);
+  report.receipts.push(taken);
+  check(
+    taken.state === "allocated" && taken.scope.headRevision === movedHead && detached(holder.path),
+    "R3 the resume replaces the blocked receipt with the freshly computed scope and starts",
+  );
+  let refusedAllocated = false;
+  try {
+    await iso.allocate({ ...fresh, scope: { ...fresh.scope, headRevision: gitHead } });
+  } catch (error) {
+    refusedAllocated = /differs/.test(String(error));
+  }
+  check(refusedAllocated, "R3 an allocated receipt with a differing scope is still refused");
   // A carried project's approved root inside the old home is replaced by this host's own folder, without touching the stored grant.
   process.env.PI_PROJECTS_HOME = join(fixture, "new-home");
   const carried = join(archiveHome(), gitProject, "worktrees");

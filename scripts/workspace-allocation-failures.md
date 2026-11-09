@@ -16,3 +16,4 @@ Written before the fix of 2026-11-09 (live: Mari PR #236, a fresh worker could n
 ## Retry after a blocked start
 - R1 a start blocked before any provider effect (no workspace path) is replayed from the stored receipt on every resume, after the cause is gone.
 - R2 the retry adopts a receipt for a differing intent or scope, or re-runs an allocated, preserved, uncertain or released receipt.
+- R3 the owner checkout moved between the blocked start and the resume: the retry keeps the old frozen scope (owner HEAD of the first attempt) and is blocked as "Git owner head drifted" forever. A blocked receipt with no workspace path froze nothing, so the resume computes a fresh scope and replaces it; any other state with a differing scope is still refused.

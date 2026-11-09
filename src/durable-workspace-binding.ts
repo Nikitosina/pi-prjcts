@@ -138,7 +138,8 @@ export function durableWorkspaceBinding(input: {
     });
     // A whole-repository thread starts from owner HEAD at its first allocation and keeps that base and branch on later dispatches.
     const receipts = whole ? (await isolation.snapshot()).receipts : [],
-      allocated = receipts.find((item) => item.intentId === intentId)?.scope;
+      // A start blocked before any effect froze nothing, so the next one computes its scope afresh.
+      allocated = receipts.find((item) => item.intentId === intentId && !(item.state === "blocked" && item.workspacePath === null))?.scope;
     const continued = allocated ? undefined : thread.continueBranch;
     const bindContext = {
       project: input.project,
