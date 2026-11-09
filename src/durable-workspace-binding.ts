@@ -10,10 +10,10 @@ import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-ty
 import { loadProject, projectDir, type Project } from "./state.ts";
 import { archiveHome, currentWorktreeRoot } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
-import { Jobs } from "./jobs.ts";
+import { Jobs, liveAgentIds } from "./jobs.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
 import { workspaceCapabilities, workspacePhysicalLockPath, type WorkspaceAuthority } from "./workspace-capabilities.ts";
-import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
+import { isolationProvider, type WorkspaceIntent, type WorkspaceReceipt } from "./workspace-types.ts";
 import { githubWorkerTools } from "./github-worker.ts";
 import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
@@ -26,6 +26,27 @@ import { plugins } from "./plugins.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
+
+/** Host-state check for detaching a retained worker allocation, never a persistent Coordinator allocation. */
+export async function endedWorkerWorkspaceOwner(root: Conversation, receipt: WorkspaceReceipt): Promise<string | null> {
+  return root.commit(async (tx) => {
+    const state = await tx.doc(Jobs, root.id);
+    const threadId = /^durable workspace (\S+)$/.exec(receipt.scope.leaseReason)?.[1];
+    const agent = threadId ? state.agents[threadId] : undefined;
+    if (
+      !agent ||
+      agent.role !== "worker" ||
+      !agent.scopeId ||
+      stableUuid(`${receipt.scope.projectId}:${agent.id}:${agent.scopeId}`) !== receipt.intentId
+    )
+      return "its owning worker thread cannot be identified from host state";
+    const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
+    if (!job) return "its owning worker Job is missing from host state";
+    if (agent.endedAt === null || job.status === "running" || liveAgentIds(state).includes(agent.id))
+      return `its owning thread ${agent.id} is ${state.paused ? "suspended" : "live or retained"}`;
+    return null;
+  }, BACKGROUND_CONTEXT);
+}
 
 /** Builds a trusted host callback; model work supplies only the persisted scope ID. */
 export type DurablePrepareWorkerEnvironment = (
@@ -117,6 +138,7 @@ export function durableWorkspaceBinding(input: {
       conversation: input.conversation(),
       authority: { projectId: input.project.id, owner: leaseOwner },
       oldHome: archiveHome(),
+      endedWorktreeOwner: (receipt) => endedWorkerWorkspaceOwner(input.conversation(), receipt),
       authorizedRepositories: [
         {
           repositoryId: repository.repositoryId,

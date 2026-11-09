@@ -48,6 +48,9 @@ type Options = {
   authorizedRepositories?: readonly Authorization[];
   context?: Context;
   /** The previous host's home: a clean, fully pushed worktree under it may be removed so its branch can be continued. */ oldHome?: string;
+  /** Host-state refusal for a current-root holder; null only when its owning worker has ended. */ endedWorktreeOwner?: (
+    receipt: WorkspaceReceipt,
+  ) => Promise<string | null>;
   /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void;
   /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string;
   /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean;
@@ -89,7 +92,8 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     if (missing) return put(receipt(intent, "blocked", {}, null, null, missing));
     const pre = await preflight(intent.scope, false);
     if (pre.reason) return put(receipt(intent, "blocked", pre.facts, null, null, pre.reason));
-    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts, options.oldHome) : await addPlugin(intent, pre.facts);
+    const effect =
+      intent.scope.provider === "git" ? await addGit(intent, pre.facts, options, snapshot) : await addPlugin(intent, pre.facts);
     if (effect.state === "allocated") await options.afterProviderEffect?.(dto(effect));
     return put(effect);
   }
@@ -329,7 +333,7 @@ async function preflight(s: WorkspaceScope, exists: boolean, options = { ownerSt
     return { facts: {}, reason: e instanceof Error ? e.message : String(e) };
   }
 }
-async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string) {
+async function addGit(i: Intent, facts: Record<string, string>, options: Options, snapshot: () => Promise<WorkspaceSnapshot>) {
   const existing = i.scope.continueBranch
     ? (await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${i.scope.branch}`], i.scope.ownerCheckout)).stdout.trim()
     : "";
@@ -350,11 +354,11 @@ async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string
       i.scope.ownerCheckout,
     );
   let x = await add();
-  if (x.code && i.scope.continueBranch && oldHome) {
-    const taken = await reclaimOldWorktree(i.scope, oldHome);
+  if (x.code && i.scope.continueBranch) {
+    const taken = await reclaimHeldWorktree(i.scope, options, snapshot);
     if (taken.refusal) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${taken.refusal}`);
-    if (taken.removed) {
-      facts = { ...facts, reclaimedWorktree: taken.removed };
+    if (taken.removed || taken.detached) {
+      facts = { ...facts, ...(taken.removed ? { reclaimedWorktree: taken.removed } : { detachedWorktree: taken.detached! }) };
       x = await add();
     }
   }
@@ -364,12 +368,12 @@ async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string
     ? receipt(i, "allocated", { ...facts, ...found.facts }, i.scope.workspacePath, null, null)
     : receipt(i, "uncertain", facts, i.scope.workspacePath, null, "Git effect lacks exact receipt facts");
 }
-/**
- * A branch that the previous host left checked out in one of its own worktrees cannot be continued. That worktree is removed only when it lives
- * under the old host's home, nothing runs in it, it has no uncommitted or untracked files and its HEAD is already on the remote branch.
- * Returns the removed path, or a refusal naming the path and the reason; neither when no worktree holds the branch.
- */
-async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{ removed?: string; refusal?: string }> {
+// Current-root holders are detached, never removed, because ignored files may be evidence.
+async function reclaimHeldWorktree(
+  s: WorkspaceScope,
+  options: Options,
+  snapshot: () => Promise<WorkspaceSnapshot>,
+): Promise<{ removed?: string; detached?: string; refusal?: string }> {
   const list = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
   const holder = list.stdout
     .trim()
@@ -379,17 +383,43 @@ async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{
   if (!holder) return {};
   const path = holder.worktree!,
     refuse = (why: string) => ({ refusal: `branch ${s.branch} is checked out in ${path}: ${why}` });
-  let real: string, home: string;
+  let real: string;
   try {
-    real = realpathSync(path);
-    home = realpathSync(oldHome);
+    real = dir(path);
   } catch {
-    return refuse("that folder or the old host's home is missing, so it was not touched");
+    return refuse("its folder is missing or symlinked, so it was not touched");
   }
-  if (!inside(home, real) || home === real)
-    return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+  const root = dir(s.approvedRoot);
+  const current = inside(root, real) && root !== real;
+  let owned: WorkspaceReceipt | undefined;
+  if (current) {
+    owned = (await snapshot()).receipts.find(
+      (receipt) =>
+        receipt.state === "allocated" &&
+        receipt.workspacePath === real &&
+        receipt.scope.approvedRoot === s.approvedRoot &&
+        receipt.scope.ownerCheckout === s.ownerCheckout &&
+        receipt.scope.repositoryId === s.repositoryId &&
+        receipt.scope.branch === s.branch &&
+        holder.locked === `workspace-intent:${receipt.intentId}`,
+    );
+    if (!owned) return refuse("its lock or allocation receipt does not identify an owned worktree");
+    if (!options.endedWorktreeOwner) return refuse("its owning thread's ended state cannot be verified");
+    const reason = await options.endedWorktreeOwner(owned);
+    if (reason) return refuse(reason);
+  } else {
+    let home: string;
+    try {
+      if (!options.oldHome) return refuse("it is outside the current approved root and no previous host home is configured");
+      home = realpathSync(options.oldHome);
+    } catch {
+      return refuse("it is outside the current approved root and the previous host's home is missing, so it was not touched");
+    }
+    if (!inside(home, real) || home === real)
+      return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+  }
   const busy = await active(real);
-  if (busy !== false) return refuse("a process is running in it");
+  if (busy !== false) return refuse(typeof busy === "string" ? `activity cannot be verified (${busy})` : "a process is running in it");
   const status = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], real);
   if (status.code) return refuse(`its status is unreadable (${short(status.stderr)})`);
   const dirty = status.stdout.split("\n").filter(Boolean);
@@ -400,6 +430,12 @@ async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{
         .map((line) => line.slice(3))
         .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`,
     );
+  if (current && owned && options.endedWorktreeOwner) {
+    const reason = await options.endedWorktreeOwner(owned);
+    if (reason) return refuse(reason);
+    const detached = await command(cli.git(), ["switch", "--detach", holder.HEAD!], real);
+    return detached.code ? refuse(`git could not detach it: ${short(detached.stderr)}`) : { detached: real };
+  }
   // Best effort: a stale remote ref only makes the check stricter. HOME is needed for the owner's git credentials.
   await command(cli.git(), ["fetch", "--quiet", "origin", s.branch], s.ownerCheckout, { HOME: process.env.HOME ?? "" });
   const remote = `refs/remotes/origin/${s.branch}`;

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,8 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceIsolation } from "../src/workspace-isolation.ts";
+import { endedWorkerWorkspaceOwner } from "../src/durable-workspace-binding.ts";
+import { Jobs } from "../src/jobs.ts";
 import { archiveHome, currentWorktreeRoot } from "../src/archive-host.ts";
 import { grantWorkspace, trustedOwner } from "../src/workspace-authorization.ts";
 import { commandProfilesSnapshot, prepareCommandProfile } from "../src/command-profiles.ts";
@@ -184,6 +186,41 @@ try {
   check(git(detached.scope.workspacePath, "rev-parse", "--abbrev-ref", "HEAD") === "HEAD", "old holder detached");
   check(readFileSync(join(detached.scope.workspacePath, "evidence", "proof.txt"), "utf8") === "keep proof\n", "ignored evidence preserved");
   check(git(owner, "rev-parse", `refs/heads/${detached.scope.branch}`) === gitHead, "branch and commits preserved without push");
+  const threadId = randomUUID(),
+    scopeId = randomUUID();
+  const hex = createHash("sha256").update(`${gitProject}:${threadId}:${scopeId}`).digest("hex");
+  const ownedReceipt = {
+    ...continued,
+    intentId: `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`,
+    scope: { ...continued.scope, leaseReason: `durable workspace ${threadId}` },
+  };
+  const ownerState = async (endedAt, status, paused = false, dismissedAt) =>
+    root.commit(async (tx) => {
+      const state = await tx.doc(Jobs, root.id);
+      state.paused = paused;
+      state.agents[threadId] = { id: threadId, role: "worker", jobId: threadId, scopeId, endedAt };
+      state.jobs[threadId] = { id: threadId, status, dismissedAt };
+    }, BACKGROUND_CONTEXT);
+  await ownerState(1, "ready-with-gaps");
+  check((await endedWorkerWorkspaceOwner(root, ownedReceipt)) === null, "durable ended owner accepted");
+  for (const [endedAt, status, paused] of [
+    [null, "running", false],
+    [null, "running", true],
+    [1, "running", true],
+    [1, "checkpoint", false],
+  ]) {
+    await ownerState(endedAt, status, paused);
+    check(
+      typeof (await endedWorkerWorkspaceOwner(root, ownedReceipt)) === "string",
+      `durable live/suspended/checkpoint owner refused: ${status}/${paused}`,
+    );
+  }
+  await ownerState(1, "checkpoint", false, 1);
+  check((await endedWorkerWorkspaceOwner(root, ownedReceipt)) === null, "dismissed checkpoint owner ended");
+  check(
+    typeof (await endedWorkerWorkspaceOwner(root, { ...ownedReceipt, intentId: randomUUID() })) === "string",
+    "foreign ownership identity refused",
+  );
   for (const reason of ["owning thread is live", "owning thread is suspended", "owning thread is unknown"]) {
     const [source, blocked] = await sameHost(`same-${reason.split(" ").at(-1)}`, reason);
     check(
@@ -202,6 +239,14 @@ try {
     );
     check(git(source.scope.workspacePath, "branch", "--show-current") === source.scope.branch, "dirty branch unchanged");
   }
+  const [foreign, foreignResult] = await sameHost("same-foreign-lock", null, (path) => {
+    git(owner, "worktree", "unlock", path);
+    git(owner, "worktree", "lock", "--reason", "foreign", path);
+  });
+  check(
+    foreignResult.state === "blocked" && foreignResult.reason.includes(foreign.scope.workspacePath) && /lock/.test(foreignResult.reason),
+    "foreign lock refused",
+  );
   let busy;
   try {
     const [source, blocked] = await sameHost("same-busy", null, async (path) => {
