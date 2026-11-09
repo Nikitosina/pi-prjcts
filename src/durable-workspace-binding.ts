@@ -27,8 +27,12 @@ import { workerEnvironmentTools } from "./worker-environment-tools.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import type { BackgroundCommands } from "./background-commands.ts";
 
-/** Host-state check for detaching a retained worker allocation, never a persistent Coordinator allocation. */
-export async function endedWorkerWorkspaceOwner(root: Conversation, receipt: WorkspaceReceipt): Promise<string | null> {
+/** A durable claim blocks retry before Git detaches, including after a crash between those effects. */
+export async function endedWorkerWorkspaceOwner(
+  root: Conversation,
+  receipt: WorkspaceReceipt,
+  continuingIntentId?: string,
+): Promise<string | null> {
   return root.commit(async (tx) => {
     const state = await tx.doc(Jobs, root.id);
     const threadId = /^durable workspace (\S+)$/.exec(receipt.scope.leaseReason)?.[1];
@@ -42,8 +46,11 @@ export async function endedWorkerWorkspaceOwner(root: Conversation, receipt: Wor
       return "its owning worker thread cannot be identified from host state";
     const job = agent.jobId ? state.jobs[agent.jobId] : undefined;
     if (!job) return "its owning worker Job is missing from host state";
+    if (agent.workspaceContinuedBy && agent.workspaceContinuedBy !== continuingIntentId)
+      return `its owning thread ${agent.id} was already claimed by allocation ${agent.workspaceContinuedBy}`;
     if (agent.endedAt === null || job.status === "running" || liveAgentIds(state).includes(agent.id))
       return `its owning thread ${agent.id} is ${state.paused ? "suspended" : "live or retained"}`;
+    if (continuingIntentId) agent.workspaceContinuedBy = continuingIntentId;
     return null;
   }, BACKGROUND_CONTEXT);
 }
@@ -138,7 +145,7 @@ export function durableWorkspaceBinding(input: {
       conversation: input.conversation(),
       authority: { projectId: input.project.id, owner: leaseOwner },
       oldHome: archiveHome(),
-      endedWorktreeOwner: (receipt) => endedWorkerWorkspaceOwner(input.conversation(), receipt),
+      endedWorktreeOwner: (receipt, continuingIntentId) => endedWorkerWorkspaceOwner(input.conversation(), receipt, continuingIntentId),
       authorizedRepositories: [
         {
           repositoryId: repository.repositoryId,

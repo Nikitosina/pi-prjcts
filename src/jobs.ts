@@ -165,6 +165,8 @@ export type Agent = {
   briefed: boolean;
   /** Answers already reported, so steers answered together report once. */
   reported: EntryId[];
+  /** A replacement allocation claimed this ended worker's branch; retry must not reopen its retained worktree. */
+  workspaceContinuedBy?: string;
   /** Workspace scope, or a PR/commit ref a scout or reviewer reads. Set by the spawn; the host prepares them. */
   scopeId: string | null;
   readRef: string | null;
@@ -1350,6 +1352,8 @@ export function createJobs(host: JobsHost) {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
       if (!agent) return `No agent ${id}.`;
+      if (agent.workspaceContinuedBy)
+        return `This worker's branch is being continued by allocation ${agent.workspaceContinuedBy}; send follow-up work to the replacement worker.`;
       const key = requestId ? `send:${requestId}` : undefined;
       if (key && doc.requests[key]) return `Already sent to ${id}.`;
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;

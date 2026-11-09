@@ -48,8 +48,9 @@ type Options = {
   authorizedRepositories?: readonly Authorization[];
   context?: Context;
   /** The previous host's home: a clean, fully pushed worktree under it may be removed so its branch can be continued. */ oldHome?: string;
-  /** Host-state refusal for a current-root holder; null only when its owning worker has ended. */ endedWorktreeOwner?: (
+  /** Checks ended ownership; when given the continuing intent, durably claims it against retry before detachment. */ endedWorktreeOwner?: (
     receipt: WorkspaceReceipt,
+    continuingIntentId?: string,
   ) => Promise<string | null>;
   /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void;
   /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string;
@@ -355,7 +356,7 @@ async function addGit(i: Intent, facts: Record<string, string>, options: Options
     );
   let x = await add();
   if (x.code && i.scope.continueBranch) {
-    const taken = await reclaimHeldWorktree(i.scope, options, snapshot);
+    const taken = await reclaimHeldWorktree(i, options, snapshot);
     if (taken.refusal) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${taken.refusal}`);
     if (taken.removed || taken.detached) {
       facts = { ...facts, ...(taken.removed ? { reclaimedWorktree: taken.removed } : { detachedWorktree: taken.detached! }) };
@@ -370,10 +371,11 @@ async function addGit(i: Intent, facts: Record<string, string>, options: Options
 }
 // Current-root holders are detached, never removed, because ignored files may be evidence.
 async function reclaimHeldWorktree(
-  s: WorkspaceScope,
+  intent: Intent,
   options: Options,
   snapshot: () => Promise<WorkspaceSnapshot>,
 ): Promise<{ removed?: string; detached?: string; refusal?: string }> {
+  const s = intent.scope;
   const list = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
   const holder = list.stdout
     .trim()
@@ -431,7 +433,7 @@ async function reclaimHeldWorktree(
         .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`,
     );
   if (current && owned && options.endedWorktreeOwner) {
-    const reason = await options.endedWorktreeOwner(owned);
+    const reason = await options.endedWorktreeOwner(owned, intent.id);
     if (reason) return refuse(reason);
     const detached = await command(cli.git(), ["switch", "--detach", holder.HEAD!], real);
     return detached.code ? refuse(`git could not detach it: ${short(detached.stderr)}`) : { detached: real };
