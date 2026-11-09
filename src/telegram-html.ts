@@ -124,7 +124,8 @@ export function splitTelegramHtml(html: string, limit = TELEGRAM_LIMIT): string[
         // Never split a surrogate pair: half an emoji is not valid text.
         if (/[\uD800-\uDBFF]/.test(rest[cut - 1]!)) {
           if (cut > 1) cut--;
-          else if (htmlToPlain(current).trim()) {
+          // Flushing also drops whitespace-only text; past only open tags no room is left to gain.
+          else if (current !== stack.map((tag) => tag.open).join("")) {
             flush();
             continue;
           } else cut++;
