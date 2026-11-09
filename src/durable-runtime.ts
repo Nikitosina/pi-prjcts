@@ -66,7 +66,7 @@ import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
 
 import { coordinatorJobReadTools } from "./job-read-tools.ts";
 import { resolveContinuationBranch } from "./branch-continuation.ts";
-import { workerChanges } from "./code-diff.ts";
+import { workerChanges, type DiffPage } from "./code-diff.ts";
 import { COORDINATOR_GITHUB_TOOLS, coordinatorGithubTools } from "./coordinator-github-tools.ts";
 import { prMonitorRuntime } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
@@ -370,7 +370,7 @@ export type DurableProjectRuntime = {
   /** Tool calls running now, without the call `excluded` and the tool calls that own it (a codemode script). */
   runningToolCalls(excluded?: string): Promise<number>;
   /** Read-only view of a worker's worktree: branch, head, status and a capped diff against the merge-base. */
-  workerDiff(threadId: string, base?: string, page?: { path?: string; offset?: number }): Promise<string>;
+  workerDiff(threadId: string, base?: string, page?: Omit<DiffPage, "reserve">): Promise<string>;
   /** A page of an agent's transcript with its tool names and recent generation state; text beyond a preview is read with `transcriptText`. */
   workerRead(
     threadId: string,

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import type { DurableProjectRuntime } from "./durable-runtime.ts";
 import { EXPANDED_RESPONSE_LIMIT, fitJson, jsonResult, RESPONSE_LIMIT } from "./response-limit.ts";
 import { coordinatorArchiveTools } from "./archive-tools.ts";
+import { DiffModeSchema } from "./code-diff.ts";
 import { ThreadReference, transcriptEntryCount, TranscriptReadOutput, trimTranscriptPage } from "./transcript-reader.ts";
 
 const Id = Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" });
@@ -60,7 +61,7 @@ export function coordinatorJobReadTools(input: {
   const diff = defineTool({
     name: "projects_worker_diff",
     description:
-      "Read-only view of what a worker thread changed in its worktree: branch, head, status (staged/unstaged/untracked paths) and the unified diff against the merge-base with trunk/default branch, including uncommitted and new files. At most 8 KiB per call: the first page has the branch, head and status; follow the note's offset for the next page, or pass path for one file or directory. Use it to review or hand over a worker's change; never move patches through artifacts. Only this project's worker thread UUIDs are accepted.",
+      "Read-only view of what a worker thread changed in its worktree: branch, head, status (staged/unstaged/untracked paths) and the unified diff against the merge-base with trunk/default branch, including uncommitted and new files. At most 8 KiB per call: the first page has the branch, head and status; follow the note's offset for the next page, pass path for one file or directory, or mode stat for every changed file with +/- line counts. Use it to review or hand over a worker's change; never move patches through artifacts. Only this project's worker thread UUIDs are accepted.",
     parameters: Type.Object(
       {
         threadId: Id,
@@ -75,14 +76,15 @@ export function coordinatorJobReadTools(input: {
           Type.String({
             minLength: 1,
             maxLength: 400,
-            description: "Only this file or directory, relative to the worktree root (git worktrees).",
+            description: "Only this file or directory, relative to the project directory in the worktree.",
           }),
         ),
+        mode: Type.Optional(DiffModeSchema),
         offset: Type.Optional(
           Type.Integer({
             minimum: 0,
             maximum: 100_000_000,
-            description: "Character offset into the diff text from the previous page's note.",
+            description: "From the previous page's note: a character offset into the diff, or with mode stat a file index.",
           }),
         ),
       },
@@ -94,7 +96,7 @@ export function coordinatorJobReadTools(input: {
         output: [
           {
             type: "text" as const,
-            text: await authorize(api).workerDiff(args.threadId, args.base, { path: args.path, offset: args.offset }),
+            text: await authorize(api).workerDiff(args.threadId, args.base, { path: args.path, offset: args.offset, mode: args.mode }),
           },
         ],
         details: undefined,

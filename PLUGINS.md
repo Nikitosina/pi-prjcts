@@ -20,7 +20,7 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 
 | capability | purpose |
 |---|---|
-| `vcs` | checkout kind: root marker, status, diffs, branch continuation, private dirs, worker rule |
+| `vcs` | checkout kind: root marker, status, diffs, branch continuation, private dirs, worker rule. `codeDiffPath: true` declares that `codeDiff` honors `helpers.path` (one file or directory relative to the checkout root, validated by the host); without it `code_diff` refuses `path` for this kind. The host counts files for `code_diff` mode `stat` from the returned diff text |
 | `workspace` | workspace-grant provider: one-click preview, worktree backend (frozen receipts), worker binding (plan/attach: tools, shell guard, instructions), cleanup facts and removal (`atBase` for a settled reader's worktree), setup cards |
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |

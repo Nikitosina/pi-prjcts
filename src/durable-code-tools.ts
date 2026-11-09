@@ -5,7 +5,7 @@ import type { Context } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { codeDiff } from "./code-diff.ts";
+import { codeDiff, DiffModeSchema } from "./code-diff.ts";
 import { clipLines, RESPONSE_LIMIT } from "./response-limit.ts";
 
 // Not pi's plain names: a scout or reviewer composes every installed extension but the coordinator's, and the coordinator and worker execution tools already own read.
@@ -82,7 +82,7 @@ export function readOnlyCodeTools(
   tools.push(
     defineTool({
       name: "code_diff",
-      description: `Read-only list of changed files and unified diff of this thread's code root (a PR head or worker worktree, including uncommitted work) against its merge-base with the default branch or the given base. A call returns at most ${RESPONSE_LIMIT / 1024} KiB: the first page lists the changed files. Continue with offset (the note names the next one), or pass path to read one file or directory.`,
+      description: `Read-only list of changed files and unified diff of this thread's code root (a PR head or worker worktree, including uncommitted work) against its merge-base with the default branch or the given base. A call returns at most ${RESPONSE_LIMIT / 1024} KiB: the first page lists the changed files. Continue with offset (the note names the next one), pass path for one file or directory, or mode "stat" for every changed file with +/- line counts (offset then counts files).`,
       parameters: Type.Object({
         base: Type.Optional(
           Type.String({
@@ -95,17 +95,26 @@ export function readOnlyCodeTools(
           Type.String({
             minLength: 1,
             maxLength: 400,
-            description: "Only this file or directory, relative to the checkout root (git checkouts).",
+            description: "Only this file or directory, relative to the project directory (the root code_read uses).",
           }),
         ),
+        mode: Type.Optional(DiffModeSchema),
         offset: Type.Optional(
-          Type.Integer({ minimum: 0, description: "Character offset into the diff text from the previous page's note." }),
+          Type.Integer({
+            minimum: 0,
+            description: "From the previous page's note: a character offset into the diff, or with mode stat a file index.",
+          }),
         ),
       }),
       replay: "safe",
       async execute(args, api, context) {
         return {
-          output: [{ type: "text", text: await codeDiff(await rootOf(api, context), args.base, { path: args.path, offset: args.offset }) }],
+          output: [
+            {
+              type: "text",
+              text: await codeDiff(await rootOf(api, context), args.base, { path: args.path, offset: args.offset, mode: args.mode }),
+            },
+          ],
           details: undefined,
         };
       },
