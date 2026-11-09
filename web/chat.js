@@ -37,7 +37,7 @@ export async function loadChat() {
           id = state.projectId,
           entries = state.live?.entries ?? 0;
         if (!id) return;
-        const [view] = await Promise.all([call("show", { id, ...chatArgs() }), loadRecentMemory().catch(fail)]);
+        const [view] = await Promise.all([call("show", { id, ...chatArgs(), messageText: "full" }), loadRecentMemory().catch(fail)]);
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
@@ -636,7 +636,7 @@ feed.addEventListener("click", async (event) => {
     const gen = state.generation,
       before = older.length ? olderBefore : state.view.before;
     if (!before) return;
-    const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100 }).catch(fail);
+    const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100, messageText: "full" }).catch(fail);
     if (stale(gen) || !page) return;
     older = [...page.items, ...older];
     olderBefore = page.before;

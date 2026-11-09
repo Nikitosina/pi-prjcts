@@ -43,7 +43,7 @@ Owner decision: one bot per host, token supplied in Settings. Long-polling `getU
 26. A code fence split mid-block leaves an unclosed `<pre>`.
 27. A link with `"` or `javascript:` in its URL becomes a broken or unsafe `href`.
 28. snake_case words or `2*3*4` turn into italics.
-29. A message longer than 4,096 characters after escaping is clipped (content lost, including by the notice feed) or split inside a tag/entity, so a chunk has unbalanced tags.
+29. A message longer than 4,096 characters after escaping is clipped (content lost, including by the notice feed) or split inside a tag, entity or emoji (surrogate pair), so a chunk has unbalanced tags or broken text.
 30. A multi-part message re-sends earlier parts after a mid-way send failure (duplicates), or reply-to on a later part does not route.
 31. Telegram still refuses the HTML (400 "can't parse entities"): the notice is stuck retrying forever instead of falling back to plain text.
 32. Bot command replies (help, /projects with names containing `<`) break because they are now parsed as HTML.

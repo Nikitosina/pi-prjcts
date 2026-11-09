@@ -4,6 +4,7 @@ import { openDurableProject, type DurableProjectRuntime, type DurableSubmissionS
 import { attachmentContent, listUploads } from "./uploads.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
+import type { MessageText } from "./transcript-reader.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(
@@ -162,8 +163,8 @@ export async function durableHostActivity(owner: DurableProjectRuntime, projectI
 }
 
 /** A pure read of the saved ledger and the newest transcript page; the ledger is kept current by `settleProject`. */
-export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string): Promise<Snapshot> {
-  const view = await owner.snapshot(chatId);
+export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?: string, messageText?: MessageText): Promise<Snapshot> {
+  const view = await owner.snapshot(chatId, messageText);
   const paused = (await owner.jobs()).paused;
   const project = loadProject(view.project.id);
   const all = jobs(project.id),

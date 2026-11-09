@@ -1,6 +1,6 @@
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, EntryId, Storage } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 
 /**
@@ -152,7 +152,8 @@ export function validateEntryId(value: unknown, name = "before"): number | undef
 }
 
 /** `full`: owner views show whole messages; agents read the bounded preview and follow `ref`. */
-export type MessageText = "preview" | "full";
+export const MessageText = Type.Union([Type.Literal("preview"), Type.Literal("full")]);
+export type MessageText = Static<typeof MessageText>;
 /** `display` rewrites a message's full text before it is cut to a preview (the host hides expanded skill bodies this way). */
 export type PageOptions = {
   before?: number | null;

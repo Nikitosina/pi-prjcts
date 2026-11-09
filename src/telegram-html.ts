@@ -121,6 +121,8 @@ export function splitTelegramHtml(html: string, limit = TELEGRAM_LIMIT): string[
         let cut = Math.max(1, room());
         const amp = rest.lastIndexOf("&", cut - 1);
         if (amp > 0 && rest.indexOf(";", amp) >= cut) cut = amp;
+        // Never split a surrogate pair: half an emoji is not valid text.
+        if (cut > 1 && /[\uD800-\uDBFF]/.test(rest[cut - 1]!)) cut--;
         current += rest.slice(0, cut);
         rest = rest.slice(cut);
         flush();

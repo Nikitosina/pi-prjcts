@@ -161,6 +161,7 @@ import {
   coordinatorStorageSource,
   readTranscriptText,
   storageSource,
+  type MessageText,
   type TranscriptPage,
   type TranscriptSource,
 } from "./transcript-reader.ts";
@@ -314,7 +315,7 @@ export type DurableProjectSnapshot = {
 
 /** Pages show the owner's text, not the skill bodies expanded into it. */
 const displayText = (role: "user" | "assistant", text: string) => (role === "user" ? compactSkillText(text) : text);
-export type HistoryOptions = { before?: number | null; limit?: number };
+export type HistoryOptions = { before?: number | null; limit?: number; messageText?: MessageText };
 /** Exactly one of a chat id or an agent id (a Job id, scout or reviewer id). */
 export type TranscriptTarget = { chatId: string } | { threadId: string };
 /** `index` is the entry id of the message, the same id a transcript page item carries (`entryId`). */
@@ -419,7 +420,7 @@ export type DurableProjectRuntime = {
    */
   reload(chatId?: string): Promise<{ chatId: string; skills: number; changed: boolean }>;
   cleanupWorktrees(): Promise<Awaited<ReturnType<typeof cleanupWorktrees>>>;
-  snapshot(chatId?: string): Promise<DurableProjectSnapshot>;
+  snapshot(chatId?: string, messageText?: MessageText): Promise<DurableProjectSnapshot>;
   /** Context use of each listed worker thread (`null` for an unknown one); the window is the worker model's catalog window or null. */
   workerContexts(threadIds: string[]): Promise<Record<string, { tokens: number; window: number | null } | null>>;
   /** Newest-first page of a chat's transcript; pass the returned `before` for the next older page. */
@@ -2816,7 +2817,7 @@ export async function openDurableProject(input: {
         assertOpen();
         return writeInspector.inspect(value);
       },
-      snapshot: async (id) => {
+      snapshot: async (id, messageText) => {
         const selected = await resolveChat(id);
         const view = await snapshot(
           openedHarness,
@@ -2830,6 +2831,7 @@ export async function openDurableProject(input: {
             window: models.getModel(coordinatorModel.provider, coordinatorModel.modelId)?.contextWindow ?? null,
             catalogWindow: catalogWindow(),
           },
+          messageText,
         );
         const workspace = await workspaces.inspect({ chatId: selected.chat.id, conversationId: Number(selected.conversation.id) });
         view.coordinator.access = {
@@ -2874,7 +2876,6 @@ export async function openDurableProject(input: {
         return readTranscriptPage(coordinatorStorageSource(openedStorage, context, admitted?.ids ?? []), Number(conversation.id), {
           ...options,
           display: displayText,
-          messageText: "full",
         });
       },
       threadHistory: async (id, options = {}) => {
@@ -2883,7 +2884,6 @@ export async function openDurableProject(input: {
           page = await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
             ...options,
             display: displayText,
-            messageText: "full",
           });
         if (!options.context) return page;
         const child = await openedHarness.conversation(conversationId, context);
@@ -3312,6 +3312,7 @@ async function snapshot(
   chats: DurableChat[],
   project: Project,
   windows: { window: number | null; catalogWindow: number | null },
+  messageText?: MessageText,
 ): Promise<DurableProjectSnapshot> {
   const identity = await harness.snapshot(DurableProjectIdentity, root.id, context);
   if (!identity?.projectId || identity.coordinatorConversationId === null) throw new Error("Durable project identity is missing");
@@ -3332,7 +3333,7 @@ async function snapshot(
         history: await readTranscriptPage(
           coordinatorStorageSource(storage, context, (await harness.snapshot(AdmittedInputs, chat.id, context))?.ids ?? []),
           Number(chat.id),
-          { display: displayText, messageText: "full" },
+          { display: displayText, messageText },
         ),
         context: {
           tokens: contextTokens((await chat.context(context)).messages),

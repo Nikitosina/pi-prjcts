@@ -6,6 +6,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { CommandProfile, CommandProfileInput } from "./command-profile-types.ts";
 import { SkillProfiles } from "./skill-profiles.ts";
+import { MessageText } from "./transcript-reader.ts";
 import { McpSettings } from "./mcp-profiles.ts";
 import { ProfileIdSchema, ProfileSettings, Profiles, Tier } from "./profiles.ts";
 import { UiPatch } from "./ui-settings.ts";
@@ -849,6 +850,7 @@ export const Request = Type.Union([
       action: Type.Literal("show"),
       id: Id,
       chatId: Type.Optional(ChatId),
+      messageText: Type.Optional(MessageText),
     },
     { additionalProperties: false },
   ),
@@ -1070,6 +1072,7 @@ export const Request = Type.Union([
       before: Type.Optional(Type.Integer({ minimum: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
       context: Type.Optional(Type.Boolean()),
+      messageText: Type.Optional(MessageText),
     },
     { additionalProperties: false },
   ),
@@ -1080,6 +1083,7 @@ export const Request = Type.Union([
       chatId: Type.Optional(ChatId),
       before: Type.Optional(Type.Integer({ minimum: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+      messageText: Type.Optional(MessageText),
     },
     { additionalProperties: false },
   ),

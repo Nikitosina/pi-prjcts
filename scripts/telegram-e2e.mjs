@@ -697,14 +697,12 @@ try {
   if (longParts.some((m) => m.text.length > 4096) || !longParts[0]?.text.includes("LONG-START") || longParts.length < 2)
     throw Error("Long result not split: " + JSON.stringify(longParts.map((m) => m.text.length)));
   if (
-    longParts
+    !longParts
       .map((m) => visible(m.text))
       .join("")
-      .split("x").length -
-      1 <
-    6000
+      .includes(`LONG-START ${"x".repeat(6000)} LONG-END`)
   )
-    throw Error("Long result lost text");
+    throw Error("Long result lost or repeated text");
   result.checks.push(
     "T17/T20 a coordinator error is sent; a 6000-character result arrives whole, split into parts under the Telegram limit",
   );

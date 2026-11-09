@@ -249,7 +249,7 @@ export async function openHostAgent(input: {
       },
       async history(before) {
         assertOpen();
-        return readTranscriptPage(storageSource(storage, context), Number(root.id), { before });
+        return readTranscriptPage(storageSource(storage, context), Number(root.id), { before, messageText: "full" });
       },
       async settings(revision, patch) {
         assertOpen();

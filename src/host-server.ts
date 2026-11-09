@@ -831,7 +831,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "command-profile-set":
       return settings.setCommandProfile(input);
     case "show":
-      return durableHostSnapshot(await durable(input.id), input.chatId);
+      return durableHostSnapshot(await durable(input.id), input.chatId, input.messageText);
     case "search":
       return searchProject(ownedProjectDir(input.id), input.query, await (await durable(input.id)).searchSources(), input.limit);
     case "chat-create":
