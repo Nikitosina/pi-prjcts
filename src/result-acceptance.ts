@@ -7,14 +7,14 @@ import { Type } from "typebox";
 import { githubCli } from "./github-authorization.ts";
 import { errorText, parse, saveJson } from "./state.ts";
 import type { MergeAnswer, MergeFacts, MergeProvider, MergeTarget } from "./plugin-types.ts";
-import { pullMainCheckout } from "./main-pull.ts";
+import { describeSelfDeploy, pullMainCheckout, type SelfDeploy } from "./main-pull.ts";
 
 /** What Approve needs from a Job record; core's Job carries more. `pr` is the provider's PR id (a number for GitHub). */
 export type AcceptJob = { id: string; pr: string; candidateSha: string };
 
 /** `auto-merge-pending`: approval is waiting for mergeability; approve again after the wait ends to resume. */
 export type AcceptanceOutcome =
-  | { kind: "accepted"; head: string }
+  | { kind: "accepted"; head: string; deploy?: SelfDeploy }
   | { kind: "merged-pull-skipped"; head: string; reason: string }
   | { kind: "merge-uncertain"; detail: string }
   | { kind: "auto-merge-pending" };
@@ -59,7 +59,7 @@ export function fileAcceptanceLog(dir: string): AcceptanceLog {
 export function describeAcceptance(outcome: AcceptanceOutcome): string {
   switch (outcome.kind) {
     case "accepted":
-      return `Merged ${outcome.head.slice(0, 8)} and updated the main checkout.`;
+      return `Merged ${outcome.head.slice(0, 8)} and updated the main checkout.${outcome.deploy ? ` The ${describeSelfDeploy(outcome.deploy)}.` : ""}`;
     case "merged-pull-skipped":
       return `Merged ${outcome.head.slice(0, 8)}. The main checkout was not updated: ${outcome.reason}.`;
     case "merge-uncertain":
@@ -159,7 +159,8 @@ export function createApprover(options: {
     options.log.write(job.id, { head, state: "merged" });
     // Shares the per-checkout queue with Follow PRs, which pulls the same checkout when it sees the merge.
     const pulled = await pullMainCheckout({ provider, checkout: target.checkout, base: facts.base, signal });
-    return pulled.pulled ? { kind: "accepted", head } : { kind: "merged-pull-skipped", head, reason: pulled.reason };
+    if (!pulled.pulled) return { kind: "merged-pull-skipped", head, reason: pulled.reason };
+    return pulled.deploy ? { kind: "accepted", head, deploy: pulled.deploy } : { kind: "accepted", head };
   }
 
   return {

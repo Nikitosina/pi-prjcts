@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { ensureHost, health, request } from "./client.ts";
 import { errorText, home, listProjects, loadDeploySettings, parse, saveJson } from "./state.ts";
 import { sendOwnerMessage } from "./telegram.ts";
+import type { SelfDeploy } from "./main-pull.ts";
 
 const exec = promisify(execFile);
 /** Host-level messages belong to no project; the label says so. */
@@ -74,6 +75,14 @@ export function deployRunning(): boolean {
   }
 }
 
+/** The host records a request a moment before its detached child takes the lock; within this grace the deploy counts as running. */
+const START_GRACE_MS = 30_000;
+/** A deploy is running, or was just requested and its child has not taken the lock yet: starting another would overwrite that request. */
+export function deployBusy(): boolean {
+  const current = readDeployState().current;
+  return deployRunning() || (current !== undefined && Date.now() - current.at < START_GRACE_MS);
+}
+
 /** The outcome of the deploy started for `requestId`, once its result is written; a deploy child that died says so after a grace period. */
 export async function awaitDeploy(requestId: string, signal?: AbortSignal): Promise<string> {
   for (;;) {
@@ -85,7 +94,7 @@ export async function awaitDeploy(requestId: string, signal?: AbortSignal): Prom
         : `Deploy${result.sha ? ` of ${result.sha.slice(0, 8)}` : ""} failed: ${result.message}`;
     if (state.current?.requestId !== requestId) return "No deploy is running for this call; see deploy-snapshot.";
     // The child takes the lock a moment after the host records the request.
-    if (!deployRunning() && Date.now() - state.current.at > 30_000)
+    if (!deployRunning() && Date.now() - state.current.at > START_GRACE_MS)
       return "The deploy ended without a result; see deploy.log in the host home.";
     await sleep(500, undefined, { signal });
   }
@@ -359,6 +368,79 @@ export function hostDeps(repo: string, options: { startAttempts?: number; smokeM
       return undefined;
     },
     tell: sendOwnerMessage,
+  };
+}
+
+/**
+ * What the host does when a pull moved its own checkout to `sha` (src/main-pull.ts): start the normal detached deploy at once. While another deploy
+ * runs, wait for it to end, then deploy only if the checkout is still at a commit the host is not running (that deploy may have shipped it, or
+ * failed because the pull changed the checkout under it). Every outcome goes to the host log and deploy.log; a deploy that cannot start also to
+ * the owner. Never waits for the deploy itself.
+ */
+export function selfDeployer(options: {
+  head(): string;
+  running(): string | undefined;
+  closing(): boolean;
+  /** Records the request and spawns the deploy child; throws when it cannot. */
+  start(): void;
+  tell(text: string): Promise<void>;
+  report(text: string): void;
+  retryMs?: number;
+}): (sha: string) => SelfDeploy {
+  let waiting: NodeJS.Timeout | undefined;
+  const note = (text: string) => {
+    options.report(text);
+    try {
+      appendFileSync(join(home(), "deploy.log"), `${JSON.stringify({ at: new Date().toISOString(), selfPull: text })}\n`, { mode: 0o600 });
+    } catch {}
+  };
+  const start = (sha: string, why: string): SelfDeploy => {
+    try {
+      options.start();
+    } catch (error) {
+      const reason = errorText(error);
+      note(`deploy of ${sha.slice(0, 8)} did not start: ${reason}`);
+      void options.tell(`${HOST_LABEL}\nDeploy of ${sha.slice(0, 8)} did not start: ${reason}`).catch(() => {});
+      return { kind: "not-started", sha, reason };
+    }
+    note(`deploy started: ${why}`);
+    return { kind: "started", sha };
+  };
+  const retry = () => {
+    if (options.closing()) {
+      waiting = undefined;
+      return;
+    }
+    if (deployBusy()) {
+      waiting = setTimeout(retry, options.retryMs ?? 5_000);
+      waiting.unref();
+      return;
+    }
+    waiting = undefined;
+    let head: string;
+    try {
+      head = options.head();
+    } catch (error) {
+      note(`the deploy waiting for the running one did not start: the checkout's HEAD could not be read (${errorText(error)})`);
+      return;
+    }
+    if (head !== options.running()) start(head, `the main checkout was pulled to ${head.slice(0, 8)} while another deploy ran`);
+  };
+  return (sha) => {
+    if (options.closing()) {
+      const reason = "the host is stopping";
+      note(`deploy of ${sha.slice(0, 8)} did not start: ${reason}`);
+      return { kind: "not-started", sha, reason };
+    }
+    if (deployBusy()) {
+      if (!waiting) {
+        note(`deploy of ${sha.slice(0, 8)} waits for the running deploy`);
+        waiting = setTimeout(retry, options.retryMs ?? 5_000);
+        waiting.unref();
+      }
+      return { kind: "waiting", sha };
+    }
+    return start(sha, `the main checkout was pulled to ${sha.slice(0, 8)}`);
   };
 }
 

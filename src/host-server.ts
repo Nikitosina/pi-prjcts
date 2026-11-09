@@ -60,6 +60,7 @@ import { createRemote, type RemoteAccess } from "./remote.ts";
 import { startWebhooks } from "./webhook.ts";
 import { startNotifier } from "./notify.ts";
 import {
+  deployBusy,
   deployPending,
   deployRunning,
   idleDeployTick,
@@ -69,8 +70,11 @@ import {
   recordDeployStop,
   recordHostSha,
   forgetHostSha,
+  readHostSha,
+  selfDeployer,
   type DeployRequest,
 } from "./deploy.ts";
+import { watchSelfCheckout } from "./main-pull.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
 import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
@@ -1867,7 +1871,7 @@ try {
 }
 /** The deploy stops this host, so it must outlive it: detached, with its own log. `by` names an agent call waiting for the result. */
 function startDeploy(by?: Omit<DeployRequest, "at">): void {
-  if (deployRunning()) throw new Error("A deploy is already running");
+  if (deployBusy()) throw new Error("A deploy is already running");
   recordDeployRequest({ requestId: by?.requestId ?? randomUUID(), at: Date.now(), ...by });
   const log = openSync(join(home(), "deploy.log"), "a", 0o600);
   const child = spawn(process.execPath, [join(repoRoot, "src", "cli.ts"), "deploy", repoRoot], {
@@ -1919,7 +1923,7 @@ async function stopForDeploy(sha: string): Promise<{ stopping: boolean }> {
 const idleDeployTimer = setInterval(
   () => {
     const settings = loadDeploySettings();
-    if (closing || !settings.idle || deployRunning()) return;
+    if (closing || !settings.idle || deployBusy()) return;
     idleDeployTick({
       now: new Date(),
       window: settings,
@@ -1933,6 +1937,21 @@ const idleDeployTimer = setInterval(
   Number(process.env.PI_PROJECTS_DEPLOY_TICK_MS ?? 5 * 60_000),
 );
 idleDeployTimer.unref();
+// A pull that moves this host's own checkout (Approve, Follow PRs) deploys it at once (owner, 2026-11-09), so the checkout never runs ahead of the host.
+const checkoutHead = () => execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 10_000 }).trim();
+watchSelfCheckout({
+  root: repoRoot,
+  head: async () => checkoutHead(),
+  running: readHostSha,
+  deploy: selfDeployer({
+    head: checkoutHead,
+    running: readHostSha,
+    closing: () => closing,
+    start: () => startDeploy(),
+    tell: sendOwnerMessage,
+    report: (text) => recordHostEvent("deploy", text),
+  }),
+});
 hostAgent = await openHostAgent({
   tools: {
     dispatch: (request) => dispatch(request),

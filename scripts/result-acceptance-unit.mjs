@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApprover, fileAcceptanceLog, githubMergeProvider } from "../src/result-acceptance.ts";
+import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "../src/result-acceptance.ts";
+import { watchSelfCheckout } from "../src/main-pull.ts";
 
 const root = mkdtempSync(join(tmpdir(), "acceptance-"));
 const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -187,4 +188,25 @@ save({});
 const one = job();
 const [x, y] = await Promise.all([approver.approve(one), approver.approve(one)]);
 assert.equal(x, y);
+// Approve that pulls the host's own checkout to a new commit starts the host's deploy (deploy-failures D1) and says so; the pull does not wait for it.
+save({});
+const asked = [],
+  hostRuns = git(checkout, "rev-parse", "HEAD");
+const unwatch = watchSelfCheckout({
+  root: checkout,
+  head: async () => git(checkout, "rev-parse", "HEAD"),
+  running: () => hostRuns,
+  deploy: (sha) => (asked.push(sha), { kind: "started", sha }),
+});
+writeFileSync(join(other, "a.txt"), "3\n");
+(git(other, "commit", "-qam", "three"), git(other, "push", "-q", "origin", "main"));
+const pushed = git(other, "rev-parse", "HEAD");
+outcome = await approver.approve(job());
+unwatch();
+assert.deepEqual(outcome, { kind: "accepted", head, deploy: { kind: "started", sha: pushed } });
+assert.deepEqual(asked, [pushed]);
+assert.equal(
+  describeAcceptance(outcome),
+  `Merged ${head.slice(0, 8)} and updated the main checkout. The host deploy of ${pushed.slice(0, 8)} started.`,
+);
 console.log("result-acceptance-unit ok");

@@ -125,3 +125,4 @@ The owner approved removing service chatter from the main conversation and reduc
 - Deploy no longer waits for idle projects. Preparation runs while work continues; then running tool calls get 10 s, the rest is cut off, and Pi Durable continues every agent after the start. There is one mode: the CLI, the agents and the nightly window all deploy this way.
 - `projects_redeploy` deploys without owner approval and returns after the restart with the outcome. Only the Host agent and the Coordinator of the project whose `cwd` is the host's own checkout get it.
 - A normal deploy takes no backup of the home. A backup stays part of a manual Pi Durable schema upgrade only.
+- 2026-11-09: a pull that moves the host's own checkout (Approve, or Follow PRs seeing a merge) deploys at once, not in the nightly window, and the host serves the web files it started with. Reason: an Approve pulled new `web/` files under the old host and broke the UI until a manual deploy.

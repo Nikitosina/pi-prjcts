@@ -25,3 +25,16 @@ With the deploy setting `branch` (e.g. `main`), a deploy ships the newest `origi
 - B4 The nightly trigger compares only the local HEAD, so new commits on `origin/<branch>` never deploy at night; or a failed fetch counts as new code.
 - B5 Without a branch set, a deploy fetches anything or behaves differently from before.
 
+
+## Deploy after a self pull
+
+An Approve or Follow PRs pull can move the checkout the running host started from (2026-11-09: Approve of PR #44 pulled `~/Projects/pi-prjcts` to `b0e30c8` while the host ran `12b3184`, and the browser got web files the old host could not answer). Such a pull now starts the normal deploy at once. Proof: `deploy-e2e.mjs` step 8 (D1-D7) and step 7 (W1).
+
+- D1 A pull that moves the host's own checkout to a commit the host is not running starts no deploy, so code and checkout drift until someone deploys by hand.
+- D2 A pull that moved nothing (already up to date), a skipped or failed pull, or a pull of another project's checkout starts a deploy.
+- D3 Two pulls that each move the checkout start two deploys, or the second one overwrites the request the first deploy answers.
+- D4 A pull while a deploy is running is dropped: the running deploy fails because the checkout changed, and the pulled commit never ships. It must deploy once the running one has ended, and only when the checkout is still ahead of the running host.
+- D5 The pull result waits for the deploy, so Approve or Follow PRs hang on a restart.
+- D6 A deploy that could not start is silent: it must reach the pull line, `deploy.log`, the host log and the owner's Telegram.
+- D7 A pull while the host is stopping starts a deploy.
+- W1 The web UI reads `web/` from disk per request, so a pulled but undeployed change reaches browsers before the host that answers them (see `ui2-web-failures.md` S12).

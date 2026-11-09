@@ -263,6 +263,175 @@ try {
   assert.ok(existsSync(join(clone, "MERGED.md")) && git("merge-base", "--is-ancestor", merged, "HEAD") === "");
   assert.notEqual((await health()).pid, pid);
   assert.equal(await deployPending(clone, undefined, branch), false);
+
+  // 7. The web UI is the one the host started with (W1, ui2-web-failures S12): a change on disk waits for the restart.
+  const web = new URL((await request({ action: "web" }, false)).url).origin;
+  const served = async (path) => {
+    const answer = await fetch(web + path);
+    return { status: answer.status, etag: answer.headers.get("etag"), text: await answer.text() };
+  };
+  const chatFile = join(clone, "web", "chat.js"),
+    original = readFileSync(chatFile, "utf8");
+  const before8 = await served("/chat.js");
+  assert.ok(before8.text === original, "the host serves web/chat.js as it is on disk at start");
+  writeFileSync(chatFile, `${original}\n// pulled but not deployed\n`);
+  const after8 = await served("/chat.js");
+  assert.ok(after8.text === original, "a changed web file is not served by the host that started before it");
+  assert.equal(after8.etag, before8.etag);
+  commit("web change");
+  result = await deploy(deps);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const deployed8 = await served("/chat.js");
+  assert.match(deployed8.text, /pulled but not deployed/, "the restarted host serves the new file");
+  assert.notEqual(deployed8.etag, before8.etag);
+
+  // 8. A pull that moves the host's own checkout deploys it at once (D1-D7). Its own home, so these fake deploys leave the host above alone.
+  const hostHome = process.env.PI_PROJECTS_HOME,
+    selfHome = join(base, "self-home");
+  mkdirSync(selfHome);
+  process.env.PI_PROJECTS_HOME = selfHome;
+  try {
+    const { pullMainCheckout, describeMainPull, watchSelfCheckout } = await import("../src/main-pull.ts");
+    const { selfDeployer } = await import("../src/deploy.ts");
+    const repoAt = (dir) => {
+      execFileSync("git", ["init", "-q", "-b", "main", dir]);
+      const g = (...args) =>
+        execFileSync("git", ["-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { encoding: "utf8" }).trim();
+      const make = (name) => (
+        writeFileSync(join(dir, name), `${name}\n`),
+        g("add", name),
+        g("commit", "-qm", name),
+        g("rev-parse", "HEAD")
+      );
+      return { g, make };
+    };
+    const self = join(base, "self"),
+      otherCheckout = join(base, "other-checkout");
+    const s = repoAt(self),
+      o = repoAt(otherCheckout);
+    const c0 = s.make("c0");
+    s.g("checkout", "-q", "-b", "incoming");
+    const c1 = s.make("c1"),
+      c2 = s.make("c2");
+    s.g("checkout", "-q", "main");
+    o.make("o0");
+    o.g("checkout", "-q", "-b", "incoming");
+    const o1 = o.make("o1");
+    o.g("checkout", "-q", "main");
+    let running = c0,
+      closing = false,
+      failStart = false;
+    const starts = [],
+      selfTold = [],
+      reports = [];
+    const deployFor = selfDeployer({
+      head: () => s.g("rev-parse", "HEAD"),
+      running: () => running,
+      closing: () => closing,
+      start: () => {
+        if (failStart) throw new Error("spawn EACCES");
+        // What the host's startDeploy records before the child takes the lock.
+        writeFileSync(join(selfHome, "deploy.json"), JSON.stringify({ current: { requestId: `r${starts.length}`, at: Date.now() } }));
+        starts.push(s.g("rev-parse", "HEAD"));
+      },
+      tell: async (text) => void selfTold.push(text),
+      report: (text) => void reports.push(text),
+      retryMs: 50,
+    });
+    const unwatch = watchSelfCheckout({
+      root: join(self, "."),
+      head: async () => s.g("rev-parse", "HEAD"),
+      running: () => running,
+      deploy: deployFor,
+    });
+    const ended = () => writeFileSync(join(selfHome, "deploy.json"), "{}");
+    const quiet = new AbortController().signal;
+    /** A provider whose pull fast-forwards the checkout to `to` (nothing when absent), or skips with a reason. */
+    const provider = (to, skip) => ({
+      pullMain: async ({ checkout }) => {
+        if (skip) return { pulled: false, reason: skip };
+        if (to) execFileSync("git", ["-C", checkout, "merge", "-q", "--ff-only", to]);
+        return { pulled: true };
+      },
+    });
+    const pull = (checkout, to, skip) => pullMainCheckout({ provider: provider(to, skip), checkout, base: "main", signal: quiet });
+
+    // D2: a no-op pull, a skipped pull and a pull of another project's checkout start nothing.
+    let outcome = await pull(self);
+    assert.deepEqual(outcome, { pulled: true }, "an up-to-date pull is only a pull");
+    outcome = await pull(self, undefined, "the checkout has uncommitted changes");
+    assert.equal(outcome.deploy, undefined);
+    outcome = await pull(otherCheckout, o1);
+    assert.equal(outcome.pulled, true);
+    assert.equal(outcome.deploy, undefined, "another project's checkout never deploys the host");
+    assert.equal(starts.length, 0);
+
+    // D1 and D3: two pulls that each move the checkout start exactly one deploy, of the commit the first one reached.
+    const [one, two] = await Promise.all([pull(self, c1), pull(self, c2)]);
+    assert.equal(starts.length, 1, JSON.stringify({ starts, one, two }));
+    assert.deepEqual(starts, [c1]);
+    assert.deepEqual(one.deploy, { kind: "started", sha: c1 });
+    assert.equal(describeMainPull(one), `main checkout pulled; host deploy of ${c1.slice(0, 8)} started`);
+    assert.equal(two.deploy.kind, "waiting", JSON.stringify(two));
+    assert.match(describeMainPull(two), new RegExp(`host deploy of ${c2.slice(0, 8)} waits for the running deploy`));
+    assert.equal(
+      JSON.parse(readFileSync(join(selfHome, "deploy.json"), "utf8")).current.requestId,
+      "r0",
+      "the first request stays recorded",
+    );
+
+    // D4: once the running deploy has ended with c1, the commit the second pull reached deploys; exactly once.
+    running = c1;
+    ended();
+    await until("the waiting deploy starts", async () => starts.length === 2);
+    assert.deepEqual(starts, [c1, c2]);
+    await sleep(300);
+    assert.equal(starts.length, 2, "the waiting deploy starts once");
+    // A waiting deploy whose commit the running one already shipped starts nothing.
+    s.g("reset", "-q", "--hard", c0);
+    running = c0;
+    outcome = await pull(self, c1);
+    assert.equal(outcome.deploy.kind, "waiting");
+    running = c1;
+    ended();
+    await sleep(300);
+    assert.equal(starts.length, 2, "nothing left to deploy after the running deploy shipped the pulled commit");
+
+    // D7: a pull while the host is stopping starts nothing.
+    s.g("reset", "-q", "--hard", c0);
+    running = c0;
+    closing = true;
+    outcome = await pull(self, c1);
+    assert.equal(outcome.deploy.kind, "not-started");
+    assert.match(outcome.deploy.reason, /stopping/);
+    assert.equal(starts.length, 2);
+    closing = false;
+
+    // D6: a deploy that cannot start says so in the pull line, deploy.log, the host log and Telegram.
+    s.g("reset", "-q", "--hard", c0);
+    failStart = true;
+    outcome = await pull(self, c1);
+    assert.deepEqual(outcome.deploy, { kind: "not-started", sha: c1, reason: "spawn EACCES" });
+    assert.match(describeMainPull(outcome), new RegExp(`host deploy of ${c1.slice(0, 8)} not started: spawn EACCES`));
+    assert.match(selfTold.at(-1), new RegExp(`^Pi Projects host · Deploy\nDeploy of ${c1.slice(0, 8)} did not start: spawn EACCES`));
+    assert.match(readFileSync(join(selfHome, "deploy.log"), "utf8"), /did not start: spawn EACCES/);
+    assert.ok(
+      reports.some((text) => /did not start: spawn EACCES/.test(text)),
+      JSON.stringify(reports),
+    );
+    assert.ok(
+      reports.some((text) => text.includes(`deploy started: the main checkout was pulled to ${c1.slice(0, 8)}`)),
+      JSON.stringify(reports),
+    );
+    failStart = false;
+    unwatch();
+    // Unwatched, a moving pull is only a pull again.
+    s.g("reset", "-q", "--hard", c0);
+    outcome = await pull(self, c1);
+    assert.deepEqual(outcome, { pulled: true });
+  } finally {
+    process.env.PI_PROJECTS_HOME = hostHome;
+  }
   console.log("deploy-e2e ok");
 } finally {
   await request({ action: "shutdown" }, false).catch(() => {});
