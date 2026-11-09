@@ -1,12 +1,13 @@
+import { createHash } from "node:crypto";
 import type { Conversation, HostPluginApi, ToolExecutionApi } from "../../src/plugin-types.ts";
 import { binaryResult } from "../../src/binary-results.ts";
-import { MAX_OWNED, simulatorResource, type Simulators } from "./simulator.ts";
+import { MAX_OWNED, simulatorResource, WORKER_OPERATIONS, type Simulators } from "./simulator.ts";
 
 /** The coordinator's simulator rules: the editable "iOS simulators" integration block, shown while management is on. Tool details live in the descriptions. */
 export const COORDINATOR_NOTE = `- iOS simulators: you manage up to ${MAX_OWNED} clones yourself (projects_simulator_status, projects_simulator_action). Never ask the owner to create, boot or delete one. Give a coding worker the exact UDID and its simulator:<UDID> lease resource. Delete clones nobody needs. An unknown outcome blocks management: tell the owner, never guess or substitute another simulator.`;
 /** Worker counterpart, appended to the instructions of workers that have the simulator tools. */
 export const WORKER_NOTE =
-  "\n\nManaged iOS simulators: get the clone your task names with projects_worker_simulator_status, acquire its simulator:<UDID> lease before build, install, launch or screenshot, and release it when done. Use only project clones; ask the Coordinator to create, boot, reset or delete one.";
+  "\n\nManaged iOS simulators: get the clone your task names with projects_worker_simulator_status, acquire its simulator:<UDID> lease before build, install, launch or screenshot, and release it when done. While you hold the lease, boot, shut down or reboot that clone with projects_worker_simulator_boot. Use only project clones; ask the Coordinator to create, reset or delete one.";
 
 export function createSimulatorTools(host: HostPluginApi, simulators: Simulators) {
   const { defineExtension, defineTool } = host.lib.durable,
@@ -148,7 +149,42 @@ export function createSimulatorTools(host: HostPluginApi, simulators: Simulators
         return json(await simulators.rotate(input.projectId, udid, args.orientation, () => {}));
       },
     });
-    return [status, screenshot, rotate];
+    const WorkerOperation = Type.Union([...WORKER_OPERATIONS, "reboot" as const].map((operation) => Type.Literal(operation)));
+    const boot = defineTool({
+      name: "projects_worker_simulator_boot",
+      description:
+        "Boot (slim), shut down, or reboot (shut down, then boot) the project clone whose canonical simulator:<UDID> lease you hold (udid; default the clone you lease). Your lease authorizes it; no other lease is needed. Waits for the outcome. Create, reset and delete stay with the Coordinator. An unknown outcome blocks simulator management until the owner inspects it: report it, never retry with another clone.",
+      parameters: Type.Object({ operation: WorkerOperation, udid: Udid("Leased clone") }, { additionalProperties: false }),
+      replay: "unsafe",
+      async execute(args, api, context) {
+        authorize(api);
+        const leased = new Set(
+          host.leases
+            .held((holder) => holder.projectId === input.projectId && holder.threadId === input.threadId)
+            .map((lease) => lease.resource),
+        );
+        const udid =
+          args.udid?.toUpperCase() ??
+          (await simulators.snapshot(input.projectId)).devices.find((device) => leased.has(simulatorResource(device.udid)))?.udid;
+        if (!udid) throw Error("Acquire the simulator's canonical lease with projects_lease_acquire before booting or shutting it down");
+        const steps = args.operation === "reboot" ? (["shutdown", "boot"] as const) : [args.operation];
+        for (const operation of steps) {
+          // Request ids derive from the tool call, so a replayed call finds its receipt instead of acting twice.
+          const requestId = callUuid(`${input.threadId}:${api.callId}:${operation}`);
+          await simulators.act(input.projectId, operation, requestId, { udid }, { kind: "leaseHolder", threadId: input.threadId });
+          const outcome = await simulators.outcome(input.projectId, requestId, context?.abortSignal);
+          if (outcome === "running") throw Error(`Stopped waiting; the ${operation} continues: check projects_worker_simulator_status`);
+          if (outcome !== "done") throw Error(`Simulator ${operation} outcome is ${outcome}; tell the Coordinator, do not retry`);
+        }
+        const device = (await simulators.snapshot(input.projectId)).devices.find((item) => item.udid === udid);
+        return json({ operation: args.operation, udid, state: device?.state ?? "Unknown", slim: device?.slim ?? null });
+      },
+    });
+    return [status, screenshot, rotate, boot];
+  }
+  function callUuid(seed: string): string {
+    const hex = createHash("sha256").update(seed).digest("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
   }
   /** Frames are stored as artifacts of `scope` (a worker's thread, or the project for the coordinator); the transcript keeps the reference and a small copy. */
   async function image(projectId: string, scope: string, udid?: string) {

@@ -20,6 +20,11 @@ export const leaseName = (resource: string) => {
 export type Simulators = ReturnType<typeof createSimulators>;
 type Frame = { bytes: Buffer; mime: "image/jpeg" | "image/png"; capturedAt: number };
 export type SimulatorTarget = { udid?: string; sourceUdid?: string };
+/** Who asks for a lifecycle operation: maintenance (Coordinator, owner, cleanup) takes its own lease; the worker holding the clone's lease boots or shuts it down under that lease. */
+export type SimulatorCaller = { kind: "maintenance" } | { kind: "leaseHolder"; threadId: string };
+const MAINTENANCE: SimulatorCaller = { kind: "maintenance" };
+/** Lifecycle operations a lease holder may run on its own clone. */
+export const WORKER_OPERATIONS = ["boot", "shutdown"] as const;
 function saveJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;
@@ -193,7 +198,15 @@ export function createSimulators(api: HostPluginApi) {
   }
 
   /** Accept once, persist the intent, then run outside the host request. Unknown outcomes never replay. */
-  async function actOnSimulator(id: string, operation: Operation, requestId: string, target: SimulatorTarget = {}) {
+  async function actOnSimulator(
+    id: string,
+    operation: Operation,
+    requestId: string,
+    target: SimulatorTarget = {},
+    caller: SimulatorCaller = MAINTENANCE,
+  ) {
+    if (caller.kind === "leaseHolder" && !WORKER_OPERATIONS.some((allowed) => allowed === operation))
+      throw Error(`Only boot and shutdown run under a worker's lease; ask the Coordinator to ${operation} a simulator`);
     await locked(id, async () => {
       activeProject(id);
       const store = readStore(id),
@@ -221,14 +234,24 @@ export function createSimulators(api: HostPluginApi) {
         const owned = targetOf(store, wanted.udid);
         await ownedDevice(owned, devices);
         const held = aliasesHeld(owned);
-        if (held.length)
-          throw Error(`Simulator ${owned.udid} is leased by thread ${held[0].threadId}; ask that worker to release it, or wait`);
+        const others =
+          caller.kind === "leaseHolder" ? held.filter((lease) => lease.projectId !== id || lease.threadId !== caller.threadId) : held;
+        if (others.length)
+          throw Error(`Simulator ${owned.udid} is leased by thread ${others[0].threadId}; ask that worker to release it, or wait`);
+        if (caller.kind === "leaseHolder" && !held.length)
+          throw Error(`Acquire ${simulatorResource(owned.udid)} with projects_lease_acquire before booting or shutting it down`);
         udid = owned.udid;
         resource = simulatorResource(owned.udid);
       }
-      const holder = { projectId: id, owner: `maintenance:${requestId}` };
-      const lease = await api.leases.acquire(resource, holder, 30 * 60_000);
-      if (!lease.acquired) throw Error(`Simulator is leased by thread ${lease.heldBy.threadId}`);
+      // A lease holder acts under its own lease; maintenance takes the clone's lease for the operation.
+      const holder = caller.kind === "maintenance" ? { projectId: id, owner: `maintenance:${requestId}` } : null;
+      if (holder) {
+        const lease = await api.leases.acquire(resource, holder, 30 * 60_000);
+        if (!lease.acquired) throw Error(`Simulator is leased by thread ${lease.heldBy.threadId}`);
+      }
+      const release = () => {
+        if (holder) api.leases.release(resource, holder);
+      };
       const abort = new AbortController();
       try {
         store.pending = { requestId, operation, udid, sourceUdid };
@@ -236,11 +259,11 @@ export function createSimulators(api: HostPluginApi) {
         writeStore(id, store);
         dropFrames(id);
       } catch (error) {
-        api.leases.release(resource, holder);
+        release();
         throw error;
       }
       const promise = perform(id, store, abort.signal).finally(() => {
-        api.leases.release(resource, holder);
+        release();
         tasks.delete(id);
       });
       tasks.set(id, { promise, abort });
@@ -249,6 +272,19 @@ export function createSimulators(api: HostPluginApi) {
       );
     });
     return simulatorSnapshot(id);
+  }
+
+  /** Waits for the project's running operation (until `signal` aborts), then reads the request's receipt; the operation itself is not cancelled. */
+  async function requestOutcome(
+    id: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<"running" | "done" | "uncertain" | "unknown"> {
+    const running = tasks.get(id)?.promise.catch(() => {});
+    if (running && signal)
+      await Promise.race([running, new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }))]);
+    else await running;
+    return readStore(id).receipts[requestId]?.status ?? "unknown";
   }
 
   async function simulatorSnapshot(id: string) {
@@ -705,6 +741,7 @@ export function createSimulators(api: HostPluginApi) {
     configure: configureSimulator,
     recover: recoverSimulator,
     act: actOnSimulator,
+    outcome: requestOutcome,
     snapshot: simulatorSnapshot,
     frame: simulatorFrame,
     pause: pauseSimulatorManagement,
