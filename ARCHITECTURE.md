@@ -99,6 +99,7 @@ Rules:
 Rules:
 - Write the intent to the acceptance log (`<project>/acceptance/<job>.json`) before calling `merge`. After a call that throws, read the PR before deciding; never retry blind.
 - Merge only the approved head. A PR head that differs from the Job's candidate refuses.
+- Pull the main checkout through `src/main-pull.ts`: one pull per real checkout path at a time host-wide, bounded (`PI_PROJECTS_MAIN_PULL_TIMEOUT_MS`, 5 min) and ended by shutdown, never a throw. Follow PRs uses the same path when it sees a PR become merged, whoever merged it: before the poll's batch is frozen, so the merged line says "main checkout pulled" or "main checkout not pulled: <reason>", and a replayed batch never pulls again. The base is the follow state's `base` (GitHub) or the merge provider's `inspect` (plugins). A pull after Approve already pulled is an ff-only no-op.
 
 ## Deploy
 

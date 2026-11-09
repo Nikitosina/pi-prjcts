@@ -1,6 +1,6 @@
 // E2E: VCS / PR provider plugin API with a FAKE plugin (scripts/fixtures). Fake model, private HOME, browser (inbox at `/`). No real VCS, PR service, gh or live host.
 // Failure cases written first: vcs-plugins-failures.md (numbers in check labels). Artifact: artifacts/vcs-plugins-<stamp>/ (report.json, screenshots, host logs).
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit, call, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
 
@@ -450,6 +450,25 @@ await kit.run(async () => {
     events().length >= 1 &&
       result.calls.some((item) => item.user.startsWith("[Owner-local event fake.follow]") && /Fake activity/.test(item.user)),
     events().map((item) => item.user.slice(0, 80)),
+  );
+  const mergedBefore = events().length;
+  patchData((data) => {
+    data.prs.find((item) => item.id === 21).merged = true;
+  });
+  await rpc({ action: "follow-poll", id });
+  await kit.eventually(async () => events().length > mergedBefore, "a merged event for #21", 100);
+  await rpc({ action: "follow-poll", id });
+  await kit.settle(id);
+  const mergedEvent = events()
+    .slice(mergedBefore)
+    .find((item) => /PR #21 .*merged/.test(item.user));
+  check(
+    "25 a merge on a provider without a base in its follow state pulls the main checkout once, on the base its merge provider reports",
+    mergedEvent &&
+      /PR #21 “[^”]*” merged — main checkout pulled/.test(mergedEvent.user) &&
+      JSON.stringify((readData().mainPulls ?? []).map((item) => item.base)) === JSON.stringify(["fake-main"]) &&
+      realpathSync(readData().mainPulls[0].checkout) === realpathSync(checkout),
+    { event: mergedEvent?.user.slice(0, 600), pulls: readData().mainPulls },
   );
 
   // ---- Uncertain writes block automatic admission ----

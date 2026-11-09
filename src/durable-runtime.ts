@@ -47,6 +47,7 @@ import { FULL_COMMIT, Jobs, createJobs, sharedHandoff, type JobsRuntime, type Jo
 import { changedFiles, headCommit } from "./vcs.ts";
 import { checkProofRefs, proofTools } from "./proof.ts";
 import { createApprover, describeAcceptance, fileAcceptanceLog, githubMergeProvider } from "./result-acceptance.ts";
+import { pullMainCheckout } from "./main-pull.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
@@ -1654,6 +1655,14 @@ export async function openDurableProject(input: {
           return agent ? (agent.working ? "running" : agent.endedAt === null ? "running" : "completed") : null;
         },
         target: eventTarget,
+        pullMain: async ({ repositoryId, pr, base, signal }) => {
+          const authorization = loadProject(project.id).workspaceAuthorization,
+            repository = authorization?.repositories.find((item) => item.repositoryId === repositoryId);
+          if (!authorization || !repository) return { pulled: false, reason: `${repositoryId} has no authorized main checkout` };
+          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          if (!provider) return { pulled: false, reason: `the ${authorization.provider} plugin has no merge capability` };
+          return pullMainCheckout({ provider, checkout: repository.ownerCheckout, base, pr: String(pr), signal });
+        },
       },
       () => closed,
     );
