@@ -44,6 +44,8 @@
     "src/routine-tools.ts": ["routine-script-e2e"],
     "src/durable-code-tools.ts": ["code-tools-unit"],
     "src/code-diff.ts": ["code-tools-unit"],
+    "src/proof.ts": ["verify-run-unit"],
+    "src/vcs.ts": ["verify-run-unit", "code-tools-unit", "vcs-plugins-e2e"],
     "src/workspace-cleanup.ts": ["workspace-cleanup-unit", "worktree-lifecycle-e2e"],
     "src/storage-usage.ts": ["storage-usage-unit", "worktree-lifecycle-e2e", "vcs-plugins-e2e"],
     "src/workspace-cache.ts": ["workspace-cache-unit", "artifacts-e2e", "codemode-native-tools-e2e", "mcp-e2e", "worktree-lifecycle-e2e"],

@@ -30,11 +30,28 @@ export function runCli(file: string, args: string[], cwd?: string): Promise<CliR
 }
 /** HEAD commit of a worktree (git or a plugin kind); null when it cannot be read. */
 export async function headCommit(cwd: string): Promise<string | null> {
-  const found = findVcsRoot(cwd);
-  const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
-  if (provider) return (await provider.workerState(cwd)).head || null;
-  const result = await runCli(cli.git(), ["-C", cwd, "rev-parse", "HEAD"]);
-  return result.code === 0 ? result.stdout.trim() || null : null;
+  const head = await readHead(cwd);
+  return head.kind === "commit" ? head.sha : null;
+}
+export type HeadRead = { kind: "commit"; sha: string } | { kind: "unreadable"; reason: string };
+/** HEAD commit of a worktree through its checkout kind (a plugin kind's provider, else git), or why it cannot be read. */
+export async function readHead(cwd: string): Promise<HeadRead> {
+  const unreadable = (reason: string): HeadRead => ({ kind: "unreadable", reason });
+  try {
+    const found = findVcsRoot(cwd);
+    const provider = found && found.kind !== "git" ? plugins.vcsProvider(found.kind) : undefined;
+    if (found && provider) {
+      const head = (await provider.workerState(found.root)).head.trim();
+      return head ? { kind: "commit", sha: head } : unreadable(`the ${found.kind} checkout reported no HEAD commit`);
+    }
+    const result = await runCli(cli.git(), ["-C", cwd, "rev-parse", "--verify", "HEAD^{commit}"]);
+    const sha = result.stdout.trim();
+    return result.code === 0 && sha
+      ? { kind: "commit", sha }
+      : unreadable(result.stderr.trim().slice(-300) || `git rev-parse exited ${result.code}`);
+  } catch (error) {
+    return unreadable(error instanceof Error ? error.message : String(error));
+  }
 }
 /** Uncommitted paths of a worktree (git or a plugin kind, by what is found above it); null when the status cannot be read. */
 export async function changedFiles(cwd: string): Promise<string[] | null> {
