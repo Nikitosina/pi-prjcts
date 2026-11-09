@@ -199,7 +199,7 @@ try {
       const state = await tx.doc(Jobs, root.id);
       state.paused = paused;
       state.agents[threadId] = { id: threadId, role: "worker", jobId: threadId, scopeId, endedAt };
-      state.jobs[threadId] = { id: threadId, status, dismissedAt };
+      state.jobs[threadId] = { id: threadId, status, ...(dismissedAt === undefined ? {} : { dismissedAt }) };
     }, BACKGROUND_CONTEXT);
   await ownerState(1, "ready-with-gaps");
   check((await endedWorkerWorkspaceOwner(root, ownedReceipt)) === null, "durable ended owner accepted");
