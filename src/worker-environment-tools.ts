@@ -1,7 +1,9 @@
 import { defineTool, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { BackgroundCommands } from "./background-commands.ts";
+import { queuedInputNote, watchQueuedInput } from "./queued-input.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
+import { sourceWriteDiagnostic } from "./source-writes.ts";
 
 const json = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }], details: undefined });
 const Resource = Type.String({
@@ -9,6 +11,9 @@ const Resource = Type.String({
   description: "Neutral name agreed by workers, e.g. ios-simulator or a device name.",
 });
 const Id = Type.String({ pattern: "^bg-[a-f0-9]{8}$" });
+/** The background wait; the stall detector judges an agent inside it by its command's output. */
+export const BACKGROUND_WAIT_TOOL = "projects_bg_status";
+const MAX_WAIT_SECONDS = 1800;
 const BLOCKED = /^printf '%s\\n' '([\s\S]*)' >&2; exit 126$/;
 /** The worker shell policies answer a blocked command with a replacement script ending in `exit 126`; unwrap its message. */
 function policyDenial(guarded: string): string | undefined {
@@ -80,6 +85,8 @@ export function workerEnvironmentTools(input: {
       const t = await input.target(api, context);
       const denial = policyDenial(t.guard(args.command));
       if (denial !== undefined) throw new Error(denial);
+      const warning = sourceWriteDiagnostic(args.command);
+      if (warning) api.diagnostic(warning);
       const { command: _command, ...info } = input.background.start(t.threadId, {
         command: args.command,
         label: args.label,
@@ -90,28 +97,34 @@ export function workerEnvironmentTools(input: {
     },
   });
   const status = defineTool({
-    name: "projects_bg_status",
-    description:
-      "State of one of your background commands: running, exited with its exit code, killed or lost, plus the last tailLines (default 40, max 200) of its output (capped) and the log artifact ref for the full output. To wait for a build or test run, pass waitSeconds (1-120): the call returns as soon as the command ends, or after waitSeconds with state running; do not poll with sleep and tail. after (a previous logBytes) returns only output newer than that offset.",
+    name: BACKGROUND_WAIT_TOOL,
+    description: `State of one of your background commands: running, exited with its exit code, killed or lost, plus the last tailLines (default 40, max 200) of its output (capped) and the log artifact ref for the full output. To wait for a build or test run, make one call with a large waitSeconds (1-${MAX_WAIT_SECONDS}) instead of polling: it returns as soon as the command ends, when a message for you is queued (state running with a note), or after waitSeconds with state running. Do not poll with sleep and tail. after (a previous logBytes) returns only output newer than that offset.`,
     parameters: Type.Object(
       {
         id: Id,
         tailLines: Type.Optional(Type.Integer({ minimum: 0, maximum: 200 })),
-        waitSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })),
+        waitSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_WAIT_SECONDS })),
         after: Type.Optional(Type.Integer({ minimum: 0 })),
       },
       { additionalProperties: false },
     ),
     replay: "safe",
     async execute(args, api, context) {
-      return json(
-        await input.background.wait(await owner(api, context), args.id, {
+      const thread = await owner(api, context);
+      const queued = args.waitSeconds ? watchQueuedInput(api, api.conversationId, context) : undefined;
+      try {
+        const signals = [context.abortSignal, queued?.signal].filter((signal) => signal !== undefined);
+        const status = await input.background.wait(thread, args.id, {
           tailLines: args.tailLines ?? 40,
           after: args.after,
           waitSeconds: args.waitSeconds ?? 0,
-          signal: context.abortSignal,
-        }),
-      );
+          signal: signals.length ? AbortSignal.any(signals) : undefined,
+        });
+        const arrived = queued?.arrived();
+        return json(arrived && status.state === "running" ? { ...status, note: queuedInputNote(arrived) } : status);
+      } finally {
+        queued?.stop();
+      }
     },
   });
   const stop = defineTool({

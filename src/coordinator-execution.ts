@@ -5,6 +5,7 @@ import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { createBashTool, createEditTool, createReadTool, createWriteTool, type ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { ensureArtifactDir } from "./artifacts.ts";
 import { binaryResult, decodeBase64, type ResultBlock } from "./binary-results.ts";
+import { sourceWriteDiagnostic } from "./source-writes.ts";
 import { CACHE_VARIABLE } from "./workspace-cache.ts";
 
 /** Where one call runs: the authorized worktree, the artifacts scope, and for whole-repository workers the shell guard and owner-checkout check. */
@@ -44,6 +45,8 @@ export function coordinatorExecutionTools(input: {
           tool.name === "bash"
             ? createBashTool({
                 prepare: (execution) => {
+                  const warning = sourceWriteDiagnostic(execution.command);
+                  if (warning) api.diagnostic(warning);
                   execution.env.PI_ARTIFACTS_DIR = artifacts;
                   if (cache) execution.env[CACHE_VARIABLE] = cache;
                   if (target.guard) execution.command = target.guard(execution.command);

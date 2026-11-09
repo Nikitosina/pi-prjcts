@@ -15,7 +15,7 @@ import { createRegistry, defineExtension, defineTool, Harness, LiveDoc } from "@
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createJobs, Jobs, liveAgentIds, planEta } from "../src/jobs.ts";
 import { guardedStream } from "../src/model-guard.ts";
-import { DEFAULT_ROLE_PROMPTS } from "../src/role-prompts.ts";
+import { DEFAULT_ROLE_PROMPTS, TASK_HELPER_PROMPT } from "../src/role-prompts.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "jobs-e2e-"));
 const model = { provider: "faux", modelId: "faux-1" };
@@ -23,7 +23,15 @@ const sha = "a".repeat(40);
 const longAnswer = "Full exact retained evidence. ".repeat(300) + "END-OF-EXACT-ANSWER";
 // Tasks a worker gives its checking scout; other scout tasks answer normally.
 const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
+// A glued-words suspect (scripts/agent-signals-failures.md G6).
+const GLUED = "Couldmerelykeepownedsessionrunningwhilelocaldebugandrenewlease";
 assert.match(DEFAULT_ROLE_PROMPTS.worker, /Mark the PR ready before calling job ready/, "Ready includes the draft PR transition");
+for (const prompt of [DEFAULT_ROLE_PROMPTS.worker, TASK_HELPER_PROMPT])
+  assert.match(
+    prompt,
+    /one projects_bg_status call with a large waitSeconds/,
+    "workers wait for long commands with one call, not by polling",
+  );
 
 // The ETA counts down inside the step in progress and keeps a minute for an overrun one.
 {
@@ -76,9 +84,15 @@ function route(request) {
       return call("agents", { action: "report", id, ...(ref ? { ref: Number(ref) } : {}) });
     }
     if (user.startsWith("Scout")) return call("agents", { action: "spawn", role: "scout", brief: "Look around", requestId: "scout-1" });
+    if (user === "Spawn glued")
+      return call("agents", { action: "spawn", role: "scout", brief: `Check ${GLUED} please`, requestId: "glued-scout" });
+    if (user.startsWith("Send glued ")) return call("agents", { action: "send", id: user.slice(11), message: `Also ${GLUED}` });
+    if (user.startsWith("Wait for ")) return call("agents", { action: "wait", id: user.slice(9), timeoutSec: 900 });
     return result ? say("OK.") : say("Noted.");
   }
   if (role === "worker") {
+    if (tag === "BRIEF-BGWAIT") return result ? say("Done.") : call("projects_bg_status", {});
+    if (tag === "BRIEF-GLUEDSUB") return result ? say("Done.") : call("subagent", { role: "scout", task: `Look at ${GLUED} closely` });
     if (user === "Replace helper result") return say("New short helper result.");
     if (user === "Replace Ready result")
       return call("job", {
@@ -229,7 +243,9 @@ let gateOpen = false,
   backgroundSilenceMs = null,
   slowCycle = 0,
   releasedSlowCycle = 0,
-  finishSlow = false;
+  finishSlow = false,
+  bgWaiting = false,
+  bgReleased = false;
 const TestTools = defineExtension({
   name: "test-tools",
   tools: [
@@ -257,6 +273,19 @@ const TestTools = defineExtension({
         const cycle = ++slowCycle;
         while (!callContext.abortSignal?.aborted && releasedSlowCycle < cycle) await delay(20);
         return { output: [{ type: "text", text: callContext.abortSignal?.aborted ? "aborted" : "process advanced" }] };
+      },
+    }),
+    // Stands in for a long background wait (agent-signals-failures.md W1, W2): blocks until released or aborted.
+    defineTool({
+      name: "projects_bg_status",
+      description: "A long background wait",
+      parameters: Type.Object({}),
+      replay: "safe",
+      execute: async (_args, _api, callContext) => {
+        bgWaiting = true;
+        while (!bgReleased && !callContext.abortSignal?.aborted) await delay(20);
+        bgWaiting = false;
+        return { output: [{ type: "text", text: '{"state":"running"}' }] };
       },
     }),
     defineTool({
@@ -492,6 +521,43 @@ await until(() => slowCycle > previousCycle, "the child makes real progress and 
 assert.deepEqual(await jobs.stallTick(harness, T + 100 * 60_000), [], "real progress clears the old episode");
 assert.deepEqual(await jobs.stallTick(harness, T + 121 * 60_000), [silent.id], "a genuinely new stall is reported after recovery");
 
+// 4b. A worker inside a long background wait is judged by its background command (agent-signals-failures.md W1, W2); the
+// Coordinator's agents wait ends when a message is queued for it (Q8).
+{
+  await say_(root, "Start BGWAIT");
+  await until(() => bgWaiting, "worker inside the background wait");
+  const waiter = (await jobsOf(harness)).find((item) => item.title === "Job BGWAIT");
+  const T2 = T + 300 * 60_000;
+  backgroundSilenceMs = 60_000;
+  assert.deepEqual(await jobs.stallTick(harness, T2), []);
+  assert.deepEqual(await jobs.stallTick(harness, T2 + 21 * 60_000), [], "W1 a wait on a printing command is not a stall");
+  backgroundSilenceMs = 21 * 60_000;
+  assert.deepEqual(await jobs.stallTick(harness, T2 + 42 * 60_000), [waiter.id], "W2 a wait on a silent command is a stall");
+  backgroundSilenceMs = null;
+
+  const waitTurn = await root.submit({ type: "input", content: `Wait for ${waiter.id}` }, context);
+  await until(
+    async () =>
+      ((await harness.snapshot(LiveDoc, root.id, context))?.tools ?? []).some(
+        (slot) => slot.name === "agents" && slot.status === "running",
+      ),
+    "the coordinator waits on the worker",
+  );
+  const steerAt = Date.now();
+  await root.submit({ type: "input", content: "Owner steer while waiting", whenBusy: "steer" }, context);
+  await Promise.race([waitTurn.wait(context), delay(15_000).then(() => assert.fail("Q8 a queued owner message ends agents wait early"))]);
+  assert.ok(Date.now() - steerAt < 8000, "Q8 a queued owner message ends agents wait early");
+  // The steer is placed right after the result, so the result is read from the transcript.
+  const waited = text(
+    (await root.entries({}, 20, undefined, context)).items.find((entry) => entry.model?.[0]?.role === "toolResult")?.model[0].content ?? "",
+  );
+  assert.match(waited, /still working/);
+  assert.match(waited, /message/i, waited);
+  assert.doesNotMatch(waited, /\[warn\]/, "a call without glued words carries no warning");
+  await jobs.stop(harness, waiter.id, "test over");
+  await until(() => !bgWaiting, "the stopped worker left its wait");
+}
+
 // 5. Stop drains the worker and its child, kills the process, and reports nothing.
 await assert.rejects(async () => jobs.stop(harness, silent.id, " "), /reason/);
 const sizeBefore = (await chatText(root)).length;
@@ -507,6 +573,37 @@ assert.ok(
   "a stopped Job reports nothing",
 );
 assert.match(await jobs.stop(harness, silent.id, "again"), /already stopped/);
+
+// G6: glued words in a brief, a steer or a subagent task are delivered, and the sender's result warns; a clean send does not.
+{
+  const warned = (result) => result.includes("[warn]") && result.includes(GLUED.slice(0, 40)) && /normal spacing/i.test(result);
+  await say_(root, "Spawn glued");
+  await quiet(harness);
+  const spawnResult =
+    requests.findLast((item) => item.role === "coordinator" && item.user === "" && item.result.includes("[warn]"))?.result ?? "";
+  assert.ok(warned(spawnResult), `the spawn result warns: ${spawnResult}`);
+  assert.ok(
+    requests.some((item) => item.role === "scout" && item.user.includes(GLUED)),
+    "the scout got the brief unchanged",
+  );
+  const scout = (await jobs.snapshot(harness)).agents.find((item) => item.role === "scout" && item.title.startsWith("Check "));
+  await say_(root, `Send glued ${scout.id}`);
+  await quiet(harness);
+  const sendResult = requests.findLast((item) => item.role === "coordinator" && item.result.startsWith("Sent to"))?.result ?? "";
+  assert.ok(warned(sendResult), `the send result warns: ${sendResult}`);
+  assert.ok(
+    requests.some((item) => item.role === "scout" && item.user === `Also ${GLUED}`),
+    "the steer was delivered unchanged",
+  );
+  await say_(root, "Start GLUEDSUB");
+  await quiet(harness);
+  const subResult = requests.findLast((item) => item.role === "worker" && item.tag === "BRIEF-GLUEDSUB" && item.result)?.result ?? "";
+  assert.ok(warned(subResult), `the subagent result warns: ${subResult}`);
+  assert.ok(
+    requests.some((item) => item.role === "scout" && item.user === `Look at ${GLUED} closely`),
+    "the subagent got its task",
+  );
+}
 
 // 6. A question to a finished Job is answered without failing it; a steer that does work reports again, and a retried steer id sends once.
 const preparesBefore = prepareRuns.filter((id) => id === job.id).length;
