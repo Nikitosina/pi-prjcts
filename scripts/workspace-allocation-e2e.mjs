@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -9,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceIsolation } from "../src/workspace-isolation.ts";
+import { workerActivity } from "../src/jobs.ts";
 import { archiveHome, currentWorktreeRoot } from "../src/archive-host.ts";
 import { grantWorkspace, trustedOwner } from "../src/workspace-authorization.ts";
 import { commandProfilesSnapshot, prepareCommandProfile } from "../src/command-profiles.ts";
@@ -175,7 +176,8 @@ try {
     taken.state === "blocked" && existsSync(oldPath) && /not pushed/.test(taken.reason),
     "an old worktree with an unpushed commit is kept",
   );
-  const outside = join(fixture, "herdr");
+  // Outside the approved root too: a worktree there that no receipt records is this host's, not a foreign one.
+  const outside = `${fixture}-herdr`;
   mkdirSync(outside, { recursive: true });
   [oldPath, taken] = await takeover("held-outside", outside);
   check(
@@ -185,6 +187,164 @@ try {
   const { continueBranch: _drop, ...plainScope } = continueIntent("plain").scope;
   taken = await iso.allocate({ ...continueIntent("plain"), scope: { ...plainScope, branch: "main" } });
   check(taken.state === "blocked" && /already exists/.test(taken.reason), "a blocked reason carries git's own message");
+  // scripts/workspace-allocation-failures.md: a branch held by another worker's worktree of this host (B1-B5, T1-T2) and a blocked start retried (R1-R2).
+  const workers = new Map(),
+    missingHome = join(fixture, "no-such-old-home");
+  mkdirSync(join(fixture, "worktrees"), { recursive: true });
+  iso = workspaceIsolation({ ...isoOptions, oldHome: missingHome, workerState: async (thread) => workers.get(thread) ?? null });
+  const holderOf = async (name, state, prepare = () => {}) => {
+    const thread = `thread-${name}`;
+    const intent = {
+      ...gitIntent,
+      id: randomUUID(),
+      attemptId: randomUUID(),
+      scope: {
+        ...gitIntent.scope,
+        workspacePath: join(fixture, "worktrees", `old-${name}`),
+        workspaceName: `old-${name}`,
+        branch: name,
+        leaseReason: `durable workspace ${thread}`,
+      },
+    };
+    check((await iso.allocate(intent)).state === "allocated", `${name}: the holder worker's worktree is allocated`);
+    git(owner, "push", "origin", name);
+    workers.set(thread, state);
+    prepare(intent.scope.workspacePath);
+    return { path: intent.scope.workspacePath, thread };
+  };
+  const symbolic = (path) => execFileSync("/usr/bin/git", ["symbolic-ref", "--quiet", "HEAD"], { cwd: path, encoding: "utf8" }).trim();
+  const detached = (path) => {
+    try {
+      symbolic(path);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  let holder = await holderOf("handoff-idle", "ended");
+  taken = await iso.allocate(continueIntent("handoff-idle"));
+  report.receipts.push(taken);
+  check(taken.state === "allocated", "B1 a fresh worker continues a branch an ended worker's clean, pushed worktree of this host holds");
+  check(
+    existsSync(join(holder.path, "owner.txt")) && detached(holder.path) && symbolic(taken.workspacePath) === "refs/heads/handoff-idle",
+    "B2 the holder is kept, moved off the branch to a detached HEAD, and the new worktree is on the branch",
+  );
+  check(
+    taken.providerFacts.handedOverFrom === realpathSync(holder.path) && taken.providerFacts.handedOverThread === holder.thread,
+    "B2 the receipt records which worktree and worker gave up the branch",
+  );
+  holder = await holderOf("handoff-dirty", "ended", (path) => writeFileSync(join(path, "scratch.txt"), "keep\n"));
+  taken = await iso.allocate(continueIntent("handoff-dirty"));
+  check(
+    taken.state === "blocked" && !detached(holder.path) && /scratch\.txt/.test(taken.reason) && taken.reason.includes(holder.thread),
+    "B3/B5 a dirty holder keeps the branch; the refusal names its worker and file",
+  );
+  holder = await holderOf("handoff-ahead", "ended", (path) => {
+    writeFileSync(join(path, "ahead.txt"), "x\n");
+    git(path, "add", "ahead.txt");
+    git(path, "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-m", "unpushed");
+  });
+  taken = await iso.allocate(continueIntent("handoff-ahead"));
+  check(
+    taken.state === "blocked" && !detached(holder.path) && /not pushed/.test(taken.reason),
+    "B3 a holder with an unpushed commit keeps the branch",
+  );
+  holder = await holderOf("handoff-running", "running");
+  const retried = continueIntent("handoff-running");
+  taken = await iso.allocate(retried);
+  check(
+    taken.state === "blocked" && !detached(holder.path) && /is running/.test(taken.reason) && taken.reason.includes(holder.thread),
+    "B3/B5 a holder whose worker is running keeps the branch; the refusal names the worker",
+  );
+  check(!/old host's home is missing/.test(taken.reason), "T1 a missing old home is not blamed for a holder of this host");
+  workers.set(holder.thread, "ended");
+  taken = await iso.allocate(retried);
+  check(
+    taken.state === "allocated" && detached(holder.path),
+    "R1 the same intent, blocked before any effect, is retried once the cause is gone",
+  );
+  check((await iso.allocate(retried)).state === "allocated", "R2 an allocated receipt is adopted as before");
+  let refusedDiffering = false;
+  try {
+    await iso.allocate({ ...retried, scope: { ...retried.scope, leaseReason: "other" } });
+  } catch (error) {
+    refusedDiffering = /differs/.test(String(error));
+  }
+  check(refusedDiffering, "R2 a differing scope for the same intent id is still refused");
+  holder = await holderOf("handoff-unknown", "ended");
+  workers.delete(holder.thread);
+  taken = await iso.allocate(continueIntent("handoff-unknown"));
+  check(
+    taken.state === "blocked" && !detached(holder.path) && /no recorded worker/.test(taken.reason),
+    "B4 a worktree whose worker is not recorded keeps the branch",
+  );
+  holder = await holderOf("handoff-gone", "ended", (path) => rmSync(path, { recursive: true, force: true }));
+  taken = await iso.allocate(continueIntent("handoff-gone"));
+  check(
+    taken.state === "blocked" && /folder is missing/.test(taken.reason) && !/home is missing/.test(taken.reason),
+    "T1 a missing holder folder is reported as the folder, not the old home",
+  );
+  // B3: the host's reading of a holder thread, from the Jobs document and whether its conversation is busy.
+  const doc = {
+    agents: {
+      done: { id: "done", role: "worker", jobId: "j1", endedAt: 1 },
+      working: { id: "working", role: "worker", jobId: "j2", endedAt: null },
+      helper: { id: "helper", role: "worker", jobId: null, endedAt: null },
+      scout: { id: "scout", role: "scout", jobId: null, endedAt: 1 },
+    },
+    jobs: { j1: { status: "checkpoint" }, j2: { status: "running" } },
+  };
+  check(
+    workerActivity(doc, "done", false) === "ended" &&
+      workerActivity(doc, "done", true) === "running" &&
+      workerActivity(doc, "working", false) === "running" &&
+      workerActivity(doc, "helper", false) === "running" &&
+      workerActivity(doc, "scout", false) === null &&
+      workerActivity(doc, "nobody", false) === null,
+    "B3 a worker is running while its Job runs or its conversation is busy; non-workers and unknown ids are not workers",
+  );
+  const orphan = held("handoff-orphan", join(fixture, "worktrees"));
+  taken = await iso.allocate(continueIntent("handoff-orphan"));
+  check(
+    taken.state === "blocked" && !detached(orphan) && /no workspace of this host records it/.test(taken.reason),
+    "B4 a worktree in this host's folder that no receipt records keeps the branch",
+  );
+  const elsewhere = held("handoff-elsewhere", outside);
+  taken = await iso.allocate(continueIntent("handoff-elsewhere"));
+  check(
+    taken.state === "blocked" &&
+      existsSync(elsewhere) &&
+      !detached(elsewhere) &&
+      taken.reason.includes(missingHome) &&
+      /previous host's home \S+ is missing/.test(taken.reason) &&
+      !/that folder/.test(taken.reason),
+    "T1/T2 a holder outside both homes is untouched, and a missing old home is named as such",
+  );
+  // R3: the owner checkout moves between a blocked start and the resume; the resume computes a fresh scope (runs last: it moves owner HEAD).
+  holder = await holderOf("handoff-moved", "running");
+  const frozen = continueIntent("handoff-moved");
+  check((await iso.allocate(frozen)).state === "blocked", "R3 the first start is blocked by the running holder");
+  writeFileSync(join(owner, "moved.txt"), "moved\n");
+  git(owner, "add", "moved.txt");
+  git(owner, "-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-m", "owner moved");
+  const movedHead = git(owner, "rev-parse", "HEAD");
+  workers.set(holder.thread, "ended");
+  taken = await iso.allocate(frozen);
+  check(taken.state === "blocked" && /drifted/.test(taken.reason), "R3 the old frozen scope cannot start after the owner moved");
+  const fresh = { ...frozen, scope: { ...frozen.scope, headRevision: movedHead } };
+  taken = await iso.allocate(fresh);
+  report.receipts.push(taken);
+  check(
+    taken.state === "allocated" && taken.scope.headRevision === movedHead && detached(holder.path),
+    "R3 the resume replaces the blocked receipt with the freshly computed scope and starts",
+  );
+  let refusedAllocated = false;
+  try {
+    await iso.allocate({ ...fresh, scope: { ...fresh.scope, headRevision: gitHead } });
+  } catch (error) {
+    refusedAllocated = /differs/.test(String(error));
+  }
+  check(refusedAllocated, "R3 an allocated receipt with a differing scope is still refused");
   // A carried project's approved root inside the old home is replaced by this host's own folder, without touching the stored grant.
   process.env.PI_PROJECTS_HOME = join(fixture, "new-home");
   const carried = join(archiveHome(), gitProject, "worktrees");

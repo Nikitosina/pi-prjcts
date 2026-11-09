@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { Value } from "typebox/value";
@@ -48,11 +48,15 @@ type Options = {
   authorizedRepositories?: readonly Authorization[];
   context?: Context;
   /** The previous host's home: a clean, fully pushed worktree under it may be removed so its branch can be continued. */ oldHome?: string;
+  /** Whether a worker thread of this project is running or ended; null when no worker has that id. An ended worker's clean, pushed worktree gives up a branch another worker continues. */ workerState?: (
+    threadId: string,
+  ) => Promise<WorkerState | null>;
   /** Test-only crash seam; production must not supply it. */ afterProviderEffect?: (receipt: WorkspaceReceipt) => Promise<void> | void;
   /** Test-only absolute missing executable; exercises actual OS probe failure only. */ testMissingProbeExecutable?: string;
   /** Test-only fixed PID-only lsof framing; exercises malformed-success preservation. */ testProbeWithoutCwdNames?: boolean;
 };
 type Facts = { facts: Record<string, string>; reason: string | null };
+export type WorkerState = "running" | "ended";
 
 /** A receipt-only module: host configuration, not a model, supplies authority. */
 export function workspaceIsolation(options: Options): WorkspaceIsolation {
@@ -81,17 +85,47 @@ export function workspaceIsolation(options: Options): WorkspaceIsolation {
     authorize(intent, allowed, authority);
     const old = await get(intent.id);
     if (old) {
-      if (!sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption");
-      return old;
+      // A start blocked before any provider effect froze nothing: it is tried again, on the caller's current scope (owner HEAD may have moved). Preflight still refuses an existing target.
+      const retry = old.state === "blocked" && old.workspacePath === null && old.attemptId === intent.attemptId;
+      if (!retry && !sameFrozenIntent(old, intent)) throw new Error("Existing workspace receipt intent/scope differs; refusing adoption");
+      if (!retry) return old;
     }
     await put(receipt(intent, "prepared", {}, null, null, null)); // Durable intent precedes unsafe CLI.
     const missing = pluginMissing(intent.scope.provider);
     if (missing) return put(receipt(intent, "blocked", {}, null, null, missing));
     const pre = await preflight(intent.scope, false);
     if (pre.reason) return put(receipt(intent, "blocked", pre.facts, null, null, pre.reason));
-    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts, options.oldHome) : await addPlugin(intent, pre.facts);
+    const effect = intent.scope.provider === "git" ? await addGit(intent, pre.facts, freeBranch) : await addPlugin(intent, pre.facts);
     if (effect.state === "allocated") await options.afterProviderEffect?.(dto(effect));
     return put(effect);
+  }
+  /** Frees a continued branch from the worktree holding it: an ended worker's of this host, or one the previous host left behind. */
+  async function freeBranch(s: WorkspaceScope): Promise<Freed> {
+    const holder = await branchHolder(s);
+    if (!holder) return {};
+    const path = resolve(holder.worktree!);
+    const recorded = (await snapshot()).receipts.find(
+      (item) =>
+        item.scope.provider === "git" &&
+        item.scope.ownerCheckout === s.ownerCheckout &&
+        item.state !== "released" &&
+        resolve(item.workspacePath ?? item.scope.workspacePath) === path,
+    );
+    if (!recorded) {
+      let ownRoot = false;
+      try {
+        ownRoot = inside(realpathSync(s.approvedRoot), realpathSync(path));
+      } catch {
+        // A missing folder is reported by the reclaim below.
+      }
+      return reclaimOldWorktree(s, holder, options.oldHome, ownRoot);
+    }
+    const thread = /^durable workspace (\S+)$/.exec(recorded.scope.leaseReason)?.[1] ?? null;
+    return handOver(s, holder, {
+      thread,
+      label: recorded.scope.leaseReason,
+      state: thread && options.workerState ? await options.workerState(thread) : null,
+    });
   }
   async function reconcile(intent: Intent) {
     authorize(intent, allowed, authority);
@@ -329,7 +363,7 @@ async function preflight(s: WorkspaceScope, exists: boolean, options = { ownerSt
     return { facts: {}, reason: e instanceof Error ? e.message : String(e) };
   }
 }
-async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string) {
+async function addGit(i: Intent, facts: Record<string, string>, free: (s: WorkspaceScope) => Promise<Freed>) {
   const existing = i.scope.continueBranch
     ? (await command(cli.git(), ["rev-parse", "--verify", "--quiet", `refs/heads/${i.scope.branch}`], i.scope.ownerCheckout)).stdout.trim()
     : "";
@@ -350,11 +384,11 @@ async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string
       i.scope.ownerCheckout,
     );
   let x = await add();
-  if (x.code && i.scope.continueBranch && oldHome) {
-    const taken = await reclaimOldWorktree(i.scope, oldHome);
+  if (x.code && i.scope.continueBranch) {
+    const taken = await free(i.scope);
     if (taken.refusal) return receipt(i, "blocked", { ...facts, add: short(x.stderr) }, null, null, `Git add failed: ${taken.refusal}`);
-    if (taken.removed) {
-      facts = { ...facts, reclaimedWorktree: taken.removed };
+    if (taken.facts) {
+      facts = { ...facts, ...taken.facts };
       x = await add();
     }
   }
@@ -364,52 +398,95 @@ async function addGit(i: Intent, facts: Record<string, string>, oldHome?: string
     ? receipt(i, "allocated", { ...facts, ...found.facts }, i.scope.workspacePath, null, null)
     : receipt(i, "uncertain", facts, i.scope.workspacePath, null, "Git effect lacks exact receipt facts");
 }
-/**
- * A branch that the previous host left checked out in one of its own worktrees cannot be continued. That worktree is removed only when it lives
- * under the old host's home, nothing runs in it, it has no uncommitted or untracked files and its HEAD is already on the remote branch.
- * Returns the removed path, or a refusal naming the path and the reason; neither when no worktree holds the branch.
- */
-async function reclaimOldWorktree(s: WorkspaceScope, oldHome: string): Promise<{ removed?: string; refusal?: string }> {
+type Freed = { facts?: Record<string, string>; refusal?: string };
+type Holder = Record<string, string | undefined>;
+/** The worktree other than this scope's that has the branch checked out, from `git worktree list --porcelain`. */
+async function branchHolder(s: WorkspaceScope): Promise<Holder | undefined> {
   const list = await command(cli.git(), ["worktree", "list", "--porcelain"], s.ownerCheckout);
-  const holder = list.stdout
+  return list.stdout
     .trim()
     .split("\n\n")
     .map((block) => Object.fromEntries(block.split("\n").map((line) => [line.split(" ")[0], line.split(" ").slice(1).join(" ")])))
     .find((entry) => entry.branch === `refs/heads/${s.branch}` && entry.worktree !== resolve(s.workspacePath));
-  if (!holder) return {};
-  const path = holder.worktree!,
-    refuse = (why: string) => ({ refusal: `branch ${s.branch} is checked out in ${path}: ${why}` });
-  let real: string, home: string;
-  try {
-    real = realpathSync(path);
-    home = realpathSync(oldHome);
-  } catch {
-    return refuse("that folder or the old host's home is missing, so it was not touched");
-  }
-  if (!inside(home, real) || home === real)
-    return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+}
+/** Why a holder worktree may not give up its branch: a process in it, uncommitted or untracked files, or commits not on origin/<branch>. */
+async function unsafeToFree(s: WorkspaceScope, real: string, head: string | undefined): Promise<string | null> {
   const busy = await active(real);
-  if (busy !== false) return refuse("a process is running in it");
+  if (busy !== false) return "a process is running in it";
   const status = await command(cli.git(), ["status", "--porcelain=v1", "--untracked-files=all"], real);
-  if (status.code) return refuse(`its status is unreadable (${short(status.stderr)})`);
+  if (status.code) return `its status is unreadable (${short(status.stderr)})`;
   const dirty = status.stdout.split("\n").filter(Boolean);
   if (dirty.length)
-    return refuse(
-      `it has uncommitted changes: ${dirty
-        .slice(0, 10)
-        .map((line) => line.slice(3))
-        .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`,
-    );
+    return `it has uncommitted changes: ${dirty
+      .slice(0, 10)
+      .map((line) => line.slice(3))
+      .join(", ")}${dirty.length > 10 ? ` and ${dirty.length - 10} more` : ""}`;
   // Best effort: a stale remote ref only makes the check stricter. HOME is needed for the owner's git credentials.
   await command(cli.git(), ["fetch", "--quiet", "origin", s.branch], s.ownerCheckout, { HOME: process.env.HOME ?? "" });
   const remote = `refs/remotes/origin/${s.branch}`;
   if ((await command(cli.git(), ["rev-parse", "--verify", "--quiet", remote], s.ownerCheckout)).code)
-    return refuse("the branch is not on the remote, so its commits may be unpushed");
-  const ahead = await command(cli.git(), ["rev-list", "--count", `${remote}..${holder.HEAD}`], s.ownerCheckout);
-  if (ahead.code || ahead.stdout.trim() !== "0") return refuse(`${ahead.stdout.trim() || "some"} commit(s) are not pushed`);
+    return "the branch is not on the remote, so its commits may be unpushed";
+  const ahead = await command(cli.git(), ["rev-list", "--count", `${remote}..${head}`], s.ownerCheckout);
+  if (ahead.code || ahead.stdout.trim() !== "0") return `${ahead.stdout.trim() || "some"} commit(s) are not pushed`;
+  return null;
+}
+/**
+ * A worker of this host that ended keeps its worktree, so the branch it worked on stays checked out there. A fresh worker continuing that branch
+ * takes it over: the holder's HEAD is detached at the same commit, so its files and history stay readable. Only when the holder's worker is not
+ * running, nothing runs in it, it has no uncommitted or untracked files and its HEAD is on origin/<branch>.
+ */
+async function handOver(
+  s: WorkspaceScope,
+  holder: Holder,
+  owner: { thread: string | null; label: string; state: WorkerState | null },
+): Promise<Freed> {
+  const path = holder.worktree!,
+    refuse = (why: string) => ({
+      refusal: `branch ${s.branch} is checked out in ${owner.thread ? `worker ${owner.thread}'s worktree ` : ""}${path}: ${why}`,
+    });
+  if (!owner.thread) return refuse(`it is a ${owner.label} workspace, not a worker's, so it was not touched`);
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return refuse("its folder is missing, so it was not touched; run git worktree prune once nothing needs it");
+  }
+  if (owner.state === null) return refuse("it belongs to no recorded worker of this project, so it was not touched");
+  if (owner.state === "running") return refuse(`worker ${owner.thread} is running; stop it or wait until it ends`);
+  const unsafe = await unsafeToFree(s, real, holder.HEAD);
+  if (unsafe) return refuse(unsafe);
+  const detached = await command(cli.git(), ["switch", "--detach", "--quiet"], real);
+  return detached.code
+    ? refuse(`git could not move it off the branch: ${short(detached.stderr)}`)
+    : { facts: { handedOverFrom: real, handedOverThread: owner.thread } };
+}
+/**
+ * A branch that the previous host left checked out in one of its own worktrees cannot be continued. That worktree is removed only when it lives
+ * under the old host's home, nothing runs in it, it has no uncommitted or untracked files and its HEAD is already on the remote branch.
+ * Returns the removed path, or a refusal naming the path and the reason.
+ */
+async function reclaimOldWorktree(s: WorkspaceScope, holder: Holder, oldHome: string | undefined, ownRoot: boolean): Promise<Freed> {
+  const path = holder.worktree!,
+    refuse = (why: string) => ({ refusal: `branch ${s.branch} is checked out in ${path}: ${why}` });
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return refuse("that folder is missing, so it was not touched; run git worktree prune once nothing needs it");
+  }
+  const home = oldHome && existsSync(oldHome) ? realpathSync(oldHome) : undefined;
+  if (!home || !inside(home, real) || home === real) {
+    if (ownRoot) return refuse("no workspace of this host records it, so it was not touched; remove it yourself");
+    if (!oldHome) return refuse("it is not a worker worktree of this host, so it was not touched; remove it yourself");
+    if (!home)
+      return refuse(`it is not a worker worktree of this host, and the previous host's home ${oldHome} is missing, so it was not touched`);
+    return refuse("it is outside the previous host's folder, so it was not touched; remove it yourself");
+  }
+  const unsafe = await unsafeToFree(s, real, holder.HEAD);
+  if (unsafe) return refuse(unsafe);
   if (holder.locked !== undefined) await command(cli.git(), ["worktree", "unlock", real], s.ownerCheckout);
   const removed = await command(cli.git(), ["worktree", "remove", real], s.ownerCheckout);
-  return removed.code ? refuse(`git could not remove it: ${short(removed.stderr)}`) : { removed: real };
+  return removed.code ? refuse(`git could not remove it: ${short(removed.stderr)}`) : { facts: { reclaimedWorktree: real } };
 }
 async function addPlugin(i: Intent, facts: Record<string, string>) {
   const out = await backendOf(i.scope.provider)!.add(i, facts);

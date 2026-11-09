@@ -10,7 +10,8 @@ import type { DurablePreparedWorkerEnvironment, DurableRole } from "./durable-ty
 import { loadProject, projectDir, type Project } from "./state.ts";
 import { archiveHome, currentWorktreeRoot } from "./archive-host.ts";
 import { captureEvidenceBytes } from "./evidence.ts";
-import { Jobs } from "./jobs.ts";
+import { Jobs, workerActivity } from "./jobs.ts";
+import { busyIn } from "./durable-idle-configure.ts";
 import { workspaceIsolation } from "./workspace-isolation.ts";
 import { workspaceCapabilities, workspacePhysicalLockPath, type WorkspaceAuthority } from "./workspace-capabilities.ts";
 import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
@@ -117,6 +118,14 @@ export function durableWorkspaceBinding(input: {
       conversation: input.conversation(),
       authority: { projectId: input.project.id, owner: leaseOwner },
       oldHome: archiveHome(),
+      workerState: (threadId) => {
+        const root = input.conversation();
+        return root.commit(async (tx) => {
+          const doc = await tx.doc(Jobs, root.id),
+            agent = doc.agents[threadId];
+          return workerActivity(doc, threadId, agent ? (await busyIn(tx, agent.conversationId)) !== null : false);
+        }, BACKGROUND_CONTEXT);
+      },
       authorizedRepositories: [
         {
           repositoryId: repository.repositoryId,
@@ -129,7 +138,8 @@ export function durableWorkspaceBinding(input: {
     });
     // A whole-repository thread starts from owner HEAD at its first allocation and keeps that base and branch on later dispatches.
     const receipts = whole ? (await isolation.snapshot()).receipts : [],
-      allocated = receipts.find((item) => item.intentId === intentId)?.scope;
+      // A start blocked before any effect froze nothing, so the next one computes its scope afresh.
+      allocated = receipts.find((item) => item.intentId === intentId && !(item.state === "blocked" && item.workspacePath === null))?.scope;
     const continued = allocated ? undefined : thread.continueBranch;
     const bindContext = {
       project: input.project,
