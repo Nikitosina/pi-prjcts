@@ -57,12 +57,19 @@ export type VcsProvider = {
   privateDirs?: readonly string[];
   /** Uncommitted paths (status lines) of a checkout; null when unreadable. */
   changedFiles(cwd: string): Promise<string[] | null>;
-  /** Diff of HEAD plus uncommitted work against the merge-base with `base` (default: provider default). */
+  /** Diff of HEAD plus uncommitted work against the merge-base with `base` (default: provider default). The host counts files from `diff` (git-style ---/+++ blocks; a block without a hunk header counts its "+" lines). */
   codeDiff(
     root: string,
     base: string | undefined,
-    helpers: { text(result: Promise<CliResult>, what: string, tolerate?: boolean): Promise<string>; cap: number },
+    helpers: {
+      text(result: Promise<CliResult>, what: string, tolerate?: boolean): Promise<string>;
+      cap: number;
+      /** Only this file or directory, relative to `root`; validated by the host and given only when codeDiffPath is set. */
+      path?: string;
+    },
   ): Promise<CodeDiffParts>;
+  /** codeDiff honors `helpers.path`; without it the host refuses path narrowing for this kind. */
+  codeDiffPath?: true;
   /** Branch, head and status lines of a worker worktree. */
   workerState(root: string): Promise<{ branch: string; head: string; status: string }>;
   /** Resolves and authorizes an existing branch (or PR) for a new worker thread to continue. */

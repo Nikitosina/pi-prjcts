@@ -59,3 +59,20 @@ Written before the code. Every simulator test run through XcodeBuildMCP leaves a
 - T2 The newest finished run of a workspace is deleted, so a test-without-building rerun has to build again.
 - T3 Something other than an XcodeBuildMCP test products folder is deleted (DerivedData, result bundles, a file or folder whose name does not match XcodeBuildMCP's pattern), or a folder is followed out through a symlink.
 - T4 A removed folder leaves its completion marker behind, a missing root throws, or the summary does not say how many folders and bytes were freed.
+
+## Worker boot and shutdown by the lease holder
+
+Written before the code (retro 2026-11-09). Owner decision: the worker that holds a clone's canonical lease may boot, shut down and reboot that clone itself (`projects_worker_simulator_boot`), authorized by its lease and without a maintenance lease. Create, reset and delete stay with the Coordinator. Proof: `scripts/simulator-worker-unit.mjs` (W1-W9, fake simslim, temp home).
+
+- W1 A worker without the clone's lease boots or shuts it down. Refused before simslim runs, naming the lease to acquire.
+- W2 The holder's boot is refused because its own lease counts as "a worker leases this clone", or the host takes a maintenance lease the holder already has and fails. The holder's lease authorizes it; no other lease is taken, and the holder still holds its lease afterwards.
+- W3 Shutdown by the holder leaves the clone running, or reports success before simslim confirms the shut-down state.
+- W4 Reboot runs boot before shutdown, or boots after a shutdown whose outcome is unknown.
+- W5 A clone leased by another worker (under any alias) is booted or shut down by a worker that does not hold it.
+- W6 The worker path reaches create, reset, delete or erase.
+- W7 The Coordinator's lifecycle actions start working on a clone a worker leases. They stay refused.
+- W8 A worker tool bound to one conversation acts for another.
+- W9 A replayed call (same tool call) runs the effect again. Request ids derive from the tool call, so a replay finds its receipt.
+- An operation already running, an unknown outcome, a disabled project or a lifecycle change refuse the worker's call as they refuse the Coordinator's.
+- The tool waits for the outcome and stops waiting when the call is aborted; the operation itself continues and stays recorded.
+- Known limit: a holder that releases its lease while its boot runs lets another worker take the clone mid-boot; the pending operation still blocks other lifecycle calls.

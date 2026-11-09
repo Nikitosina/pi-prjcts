@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import { defineExtension, defineTool, ROOT_CONVERSATION_ID, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
 import { Type } from "typebox";
@@ -11,9 +9,8 @@ import { Jobs, type Job } from "./jobs.ts";
 import type { ResourceLeases } from "./resource-leases.ts";
 import { missingLease } from "./verification-resources.ts";
 import { workerEnvironmentTools } from "./worker-environment-tools.ts";
+import { readHead } from "./vcs.ts";
 import { CACHE_VARIABLE, type WorkspaceCaches } from "./workspace-cache.ts";
-
-const exec = promisify(execFile);
 
 /** One command run for a Job: its log lives under the Job's artifacts, and the run is tied to the commit it ran on. */
 export type ProofRun = {
@@ -101,13 +98,12 @@ export function proofTools(deps: ProofDeps) {
     const cache = await deps.caches?.forCwd(cwd);
     return cache ? { [CACHE_VARIABLE]: cache } : {};
   };
-  const headOf = async (cwd: string) => (await exec("git", ["-C", cwd, "rev-parse", "HEAD"])).stdout.trim();
   const run = defineTool({
     name: "projects_verify_run",
     description:
       "Run one shell command in the Job's worktree (your working directory) on the candidate commit and keep its log. It runs as the same user, with the worker's environment and shell policy, and nothing confines it: use what the verify skill and criteria call for, and do not edit the work. " +
       "Commands naming a simulator, container runtime, fixed browser port or desktop session need your lease on it first (projects_lease_acquire). " +
-      "Returns the exit code, the output tail and a run id (r1, r2, …) to cite as proof. A run is refused when the worktree is not on the candidate commit. Commands run one at a time.",
+      "Returns the exit code, the output tail and a run id (r1, r2, …) to cite as proof. A run is refused, with the next step, when there is no candidate yet or the worktree is not on the candidate commit. Commands run one at a time.",
     parameters: Type.Object(
       {
         command: Type.String({ minLength: 1, maxLength: 4000 }),
@@ -122,11 +118,24 @@ export function proofTools(deps: ProofDeps) {
       const job = await jobOf(api, context);
       const cwd = (await api.agent(context)).cwd;
       if (!cwd) return text("This conversation has no working directory", true);
-      if (!job.candidate) return text("The Job has no candidate yet: the worker records one with job candidate after pushing.", true);
-      const head = await headOf(cwd).catch(() => "");
+      const helper = Boolean(job.workspace);
+      if (!job.candidate)
+        return text(
+          helper
+            ? 'Not run: there is no candidate yet. Commit your work, record the commit with job {action:"candidate", sha} (a local candidate: no push, no branch or PR), then retry.'
+            : 'Not run: the Job has no candidate yet. Commit your work, push the branch, record it with job {action:"candidate", sha, branch, pr}, then retry.',
+          true,
+        );
+      const read = await readHead(cwd);
+      if (read.kind === "unreadable") return text(`Not run: cannot read HEAD: ${read.reason}`, true);
+      const head = read.sha;
       if (head !== job.candidate)
         return text(
-          `Not run: the worktree is on ${head.slice(0, 8) || "an unknown commit"}, not the candidate ${job.candidate.slice(0, 8)}. Verify the candidate or ask the worker to record the new one.`,
+          `Not run: the worktree is on ${head}, not the candidate ${job.candidate}. If this commit is the work to verify, ${
+            helper
+              ? `record it with job {action:"candidate", sha:"${head}"}`
+              : `push it, then record it with job {action:"candidate", sha:"${head}", branch, pr}`
+          } and retry; otherwise check out the candidate ${job.candidate} first.`,
           true,
         );
       const shell = deps.shell(job, cwd);
