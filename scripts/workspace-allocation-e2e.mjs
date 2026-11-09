@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -122,6 +122,8 @@ try {
   git(fixture, "init", "--bare", "--initial-branch=main", remote);
   git(owner, "remote", "add", "origin", remote);
   git(owner, "push", "origin", "main");
+  const currentRoot = join(fixture, "current-worktrees");
+  mkdirSync(currentRoot);
   const oldHome = join(fixture, "old-home");
   mkdirSync(join(oldHome, "wt"), { recursive: true });
   const held = (name, where) => {
@@ -135,7 +137,14 @@ try {
     ...gitIntent,
     id: randomUUID(),
     attemptId: randomUUID(),
-    scope: { ...gitIntent.scope, workspacePath: join(fixture, `new-${name}`), workspaceName: name, branch: name, continueBranch: true },
+    scope: {
+      ...gitIntent.scope,
+      approvedRoot: currentRoot,
+      workspacePath: join(currentRoot, `new-${name}`),
+      workspaceName: name,
+      branch: name,
+      continueBranch: true,
+    },
   });
   const takeover = async (name, where, prepare = () => {}) => {
     const path = held(name, where);
@@ -147,9 +156,71 @@ try {
     conversation: root,
     authority: { projectId: gitProject, owner: gitOwner },
     authorizedRepositories: [
-      { repositoryId: "git-e2e", provider: "git", approvedRoot: fixture, ownerCheckout: owner, fileOwnershipPrefix: "owned" },
+      { repositoryId: "git-e2e", provider: "git", approvedRoot: currentRoot, ownerCheckout: owner, fileOwnershipPrefix: "owned" },
     ],
   };
+  // Current-host recovery must preserve ignored files even with a missing archive home and no remote branch.
+  const sameHost = async (name, refusal = null, prepare = () => {}) => {
+    const source = {
+      ...continueIntent(name),
+      scope: { ...continueIntent(name).scope, continueBranch: false, workspacePath: join(currentRoot, name) },
+    };
+    const allocator = workspaceIsolation(isoOptions);
+    check((await allocator.allocate(source)).state === "allocated", `${name}: source allocated`);
+    await prepare(source.scope.workspacePath);
+    const recovery = workspaceIsolation({ ...isoOptions, oldHome: join(fixture, "missing-home"), endedWorktreeOwner: async () => refusal });
+    const target = await recovery.allocate(continueIntent(name));
+    report.receipts.push(target);
+    return [source, target];
+  };
+  const [detached, continued] = await sameHost("same-ended", null, (path) => {
+    git(path, "config", "core.excludesFile", join(fixture, "ignored-patterns"));
+    writeFileSync(join(fixture, "ignored-patterns"), "evidence/\n");
+    mkdirSync(join(path, "evidence"));
+    writeFileSync(join(path, "evidence", "proof.txt"), "keep proof\n");
+  });
+  check(continued.state === "allocated", `ended same-host holder continued: ${continued.reason}`);
+  check(git(detached.scope.workspacePath, "rev-parse", "--abbrev-ref", "HEAD") === "HEAD", "old holder detached");
+  check(readFileSync(join(detached.scope.workspacePath, "evidence", "proof.txt"), "utf8") === "keep proof\n", "ignored evidence preserved");
+  check(git(owner, "rev-parse", `refs/heads/${detached.scope.branch}`) === gitHead, "branch and commits preserved without push");
+  for (const reason of ["owning thread is live", "owning thread is suspended", "owning thread is unknown"]) {
+    const [source, blocked] = await sameHost(`same-${reason.split(" ").at(-1)}`, reason);
+    check(
+      blocked.state === "blocked" && blocked.reason.includes(source.scope.workspacePath) && blocked.reason.includes(reason),
+      `${reason}: precise refusal`,
+    );
+    check(git(source.scope.workspacePath, "branch", "--show-current") === source.scope.branch, `${reason}: branch unchanged`);
+  }
+  for (const tracked of [false, true]) {
+    const [source, blocked] = await sameHost(`same-dirty-${tracked}`, null, (path) =>
+      writeFileSync(join(path, tracked ? "owner.txt" : "untracked.txt"), "keep changes\n"),
+    );
+    check(
+      blocked.state === "blocked" && blocked.reason.includes(source.scope.workspacePath) && /uncommitted/.test(blocked.reason),
+      "dirty same-host holder refused",
+    );
+    check(git(source.scope.workspacePath, "branch", "--show-current") === source.scope.branch, "dirty branch unchanged");
+  }
+  let busy;
+  try {
+    const [source, blocked] = await sameHost("same-busy", null, async (path) => {
+      busy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: path, stdio: "ignore" });
+      await new Promise((ok, fail) => {
+        busy.once("spawn", ok);
+        busy.once("error", fail);
+      });
+    });
+    check(
+      blocked.state === "blocked" && blocked.reason.includes(source.scope.workspacePath) && /process/.test(blocked.reason),
+      "active same-host holder refused",
+    );
+  } finally {
+    if (busy) {
+      const ended = new Promise((ok) => busy.once("exit", ok));
+      busy.kill();
+      await ended;
+    }
+  }
   let [oldPath, taken] = await takeover("held-clean", join(oldHome, "wt"));
   report.receipts.push(taken);
   check(
