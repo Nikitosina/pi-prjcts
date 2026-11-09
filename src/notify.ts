@@ -2,7 +2,6 @@ import type { JobProgress } from "./telegram.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { inbox } from "./inbox.ts";
-import { extractTelegramMedia } from "./telegram-media.ts";
 import { PR_NOTICE_TITLE } from "./pr-notices.ts";
 import { loadAutomations } from "./project-automations.ts";
 import { errorText, home, listProjects, projectDir, saveJson, type Project } from "./state.ts";
@@ -167,9 +166,8 @@ export function startNotifier(options: {
             chat: chat.title,
             kind: "result",
             title: direct && !report ? "Reply" : "Finished",
-            text: extractTelegramMedia(submission.text).media.some((media) => media.ref.startsWith("artifact:"))
-              ? submission.text.trim()
-              : clip(submission.text.trim()),
+            // Whole answer: Telegram splits it into parts.
+            text: submission.text.trim(),
             ...(approvable ? { jobId: approvable.id, mergeable: true } : {}),
           });
         } else if (submission.status === "unanswered" && submission.reason !== "aborted")

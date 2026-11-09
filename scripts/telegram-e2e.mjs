@@ -690,9 +690,24 @@ try {
   text(OWNER, "MARK-FAIL please");
   await lastTo(/error|failed/i, "error notice", mark);
   text(OWNER, "MARK-LONG please");
-  const long = await lastTo(/LONG-START/, "long result", mark);
-  if (long.text.length > 4096) throw Error("Long message not clipped");
-  result.checks.push("T17/T20 a coordinator error is sent; a 6000-character result is clipped under the Telegram limit");
+  await lastTo(/LONG-END/, "long result end", mark);
+  const longParts = toOwner()
+    .slice(mark)
+    .filter((m) => /LONG-START|^x+/.test(m.text));
+  if (longParts.some((m) => m.text.length > 4096) || !longParts[0]?.text.includes("LONG-START") || longParts.length < 2)
+    throw Error("Long result not split: " + JSON.stringify(longParts.map((m) => m.text.length)));
+  if (
+    longParts
+      .map((m) => visible(m.text))
+      .join("")
+      .split("x").length -
+      1 <
+    6000
+  )
+    throw Error("Long result lost text");
+  result.checks.push(
+    "T17/T20 a coordinator error is sent; a 6000-character result arrives whole, split into parts under the Telegram limit",
+  );
   await k.ask(b, "main", "MARK-BETA hello");
   const betaResult = await lastTo(/Done MARK-BETA\./, "beta result", mark);
   text(OWNER, "MARK-REPLY via reply", {

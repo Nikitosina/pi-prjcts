@@ -286,7 +286,7 @@ function itemHtml(item, who = "Coordinator") {
   if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
   if (item.kind !== "message") return "";
   const text = item.text?.trim() ? `<div class="prose">${markdown(item.text)}</div>` : "";
-  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}${item.truncated ? `<p class="muted small">Message shortened in this view.</p>` : ""}</article>` : ""}`;
+  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
 }
 function thinkingHtml(text, key, running = false) {
   const open = expanded.has(key);

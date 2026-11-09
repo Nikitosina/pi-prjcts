@@ -23,7 +23,7 @@ try {
   if (failed.state !== "failed") throw Error("Fixture turn did not fail: " + failed.state);
   await k.ask(a, "main", "MARK-LONG reply");
   await eventually(async () => has((n) => n.kind === "error" && n.chat === "Two"), "no error notice", 300);
-  await eventually(async () => has((n) => n.text.includes("LONG-END") || n.text.includes("LONG-START")), "no long result notice", 300);
+  await eventually(async () => has((n) => n.text.includes("LONG-START")), "no long result notice", 300);
   const items = await feed();
   const one = (test, label) => {
     const found = items.filter(test);
@@ -40,9 +40,9 @@ try {
   if (shipped.mergeable !== true || !shipped.jobId)
     throw Error("A Job's final notice lacks jobId and mergeable: " + JSON.stringify(shipped));
   const long = items.find((n) => n.text.includes("LONG-START"));
-  if (!long || long.text.length > 3500) throw Error("Notice text not clipped: " + long?.text.length);
+  if (!long?.text.includes("LONG-END")) throw Error("Result notice text clipped: " + long?.text.length);
   result.checks.push(
-    "N2/N7 results from another chat and another project, a question, a Job's final report and a coordinator error are each in the feed once, named by project and chat, text clipped",
+    "N2/N7 results from another chat and another project, a question, a Job's final report and a coordinator error are each in the feed once, named by project and chat, a long result whole",
   );
 
   // N3/N10/N14: a host restart re-emits nothing and keeps the address and token; a result after it is reported exactly once.

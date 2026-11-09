@@ -151,8 +151,15 @@ export function validateEntryId(value: unknown, name = "before"): number | undef
   return value;
 }
 
+/** `full`: owner views show whole messages; agents read the bounded preview and follow `ref`. */
+export type MessageText = "preview" | "full";
 /** `display` rewrites a message's full text before it is cut to a preview (the host hides expanded skill bodies this way). */
-export type PageOptions = { before?: number | null; limit?: number; display?: (role: "user" | "assistant", text: string) => string };
+export type PageOptions = {
+  before?: number | null;
+  limit?: number;
+  display?: (role: "user" | "assistant", text: string) => string;
+  messageText?: MessageText;
+};
 export async function readTranscriptPage(
   source: TranscriptSource,
   conversationId: number,
@@ -167,7 +174,9 @@ export async function readTranscriptPage(
     entries = older ? rows.slice(0, limit) : rows;
   return {
     conversationId,
-    items: entries.toReversed().flatMap((entry) => entryItems(entry, options.display)),
+    items: entries
+      .toReversed()
+      .flatMap((entry) => entryItems(entry, options.display, options.messageText === "full" ? Infinity : TEXT_PREVIEW_CHARS)),
     before: older ? entries[entries.length - 1]!.id : null,
     entries: entries.length,
   };
@@ -184,10 +193,10 @@ const reportData = (entry: RawEntry) =>
   entry.kind === "projects.agent-report" && Value.Check(ReportData, entry.data) ? entry.data : undefined;
 
 /** Items of one entry in display order. Calls come out right after their assistant text. */
-function entryItems(entry: RawEntry, display?: PageOptions["display"]): TranscriptItem[] {
+function entryItems(entry: RawEntry, display: PageOptions["display"], messageChars: number): TranscriptItem[] {
   const report = reportData(entry);
   if (report) {
-    const text = preview(report.text, TEXT_PREVIEW_CHARS);
+    const text = preview(report.text, messageChars);
     return [
       {
         kind: "message",
@@ -221,7 +230,7 @@ function entryItems(entry: RawEntry, display?: PageOptions["display"]): Transcri
       ref = `${entry.id}.${index}`;
     if (message.role === "user" || message.role === "assistant") {
       const content = parts(message.content),
-        text = preview(display ? display(message.role, joinText(content)) : joinText(content), TEXT_PREVIEW_CHARS),
+        text = preview(display ? display(message.role, joinText(content)) : joinText(content), messageChars),
         thinking = message.role === "assistant" ? preview(joinText(content, "thinking"), THINKING_PREVIEW_CHARS).text : "";
       items.push({
         kind: "message",

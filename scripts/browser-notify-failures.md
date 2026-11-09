@@ -8,7 +8,7 @@ Owner decision: Notification API for needs-you items, results and errors when th
 4. The toggle is on by default, does not ask for permission, or claims "on" when permission is denied.
 5. The toggle does not persist across reloads, or turning it off does not stop notifications.
 6. Clicking a notification does not focus the tab, or opens the wrong project/chat.
-7. Notification text includes raw secrets or unbounded text (body must be clipped).
+7. Notification text includes raw secrets, or a coordinator result is clipped in the feed so Telegram loses its end (a browser body clips on its own).
 8. Polling the feed when the toggle is off costs requests, or a feed error breaks the page.
 9. The host feed is unbounded in memory or on disk.
 10. The feed misses a turn that starts and finishes between two scans, or a result settled while the host was down is never reported (or old ones flood after restart).
@@ -26,7 +26,7 @@ Live host evidence (read-only): `notifications.json` holds 66 notices since 07:1
 ## After the classic inbox (2026-11-04)
 
 The inbox at `/` does not show browser notifications (docs/classic-retirement.md lists the gap; Telegram delivers the same feed).
-`browser-notify-e2e.mjs` now checks the host feed only: 2 and 7 (each notice once, named by project and chat, clipped), 3/10/14 (a
+`browser-notify-e2e.mjs` now checks the host feed only: 2 and 7 (each notice once, named by project and chat, a long result whole), 3/10/14 (a
 restart replays nothing, keeps the address and token, and the next notice follows the cursor), 9 (bounded) and 11. Cases 1, 4-6, 8,
 12, 13, 15 and 16 were about the classic page's notifications and toggle and are retired with it; 17 stays untestable.
 Known: Settings → Notifications in the new client offers to allow browser alerts, but nothing in it shows one yet.

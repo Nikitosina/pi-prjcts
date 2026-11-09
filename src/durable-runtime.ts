@@ -2874,6 +2874,7 @@ export async function openDurableProject(input: {
         return readTranscriptPage(coordinatorStorageSource(openedStorage, context, admitted?.ids ?? []), Number(conversation.id), {
           ...options,
           display: displayText,
+          messageText: "full",
         });
       },
       threadHistory: async (id, options = {}) => {
@@ -2882,6 +2883,7 @@ export async function openDurableProject(input: {
           page = await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
             ...options,
             display: displayText,
+            messageText: "full",
           });
         if (!options.context) return page;
         const child = await openedHarness.conversation(conversationId, context);
@@ -3330,7 +3332,7 @@ async function snapshot(
         history: await readTranscriptPage(
           coordinatorStorageSource(storage, context, (await harness.snapshot(AdmittedInputs, chat.id, context))?.ids ?? []),
           Number(chat.id),
-          { display: displayText },
+          { display: displayText, messageText: "full" },
         ),
         context: {
           tokens: contextTokens((await chat.context(context)).messages),
