@@ -61,6 +61,7 @@
     "src/durable-workspace-binding.ts": ["worktree-lifecycle-e2e", "codemode-native-tools-e2e"],
     "src/durable-schedule.ts": ["automations-e2e", "routine-script-e2e", "worktree-lifecycle-e2e"],
     "src/agent-redaction.ts": ["host-agent-e2e"],
+    "src/queued-input.ts": ["agent-signals-e2e", "jobs-e2e"],
     "src/skill-profiles.ts": ["ui2-settings-e2e"],
     "src/provider-failure.ts": ["worker-quota"],
     "scripts/ui2-trial*.mjs": ["ui2-trial-e2e"],

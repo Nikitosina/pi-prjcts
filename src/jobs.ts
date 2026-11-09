@@ -36,6 +36,9 @@ import type { AcceptanceOutcome, AcceptJob } from "./result-acceptance.ts";
 import { behaviorKey, composePrompt, type PromptFrame } from "./prompt-blocks.ts";
 import { busyIn } from "./durable-idle-configure.ts";
 import { DEFAULT_REVIEW_RECHECKS } from "./state.ts";
+import { gluedWordsDiagnostic } from "./glued-words.ts";
+import { queuedInputNote, watchQueuedInput } from "./queued-input.ts";
+import { BACKGROUND_WAIT_TOOL } from "./worker-environment-tools.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
@@ -1128,10 +1131,16 @@ export function createJobs(host: JobsHost) {
       }
       if (action === "wait") {
         const until = clock() + Math.min(Math.max(args.timeoutSec ?? 60, 1), 900) * 1000;
-        while (clock() < until && (await working(api, agent!.conversationId))) await sleep(100);
+        const queued = watchQueuedInput(api, api.conversationId, callContext);
+        try {
+          while (clock() < until && !queued.arrived() && (await working(api, agent!.conversationId))) await sleep(100);
+        } finally {
+          queued.stop();
+        }
+        const arrived = queued.arrived();
         return reply(
           (await working(api, agent!.conversationId))
-            ? `${agent!.id} is still working.`
+            ? `${agent!.id} is still working.${arrived ? ` ${queuedInputNote(arrived)}` : ""}`
             : `${agent!.id} is idle; its answer arrives as a message.`,
         );
       }
@@ -1142,10 +1151,14 @@ export function createJobs(host: JobsHost) {
       if (action === "dismiss") return reply(await dismissAgent(api, agent!.id));
       if (action === "send") {
         if (!args.message?.trim()) return reply("send needs a message.");
+        const glued = gluedWordsDiagnostic(args.message);
+        if (glued) api.diagnostic(glued);
         return reply(await sendTo(api, agent!.id, args.message, args.followUp === true, args.requestId));
       }
       // spawn
       if (!args.role) return reply("spawn needs a role and a brief.");
+      const glued = gluedWordsDiagnostic([args.title, args.brief, ...(args.acceptance ?? [])].filter(Boolean).join("\n"));
+      if (glued) api.diagnostic(glued);
       const result = await spawn(
         api,
         api.conversationId,
@@ -1288,6 +1301,8 @@ export function createJobs(host: JobsHost) {
     ]),
     replay: "safe",
     execute: async (args, api, callContext) => {
+      const glued = gluedWordsDiagnostic(args.task);
+      if (glued) api.diagnostic(glued);
       const cwd = (await api.agent(callContext)).cwd;
       const child = await api.commit(async (tx) => {
         const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
@@ -1685,6 +1700,12 @@ export function createJobs(host: JobsHost) {
       }
       const leaf = running ? await activeLeaf(harness, worker) : worker;
       const live = await harness.snapshot(LiveDoc, leaf, context);
+      // Inside a long background wait the command's output is the progress, as a child's is for a worker waiting on it.
+      const waitsOnBackground =
+        background !== null &&
+        [...(live?.tools ?? []), ...(live?.nestedTools ?? [])].some(
+          (slot) => slot.name === BACKGROUND_WAIT_TOOL && slot.status === "running",
+        );
       const latest = (await (await harness.conversation(leaf, context))!.entries({}, 1, undefined, context)).items[0];
       const signature = `${leaf}:${latest?.id ?? ""}:${(live?.tools ?? []).map((slot) => `${slot.status}${slot.output?.length ?? 0}`).join(",")}:${live?.generation?.message ? JSON.stringify(live.generation.message).length : 0}`;
       const previous = seen.get(worker);
@@ -1694,7 +1715,7 @@ export function createJobs(host: JobsHost) {
       const tail = calls.slice(-REPEATS);
       let problem: string | null = null;
       if (idle && silent >= limit) problem = `the worker is idle and has not reported for ${minutes(silent)}`;
-      else if (running && silent >= limit) problem = `no progress for ${minutes(silent)}`;
+      else if (running && silent >= limit && !waitsOnBackground) problem = `no progress for ${minutes(silent)}`;
       else if (running && tail.length === REPEATS && tail.every((call) => call.key === tail[0]!.key))
         problem = `the same tool call returned the same result ${REPEATS} times`;
       else if (background !== null && background >= limit && silent >= limit)
