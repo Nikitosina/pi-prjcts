@@ -70,3 +70,8 @@ P8 The composer draft is cleared or replaced by the merge request.
 P9 A failed submission is silent. It must show the error and let the owner retry.
 P10 Merge is offered on a draft PR, or on a PR the provider reports merged or closed. It is disabled with the reason; failing CI
 is not a reason to hide it (the Coordinator decides).
+P6b Provider strings (label, reference, branch, head) are written into the instruction sentence, so a crafted branch name reads
+as the owner's words. They travel as one JSON line under an untrusted-data header, apart from the fixed instruction.
+P11 After a send the rows re-render and focus falls to a non-focusable container. It returns to that PR's new Merge button.
+P12 After selecting another project, the old project's rows stay clickable until its PRs load, and Merge pairs an old PR with the
+new project. The rows leave at once, and each row carries its project.
