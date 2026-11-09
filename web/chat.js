@@ -18,7 +18,7 @@ let live = null,
   held = null, // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
   stick = true;
 const expanded = new Set(); // tool callIds and group keys the owner opened
-const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+): ([^\]\n]*)\]([\s\S]*)$/;
+const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 
 /** Re-reads the selected chat. Coalesces: a call while one is in flight runs once more afterwards. */
@@ -275,6 +275,7 @@ function reportRowHtml(message, match) {
       checkpoint: "Checkpoint",
       completed: "Returned",
       failed: "Failed",
+      "failed to start": "Did not start",
       stopped: "Stopped",
     }[status] ?? status;
   const summary = /Summary:\s*(.+)/.exec(body)?.[1] ?? "";

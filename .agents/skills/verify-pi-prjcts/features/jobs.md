@@ -8,6 +8,9 @@ The owner asks the coordinator for work, watches the Job in the Workers panel (r
 - `ready`: a Ready worker card shows the PR and an Approve button (only when the Job has a PR and candidate); the coordinator chat shows no internal report.
 - `approve`: Approve asks for a second press ("Confirm approve #12"), then calls the host; a refusal or failure shows as a toast.
 - `checkpoint`: an independent worker returns an intermediate result with retained proof and gaps, without readiness or approval.
+- `auto-checkpoint`: a worker that ends without a report shows "No report" and its final answer, with Open but no Approve.
+- `did-not-start`: a worker whose preparation fails shows "Did not start" and the cause, apart from a run failure.
+- `review-budget`: Settings → General edits the review re-checks (0–5, default 2).
 - `scope`: a new chat shows an empty Workers panel; Main shows its Jobs again.
 - `deploy`: Settings → Deploy shows the deploy window (default 02:00–07:00) and idle state. It is read only here; the CLI deploys.
 
@@ -20,7 +23,7 @@ The owner asks the coordinator for work, watches the Job in the Workers panel (r
 
 Preconditions: launch succeeded, doctor `ok: true`, project `Verify seed` exists (seeded).
 
-- Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> jobs`. The fake provider reads `VERIFY-JOB`: the coordinator spawns a worker, the worker plans (2 steps) and reports Ready with PR 12 and a candidate. The drive types in `#composer textarea` and presses Enter, waits for `#workers .worker[data-status="ready"]`, presses `[data-approve]` twice, opens the transcript from `.w-title`, runs the checkpoint worker, checks a new chat's empty panel, and reads Settings → Deploy. Proof: `jobs-snapshot`, screenshots and the approve toast.
+- Scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> jobs`. The fake provider reads `VERIFY-JOB`: the coordinator spawns a worker, the worker plans (2 steps) and reports Ready with PR 12 and a candidate. The drive types in `#composer textarea` and presses Enter, waits for `#workers .worker[data-status="ready"]`, presses `[data-approve]` twice, opens the transcript from `.w-title`, runs the checkpoint worker, sends `VERIFY-NOREPORT` (a worker that only asks a question) and `VERIFY-NOSTART` (a worker on a missing branch), checks a new chat's empty panel, saves 4 review re-checks in Settings → General (read back through `settings-snapshot`), and reads Settings → Deploy. Proof: `jobs-snapshot`, screenshots and the approve toast.
 
 ## Gotchas
 

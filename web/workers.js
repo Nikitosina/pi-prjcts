@@ -21,6 +21,20 @@ const STATE = {
   approved: { label: "Approved", tone: "done" },
   completed: { label: "Done", tone: "done" },
 };
+/** The status badge, with the two variants the host marks: a checkpoint recorded because the worker ended without a report, and a Job that never started. */
+const lookOf = (worker) =>
+  worker.status === "checkpoint" && worker.checkpoint?.auto
+    ? { label: "No report", tone: "needs" }
+    : worker.status === "failed" && worker.failure === "start"
+      ? { label: "Did not start", tone: "bad" }
+      : (STATE[worker.status] ?? { label: worker.status ?? "", tone: "muted" });
+/** What the worker handed back when it is not Ready: its checkpoint (an automatic one says so), or why it failed. */
+const handbackCard = (worker) =>
+  worker?.status === "checkpoint" && worker.checkpoint
+    ? `<div class="report-card" data-tone="needs"><b>${worker.checkpoint.auto ? "Stopped without a report" : "Checkpoint"}</b>${worker.checkpoint.auto ? `<p class="muted small">The worker stopped without a Ready report or checkpoint; it may be waiting for a decision.</p>` : ""}<p>${esc(worker.checkpoint.summary)}</p>${worker.checkpoint.gaps?.length ? `<ul>${worker.checkpoint.gaps.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : ""}</div>`
+    : worker?.status === "failed" && worker.reason
+      ? `<div class="report-card" data-tone="bad"><b>${worker.failure === "start" ? "Did not start" : "Failed"}</b><p>${esc(worker.reason.replace(/^Did not start: /, ""))}</p></div>`
+      : "";
 
 export async function loadJobs() {
   const gen = state.generation;
@@ -88,7 +102,7 @@ function renderWorkers() {
 }
 function workerHtml(worker) {
   const stalled = worker.status === "running" && worker.stalledAt;
-  const look = stalled ? { label: "Stalled", tone: "needs" } : (STATE[worker.status] ?? { label: worker.status, tone: "muted" });
+  const look = stalled ? { label: "Stalled", tone: "needs" } : lookOf(worker);
   const plan = worker.plan ?? [],
     done = plan.filter((step) => step.status === "done").length,
     doing = plan.find((step) => step.status === "doing") ?? plan.find((step) => step.status === "todo");
@@ -112,7 +126,7 @@ function workerHtml(worker) {
         : worker.status === "failed" || worker.status === "checkpoint"
           ? `<button type="button" class="ghost-btn small" data-open-worker="${esc(worker.id)}">Open</button>`
           : "";
-  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}" data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
+  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
 }
 async function loadLastTools(gen) {
   const running = chatWorkers()
@@ -207,8 +221,8 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     state.jobs?.agents.find((agent) => agent.id === id);
   const head = () => {
     const worker = find();
-    const look = worker ? (STATE[worker.status] ?? { label: worker.status ?? "", tone: "muted" }) : null;
-    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
+    const look = worker ? lookOf(worker) : null;
+    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
   let items = [];
@@ -234,7 +248,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     });
     if (!page || !alive()) return;
     items = page.items;
-    root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card">[\s\S]*$/, "");
+    root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card"[\s\S]*$/, "");
     const line = promptLine(find()),
       old = root.querySelector(".w-prompt");
     if (old) old.outerHTML = line;

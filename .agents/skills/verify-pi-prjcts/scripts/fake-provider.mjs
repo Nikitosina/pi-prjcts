@@ -157,8 +157,27 @@ const server = createServer((req, res) => {
       reply = say(
         user.includes(" checkpoint:")
           ? "The intermediate result needs your decision."
-          : "The work is ready. Proof is available in the task details.",
+          : user.includes(" failed to start:")
+            ? "The worker did not start; see the cause in its card."
+            : "The work is ready. Proof is available in the task details.",
       );
+    } else if (/VERIFY-(NOREPORT|NOSTART)/.test(user) && names.includes("agents")) {
+      // NOREPORT: the worker only asks a question (an automatic checkpoint); NOSTART: its branch does not exist, so it never starts.
+      const noStart = user.includes("VERIFY-NOSTART");
+      reply =
+        stage === 0
+          ? call("agents", {
+              action: "spawn",
+              role: "worker",
+              title: noStart ? "VERIFY-NOSTART missing branch" : "VERIFY-NOREPORT question",
+              brief: noStart ? "VERIFY-NOSTART continue the branch." : "VERIFY-NOREPORT pick the greeting language.",
+              acceptance: ["It greets."],
+              ...(noStart ? { branch: "verify-missing-branch" } : {}),
+              requestId: noStart ? "verify-nostart" : "verify-noreport",
+            })
+          : say("Started the Job.");
+    } else if (user.includes("VERIFY-NOREPORT") && names.includes("job")) {
+      reply = say("Should the greeting stay in English or follow the locale?");
     } else if (user.includes("VERIFY-CHECKPOINT") && names.includes("agents")) {
       reply =
         stage === 0

@@ -727,16 +727,18 @@ async function ui2WorkerImages(run, page, record, dir) {
     "worker reply with its screenshot",
     90000,
   );
-  // Click only once the coordinator's turn about this worker has painted; a repaint under the click would swallow it.
+  // Click only once the coordinator's turn about this worker (an automatic checkpoint: it answers without a report) has painted.
   await page.waitFor(
-    `document.querySelectorAll('#feed [data-open-worker="${worker}"]').length >= 2 && [...document.querySelectorAll('#feed .msg.agent')].at(-1)?.innerText.includes('Proof is available')`,
+    `document.querySelectorAll('#feed [data-open-worker="${worker}"]').length >= 2 && [...document.querySelectorAll('#feed .msg.agent')].at(-1)?.innerText.includes('needs your decision')`,
     "coordinator turn about the worker settled",
     60000,
   );
   await delay(500);
   await page.click(`#feed [data-open-worker="${worker}"]`);
   await page.waitFor(`document.querySelector('#center').dataset.focus === 'worker'`, "worker transcript in the center");
-  // Lazy: the view opens at the bottom, where the reply's images are; the read row's image loads once it is scrolled near.
+  // Lazy: the view opens at the bottom, under the checkpoint report, so bring the reply's images and then the read row near.
+  await page.waitFor(`!!document.querySelector('#worker-feed .msg.agent')`, "worker reply");
+  await page.evaluate(`[...document.querySelectorAll('#worker-feed .msg.agent')].at(-1).scrollIntoView({ block: 'center' })`);
   const missingNote = `#worker-feed .prose [data-media][data-state="missing"]`;
   await page.waitFor(`!!document.querySelector('${missingNote}')`, "worker missing artifact note");
   await page.evaluate(`document.querySelector('${missingNote}').scrollIntoView({ block: 'end' })`);
@@ -1253,6 +1255,59 @@ const journeys = {
       "verified",
       "a real independent checkpoint keeps its evidence on the host, offers Open but no Approve, and gets a concise coordinator reply",
     );
+    // A worker that stops without a report is an automatic checkpoint: "No report", its question, Open but no Approve.
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: "VERIFY-NOREPORT ask before choosing" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    const auto = `${worker("checkpoint")}[data-auto="1"]`;
+    await page.waitFor(`!!document.querySelector('${auto}')`, "automatic checkpoint", 60000);
+    const autoCard = await page.evaluate(`document.querySelector('${auto}').innerText`);
+    if (!/No report/.test(autoCard) || (await page.evaluate(`!!document.querySelector('${auto} [data-approve]')`)))
+      throw Error(`Automatic checkpoint card wrong: ${JSON.stringify(autoCard)}`);
+    await page.shot(dir, "04g-auto-checkpoint-card");
+    await page.click(`${auto} [data-open-worker]`);
+    await page.waitFor(
+      `/stopped without a Ready report/.test(document.querySelector('#center .report-card')?.innerText ?? '') && /English or follow the locale/.test(document.querySelector('#center .report-card').innerText)`,
+      "automatic checkpoint report in the worker view",
+    );
+    await page.waitFor(`!!document.querySelector('#worker-feed .msg, #worker-feed .report-row')`, "worker transcript loaded");
+    if ((await page.evaluate(`document.querySelectorAll('#center .report-card').length`)) !== 1) throw Error("Handback card repeated");
+    await page.shot(dir, "04h-auto-checkpoint-worker");
+    await page.press("Escape", { keyCode: 27 });
+    const autoJob = (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.find((job) =>
+      job.title.startsWith("VERIFY-NOREPORT"),
+    );
+    if (autoJob?.status !== "checkpoint" || autoJob.checkpoint?.auto !== true)
+      throw Error(`Host automatic checkpoint wrong: ${JSON.stringify(autoJob)}`);
+    record(
+      "verified",
+      "a worker that ends without a report shows No report with its question, no Approve; the host stores checkpoint.auto",
+    );
+    // A worker whose preparation fails reads "Did not start" with the cause, apart from a run failure.
+    await page.click(composer);
+    await page.cdp("Input.insertText", { text: "VERIFY-NOSTART continue a missing branch" });
+    await page.press("Enter", { code: "Enter", keyCode: 13 });
+    const failed = `${worker("failed")}[data-failure="start"]`;
+    await page.waitFor(`!!document.querySelector('${failed}')`, "did-not-start card", 60000);
+    const failedCard = await page.evaluate(`document.querySelector('${failed}').innerText`);
+    if (!/Did not start/.test(failedCard)) throw Error(`Did-not-start card wrong: ${JSON.stringify(failedCard)}`);
+    await page.shot(dir, "04i-did-not-start-card");
+    await page.click(`${failed} [data-open-worker]`);
+    await page.waitFor(
+      `/^Did not start\\n+Branch verify-missing-branch/.test(document.querySelector('#center .report-card')?.innerText ?? '')`,
+      "did-not-start reason",
+    );
+    await page.shot(dir, "04j-did-not-start-worker");
+    await page.press("Escape", { keyCode: 27 });
+    const notStarted = (await rpc(run, { action: "jobs-snapshot", id: run.projectId })).jobs.find((job) =>
+      job.title.startsWith("VERIFY-NOSTART"),
+    );
+    if (notStarted?.failure !== "start" || !/^Did not start: /.test(notStarted.reason ?? ""))
+      throw Error(`Host start failure wrong: ${JSON.stringify(notStarted)}`);
+    record(
+      "verified",
+      `a preparation failure shows Did not start with the cause (${JSON.stringify(notStarted.reason.slice(0, 120))}); the host stores failure "start"`,
+    );
     // A new chat has its own, empty Workers panel; Main keeps the Jobs.
     await page.click(`#tree [data-new-chat]`);
     await page.waitFor(
@@ -1267,6 +1322,21 @@ const journeys = {
     await page.waitFor(`document.querySelector('#workers').innerText.includes('VERIFY-JOB')`, "Jobs back on Main");
     await page.shot(dir, "04d-back-on-main");
     record("visible", "a new chat shows an empty Workers panel; Main shows its Jobs again");
+    // Settings → General: the review budget (re-checks after the full review) saves through settings-update.
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-section="general"]')`, "settings open");
+    await page.click(`dialog[open] [data-section="general"]`);
+    await page.waitFor(`document.querySelector('#review-rechecks')?.value === '2'`, "default re-checks", 30000);
+    await page.shot(dir, "05a-review-budget-default");
+    await page.evaluate(`(() => { const input = document.querySelector('#review-rechecks'); input.select(); })()`);
+    await page.cdp("Input.insertText", { text: "4" });
+    await page.click(`#review-form button[type="submit"]`);
+    await page.waitFor(`/re-checks/i.test(document.querySelector('dialog[open] .settings-status')?.innerText ?? '')`, "saved status");
+    await page.shot(dir, "05b-review-budget-saved");
+    const savedBudget = (await rpc(run, { action: "settings-snapshot", id: run.projectId })).values.review;
+    if (savedBudget?.rechecks !== 4) throw Error(`Review budget not saved: ${JSON.stringify(savedBudget)}`);
+    await page.press("Escape", { keyCode: 27 });
+    record("verified", "Settings → General saves 4 review re-checks; settings-snapshot reads review.rechecks = 4");
     // Host settings: the Deploy section reports the default window (read only in this client; the CLI deploys).
     await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
     await page.waitFor(`!!document.querySelector('dialog[open] [data-section="deploy"]')`, "settings open");

@@ -1535,6 +1535,12 @@ pre.code,
 .report-card p {
   margin: 4px 0;
 }
+.report-card[data-tone="needs"] {
+  border-color: color-mix(in srgb, var(--needs) 40%, var(--line));
+}
+.report-card[data-tone="bad"] {
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
+}
 .worker-send {
   margin-top: 8px;
 }
@@ -1832,6 +1838,9 @@ dialog:focus-visible {
 .field-row input:not([type="checkbox"]) {
   flex: 1;
   max-width: 420px;
+}
+.field-row input[type="number"] {
+  flex: 0 0 72px;
 }
 .path {
   font-size: 12px;

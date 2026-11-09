@@ -144,11 +144,18 @@ async function general(body, alive) {
   const view = state.view,
     projectInfo = view?.project;
   if (!projectInfo) return void (body.innerHTML = `<p class="muted">Select a project first.</p>`);
-  body.innerHTML = `${line("Name, workspace and lifecycle of this project.")}<form class="field-row" id="name-form"><label for="project-name">Name</label><input id="project-name" value="${esc(projectInfo.name)}" maxlength="200" /><button type="submit" class="ghost-btn small">Save</button></form><div class="field-row"><span class="label">Workspace</span><code class="path">${esc(projectInfo.cwd)}</code></div><div class="field-row"><span class="label">State</span><span class="badge ${view.paused ? "t-needs" : "t-ready"}">${view.paused ? "Paused" : "Running"}</span><button type="button" class="ghost-btn small" data-life="${view.paused ? "resume" : "pause"}">${view.paused ? "Resume" : "Pause"}</button></div><div class="danger-zone"><p class="desc">Archive hides the project; delete removes it. Both ask once more. ${info("Archived projects can be restored. Delete keeps nothing.")}</p><button type="button" class="ghost-btn small" data-life="archive">Archive…</button><button type="button" class="ghost-btn small danger" data-life="delete">Delete…</button></div>`;
+  const { review } = (await projectSettings()).values;
+  if (!alive()) return;
+  body.innerHTML = `${line("Name, workspace and lifecycle of this project.")}<form class="field-row" id="name-form"><label for="project-name">Name</label><input id="project-name" value="${esc(projectInfo.name)}" maxlength="200" /><button type="submit" class="ghost-btn small">Save</button></form><form class="field-row" id="review-form"><label for="review-rechecks">Review re-checks</label><input id="review-rechecks" type="number" min="0" max="5" step="1" required value="${esc(String(review.rechecks))}" /><button type="submit" class="ghost-btn small">Save</button>${info("Workers run one full review, then at most this many re-checks of the fix diff and the open findings (0–5). Findings still open after that go to the Ready report's gaps.")}</form><div class="field-row"><span class="label">Workspace</span><code class="path">${esc(projectInfo.cwd)}</code></div><div class="field-row"><span class="label">State</span><span class="badge ${view.paused ? "t-needs" : "t-ready"}">${view.paused ? "Paused" : "Running"}</span><button type="button" class="ghost-btn small" data-life="${view.paused ? "resume" : "pause"}">${view.paused ? "Resume" : "Pause"}</button></div><div class="danger-zone"><p class="desc">Archive hides the project; delete removes it. Both ask once more. ${info("Archived projects can be restored. Delete keeps nothing.")}</p><button type="button" class="ghost-btn small" data-life="archive">Archive…</button><button type="button" class="ghost-btn small danger" data-life="delete">Delete…</button></div>`;
   body.querySelector("#name-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     await update({ name: body.querySelector("#project-name").value.trim() }, "Renamed.").catch(sayFail);
     emit("projects-changed");
+  });
+  body.querySelector("#review-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const rechecks = Number(body.querySelector("#review-rechecks").value);
+    await update({ review: { rechecks } }, `Review re-checks: ${rechecks}.`).catch(sayFail);
   });
   body.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-life]");
