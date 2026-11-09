@@ -386,6 +386,8 @@ try {
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  // A headless page has no window focus, so :focus-within never matches without this.
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   const feed = `document.querySelector('#feed').innerText`,
     chats = `document.querySelectorAll('#tree .tree-project.selected [data-chat]')`,
@@ -535,7 +537,6 @@ try {
   await waitFor(shown(spare), s, "archive button on hover");
   await shot("05-archive-hover", s);
   await evaluate(`document.querySelector('#tree [data-chat="main"]').focus()`, s);
-  await waitFor(`!${shown(spare)}`, s, "hover moved away").catch(() => {});
   await press("ArrowDown", "ArrowDown");
   if ((await evaluate(`document.activeElement?.dataset.chat ?? document.activeElement?.className`, s)) !== chatId)
     throw Error("Arrow down left the chat rows");

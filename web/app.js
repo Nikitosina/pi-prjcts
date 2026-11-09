@@ -2,14 +2,23 @@
 // Three areas on every screen: list (left), focus (center), context (right); the Host agent drawer opens over them.
 import { call, setToken, stream, token } from "./api.js";
 import { clip, esc } from "./format.js";
-import { register, paintHints, onBindingsChange } from "./hotkeys.js";
+import { register, paintHints, onBindingsChange, typing } from "./hotkeys.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { loadUi, setUi } from "./ui.js";
 import { paintStatusLine } from "./statusline.js";
 import { loadLimits } from "./limits.js";
 import { closeLimitDetail, limitDetailOpen } from "./limit-detail.js";
 import { closeDiskDetail, diskDetailOpen } from "./disk-detail.js";
-import { loadProjects, markSeen, rememberChats, renderTree, visibleChats } from "./tree.js";
+import {
+  archiveDialogOpen,
+  closeArchiveDialog,
+  loadProjects,
+  markSeen,
+  rememberChats,
+  renderTree,
+  requestArchive,
+  visibleChats,
+} from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
 import { loadJobs, loadSide, renderWorker } from "./workers.js";
 import { renderMemoryEntry, renderMemoryList } from "./memory.js";
@@ -261,6 +270,7 @@ document.addEventListener("pi-remote-host", renderRemoteHost);
 renderRemoteHost();
 
 function leaveTop() {
+  if (archiveDialogOpen()) return closeArchiveDialog();
   if (limitDetailOpen()) return closeLimitDetail();
   if (diskDetailOpen()) return closeDiskDetail();
   if (slashMenuOpen()) return closeSlashMenu();
@@ -271,10 +281,15 @@ function leaveTop() {
   if (leaveFocus()) return;
   if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
 }
-const outside = () => !paletteOpen() && !settingsOpen();
+const outside = () => !paletteOpen() && !settingsOpen() && !archiveDialogOpen();
+const overlays = new Set(["settings", "palette", "stop"]);
 for (const [id, run] of Object.entries(COMMANDS))
-  register(id, run, { when: id === "settings" || id === "palette" || id === "leave-focus" || id === "stop" ? () => true : outside });
+  register(id, run, { when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !archiveDialogOpen() : outside });
 register("toggle-steer", () => toggleSteer(), { when: outside });
+// Only the chat in the center: not while typing, in the worker or Memory view, or with the Host agent drawer open.
+register("archive-chat", () => requestArchive(state.projectId, state.chatId), {
+  when: (event) => outside() && !typing(event.target) && state.focus.kind === "chat" && !drawerOpen(),
+});
 for (let i = 1; i <= 9; i++)
   register(
     `chat-${i}`,

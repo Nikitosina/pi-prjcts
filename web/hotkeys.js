@@ -11,6 +11,7 @@ export const DEFAULTS = {
   settings: "Mod+,",
   stop: "Mod+.",
   "toggle-steer": "B",
+  "archive-chat": "Mod+Shift+E",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`chat-${i + 1}`, String(i + 1)])),
   // Settings sections, active only while the overlay is open.
   "settings-general": "G",
@@ -40,6 +41,7 @@ export const LABELS = {
   settings: "Settings",
   stop: "Stop the current turn",
   "toggle-steer": "Queue or steer while busy",
+  "archive-chat": "Archive chat",
 };
 
 const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -115,8 +117,8 @@ function eventBinding(event) {
   const mods = [];
   if (mac ? event.metaKey : event.ctrlKey) mods.push("Mod");
   if (event.altKey) mods.push("Alt");
-  // Shift is part of the character for symbols ("?", "{"); only letters and named keys record it.
-  if (event.shiftKey && (/^[A-Z]$/.test(k) ? false : k.length > 1)) mods.push("Shift");
+  // Shift is part of the character for symbols ("?", "{") and a lone capital; named keys and modified letters record it.
+  if (event.shiftKey && (/^[A-Z]$/.test(k) ? mods.length > 0 : k.length > 1)) mods.push("Shift");
   return [...mods, k].join("+");
 }
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();
@@ -126,7 +128,7 @@ export function captureNext() {
     capture = resolve;
   });
 }
-function typing(target) {
+export function typing(target) {
   return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
 }
 addEventListener(
