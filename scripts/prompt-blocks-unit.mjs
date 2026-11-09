@@ -48,6 +48,23 @@ assert.match(coordinatorText, /independent Job's worker/, "H6 events go to an in
 assert.match(coordinatorText, /no dry run/, "H7 rebase has no dry run");
 assert.match(coordinatorText, /backup branch/, "H7 rebase starts from a backup branch");
 
+// Retro 2026-11-09 (jobs-failures.md R, C): review budget, acceptance, fresh workers after Ready, no CI waiting, questions as checkpoints.
+const workerText = DEFAULT_ROLE_PROMPTS.worker;
+assert.match(workerText, /one full review.*kind full/s, "R1 the worker starts one full review");
+assert.match(workerText, /re-checks.*kind recheck.*fix diff.*still-open findings/s, "R1 re-checks cover the fix diff and open findings");
+assert.match(workerText, /Only P0 and P1 block Ready/, "R1 only P0/P1 block Ready");
+assert.match(workerText, /budget is spent.*gaps/s, "R6 spent budget: remaining findings become gaps");
+assert.doesNotMatch(workerText, /No further rounds/, "R1 the old single re-check rule is gone");
+assert.match(workerText, /questions.*job checkpoint/is, "C1 questions go through job checkpoint");
+assert.match(workerText, /Follow PR/, "workers report Ready instead of waiting for CI");
+assert.doesNotMatch(workerText, /fails the Job/, "C1 no report is no longer a failure");
+assert.match(coordinatorText, /back to the worker at most once/, "a ready-with-gaps result goes back once at most");
+assert.match(coordinatorText, /concrete P0 or P1 or a failed check/, "only for a concrete P0/P1 or a failed check");
+assert.match(coordinatorText, /fresh worker on the same branch with a handoff/, "after Ready a small change is a fresh worker");
+assert.match(coordinatorText, /new task is a new Job/, "after Ready a new task is a new Job");
+assert.doesNotMatch(coordinatorText, /so its branch carries on/, "the old same-worker rule is gone");
+assert.match(coordinatorText, /restart a worker when CI fails/i, "Follow PR wakes the Coordinator for CI");
+
 // B2: a legacy override is the exact old text plus the mode's delivery block, marked legacy, and reaches task helpers too.
 const delivery = (id) => ROLE_BLOCKS.worker.find((block) => block.id === id).text;
 const legacy = project({ prompts: { worker: "OWNER WORKER TEXT", scout: "S" } });
