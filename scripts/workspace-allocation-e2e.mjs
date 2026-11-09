@@ -221,6 +221,15 @@ try {
     typeof (await endedWorkerWorkspaceOwner(root, { ...ownedReceipt, intentId: randomUUID() })) === "string",
     "foreign ownership identity refused",
   );
+  await ownerState(1, "ready");
+  const [firstClaim, secondClaim] = await Promise.all([
+    endedWorkerWorkspaceOwner(root, ownedReceipt, "next-intent"),
+    endedWorkerWorkspaceOwner(root, ownedReceipt, "other-intent"),
+  ]);
+  check([firstClaim, secondClaim].filter((value) => value === null).length === 1, "concurrent claims have only one winner");
+  const claimed = await root.commit(async (tx) => (await tx.doc(Jobs, root.id)).agents[threadId].workspaceContinuedBy, BACKGROUND_CONTEXT);
+  check(claimed === "next-intent" || claimed === "other-intent", "handoff is durable before Git detach");
+  check((await endedWorkerWorkspaceOwner(root, ownedReceipt, claimed)) === null, "same claim is replay safe");
   for (const reason of ["owning thread is live", "owning thread is suspended", "owning thread is unknown"]) {
     const [source, blocked] = await sameHost(`same-${reason.split(" ").at(-1)}`, reason);
     check(

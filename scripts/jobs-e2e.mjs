@@ -1149,6 +1149,18 @@ assert.deepEqual(await jobs.stallTick(harness, T + 21 * 60_000), [gate.id], "an 
   );
 }
 
+// A branch handoff reserves the former worker before Git detaches; retry cannot race or reopen it afterward.
+{
+  const state = await harness.snapshot(Jobs, root.id, context);
+  const former = Object.values(state.agents).find((agent) => agent.role === "worker" && agent.endedAt !== null);
+  assert.ok(former);
+  await root.commit(async (tx) => {
+    (await tx.doc(Jobs, root.id)).agents[former.id].workspaceContinuedBy = "replacement-allocation";
+  }, context);
+  const before = await harness.snapshot(Jobs, root.id, context);
+  assert.match(await jobs.steer(harness, former.id, "Retry former worker"), /continued.*replacement-allocation/);
+  assert.deepEqual(await harness.snapshot(Jobs, root.id, context), before, "handoff refusal leaves owner and Job ended");
+}
 await harness.close(context);
 rmSync(dir, { recursive: true, force: true });
 console.log("jobs e2e passed");
