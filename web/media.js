@@ -192,7 +192,13 @@ function finish() {
 }
 export function closeLightbox() {
   if (!lightbox.open || closing) return;
-  const motion = zoom(thumbnail()?.querySelector("img"), true);
+  // Closed while still opening: play the same zoom backwards from where it is.
+  const opening = lightbox.getAnimations({ subtree: true });
+  for (const animation of opening) {
+    animation.effect.updateTiming({ fill: "both" });
+    animation.reverse();
+  }
+  const motion = opening.length ? big.getAnimations()[0]?.finished : zoom(thumbnail()?.querySelector("img"), true);
   if (!motion) return finish();
   closing = true;
   motion.then(finish, finish);

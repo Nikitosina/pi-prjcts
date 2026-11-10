@@ -163,7 +163,11 @@ function sync(parent, next) {
     for (const { name } of [...keep.attributes]) if (!node.hasAttribute(name)) keep.removeAttribute(name);
     for (const { name, value } of node.attributes) if (keep.getAttribute(name) !== value) keep.setAttribute(name, value);
     if ([...node.children].some((child) => child.dataset.key)) sync(keep, node);
-    else if (keep.innerHTML !== node.innerHTML) keep.replaceChildren(...node.childNodes);
+    else if (keep.innerHTML !== node.innerHTML) {
+      const focused = keep.contains(document.activeElement) ? document.activeElement : null;
+      keep.replaceChildren(...node.childNodes);
+      if (focused) [...keep.querySelectorAll(focused.tagName)].find((item) => item.className === focused.className)?.focus();
+    }
     return keep;
   });
   // Moving a node restarts its animation, so kept nodes move only when out of order.

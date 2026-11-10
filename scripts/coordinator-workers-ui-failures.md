@@ -24,4 +24,4 @@ C5 Ended workers in the history carry a ring. Only active workers get one.
 ## Worker cards during command updates (2026-11-10)
 F1 Every jobs push or current-command read redraws the panel, so a running worker's card is rebuilt and its entry animation
 replays: the card flashes once per command. A card must mount and animate in once; later updates change its content in place.
-New cards still animate in, and ended ones still leave.
+New cards still animate in, and ended ones still leave. A focused control inside the card keeps the keyboard across the update.

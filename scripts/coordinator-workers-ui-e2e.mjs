@@ -662,14 +662,21 @@ try {
     s,
   );
   await rpc({ action: "message", id, text: "MARK-STEPS" });
+  // The keyboard stays on the card's title while its command line changes.
+  await waitFor(`!!__cards.node?.querySelector('.w-tool')`, s, "steps card with its first command");
+  await evaluate(`__cards.node.querySelector('.w-title').focus()`, s);
   await eventually(() => result.steps === STEPS, "steps worker did not run its commands");
   await delay(1200);
-  const cards = await evaluate(`({ enters: __cards.enters, mounts: __cards.mounts, tools: __cards.tools })`, s);
+  const cards = await evaluate(
+    `({ enters: __cards.enters, mounts: __cards.mounts, tools: __cards.tools, focused: document.activeElement === __cards.node.querySelector('.w-title') })`,
+    s,
+  );
   await shot("01e-steps-card", s);
   releaseSteps();
   result.cards = cards;
   if (cards.tools.length < 2) throw Error("F1 setup: the card never showed a changing current command: " + JSON.stringify(cards));
-  if (cards.enters !== 1 || cards.mounts !== 1) throw Error("F1 the worker card flashed on command updates: " + JSON.stringify(cards));
+  if (cards.enters !== 1 || cards.mounts !== 1 || !cards.focused)
+    throw Error("F1 the worker card flashed on command updates: " + JSON.stringify(cards));
   result.checks.push(`F1 one card through ${cards.tools.length} current commands: mounted once, animated in once`);
   await eventually(async () => (await workFor(id, "MARK-STEPSTASK")).status !== "running", "steps Job did not finish");
 

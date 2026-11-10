@@ -326,6 +326,21 @@ try {
   await mouse(16, await evaluate("innerHeight - 16", s));
   await waitFor(closed, s, "backdrop closes the viewer");
   check("A24 a click on the backdrop closes the viewer", true);
+  // Slowed down so the half-played zoom is still there to inspect.
+  await send("Animation.setPlaybackRate", { playbackRate: 0.1 }, s);
+  await clickThumb();
+  await waitFor(`${viewer}.querySelector('img').getAnimations()[0]?.currentTime > 20`, s, "opening zoom under way");
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  check(
+    "A24 closing during the opening zoom reverses it instead of jumping",
+    await evaluate(
+      `Promise.all(${viewer}.querySelector('img').getAnimations().map((a) => a.ready)).then((list) => list.map((a) => a.playbackRate).join() === '-1')`,
+      s,
+    ),
+  );
+  await waitFor(closed, s, "early close finishes");
+  await send("Animation.setPlaybackRate", { playbackRate: 1 }, s);
   await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] }, s);
   await waitFor(`document.documentElement.dataset.motion === 'off'`, s, "reduced motion applied");
   await clickThumb();
