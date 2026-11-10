@@ -28,6 +28,7 @@ Verified by `scripts/artifacts-e2e.mjs` unless marked (inspection).
 - A18 A reference to a missing file or another project's thread breaks the page (uncaught error) instead of showing "missing".
 - A19 Re-rendering the transcript refetches every image each refresh (flicker, bandwidth), or leaks blob URLs without bound.
 - A20 Untrusted markdown can craft an `artifact:` link that triggers a non-GET request or script execution (`javascript:`), or HTML injection through file names.
+- A24 A chat image stays thumbnail-sized with no way to see it larger; or the viewer does not fit the viewport (upscale or overflow), cannot be closed with Escape, the backdrop or a labelled close button, does not trap focus or return it to the image, animates when the owner asks for reduced motion, jumps when closed during the opening zoom, or reopens with the previous image.
 
 ## Owner browsing
 - A21 The Activity thread pane does not show the thread's artifacts (names, sizes, inline previews).

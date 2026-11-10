@@ -138,17 +138,45 @@ function renderWorkers() {
     active = list.filter(isActive),
     ended = list.filter((worker) => !isActive(worker));
   document.querySelector("#workers-count").textContent = active.length ? String(active.length) : "";
-  if (!list.length) {
-    box.innerHTML = `<p class="muted small empty-line">No workers in this chat yet.</p>`;
-    return;
-  }
+  if (!list.length) return paint(`<p class="muted small empty-line">No workers in this chat yet.</p>`);
   const open = historyOpen(),
     tally = historyTally(ended);
-  box.innerHTML =
+  paint(
     (active.length ? active.map(workerHtml).join("") : `<p class="muted small empty-line">No active workers.</p>`) +
-    (ended.length
-      ? `<button type="button" class="w-history" data-worker-history aria-expanded="${open}" aria-controls="workers-history"><span class="chev" aria-hidden="true">${open ? "▾" : "▸"}</span>Ended <span class="count">${ended.length}</span>${tally ? `<span class="w-history-tally">${tally}</span>` : ""}</button>${open ? `<div id="workers-history">${ended.map(workerHtml).join("")}</div>` : ""}`
-      : "");
+      (ended.length
+        ? `<button type="button" class="w-history" data-key="history" data-worker-history aria-expanded="${open}" aria-controls="workers-history"><span class="chev" aria-hidden="true">${open ? "▾" : "▸"}</span>Ended <span class="count">${ended.length}</span>${tally ? `<span class="w-history-tally">${tally}</span>` : ""}</button>${open ? `<div id="workers-history" data-key="ended">${ended.map(workerHtml).join("")}</div>` : ""}`
+        : ""),
+  );
+}
+/** Redraws the panel keeping keyed nodes, so a card mounts and animates in once and later pushes change it in place
+ * (coordinator-workers-ui-failures.md F1). */
+function paint(html) {
+  const next = document.createElement("div");
+  next.innerHTML = html;
+  sync(box, next);
+}
+function sync(parent, next) {
+  const old = new Map([...parent.children].filter((node) => node.dataset.key).map((node) => [node.dataset.key, node]));
+  const nodes = [...next.children].map((node) => {
+    const keep = node.dataset.key && old.get(node.dataset.key);
+    if (!keep || keep.tagName !== node.tagName) return node;
+    for (const { name } of [...keep.attributes]) if (!node.hasAttribute(name)) keep.removeAttribute(name);
+    for (const { name, value } of node.attributes) if (keep.getAttribute(name) !== value) keep.setAttribute(name, value);
+    if ([...node.children].some((child) => child.dataset.key)) sync(keep, node);
+    else if (keep.innerHTML !== node.innerHTML) {
+      const focused = keep.contains(document.activeElement) ? document.activeElement : null;
+      keep.replaceChildren(...node.childNodes);
+      if (focused) [...keep.querySelectorAll(focused.tagName)].find((item) => item.className === focused.className)?.focus();
+    }
+    return keep;
+  });
+  // Moving a node restarts its animation, so kept nodes move only when out of order.
+  const wanted = new Set(nodes);
+  for (const child of [...parent.childNodes]) if (!wanted.has(child)) child.remove();
+  nodes.forEach((node, index) => {
+    const at = parent.children[index];
+    if (at !== node) parent.insertBefore(node, at ?? null);
+  });
 }
 
 /** The share of the context window an active worker uses, as a ring; unknown (no entry, no window) is never drawn as 0 %. */
@@ -214,7 +242,7 @@ function workerHtml(worker) {
         : worker.status === "failed" || worker.status === "checkpoint"
           ? `<button type="button" class="ghost-btn small" data-open-worker="${esc(worker.id)}">Open</button>`
           : "";
-  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
+  return `<article class="worker${worker.working ? " working" : ""}" data-key="w:${esc(worker.id)}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
 }
 async function loadLastTools(gen) {
   const running = chatWorkers()

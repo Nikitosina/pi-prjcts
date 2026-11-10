@@ -77,14 +77,14 @@ export function renderTree() {
       const questions = project.notice?.questions ?? 0;
       const rows = expanded
         ? chats
-            .map((chat, index) => {
+            .map((chat) => {
               const activity = project.activity?.chats?.[chat.id];
               const unread =
                 !!activity?.finishedAt &&
                 activity.finishedAt > (seen[`${project.id}:${chat.id}`] ?? 0) &&
                 !(selected && chat.id === state.chatId);
               const current = selected && chat.id === state.chatId && state.focus.kind !== "memory";
-              const row = `<button type="button" role="treeitem" class="tree-chat${current ? " current" : ""}" data-project-id="${esc(project.id)}" data-chat="${esc(chat.id)}" aria-current="${current}">${dot(activity)}<span class="name">${esc(clip(chat.title, 40))}</span>${unread ? `<span class="unread" aria-label="unread"></span>` : ""}${selected && index < 9 ? `<kbd>${index + 1}</kbd>` : ""}</button>`;
+              const row = `<button type="button" role="treeitem" class="tree-chat${current ? " current" : ""}" data-project-id="${esc(project.id)}" data-chat="${esc(chat.id)}" aria-current="${current}">${dot(activity)}<span class="name">${esc(clip(chat.title, 40))}</span>${unread ? `<span class="unread" aria-label="unread"></span>` : ""}</button>`;
               if (chat.id === "main") return row;
               const pending = archiving.has(`${project.id}:${chat.id}`);
               return `<div class="tree-row" role="none">${row}<button type="button" class="tree-archive" data-project-id="${esc(project.id)}" data-archive-chat="${esc(chat.id)}" aria-label="Archive chat “${esc(clip(chat.title, 40))}”" title="${esc(archiveTitle())}"${pending ? " disabled" : ""}>${ARCHIVE_ICON}</button></div>`;

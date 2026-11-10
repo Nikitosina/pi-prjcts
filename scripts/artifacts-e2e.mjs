@@ -281,6 +281,76 @@ try {
   );
   await delay(300);
   await shot("01-chat-inline-media", s);
+
+  // A24: the chat image opens enlarged in #lightbox with a short zoom, and closes by Escape, the backdrop or the close button.
+  const thumb = `document.querySelector('#feed .media-open')`;
+  const viewer = `document.querySelector('#lightbox')`;
+  const mouse = async (x, y) => {
+    for (const type of ["mousePressed", "mouseReleased"])
+      await send("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 }, s);
+  };
+  const clickThumb = async () => {
+    const box = await evaluate(
+      `(() => { const r = ${thumb}.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+      s,
+    );
+    await mouse(box.x, box.y);
+  };
+  const opened = `${viewer}.open && document.activeElement === ${viewer}.querySelector('[data-lightbox-close]')`;
+  const closed = `!${viewer}.open && document.activeElement === ${thumb}`;
+  check(
+    "A24 the inline image is a labelled button",
+    await evaluate(`${thumb}?.tagName === 'BUTTON' && /image/i.test(${thumb}.getAttribute('aria-label') ?? '')`, s),
+  );
+  await clickThumb();
+  check("A24 opening zooms the image from its thumbnail", await evaluate(`${viewer}.querySelector('img').getAnimations().length > 0`, s));
+  await waitFor(`${opened} && ${viewer}.querySelector('img').getAnimations().length === 0`, s, "viewer open");
+  const sizes = await evaluate(
+    `(() => { const big = ${viewer}.querySelector('img'), r = big.getBoundingClientRect(), t = ${thumb}.querySelector('img'); return { same: big.src === t.src, w: r.width, thumb: t.getBoundingClientRect().width, inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight, ratio: Math.abs(r.width / r.height - 320 / 200) < 0.02 }; })()`,
+    s,
+  );
+  check(
+    "A24 the viewer shows the same image enlarged inside the viewport",
+    sizes.same && sizes.w > sizes.thumb * 1.5 && sizes.inside && sizes.ratio,
+    sizes,
+  );
+  await shot("01b-image-viewer-open", s);
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  check("A24 closing zooms back", await evaluate(`${viewer}.querySelector('img').getAnimations().length > 0`, s));
+  await waitFor(closed, s, "Escape closes the viewer and focus returns to the image");
+  check("A24 Escape closes the viewer and gives focus back to the image", true);
+  await shot("01c-image-viewer-closed", s);
+  await clickThumb();
+  await waitFor(opened, s, "viewer open again");
+  await mouse(16, await evaluate("innerHeight - 16", s));
+  await waitFor(closed, s, "backdrop closes the viewer");
+  check("A24 a click on the backdrop closes the viewer", true);
+  // Slowed down so the half-played zoom is still there to inspect.
+  await send("Animation.setPlaybackRate", { playbackRate: 0.1 }, s);
+  await clickThumb();
+  await waitFor(`${viewer}.querySelector('img').getAnimations()[0]?.currentTime > 20`, s, "opening zoom under way");
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }, s);
+  check(
+    "A24 closing during the opening zoom reverses it instead of jumping",
+    await evaluate(
+      `Promise.all(${viewer}.querySelector('img').getAnimations().map((a) => a.ready)).then((list) => list.map((a) => a.playbackRate).join() === '-1')`,
+      s,
+    ),
+  );
+  await waitFor(closed, s, "early close finishes");
+  await send("Animation.setPlaybackRate", { playbackRate: 1 }, s);
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] }, s);
+  await waitFor(`document.documentElement.dataset.motion === 'off'`, s, "reduced motion applied");
+  await clickThumb();
+  check(
+    "A24 with reduced motion the viewer opens without animation",
+    await evaluate(`${opened} && ${viewer}.getAnimations({ subtree: true }).length === 0`, s),
+  );
+  await evaluate(`${viewer}.querySelector('[data-lightbox-close]').click()`, s);
+  check("A24 with reduced motion the close button closes at once", await evaluate(closed, s));
+  await send("Emulation.setEmulatedMedia", { features: [] }, s);
   const fetches = () => evaluate(`performance.getEntriesByType('resource').filter(e => e.name.includes('/shot.png')).length`, s);
   const before = await fetches();
   await k.ask(id, "main", "MARK-PING re-render the transcript");

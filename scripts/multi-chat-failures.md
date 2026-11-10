@@ -43,6 +43,7 @@ The runtime refuses to archive Main and aborts a busy chat's turn when it is arc
 28. The archive does not survive a reload.
 29. Arrow keys in the tree stop on archive buttons.
 30. The button or the shortcut archives without a confirmation dialog naming the chat; Cancel or Escape archives or moves the selection; a repeated shortcut stacks dialogs or archives; focus is lost when the dialog closes.
+31. Hovering the tree shows 1–9 badges on chat rows (noise the owner removed), or removing them also breaks the digit shortcuts that switch chats.
 
 ## Regressions to keep
 19. live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.
