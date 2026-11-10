@@ -23,6 +23,9 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 - Q6 The summary model gets tools, or tool text is presented as instructions rather than data; a returned paragraph longer than two sentences is shown as is.
 - Q7 Summary work blocks, slows or fails the agent's own turn, or writes anything into the agent's conversation or context.
 - Q8 A stored summary row keeps its bounded copy of the calls after it finished (state grows with history).
+- Q9 Summaries are turned off while a summary waits for the model catalog, and its request is still sent afterwards.
+- Q10 Restarts during the last attempt start more requests than the attempt limit.
+- Q11 A message whose results never arrive (a turn cut off mid-call) keeps its row and its copy of the calls forever.
 
 ## Settings and models
 
@@ -36,6 +39,7 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 
 - U1 Summary tokens and cost are lost, mixed into the agent's own model usage, or missing from the totals the owner sees.
 - U2 A cut-off request reports a cost of zero instead of unknown.
+- U3 A request stopped by turning summaries off is counted neither as spent nor as an unknown cost.
 
 ## Display
 

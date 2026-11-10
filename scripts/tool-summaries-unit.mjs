@@ -431,5 +431,81 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   await service.close();
 }
 
+// Q9: turning summaries off while a summary waits for the model catalog sends nothing.
+{
+  fresh();
+  const runtime = fakeRuntime();
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const service = openToolSummaries({
+    path,
+    settings: { enabled: true, model: MODEL },
+    runtime: async () => (await gate, runtime),
+    limits: LIMITS,
+  });
+  const call = nextCall("bash", { command: "gated" });
+  const message = assistant(15, [call]);
+  service.observe("p1", commit(message, result(15, call, "gated")));
+  service.configure({ enabled: false, model: MODEL });
+  release();
+  await delay(30);
+  assert.equal(runtime.requests.length, 0, "Q9: no request after summaries were turned off");
+  service.configure({ enabled: true, model: MODEL });
+  assert.equal(service.read("p1", 15, [message.value.id]).size, 0, "Q9: the cancelled summary stays cancelled");
+  await service.close();
+}
+
+// U3: a request stopped by turning summaries off is counted as an unknown cost.
+{
+  fresh();
+  const runtime = fakeRuntime();
+  runtime.plan.push("hang");
+  const service = open(runtime);
+  const call = nextCall("bash", { command: "stopped" });
+  service.observe("p1", commit(assistant(16, [call]), result(16, call, "stopped")));
+  await waitFor(() => runtime.requests.length === 1, "request started");
+  service.configure({ enabled: false, model: MODEL });
+  await waitFor(() => service.usage("p1").get(16)?.interrupted === 1, "U3: the stopped request counts as interrupted");
+  assert.equal(service.usage("p1").get(16).requests, 1);
+  await service.close();
+}
+
+// Q10: a restart during the last attempt fails the summary instead of asking again.
+{
+  fresh();
+  const hanging = fakeRuntime();
+  hanging.plan.push("hang");
+  let service = open(hanging, undefined, { attempts: 1 });
+  const call = nextCall("bash", { command: "last" });
+  const message = assistant(17, [call]);
+  service.observe("p1", commit(message, result(17, call, "last")));
+  await waitFor(() => hanging.requests.length === 1, "last attempt started");
+  await service.close();
+  const runtime = fakeRuntime();
+  service = open(runtime, undefined, { attempts: 1 });
+  await delay(30);
+  assert.equal(runtime.requests.length, 0, "Q10: no request past the attempt limit");
+  assert.equal(statusOf(service, "p1", 17, message.value.id)?.status, "failed");
+  assert.equal(service.usage("p1").get(17).interrupted, 1, "the cut-off attempt still has an unknown cost");
+  await service.close();
+}
+
+// Q11: a message whose results never arrive is dropped when its conversation moves on.
+{
+  fresh();
+  const runtime = fakeRuntime(),
+    service = open(runtime);
+  const lost = nextCall("bash", { command: "cut off" });
+  const lostMessage = assistant(18, [lost]);
+  service.observe("p1", commit(lostMessage));
+  const next = nextCall("bash", { command: "next" });
+  service.observe("p1", commit(assistant(18, [next])));
+  const db = new DatabaseSync(path, { readOnly: true });
+  const row = db.prepare("SELECT status, calls FROM summaries WHERE entry = ?").get(lostMessage.value.id);
+  db.close();
+  assert.deepEqual({ ...row }, { status: "cancelled", calls: null }, "Q11: the abandoned message keeps nothing");
+  await service.close();
+}
+
 rmSync(root, { recursive: true, force: true });
 console.log(JSON.stringify({ status: "passed" }));

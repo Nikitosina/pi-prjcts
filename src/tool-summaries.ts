@@ -3,13 +3,14 @@ import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { CommitPublication } from "@earendil-works/pi-durable";
 import { guardedStream } from "./model-guard.ts";
+import type { UiSettings } from "./ui-settings.ts";
 
 /**
  * Tool summaries (scripts/tool-summaries-failures.md): one or two sentences about the tools one assistant message called, written by a
  * light model after every result of that message arrived. Derived display data in its own database, never in a conversation. Only
  * commits seen while summaries are on start one; reads never do.
  */
-export type ToolSummarySettings = { enabled: boolean; model: string | null };
+export type ToolSummarySettings = UiSettings["toolSummaries"];
 export type ToolSummaryLimits = {
   /** Requests running at once, host-wide. */
   concurrency: number;
@@ -243,13 +244,17 @@ export function openToolSummaries(options: {
       attempts INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0, usage TEXT,
       created INTEGER NOT NULL, updated INTEGER NOT NULL,
       PRIMARY KEY (scope, entry));
-    CREATE INDEX IF NOT EXISTS summaries_open ON summaries (scope, conversation, status);`);
+    CREATE INDEX IF NOT EXISTS summaries_open ON summaries (scope, conversation, status);
+    CREATE INDEX IF NOT EXISTS summaries_status ON summaries (status);`);
   const now = () => Date.now();
   const sql = {
     insert: db.prepare(
       "INSERT OR IGNORE INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES (?, ?, ?, 'collecting', ?, ?, ?, ?)",
     ),
     collecting: db.prepare("SELECT * FROM summaries WHERE scope = ? AND conversation = ? AND status = 'collecting'"),
+    abandon: db.prepare(
+      "UPDATE summaries SET status = 'cancelled', calls = NULL, waiting = NULL, updated = ? WHERE scope = ? AND conversation = ? AND status = 'collecting' AND entry < ?",
+    ),
     get: db.prepare("SELECT * FROM summaries WHERE scope = ? AND entry = ?"),
     collect: db.prepare("UPDATE summaries SET waiting = ?, calls = ?, updated = ? WHERE scope = ? AND entry = ? AND status = 'collecting'"),
     active: db.prepare("SELECT COUNT(*) AS n FROM summaries WHERE status IN ('pending','running')"),
@@ -261,10 +266,13 @@ export function openToolSummaries(options: {
       "UPDATE summaries SET status = ?, text = ?, error = ?, model = COALESCE(?, model), usage = ?, interrupted = interrupted + ?, calls = CASE WHEN ? = 'pending' THEN calls ELSE NULL END, waiting = NULL, updated = ? WHERE scope = ? AND entry = ?",
     ),
     cancel: db.prepare(
-      "UPDATE summaries SET status = 'cancelled', calls = NULL, waiting = NULL, updated = ? WHERE status IN ('collecting','pending','running') RETURNING scope, conversation",
+      "UPDATE summaries SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = ? WHERE status IN ('collecting','pending','running') RETURNING scope, conversation",
     ),
     recover: db.prepare(
-      "UPDATE summaries SET status = 'pending', interrupted = interrupted + 1, updated = ? WHERE status = 'running' RETURNING scope, entry",
+      "UPDATE summaries SET status = 'pending', interrupted = interrupted + 1, updated = ? WHERE status = 'running' AND attempts < ?",
+    ),
+    exhaust: db.prepare(
+      "UPDATE summaries SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = ? WHERE status = 'running'",
     ),
     pending: db.prepare("SELECT scope, entry FROM summaries WHERE status = 'pending' ORDER BY updated"),
     read: db.prepare(
@@ -328,15 +336,18 @@ export function openToolSummaries(options: {
   };
 
   async function summarize(row: Row): Promise<void> {
-    const ref = settings.model ?? "";
-    const slash = ref.indexOf("/");
-    const fail = (error: string) => finish(row, "failed", { error, model: ref || undefined });
-    let runtime: SummaryRuntime;
+    let runtime: SummaryRuntime | undefined, loadError: unknown;
     try {
       runtime = await options.runtime();
     } catch (error) {
-      return fail(`Model catalog failed to load: ${message(error)}`);
+      loadError = error;
     }
+    // Settings may have changed while the catalog loaded: a cancelled row stays cancelled.
+    if (closed || !settings.enabled || (sql.get.get(row.scope, row.entry) as Row | undefined)?.status !== "pending") return;
+    const ref = settings.model ?? "";
+    const slash = ref.indexOf("/");
+    const fail = (error: string) => finish(row, "failed", { error, model: ref || undefined });
+    if (!runtime) return fail(`Model catalog failed to load: ${message(loadError)}`);
     const model = slash > 0 ? runtime.getModel(ref.slice(0, slash), ref.slice(slash + 1)) : undefined;
     if (!model) return fail(ref ? `Summary model ${ref} is not installed` : "No summary model is selected");
     if (!runtime.getProviderAuthStatus(model.provider).configured) return fail(`Summary model ${ref} has no configured credentials`);
@@ -408,7 +419,8 @@ export function openToolSummaries(options: {
   };
 
   // Recovery: requests cut off by the last exit are counted as interrupted and asked again.
-  sql.recover.all(now());
+  sql.recover.run(now(), limits.attempts);
+  sql.exhaust.run(now());
   if (settings.enabled) for (const row of sql.pending.all() as { scope: string; entry: number }[]) queue.push([row.scope, row.entry]);
   else cancelAll();
   pump();
@@ -422,14 +434,16 @@ export function openToolSummaries(options: {
         const record = modelMessage(entry);
         const conversation = Number(entry.conversationId);
         if (record?.role === "assistant") {
+          // A new message means the earlier ones of this conversation got every result they ever will.
+          sql.abandon.run(now(), scope, conversation, Number(entry.id));
           const input = callsOf(record.content);
           if (!input) continue;
+          // Every call is awaited, even past the limit, so the summary starts after the message's last result.
+          const waiting = input.calls.map((call) => call.id);
           if (input.calls.length > MAX_CALLS) {
             input.more = input.calls.length - MAX_CALLS;
             input.calls = input.calls.slice(0, MAX_CALLS);
           }
-          // Every call is awaited, even past the limit, so the summary starts after the message's last result.
-          const waiting = (callsOf(record.content)?.calls ?? []).map((call) => call.id);
           sql.insert.run(scope, conversation, Number(entry.id), JSON.stringify(waiting), JSON.stringify(input), now(), now());
         } else if (record?.role === "toolResult" && typeof record.toolCallId === "string") {
           for (const row of sql.collecting.all(scope, conversation) as Row[]) {
