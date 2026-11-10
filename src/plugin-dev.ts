@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { PluginStatus } from "./plugin-types.ts";
 
-/*
- * Plugin development from the CLI (`projects plugin new|check`). `new` writes a minimal plugin with its own test into an empty
- * directory anywhere; `check` loads one plugin through the host's own loader in a fresh temporary home, so it never reads or writes
- * a live home and reports exactly the status a host would record. Activating a plugin on a host stays a separate, explicit step.
- */
+// `projects plugin new|check`: the check uses the host's own loader in a temporary home, so it never touches a live home.
 
 /** Same rule as the loader's; checked here so a scaffold never carries a name the host would refuse. */
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
@@ -71,7 +67,8 @@ export async function checkPlugin(path: string): Promise<{ ok: boolean; home: st
   try {
     const { plugins } = await import("./plugins.ts");
     const statuses = await plugins.load();
-    await plugins.close();
+    // A close hook that hangs must not keep the result or the temporary home's removal waiting.
+    await Promise.race([plugins.close(), new Promise((done) => setTimeout(done, 5_000).unref())]);
     return { ok: statuses.every((item) => item.state === "loaded"), home, plugins: statuses };
   } finally {
     rmSync(home, { recursive: true, force: true });
