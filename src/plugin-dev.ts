@@ -64,13 +64,15 @@ export async function checkPlugin(path: string): Promise<{ ok: boolean; home: st
   const home = mkdtempSync(join(tmpdir(), "pi-plugin-check-"));
   process.env.PI_PROJECTS_HOME = home;
   process.env.PI_PROJECTS_PLUGINS = source;
+  let deadline: NodeJS.Timeout | undefined;
   try {
     const { plugins } = await import("./plugins.ts");
     const statuses = await plugins.load();
-    // A close hook that hangs must not keep the result or the temporary home's removal waiting.
-    await Promise.race([plugins.close(), new Promise((done) => setTimeout(done, 5_000).unref())]);
+    // A hanging close hook must not delay the result; the timer stays referenced, or a hook holding no handle ends the process mid-await.
+    await Promise.race([plugins.close(), new Promise((done) => (deadline = setTimeout(done, 5_000)))]);
     return { ok: statuses.every((item) => item.state === "loaded"), home, plugins: statuses };
   } finally {
+    clearTimeout(deadline);
     rmSync(home, { recursive: true, force: true });
   }
 }

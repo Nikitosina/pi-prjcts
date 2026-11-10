@@ -1,4 +1,4 @@
-// Unit: `projects plugin new|check` (scripts/plugin-dev-failures.md 1-10). Temp directories only: no host, no model, no live home.
+// Unit: `projects plugin new|check` (scripts/plugin-dev-failures.md 1-11). Temp directories only: no host, no model, no live home.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -87,6 +87,17 @@ try {
     assert.equal(result.code, 1, `10 ${label} version refused`);
     assert.match(result.json.plugins[0].error, /version/, `10 ${label} version reason`);
   }
+
+  // 11: a close hook that never settles and holds no handle still lets the check print its result and remove its home.
+  const hangs = join(root, "hangs-on-close.mjs");
+  writeFileSync(
+    hangs,
+    `export default { name: "hangs", register(api) { api.provide({ lifecycle: { close: () => new Promise(() => {}) } }); } };\n`,
+  );
+  const hung = projects("plugin", "check", hangs);
+  assert.equal(hung.code, 0, `11 check finishes: ${hung.code} ${hung.stdout}${hung.stderr}`);
+  assert.equal(hung.json?.plugins?.[0]?.state, "loaded", "11 the result is printed");
+  assert.ok(!existsSync(hung.json.home), "11 the temporary home is removed");
 
   // Missing arguments print the usage.
   assert.equal(projects("plugin", "check").code, 1, "usage without a directory");

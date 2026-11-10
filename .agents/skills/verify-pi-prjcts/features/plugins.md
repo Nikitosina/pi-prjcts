@@ -16,7 +16,7 @@ A plugin author starts a private host with a plugin under development and checks
 
 Preconditions: `launch --plugin <dir>` succeeded, doctor `ok: true`. A scaffold from `npm run projects -- plugin new <dir>` is enough.
 
-- `load` + `list` + `status`, scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> plugins`. It reads the `plugins` RPC into `host-plugins.json`, opens the inbox on Main, waits for the Plugins rows, screenshots `01-plugins`, writes `plugins-dom.json`, and asserts that every launched plugin's row shows its name, version, state and error (if any). A drive without `--plugin` fails with that reason.
+- `load` + `list` + `status`, scripted: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive --run <scratch> plugins`. It reads the `plugins` RPC into `host-plugins.json`, opens the inbox on Main, waits for the Plugins rows, screenshots `01-plugins`, writes `plugins-dom.json`, and asserts that every launched plugin's row shows its name, version, state and error (if any). The Plugins section clips an error over 300 characters with `…`, so the drive accepts the full error or a clipped start of it. To cover a long error, add `--plugin scripts/fixtures/long-error.mjs` to the launch. A drive without `--plugin` fails with that reason.
 
 ## Gotchas
 

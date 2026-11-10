@@ -2568,13 +2568,16 @@ const journeys = {
     await page.evaluate(`document.querySelector('#plugin-cards').scrollIntoView()`);
     await page.shot(dir, "01-plugins");
     const rows = await page.evaluate(
-      `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText }))`,
+      `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
     );
     writeFileSync(join(dir, "plugins-dom.json"), JSON.stringify(rows, null, 2));
+    // A long error is clipped with "…": the shown text must be the error itself or its first 100 characters at least.
+    const showsError = (shown, error) =>
+      !error || shown === error || (!!shown && shown.length > 100 && shown.endsWith("…") && error.startsWith(shown.slice(0, -1)));
     for (const item of mine) {
       const row = rows.find((candidate) => candidate.source === item.source);
-      const expected = [item.name, item.version, item.state, item.error].filter(Boolean);
-      if (!row || row.state !== item.state || expected.some((text) => !row.text.includes(text)))
+      const expected = [item.name, item.version, item.state].filter(Boolean);
+      if (!row || row.state !== item.state || expected.some((text) => !row.text.includes(text)) || !showsError(row.error, item.error))
         throw Error(`Plugins section does not show ${JSON.stringify(item)}: ${JSON.stringify(row)}`);
       record("visible", `Plugins section shows ${JSON.stringify(row.text.replace(/\s+/g, " "))}`);
     }

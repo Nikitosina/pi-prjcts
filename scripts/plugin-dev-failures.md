@@ -13,6 +13,7 @@ Check (`plugin check <dir>`)
 6. `plugin check` also loads plugins from an inherited `PI_PROJECTS_PLUGINS`: it must load only the given directory.
 7. A broken plugin passes the check, or the check hides why: it must exit 1 and print the same status the host records (`state: "failed"`, `error`).
 8. The check validates differently from the host (a second loader): the error text for a provider with a missing method must be the host loader's.
+11. A close hook that never settles and holds no timer or socket lets the process exit at the end of the event loop, mid-`await`, with no JSON printed and the temporary home left behind. The check must still print its result and remove the home.
 
 Version
 9. A plugin without `version` stops loading: existing plugins must load unchanged, with `version: null`.
