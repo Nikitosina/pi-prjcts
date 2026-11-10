@@ -24,6 +24,7 @@ export const DEFAULTS = {
   "settings-tiers": "I",
   "settings-theme": "H",
   "settings-animations": "A",
+  "settings-display": "L",
   "settings-statusline": "S",
   "settings-hotkeys": "?",
   "settings-notifications": "N",

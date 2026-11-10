@@ -236,7 +236,8 @@ await kit.run(async () => {
   await page.evaluate(
     `[...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-TWO second run')).querySelector('.tool-summary .ts-line').focus()`,
   );
-  await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  // The text makes Chrome activate the focused button, as a real Enter does.
+  await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
   await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await page.waitFor(`document.querySelector('#feed .tool-summary.open .tool-row')`, "expanded calls");
   const opened = await page.evaluate(

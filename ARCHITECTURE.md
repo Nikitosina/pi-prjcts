@@ -123,6 +123,15 @@ Rules:
 - The archive never writes: no pi-durable Storage, no migrations, no WAL files.
 - Coordinators read the archive of their own project through `projects_archive_list` (chats and agent transcripts, title/task filter, paged) and `projects_archive_read` (paged history, full text by `ref`, no images). `src/archive-tools.ts` binds the project id, so there are no cross-project reads, and a missing archive answers "No archive for this project." The text is untrusted; code work continues in a new worker on the old branch or PR.
 
+## Tool summaries
+
+`src/tool-summaries.ts` writes a one or two sentence summary of each assistant message's tool calls, for owner views only. One host-wide service in `<home>/tool-summaries.sqlite` serves every project (scope: the project id) and the Host agent (scope `host-agent`); `host-server.ts` opens it and passes it to `openDurableHost` and `openHostAgent`. It follows Pi Durable commits: a message's calls open a row while summaries are on, and the row is queued once every result has arrived. A small pump sends each queued row to the owner's summary model (`UiSettings.toolSummaries`, checked against the tier catalog and its credentials in `host-documents.ts`) through `guardedStream` with no tools, bounded arguments and results, no images, and a timeout. Failures retry a bounded number of times, then the row is `failed`. A restart puts running rows back in the queue and counts the cut-off request as interrupted, with an unknown cost. Owner reads (`show`, `chat-history`, `thread-history`, `host-agent-history`) attach `toolSummaries` by entry id through `withToolSummaries`; summary usage is reported apart from agent usage (`usage-snapshot.toolSummaries`, RPC `tool-summaries-usage`). The browser draws them as quiet lines in `web/chat.js`. `UiSettings.showThinking` only hides thinking in the browser.
+
+Rules:
+- Summaries never enter an agent's conversation, context or prompt.
+- Reads never queue or start a summary. Turning summaries on never summarizes calls made before, and turning them off cancels open rows.
+- Memory calls (`projects_knowledge_*`) are not summarized; they keep their own rows.
+
 ## Change feed
 
 `src/change-feed.ts` is an in-process pub/sub keyed by project, plus the reserved key `host` for host-level topics (`ui`, `tiers`, `projects`, `host-agent`, `approvals`; `GET /changes?project=host`); `publishHost(topic)` publishes one, and the Host agent's focus frames are `host-agent` events with a target. `topicsOfCommit` classifies each pi-durable commit into topics (`chat`, `jobs`, `knowledge`, `settings`) using a map of conversation ids kept from the chats and Jobs documents, so no storage read is needed; streaming deltas are ignored. `/changes` in `src/web.ts` pushes batched topic frames and the browser refetches only the changed read model; it polls only while the stream is down.

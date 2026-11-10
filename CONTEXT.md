@@ -34,6 +34,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Tier**: an ordered list of models stored host-wide; index 0 is preferred, the rest are the fallback order.
 - **Profile**: a role's per-project settings: tier, thinking level and switched-off tools.
 - **Archive**: read-only view of chats and transcripts from the pre-Job host.
+- **Tool summary**: one or two sentences, written by the owner's chosen summary model, on what one assistant message's tool calls did and how they ended. Shown to the owner in place of the calls; never seen by any agent.
 
 ## Pi Durable terms used as-is
 

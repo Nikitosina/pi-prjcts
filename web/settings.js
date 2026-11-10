@@ -28,6 +28,7 @@ export const SECTIONS = [
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
   { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
   { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
+  { id: "display", label: "Chat display", scope: "host", group: "Host", render: chatDisplay },
   { id: "statusline", label: "Status line", scope: "host", group: "Host", render: statusLine },
   { id: "hotkeys", label: "Hotkeys", scope: "host", group: "Host", render: hotkeys },
   { id: "notifications", label: "Notifications", scope: "host", group: "Advanced", render: notifications },
@@ -880,6 +881,48 @@ function animations(body) {
     if (!pick) return;
     void setUi({ animations: pick.dataset.motion }).then((ok) => ok && say(`Animations: ${pick.dataset.motion}`));
     body.querySelectorAll("[data-motion]").forEach((node) => node.setAttribute("aria-checked", String(node === pick)));
+  });
+}
+/** Thinking and tool summaries in every transcript: chats, workers and the Host agent. Both change only what this page draws. */
+async function chatDisplay(body, alive) {
+  const [tiers, usage] = await Promise.all([call("tiers-get"), call("tool-summaries-usage").catch(() => null)]);
+  if (!alive()) return;
+  const draw = () => {
+    const { showThinking, toolSummaries } = state.ui,
+      chosen = tiers.catalog.find((item) => item.ref === toolSummaries.model);
+    const problem = !toolSummaries.model
+      ? ""
+      : !chosen
+        ? `${toolSummaries.model} is no longer installed.`
+        : !chosen.available
+          ? `${toolSummaries.model} has no credentials; sign in to ${chosen.provider}.`
+          : "";
+    const options = tiers.catalog
+      .map(
+        (item) =>
+          `<option value="${esc(item.ref)}" ${item.ref === toolSummaries.model ? "selected" : ""} ${item.available ? "" : "disabled"}>${esc(item.ref)}${item.available ? "" : " · no credentials"}</option>`,
+      )
+      .join("");
+    const spent = usage
+      ? `${usage.summaries} summaries, ${usage.requests} requests, ${usd(usage.usage.cost.total)}${usage.interrupted ? `; ${usage.interrupted} cut off by a restart, their cost is unknown` : ""}.`
+      : "";
+    body.innerHTML = `${line("How transcripts look in every project, worker and the Host agent.", "Only this display changes: the agents and their context stay the same.")}<div class="field-row"><label class="switch"><input type="checkbox" id="show-thinking" ${showThinking ? "checked" : ""}/> Show thinking</label></div><div class="field-row"><label class="switch"><input type="checkbox" id="tool-summaries" ${toolSummaries.enabled ? "checked" : ""}/> Summarize tool calls</label></div><div class="field-row ts-model-row"><label for="summary-model" class="label">Summary model</label><select id="summary-model"><option value="" ${toolSummaries.model ? "" : "selected"} disabled>Choose a model</option>${options}</select></div>${problem ? `<p class="error-line small">${esc(problem)}</p>` : ""}<p class="muted small ts-data-note">Each finished step's calls get one or two sentences. The host sends their names, arguments and results to the summary model, each cut to a few hundred characters; images and files are never sent. Calls made while this is off are never summarized. Summaries are stored apart from the chat and never reach the agents.</p>${spent ? `<p class="muted small">Used so far: ${esc(spent)}</p>` : ""}`;
+  };
+  draw();
+  body.addEventListener("change", async (event) => {
+    const target = event.target;
+    if (target.id === "show-thinking") {
+      if (await setUi({ showThinking: target.checked })) say(target.checked ? "Thinking shown" : "Thinking hidden");
+    } else if (target.id === "tool-summaries") {
+      if (target.checked && !state.ui.toolSummaries.model) {
+        target.checked = false;
+        return say("Choose a summary model first", { error: true });
+      }
+      if (await setUi({ toolSummaries: { enabled: target.checked } })) say(target.checked ? "Tool summaries on" : "Tool summaries off");
+    } else if (target.id === "summary-model") {
+      if (await setUi({ toolSummaries: { model: target.value } })) say(`Summary model: ${target.value}`);
+    } else return;
+    if (alive()) draw();
   });
 }
 /** Status line: show the bar, and order and show its built-in items. Keyboard: Tab to an item's ↑/↓ or its checkbox. */

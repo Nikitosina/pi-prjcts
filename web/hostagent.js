@@ -16,6 +16,7 @@ const drawer = document.querySelector("#host-agent"),
   form = drawer.querySelector("#ha-composer"),
   input = form.querySelector("textarea");
 let items = [],
+  summaries = {},
   before = null,
   live = null,
   frame = null,
@@ -65,6 +66,8 @@ export function onHostTopic(change) {
   else if (change.topic === "host-agent" && isOpen()) void loadHostAgent();
 }
 
+on("chat-display", () => isOpen() && void loadHostAgent());
+
 export async function loadHostAgent() {
   const load = ++loads;
   let problem = "";
@@ -89,6 +92,8 @@ export async function loadHostAgent() {
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
+  // Earlier pages keep the summaries they were read with; the newest page brings its own.
+  summaries = { ...summaries, ...history.toolSummaries };
   before = history.before;
   paint();
   if (isOpen() && !live)
@@ -148,7 +153,7 @@ function offerSettings(section, before = () => {}) {
 // ---------------------------------------------------------------------------------------------------------------- transcript
 
 function paint() {
-  const transcript = transcriptHtml(items, false, "Host agent", { fold: false });
+  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, summaries });
   morph(
     body,
     (before ? `<button type="button" class="earlier" data-ha-earlier>Show earlier</button>` : "") +
@@ -181,6 +186,7 @@ body.addEventListener("click", async (event) => {
     const page = await call("host-agent-history", { before }).catch(fail);
     if (load !== loads || !page) return;
     items = [...page.items, ...items];
+    summaries = { ...page.toolSummaries, ...summaries };
     before = page.before;
     const top = body.scrollHeight - body.scrollTop;
     paint();
