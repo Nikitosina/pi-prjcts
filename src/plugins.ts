@@ -170,6 +170,7 @@ export const plugins = {
 const timeoutMs = () => Number(process.env.PI_PROJECTS_PLUGIN_TIMEOUT_MS) || 15_000;
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const VERSION = /^\S{1,40}$/;
 
 /** Configured plugin sources: [{ source, path }] or a recorded problem. */
 function configured(): Array<{ source: string; path: string } | { source: string; problem: string }> {
@@ -376,7 +377,7 @@ function webFiles(web: WebContribution | undefined): Loaded["web"] {
 }
 
 async function loadOne(source: string, path: string): Promise<PluginStatus> {
-  const status: PluginStatus = { source, name: null, state: "failed", provides: [], loadedAtMs: Date.now() };
+  const status: PluginStatus = { source, name: null, version: null, state: "failed", provides: [], loadedAtMs: Date.now() };
   try {
     const imported = await withTimeout(import(pathToFileURL(entryOf(path)).href) as Promise<Record<string, unknown>>, "import");
     const module = (imported.default && typeof imported.default === "object" ? imported.default : imported) as Partial<PluginModule>;
@@ -384,6 +385,9 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
       throw new Error("the module must export a name matching /^[a-z][a-z0-9-]{0,39}$/");
     if (typeof module.register !== "function") throw new Error("the module must export register(api)");
     status.name = module.name;
+    if (module.version !== undefined && (typeof module.version !== "string" || !VERSION.test(module.version)))
+      throw new Error("the module's version must be a string of 1 to 40 characters without spaces");
+    status.version = module.version ?? null;
     const stage: PluginCapabilities = {};
     await withTimeout(
       hostApi(module.name, stage).then((api) => module.register!(api)),
@@ -408,7 +412,15 @@ export function loadPlugins(): Promise<PluginStatus[]> {
   return (loading ??= (async () => {
     for (const item of configured()) {
       if ("problem" in item) {
-        statuses.push({ source: item.source, name: null, state: "failed", error: item.problem, provides: [], loadedAtMs: Date.now() });
+        statuses.push({
+          source: item.source,
+          name: null,
+          version: null,
+          state: "failed",
+          error: item.problem,
+          provides: [],
+          loadedAtMs: Date.now(),
+        });
         continue;
       }
       statuses.push(await loadOne(item.source, item.path));

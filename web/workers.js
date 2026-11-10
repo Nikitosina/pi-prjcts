@@ -322,10 +322,16 @@ export async function loadSide() {
     )
     .slice(0, 12);
   renderPrs();
-  const cards = (plugins?.web ?? []).filter((card) => card.title || card.label);
-  document.querySelector("#plugin-cards").innerHTML = cards.length
-    ? `<h2>Plugins</h2>${cards.map((card) => `<div class="plugin-card"><b>${esc(card.title ?? card.label)}</b>${card.text ? `<p class="small muted">${esc(clip(card.text, 160))}</p>` : ""}</div>`).join("")}`
-    : "";
+  const list = plugins?.plugins ?? [];
+  document.querySelector("#plugin-cards").innerHTML = list.length ? `<h2>Plugins</h2>${list.map(pluginRow).join("")}` : "";
+}
+/** What the host loaded at its start: a change on disk shows here only after the next restart. */
+function pluginRow(plugin) {
+  const loaded = plugin.state === "loaded";
+  const detail = loaded
+    ? `<p class="small muted">${esc(plugin.provides.join(", ") || "no capabilities")}</p>`
+    : `<p class="small plugin-error">${esc(clip(plugin.error ?? "failed", 300))}</p>${plugin.error?.includes(plugin.source) ? "" : `<p class="small muted mono">${esc(clip(plugin.source, 160))}</p>`}`;
+  return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span></div>${detail}</div>`;
 }
 
 // Merge never merges here: it sends the owner's request to the Coordinator of the chat named in the confirmation.

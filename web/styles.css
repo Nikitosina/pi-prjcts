@@ -1588,11 +1588,25 @@ a.pr-link:hover .pr-title {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.plugin-card {
-  border: 1px solid var(--line);
-  border-radius: var(--r-m);
-  padding: 8px 10px;
-  margin-bottom: 8px;
+.plugin-row {
+  padding: 4px 2px;
+  font-size: 12.5px;
+}
+.plugin-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.plugin-head .badge {
+  margin-left: auto;
+}
+.plugin-row p {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+.badge[data-tone="bad"],
+.plugin-error {
+  color: var(--bad);
 }
 
 /* ------------------------------------------------------------------------------------------------ focus views */

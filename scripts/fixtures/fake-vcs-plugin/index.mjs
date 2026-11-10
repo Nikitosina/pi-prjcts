@@ -11,6 +11,7 @@ const RECORD = "fakeAuthorization";
 
 export default {
   name: "fake",
+  version: "1.2.3",
   register(api) {
     const { defineTool, defineExtension } = api.lib.durable,
       { Type } = api.lib.typebox;

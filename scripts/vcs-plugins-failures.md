@@ -42,3 +42,9 @@ Retired with the classic client, so no longer checked in a browser: the grouped 
 (11/23), the failed-plugin banner (9; the `plugins` RPC still reports failures), the Owner setup plugin step (10; Owner setup was
 removed) and the "plugin is not loaded" note in the PR card (20; `automation-snapshot` still flags `unloadedProviders`).
 26. A plugin's declared browser file (`web.script`) changed on disk after the plugin loaded is served before the host restarts, so the browser runs plugin code the running host did not load (ui2-web-failures S12).
+
+## Developing a plugin (2026-11-10)
+
+27. A plugin's declared version is missing from the `plugins` RPC or `/health`, so the owner cannot tell which version a host runs.
+28. The browser shows no plugin status: the Plugins section of the context panel must list every plugin with its name, version, state and capabilities, and a failed plugin with its source and error, escaped.
+29. A plugin scaffolded by `projects plugin new` in a directory outside the core repository does not load on a host started with it, or its scaffolded read RPC does not answer.

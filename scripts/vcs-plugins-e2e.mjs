@@ -1,5 +1,6 @@
 // E2E: VCS / PR provider plugin API with a FAKE plugin (scripts/fixtures). Fake model, private HOME, browser (inbox at `/`). No real VCS, PR service, gh or live host.
 // Failure cases written first: vcs-plugins-failures.md (numbers in check labels). Artifact: artifacts/vcs-plugins-<stamp>/ (report.json, screenshots, host logs).
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createKit, call, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
@@ -39,6 +40,12 @@ const pluginUi = join(kit.root, "fake-ui.js");
 writeFileSync(pluginUi, "// fake plugin ui, as loaded\n");
 kit.hostEnv.FAKE_PLUGIN_UI = pluginUi;
 const { check, rpc, result } = kit;
+// 29: a plugin scaffolded by the CLI in a directory outside the core repository, loaded through the env list.
+const helloPath = join(kit.root, "elsewhere", "hello");
+const scaffold = spawnSync(process.execPath, [join(kit.core, "src", "cli.ts"), "plugin", "new", helloPath, "--name", "hello"], {
+  encoding: "utf8",
+});
+kit.hostEnv.PI_PROJECTS_PLUGINS += `:${helloPath}`;
 const dataPath = join(kit.root, "fake-plugin-data.json");
 kit.hostEnv.FAKE_PLUGIN_DATA = dataPath;
 const pr = (id, title, ci, extra = {}) => ({ id, title, ci, ...extra });
@@ -123,10 +130,25 @@ await kit.run(async () => {
     ),
     byName("fake").provides,
   );
+  check(
+    "27 the plugins RPC reports a declared version, and null without one",
+    byName("fake")?.version === "1.2.3" && byName("second")?.version === null,
+    [byName("fake"), byName("second")],
+  );
+  check(
+    "29 the scaffolded plugin loads from outside the core repository and its read RPC answers",
+    scaffold.status === 0 &&
+      byName("hello")?.state === "loaded" &&
+      byName("hello")?.version === "0.1.0" &&
+      (await rpc({ action: "plugin", plugin: "hello", method: "hello", params: { who: "owner" } }))?.greeting === "Hello, owner!",
+    { scaffold: scaffold.stderr, hello: byName("hello") },
+  );
   const health = await rpc();
   check(
     "9 /health lists the plugins including failures",
-    health.plugins.length === status.length && health.plugins.some((item) => item.state === "failed" && item.error),
+    health.plugins.length === status.length &&
+      health.plugins.some((item) => item.state === "failed" && item.error) &&
+      health.plugins.find((item) => item.name === "fake")?.version === "1.2.3",
     health.plugins,
   );
   check(
@@ -524,6 +546,26 @@ await kit.run(async () => {
     prsText,
   );
   await page.shot("01-prs-two-providers");
+  await page.waitFor(`/hello/.test(document.querySelector('#plugin-cards')?.innerText ?? '')`, "plugin list");
+  const pluginRows = await page.evaluate(
+    `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, text: row.innerText }))`,
+  );
+  const rowOf = (name) => pluginRows.find((row) => row.name === name);
+  check(
+    "28 the context panel lists each plugin with name, version, state and capabilities, and failures with their reason",
+    /fake/.test(rowOf("fake")?.text) &&
+      /1\.2\.3/.test(rowOf("fake")?.text) &&
+      rowOf("fake")?.state === "loaded" &&
+      /vcs/.test(rowOf("fake")?.text) &&
+      /0\.1\.0/.test(rowOf("hello")?.text) &&
+      rowOf("throws")?.state === "failed" &&
+      /boom in register/.test(rowOf("throws")?.text) &&
+      pluginRows.some((row) => row.state === "failed" && /does-not-exist/.test(row.text)) &&
+      !(await page.evaluate(`!!document.querySelector('#plugin-cards script, #plugin-cards img')`)),
+    pluginRows,
+  );
+  await page.evaluate(`document.querySelector('#plugin-cards').scrollIntoView()`);
+  await page.shot("02-plugin-list");
 
   // ---- Config problems and the plugin missing after use (19-21) ----
   const snapshotBefore = {
