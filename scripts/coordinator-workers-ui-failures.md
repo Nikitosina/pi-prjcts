@@ -20,3 +20,8 @@ C3 Context reads are unbounded: one request per jobs push, per worker, or more t
 They must be batched (one request for the visible active workers, at most 40 ids) and throttled.
 C4 A late `worker-contexts` answer from a previous chat or an older request paints over a newer one. It must be dropped.
 C5 Ended workers in the history carry a ring. Only active workers get one.
+
+## Worker cards during command updates (2026-11-10)
+F1 Every jobs push or current-command read redraws the panel, so a running worker's card is rebuilt and its entry animation
+replays: the card flashes once per command. A card must mount and animate in once; later updates change its content in place.
+New cards still animate in, and ended ones still leave.
