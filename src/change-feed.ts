@@ -54,19 +54,22 @@ export const JOBS_KIND = "projects.jobs";
  */
 export function topicsOfCommit(publication: CommitPublication, map: TopicMap): ProjectEvent[] {
   const seen = new Map<string, ProjectEvent>();
-  const add = (event: ProjectEvent) => seen.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
-  const conversation = (id: number) => {
-    const chat = id === map.rootId ? "main" : map.chats.get(id),
-      agent = map.agents.get(id);
-    if (chat) add({ topic: "chat", chat });
-    else if (agent) add({ topic: "jobs", thread: agent });
-  };
+  const add = (event: ProjectEvent | undefined) => event && seen.set(`${event.topic}:${event.chat ?? ""}:${event.thread ?? ""}`, event);
   for (const change of publication.changes) {
-    if (change.type === "entry" || change.type === "submission") conversation(Number(change.value.conversationId));
+    if (change.type === "entry" || change.type === "submission") add(topicOfConversation(Number(change.value.conversationId), map));
     else if (change.type === "document") {
       if (change.record.kind === CHATS_KIND) add({ topic: "chat", chat: "*" });
       else if (change.record.kind === JOBS_KIND) add({ topic: "jobs" });
     }
   }
   return [...seen.values()];
+}
+
+/** The read model a conversation's transcript belongs to: its chat, or the agent that owns it. */
+export function topicOfConversation(id: number, map: TopicMap): ProjectEvent | undefined {
+  const chat = id === map.rootId ? "main" : map.chats.get(id),
+    agent = map.agents.get(id);
+  if (chat) return { topic: "chat", chat };
+  if (agent) return { topic: "jobs", thread: agent };
+  return undefined;
 }

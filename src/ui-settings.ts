@@ -19,6 +19,12 @@ export const STATUS_ITEM_IDS = StatusItemId.anyOf.map((item) => item.const);
 const StatusItem = Type.Object({ id: StatusItemId, enabled: Type.Boolean() }, { additionalProperties: false });
 /** Every item exactly once, so reordering and hiding never loses one; uniqueness is checked by `checkStatusItems`. */
 const StatusItems = Type.Array(StatusItem, { minItems: STATUS_ITEM_IDS.length, maxItems: STATUS_ITEM_IDS.length });
+/** Tool summaries (src/tool-summaries.ts): on or off, and the installed `provider/model` that writes them. `ui-set` refuses turning them on
+ * without a model that is installed and has credentials. */
+const ToolSummaries = Type.Object(
+  { enabled: Type.Boolean(), model: Type.Union([Type.String({ minLength: 3, maxLength: 200, pattern: "^[^/]+/.+$" }), Type.Null()]) },
+  { additionalProperties: false },
+);
 
 /** The host UI document (docs/ui2-contract.md): one per host, shared by every browser. */
 export const UiSettings = Type.Object(
@@ -32,6 +38,9 @@ export const UiSettings = Type.Object(
     panels: Type.Object({ list: Type.Boolean(), context: Type.Boolean(), hostAgent: Type.Boolean() }, { additionalProperties: false }),
     statusLine: Type.Boolean(),
     statusItems: StatusItems,
+    /** Display only: hiding thinking changes neither the model's thinking level nor its context. */
+    showThinking: Type.Boolean(),
+    toolSummaries: ToolSummaries,
   },
   { additionalProperties: false },
 );
@@ -46,6 +55,8 @@ export const UiPatch = Type.Partial(
       panels: Type.Partial(UiSettings.properties.panels),
       statusLine: UiSettings.properties.statusLine,
       statusItems: Type.Array(StatusItem, { maxItems: 64 }),
+      showThinking: UiSettings.properties.showThinking,
+      toolSummaries: Type.Partial(ToolSummaries),
     },
     { additionalProperties: false },
   ),
@@ -58,6 +69,8 @@ export const DEFAULT_UI: UiSettings = {
   panels: { list: true, context: true, hostAgent: true },
   statusLine: true,
   statusItems: STATUS_ITEM_IDS.map((id) => ({ id, enabled: true })),
+  showThinking: true,
+  toolSummaries: { enabled: false, model: null },
 };
 
 /** Gives a stored list from before an item existed that item, enabled, right after its predecessor in the built-in order; the

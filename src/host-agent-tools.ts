@@ -180,8 +180,11 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "host-agent-settings": allow("The Host agent's model, thinking and disabled tools."),
   "approvals-list": allow("Owner approvals and their states."),
   "approval-decide": exclude("Only the owner decides approvals."),
-  "ui-get": allow("The owner's UI settings (theme, animations, hotkeys, panels, status line) with their revision."),
+  "ui-get": allow(
+    "The owner's UI settings (theme, animations, hotkeys, panels, status line, thinking visibility, tool summaries) with their revision.",
+  ),
   "ui-set": allow("Change the owner's UI settings with a partial patch (revision from ui-get)."),
+  "tool-summaries-usage": allow("Tokens and cost of tool summaries, per project and for the Host agent, apart from the agents' own usage."),
   "storage-get": allow("Host storage settings: the workspace cache root (null keeps caches in each project's folder) with its revision."),
   "storage-set": allow(
     "Move the workspace cache root to an absolute folder, or null for each project's folder (revision from storage-get).",
@@ -339,7 +342,7 @@ export function hostAgentTools(deps: HostToolDeps): ToolRegistration[] {
   });
   const uiSet = defineTool({
     name: "ui_set",
-    description: `Change the owner's UI settings (theme, font, animations, hotkeys, panels, status line) with a partial patch. statusLine: false hides the whole status line; statusItems orders it and hides items: list every one of ${STATUS_ITEM_IDS.join(", ")} exactly once as { id, enabled }. Read the current list with host_call ui-get first.`,
+    description: `Change the owner's UI settings (theme, font, animations, hotkeys, panels, status line, showThinking, toolSummaries { enabled, model }) with a partial patch. statusLine: false hides the whole status line; statusItems orders it and hides items: list every one of ${STATUS_ITEM_IDS.join(", ")} exactly once as { id, enabled }. Read the current list with host_call ui-get first.`,
     parameters: Type.Object({ patch: Type.Record(Type.String(), Type.Unknown()) }),
     replay: "unsafe",
     async execute(args) {
