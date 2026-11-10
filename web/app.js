@@ -36,6 +36,7 @@ import {
 } from "./hostagent.js";
 import { closePalette, openPalette, paletteOpen, setPaletteSource } from "./palette.js";
 import { closeSlashMenu, slashMenuOpen } from "./slash.js";
+import { closeLightbox, lightboxOpen } from "./media.js";
 
 const app = document.querySelector("#app"),
   center = document.querySelector("#center"),
@@ -270,6 +271,7 @@ document.addEventListener("pi-remote-host", renderRemoteHost);
 renderRemoteHost();
 
 function leaveTop() {
+  if (lightboxOpen()) return closeLightbox();
   if (archiveDialogOpen()) return closeArchiveDialog();
   if (mergeDialogOpen()) return closeMergeDialog();
   if (limitDetailOpen()) return closeLimitDetail();
@@ -282,11 +284,12 @@ function leaveTop() {
   if (leaveFocus()) return;
   if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
 }
-const outside = () => !paletteOpen() && !settingsOpen() && !archiveDialogOpen() && !mergeDialogOpen();
+const confirming = () => archiveDialogOpen() || mergeDialogOpen() || lightboxOpen();
+const outside = () => !paletteOpen() && !settingsOpen() && !confirming();
 const overlays = new Set(["settings", "palette", "stop"]);
 for (const [id, run] of Object.entries(COMMANDS))
   register(id, run, {
-    when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !archiveDialogOpen() && !mergeDialogOpen() : outside,
+    when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !confirming() : outside,
   });
 register("toggle-steer", () => toggleSteer(), { when: outside });
 // Only the chat in the center: not while typing, in the worker or Memory view, or with the Host agent drawer open.

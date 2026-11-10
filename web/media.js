@@ -72,7 +72,7 @@ function loadSlot(slot, source) {
 function show(slot, url) {
   slot.dataset.state = "ready";
   const label = slot.dataset.label ?? "";
-  slot.innerHTML = `<img class="media-img" src="${esc(url)}" alt="${esc(label)}" title="${esc(label)}" decoding="async">`;
+  slot.innerHTML = `<button type="button" class="media-open" aria-label="Enlarge image: ${esc(label)}"><img class="media-img" src="${esc(url)}" alt="${esc(label)}" title="${esc(label)}" decoding="async"></button>`;
 }
 function failed(slot, error) {
   const reason = error instanceof MediaError ? error.message : "could not load";
@@ -128,6 +128,86 @@ export function hydrateMedia(root, source) {
     }
   }
 }
+
+// The image viewer: a loaded image opens enlarged in #lightbox, zooming out of its thumbnail and back into it on close.
+const lightbox = document.querySelector("#lightbox"),
+  big = lightbox.querySelector("img");
+let opener = null,
+  closing = false;
+
+export const lightboxOpen = () => lightbox.open;
+
+/** Starts the zoom between the thumbnail and the viewer; null when motion is off or there is nothing to zoom from. */
+function zoom(thumb, out) {
+  if (document.documentElement.dataset.motion === "off") return null;
+  const to = big.getBoundingClientRect(),
+    from = thumb?.getBoundingClientRect();
+  if (!to.width) return null;
+  const css = getComputedStyle(document.documentElement);
+  // Closing holds the last frame until the dialog closes, so the image does not snap back to full size.
+  const timing = {
+    duration: parseFloat(css.getPropertyValue("--t-med")) || 200,
+    easing: css.getPropertyValue("--ease").trim(),
+    fill: out ? "forwards" : "none",
+  };
+  // A thumbnail scrolled out of view (or re-rendered away) gets a short fade instead of a flight across the screen.
+  const seen = from?.width && from.bottom > 0 && from.top < innerHeight;
+  const small = seen
+    ? {
+        transform: `translate(${from.x + from.width / 2 - to.x - to.width / 2}px, ${from.y + from.height / 2 - to.y - to.height / 2}px) scale(${from.width / to.width}, ${from.height / to.height})`,
+      }
+    : { transform: "scale(0.96)", opacity: 0 };
+  const frames = (start, end) => (out ? [end, start] : [start, end]);
+  lightbox.animate(frames({ opacity: 0 }, { opacity: 1 }), { ...timing, pseudoElement: "::backdrop" });
+  for (const node of lightbox.querySelectorAll(".lightbox-x, figcaption")) node.animate(frames({ opacity: 0 }, { opacity: 1 }), timing);
+  return big.animate(frames(small, { transform: "none", opacity: 1 }), timing).finished;
+}
+function thumbnail() {
+  if (opener?.isConnected) return opener;
+  // The transcript may have re-rendered meanwhile; the blob URL is cached, so the new button shows the same src.
+  return [...document.querySelectorAll(".media-open")].find((button) => button.querySelector("img")?.src === big.src) ?? null;
+}
+function openLightbox(button) {
+  const thumb = button.querySelector("img");
+  if (lightbox.open || !thumb?.naturalWidth) return;
+  opener = button;
+  big.src = thumb.src;
+  big.alt = thumb.alt;
+  big.style.setProperty("--ar", `${thumb.naturalWidth} / ${thumb.naturalHeight}`);
+  big.style.setProperty("--w", `${thumb.naturalWidth}px`);
+  lightbox.querySelector("figcaption").textContent = thumb.alt;
+  lightbox.showModal();
+  lightbox.querySelector("[data-lightbox-close]").focus();
+  void zoom(thumb, false);
+}
+function finish() {
+  if (!opener) return;
+  const back = thumbnail();
+  opener = null;
+  closing = false;
+  if (lightbox.open) lightbox.close();
+  for (const animation of lightbox.getAnimations({ subtree: true })) animation.cancel();
+  big.removeAttribute("src");
+  back?.focus();
+}
+export function closeLightbox() {
+  if (!lightbox.open || closing) return;
+  const motion = zoom(thumbnail()?.querySelector("img"), true);
+  if (!motion) return finish();
+  closing = true;
+  motion.then(finish, finish);
+}
+lightbox.addEventListener("click", closeLightbox);
+lightbox.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeLightbox();
+});
+// The browser may still close the dialog itself (a repeated Escape); clean up the same way.
+lightbox.addEventListener("close", finish);
+document.addEventListener("click", (event) => {
+  const button = event.target.closest?.(".media-open");
+  if (button) openLightbox(button);
+});
 
 // A non-image artifact (log, archive, video) is fetched only when the owner clicks it, then saved under its own name.
 document.addEventListener("click", async (event) => {

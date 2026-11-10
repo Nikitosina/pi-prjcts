@@ -545,6 +545,19 @@ try {
   await hover(`#tree [data-chat="${spare}"]`);
   await waitFor(shown(spare), s, "archive button on hover");
   await shot("05-archive-hover", s);
+  // F31: hovering the tree shows no 1–9 badges; the digits still switch chats of the selected project in tree order.
+  if (await evaluate(`!!document.querySelector('#tree kbd')`, s)) throw Error("Tree rows still show shortcut badges");
+  await evaluate(`document.activeElement?.blur()`, s);
+  for (const [key, chat] of [
+    ["3", spare],
+    ["1", "main"],
+    ["2", chatId],
+  ]) {
+    await press(key, `Digit${key}`);
+    await waitFor(`${current}?.dataset.chat === ${JSON.stringify(chat)}`, s, `digit ${key} opens its chat`);
+  }
+  await hover(`#tree [data-chat="${spare}"]`);
+  result.checks.push("F31 hovering the tree shows no shortcut badges; digits 1–9 still switch chats");
   await evaluate(`document.querySelector('#tree [data-chat="main"]').focus()`, s);
   await press("ArrowDown", "ArrowDown");
   if ((await evaluate(`document.activeElement?.dataset.chat ?? document.activeElement?.className`, s)) !== chatId)

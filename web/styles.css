@@ -486,14 +486,6 @@ a {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tree-chat kbd {
-  opacity: 0;
-  transition: opacity var(--t-fast);
-}
-#tree:hover .tree-chat kbd,
-#tree:focus-within .tree-chat kbd {
-  opacity: 1;
-}
 .tree-row {
   position: relative;
 }
@@ -776,6 +768,86 @@ a {
 }
 .prose .media-img {
   margin: 4px 0;
+}
+.media-open {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-s);
+  background: none;
+  cursor: zoom-in;
+}
+.media-open .media-img {
+  transition: border-color var(--t-fast);
+}
+.media-open:hover .media-img {
+  border-color: var(--line-strong);
+}
+/* Image viewer: the image fills the viewport keeping its aspect (--ar), up to twice its own width (--w) so small ones stay sharp. */
+#lightbox {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  cursor: zoom-out;
+}
+#lightbox[open] {
+  display: grid;
+  place-items: center;
+  animation: none;
+}
+#lightbox::backdrop {
+  background: rgb(0 0 0 / 0.82);
+  backdrop-filter: blur(6px);
+}
+#lightbox figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+#lightbox img {
+  display: block;
+  aspect-ratio: var(--ar);
+  width: min(92vw, calc((100dvh - 96px) * var(--ar)), calc(var(--w) * 2));
+  height: auto;
+  border-radius: var(--r-m);
+  background: var(--code-bg);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.5);
+}
+#lightbox figcaption {
+  max-width: 92vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--mono);
+  color: rgb(255 255 255 / 0.72);
+}
+.lightbox-x {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.45);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.lightbox-x:hover {
+  background: rgb(255 255 255 / 0.16);
 }
 .artifact-open.failed {
   text-decoration: line-through;
