@@ -420,12 +420,204 @@ try {
   chromeSession = s;
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  // A page-side spy on /api: records worker-contexts and thread-history reads, and lets a check rewrite or hold one answer.
+  await send(
+    "Page.addScriptToEvaluateOnNewDocument",
+    {
+      source: `window.__spy = { contexts: [], history: [], rewrite: {} };
+        const realFetch = window.fetch;
+        window.fetch = async (url, init) => {
+          const body = typeof init?.body === "string" && String(url).endsWith("/api") ? JSON.parse(init.body) : null;
+          if (body?.action === "worker-contexts") window.__spy.contexts.push({ at: Date.now(), ids: body.threadIds, project: body.id });
+          if (body?.action === "thread-history") window.__spy.history.push(body.threadId);
+          const rewrite = body && window.__spy.rewrite[body.action];
+          if (!rewrite) return realFetch(url, init);
+          const response = await realFetch(url, init), reply = await response.json();
+          const data = await rewrite(reply.data);
+          return new Response(JSON.stringify({ ...reply, data }), { status: response.status, headers: { "content-type": "application/json" } });
+        };`,
+    },
+    s,
+  );
   await send("Page.navigate", { url: launch.toString() }, s);
   const workers = `(document.querySelector('#workers')?.innerText ?? '')`;
-  await waitFor(`document.body.dataset.ready === "1" && ${workers}.includes('MARK-FAILTASK')`, s, "project loaded");
+  const history = `document.querySelector('#workers [data-worker-history]')`;
+  await waitFor(`document.body.dataset.ready === "1" && !!${history}`, s, "project loaded");
   await ask("MARK-HOLD");
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status === "running", "hold not running");
   await waitFor(`${workers}.includes('MARK-HOLDTASK')`, s, "running Job in the list");
+
+  // H1-H5, C1-C5 (coordinator-workers-ui-failures.md): active workers on top, ended ones collapsed with a count, context rings.
+  const snap = await rpc({ action: "jobs-snapshot", id });
+  const holdId = snap.jobs.find((job) => job.title.startsWith("MARK-HOLDTASK")).id;
+  const endedCount =
+    snap.jobs.filter((job) => job.id !== holdId && !job.dismissedAt).length +
+    snap.agents.filter((agent) => !agent.jobId && agent.endedAt !== null && !agent.dismissedAt).length;
+  const panel = () =>
+    evaluate(
+      `(() => { const box = document.querySelector('#workers'), toggle = box.querySelector('[data-worker-history]'), list = box.querySelector('#workers-history');
+        return { active: [...box.querySelectorAll(':scope > .worker')].map((n) => n.innerText), toggle: toggle?.innerText ?? null, expanded: toggle?.getAttribute('aria-expanded') ?? null,
+          ended: list ? [...list.querySelectorAll('.worker')].map((n) => ({ text: n.innerText, ring: !!n.querySelector('.ctx-ring'), open: !!n.querySelector('[data-open-worker]') })) : [],
+          count: document.querySelector('#workers-count').textContent }; })()`,
+      s,
+    );
+  let seen = await panel();
+  if (
+    seen.active.length !== 1 ||
+    !seen.active[0].includes("MARK-HOLDTASK") ||
+    seen.expanded !== "false" ||
+    seen.ended.length ||
+    !seen.toggle?.includes(String(endedCount)) ||
+    seen.count !== "1"
+  )
+    throw Error("H1 active worker on top, ended ones collapsed with their count: " + JSON.stringify({ seen, endedCount }));
+  result.checks.push(`H1 the running Job is the one card; ${endedCount} ended workers are collapsed behind a toggle with their count`);
+  if (!/1 failed/.test(seen.toggle)) throw Error("H2 collapsed history hides the failure: " + seen.toggle);
+  result.checks.push("H2 the collapsed toggle still says 1 failed");
+  await shot("01a-active-collapsed", s);
+
+  // C1: the ring is the host's worker-contexts value.
+  const ring = `document.querySelector('#workers .worker .ctx-ring')`;
+  const hostContext = (await rpc({ action: "worker-contexts", id, threadIds: [holdId] }))[holdId];
+  if (!hostContext?.window) throw Error("Fake worker has no known context window: " + JSON.stringify(hostContext));
+  const pct = Math.round((100 * hostContext.tokens) / hostContext.window);
+  await waitFor(`${ring}?.dataset.state === "known"`, s, "known context ring");
+  const ringSeen = await evaluate(`({ pct: ${ring}.dataset.pct, label: ${ring}.getAttribute('aria-label'), title: ${ring}.title })`, s);
+  if (ringSeen.pct !== String(pct) || !ringSeen.title.includes(`${pct}%`) || !/tokens/.test(ringSeen.title) || !ringSeen.label)
+    throw Error("C1 ring differs from worker-contexts: " + JSON.stringify({ ringSeen, hostContext }));
+  result.checks.push(`C1 the active worker's ring shows ${pct}% with tokens in its tooltip, the host's worker-contexts value`);
+
+  // C3: a burst of jobs reads is one bounded worker-contexts request, never a transcript read of an ended agent.
+  const before = await evaluate(`window.__spy.contexts.length`, s);
+  await evaluate(`import('/workers.js').then((m) => Promise.all(Array.from({ length: 15 }, () => m.loadJobs())))`, s);
+  await delay(1500);
+  const spy = await evaluate(`window.__spy`, s);
+  const endedIds = snap.jobs
+    .filter((job) => job.id !== holdId)
+    .map((job) => job.id)
+    .concat(snap.agents.filter((agent) => !agent.jobId).map((agent) => agent.id));
+  if (
+    spy.contexts.length - before > 1 ||
+    spy.contexts.some((item) => item.ids.length > 40 || item.ids.some((one) => endedIds.includes(one))) ||
+    spy.history.some((one) => endedIds.includes(one))
+  )
+    throw Error("C3 context reads not bounded: " + JSON.stringify({ before, spy }));
+  result.checks.push(
+    `C3 15 jobs reloads made ${spy.contexts.length - before} worker-contexts request (≤ 40 active ids, no ended agent, no transcript read)`,
+  );
+
+  // C2: an unknown context reads as unknown, never 0 %.
+  const reloadJobs = () => evaluate(`import('/workers.js').then((m) => m.loadJobs())`, s);
+  const waitContextsCall = async (count) => waitFor(`window.__spy.contexts.length > ${count}`, s, "next worker-contexts request", 40);
+  for (const [label, value] of [
+    ["null entry", null],
+    ["zero window", { tokens: 500, window: 0 }],
+  ]) {
+    await evaluate(
+      `window.__spy.rewrite['worker-contexts'] = (data) => ({ ...data, ${JSON.stringify(holdId)}: ${JSON.stringify(value)} })`,
+      s,
+    );
+    const count = await evaluate(`window.__spy.contexts.length`, s);
+    await reloadJobs();
+    await waitContextsCall(count);
+    await waitFor(`${ring}?.dataset.state === "unknown"`, s, `unknown ring (${label})`);
+    const unknown = await evaluate(
+      `({ label: ${ring}.getAttribute('aria-label'), title: ${ring}.title, pct: ${ring}.dataset.pct ?? null })`,
+      s,
+    );
+    if (/\b0\s?%/.test(unknown.label + unknown.title) || unknown.pct !== null || !/unknown/i.test(unknown.label))
+      throw Error(`C2 unknown context (${label}) shown as a number: ` + JSON.stringify(unknown));
+    if (label === "null entry") await shot("01b-ring-unknown", s);
+  }
+  result.checks.push("C2 a null entry and a zero window both read as unknown context, not 0 %");
+
+  // C4: a held older answer (77 %) arrives after a newer one and after a chat switch; it never paints.
+  const second = (await rpc({ action: "chat-create", id, title: "Second" })).id;
+  await evaluate(
+    `window.__spy.release = null; window.__spy.rewrite['worker-contexts'] = (data) => new Promise((ok) => { window.__spy.release = () => ok({ ...data, ${JSON.stringify(holdId)}: { tokens: 77000, window: 100000 } }); })`,
+    s,
+  );
+  let count = await evaluate(`window.__spy.contexts.length`, s);
+  await reloadJobs();
+  await waitContextsCall(count);
+  await waitFor(`typeof window.__spy.release === "function"`, s, "held worker-contexts answer");
+  await evaluate(`(() => { const held = window.__spy.release; window.__spy.held = held; window.__spy.rewrite = {}; })()`, s);
+  await evaluate(`document.querySelector('#tree [data-chat="${second}"]').click()`, s);
+  await waitFor(
+    `document.body.dataset.ready === "1" && !document.querySelector('#workers .worker') && new URL(location.href).searchParams.get('chat') === "${second}"`,
+    s,
+    "second chat",
+  );
+  count = await evaluate(`window.__spy.contexts.length`, s);
+  await evaluate(`document.querySelector('#tree [data-chat="main"]').click()`, s);
+  await waitContextsCall(count);
+  await waitFor(`${ring}?.dataset.state === "known" && ${ring}.dataset.pct === "${pct}"`, s, "fresh ring on Main");
+  await evaluate(`window.__spy.held()`, s);
+  await delay(800);
+  const afterLate = await evaluate(`${ring}?.dataset.pct ?? null`, s);
+  if (afterLate !== String(pct)) throw Error("C4 a stale worker-contexts answer painted: " + afterLate);
+  result.checks.push("C4 a held worker-contexts answer released after a chat switch and a newer answer is dropped");
+
+  // H4: the Job record lags (status no longer running) while its worker still works: it stays on top.
+  await evaluate(
+    `window.__spy.rewrite['jobs-snapshot'] = (data) => ({ ...data, jobs: data.jobs.map((job) => job.id === ${JSON.stringify(holdId)} ? { ...job, status: "completed", working: true } : job) })`,
+    s,
+  );
+  await reloadJobs();
+  seen = await panel();
+  await evaluate(`window.__spy.rewrite = {}`, s);
+  if (seen.active.length !== 1 || !seen.active[0].includes("MARK-HOLDTASK") || seen.toggle?.includes(String(endedCount + 1)))
+    throw Error("H4 a working agent with a lagging Job status was hidden: " + JSON.stringify(seen));
+  result.checks.push("H4 a working worker whose Job status lags stays on top");
+  await reloadJobs();
+
+  // H3, H5, C5: expanding shows every ended card with its controls and no ring; it survives a jobs push and a reload.
+  await evaluate(`${history}.click()`, s);
+  await waitFor(`${history}.getAttribute('aria-expanded') === "true"`, s, "history expanded");
+  seen = await panel();
+  const failedCard = seen.ended.find((item) => item.text.includes("MARK-FAILTASK"));
+  if (seen.ended.length !== endedCount || !failedCard?.open || seen.ended.some((item) => item.ring))
+    throw Error("H5/C5 expanded history wrong: " + JSON.stringify(seen));
+  result.checks.push(`H5 the expanded history shows all ${endedCount} ended cards with Open; C5 none carries a ring`);
+  await shot("01c-history-expanded", s);
+  await reloadJobs();
+  await send("Page.reload", {}, s);
+  await waitFor(`document.body.dataset.ready === "1" && !!${history}`, s, "reloaded");
+  seen = await panel();
+  if (seen.expanded !== "true" || seen.ended.length !== endedCount) throw Error("H3 expansion lost on refresh: " + JSON.stringify(seen));
+  // Another chat with its own ended scout starts collapsed.
+  await rpc({ action: "message", id, chatId: second, text: "MARK-SCOUT" });
+  await eventually(
+    async () =>
+      (await rpc({ action: "jobs-snapshot", id })).agents.filter((agent) => agent.title.startsWith("MARK-SCOUTTASK") && agent.endedAt)
+        .length === 2,
+    "second chat scout did not end",
+  );
+  await evaluate(`document.querySelector('#tree [data-chat="${second}"]').click()`, s);
+  await waitFor(`new URL(location.href).searchParams.get('chat') === "${second}" && !!${history}`, s, "second chat history");
+  if ((await evaluate(`${history}.getAttribute('aria-expanded')`, s)) !== "false") throw Error("H3 expansion leaked into another chat");
+  await evaluate(`document.querySelector('#tree [data-chat="main"]').click()`, s);
+  await waitFor(
+    `new URL(location.href).searchParams.get('chat') === null && ${history}?.getAttribute('aria-expanded') === "true"`,
+    s,
+    "Main still expanded",
+  );
+  result.checks.push("H3 the expanded history survives a jobs push and a reload in its chat; another chat starts collapsed");
+
+  // Narrow: the context sheet at 390 px keeps the cards, the toggle and the ring inside the panel.
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await evaluate(`document.querySelector('[data-cmd="toggle-context"]').click()`, s);
+  await waitFor(`document.querySelector('#app').dataset.sheet === "context"`, s, "context sheet");
+  const narrow = await evaluate(
+    `(() => { const panel = document.querySelector('#context'), box = panel.getBoundingClientRect(); return { overflow: panel.scrollWidth - panel.clientWidth, outside: [...panel.querySelectorAll('.worker, [data-worker-history], .ctx-ring')].filter((n) => { const r = n.getBoundingClientRect(); return r.right > box.right + 1 || r.left < box.left - 1; }).length }; })()`,
+    s,
+  );
+  if (narrow.overflow > 1 || narrow.outside) throw Error("Narrow context sheet overflows: " + JSON.stringify(narrow));
+  await delay(500); // let the sheet's open transition finish before the screenshot
+  await shot("01d-narrow-390", s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ""`, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  result.checks.push("N1 at 390 px the context sheet shows the cards, toggle and ring without overflow");
   releaseHold();
   await eventually(async () => (await workFor(id, "MARK-HOLDTASK")).status !== "running", "held Job did not finish");
   result.checks.push("A1 the chat's Workers list shows failed and running Jobs; a held Job finishes");

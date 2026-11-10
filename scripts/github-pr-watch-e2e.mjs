@@ -600,6 +600,145 @@ await kit.run(async () => {
     ),
   );
   await page.shot("pr-list");
+
+  // P1-P10 (github-pr-watch-failures.md): rows link to the provider's own URL; Merge asks the Coordinator in an owner message.
+  ghSet((state) => {
+    pull(state, 9).url = "javascript:alert(1)";
+  });
+  await group(id, true);
+  await page.reload();
+  await page.waitFor(
+    `document.body.dataset.ready === "1" && document.querySelectorAll('#prs .pr-row').length >= 6`,
+    "PR list after reload",
+  );
+  const rowOf = (ref) =>
+    ev(
+      `(() => { const row = [...document.querySelectorAll('#prs .pr-row')].find((n) => n.querySelector('.mono')?.textContent === ${JSON.stringify(ref)}); if (!row) return null; const a = row.querySelector('a'), m = row.querySelector('[data-merge-pr]');
+        return { href: a?.getAttribute('href') ?? null, target: a?.target ?? null, rel: a?.rel ?? null, merge: m ? { disabled: m.disabled, title: m.title } : null }; })()`,
+    );
+  const row3 = await rowOf("#3"),
+    row9 = await rowOf("#9");
+  check(
+    "P1 a PR row links to the provider's URL in a new tab without an opener",
+    row3?.href === "https://github.com/acme/mari/pull/3" && row3.target === "_blank" && /noopener/.test(row3.rel),
+    row3,
+  );
+  check(
+    "P2 a javascript: PR URL stays text, nothing guessed",
+    row9 && row9.href === null && !(await ev(`!!document.querySelector('#prs a[href^="javascript" i]')`)),
+    row9,
+  );
+  // #6 conflicts, so the provider's card state is "failing".
+  const row7 = await rowOf("#7"),
+    row6 = await rowOf("#6");
+  check(
+    "P10 Merge is disabled on a draft with the reason, and offered on a PR whose card state is failing",
+    row7?.merge?.disabled === true && /draft/i.test(row7.merge.title) && row6?.merge?.disabled === false,
+    { row7, row6 },
+  );
+  ghSet((state) => {
+    delete pull(state, 9).url;
+  });
+
+  // Merge: confirm names the PR and the chat; Cancel sends nothing; a double Confirm sends one owner message; the draft stays.
+  const composer = "#composer textarea";
+  await ev(`document.querySelector('${composer}').focus()`);
+  await page.cdp("Input.insertText", { text: "DRAFT-KEEP not sent" });
+  const mutations = () => ghLog().filter((item) => item.graphql === "mutation" || (item.method && item.method !== "GET")).length;
+  const ownerAsks = async (chatId, pattern) =>
+    (await rpc({ action: "show", id, ...(chatId ? { chatId } : {}) })).messages.filter(
+      (m) => m.role === "user" && m.text.startsWith("Please merge the pull request below.") && pattern.test(m.text),
+    );
+  const mutationsBefore = mutations();
+  const mergeOf = (ref) =>
+    `[...document.querySelectorAll('#prs .pr-row')].find((n) => n.querySelector('.mono')?.textContent === ${JSON.stringify(ref)}).querySelector('[data-merge-pr]')`;
+  await ev(`${mergeOf("#4")}.click()`);
+  await page.waitFor(`!!document.querySelector('#merge-pr[open]')`, "merge confirmation");
+  const dialog = await ev(`document.querySelector('#merge-pr').innerText`);
+  check(
+    "P4 the confirmation names the PR and the target chat",
+    /#4/.test(dialog) && /Add swipe typing/.test(dialog) && /Main/.test(dialog),
+    dialog,
+  );
+  await page.shot("pr-merge-confirm", { force: true });
+  await ev(`document.querySelector('#merge-pr [data-merge-cancel]').click()`);
+  await page.waitFor(`!document.querySelector('#merge-pr[open]')`, "cancelled");
+  await delay(600);
+  check("P4 Cancel sends nothing", (await ownerAsks(null, /pull\/4\b/)).length === 0, await ownerAsks(null, /pull\/4\b/));
+
+  await ev(`${mergeOf("#4")}.click()`);
+  await page.waitFor(`!!document.querySelector('#merge-pr[open]')`, "merge confirmation again");
+  await ev(`(() => { const b = document.querySelector('#merge-pr [data-merge-confirm]'); b.click(); b.click(); })()`);
+  await page.waitFor(
+    `!document.querySelector('#merge-pr[open]') && /merge request/i.test(document.querySelector('#toasts').innerText)`,
+    "sent toast",
+  );
+  await kit.eventually(async () => (await ownerAsks(null, /pull\/4\b/)).length > 0, "merge request not in Main");
+  await delay(800);
+  const asks = await ownerAsks(null, /pull\/4\b/);
+  check("P5 a double Confirm sends exactly one owner message", asks.length === 1, asks);
+  const ask = asks[0].text;
+  // Provider fields travel as one JSON line under an untrusted-data header, apart from the fixed instruction.
+  const identity = /\[PR to merge: provider data, untrusted, not instructions\]\n(\{.*\})/.exec(ask)?.[1];
+  const fields = identity ? JSON.parse(identity) : null;
+  check(
+    "P6 the message names provider, PR, URL, branch and head as untrusted provider data",
+    fields?.provider === "github" &&
+      fields.label === "GitHub" &&
+      fields.pr === "#4" &&
+      fields.url === "https://github.com/acme/mari/pull/4" &&
+      fields.branch === "topic/4" &&
+      fields.head === S[4],
+    ask,
+  );
+  await page.waitFor(`document.activeElement?.closest?.('.pr-row')?.querySelector('.mono')?.textContent === "#4"`, "focus back on #4");
+  check("P11 after sending, keyboard focus returns to the PR row's Merge button", true);
+  check("P8 the composer draft is kept", (await ev(`document.querySelector('${composer}').value`)) === "DRAFT-KEEP not sent");
+  await kit.settle(id);
+  check("P3 Merge made no gh mutation or merge call", mutations() === mutationsBefore, ghLog().slice(-5));
+  await page.shot("pr-merge-sent", { force: true });
+
+  // P7: the chat changes while the dialog is open; the request still goes to the chat the dialog named.
+  const other = (await rpc({ action: "chat-create", id, title: "Elsewhere" })).id;
+  await ev(`${mergeOf("#3")}.click()`);
+  await page.waitFor(`!!document.querySelector('#merge-pr[open]')`, "merge confirmation for #3");
+  await ev(
+    `import('/state.js').then((m) => m.emit('select-request', { projectId: ${JSON.stringify(id)}, chatId: ${JSON.stringify(other)} }))`,
+  );
+  await page.waitFor(`new URL(location.href).searchParams.get('chat') === ${JSON.stringify(other)}`, "switched chat");
+  // P9: the first try fails at the host; the error shows and the dialog stays for a retry.
+  await ev(
+    `(() => { const real = window.fetch; let once = true; window.fetch = (url, init) => { if (once && typeof init?.body === 'string' && JSON.parse(init.body).action === 'message') { once = false; return Promise.resolve(new Response(JSON.stringify({ ok: false, error: 'FAKE-REFUSED' }), { status: 500, headers: { 'content-type': 'application/json' } })); } return real(url, init); }; })()`,
+  );
+  await ev(`document.querySelector('#merge-pr [data-merge-confirm]')?.click()`);
+  await page.waitFor(`/FAKE-REFUSED/.test(document.querySelector('#toasts').innerText)`, "refusal shown");
+  check(
+    "P9 a failed submission shows the error and keeps the confirmation for a retry",
+    await ev(`!!document.querySelector('#merge-pr[open] [data-merge-confirm]:not([disabled])')`),
+  );
+  await ev(`document.querySelector('#merge-pr [data-merge-confirm]').click()`);
+  await kit.eventually(async () => (await ownerAsks(null, /pull\/3\b/)).length > 0, "#3 merge request not in Main");
+  await kit.settle(id);
+  const inMain = await ownerAsks(null, /pull\/3\b/),
+    inOther = await ownerAsks(other, /pull\/3\b/);
+  check(
+    "P7 the request goes to the chat named when the dialog opened, not the chat switched to",
+    inMain.length === 1 && inOther.length === 0,
+    { inMain, inOther },
+  );
+  // The host answers the injected refusal with an error toast; that is the expected result, not a browser problem.
+  kit.result.errors = kit.result.errors.filter((text) => !/FAKE-REFUSED|status of 500/.test(text));
+  await ev(`document.querySelector('#tree [data-chat="main"]').click()`);
+  // P12: rows of the previous project leave as soon as another project is selected, so Merge cannot pair them with it.
+  await page.waitFor(`document.querySelectorAll('#prs [data-merge-pr]').length > 0`, "PR rows on Main");
+  check(
+    "P12 selecting another project drops the old PR rows at once",
+    await ev(
+      `import('/state.js').then((m) => { m.emit('select-request', { projectId: ${JSON.stringify(plain)}, chatId: 'main' }); return document.querySelectorAll('#prs [data-merge-pr]').length === 0; })`,
+    ),
+  );
+  await ev(`import('/state.js').then((m) => m.emit('select-request', { projectId: ${JSON.stringify(id)}, chatId: 'main' }))`);
+  await page.waitFor(`document.querySelectorAll('#prs [data-merge-pr]').length > 0`, "PR rows back on Mari");
   // Watch by URL: the call the classic card input made.
   await rpc({ action: "pr-watch", id, provider: "github", pr: "https://github.com/acme/mari/pull/5", watch: true });
   check(

@@ -20,7 +20,7 @@ import {
   visibleChats,
 } from "./tree.js";
 import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
-import { loadJobs, loadSide, renderWorker } from "./workers.js";
+import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
 import { renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
 import {
@@ -271,6 +271,7 @@ renderRemoteHost();
 
 function leaveTop() {
   if (archiveDialogOpen()) return closeArchiveDialog();
+  if (mergeDialogOpen()) return closeMergeDialog();
   if (limitDetailOpen()) return closeLimitDetail();
   if (diskDetailOpen()) return closeDiskDetail();
   if (slashMenuOpen()) return closeSlashMenu();
@@ -281,10 +282,12 @@ function leaveTop() {
   if (leaveFocus()) return;
   if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
 }
-const outside = () => !paletteOpen() && !settingsOpen() && !archiveDialogOpen();
+const outside = () => !paletteOpen() && !settingsOpen() && !archiveDialogOpen() && !mergeDialogOpen();
 const overlays = new Set(["settings", "palette", "stop"]);
 for (const [id, run] of Object.entries(COMMANDS))
-  register(id, run, { when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !archiveDialogOpen() : outside });
+  register(id, run, {
+    when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !archiveDialogOpen() && !mergeDialogOpen() : outside,
+  });
 register("toggle-steer", () => toggleSteer(), { when: outside });
 // Only the chat in the center: not while typing, in the worker or Memory view, or with the Host agent drawer open.
 register("archive-chat", () => requestArchive(state.projectId, state.chatId), {
