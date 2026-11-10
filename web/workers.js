@@ -148,7 +148,8 @@ function renderWorkers() {
         : ""),
   );
 }
-/** Redraws the panel keeping keyed nodes, so a card mounts and animates in once and later pushes change it in place (F1). */
+/** Redraws the panel keeping keyed nodes, so a card mounts and animates in once and later pushes change it in place
+ * (coordinator-workers-ui-failures.md F1). */
 function paint(html) {
   const next = document.createElement("div");
   next.innerHTML = html;

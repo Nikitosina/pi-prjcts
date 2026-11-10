@@ -284,12 +284,12 @@ function leaveTop() {
   if (leaveFocus()) return;
   if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) document.activeElement.blur();
 }
-const confirming = () => archiveDialogOpen() || mergeDialogOpen() || lightboxOpen();
-const outside = () => !paletteOpen() && !settingsOpen() && !confirming();
+const modal = () => archiveDialogOpen() || mergeDialogOpen() || lightboxOpen();
+const outside = () => !paletteOpen() && !settingsOpen() && !modal();
 const overlays = new Set(["settings", "palette", "stop"]);
 for (const [id, run] of Object.entries(COMMANDS))
   register(id, run, {
-    when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !confirming() : outside,
+    when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !modal() : outside,
   });
 register("toggle-steer", () => toggleSteer(), { when: outside });
 // Only the chat in the center: not while typing, in the worker or Memory view, or with the Host agent drawer open.
