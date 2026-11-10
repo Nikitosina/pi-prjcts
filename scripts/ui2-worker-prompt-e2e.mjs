@@ -57,7 +57,10 @@ try {
     await page.waitFor(`document.body.dataset.ready === "1"`, "UI2 ready");
     const line = `document.querySelector('#center .w-prompt')`;
     const open = async (item) => {
-      await page.waitFor(`!!document.querySelector('#workers [data-open-worker="${focusId(item)}"]')`, "worker in the list");
+      await page.waitFor(
+        `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker="${focusId(item)}"]'))`,
+        "worker in the list",
+      );
       await page.evaluate(`document.querySelector('#workers [data-open-worker="${focusId(item)}"]').click()`);
       await page.waitFor(`!!document.querySelector('#center .focus-head')`, "worker details");
     };

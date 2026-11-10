@@ -55,3 +55,23 @@ The browser check now reads the new client's PR list (`#prs .pr-row`): the proje
 Retired with the classic card: state ordering on the card, the watch toggles, the watch-by-URL input (the call is kept over RPC:
 a PR URL is stored as its normalized id), hide/show hidden, the `#` PR menu in the composer and the card's contrast scans.
 Gaps: the new client cannot watch, unwatch or hide a PR, or insert a `#` reference from a menu.
+
+## PR links and Merge through the Coordinator (2026-11-09)
+P1 A PR row is plain text: it must link to the provider's own `url` of that PR, opening a new tab without an opener.
+P2 A URL that is not http(s) (for example `javascript:`) becomes a live link. Such a row stays text, no guessed URL.
+P3 Merge calls a merge or approval endpoint. It must only submit an owner message to the Coordinator of the chat the owner sees,
+and the fake gh log shows no mutation from it.
+P4 Merge sends without asking. It must confirm first, naming the PR and the target chat; Cancel sends nothing.
+P5 A double click on Confirm, or a second Merge while one is in flight, sends twice. Exactly one message per confirmation.
+P6 The message is vague. It must name the provider, the PR reference, its URL and branch, and its head when the card has one.
+P7 The target moves: switching chat while the dialog is open or the request is in flight retargets the message. The target is frozen
+when the dialog opens.
+P8 The composer draft is cleared or replaced by the merge request.
+P9 A failed submission is silent. It must show the error and let the owner retry.
+P10 Merge is offered on a draft PR, or on a PR the provider reports merged or closed. It is disabled with the reason; failing CI
+is not a reason to hide it (the Coordinator decides).
+P6b Provider strings (label, reference, branch, head) are written into the instruction sentence, so a crafted branch name reads
+as the owner's words. They travel as one JSON line under an untrusted-data header, apart from the fixed instruction.
+P11 After a send the rows re-render and focus falls to a non-focusable container. It returns to that PR's new Merge button.
+P12 After selecting another project, the old project's rows stay clickable until its PRs load, and Merge pairs an old PR with the
+new project. The rows leave at once, and each row carries its project.

@@ -406,7 +406,12 @@ try {
   result.checks.push("H2 composer: short placeholder, model in the status line, no resize grip, grows up to a cap and shrinks back");
 
   // Workers
-  await waitFor(`(document.querySelector('#workers')?.innerText ?? '').includes('MARK-HOLDTASK')`, s, "workers list");
+  // The failed worker and the scout are in the ended history; open it.
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), (document.querySelector('#workers')?.innerText ?? '').includes('MARK-HOLDTASK'))`,
+    s,
+    "workers list",
+  );
   const rail = await evaluate(`document.querySelector('#workers').innerText`, s);
   if (!rail.includes("MARK-FAILTASK") || /work items/.test(rail)) throw Error("Workers content wrong: " + JSON.stringify(rail));
   result.checks.push('R2 the Workers list shows the failed and the running worker; no "work items" grammar');

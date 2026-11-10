@@ -42,7 +42,11 @@ for (const dir of [home, workspace, agentDir]) mkdirSync(dir, { mode: 0o700 });
 const click = (s, selector) => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`, s);
 // The inbox at `/`: a worker opens from the Workers list into the center worker view.
 const openWorker = async (s, id) => {
-  await waitFor(`!!document.querySelector('#workers [data-open-worker="${id}"]')`, s, "worker listed");
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker="${id}"]'))`,
+    s,
+    "worker listed",
+  );
   await evaluate(`document.querySelector('#workers [data-open-worker="${id}"]').click()`, s);
   await waitFor(`!!document.querySelector('#focus-view #worker-feed')`, s, "worker view");
 };

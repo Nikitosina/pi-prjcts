@@ -386,6 +386,8 @@ try {
   const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
   for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  // A headless page has no window focus, so :focus-within never matches without this.
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true }, s);
   await send("Page.navigate", { url: launch.toString() }, s);
   const feed = `document.querySelector('#feed').innerText`,
     chats = `document.querySelectorAll('#tree .tree-project.selected [data-chat]')`,
@@ -420,7 +422,12 @@ try {
   const report = result.calls.find((c) => c.coordinator && /^\[(worker|scout|reviewer) /.test(c.user));
   if (!report.user.includes("SCOUT-RESULT-42") || !report.history.includes("MARK-DELEG") || report.history.includes("MARK-MAIN"))
     throw Error("Report reached the wrong conversation: " + report.history.slice(-400));
-  await waitFor(`!!document.querySelector('#workers [data-open-worker]')`, s, "the scout in chat two's Workers list");
+  // Ended workers sit in the collapsed history; open it first.
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker]'))`,
+    s,
+    "the scout in chat two's Workers list",
+  );
   await click(s, "#workers [data-open-worker]");
   await waitFor(
     `(document.querySelector('#focus-view')?.innerText ?? '').includes('SCOUT-RESULT-42')`,
@@ -446,7 +453,11 @@ try {
   await waitFor(`!(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "Main's Workers list");
   await click(s, `#tree [data-chat="${chatId}"]`);
   await waitFor(`${feed}.includes('REPORT-ACK') && !${feed}.includes('Done MARK-MAIN')`, s, "chat two selected");
-  await waitFor(`(document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB')`, s, "chat two's Workers list");
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), (document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB'))`,
+    s,
+    "chat two's Workers list",
+  );
   result.checks.push("F12 switching chats swaps the transcript and the Workers list shows only that chat's work");
   // Other projects' rows in the tree are drawn from the host's list: it must carry each chat's own activity.
   await new Promise((done) => setTimeout(done, 1700));
@@ -495,11 +506,210 @@ try {
   result.checks.push("F14/F15 /name renames; reload keeps the selected chat");
   await shot("04-renamed", s);
 
-  // F14/F18: archive (host API; the new client has no archive control) hides the chat and refuses messages; Main cannot be archived.
+  // F20-F29: archive from the row's button and Mod+Shift+E. Spare is a third chat after Research.
+  const spare = (await rpc({ action: "chat-create", id, title: "Spare" })).id;
+  await waitFor(`${chats}.length === 3 && ${current}?.dataset.chat === ${JSON.stringify(chatId)}`, s, "spare chat listed");
+  const archived = async (chat) => (await rpc({ action: "show", id })).chats.find((c) => c.id === chat)?.archived === true;
+  const archiveButton = (chat) => `document.querySelector('#tree [data-archive-chat="${chat}"]')`;
+  const mac = await evaluate(`/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)`, s);
+  const shortcut = mac ? "⌘⇧E" : "Ctrl+Shift+E";
+  const press = async (key, code, modifiers = 0) => {
+    for (const type of ["rawKeyDown", "keyUp"])
+      await send("Input.dispatchKeyEvent", { type, key, code, windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), modifiers }, s);
+  };
+  const MOD = mac ? 4 : 2,
+    SHIFT = 8;
+  const archiveKey = () => press("E", "KeyE", MOD | SHIFT);
+  const hover = async (selector) => {
+    const box = await evaluate(
+      `(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+      s,
+    );
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...box }, s);
+  };
+  const shown = (chat) => `getComputedStyle(${archiveButton(chat)}).opacity === '1'`;
+  const rowFacts = await evaluate(
+    `[...document.querySelectorAll('#tree .tree-project.selected [data-chat]')].map((row) => { const b = document.querySelector('#tree [data-archive-chat="' + row.dataset.chat + '"]'); return { id: row.dataset.chat, has: !!b, nested: !!row.querySelector('button'), label: b?.getAttribute('aria-label') ?? '', title: b?.title ?? '', opacity: b ? getComputedStyle(b).opacity : '' }; })`,
+    s,
+  );
+  const research = rowFacts.find((row) => row.id === chatId);
+  if (
+    rowFacts.find((row) => row.id === "main").has ||
+    rowFacts.some((row) => row.nested) ||
+    !research?.has ||
+    !research.label.includes("Research") ||
+    !research.title.includes(shortcut) ||
+    research.opacity !== "0"
+  )
+    throw Error("Archive buttons wrong: " + JSON.stringify(rowFacts));
+  await hover(`#tree [data-chat="${spare}"]`);
+  await waitFor(shown(spare), s, "archive button on hover");
+  await shot("05-archive-hover", s);
+  await evaluate(`document.querySelector('#tree [data-chat="main"]').focus()`, s);
+  await press("ArrowDown", "ArrowDown");
+  if ((await evaluate(`document.activeElement?.dataset.chat ?? document.activeElement?.className`, s)) !== chatId)
+    throw Error("Arrow down left the chat rows");
+  await waitFor(shown(chatId), s, "archive button on keyboard focus");
+  result.checks.push(
+    "F20/F21/F29 non-Main rows get a sibling archive button named for the chat with the shortcut; hover and focus show it",
+  );
+
+  // F30: the button opens a confirmation naming the chat; Cancel and Escape change nothing and give focus back.
+  const dialogOpen = `!!document.querySelector('#archive-chat')?.open`;
+  const confirmArchive = async () => {
+    await waitFor(dialogOpen, s, "archive confirmation");
+    await click(s, "#archive-chat [data-archive-confirm]");
+  };
+  await evaluate(`${archiveButton(chatId)}.focus()`, s);
+  await click(s, `#tree [data-archive-chat="${chatId}"]`);
+  await waitFor(
+    `${dialogOpen} && document.querySelector('#archive-chat').innerText.includes('Research') && document.querySelector('#archive-chat').contains(document.activeElement)`,
+    s,
+    "dialog names the chat and takes focus",
+  );
+  await shot("06-archive-confirm", s);
+  if (await archived(chatId)) throw Error("Archived before confirmation");
+  await click(s, "#archive-chat [data-archive-cancel]");
+  await waitFor(`!${dialogOpen} && document.activeElement === ${archiveButton(chatId)}`, s, "cancel returns focus");
+  await click(s, `#tree [data-archive-chat="${chatId}"]`);
+  await waitFor(dialogOpen, s, "dialog again");
+  await press("Escape", "Escape");
+  await waitFor(`!${dialogOpen}`, s, "escape closes the dialog");
+  await delay(300);
+  if ((await archived(chatId)) || (await evaluate(`${current}?.dataset.chat`, s)) !== chatId || (await chatButtons(s)).length !== 3)
+    throw Error("Cancel or Escape changed the chat");
+  result.checks.push("F30 the archive button asks first, naming the chat; Cancel and Escape keep chat, selection and focus");
+
+  // F22: a busy chat is refused with a reason; its turn keeps running.
+  const spareTurn = await rpc({ action: "message", id, chatId: spare, text: "MARK-SLOW busy spare" });
+  await eventually(async () => (await rpc({ action: "show", id })).chats.find((c) => c.id === spare)?.busy, "Spare did not start");
+  await click(s, `#tree [data-archive-chat="${spare}"]`);
+  await confirmArchive();
+  await waitFor(`/stop/i.test(document.querySelector('#toasts .toast.error')?.innerText ?? '')`, s, "busy chat refused");
+  if ((await archived(spare)) || (await settle(id, spare, spareTurn)).state !== "done") throw Error("Busy chat was archived or aborted");
+  result.checks.push("F22 archiving a chat with a running turn is refused with a reason and the turn finishes");
+
+  // F25: a failed request keeps the row and the selection and shows the error.
+  await evaluate(
+    `(() => { window.__archiveCalls = 0; window.__fail = true; const real = window.fetch; window.fetch = (url, init) => { if (String(init?.body ?? '').includes('"chat-update"')) { window.__archiveCalls++; if (window.__fail) { window.__fail = false; return Promise.reject(new TypeError('MARK-OFFLINE')); } } return real(url, init); }; })()`,
+    s,
+  );
+  await click(s, `#tree [data-archive-chat="${chatId}"]`);
+  await confirmArchive();
+  await waitFor(`(document.querySelector('#toasts')?.innerText ?? '').includes('MARK-OFFLINE')`, s, "archive error shown");
+  if ((await evaluate(`${current}?.dataset.chat`, s)) !== chatId || (await chatButtons(s)).length !== 3 || (await archived(chatId)))
+    throw Error("Failed archive changed the tree");
+  result.checks.push("F25 a failed archive keeps the chat and the selection and shows the error");
+
+  // F23/F24/F26: archiving the selected chat once selects the next chat; Undo restores it with its transcript.
+  await click(s, `#tree [data-archive-chat="${chatId}"]`);
+  await waitFor(dialogOpen, s, "dialog before double confirm");
+  await evaluate(
+    `(() => { window.__archiveCalls = 0; const b = document.querySelector('#archive-chat [data-archive-confirm]'); b.click(); b.click(); })()`,
+    s,
+  );
+  await waitFor(`${chats}.length === 2 && ${current}?.dataset.chat === ${JSON.stringify(spare)}`, s, "next chat selected");
+  await waitFor(`!!document.querySelector('#toasts .toast:not(.leaving) button:not(.toast-x)')`, s, "undo offered");
+  if (!(await archived(chatId)) || (await evaluate(`window.__archiveCalls`, s)) !== 1) throw Error("Archive not stored once");
+  if (new URL(await evaluate("location.href", s)).searchParams.get("chat") !== spare) throw Error("URL kept the archived chat");
+  await shot("06-archived-undo", s);
+  await click(s, "#toasts .toast:not(.leaving) button:not(.toast-x)");
+  await waitFor(
+    `${chats}.length === 3 && ${current}?.dataset.chat === ${JSON.stringify(chatId)} && ${feed}.includes('ANSWER-ACK')`,
+    s,
+    "undo",
+  );
+  if (await archived(chatId)) throw Error("Undo not stored");
+  result.checks.push("F23/F24/F26 one archive request; the next chat is selected; Undo restores the chat and its transcript");
+
+  // F21/F27: the shortcut stays out of text fields, the worker view, Settings and Main; it shows on the Hotkeys page.
+  const stays = async (label) => {
+    await delay(400);
+    if ((await archived(chatId)) || (await chatButtons(s)).length !== 3) throw Error(`Shortcut archived ${label}`);
+  };
+  await evaluate(`document.querySelector('#composer-input').focus()`, s);
+  await archiveKey();
+  await stays("while typing");
+  await evaluate(`document.activeElement.blur()`, s);
+  await press("e", "KeyE", MOD);
+  await stays("on Mod+E");
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), !!document.querySelector('#workers [data-open-worker]'))`,
+    s,
+    "worker in the list",
+  );
+  await click(s, "#workers [data-open-worker]");
+  await waitFor(`document.querySelector('#center').dataset.focus === 'worker'`, s, "worker view");
+  await archiveKey();
+  await stays("in the worker view");
+  await click(s, '#focus-view [data-cmd="leave-focus"]');
+  await press(",", "Comma", MOD);
+  await waitFor(`document.querySelector('#settings').open`, s, "settings open");
+  await archiveKey();
+  await stays("with settings open");
+  if ((await evaluate(dialogOpen, s)) === true) throw Error("Shortcut opened the dialog over Settings");
+  await click(s, '#settings nav [data-section="hotkeys"]');
+  await waitFor(
+    `/Archive chat\\s*${shortcut.replaceAll("+", "\\\\+")}/.test(document.querySelector('#settings').innerText)`,
+    s,
+    "hotkeys page row",
+  );
+  await press("Escape", "Escape");
+  await press("Escape", "Escape");
+  await waitFor(`!document.querySelector('#settings').open`, s, "settings closed");
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${current}?.dataset.chat === 'main'`, s, "main selected");
+  await archiveKey();
+  await waitFor(`/Main/.test(document.querySelector('#toasts')?.innerText ?? '')`, s, "Main refused");
+  if (await archived("main")) throw Error("Main archived");
+  await click(s, `#tree [data-chat="${chatId}"]`);
+  await waitFor(`${current}?.dataset.chat === ${JSON.stringify(chatId)} && ${feed}.includes('ANSWER-ACK')`, s, "research selected");
+  await archiveKey();
+  await waitFor(`${dialogOpen} && document.querySelector('#archive-chat').innerText.includes('Research')`, s, "shortcut asks first");
+  await archiveKey();
+  await archiveKey();
+  if ((await evaluate(`document.querySelectorAll('dialog[open]').length`, s)) !== 1 || (await archived(chatId)))
+    throw Error("Repeated shortcut stacked dialogs or archived");
+  await press("Escape", "Escape");
+  await waitFor(`!${dialogOpen}`, s, "escape after shortcut");
+  await stays("after Escape");
+  await archiveKey();
+  await confirmArchive();
+  await waitFor(`${chats}.length === 2 && ${current}?.dataset.chat === ${JSON.stringify(spare)}`, s, "shortcut archived");
+  if (!(await archived(chatId)) || (await rpc({ action: "list" })).find((p) => p.id === id)?.archived)
+    throw Error("Shortcut archive wrong");
+  result.checks.push(
+    "F21/F27/F30 Mod+Shift+E asks once, then archives the selected chat only from the chat view, never Main, and is listed under Hotkeys",
+  );
+
+  // Touch screens have no hover: the button shows on a narrow touch viewport.
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }, s);
+  await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 }, s);
+  await evaluate(`document.querySelector('[data-cmd="toggle-list"]')?.click()`, s);
+  await waitFor(
+    `document.querySelector('#app').dataset.sheet === 'list' && matchMedia('(hover: none)').matches && ${shown(spare)}`,
+    s,
+    "touch button",
+  );
+  await shot("07-archive-touch", s);
+  await send("Emulation.setTouchEmulationEnabled", { enabled: false }, s);
+  await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, s);
+  await evaluate(`document.querySelector('#app').dataset.sheet = ''`, s);
+  result.checks.push("F20 the archive button is visible without hover on a narrow touch screen");
+
+  // F23/F28: archiving another chat keeps the selection; archives survive a reload.
   await click(s, '#tree [data-chat="main"]');
   await waitFor(`${feed}.includes('Done MARK-MAIN')`, s, "main before archive");
-  await rpc({ action: "chat-update", id, chatId, archived: true });
+  await click(s, `#tree [data-archive-chat="${spare}"]`);
+  await confirmArchive();
   await waitFor(`${chats}.length === 1 && ${current}?.dataset.chat === 'main'`, s, "archived chat leaves the tree");
+  await send("Page.reload", {}, s);
+  await waitFor(
+    `document.body.dataset.ready === "1" && ${chats}.length === 1 && ${current}?.dataset.chat === 'main'`,
+    s,
+    "reload keeps archives",
+  );
+  result.checks.push("F23/F28 archiving another chat keeps the selection; archived chats stay hidden after reload");
   await rejects({ action: "message", id, chatId, text: "MARK-NOPE" }, /archived/i, "archived chat message");
   await rejects({ action: "chat-update", id, chatId: "main", archived: true }, /Main/, "archive main");
   result.checks.push("F14/F18 archive hides the chat and refuses its messages; Main cannot be archived");

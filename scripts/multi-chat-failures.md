@@ -30,13 +30,28 @@ Owner decision: each chat is its own durable coordinator conversation. All chats
 17. Project pause stops only Main; another chat keeps generating.
 18. Messages to an archived chat, or while paused, are admitted.
 
+## Archive from the sidebar and keyboard
+The runtime refuses to archive Main and aborts a busy chat's turn when it is archived; workers it delegated keep running and report to Main.
+20. A chat row has no archive control, the control is a button nested in the row button, or it shows only on hover (not on keyboard focus or touch screens). Its name and tooltip lack the chat or the current shortcut.
+21. Main offers archive, or the shortcut archives Main or the project instead of the chat.
+22. Archiving a chat whose turn is running silently aborts that turn. The page must refuse and say to stop it first.
+23. Archiving the selected chat leaves it selected or selects nothing; it must select the next chat (else the previous). Archiving another chat moves the selection.
+24. There is no Undo, or Undo does not bring the chat back to the tree with its transcript.
+25. A failed archive drops the row or the selection, or shows no error.
+26. A double click sends two archive requests.
+27. Mod+Shift+E does nothing, matches Mod+E, fires while typing, in the worker view or with Settings open, or is missing from the Hotkeys page.
+28. The archive does not survive a reload.
+29. Arrow keys in the tree stop on archive buttons.
+30. The button or the shortcut archives without a confirmation dialog naming the chat; Cancel or Escape archives or moves the selection; a repeated shortcut stacks dialogs or archives; focus is lost when the dialog closes.
+
 ## Regressions to keep
 19. live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.
 
 ## The inbox at `/` (classic inbox retired 2026-11-04)
 Chats are the selected project's `[data-chat]` rows in `#tree`; New chat is `[data-new-chat]`; the transcript is `#feed` and the live
 turn `#live-turn`. F8 opens the scout from `#workers` into the worker view. F12 checks that switching chats swaps the transcript and
-the Workers list. F14 renames with `/name`; archiving goes through `chat-update` over RPC (the new client has no archive control).
+the Workers list. F14 renames with `/name`. F20-F30 archive with the row's `[data-archive-chat]` button and Mod+Shift+E, confirmed in `#archive-chat`; F25 stubs
+`fetch` in the page to fail one `chat-update`.
 Retired with the classic layout: per-chat composer drafts and the chat tab strip.
 Known gap: the tree's dot for a background chat does not turn "working" while it streams: running turns publish no topic, so the
 project list only refreshes on the next commit or the 15 s list read. F13 checks busy flags over RPC, as before.
