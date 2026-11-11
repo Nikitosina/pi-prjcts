@@ -457,10 +457,15 @@ await kit.run(async () => {
     for (const turn of feed.querySelectorAll(':scope > .turn')) turn.__kept = true;
     const line = feed.querySelector('.tool-summary[data-status="pending"] .ts-line');
     line.focus();
-    feed.scrollTop = 0;
     return { focus: line.dataset.toggle, scrollable: feed.scrollHeight > feed.clientHeight + 40 };
   })()`);
   check("D6 the worker feed can scroll for this check", before.scrollable, before);
+  // The reader scrolls to the top with the wheel, as only the owner's own input stops following.
+  const feedPoint = await page.evaluate(
+    `(() => { const r = document.querySelector('#worker-feed').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`,
+  );
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", ...feedPoint, deltaX: 0, deltaY: -100000 });
+  await page.waitFor(`document.querySelector('#worker-feed').scrollTop === 0`, "worker reader at the top");
   await waitFor(() => summary.requests.length > heldFrom, "held worker summary request");
   summary.mode = "ok";
   summary.release();
