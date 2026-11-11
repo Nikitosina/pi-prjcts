@@ -1,7 +1,8 @@
 // notes: the example plugin of docs/plugins. Short notes per project, kept in the plugin's state directory.
-// The owner's browser and the Host agent use the RPC methods; coordinators and workers use the tools.
+// The owner's browser (the panel in Settings → Plugins) and the Host agent use the RPC methods; coordinators and workers use the tools.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PROJECT_ID = /^[a-f0-9-]{36}$/;
 
@@ -40,6 +41,7 @@ export default {
       },
       // Clearing loses data, so the Host agent needs the owner's approval for it.
       rpcPolicy: { list: "read", add: "write", clear: "dangerous" },
+      web: { script: fileURLToPath(new URL("ui.js", import.meta.url)), style: fileURLToPath(new URL("ui.css", import.meta.url)) },
 
       coordinatorTools: {
         applies: () => true,

@@ -1,8 +1,8 @@
 // Runs without a host: register gets a stand-in api with the libraries the host would pass in api.lib (same versions as the host).
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import * as durable from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
@@ -32,6 +32,8 @@ test("RPC methods keep notes per project, with an agent policy for each", async 
     await assert.rejects(provided.rpc.add({ projectId, params: { text: "" } }), /1 to 500/);
     await assert.rejects(provided.rpc.list({ projectId: undefined }), /project id/);
     assert.deepEqual(await provided.rpc.clear({ projectId }), { notes: [] });
+    // The Settings panel's files: the host serves them as /plugins/notes/ui.js and ui.css.
+    for (const path of [provided.web.script, provided.web.style]) assert.ok(isAbsolute(path) && existsSync(path), path);
   } finally {
     done();
   }
