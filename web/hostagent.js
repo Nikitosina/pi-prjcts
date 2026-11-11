@@ -4,7 +4,7 @@
 import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { morph, transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
@@ -177,7 +177,8 @@ function paintLive() {
         `<div class="tool-row live" data-tool="${esc(tool.name)}" data-status="running"><div class="tool-line"><span class="tool-head static"><span class="spin" aria-label="running"></span><span class="tool-name">${esc(tool.name)}</span><span class="tool-args">${esc(tool.status)}</span><span class="tool-dur"></span></span></div></div>`,
     )
     .join("");
-  node.innerHTML = `${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Host agent</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${frame.text ? "Writing" : tools ? "Using tools" : "Working"}…</div>`;
+  const thinking = frame.thinking && frame.thinkingText && showThinking() ? thinkingHtml(frame.thinkingText, "ha-live-thinking", true) : "";
+  node.innerHTML = `${thinking}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Host agent</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${frame.text ? "Writing" : frame.thinking ? "Thinking" : tools ? "Using tools" : "Working"}…</div>`;
   body.scrollTop = body.scrollHeight;
 }
 body.addEventListener("click", async (event) => {

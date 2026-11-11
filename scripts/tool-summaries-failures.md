@@ -52,5 +52,5 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 - D5 Turning summaries off keeps showing summaries.
 - D6 A summary arriving replaces or flashes the whole transcript, or animates again on later updates. In the worker transcript too: unchanged turns keep their nodes, the focused line keeps focus, an open line stays open, and a reader who scrolled up stays where they were.
 - D7 Hidden thinking still shows in history, in the streaming turn or in the held step after a commit, or hiding it changes the model's thinking level or the agent's context.
-- D8 Worker transcripts or the Host agent ignore either setting.
+- D8 Worker transcripts or the Host agent ignore either setting. Every conversation type (Coordinator, worker, scout, reviewer, a worker's own scout and reviewer, the Host agent) gets summaries with the error mark and its thinking, and each view that shows it applies both settings without a reload; the Host agent's streaming turn shows its live thinking like the Coordinator's. Agents keep their own model and thinking; only summaries use the summary model.
 - D9 The summary line is not reachable with the keyboard, overflows a narrow (390 px) screen, or animates with reduced motion.

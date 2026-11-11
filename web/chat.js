@@ -312,8 +312,8 @@ function itemHtml(item, who = "Coordinator") {
   return `${item.thinking && showThinking() ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
 }
 /** Thinking is display-only: hiding it changes nothing the model gets. */
-const showThinking = () => state.ui?.showThinking !== false;
-function thinkingHtml(text, key, running = false) {
+export const showThinking = () => state.ui?.showThinking !== false;
+export function thinkingHtml(text, key, running = false) {
   const open = expanded.has(key);
   return `<div class="thinking${running ? " running" : ""}"><button type="button" class="thinking-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="th-mark" aria-hidden="true">∴</span>Thinking<span class="th-preview">${esc(clip(oneLine(text), 90))}</span></button>${open ? `<div class="thinking-body">${esc(text)}</div>` : ""}</div>`;
 }

@@ -25,6 +25,12 @@ const calls = (...list) =>
   "data: [DONE]\n\n";
 const thinkThenSay = (thinking, text) =>
   chunk({ role: "assistant", reasoning_content: thinking }, null) + chunk({ content: text }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+/** One assistant message that thinks, then makes these calls: historical thinking and a summary in the same turn. */
+const thinkThenCall = (thinking, ...list) => chunk({ role: "assistant", reasoning_content: thinking }, null) + calls(...list);
+// Agent requests by role, to show each keeps its own model and thinking while summaries use the light model.
+const agentRequests = [];
+// The Host agent's held turn: it streams its thinking, then waits for `release` (live thinking in the drawer).
+const hostHold = { on: false, release: () => {} };
 
 // The summary model's behaviour: "ok" answers, "fail" refuses, "hold" waits for `release`.
 const summary = { mode: "ok", requests: [], release: () => {} };
@@ -42,8 +48,38 @@ const kit = await createKit("tool-summaries", {
       const marker = /TS-[A-Z0-9-]+/.exec(user)?.[0] ?? "";
       return say(`SUMMARY ${marker} read the files and listed the folder. Nothing else changed. A third sentence that must be cut.`);
     }
+    agentRequests.push({
+      role,
+      model: request.model,
+      reasoning: request.reasoning_effort ?? request.reasoning ?? null,
+      user: user.slice(0, 80),
+    });
+    // Role tasks: each thinks, makes calls (one of them fails, for the error mark) and answers.
+    const task = /TS-(?:SCOUT|REVIEW|NEST|NSCOUT|NREVIEW)TASK/.exec(user)?.[0];
+    if (task === "TS-NESTTASK") {
+      if (results.length === 0) return calls(["subagent", { role: "scout", task: "TS-NSCOUTTASK look" }]);
+      if (results.length === 1) return calls(["subagent", { role: "reviewer", kind: "full", task: "TS-NREVIEWTASK check" }]);
+      return say("Nested done.");
+    }
+    if (task && role !== "coordinator")
+      return results.length
+        ? say(`${task} answered.`)
+        : thinkThenCall(`${task}-THOUGHT weighing`, ["code_ls", { path: "." }], ["code_read", { path: `missing-${task}.md` }]);
     if (role === "coordinator") {
       const marker = /TS-[A-Z0-9]+/.exec(user)?.[0];
+      const spawn = { "TS-SCOUT": "scout", "TS-REVIEW": "reviewer", "TS-NEST": "worker" }[marker];
+      if (spawn && !results.length)
+        return calls([
+          "agents",
+          {
+            action: "spawn",
+            role: spawn,
+            title: `${marker}TASK`,
+            brief: `${marker}TASK go`,
+            ...(spawn === "worker" ? { acceptance: ["done"] } : {}),
+            requestId: randomUUID(),
+          },
+        ]);
       if (marker === "TS-TWO") {
         if (results.length === 0)
           return calls(["read", { path: "README.md", note: "TS-ARG-ONE" }], ["bash", { command: "echo TS-README-CONTENT" }]);
@@ -70,9 +106,24 @@ const kit = await createKit("tool-summaries", {
         ]);
       return say("Noted.");
     }
-    if (role === "worker" && user.includes("TS-WORKTASK")) return results.length ? say("Listed.") : calls(["bash", { command: "ls" }]);
+    if (role === "worker" && user.includes("TS-WORKTASK"))
+      return results.length
+        ? say("Listed.")
+        : thinkThenCall("TS-WTHOUGHT which folder", ["bash", { command: "ls" }], ["bash", { command: "exit 3" }]);
     if (tools.includes("host_call") && user.includes("TS-HOSTAGENT"))
-      return results.length ? say("Checked the machine.") : calls(["host_call", { action: "machine-status" }]);
+      return results.length
+        ? say("Checked the machine.")
+        : thinkThenCall(
+            "TS-HTHOUGHT what to check",
+            ["host_call", { action: "machine-status" }],
+            ["host_call", { action: "no-such-action" }],
+          );
+    if (tools.includes("host_call") && user.includes("TS-HOSTLIVE"))
+      return (async function* () {
+        yield chunk({ role: "assistant", reasoning_content: "TS-HLIVE thinking now" }, null);
+        await new Promise((resolve) => (hostHold.release = resolve));
+        yield chunk({ content: "Live done." }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+      })();
     return undefined;
   },
 });
@@ -431,4 +482,158 @@ await kit.run(async () => {
   check("D8 the Host agent gets summaries", Object.keys(hostPage.toolSummaries).length >= 1);
   const scopes = (await rpc({ action: "tool-summaries-usage" })).scopes.map((item) => item.scope);
   check("the Host agent's usage is its own scope", scopes.includes("host-agent"), scopes);
+
+  // Roles: each conversation type gets summaries, its thinking, the error mark, its original calls, and toggles without a restart.
+  const matrix = {};
+  const readyPage = (read, label) =>
+    waitFor(
+      async () => {
+        const history = await read();
+        const entries = toolEntries(history.items);
+        return entries.length && entries.every((entry) => history.toolSummaries?.[entry]?.status === "ready") && history;
+      },
+      label,
+      { timeout: 60000 },
+    );
+  const thoughtIn = (history, text) => history.items.some((item) => item.kind === "message" && item.thinking?.includes(text));
+  /** The display checks in one transcript (`feed` is its selector), named `label` in the matrix and the screenshots. */
+  const display = async (label, feed, thought) => {
+    const row = (matrix[label] ??= {});
+    await page.waitFor(
+      `document.querySelector('${feed} .tool-summary[data-status="ready"][data-errors="1"]')`,
+      `${label} summary with error mark`,
+    );
+    row.summaryLine = row.errorMark = true;
+    await page.waitFor(
+      `[...document.querySelectorAll('${feed} .thinking')].some((node) => node.innerText.includes('${thought}'))`,
+      `${label} thinking`,
+    );
+    row.thinkingShown = true;
+    await page.evaluate(`document.querySelector('${feed} .tool-summary[data-errors="1"]:not(.open) .ts-line')?.click()`);
+    await page.waitFor(
+      `[...document.querySelectorAll('${feed} .tool-summary.open[data-errors="1"]')].some((node) => node.querySelectorAll('.ts-body .tool-row').length === 2)`,
+      `${label} original calls`,
+    );
+    row.originals = true;
+    await page.shot(`role-${label}`, { force: true });
+    await setUi({ showThinking: false });
+    await page.waitFor(
+      `!document.querySelector('${feed} .thinking') && document.querySelector('${feed} .tool-summary')`,
+      `${label} thinking hidden live`,
+    );
+    await setUi({ toolSummaries: { enabled: false } });
+    await page.waitFor(
+      `!document.querySelector('${feed} .tool-summary') && document.querySelector('${feed} .tool-group, ${feed} .tool-row')`,
+      `${label} summaries off live`,
+    );
+    await setUi({ showThinking: true, toolSummaries: { enabled: true } });
+    await page.waitFor(
+      `document.querySelector('${feed} .tool-summary[data-status="ready"]') && document.querySelector('${feed} .thinking')`,
+      `${label} back on`,
+    );
+    row.togglesLive = true;
+  };
+  const openAgent = (agentId) =>
+    page.waitFor(
+      `(() => { const button = document.querySelector('[data-open-worker="${agentId}"]'); if (button) { button.click(); return true; } document.querySelector('[data-worker-history][aria-expanded="false"]')?.click(); return false; })()`,
+      `open ${agentId}`,
+    );
+  const agentOf = (title) =>
+    waitFor(async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === title), title, {
+      timeout: 60000,
+    });
+
+  // Coordinator: summaries and thinking were checked above in #feed.
+  matrix.coordinator = { summaryLine: true, errorMark: true, thinkingShown: true, originals: true, togglesLive: true };
+  // Worker: its first message thought and listed the folder.
+  check("worker thinking is in its transcript", thoughtIn(workerPage, "TS-WTHOUGHT"));
+  await page.evaluate(`document.querySelector('[data-cmd="leave-focus"]')?.click()`);
+  await openAgent(worker.id);
+  await display("worker", "#worker-feed", "TS-WTHOUGHT");
+  for (const [marker, label] of [
+    ["TS-SCOUT", "scout"],
+    ["TS-REVIEW", "reviewer"],
+  ]) {
+    await kit.ask(id, `${marker} go`);
+    const agent = await agentOf(`${marker}TASK`);
+    const history = await readyPage(
+      () => rpc({ action: "thread-history", id, threadId: agent.id, messageText: "full" }),
+      `${label} summary`,
+    );
+    check(`${label} thinking is in its transcript`, thoughtIn(history, `${marker}TASK-THOUGHT`));
+    await page.evaluate(`document.querySelector('[data-cmd="leave-focus"]')?.click()`);
+    await openAgent(agent.id);
+    await display(label, "#worker-feed", `${marker}TASK-THOUGHT`);
+  }
+  // A worker's own scout and reviewer: summarized in the project store; the browser has no view of a nested transcript.
+  await kit.ask(id, "TS-NEST go");
+  const nester = await agentOf("TS-NESTTASK");
+  const children = await waitFor(
+    async () => {
+      const job = (await rpc({ action: "jobs-snapshot", id })).jobs?.find((item) => item.id === nester.id);
+      return job?.children?.length === 2 && job.children;
+    },
+    "nested scout and reviewer",
+    { timeout: 60000 },
+  );
+  for (const child of children) {
+    const label = `nested-${child.role}`;
+    const history = await readyPage(
+      () => rpc({ action: "thread-history", id, threadId: `${nester.id}/${child.id}`, messageText: "full" }),
+      `${label} summary`,
+    );
+    const failed =
+      Object.values(history.toolSummaries).length >= 1 && history.items.some((item) => item.kind === "tool-result" && item.isError);
+    check(`${label} gets a summary of a failing call`, failed);
+    check(
+      `${label} thinking is in its transcript`,
+      thoughtIn(history, child.role === "scout" ? "TS-NSCOUTTASK-THOUGHT" : "TS-NREVIEWTASK-THOUGHT"),
+    );
+    matrix[label] = { summaryRpc: true, errorRpc: true, thinkingRpc: true, browserView: "none" };
+  }
+
+  // Host agent: its summaries, thinking, error mark, original calls and toggles in the drawer, and its live thinking.
+  await page.evaluate(`document.querySelector('[data-cmd="leave-focus"]')?.click()`);
+  await page.evaluate(`document.querySelector('[data-cmd="host-agent"]').click()`);
+  check("the Host agent's thinking is in its transcript", thoughtIn(await rpc({ action: "host-agent-history" }), "TS-HTHOUGHT"));
+  await display("host-agent", "#host-agent .ha-body", "TS-HTHOUGHT");
+  await rpc({ action: "host-agent-send", requestId: randomUUID(), text: "TS-HOSTLIVE now" });
+  await page.waitFor(
+    `[...document.querySelectorAll('#ha-live .thinking')].some((node) => node.innerText.includes('TS-HLIVE'))`,
+    "Host agent live thinking",
+  );
+  matrix["host-agent"].liveThinking = true;
+  await page.shot("role-host-agent-live", { force: true });
+  await setUi({ showThinking: false });
+  await page.waitFor(
+    `!document.querySelector('#ha-live .thinking') && document.querySelector('#ha-live .live-status')`,
+    "live thinking hidden",
+  );
+  await setUi({ showThinking: true });
+  hostHold.release();
+
+  // Every agent request used the agent's own model, never the summary model; summary requests used only the summary model.
+  const roles = new Set(agentRequests.map((item) => item.role));
+  check(
+    "agent requests of every role ran",
+    ["coordinator", "worker", "scout", "reviewer"].every((item) => roles.has(item)),
+    [...roles],
+  );
+  check(
+    "agents keep their own model",
+    agentRequests.every((item) => item.model !== "fake-light"),
+    agentRequests.slice(-5),
+  );
+  check(
+    "summaries use only the summary model",
+    summary.requests.every((item) => item.model === "fake-light" && item.tools.length === 0),
+  );
+  writeFileSync(
+    join(kit.artifacts, "role-matrix.json"),
+    JSON.stringify(
+      { matrix, agentModels: [...new Set(agentRequests.map((item) => `${item.role}:${item.model}:reasoning=${item.reasoning}`))] },
+      null,
+      2,
+    ),
+  );
 });
