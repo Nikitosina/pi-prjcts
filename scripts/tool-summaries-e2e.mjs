@@ -566,16 +566,18 @@ await kit.run(async () => {
   summary.mode = "ok";
   // Q11: groups of conversations with no running turn (a turn that ended while the host was down) are dropped when each store opens.
   const summariesDb = join(kit.home, "tool-summaries.sqlite");
+  // The running host writes this file too: wait for its lock like the host does instead of failing at once.
+  const BUSY = { timeout: 5000 };
   const orphan = (scope, entry) =>
     `INSERT INTO tool_groups (scope, conversation, first_entry, first_call, last_entry, status, size, waiting, calls, created, updated) VALUES ('${scope}', 999999, ${entry}, 'gone', ${entry}, 'open', 1, '["gone"]', '{"calls":[{"id":"gone","name":"bash","args":"TS-ORPHAN","result":null}],"more":0}', 0, 0)`;
   {
-    const db = new DatabaseSync(summariesDb);
+    const db = new DatabaseSync(summariesDb, BUSY);
     db.exec(`${orphan(id, 999999)}; ${orphan("host-agent", 999998)}`);
     db.close();
   }
   await kit.restartHost();
   await waitFor(() => {
-    const db = new DatabaseSync(summariesDb, { readOnly: true });
+    const db = new DatabaseSync(summariesDb, { readOnly: true, ...BUSY });
     const rows = db.prepare("SELECT status, calls FROM tool_groups WHERE conversation = 999999").all();
     db.close();
     return rows.length === 2 && rows.every((row) => row.status === "cancelled" && row.calls === null);
@@ -888,7 +890,7 @@ await kit.run(async () => {
   // N2: groups of nested conversations left over from before (queued, cut off while running, still collecting) send nothing
   // after a restart and drop their copy of the calls; a saved nested summary is kept.
   {
-    const db = new DatabaseSync(summariesDb);
+    const db = new DatabaseSync(summariesDb, BUSY);
     const insert = db.prepare(
       "INSERT INTO tool_groups (scope, conversation, first_entry, first_call, last_entry, status, size, waiting, calls, text, attempts, requests, created, updated) VALUES (?1, ?2, ?3, 'c', ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, 0, 0)",
     );
@@ -902,7 +904,7 @@ await kit.run(async () => {
     db.close();
     await kit.restartHost();
     const rows = await waitFor(() => {
-      const db = new DatabaseSync(summariesDb, { readOnly: true });
+      const db = new DatabaseSync(summariesDb, { readOnly: true, ...BUSY });
       const found = db
         .prepare(
           "SELECT first_entry AS entry, status, calls FROM tool_groups WHERE first_entry >= 990001 AND first_entry <= 990004 ORDER BY first_entry",
