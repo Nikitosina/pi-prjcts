@@ -36,6 +36,15 @@ const BUDGET_STEPS = [
   review("full"),
   ["job", { action: "ready", summary: "Within budget", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK", gaps: ["open P1"] }],
 ];
+// A full reviewer whose model fails, then the whole full round, a fourth full reviewer, Ready.
+const REFUND_STEPS = [
+  ["subagent", { role: "reviewer", kind: "full", task: "REVIEW-FAIL" }],
+  review("full"),
+  review("full"),
+  review("full"),
+  review("full"),
+  ["job", { action: "ready", summary: "Reviewed", pr: "12", candidate: sha, proof: ["p"], review: "REVIEW-OK" }],
+];
 // Tasks a worker gives its checking scout; other scout tasks answer normally.
 const CHECKS = new Set(["CHECK", "SLOW-CHECK", "SILENT", "BUSY"]);
 // A glued-words suspect (scripts/agent-signals-failures.md G6).
@@ -178,6 +187,10 @@ function route(request) {
       const step = BUDGET_STEPS[messages.filter((message) => message.role === "toolResult").length];
       return step ? call(...step) : say("Budget spent.");
     }
+    if (tag === "BRIEF-REFUND") {
+      const step = REFUND_STEPS[messages.filter((message) => message.role === "toolResult").length];
+      return step ? call(...step) : say("Reviewed.");
+    }
     if (tag === "BRIEF-NOREPORT" && user.includes("BRIEF-NOREPORT")) return say("Should I keep the old API or remove it?");
     if (user === "Hold helper response") return call("gate", {});
     if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER"))
@@ -250,6 +263,8 @@ function route(request) {
     if (result.startsWith("step ")) return Number(result.slice(5)) < 12 ? call("step", { n: Number(result.slice(5)) + 1 }) : say("PASS");
     return say("PASS");
   }
+  if (role === "reviewer" && user === "REVIEW-FAIL")
+    return fauxAssistantMessage([], { stopReason: "error", errorMessage: "scripted reviewer failure" });
   return say(user === "LONG-SCOUT" ? longAnswer : role === "reviewer" ? "REVIEW-OK" : "Scouted.");
 }
 
@@ -982,6 +997,18 @@ assert.equal(deliveredCheckpoint.checkpoint, undefined, "a Ready delivery replac
   const refusal = requests.findLast((item) => item.role === "worker" && item.tag === "BRIEF-BUDGET").result;
   assert.match(refusal, /2 re-checks/, "R4 the spent budget survives a restart and a follow-up");
   assert.deepEqual((await jobsOf(harness)).find((item) => item.id === budget.id).reviews, { full: 3, rechecks: 2 });
+}
+
+// R9 (jobs-failures.md): a reviewer that never answered gives its place back; the full round still gets three answers.
+{
+  await say_(root, "Start REFUND");
+  await quiet(harness);
+  const refund = (await jobsOf(harness)).find((item) => item.title === "Job REFUND");
+  const results = requests.filter((item) => item.role === "worker" && item.tag === "BRIEF-REFUND").map((item) => item.result);
+  assert.match(results[1], /did not answer/, "R9 the failed reviewer reports that it did not answer");
+  for (const step of [2, 3, 4]) assert.equal(results[step], "REVIEW-OK", `R9 full reviewer ${step - 1} runs after the failed one`);
+  assert.match(results[5], /full review round already/i, "R9 answered reviewers still close the round");
+  assert.equal(refund.status, "ready");
 }
 
 // C1-C3: a worker that ends its turn without a report becomes a checkpoint automatically, once, keeping its workspace.

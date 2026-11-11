@@ -90,6 +90,21 @@ export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: nu
   if (spent.rechecks >= rechecks) return `All ${rechecks} re-checks of this Job are spent.`;
   return null;
 }
+/** Reviewers that count against the budget: those started, less the ones whose subagent call ended without an answer. */
+async function countedReviews(tx: Tx, job: Job): Promise<ReviewSpend> {
+  const spent = { ...(job.reviews ?? { full: 0, rechecks: 0 }) };
+  for (const child of job.children) {
+    // Before the kind was kept, every reviewer was full until the first re-check; later kindless ones stay counted.
+    const kind = child.review ?? (child.role === "reviewer" && job.reviews?.rechecks === 0 ? "full" : undefined);
+    if (!kind) continue;
+    const owner = (await tx.conversation(child.id))?.owner;
+    const state = owner && (await tx.task(owner.taskId))?.state;
+    if (state?.status !== "terminal" || state.outcome.status === "completed") continue;
+    if (kind === "full") spent.full = Math.max(0, spent.full - 1);
+    else spent.rechecks = Math.max(0, spent.rechecks - 1);
+  }
+  return spent;
+}
 export type ReadyReport = {
   summary: string;
   proof: string[];
@@ -111,8 +126,8 @@ type JobFacts = {
   workerConversation: ConversationId;
   /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
   scopeId: string | null;
-  /** Verifier, reviewer and scout subagents the worker started, oldest first. */
-  children: { id: ConversationId; role: AgentRole; title: string }[];
+  /** Verifier, reviewer and scout subagents the worker started, oldest first; a reviewer keeps its review kind (absent before 2026-11-11). */
+  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind }[];
   branch: string | null;
   candidate: string | null;
   plan: PlanStep[];
@@ -1318,16 +1333,22 @@ export function createJobs(host: JobsHost) {
         const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
         if (!job) throw new Error("subagent belongs to a worker's Job");
         if (args.role === "reviewer") {
-          const spent = job.reviews ?? { full: 0, rechecks: 0 };
+          const spent = await countedReviews(tx, job);
           const refusal = reviewRefusal(spent, args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
           if (refusal)
             throw new Error(
               `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
             );
-          job.reviews = args.kind === "full" ? { ...spent, full: spent.full + 1 } : { ...spent, rechecks: spent.rechecks + 1 };
+          const started = job.reviews ?? { full: 0, rechecks: 0 };
+          job.reviews = args.kind === "full" ? { ...started, full: started.full + 1 } : { ...started, rechecks: started.rechecks + 1 };
         }
         const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-        job.children.push({ id: created.id, role: args.role, title: clip(args.task, 80) });
+        job.children.push({
+          id: created.id,
+          role: args.role,
+          title: clip(args.task, 80),
+          ...(args.role === "reviewer" ? { review: args.kind } : {}),
+        });
         doc.subagents[String(created.id)] = job.id;
         await configure(
           tx,

@@ -42,6 +42,7 @@ Owner rule: one full review, then at most `review.rechecks` re-checks (project s
 - R6 A refusal says only "refused": the worker loops or stops without a report instead of reporting Ready with the remaining findings as gaps.
 - R7 Scouts count against the review budget.
 - R8 The project setting is ignored, or accepts a value outside 0-5, or a settings save needs a host restart to apply.
+- R9 A reviewer that never answered (its model failed, or its call was cancelled with a failed sibling) still holds its place in the budget, so the retry is refused with no review done (live 2026-11-11: one quota failure and two cancelled siblings spent the whole full round). Only a reviewer that answered, or is still running, counts; Jobs recorded before reviewer children carried their kind count theirs the same way.
 - C1 A worker that ends its turn without `job ready` or `job checkpoint` fails the Job; its question or partial work looks like a crash.
 - C2 The automatic checkpoint is indistinguishable from one the worker recorded, or offers Approve, or drops the worker's workspace.
 - C3 The automatic checkpoint notifies the Coordinator twice, or not at all.
