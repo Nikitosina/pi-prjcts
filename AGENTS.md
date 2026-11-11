@@ -15,11 +15,13 @@ Read `CONTEXT.md` (domain terms; use them exactly) and `ARCHITECTURE.md` (module
 - Commit lean tests: one per contract. Extend an existing script before adding a new one.
 - Write the ways a new module can fail into `scripts/<name>-failures.md` before the code. Show a fix with a red run before and a green run after.
 - `knownFailing` in `scripts/e2e-manifest.json` stays empty. A script that fails is fixed, or deleted when it only tests removed behavior. Do not weaken an assertion about behavior that still exists.
-- Every script uses its own temp home, socket, port and Chrome profile, and a fake model. No script reaches a real provider.
+- Every script uses its own temp home, socket, port and Chrome profile, and a fake model. No script reaches a real provider unless explicitly approved by user.
 
 ## Live data
 
 Tests and verification must use a fresh `PI_PROJECTS_HOME` in a temp directory and the fake provider. Never point them at a live `PI_PROJECTS_HOME` (`~/.pi/agent/projects*`, including `projects-dev` and `projects-next`) or at `~/Projects/pi-prjcts`.
+
+If you feel like verification on Live data is suitable for the feature you are building, ask user permission to perform live testing. User may also explicitly ask you to verify on live data and providers.
 
 For deployment, use the normal Deploy flow described in `ARCHITECTURE.md` (`npm run projects -- deploy`). It does not wait for idle projects, and needs no backup of the home. Do not replace it with a manual restart or migrate a running host.
 
