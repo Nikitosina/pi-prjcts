@@ -18,7 +18,7 @@ import { isolationProvider, type WorkspaceIntent } from "./workspace-types.ts";
 import { githubWorkerTools } from "./github-worker.ts";
 import { authorizationFingerprint } from "./workspace-authorization.ts";
 import { commandExecution, commandResource, commandWorkerTools, hasUncertainCommands } from "./command-runtime.ts";
-import { loadDurableStanding, type DurableStanding } from "./durable-standing.ts";
+import { loadDurableStanding } from "./durable-standing.ts";
 import { worktreeSetup } from "./worktree-maintenance.ts";
 import { verificationProviderProblem } from "./project-settings.ts";
 import { artifactInstructions, ensureArtifactDir } from "./artifacts.ts";
@@ -47,7 +47,6 @@ export function durableWorkspaceBinding(input: {
   configuredSkillLoader?: Pick<ResourceLoader, "getSkills">;
   conversation: () => Conversation;
   controlRoot: string;
-  projectStanding?: DurableStanding;
   commands?: ReturnType<typeof commandExecution>;
   isClosed?: () => boolean;
   /** Whole-repository workers get lease and background-command tools when present. */ environment?: {
@@ -59,7 +58,6 @@ export function durableWorkspaceBinding(input: {
   const authorization = input.project.workspaceAuthorization;
   if (!authorization) return undefined;
   const projectRoot = realpathSync(input.project.cwd);
-  const projectStanding = input.projectStanding ?? loadDurableStanding(projectRoot);
   const repositoryById = new Map(authorization.repositories.map((repository) => [repository.repositoryId, repository]));
   const scopeById = new Map(authorization.scopes.map((scope) => [scope.id, scope]));
   if (repositoryById.size !== authorization.repositories.length || scopeById.size !== authorization.scopes.length)
@@ -87,13 +85,13 @@ export function durableWorkspaceBinding(input: {
       );
     // Some checkout roots have no standing instructions of their own: the project folder is then the standing root.
     const repositoryRoot = plug?.standingAtProjectRoot ? projectRoot : realpathSync(selectedRepository.ownerCheckout);
-    const selectedStanding = repositoryRoot === projectRoot ? projectStanding : loadDurableStanding(repositoryRoot);
-    const repositoryStanding = repositoryRoot !== projectRoot ? selectedStanding : undefined;
+    // Read at each preparation: the checkout's AGENTS.md may change while the host runs (a branch switch), and only a running thread stays frozen.
+    const repositoryStanding = loadDurableStanding(repositoryRoot);
     function assertStanding() {
       if ((plug?.standingAtProjectRoot ? projectRoot : realpathSync(selectedRepository.ownerCheckout)) !== repositoryRoot)
         throw new Error("Selected repository standing root changed");
       const current = loadDurableStanding(repositoryRoot);
-      if (current.revision !== selectedStanding.revision || current.text !== selectedStanding.text)
+      if (current.revision !== repositoryStanding.revision || current.text !== repositoryStanding.text)
         throw new Error("Selected repository standing instructions changed; frozen thread will not be retargeted");
     }
     assertStanding();
@@ -439,7 +437,10 @@ export function durableWorkspaceBinding(input: {
           commands: (input.project.commandProfiles ?? [])
             .filter((profile) => profile.enabled && profile.scopeIds.includes(scope.id))
             .map((profile) => ({ id: profile.id, revision: profile.revision })),
-          ...(repositoryStanding?.text.length ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) } : {}),
+          // Project-root standing stays out of the revision, as before, so existing threads keep their binding revision.
+          ...(repositoryRoot !== projectRoot && repositoryStanding.text.length
+            ? { repositoryStanding: hash(JSON.stringify(repositoryStanding)) }
+            : {}),
         }),
       ),
     };

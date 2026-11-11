@@ -1074,7 +1074,6 @@ export async function openDurableProject(input: {
     const binder = durableWorkspaceBinding({
       project,
       configuredSkillLoader: input.configuredSkillLoader,
-      projectStanding: standing,
       commands,
       isClosed: () => closed,
       environment: { leases: hostLeases, background },
