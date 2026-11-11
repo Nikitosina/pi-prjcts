@@ -92,7 +92,7 @@ A plugin offers two kinds of calls. Pick by who calls.
 | Called by | clients of the host API: the browser, local scripts over the host socket, and the Host agent through `host_call` | the model of a coordinator or worker conversation |
 | Shape | `{ action: "plugin", plugin, method, id?, params? }` | a Durable tool with a typebox schema, offered by name |
 | Input checks | none by the host; validate `params` yourself | the harness validates arguments against `parameters` |
-| Agent safety | `rpcPolicy` decides whether the Host agent needs the owner's approval | the owner can switch tools off per profile in Settings → Tools (group Plugins) |
+| Agent safety | `rpcPolicy` decides whether the Host agent needs the owner's approval | the owner can switch coordinator tools off in Settings → Tools (group Plugins); worker tools are not listed there, and the plugin's `workerTools.offered` decides which projects get them |
 | Durability | a plain call | recorded in the conversation; `replay` decides whether an interrupted call reruns after a restart |
 
 Coordinators and workers cannot call RPC methods. To let them use the same behavior, put it in a function and call it from both an RPC handler and a tool, as the example plugin does.
