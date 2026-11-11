@@ -486,6 +486,8 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         for (let i = 0; i < 50 && !cdpEnded; i++) await delay(20);
         if (!cdpEnded) chrome.kill("SIGTERM");
       }
+      // Chrome's updater inherits its output pipes and can outlive it; open pipes would keep this script alive until the runner's timeout.
+      for (const stream of chrome?.stdio ?? []) stream?.destroy();
       if (frames.length > 1) encodeVideo(frames, artifacts);
       await kit.stopHost().catch(() => host?.kill("SIGKILL"));
       model.closeAllConnections();
