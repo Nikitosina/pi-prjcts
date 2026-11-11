@@ -434,6 +434,17 @@ await k.run(async () => {
   journeyCheck("F10 a reader a little above the bottom stays in place", Math.abs(kept.top - nudged.top) < 2, { nudged, kept });
   await wheel("#worker-feed", 100000);
   journeyCheck("F10 back at the bottom the worker transcript follows again", (await workerTurn(3)).gap < 3, await at("#worker-feed"));
+  // F14: a reader of the worker transcript returns to the same place after a visit to the Coordinator.
+  await wheel("#worker-feed", -700);
+  const workerRead = await reading("#worker-feed");
+  k.check("F14 fixture: the worker reader left the bottom", (await at("#worker-feed")).gap > 300, await at("#worker-feed"));
+  await back();
+  await openWorker();
+  journeyCheck(
+    "F14 a worker reader returns to the same place",
+    (await reading("#worker-feed")).key === workerRead.key && Math.abs((await reading("#worker-feed")).offset - workerRead.offset) < 2,
+    { workerRead, after: await reading("#worker-feed") },
+  );
   await page.shot("journey-worker", { force: true });
   k.check("journeys keep their follow contracts", broken.length === 0, broken);
 });
