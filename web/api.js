@@ -48,6 +48,11 @@ export async function call(action, input = {}) {
   return body.data;
 }
 
+/** An authenticated GET of a host path outside `/api` (plugin routes). */
+export function authorizedFetch(path, init = {}) {
+  return fetch(path, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } });
+}
+
 /**
  * Reads one SSE stream (`/live` or `/changes`) and calls `onFrame` per JSON frame. Reconnects with backoff until `stop()`.
  * `onState(up)` reports the connection for the status line. A 4xx (e.g. host streams before the backend merge) backs off to 60 s.

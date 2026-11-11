@@ -502,7 +502,7 @@ async function pluginsSection(body, alive) {
   const status = await call("plugins");
   if (!alive()) return;
   body.innerHTML = `${line("Plugins this host loaded at its start, and the panels they provide for this project.", "A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
-  if (state.projectId) unmount = mountPanels(body, state.projectId, status.web);
+  unmount = mountPanels(body, state.projectId, status.web);
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Automations

@@ -96,6 +96,7 @@ Panel errors show in the plugin's card in Settings → Plugins:
 | `ui.js uses the retired context-panel hooks ...` | a card written for the classic inbox; port it to `mount(slot, panel)` |
 | `piProjects.register must be called while its ui.js runs` | `register` was called later, for example after an `await` |
 | `ui.js could not be loaded from ...` | the host could not read the file at its start (it answers 404) |
+| `ui.css could not be loaded from ...` | the same for the stylesheet; the panel still mounts |
 | any other message | what your script, `mount` or `action` threw |
 
 ## Compatibility

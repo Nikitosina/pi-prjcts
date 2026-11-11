@@ -2,7 +2,7 @@
 // window.piProjects.register({ name, mount(slot, panel), action?(name, node, panel) }) while it first runs. Each script and style
 // loads once per page; a panel mounts in its plugin's card while the section shows, and a project change mounts it again.
 // Plugin code is trusted, not isolated: the API only keeps it to its own slot, methods, routes and project.
-import { call, token } from "./api.js";
+import { call, authorizedFetch } from "./api.js";
 import { clip, esc } from "./format.js";
 
 const RETIRED = ["render", "tick", "projectChanged", "hide"]; // the classic inbox's context-panel hooks
@@ -37,18 +37,29 @@ window.addEventListener("error", (event) => {
     entry = name && scripts.get(name);
   if (!entry) return;
   const error = event.error ?? event.message;
-  if (!entry.definition) entry.error ??= messageOf(error);
+  if (!entry.loaded) entry.error ??= messageOf(error);
   else mounted.get(name)?.(error);
 });
 
 function load({ plugin, script, style }) {
   if (scripts.has(plugin)) return scripts.get(plugin).ready;
-  const entry = { definition: null, error: null, refused: null, ready: null };
+  const entry = { definition: null, error: null, refused: null, styleError: null, loaded: false, ready: null };
   scripts.set(plugin, entry);
-  if (style) document.head.append(Object.assign(document.createElement("link"), { rel: "stylesheet", href: style }));
-  entry.ready = new Promise((resolve) => {
+  const styled = new Promise((resolve) => {
+    if (!style) return resolve();
+    const link = Object.assign(document.createElement("link"), { rel: "stylesheet", href: style });
+    link.addEventListener("load", resolve);
+    link.addEventListener("error", () => {
+      entry.styleError = `ui.css could not be loaded from ${style}`;
+      resolve();
+    });
+    document.head.append(link);
+  });
+  const ran = new Promise((resolve) => {
     const node = Object.assign(document.createElement("script"), { src: script });
     node.addEventListener("load", () => {
+      // Any uncaught error during the first run fails the panel, also one thrown after a successful register.
+      entry.loaded = true;
       if (!entry.definition) entry.error ??= entry.refused ?? "ui.js did not register a panel (window.piProjects.register)";
       resolve();
     });
@@ -58,6 +69,7 @@ function load({ plugin, script, style }) {
     });
     document.body.append(node);
   });
+  entry.ready = Promise.all([styled, ran]);
   return entry.ready;
 }
 
@@ -88,6 +100,11 @@ export function pluginCards({ plugins, web }) {
 export function mountPanels(container, projectId, web) {
   const controller = new AbortController();
   for (const node of container.querySelectorAll(".plugin-panel[data-plugin]")) {
+    if (!projectId) {
+      node.dataset.state = "idle";
+      node.querySelector(".plugin-slot").innerHTML = `<p class="muted small">Select a project to use this panel.</p>`;
+      continue;
+    }
     const item = web.find((entry) => entry.plugin === node.dataset.plugin && entry.script);
     if (item) void mountOne(node, item, projectId, controller.signal);
   }
@@ -110,24 +127,24 @@ async function mountOne(node, item, projectId, signal) {
     slot.replaceChildren();
   };
   await load(item);
-  const { definition, error } = scripts.get(name);
+  const { definition, error, styleError } = scripts.get(name);
   if (signal.aborted) return;
-  if (!definition) return fail(error);
-  // Answers that arrive after the panel went away reject with an AbortError, so they never render into the next project.
-  const settled = async (promise) => {
+  if (!definition || error) return fail(error);
+  if (styleError) show(styleError);
+  // A call after the panel went away is never sent, and a late answer rejects with an AbortError, so nothing reaches the next project.
+  const settled = async (send) => {
     signal.throwIfAborted();
-    const value = await promise;
+    const value = await send();
     signal.throwIfAborted();
     return value;
   };
   const panel = Object.freeze({
     projectId,
     signal,
-    rpc: (method, params) => settled(call("plugin", { plugin: name, method, id: projectId, params })),
+    rpc: (method, params) => settled(() => call("plugin", { plugin: name, method, id: projectId, params })),
     fetch: (route, query = {}) =>
-      settled(
-        fetch(`/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId })}`, {
-          headers: { authorization: `Bearer ${token}` },
+      settled(() =>
+        authorizedFetch(`/plugins/${name}/${encodeURIComponent(route)}?${new URLSearchParams({ ...query, project: projectId })}`, {
           signal,
         }),
       ),

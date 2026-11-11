@@ -238,7 +238,7 @@ web?: {
 
 ### Settings panel
 
-Settings → Plugins lists every plugin the host loaded, one card each. A loaded plugin with a `script` gets a panel in its card. The inbox loads each `ui.js` and `ui.css` once per page, the first time the owner opens the section. The panel is mounted while the section shows: again after Settings closes and reopens, and again for each project the owner selects.
+Settings → Plugins lists every plugin the host loaded, one card each. A loaded plugin with a `script` gets a panel in its card. The inbox loads each `ui.js` and `ui.css` once per page, the first time the owner opens the section. The panel is mounted while the section shows: again after Settings closes and reopens, and again for each project the owner selects. With no project selected, the card says so and nothing mounts.
 
 `ui.js` is a classic script. While it first runs, it registers its panel:
 
@@ -264,10 +264,10 @@ window.piProjects.register({
 Rules:
 
 - Render only into `slot`. It is a fresh element on every mount. Listeners on it and its children go away with it, so a mount never stacks on an earlier one. Clicks inside it do not reach the inbox's own handlers.
-- After `signal` aborts, `rpc` and `fetch` reject with an `AbortError`, even when the answer arrives later. Let it propagate: the inbox ignores it, so an answer for the previous project never renders. Stop your own timers on `abort`.
+- After `signal` aborts, `rpc` and `fetch` send nothing and reject with an `AbortError`; a call already sent rejects the same way when its answer arrives. Let it propagate: the inbox ignores it, so an answer for the previous project never renders. Stop your own timers on `abort`.
 - Escape everything you put into HTML that came from a project, a user or the host, with `esc` or `textContent`.
 - `ui.css` applies to the whole page. Scope its selectors to your panel, as the example does with `.notes-panel`.
-- The inbox shows errors in the plugin's card: a `ui.js` that throws while it loads or never registers, a refused registration, a `mount` that throws or rejects, and an `action` that throws or rejects. An exception your file leaves uncaught while the panel is mounted shows there too; an unhandled promise rejection does not, so return or await your promises. Other panels and Settings sections keep working.
+- The inbox shows errors in the plugin's card: a `ui.js` that throws during its first run (also after `register`) or never registers, a `ui.css` that cannot be loaded (the panel still mounts), a refused registration, a `mount` that throws or rejects, and an `action` that throws or rejects. An exception your file leaves uncaught while the panel is mounted shows there too; an unhandled promise rejection does not, so return or await your promises. Other panels and Settings sections keep working.
 - `register` refuses a second call, a name other than the plugin's own, a call after `ui.js` finished its first run, and the hooks of the retired context-panel card (`render`, `tick`, `projectChanged`, `hide`).
 
 The code is trusted, not isolated: it runs in the owner's page with the owner's token. The API keeps a well-behaved panel to its own slot, plugin and project; it does not stop code that ignores it. There is no hot reload, and a panel cannot place anything elsewhere in the inbox.

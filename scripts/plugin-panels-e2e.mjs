@@ -17,7 +17,7 @@ const plugins = [
 ];
 const kit = await createKit("plugin-panels", { env: { PI_PROJECTS_PLUGINS: plugins.join(":") } });
 // Errors the broken fixtures raise on purpose, and the 401 of the unauthenticated route probe (16).
-const EXPECTED_ERRORS = [/broken at load/, /registered as "notes"/, /retired context-panel hooks/, /thrown after register/];
+const EXPECTED_ERRORS = [/broken at load/, /registered as "notes"/, /retired context-panel hooks/, /thrown after register/, /panel-no-style\/ui\.css/];
 
 await kit.run(async () => {
   const { check, rpc, result } = kit;
