@@ -14,7 +14,7 @@
 
 The owner's own input stops following: an upward wheel, touch or navigation key, a drag that starts on the transcript (its scrollbar
 or a text selection), or opening a detail. Besides input, only a scroll that moves the view up past the 40 px band while the
-transcript keeps its size stops it (find in page, a link into the transcript). A scroll event that follows a layout change never does,
+transcript keeps its height on screen stops it (find in page, a link into the transcript); content growing never moves the view up. A scroll event that follows a layout change never does,
 since the browser may deliver it after the layout already changed. Each transcript keeps its own following state.
 
 - F5 A scroll event that arrives after the transcript changed size (the window narrows, a panel opens) stops following, so the

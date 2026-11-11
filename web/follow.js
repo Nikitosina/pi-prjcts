@@ -1,6 +1,7 @@
 // Following a transcript's newest line. Each transcript (the Coordinator feed, a worker view) has its own follower.
-// Only the owner's own input stops it: an upward wheel, touch or key, a drag up, or opening a detail. A scroll event alone never
-// does, since the browser may deliver one after the layout changed (scripts/streaming-follow-intent-failures.md F5).
+// The owner's own input stops it: an upward wheel, touch or key, a drag up, or opening a detail. Otherwise only a scroll that moves
+// the view far up while the transcript kept its height on screen does (find in page, F12); content growing never moves the view up,
+// and a scroll event after a resize may be a late one (scripts/streaming-follow-intent-failures.md F5).
 
 /** Keeps `node` at its newest line while following, and the turn a reader reads in place otherwise, across renders, resizes and hiding. */
 export function follower(node) {
@@ -9,10 +10,15 @@ export function follower(node) {
     pressed = false,
     shown = node.clientHeight > 0,
     saved = [],
-    touchY = null;
+    touchY = null,
+    view = node.clientHeight; // the height on screen last seen, so a scroll event can tell a resize from a scroll
   const watched = new Set();
+  // Where the view was last put, by a scroll event or by this follower: the browser merges the event of its own move with a later
+  // scroll in the same frame, which would otherwise read as a move down.
+  const placed = () => void (top = node.scrollTop);
   const pin = () => {
     node.scrollTop = node.scrollHeight;
+    placed();
   };
   // Upward input only stops following when the transcript can scroll, so a short one still follows once it grows. Not scrollTop:
   // the compositor may have applied a big wheel before the event reaches the page.
@@ -21,10 +27,11 @@ export function follower(node) {
   };
   const resized = new ResizeObserver(() => {
     if (!node.isConnected) return resized.disconnect();
+    view = node.clientHeight;
     // A hidden transcript (the Coordinator's while a worker is open) keeps its place until it shows again.
-    if (!node.clientHeight) return void (shown = false);
+    if (!view) return void (shown = false);
     if (following) pin();
-    else if (!shown) keepAnchor(node, saved);
+    else if (!shown) (keepAnchor(node, saved), placed());
     shown = true;
   });
   const watch = () => {
@@ -51,11 +58,14 @@ export function follower(node) {
     addEventListener("pointerup", () => void (pressed = false), { once: true });
   });
   node.addEventListener("scroll", () => {
-    const now = node.scrollTop;
-    if (pressed && now < top - 1) following = false;
-    else if (now >= top && node.scrollHeight - now - node.clientHeight < 2) following = true;
+    const now = node.scrollTop,
+      gap = node.scrollHeight - now - node.clientHeight,
+      up = now < top - 1;
+    if (up && (pressed || (node.clientHeight === view && gap >= 40))) following = false;
+    else if (!up && gap < 2) following = true;
     top = now;
-    if (!following && node.clientHeight) saved = readingAnchor(node);
+    view = node.clientHeight;
+    if (!following && view) saved = readingAnchor(node);
   });
   return {
     get following() {
@@ -73,9 +83,10 @@ export function follower(node) {
     settle() {
       if (following) pin();
     },
-    /** Scrolls so that `element`, a line the owner just used, is back at viewport offset `top`. */
-    keepAt(element, top) {
-      node.scrollTop += element.getBoundingClientRect().top - top;
+    /** Scrolls so that `element`, a line the owner just used, is back at viewport offset `at`. */
+    keepAt(element, at) {
+      node.scrollTop += element.getBoundingClientRect().top - at;
+      placed();
     },
     /** Runs `paint`, which may replace any turn, then pins while following or keeps the turn being read where it was. */
     render(paint) {
@@ -86,6 +97,7 @@ export function follower(node) {
       if (!visible) return;
       if (following) return pin();
       keepAnchor(node, anchor);
+      placed();
       saved = readingAnchor(node);
     },
   };
