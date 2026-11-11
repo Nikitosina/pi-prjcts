@@ -338,6 +338,16 @@ await kit.run(async () => {
       existsSync(join(fakeTree.path, ".fake-worktree")),
     inventory.items,
   );
+  // 27: a worker started after AGENTS.md changed reads it afresh.
+  writeFileSync(join(checkout, "AGENTS.md"), "Standing v2: changed after the host started.\n");
+  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ title: "After standing change", brief: "STANDING-V2 worker task" })}`);
+  const standingJob = (await kit.jobs(id)).at(-1);
+  const standingCall = result.calls.findLast((item) => item.role === "worker" && item.user.includes("STANDING-V2"));
+  check(
+    "27 a worker started after the checkout's AGENTS.md changed runs with the current instructions",
+    standingJob.status !== "failed" && /Standing v2: changed after the host started/.test(standingCall?.system ?? ""),
+    { status: standingJob.status, error: standingJob.error },
+  );
   const treePath = fakeTree.path;
   const receiptsBefore = JSON.stringify(readdirSync(join(kit.home, id)));
 
