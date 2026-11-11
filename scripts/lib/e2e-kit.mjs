@@ -72,7 +72,8 @@ export async function waitFor(fn, description = "condition", { timeout = 30000, 
 }
 /** Screenshots that no assertion reads are only written when E2E_SHOTS=1. */
 export const shotsEnabled = () => process.env.E2E_SHOTS === "1";
-/** E2E_VIDEO=1 records the page as `video.mp4` in the artifacts (needs ffmpeg on PATH); proof media only, no assertion reads it. */
+/** E2E_VIDEO=1 records the page as `video.mp4` in the artifacts (needs ffmpeg on PATH); proof media only, no assertion reads it. A page
+ * opened with `{ video: "segment" }` records only between `page.screencast(true)` and `page.screencast(false)`. */
 const videoEnabled = () => process.env.E2E_VIDEO === "1";
 
 /** `handler({ role, user, results, tools, system, msgs })` returns a response string (say/call) or nothing (default: "DONE <role>"). */
@@ -365,7 +366,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       });
       chrome.stdio[3].write(JSON.stringify({ id: key, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
     });
-  kit.openPage = async (url) => {
+  kit.openPage = async (url, { video = "all" } = {}) => {
     const clog = createWriteStream(join(artifacts, "chrome.log"), { flags: "a", mode: 0o600 });
     chrome = spawn(
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -419,10 +420,8 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
     // Started on the blank page: during a navigation Chrome refuses it as not attached to an active page.
-    if (videoEnabled()) {
-      mkdirSync(join(artifacts, "frames"), { recursive: true });
-      await send("Page.startScreencast", { format: "jpeg", quality: 70 }, s);
-    }
+    if (videoEnabled()) mkdirSync(join(artifacts, "frames"), { recursive: true });
+    if (videoEnabled() && video === "all") await send("Page.startScreencast", { format: "jpeg", quality: 70 }, s);
     await send("Page.navigate", { url }, s);
     const page = {
       evaluate: async (expression) => {
@@ -439,6 +438,10 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
       reload: () => send("Page.reload", {}, s),
       viewport: (width, height, mobile = false) =>
         send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: mobile ? 2 : 1, mobile }, s),
+      screencast: async (on) => {
+        if (videoEnabled() && video === "segment")
+          await send(on ? "Page.startScreencast" : "Page.stopScreencast", on ? { format: "jpeg", quality: 70 } : {}, s);
+      },
       /** Raw CDP call on this page (trusted input: Input.insertText, Input.dispatchKeyEvent). */
       cdp: (method, params = {}) => send(method, params, s),
     };

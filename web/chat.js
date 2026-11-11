@@ -15,7 +15,7 @@ const feed = document.querySelector("#feed"),
 let live = null,
   liveKey = "",
   older = [],
-  olderSummaries = {},
+  olderGroups = null,
   olderBefore = null,
   loading = null,
   held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
@@ -59,7 +59,7 @@ export async function loadChat() {
 }
 on("select", () => {
   older = [];
-  olderSummaries = {};
+  olderGroups = null;
   follow.follow();
   expanded.clear();
   feed.replaceChildren();
@@ -154,7 +154,7 @@ export function renderFeed() {
     html.push(
       `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
-  html.push(transcriptHtml(all, busy, "Coordinator", { summaries: { ...olderSummaries, ...state.view.toolSummaries } }));
+  html.push(transcriptHtml(all, busy, "Coordinator", { groups: mergeGroups(olderGroups, state.view.toolGroups) }));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
   follow.render(() => {
@@ -190,21 +190,26 @@ export function morph(parent, html) {
   });
 }
 
-/** Turn sections for a list of transcript items (also used for worker transcripts in the center). `summaries` are the page's
- * tool summaries by assistant entry id; they show only while the owner has summaries on. */
-export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, summaries = null } = {}) {
+/** The tool groups of two pages read at different times; a group on both takes `newer`'s state. */
+export function mergeGroups(older, newer) {
+  if (!older || !newer) return newer ?? older ?? null;
+  return { groups: { ...older.groups, ...newer.groups }, calls: { ...older.calls, ...newer.calls } };
+}
+/** Turn sections for a list of transcript items (also used for worker transcripts in the center). `groups` are the host's tool
+ * groups of the loaded calls (`{ groups, calls }`); they show only while the owner has summaries on. */
+export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, groups = null } = {}) {
   const all = Array.isArray(items[0]?.items) ? items : turns(items);
-  const shown = state.ui?.toolSummaries?.enabled ? (summaries ?? {}) : {};
+  const shown = state.ui?.toolSummaries?.enabled ? groups : null;
   return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
 }
-function turnHtml(turn, liveTurn, who, fold = true, summaries = {}) {
+function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
   const { start } = turn,
     key = `t${start.entryId ?? start.at}`;
   // A turn that does not open with an input (a page starting mid-turn) has its first item in `items` too.
   const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : "";
   const body = [];
   let run = [],
-    block = null; // the calls of one summarized assistant message
+    block = null; // the calls of one host tool group
   const runHtml = (entries) =>
     entries.length >= 2 && !liveTurn && fold ? groupHtml(entries) : entries.map((entry) => toolRowHtml(entry, callStatus(entry))).join("");
   const flush = () => {
@@ -219,20 +224,22 @@ function turnHtml(turn, liveTurn, who, fold = true, summaries = {}) {
   for (const item of turn.items) {
     // Memory rows never fold: what the agent remembered or relied on stays visible.
     if (item.kind === "tool-call" && MEMORY.test(item.name)) {
-      // A memory row next to a summarized message stays out of its line and does not split it.
+      // A memory row inside a group stays out of its line and does not split it.
       if (run.length) body.push(runHtml(run));
       run = [];
       const entry = { call: item, result: results.get(item.callId) };
       body.push(toolRowHtml(entry, callStatus(entry)));
-    } else if (item.kind === "tool-call" && summaries[item.entryId]) {
-      if (run.length || block?.entryId !== item.entryId) flush();
-      block ??= { entryId: item.entryId, view: summaries[item.entryId], entries: [] };
+    } else if (item.kind === "tool-call" && groups?.groups[groups.calls[`${item.entryId}:${item.callId}`]]) {
+      const id = groups.calls[`${item.entryId}:${item.callId}`];
+      if (run.length || block?.id !== id) flush();
+      block ??= { id, view: groups.groups[id], entries: [] };
       block.entries.push({ call: item, result: results.get(item.callId) });
     } else if (item.kind === "tool-call") {
       if (block) flush();
       run.push({ call: item, result: results.get(item.callId) });
     } else if (item.kind === "tool-result") continue;
-    else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking && !item.images?.length) continue;
+    else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking?.trim() && !item.images?.length)
+      continue;
     else {
       flush();
       body.push(itemHtml(item, who));
@@ -357,18 +364,21 @@ function groupHtml(run) {
   return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
 const seenSummaries = new Map(); // toggle key -> last drawn status, so only a summary that just arrived fades in
-/** One assistant message's calls as one quiet line: its summary, a failure mark, the call count and time; it opens to the calls.
- * A pending summary waits with its own glyph, unlike a running call's spinner; a failed one shows the calls with a quiet note. */
-function summaryHtml({ entries, view }, runHtml) {
-  const key = `s${entries[0].call.callId}`,
+/** One tool group's calls as one quiet line: its summary, a failure mark, the call count and time; it opens to the calls. A group
+ * still collecting calls shows a spinner and "running…"; a pending summary waits with its own glyph; a failed one shows the calls
+ * with a quiet note. `view.calls` counts the whole group, also the calls on pages not loaded yet. */
+function summaryHtml({ id, entries, view }, runHtml) {
+  const key = `s${id}`,
     open = expanded.has(key),
     previous = seenSummaries.get(key);
   seenSummaries.set(key, view.status);
   const failed = entries.filter(({ result }) => result?.isError).length,
     first = entries[0].call.at,
     last = Math.max(...entries.map(({ call: item, result }) => result?.at ?? item.at));
-  const count = `${entries.length} ${entries.length === 1 ? "call" : "calls"}`,
-    took = Number.isFinite(first) && Number.isFinite(last) ? ` · ${dur(last - first)}` : "";
+  const total = Math.max(view.calls ?? 0, entries.length),
+    elsewhere = total - entries.length;
+  const count = `${total} ${total === 1 ? "call" : "calls"}${elsewhere ? ` · ${elsewhere} on earlier pages` : ""}`,
+    took = Number.isFinite(first) && Number.isFinite(last) && !elsewhere ? ` · ${dur(last - first)}` : "";
   const names = new Map();
   for (const { call: item } of entries) names.set(item.name, (names.get(item.name) ?? 0) + 1);
   const label = [...names].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(", ");
@@ -376,14 +386,21 @@ function summaryHtml({ entries, view }, runHtml) {
   if (view.status === "failed")
     return `<div class="tool-summary" data-status="failed" data-errors="${failed}"><p class="ts-note" title="${esc(clip(oneLine(view.error), 300))}"><span class="ts-glyph" aria-hidden="true">·</span>No summary for ${esc(label)}; showing the calls</p>${runHtml(entries)}</div>`;
   const glyph =
-    view.status === "pending"
-      ? `<span class="ts-pending" aria-label="summary pending"></span>`
-      : failed
-        ? `<span class="st err" aria-label="a call failed">✕</span>`
-        : `<span class="st ok" aria-label="done">✓</span>`;
-  const text = view.status === "pending" ? `${esc(label)} · writing summary…` : esc(view.text);
+    view.status === "collecting"
+      ? `<span class="spin" aria-label="running"></span>`
+      : view.status === "pending"
+        ? `<span class="ts-pending" aria-label="summary pending"></span>`
+        : failed
+          ? `<span class="st err" aria-label="a call failed">✕</span>`
+          : `<span class="st ok" aria-label="done">✓</span>`;
+  const text =
+    view.status === "collecting"
+      ? `${esc(label)} · running…`
+      : view.status === "pending"
+        ? `${esc(label)} · writing summary…`
+        : esc(view.text);
   const fresh = view.status === "ready" && previous === "pending" ? " fresh" : "";
-  return `<div class="tool-summary${open ? " open" : ""}${fresh}" data-status="${view.status}" data-errors="${failed}"><button type="button" class="ts-line" data-toggle="${esc(key)}" aria-expanded="${open}">${glyph}<span class="ts-text">${text}</span><span class="ts-meta">${failed ? `<span class="ts-err">${failed} failed</span>` : ""}<span>${count}${esc(took)}</span><span class="chev" aria-hidden="true">›</span></span></button>${open ? `<div class="ts-body">${entries.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}${by}</div>` : imagesHtml(entries.flatMap(({ result }) => result?.images ?? []))}</div>`;
+  return `<div class="tool-summary${open ? " open" : ""}${fresh}" data-status="${view.status}" data-errors="${failed}"><button type="button" class="ts-line" data-toggle="${esc(key)}" aria-expanded="${open}">${glyph}<span class="ts-text">${text}</span><span class="ts-meta">${failed ? `<span class="ts-err">${failed} failed</span>` : ""}<span>${count}${esc(took)}</span><span class="chev" aria-hidden="true">›</span></span></button>${open ? `<div class="ts-body">${entries.map((entry) => toolRowHtml(entry, entry.result ? undefined : view.status === "collecting" ? "running" : "ok")).join("")}${by}</div>` : imagesHtml(entries.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
@@ -651,7 +668,7 @@ feed.addEventListener("click", async (event) => {
     const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100, messageText: "full" }).catch(fail);
     if (stale(gen) || !page) return;
     older = [...page.items, ...older];
-    olderSummaries = { ...page.toolSummaries, ...olderSummaries };
+    olderGroups = mergeGroups(page.toolGroups, olderGroups);
     olderBefore = page.before;
     follow.stop();
     renderFeed();

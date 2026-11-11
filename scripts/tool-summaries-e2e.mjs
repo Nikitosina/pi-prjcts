@@ -32,6 +32,17 @@ const thinkThenCall = (thinking, ...list) => chunk({ role: "assistant", reasonin
 const agentRequests = [];
 // The Host agent's held turn: it streams its thinking, then waits for `release` (live thinking in the drawer).
 const hostHold = { on: false, release: () => {} };
+// The owner's example (TS-GROUPS): thinking, three calls from three messages, thinking, two calls, the final text. The Coordinator
+// waits before the steps in `at`; `step` is the step it waits at, until `release`.
+const groupHold = { at: new Set(), step: null, release: () => {} };
+const GROUP_STEPS = [
+  () => thinkThenCall("TS-G1-THOUGHT gather the facts first", ["read", { path: "missing-TS-G1-report.json" }]),
+  () => calls(["bash", { command: "echo TS-G1-LOG" }]),
+  () => calls(["bash", { command: "ls" }]),
+  () => thinkThenCall("TS-G2-THOUGHT now check the fix", ["bash", { command: "echo TS-G2-CHECK" }]),
+  () => calls(["bash", { command: "pwd" }]),
+  () => say("Found it and checked the fix."),
+];
 
 // The summary model's behaviour: "ok" answers, "fail" refuses, "hold" waits for `release`.
 const summary = { mode: "ok", requests: [], release: () => {} };
@@ -44,7 +55,9 @@ const kit = await createKit("tool-summaries", {
       if (summary.mode === "hold")
         return (async function* () {
           await new Promise((resolve) => (summary.release = resolve));
-          yield chunk({ role: "assistant", content: "Held summary." }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+          yield chunk({ role: "assistant", content: "Read the report, the log and the folder; the report is missing." }, null) +
+            chunk({}, "stop") +
+            "data: [DONE]\n\n";
         })();
       const marker = /TS-[A-Z0-9-]+/.exec(user)?.[0] ?? "";
       return say(`SUMMARY ${marker} read the files and listed the folder. Nothing else changed. A third sentence that must be cut.`);
@@ -81,6 +94,15 @@ const kit = await createKit("tool-summaries", {
             requestId: randomUUID(),
           },
         ]);
+      if (marker === "TS-GROUPS") {
+        const step = results.length;
+        if (groupHold.at.delete(step)) {
+          groupHold.step = step;
+          await new Promise((resolve) => (groupHold.release = resolve));
+          groupHold.step = null;
+        }
+        return GROUP_STEPS[step]?.();
+      }
       if (marker === "TS-TWO") {
         if (results.length === 0)
           return calls(["read", { path: "README.md", note: "TS-ARG-ONE" }], ["bash", { command: "echo TS-README-CONTENT" }]);
@@ -149,14 +171,29 @@ await kit.run(async () => {
   const ui = () => rpc({ action: "ui-get" });
   const setUi = async (patch) => rpc({ action: "ui-set", revision: (await ui()).revision, patch });
   const show = () => rpc({ action: "show", id, messageText: "full" });
-  const toolEntries = (items) => [...new Set(items.filter((item) => item.kind === "tool-call").map((item) => item.entryId))];
-  const turnEntries = (items, marker) => {
+  const MEMORY = /^projects_knowledge_/;
+  const toolCalls = (items) => items.filter((item) => item.kind === "tool-call" && !MEMORY.test(item.name));
+  const turnCalls = (items, marker) => {
     const start = items.findLastIndex((item) => item.kind === "message" && item.role === "user" && item.text.includes(marker));
-    return toolEntries(items.slice(start));
+    return toolCalls(items.slice(start));
+  };
+  const groupId = (page, call) => page.toolGroups?.calls[`${call.entryId}:${call.callId}`];
+  /** The groups of these calls in order, each once; a call in no group is `undefined`. */
+  const groupsOf = (page, list) => {
+    const found = new Map();
+    for (const call of list) {
+      const key = groupId(page, call);
+      found.set(key ?? `none-${call.callId}`, key ? { id: key, ...page.toolGroups.groups[key] } : undefined);
+    }
+    return [...found.values()];
+  };
+  const allReady = (page) => {
+    const found = groupsOf(page, toolCalls(page.items));
+    return found.length > 0 && found.every((group) => group?.status === "ready");
   };
   const summariesOf = async (marker) => {
     const view = await show();
-    return turnEntries(view.messages, marker).map((entry) => view.toolSummaries?.[entry]);
+    return groupsOf(view, turnCalls(view.messages, marker));
   };
 
   // Defaults.
@@ -195,16 +232,17 @@ await kit.run(async () => {
   await setUi({ toolSummaries: { enabled: true, model: "fake/fake-light" } });
   await delay(500);
   const off = await summariesOf("TS-TWO first run");
-  check("G5 no backfill: the earlier turn has no summaries", off.length === 2 && off.every((item) => item === undefined), off);
+  check("G5 no backfill: the earlier turn has no groups", off.length === 3 && off.every((item) => item === undefined), off);
   check("G6 reading the chat asks the summary model nothing", summary.requests.length === 0, summary.requests);
 
-  // G1 G2 Q6: one summary per assistant message, after its results; bounded, untrusted, no tools.
+  // G1 G2 Q6: consecutive calls of two assistant messages are one group, summarized once after the final text closed it.
   await kit.ask(id, "TS-TWO second run");
   const ready = await waitFor(async () => {
     const found = await summariesOf("TS-TWO second run");
-    return found.length === 2 && found.every((item) => item?.status === "ready") && found;
-  }, "two summaries");
-  check("G1 two assistant messages, two summaries", summary.requests.length === 2, summary.requests);
+    return found.length === 1 && found[0]?.status === "ready" && found;
+  }, "one group summary");
+  check("G1 two assistant messages without text between, one summary", summary.requests.length === 1, summary.requests);
+  check("G1 the group counts the calls of both messages", ready[0].calls === 3, ready);
   check(
     "summaries use the chosen model",
     summary.requests.every((item) => item.model === "fake-light"),
@@ -215,15 +253,12 @@ await kit.run(async () => {
     summary.requests.every((item) => !item.tools.length),
   );
   check(
-    "the first summary covers both calls of its message and their results",
+    "the summary covers the calls of both messages and their results",
     summary.requests[0].user.includes("TS-ARG-ONE") &&
       summary.requests[0].user.includes("README.md") &&
-      /Result:\nTS-README-CONTENT/.test(summary.requests[0].user),
+      /Result:\nTS-README-CONTENT/.test(summary.requests[0].user) &&
+      summary.requests[0].user.includes("TS-MISSING"),
     summary.requests[0].user,
-  );
-  check(
-    "G1 the second summary covers only its own call",
-    !summary.requests[1].user.includes("TS-ARG-ONE") && summary.requests[1].user.includes("TS-MISSING"),
   );
   check(
     "Q5 output is bounded",
@@ -251,30 +286,30 @@ await kit.run(async () => {
   const usage = await rpc({ action: "usage-snapshot", id, limit: 1 });
   check(
     "U1 summary usage is reported apart from the agents'",
-    usage.toolSummaries?.requests === 3 && usage.toolSummaries.summaries === 3 && usage.toolSummaries.interrupted === 0,
+    usage.toolSummaries?.requests === 2 && usage.toolSummaries.summaries === 2 && usage.toolSummaries.interrupted === 0,
     usage.toolSummaries,
   );
   const totals = await rpc({ action: "tool-summaries-usage" });
   check(
     "U1 host-wide totals list the project",
-    totals.scopes.some((item) => item.scope === id && item.requests === 3),
+    totals.scopes.some((item) => item.scope === id && item.requests === 2),
     totals,
   );
 
   // Browser: the quiet line, its calls, the error mark, keyboard access.
-  const page = await kit.openPage(await kit.webUrl(id));
+  const page = await kit.openPage(await kit.webUrl(id), { video: "segment" });
   await page.waitFor(`document.body.dataset.ready === "1"`, "page ready");
-  await page.waitFor(`document.querySelectorAll('#feed .tool-summary[data-status="ready"]').length >= 3`, "summary lines");
+  await page.waitFor(`document.querySelectorAll('#feed .tool-summary[data-status="ready"]').length >= 2`, "summary lines");
   const lines = await page.evaluate(
     `[...document.querySelectorAll('#feed .turn')].filter((turn) => turn.innerText.includes('TS-TWO second run')).flatMap((turn) => [...turn.querySelectorAll('.tool-summary')].map((node) => ({ status: node.dataset.status, errors: node.dataset.errors ?? '', text: node.querySelector('.ts-text')?.innerText ?? '', rows: node.querySelectorAll('.tool-row').length, meta: node.querySelector('.ts-meta')?.innerText ?? '' })))`,
   );
-  check("D1 the summarized turn shows two lines and no loose rows", lines.length === 2 && lines.every((line) => line.rows === 0), lines);
+  check("D1 the summarized turn shows one line and no loose rows", lines.length === 1 && lines[0].rows === 0, lines);
   check(
     "D1 the line shows the summary, the call count and the time",
-    /SUMMARY/.test(lines[0].text) && /2 calls/.test(lines[0].meta),
+    /SUMMARY/.test(lines[0].text) && /3 calls/.test(lines[0].meta),
     lines,
   );
-  check("D1 a failed call stays marked on its summary", lines[1].errors === "1" && /1 failed/.test(lines[1].meta), lines);
+  check("D1 a failed call stays marked on its summary", lines[0].errors === "1" && /1 failed/.test(lines[0].meta), lines);
   const earlier = await page.evaluate(
     `[...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-TWO first run'))?.querySelectorAll('.tool-summary').length`,
   );
@@ -295,7 +330,7 @@ await kit.run(async () => {
   const opened = await page.evaluate(
     `(() => { const node = document.querySelector('#feed .tool-summary.open'); return { rows: node.querySelectorAll('.tool-row').length, focused: document.activeElement?.classList.contains('ts-line'), expanded: node.querySelector('.ts-line').getAttribute('aria-expanded'), by: node.querySelector('.ts-by')?.innerText ?? '' }; })()`,
   );
-  check("D2 D9 Enter opens the original calls and keeps focus", opened.rows === 2 && opened.focused && opened.expanded === "true", opened);
+  check("D2 D9 Enter opens the original calls and keeps focus", opened.rows === 3 && opened.focused && opened.expanded === "true", opened);
   check("the open line names the summary model", /fake-light/.test(opened.by), opened);
   await page.shot("desktop-open", { force: true });
   await page.viewport(390, 844, true);
@@ -305,6 +340,178 @@ await kit.run(async () => {
   );
   check("D9 lines fit a narrow screen", overflow === false);
   await page.shot("narrow-open", { force: true });
+  await page.viewport(1440, 1000);
+
+  // G1 G2 G8 G9 D3: the owner's example. Thinking, three calls from three messages, thinking, two calls, the final text: two groups
+  // of three and two calls, each one quiet line while collecting, then pending, then its summary; hiding thinking keeps them.
+  const lineOf = (index) =>
+    `[...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-GROUPS go'))?.querySelectorAll('.tool-summary')[${index}]`;
+  const linesNow = () =>
+    page.evaluate(
+      `[...([...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-GROUPS go'))?.querySelectorAll('.tool-summary') ?? [])].map((node) => ({ status: node.dataset.status, key: node.querySelector('.ts-line').dataset.toggle, text: node.querySelector('.ts-text').innerText, meta: node.querySelector('.ts-meta').innerText, spin: !!node.querySelector('.ts-line .spin'), rows: node.querySelectorAll('.ts-body .tool-row').length, loose: node.closest('.turn').querySelectorAll(':scope > .tool-row, :scope > .tool-group').length }))`,
+    );
+  // Screenshots show the example turn; the reader scrolls there like the owner would.
+  const showTurn = () =>
+    page.evaluate(
+      `[...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-GROUPS go'))?.scrollIntoView({ block: 'start' })`,
+    );
+  summary.mode = "hold";
+  groupHold.at = new Set([3, 5]);
+  const groupsFrom = summary.requests.length;
+  await page.screencast(true);
+  await rpc({ action: "message", id, text: "TS-GROUPS go" });
+  await waitFor(() => groupHold.step === 3, "the Coordinator waits after three calls", { timeout: 60000 });
+  await page.waitFor(`${lineOf(0)}?.querySelector('.ts-meta')?.innerText.includes('3 calls')`, "collecting line with 3 calls");
+  const collecting = await linesNow();
+  check(
+    "D3 a group collecting calls is one quiet line with a spinner, running… and its count",
+    collecting.length === 1 &&
+      collecting[0].status === "collecting" &&
+      collecting[0].spin &&
+      /running…/.test(collecting[0].text) &&
+      /3 calls/.test(collecting[0].meta) &&
+      collecting[0].loose === 0,
+    collecting,
+  );
+  check("G2 G9 nothing is asked while the group may still grow", summary.requests.length === groupsFrom, summary.requests.length);
+  await showTurn();
+  await page.shot("groups-01-collecting-3-calls", { force: true });
+  await page.evaluate(`${lineOf(0)}.querySelector('.ts-line').click()`);
+  await page.waitFor(`${lineOf(0)}?.querySelectorAll('.ts-body .tool-row').length === 3`, "the group's three calls open");
+  await showTurn();
+  await page.shot("groups-02-collecting-expanded", { force: true });
+  await page.evaluate(`${lineOf(0)}.querySelector('.ts-line').click()`);
+  groupHold.release();
+  await waitFor(() => summary.requests.length > groupsFrom, "thinking closed the first group", { timeout: 60000 });
+  await waitFor(() => groupHold.step === 5, "the Coordinator waits after the second group's calls", { timeout: 60000 });
+  await page.waitFor(
+    `${lineOf(0)}?.dataset.status === 'pending' && ${lineOf(1)}?.querySelector('.ts-meta')?.innerText.includes('2 calls')`,
+    "first pending, second collecting",
+  );
+  const second = await linesNow();
+  check("the second group is its own collecting line", second[1]?.status === "collecting" && second[1].key !== second[0].key, second);
+  check("D3 the closed group waits with the pending glyph", second[0].status === "pending" && !second[0].spin, second);
+  await showTurn();
+  await page.shot("groups-03-first-pending-second-collecting", { force: true });
+  summary.mode = "ok";
+  summary.release();
+  await page.waitFor(`${lineOf(0)}?.dataset.status === 'ready'`, "first summary");
+  await showTurn();
+  await page.shot("groups-04-first-ready", { force: true });
+  groupHold.release();
+  await page.waitFor(`${lineOf(1)}?.dataset.status === 'ready'`, "second summary");
+  await kit.settle(id);
+  const done = await linesNow();
+  check(
+    "G1 exactly two lines, of three calls and of two",
+    done.length === 2 && /3 calls/.test(done[0].meta) && /2 calls/.test(done[1].meta) && done.every((line) => line.status === "ready"),
+    done,
+  );
+  const groupRequests = summary.requests.slice(groupsFrom);
+  check("G9 exactly two summary requests", groupRequests.length === 2, groupRequests.length);
+  check(
+    "G1 the first summary covers the first group only, the second the second",
+    groupRequests[0].user.includes("TS-G1-LOG") &&
+      !groupRequests[0].user.includes("TS-G2-CHECK") &&
+      groupRequests[1].user.includes("TS-G2-CHECK") &&
+      !groupRequests[1].user.includes("TS-G1-LOG"),
+    groupRequests.map((item) => item.user.slice(0, 400)),
+  );
+  check("the agent's thinking is never sent to the summary model", !groupRequests.some((item) => /TS-G[12]-THOUGHT/.test(item.user)));
+  const hostGroups = await summariesOf("TS-GROUPS go");
+  check("the host forms the two groups", hostGroups.length === 2 && hostGroups[0].calls === 3 && hostGroups[1].calls === 2, hostGroups);
+  await showTurn();
+  await page.shot("groups-05-final-thinking-shown", { force: true });
+  await setUi({ showThinking: false });
+  await page.waitFor(
+    `![...document.querySelectorAll('#feed .turn')].find((turn) => turn.innerText.includes('TS-GROUPS go'))?.querySelector('.thinking')`,
+    "thinking hidden",
+  );
+  const hidden = await linesNow();
+  check(
+    "G8 hiding thinking keeps the same two lines",
+    JSON.stringify(hidden.map((line) => [line.key, line.meta])) === JSON.stringify(done.map((line) => [line.key, line.meta])),
+    { done, hidden },
+  );
+  check("G8 hiding thinking keeps the host's groups", JSON.stringify(await summariesOf("TS-GROUPS go")) === JSON.stringify(hostGroups));
+  await showTurn();
+  await page.shot("groups-06-final-thinking-hidden", { force: true });
+  await setUi({ showThinking: true });
+  await page.waitFor(`${lineOf(0)}?.closest('.turn').querySelector('.thinking')`, "thinking back");
+  await page.screencast(false);
+
+  // D10: a history page holding only the later calls of a group reads the group's whole count; loading the older page joins them.
+  const latest = await show();
+  check(
+    "G10 every call of the turn is in one of the two groups",
+    turnCalls(latest.messages, "TS-GROUPS go").every((call) => [hostGroups[0].id, hostGroups[1].id].includes(groupId(latest, call))),
+  );
+  const firstGroup = hostGroups[0].id;
+  let partial;
+  for (let limit = 1; limit < 40 && !partial; limit++) {
+    const newest = await rpc({ action: "chat-history", id, limit, messageText: "full" });
+    const present = toolCalls(newest.items).filter((call) => groupId(newest, call) === firstGroup).length;
+    if (present > 0 && present < 3) partial = newest;
+  }
+  check("D10 a page holds only part of the first group", !!partial);
+  check("D10 the partial page reads the group's whole count", partial.toolGroups.groups[firstGroup].calls === 3, partial.toolGroups);
+  const olderPage = await rpc({ action: "chat-history", id, before: partial.before, limit: 100, messageText: "full" });
+  // The production renderer draws both pages: one line for the group, with its earlier calls counted until they load.
+  const drawn = await page.evaluate(`(async () => {
+    const { transcriptHtml, mergeGroups } = await import('/chat.js');
+    const draw = (items, groups) => {
+      const box = document.createElement('div');
+      box.innerHTML = transcriptHtml(items, false, 'Coordinator', { groups });
+      const lines = [...box.querySelectorAll('.tool-summary')].filter((node) => node.querySelector('.ts-line').dataset.toggle === 's${firstGroup}');
+      return { lines: lines.length, meta: lines[0]?.querySelector('.ts-meta').innerText ?? '' };
+    };
+    const newest = ${JSON.stringify({ items: partial.items, groups: partial.toolGroups })};
+    const older = ${JSON.stringify({ items: olderPage.items, groups: olderPage.toolGroups ?? null })};
+    return { partial: draw(newest.items, newest.groups), joined: draw([...older.items, ...newest.items], mergeGroups(older.groups, newest.groups)) };
+  })()`);
+  check(
+    "D10 a partial page draws one line that counts the calls on earlier pages",
+    drawn.partial.lines === 1 && /3 calls/.test(drawn.partial.meta) && /on earlier pages/.test(drawn.partial.meta),
+    drawn,
+  );
+  check(
+    "D10 loading the older page joins them into the same line",
+    drawn.joined.lines === 1 && /3 calls/.test(drawn.joined.meta) && !/earlier/.test(drawn.joined.meta),
+    drawn,
+  );
+
+  // D9 narrow: the group lines fit, scroll with the wheel and the keyboard, and open with Enter.
+  await page.viewport(390, 844, true);
+  await page.waitFor(`${lineOf(1)}`, "narrow lines");
+  const narrowFit = await page.evaluate(
+    `[...document.querySelectorAll('#feed .tool-summary')].every((node) => node.getBoundingClientRect().right <= document.documentElement.clientWidth + 1)`,
+  );
+  check("D9 group lines fit 390 px", narrowFit);
+  const scroller = await page.evaluate(`(() => {
+    let node = document.querySelector('#feed');
+    while (node && !(node.scrollHeight > node.clientHeight + 4 && /auto|scroll/.test(getComputedStyle(node).overflowY))) node = node.parentElement;
+    const r = (node ?? document.querySelector('#feed')).getBoundingClientRect();
+    return { id: node?.id ?? null, top: node?.scrollTop ?? null, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  check("the chat scrolls on a narrow screen", scroller.id !== null, scroller);
+  await page.evaluate(`document.getElementById('${scroller.id}').scrollTop = 0`);
+  await page.cdp("Input.dispatchMouseEvent", { type: "mouseWheel", x: scroller.x, y: scroller.y, deltaX: 0, deltaY: 600 });
+  await page.waitFor(`document.getElementById('${scroller.id}').scrollTop > 0`, "wheel scrolled down");
+  await page.evaluate(`${lineOf(0)}.querySelector('.ts-line').scrollIntoView({ block: 'center' })`);
+  await page.evaluate(`${lineOf(0)}.querySelector('.ts-line').focus()`);
+  await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
+  await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await page.waitFor(`${lineOf(0)}?.querySelectorAll('.ts-body .tool-row').length === 3`, "narrow Enter opens the group");
+  const beforeKeys = await page.evaluate(`document.getElementById('${scroller.id}').scrollTop`);
+  for (const key of ["PageUp", "PageUp"]) {
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: 33 });
+    await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: 33 });
+  }
+  await page.waitFor(`document.getElementById('${scroller.id}').scrollTop < ${beforeKeys}`, "keyboard scrolled up");
+  check("D6 the open group line keeps its state while the reader scrolls", await page.evaluate(`${lineOf(0)}.classList.contains('open')`));
+  await page.evaluate(`${lineOf(0)}.scrollIntoView({ block: 'start' })`);
+  await page.shot("groups-07-narrow-expanded", { force: true });
+  await page.evaluate(`${lineOf(0)}.querySelector('.ts-line').click()`);
   await page.viewport(1440, 1000);
 
   // D3 Q1 Q2: a pending summary looks unlike a running call, and survives a restart.
@@ -326,7 +533,7 @@ await kit.run(async () => {
   // Q11: groups of conversations with no running turn (a turn that ended while the host was down) are dropped when each store opens.
   const summariesDb = join(kit.home, "tool-summaries.sqlite");
   const orphan = (scope, entry) =>
-    `INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES ('${scope}', 999999, ${entry}, 'collecting', '["gone"]', '{"calls":[{"id":"gone","name":"bash","args":"TS-ORPHAN","result":null}],"more":0}', 0, 0)`;
+    `INSERT INTO tool_groups (scope, conversation, first_entry, first_call, last_entry, status, size, waiting, calls, created, updated) VALUES ('${scope}', 999999, ${entry}, 'gone', ${entry}, 'open', 1, '["gone"]', '{"calls":[{"id":"gone","name":"bash","args":"TS-ORPHAN","result":null}],"more":0}', 0, 0)`;
   {
     const db = new DatabaseSync(summariesDb);
     db.exec(`${orphan(id, 999999)}; ${orphan("host-agent", 999998)}`);
@@ -335,7 +542,7 @@ await kit.run(async () => {
   await kit.restartHost();
   await waitFor(() => {
     const db = new DatabaseSync(summariesDb, { readOnly: true });
-    const rows = db.prepare("SELECT status, calls FROM summaries WHERE conversation = 999999").all();
+    const rows = db.prepare("SELECT status, calls FROM tool_groups WHERE conversation = 999999").all();
     db.close();
     return rows.length === 2 && rows.every((row) => row.status === "cancelled" && row.calls === null);
   }, "Q11 orphaned groups of the project and the Host agent dropped after a restart");
@@ -432,13 +639,12 @@ await kit.run(async () => {
   const workerPage = await waitFor(
     async () => {
       const history = await rpc({ action: "thread-history", id, threadId: worker.id, messageText: "full" });
-      const entries = toolEntries(history.items);
-      return entries.length && entries.every((entry) => history.toolSummaries?.[entry]?.status === "ready") && history;
+      return allReady(history) && history;
     },
     "D8 worker summary",
     { timeout: 60000 },
   );
-  check("D8 worker transcripts get summaries", Object.keys(workerPage.toolSummaries).length >= 1);
+  check("D8 worker transcripts get summaries", Object.keys(workerPage.toolGroups.groups).length >= 1);
   await page.evaluate(`document.querySelector('[data-open-worker="${worker.id}"]')?.click()`);
   await page.waitFor(`document.querySelector('#worker-feed .tool-summary[data-status="ready"]')`, "worker summary line");
   await page.shot("worker-summary", { force: true });
@@ -527,13 +733,12 @@ await kit.run(async () => {
   const hostPage = await waitFor(
     async () => {
       const history = await rpc({ action: "host-agent-history" });
-      const entries = toolEntries(history.items);
-      return entries.length && entries.every((entry) => history.toolSummaries?.[entry]?.status === "ready") && history;
+      return allReady(history) && history;
     },
     "D8 host agent summary",
     { timeout: 60000 },
   );
-  check("D8 the Host agent gets summaries", Object.keys(hostPage.toolSummaries).length >= 1);
+  check("D8 the Host agent gets summaries", Object.keys(hostPage.toolGroups.groups).length >= 1);
   const scopes = (await rpc({ action: "tool-summaries-usage" })).scopes.map((item) => item.scope);
   check("the Host agent's usage is its own scope", scopes.includes("host-agent"), scopes);
 
@@ -543,8 +748,7 @@ await kit.run(async () => {
     waitFor(
       async () => {
         const history = await read();
-        const entries = toolEntries(history.items);
-        return entries.length && entries.every((entry) => history.toolSummaries?.[entry]?.status === "ready") && history;
+        return allReady(history) && history;
       },
       label,
       { timeout: 60000 },
@@ -638,21 +842,21 @@ await kit.run(async () => {
   for (const child of children) {
     const label = `nested-${child.role}`;
     const history = await rpc({ action: "thread-history", id, threadId: `${nester.id}/${child.id}`, messageText: "full" });
-    const ran = toolEntries(history.items).length >= 1 && history.items.some((item) => item.kind === "tool-result" && item.isError);
+    const ran = toolCalls(history.items).length >= 1 && history.items.some((item) => item.kind === "tool-result" && item.isError);
     check(`${label} made its calls, failing one included`, ran);
-    check(`N1 ${label} has no summaries`, history.toolSummaries === undefined, history.toolSummaries);
+    check(`N1 ${label} has no summaries`, history.toolGroups === undefined, history.toolGroups);
     check(
       `${label} thinking is in its transcript`,
       thoughtIn(history, child.role === "scout" ? "TS-NSCOUTTASK-THOUGHT" : "TS-NREVIEWTASK-THOUGHT"),
     );
     matrix[label] = { summaryRequests: 0, toolSummaries: "none", thinkingRpc: true, browserView: "none" };
   }
-  // N2: summary rows of nested conversations left over from before (queued, cut off while running, still collecting) send nothing
+  // N2: groups of nested conversations left over from before (queued, cut off while running, still collecting) send nothing
   // after a restart and drop their copy of the calls; a saved nested summary is kept.
   {
     const db = new DatabaseSync(summariesDb);
     const insert = db.prepare(
-      "INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, text, attempts, requests, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+      "INSERT INTO tool_groups (scope, conversation, first_entry, first_call, last_entry, status, size, waiting, calls, text, attempts, requests, created, updated) VALUES (?1, ?2, ?3, 'c', ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, 0, 0)",
     );
     const input = (marker, result) => JSON.stringify({ calls: [{ id: `c-${marker}`, name: "bash", args: marker, result }], more: 0 });
     const done = { text: "ok", isError: false, images: 0, nested: null };
@@ -665,7 +869,11 @@ await kit.run(async () => {
     await kit.restartHost();
     const rows = await waitFor(() => {
       const db = new DatabaseSync(summariesDb, { readOnly: true });
-      const found = db.prepare("SELECT entry, status, calls FROM summaries WHERE entry >= 990001 AND entry <= 990004 ORDER BY entry").all();
+      const found = db
+        .prepare(
+          "SELECT first_entry AS entry, status, calls FROM tool_groups WHERE first_entry >= 990001 AND first_entry <= 990004 ORDER BY first_entry",
+        )
+        .all();
       db.close();
       return found.slice(0, 3).every((row) => row.status === "cancelled" && row.calls === null) && found;
     }, "N2 recovered nested rows dropped");

@@ -6,18 +6,21 @@ import type { CommitPublication, ConversationId, Cursor, EntryId, EntryRecord, S
 import { Type, type Static, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { guardedStream } from "./model-guard.ts";
+import type { TranscriptItem } from "./transcript-reader.ts";
 import type { UiSettings } from "./ui-settings.ts";
 
 /**
- * Tool summaries (scripts/tool-summaries-failures.md): one or two sentences about the tools one assistant message called, written by a
- * light model after every result of that message arrived. Derived display data in its own database, never in a conversation. Only
- * commits seen while summaries are on start one; reads never do. A worker's own subagents (nested conversations) never get one.
+ * Tool summaries (scripts/tool-summaries-failures.md): one or two sentences about one group of tool calls, written by a light model
+ * once the group closed and every result of it arrived. A group is the consecutive calls of one run across assistant messages; text
+ * or thinking, an input, a compaction, a reset or the end of the run closes it, in block order. Derived display data in its own
+ * database, never in a conversation. Only commits seen while summaries are on start or grow a group; reads never do. A worker's own
+ * subagents (nested conversations) never get one.
  */
 export type ToolSummarySettings = UiSettings["toolSummaries"];
 export type ToolSummaryLimits = {
   /** Requests running at once, host-wide. */
   concurrency: number;
-  /** Summaries queued or running at once; a message past it fails instead of waiting. */
+  /** Summaries queued or running at once; a group past it fails instead of waiting. */
   queue: number;
   /** Requests per summary, including the first. */
   attempts: number;
@@ -34,11 +37,15 @@ export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = {
   retryMs: 2_000,
 };
 
-/** What a page shows: `pending` covers queued and running; cancelled and collecting summaries read as none. */
-export type ToolSummaryView =
-  | { status: "pending"; model: string | null }
-  | { status: "ready"; text: string; model: string | null }
-  | { status: "failed"; error: string; model: string | null };
+/** What a page shows of one group: `collecting` until it closed with every result, `pending` while queued or running; `calls` is
+ * the group's whole count, also when the page holds only some of them. Cancelled groups read as none. */
+export type ToolGroupView = { calls: number; model: string | null } & (
+  { status: "collecting" } | { status: "pending" } | { status: "ready"; text: string } | { status: "failed"; error: string }
+);
+/** The groups of a page by their stable id, and the group of each call by `<entryId>:<callId>`; calls in no group are absent. */
+export type ToolGroupsView = { groups: Record<string, ToolGroupView>; calls: Record<string, string> };
+/** One tool call of a transcript page. */
+export type ToolCallRef = { entry: number; call: string; name: string };
 export type ToolSummaryUsage = { summaries: number; requests: number; interrupted: number; usage: Usage };
 type SummaryRuntime = Pick<ModelRuntime, "getModel" | "getProviderAuthStatus" | "streamSimple">;
 
@@ -46,14 +53,15 @@ export interface ToolSummaries {
   /** Feed one Pi Durable commit of the conversation store `scope` (a project id, or `host-agent`); `nested` conversations are skipped. */
   observe(scope: string, publication: Pick<CommitPublication, "changes">, nested?: ReadonlySet<number>): void;
   /**
-   * The store of `scope` opened: drops its open messages written before `before` whose conversation is not in `running`, and every
-   * open message of a `nested` conversation, then queues its summaries recovered from the last run. Nothing of `scope` is sent before.
+   * The store of `scope` opened: settles its open groups written before `before` whose conversation is not in `running` (complete
+   * ones are queued, the rest dropped), drops every live group of a `nested` conversation, then queues its summaries recovered from
+   * the last run. Nothing of `scope` is sent before.
    */
   reconcile(query: { scope: string; running: ReadonlySet<number>; before: number; nested: ReadonlySet<number> }): void;
   /** Calls `listener` with a conversation id when one of its summaries changed state. */
   watch(scope: string, listener: (conversationId: number) => void): () => void;
-  /** The summaries of these assistant entries; empty while summaries are off. Writes nothing. */
-  read(query: { scope: string; conversationId: number; entries: readonly number[] }): Map<number, ToolSummaryView>;
+  /** The groups of these calls; undefined while summaries are off or when none is in a group. Writes nothing. */
+  read(query: { scope: string; conversationId: number; calls: readonly ToolCallRef[] }): ToolGroupsView | undefined;
   /** Summary model usage per conversation of `scope`, including cancelled and failed summaries. */
   usage(scope: string): Map<number, ToolSummaryUsage>;
   /** Host-wide usage: the total and one line per scope. Cut-off requests have an unknown cost that is not in `usage`. */
@@ -65,8 +73,8 @@ export interface ToolSummaries {
 /** The scope of the Host agent's conversation store; project scopes are project ids (UUIDs), so it never collides. */
 export const HOST_AGENT_SCOPE = "host-agent";
 
-/** Drops the open messages of `scope` whose turn ended unobserved or that are `nested`, and queues its recovered summaries; call it
- * once the store is open and its commits are observed. */
+/** Settles the open groups of `scope` whose run ended unobserved, drops those that are `nested`, and queues its recovered summaries;
+ * call it once the store is open and its commits are observed. */
 export async function reconcileToolSummaries(input: {
   summaries: ToolSummaries;
   scope: string;
@@ -87,15 +95,17 @@ export async function reconcileToolSummaries(input: {
   input.summaries.reconcile({ scope: input.scope, running, before, nested: input.nested });
 }
 
-/** Adds the summaries of a transcript page's assistant entries, for owner views; agent-facing reads never call it. */
-export function withToolSummaries<T extends { conversationId: number; items: readonly { kind: string; entryId: number }[] }>(
+/** Adds the tool groups of a transcript page's calls, for owner views; agent-facing reads never call it. */
+export function withToolSummaries<T extends { conversationId: number; items: readonly TranscriptItem[] }>(
   service: Pick<ToolSummaries, "read"> | undefined,
   scope: string,
   page: T,
-): T & { toolSummaries?: Record<string, ToolSummaryView> } {
-  const entries = [...new Set(page.items.filter((item) => item.kind === "tool-call").map((item) => item.entryId))];
-  const found = service?.read({ scope, conversationId: page.conversationId, entries });
-  return found?.size ? { ...page, toolSummaries: Object.fromEntries(found) } : page;
+): T & { toolGroups?: ToolGroupsView } {
+  const calls = page.items.flatMap((item) =>
+    item.kind === "tool-call" ? [{ entry: item.entryId, call: item.callId, name: item.name }] : [],
+  );
+  const found = calls.length ? service?.read({ scope, conversationId: page.conversationId, calls }) : undefined;
+  return found ? { ...page, toolGroups: found } : page;
 }
 
 /** Summary usage of one conversation store, for usage views: kept apart from the agents' own model usage. */
@@ -113,11 +123,16 @@ export function summaryUsageTotal(byConversation: ReadonlyMap<number, ToolSummar
 
 /** Memory calls keep their own Remembered / Used memory rows (web/chat.js), so they are never summarized. */
 const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
-/** The task of one turn: its tool calls run as its children, so once it ends no result of its calls is still coming. */
+/** The task of one generation: its tool calls run as its children, so once it ends no result of its calls is still coming. A run
+ * goes on when the ending generation hands over to the next one in the same commit. */
 const TURN_TASK = "pi.generation";
+/** Entries without a `user` record that still close a group; any input (owner, steer, internal, agent prompt) has a `user` record. */
+const BOUNDARY_KINDS = new Set(["pi.reset", "pi.compaction", "projects.agent-report"]);
 // `completing` is a finished turn waiting for its owned work; its results may still arrive.
 const LIVE_TURN = ["pending", "running", "waiting", "sleeping", "completing"] as const satisfies readonly TaskQuery["status"][];
+// A long group keeps its first `HEAD_CALLS` and its latest calls, so the model sees how it started and how it ended.
 const MAX_CALLS = 16,
+  HEAD_CALLS = 8,
   ARGS_CHARS = 400,
   NESTED_ARGS_CHARS = 160,
   RESULT_CHARS = 600,
@@ -126,7 +141,7 @@ const MAX_CALLS = 16,
   JSON_DEPTH = 6,
   JSON_ITEMS = 32,
   KEY_CHARS = 80,
-  PROMPT_CHARS = 20_000,
+  CALL_CHARS = 1_250,
   OUTPUT_TOKENS = 200,
   SUMMARY_CHARS = 400,
   ERROR_CHARS = 300;
@@ -148,12 +163,12 @@ const StoredCall = Type.Object(
   { id: Type.String(), name: Type.String(), args: Type.String(), result: Nullable(StoredResult) },
   { additionalProperties: false },
 );
-/** The bounded copy of a message's calls: at most `MAX_CALLS`, and how many more it made. */
+/** The bounded copy of a group's calls: at most `MAX_CALLS`, and how many more it made between its head and its latest calls. */
 const StoredInput = Type.Object(
   { calls: Type.Array(StoredCall, { maxItems: MAX_CALLS }), more: Type.Integer({ minimum: 0 }) },
   { additionalProperties: false },
 );
-/** The ids of every call of the message whose result has not arrived, including calls past `MAX_CALLS`. */
+/** The ids of every call of the group whose result has not arrived, including calls left out of the copy. */
 const StoredWaiting = Type.Array(Type.String());
 const StoredCost = Type.Object({
   input: Type.Number(),
@@ -170,7 +185,9 @@ const StoredUsage = Type.Object({
   totalTokens: Type.Number(),
   cost: StoredCost,
 });
+// `open` takes more calls; `collecting` is closed and waits for the rest of its results.
 const Status = Type.Union([
+  Type.Literal("open"),
   Type.Literal("collecting"),
   Type.Literal("pending"),
   Type.Literal("running"),
@@ -182,8 +199,8 @@ const StoredRow = Type.Object({
   id: Type.Integer(),
   scope: Type.String(),
   conversation: Type.Integer(),
-  entry: Type.Integer(),
   status: Status,
+  size: Type.Integer({ minimum: 0 }),
   waiting: Nullable(Type.String()),
   calls: Nullable(Type.String()),
   text: Nullable(Type.String()),
@@ -194,7 +211,18 @@ const StoredRow = Type.Object({
 });
 const ReadRow = Type.Object({
   entry: Type.Integer(),
+  call: Type.String(),
+  grp: Type.Integer(),
   status: Status,
+  size: Type.Integer({ minimum: 0 }),
+  text: Nullable(Type.String()),
+  error: Nullable(Type.String()),
+  model: Nullable(Type.String()),
+});
+/** A summary written per assistant message before groups existed: read as the group of that message's calls. */
+const LegacyRow = Type.Object({
+  entry: Type.Integer(),
+  status: Type.Union([Type.Literal("ready"), Type.Literal("failed")]),
   text: Nullable(Type.String()),
   error: Nullable(Type.String()),
   model: Nullable(Type.String()),
@@ -207,6 +235,7 @@ const UsageRow = Type.Object({
   usage: Type.String(),
 });
 const RowId = Type.Object({ id: Type.Integer() });
+const MarkRow = Type.Object({ entry: Nullable(Type.Integer()) });
 const ScopeRow = Type.Object({ scope: Type.String() });
 const ConversationRow = Type.Object({ scope: Type.String(), conversation: Type.Integer() });
 const check = {
@@ -216,6 +245,8 @@ const check = {
   usageList: Compile(Type.Array(Nullable(Type.String()))),
   row: Compile(StoredRow),
   read: Compile(ReadRow),
+  legacy: Compile(LegacyRow),
+  mark: Compile(MarkRow),
   usageRow: Compile(UsageRow),
   rowId: Compile(RowId),
   scope: Compile(ScopeRow),
@@ -223,10 +254,10 @@ const check = {
 };
 type Input = Static<typeof StoredInput>;
 type StoredResult = Static<typeof StoredResult>;
-/** A summary row as the scheduler sees it; a state carries only the fields that state has. */
-type RowBase = { id: number; scope: string; conversation: ConversationId; entry: EntryId; attempts: number; usage: Usage | null };
+/** A group row as the scheduler sees it; a state carries only the fields that state has. */
+type RowBase = { id: number; scope: string; conversation: ConversationId; attempts: number; usage: Usage | null };
 type Row =
-  | (RowBase & { status: "collecting"; waiting: string[]; input: Input })
+  | (RowBase & { status: "open" | "collecting"; waiting: string[]; input: Input })
   | (RowBase & { status: "pending"; input: Input })
   | (RowBase & { status: "running"; input: Input })
   | (RowBase & { status: "ready" | "failed" | "cancelled" });
@@ -330,22 +361,24 @@ function boundedJson(value: unknown, max: number): string {
   return out.join("");
 }
 
-/** The non-memory calls of an assistant message, bounded, and the ids of every call whose result the summary waits for. */
-function callsOf(record: AssistantMessage): { input: Input; waiting: string[] } | undefined {
-  const calls = (Array.isArray(record.content) ? record.content : []).flatMap((part) =>
-    part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string" && !MEMORY.test(part.name) ? [part] : [],
-  );
-  if (!calls.length) return undefined;
-  return {
-    // Every call is awaited, even past the limit, so the summary starts after the message's last result.
-    waiting: calls.map((call) => call.id),
-    input: {
-      calls: calls
-        .slice(0, MAX_CALLS)
-        .map((call) => ({ id: call.id, name: call.name, args: boundedJson(call.arguments, ARGS_CHARS), result: null })),
-      more: Math.max(0, calls.length - MAX_CALLS),
-    },
-  };
+/** How a block of an assistant message acts on its conversation's groups, in block order. */
+type Block = { kind: "call"; id: string; name: string; args: unknown } | { kind: "boundary" } | { kind: "none" };
+function blockOf(part: AssistantMessage["content"][number]): Block {
+  if (part.type === "toolCall")
+    // Memory calls keep their own rows and leave the group as it is.
+    return typeof part.id === "string" && typeof part.name === "string" && !MEMORY.test(part.name)
+      ? { kind: "call", id: part.id, name: part.name, args: part.arguments }
+      : { kind: "none" };
+  const text = part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : undefined;
+  // Only meaningful text or thinking splits a group, whether or not the owner shows thinking.
+  return typeof text === "string" && text.trim() ? { kind: "boundary" } : { kind: "none" };
+}
+
+/** The copy with one more call: past `MAX_CALLS` the oldest call after the head is left out and counted. */
+function withCall(input: Input, call: Extract<Block, { kind: "call" }>): Input {
+  const stored = { id: call.id, name: call.name, args: boundedJson(call.args, ARGS_CHARS), result: null };
+  if (input.calls.length < MAX_CALLS) return { calls: [...input.calls, stored], more: input.more };
+  return { calls: [...input.calls.slice(0, HEAD_CALLS), ...input.calls.slice(HEAD_CALLS + 1), stored], more: input.more + 1 };
 }
 
 /** The bounded text of one result: the text of its first parts only; images are counted, never sent. */
@@ -397,14 +430,15 @@ function nestedOf(record: NestedToolCalls): string {
 
 function prompt(input: Input): string {
   const blocks = input.calls.map((call, index) => {
-    const lines = [`### Call ${index + 1}: ${call.name}${call.result?.isError ? " (failed)" : ""}`, `Arguments: ${call.args}`];
+    const number = index < HEAD_CALLS ? index + 1 : index + 1 + input.more;
+    const lines = [`### Call ${number}: ${call.name}${call.result?.isError ? " (failed)" : ""}`, `Arguments: ${call.args}`];
     if (call.result?.nested) lines.push(`Nested calls it made (results not recorded):\n${call.result.nested}`);
     lines.push(`Result:\n${call.result?.text ?? "(no result)"}`);
     if (call.result?.images) lines.push(`(${call.result.images} image${call.result.images === 1 ? "" : "s"} omitted)`);
-    return lines.join("\n");
+    return clip(lines.join("\n"), CALL_CHARS);
   });
-  const more = input.more ? `\n(${input.more} more calls of this message are not shown)` : "";
-  return `<tool_records>\n${clip(blocks.join("\n\n"), PROMPT_CHARS)}${more}\n</tool_records>`;
+  if (input.more) blocks.splice(HEAD_CALLS, 0, `(${input.more} more calls of this group in between are not shown)`);
+  return `<tool_records>\n${blocks.join("\n\n")}\n</tool_records>`;
 }
 
 export function openToolSummaries(options: {
@@ -419,6 +453,7 @@ export function openToolSummaries(options: {
   let settings = options.settings,
     closed = false;
   const db = new DatabaseSync(options.path);
+  // `summaries` holds the per-message summaries written before groups: kept readable and counted, never queued again (C1).
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=2000;
     CREATE TABLE IF NOT EXISTS summaries (
       scope TEXT NOT NULL, conversation INTEGER NOT NULL, entry INTEGER NOT NULL,
@@ -427,60 +462,90 @@ export function openToolSummaries(options: {
       attempts INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0, usage TEXT,
       created INTEGER NOT NULL, updated INTEGER NOT NULL,
       PRIMARY KEY (scope, entry));
-    CREATE INDEX IF NOT EXISTS summaries_open ON summaries (scope, conversation, status);
-    CREATE INDEX IF NOT EXISTS summaries_status ON summaries (status);`);
+    CREATE TABLE IF NOT EXISTS tool_groups (
+      id INTEGER PRIMARY KEY, scope TEXT NOT NULL, conversation INTEGER NOT NULL,
+      first_entry INTEGER NOT NULL, first_call TEXT NOT NULL, last_entry INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('open','collecting','pending','running','ready','failed','cancelled')),
+      size INTEGER NOT NULL DEFAULT 0, waiting TEXT, calls TEXT, text TEXT, error TEXT, model TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0, usage TEXT,
+      created INTEGER NOT NULL, updated INTEGER NOT NULL,
+      UNIQUE (scope, first_entry, first_call));
+    CREATE INDEX IF NOT EXISTS tool_groups_live ON tool_groups (scope, conversation, status);
+    CREATE INDEX IF NOT EXISTS tool_groups_status ON tool_groups (status);
+    CREATE TABLE IF NOT EXISTS tool_group_calls (
+      scope TEXT NOT NULL, conversation INTEGER NOT NULL, entry INTEGER NOT NULL, call TEXT NOT NULL, grp INTEGER NOT NULL,
+      PRIMARY KEY (scope, entry, call));`);
   const now = () => Date.now();
-  const ROW = "SELECT rowid AS id, scope, conversation, entry, status, waiting, calls, text, error, model, attempts, usage FROM summaries";
-  // Dropping a message's copy of its calls: it can hold whatever the tools were given or returned.
+  const ROW = "SELECT id, scope, conversation, status, size, waiting, calls, text, error, model, attempts, usage FROM tool_groups";
+  // Dropping a group's copy of its calls: it can hold whatever the tools were given or returned.
   const DROP = "status = 'cancelled', calls = NULL, waiting = NULL, updated = :now";
+  const LIVE = "('open','collecting','pending','running')";
   const sql = {
-    insert: db.prepare(
-      "INSERT OR IGNORE INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES (:scope, :conversation, :entry, 'collecting', :waiting, :calls, :now, :now)",
+    create: db.prepare(
+      "INSERT OR IGNORE INTO tool_groups (scope, conversation, first_entry, first_call, last_entry, status, waiting, calls, created, updated) VALUES (:scope, :conversation, :entry, :call, :entry, 'open', '[]', :calls, :now, :now) RETURNING id",
     ),
-    collecting: db.prepare(`${ROW} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting'`),
-    movedOn: db.prepare(
-      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting' AND entry < :entry`,
+    member: db.prepare(
+      "INSERT OR IGNORE INTO tool_group_calls (scope, conversation, entry, call, grp) VALUES (:scope, :conversation, :entry, :call, :grp)",
     ),
-    turnEnded: db.prepare(`UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting'`),
+    open: db.prepare(`${ROW} WHERE scope = :scope AND conversation = :conversation AND status = 'open' ORDER BY id DESC LIMIT 1`),
+    waiting: db.prepare(
+      `${ROW} WHERE scope = :scope AND conversation = :conversation AND status IN ('open','collecting') ORDER BY id DESC`,
+    ),
     idle: db.prepare(
-      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND status = 'collecting' AND created < :before AND conversation NOT IN (SELECT value FROM json_each(:running))`,
+      `${ROW} WHERE scope = :scope AND status IN ('open','collecting') AND created < :before AND conversation NOT IN (SELECT value FROM json_each(:running))`,
     ),
     nested: db.prepare(
-      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND status IN ('collecting','pending','running') AND conversation IN (SELECT value FROM json_each(:nested))`,
+      `UPDATE tool_groups SET ${DROP} WHERE scope = :scope AND status IN ${LIVE} AND conversation IN (SELECT value FROM json_each(:nested))`,
     ),
-    get: db.prepare(`${ROW} WHERE rowid = :id`),
+    mark: db.prepare("SELECT MAX(last_entry) AS entry FROM tool_groups WHERE scope = :scope AND conversation = :conversation"),
+    get: db.prepare(`${ROW} WHERE id = :id`),
+    grow: db.prepare(
+      "UPDATE tool_groups SET size = size + 1, last_entry = :entry, waiting = :waiting, calls = :calls, updated = :now WHERE id = :id AND status = 'open'",
+    ),
     collect: db.prepare(
-      "UPDATE summaries SET waiting = :waiting, calls = :calls, updated = :now WHERE rowid = :id AND status = 'collecting'",
+      "UPDATE tool_groups SET waiting = :waiting, calls = :calls, updated = :now WHERE id = :id AND status IN ('open','collecting')",
     ),
+    shut: db.prepare("UPDATE tool_groups SET status = 'collecting', updated = :now WHERE id = :id AND status = 'open'"),
+    drop: db.prepare(`UPDATE tool_groups SET ${DROP} WHERE id = :id`),
     damaged: db.prepare(
-      "UPDATE summaries SET status = 'failed', error = :error, calls = NULL, waiting = NULL, updated = :now WHERE rowid = :id RETURNING scope, conversation",
+      "UPDATE tool_groups SET status = 'failed', error = :error, calls = NULL, waiting = NULL, updated = :now WHERE id = :id RETURNING scope, conversation",
     ),
-    queue: db.prepare("UPDATE summaries SET status = 'pending', updated = :now WHERE rowid = :id"),
+    queue: db.prepare("UPDATE tool_groups SET status = 'pending', updated = :now WHERE id = :id"),
     start: db.prepare(
-      "UPDATE summaries SET status = 'running', model = :model, attempts = attempts + 1, requests = requests + 1, updated = :now WHERE rowid = :id",
+      "UPDATE tool_groups SET status = 'running', model = :model, attempts = attempts + 1, requests = requests + 1, updated = :now WHERE id = :id",
     ),
     retry: db.prepare(
-      "UPDATE summaries SET status = 'pending', error = :error, model = :model, usage = :usage, interrupted = interrupted + :interrupted, updated = :now WHERE rowid = :id",
+      "UPDATE tool_groups SET status = 'pending', error = :error, model = :model, usage = :usage, interrupted = interrupted + :interrupted, updated = :now WHERE id = :id",
     ),
     settle: db.prepare(
-      "UPDATE summaries SET status = :status, text = :text, error = :error, model = COALESCE(:model, model), usage = :usage, interrupted = interrupted + :interrupted, calls = NULL, waiting = NULL, updated = :now WHERE rowid = :id",
+      "UPDATE tool_groups SET status = :status, text = :text, error = :error, model = COALESCE(:model, model), usage = :usage, interrupted = interrupted + :interrupted, calls = NULL, waiting = NULL, updated = :now WHERE id = :id",
     ),
     cancel: db.prepare(
-      "UPDATE summaries SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = :now WHERE status IN ('collecting','pending','running') RETURNING scope, conversation",
+      `UPDATE tool_groups SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = :now WHERE status IN ${LIVE} RETURNING scope, conversation`,
     ),
     recover: db.prepare(
-      "UPDATE summaries SET status = 'pending', interrupted = interrupted + 1, updated = :now WHERE status = 'running' AND attempts < :attempts",
+      "UPDATE tool_groups SET status = 'pending', interrupted = interrupted + 1, updated = :now WHERE status = 'running' AND attempts < :attempts",
     ),
     exhaust: db.prepare(
-      "UPDATE summaries SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = :now WHERE status = 'running'",
+      "UPDATE tool_groups SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = :now WHERE status = 'running'",
     ),
-    pending: db.prepare("SELECT rowid AS id FROM summaries WHERE scope = :scope AND status = 'pending' ORDER BY updated"),
+    // A per-message row in flight under the old rule is never asked again; a request it had running has an unknown cost.
+    legacyCancel: db.prepare(
+      "UPDATE summaries SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = :now WHERE status IN ('collecting','pending','running')",
+    ),
+    pending: db.prepare("SELECT id FROM tool_groups WHERE scope = :scope AND status = 'pending' ORDER BY updated"),
     read: db.prepare(
-      "SELECT entry, status, text, error, model FROM summaries WHERE scope = :scope AND conversation = :conversation AND entry IN (SELECT value FROM json_each(:entries))",
+      "SELECT m.entry, m.call, m.grp, g.status, g.size, g.text, g.error, g.model FROM tool_group_calls m JOIN tool_groups g ON g.id = m.grp WHERE m.scope = :scope AND m.conversation = :conversation AND m.entry IN (SELECT value FROM json_each(:entries))",
     ),
-    scopes: db.prepare("SELECT DISTINCT scope FROM summaries WHERE requests > 0"),
+    legacy: db.prepare(
+      "SELECT entry, status, text, error, model FROM summaries WHERE scope = :scope AND conversation = :conversation AND status IN ('ready','failed') AND entry IN (SELECT value FROM json_each(:entries))",
+    ),
+    scopes: db.prepare("SELECT scope FROM tool_groups WHERE requests > 0 UNION SELECT scope FROM summaries WHERE requests > 0"),
     usage: db.prepare(
-      "SELECT conversation, SUM(status = 'ready') AS summaries, SUM(requests) AS requests, SUM(interrupted) AS interrupted, json_group_array(usage) AS usage FROM summaries WHERE scope = :scope AND requests > 0 GROUP BY conversation",
+      `SELECT conversation, SUM(status = 'ready') AS summaries, SUM(requests) AS requests, SUM(interrupted) AS interrupted, json_group_array(usage) AS usage
+       FROM (SELECT conversation, status, requests, interrupted, usage FROM tool_groups WHERE scope = :scope AND requests > 0
+             UNION ALL SELECT conversation, status, requests, interrupted, usage FROM summaries WHERE scope = :scope AND requests > 0)
+       GROUP BY conversation`,
     ),
   };
   const listeners = new Map<string, Set<(conversationId: number) => void>>();
@@ -507,7 +572,6 @@ export function openToolSummaries(options: {
       id: row.id,
       scope: row.scope,
       conversation: conversationId(row.conversation),
-      entry: entryId(row.entry),
       attempts: row.attempts,
       usage: row.usage === null ? null : parsed(check.usage, row.usage),
     };
@@ -515,11 +579,12 @@ export function openToolSummaries(options: {
       const usage = base.usage;
       if (row.status === "ready" || row.status === "failed" || row.status === "cancelled") return { ...base, usage, status: row.status };
       const input = parsed(check.input, row.calls);
-      // A queued message has every result; one without is damaged, never summarized as incomplete.
+      // A queued group has every result; one without is damaged, never summarized as incomplete.
       if (input?.calls.every((call) => call.result) && (row.status === "pending" || row.status === "running"))
         return { ...base, usage, status: row.status, input };
       const waiting = parsed(check.waiting, row.waiting);
-      if (input && waiting && row.status === "collecting") return { ...base, usage, status: row.status, input, waiting };
+      if (input && waiting && (row.status === "open" || row.status === "collecting"))
+        return { ...base, usage, status: row.status, input, waiting };
     }
     if (!check.rowId.Check(raw)) return undefined;
     for (const touched of sql.damaged.all({ id: raw.id, error: DAMAGED, now: now() }))
@@ -629,7 +694,7 @@ export function openToolSummaries(options: {
     timers.set(row.id, timer);
   }
 
-  /** The message has every result: queue it, or fail it quietly when the queue is full. */
+  /** The group closed with every result: queue it, or fail it quietly when the queue is full. */
   const ready = (row: RowBase) => {
     if (queue.length + timers.size + working.size >= limits.queue)
       return finish(row, { status: "failed", error: "The summary queue is full", model: null, usage: null, interrupted: 0 });
@@ -648,35 +713,79 @@ export function openToolSummaries(options: {
       notify(item.scope, item.conversation);
   };
 
-  /** One result arrived: it joins the copy of the message waiting for it, which is queued once nothing is missing. */
-  const collect = ({ scope, conversation, record }: { scope: string; conversation: ConversationId; record: ToolResultMessage }) => {
-    for (const raw of sql.collecting.all({ scope, conversation })) {
+  type Place = { scope: string; conversation: ConversationId };
+  /** The open group closes: queued when it has every result, otherwise it waits for the rest. */
+  const close = (place: Place) => {
+    const row = rowOf(sql.open.get(place));
+    if (row?.status !== "open") return;
+    if (!row.waiting.length) return ready(row);
+    sql.shut.run({ id: row.id, now: now() });
+    notify(row.scope, row.conversation);
+  };
+  /** Groups still missing a result whose results will not come: the next message was written, or the generation ended. */
+  const abandon = (place: Place) => {
+    for (const raw of sql.waiting.all(place)) {
       const row = rowOf(raw);
-      if (row?.status !== "collecting" || !row.waiting.includes(record.toolCallId)) continue;
+      if ((row?.status !== "open" && row?.status !== "collecting") || !row.waiting.length) continue;
+      sql.drop.run({ id: row.id, now: now() });
+      notify(row.scope, row.conversation);
+    }
+  };
+  /** A call joins the open group of its conversation, or starts one. */
+  const join = (place: Place, entry: EntryId, call: Extract<Block, { kind: "call" }>) => {
+    let row = rowOf(sql.open.get(place));
+    if (row?.status !== "open") {
+      const created = sql.create.get({ ...place, entry, call: call.id, calls: JSON.stringify({ calls: [], more: 0 }), now: now() });
+      if (!check.rowId.Check(created)) return;
+      row = load(created.id);
+      if (row?.status !== "open") return;
+      notify(place.scope, place.conversation);
+    }
+    if (!sql.member.run({ ...place, entry, call: call.id, grp: row.id }).changes) return;
+    const waiting = JSON.stringify([...row.waiting, call.id]);
+    sql.grow.run({ id: row.id, entry, waiting, calls: JSON.stringify(withCall(row.input, call)), now: now() });
+  };
+  /** One result arrived: it joins the copy of the group waiting for it, which is queued once it closed and nothing is missing. */
+  const collect = (place: Place, record: ToolResultMessage) => {
+    for (const raw of sql.waiting.all(place)) {
+      const row = rowOf(raw);
+      if ((row?.status !== "open" && row?.status !== "collecting") || !row.waiting.includes(record.toolCallId)) continue;
       const result = resultOf(record);
       const input = { ...row.input, calls: row.input.calls.map((call) => (call.id === record.toolCallId ? { ...call, result } : call)) };
       const waiting = row.waiting.filter((id) => id !== record.toolCallId);
       sql.collect.run({ id: row.id, waiting: JSON.stringify(waiting), calls: JSON.stringify(input), now: now() });
-      if (!waiting.length) ready(row);
+      if (!waiting.length && row.status === "collecting") ready(row);
       return;
     }
   };
-  const observeEntry = ({ scope, entry }: { scope: string; entry: EntryRecord }) => {
+  // The last assistant or boundary entry seen per conversation: a commit seen again never closes a newer group (G3).
+  const marks = new Map<string, number>();
+  const markOf = (place: Place) => {
+    const key = `${place.scope}:${place.conversation}`;
+    let mark = marks.get(key);
+    if (mark === undefined) {
+      const row = sql.mark.get(place);
+      mark = check.mark.Check(row) ? (row.entry ?? 0) : 0;
+    }
+    return { key, mark };
+  };
+  const observeEntry = (scope: string, entry: EntryRecord) => {
+    const place = { scope, conversation: entry.conversationId };
     const record = entry.model?.[0];
-    if (record?.role === "assistant") {
-      // A new message means the earlier ones of this conversation got every result they ever will.
-      sql.movedOn.run({ scope, conversation: entry.conversationId, entry: entry.id, now: now() });
-      const found = callsOf(record);
-      if (found)
-        sql.insert.run({
-          scope,
-          conversation: entry.conversationId,
-          entry: entry.id,
-          waiting: JSON.stringify(found.waiting),
-          calls: JSON.stringify(found.input),
-          now: now(),
-        });
-    } else if (record?.role === "toolResult") collect({ scope, conversation: entry.conversationId, record });
+    if (record?.role === "toolResult") return collect(place, record);
+    const assistant = record?.role === "assistant" ? record : undefined;
+    if (!assistant && !BOUNDARY_KINDS.has(entry.kind) && !entry.model?.some((item) => item.role === "user")) return;
+    const { key, mark } = markOf(place);
+    if (entry.id <= mark) return;
+    marks.set(key, entry.id);
+    if (!assistant) return close(place);
+    // A new message means the earlier calls of this conversation got every result they ever will.
+    abandon(place);
+    for (const part of Array.isArray(assistant.content) ? assistant.content : []) {
+      const block = blockOf(part);
+      if (block.kind === "call") join(place, entry.id, block);
+      else if (block.kind === "boundary") close(place);
+    }
   };
   const guarded = ({ what, run }: { what: string; run: () => void }) => {
     try {
@@ -689,6 +798,7 @@ export function openToolSummaries(options: {
   // Recovery: requests cut off by the last exit are counted as interrupted and asked again once their store opens (`reconcile`).
   sql.recover.run({ now: now(), attempts: limits.attempts });
   sql.exhaust.run({ now: now() });
+  sql.legacyCancel.run({ now: now() });
   if (!settings.enabled) cancelAll();
 
   return {
@@ -697,30 +807,37 @@ export function openToolSummaries(options: {
       guarded({
         what: "read a commit",
         run: () => {
-          const ended = new Set<ConversationId>();
+          const ended = new Set<ConversationId>(),
+            next = new Set<ConversationId>();
           for (const change of publication.changes) {
             if (change.type === "entry") {
-              if (!nested?.has(Number(change.value.conversationId))) observeEntry({ scope, entry: change.value });
+              if (!nested?.has(Number(change.value.conversationId))) observeEntry(scope, change.value);
+            } else if (change.type === "task" && change.value.kind === TURN_TASK && !change.value.owner) {
+              if (change.value.state.status === "terminal") ended.add(change.value.conversationId);
+              else next.add(change.value.conversationId);
             }
-            // A turn that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this commit.
-            else if (
-              change.type === "task" &&
-              change.value.kind === TURN_TASK &&
-              !change.value.owner &&
-              change.value.state.status === "terminal"
-            )
-              ended.add(change.value.conversationId);
           }
-          for (const conversation of ended) sql.turnEnded.run({ scope, conversation, now: now() });
+          // A generation that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this
+          // commit. The run ends with it unless the next generation started in the same commit.
+          for (const conversation of ended) {
+            if (nested?.has(Number(conversation))) continue;
+            abandon({ scope, conversation });
+            if (!next.has(conversation)) close({ scope, conversation });
+          }
         },
       });
     },
     reconcile({ scope, running, before, nested }) {
       if (closed) return;
       guarded({
-        what: "drop messages of ended turns",
+        what: "settle groups of ended runs",
         run: () => {
-          sql.idle.run({ scope, before, running: JSON.stringify([...running]), now: now() });
+          for (const raw of sql.idle.all({ scope, before, running: JSON.stringify([...running]) })) {
+            const row = rowOf(raw);
+            if (row?.status !== "open" && row?.status !== "collecting") continue;
+            if (!nested.has(row.conversation) && !row.waiting.length) ready(row);
+            else sql.drop.run({ id: row.id, now: now() });
+          }
           sql.nested.run({ scope, nested: JSON.stringify([...nested]), now: now() });
           if (settings.enabled) for (const row of sql.pending.all({ scope })) if (check.rowId.Check(row)) enqueue(row.id);
         },
@@ -732,18 +849,58 @@ export function openToolSummaries(options: {
       set.add(listener);
       return () => set.delete(listener);
     },
-    read({ scope, conversationId, entries }) {
-      const out = new Map<number, ToolSummaryView>();
-      if (!settings.enabled || !entries.length) return out;
-      for (const row of sql.read.all({ scope, conversation: conversationId, entries: JSON.stringify(entries) })) {
+    read({ scope, conversationId, calls }) {
+      if (!settings.enabled || !calls.length) return undefined;
+      const entries = JSON.stringify([...new Set(calls.map((call) => call.entry))]);
+      const found = new Map<string, { id: string; view: ToolGroupView }>();
+      for (const row of sql.read.all({ scope, conversation: conversationId, entries })) {
         if (!check.read.Check(row)) continue;
         const model = row.model;
-        if (row.status === "pending" || row.status === "running") out.set(row.entry, { status: "pending", model });
-        else if (row.status === "ready" && row.text !== null) out.set(row.entry, { status: "ready", text: row.text, model });
-        else if (row.status === "ready" || row.status === "failed")
-          out.set(row.entry, { status: "failed", error: row.error ?? (row.status === "ready" ? DAMAGED : "Summary failed"), model });
+        const calls = row.size;
+        const view: ToolGroupView | undefined =
+          row.status === "open" || row.status === "collecting"
+            ? { status: "collecting", calls, model }
+            : row.status === "pending" || row.status === "running"
+              ? { status: "pending", calls, model }
+              : row.status === "ready" && row.text !== null
+                ? { status: "ready", text: row.text, calls, model }
+                : row.status === "ready" || row.status === "failed"
+                  ? { status: "failed", error: row.error ?? (row.status === "ready" ? DAMAGED : "Summary failed"), calls, model }
+                  : undefined;
+        if (view) found.set(`${row.entry}:${row.call}`, { id: `g${row.grp}`, view });
       }
-      return out;
+      // A summary of one message from before groups covers that message's calls on the page.
+      const legacy = new Map<number, Static<typeof LegacyRow>>();
+      for (const row of sql.legacy.all({ scope, conversation: conversationId, entries }))
+        if (check.legacy.Check(row)) legacy.set(row.entry, row);
+      const out: ToolGroupsView = { groups: {}, calls: {} };
+      const sizes = new Map<number, number>();
+      for (const call of calls)
+        if (legacy.has(call.entry) && !MEMORY.test(call.name) && !found.has(`${call.entry}:${call.call}`))
+          sizes.set(call.entry, (sizes.get(call.entry) ?? 0) + 1);
+      for (const call of calls) {
+        const key = `${call.entry}:${call.call}`;
+        const group = found.get(key);
+        const old = legacy.get(call.entry);
+        const size = sizes.get(call.entry);
+        if (group) {
+          out.groups[group.id] ??= group.view;
+          out.calls[key] = group.id;
+        } else if (old && size && !MEMORY.test(call.name)) {
+          const id = `m${old.entry}`;
+          out.groups[id] ??=
+            old.status === "ready" && old.text !== null
+              ? { status: "ready", text: old.text, calls: size, model: old.model }
+              : {
+                  status: "failed",
+                  error: old.error ?? (old.status === "ready" ? DAMAGED : "Summary failed"),
+                  calls: size,
+                  model: old.model,
+                };
+          out.calls[key] = id;
+        }
+      }
+      return Object.keys(out.calls).length ? out : undefined;
     },
     usage(scope) {
       const out = new Map<number, ToolSummaryUsage>();
