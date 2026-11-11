@@ -9,7 +9,7 @@ import type { PluginStatus } from "./plugin-types.ts";
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 
 const files = (name: string): Record<string, string> => ({
-  "index.mjs": `// ${name}: a pi-prjcts plugin. Contract: PLUGINS.md and HostPluginApi in src/plugin-types.ts of the pi-prjcts repository.
+  "index.mjs": `// ${name}: a pi-prjcts plugin. Guide: docs/plugins/README.md; contract: HostPluginApi in src/plugin-types.ts of the pi-prjcts repository.
 export const greet = (who) => \`Hello, \${who || "world"}!\`;
 
 export default {
@@ -37,7 +37,7 @@ test("registers a read RPC that greets", async () => {
 `,
   "README.md": `# ${name}
 
-A pi-prjcts plugin. The contract is \`PLUGINS.md\` in the pi-prjcts repository.
+A pi-prjcts plugin. The author guide is \`docs/plugins/README.md\` in the pi-prjcts repository; the contract is \`HostPluginApi\` in its \`src/plugin-types.ts\`.
 
 - Test: \`node --test\` in this directory.
 - Check that a host would load it: \`npm run projects -- plugin check <this directory>\` from the pi-prjcts checkout.

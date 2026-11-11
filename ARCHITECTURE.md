@@ -163,7 +163,7 @@ Rules:
 
 ## Plugins
 
-`src/plugins.ts` loads modules listed in `$PI_PROJECTS_HOME/plugins.json` or `PI_PROJECTS_PLUGINS` at host start; `src/plugin-types.ts` defines the API. A plugin provides capabilities (`vcs`, `workspace`, `prs`, `follow`, `merge`, `coordinatorTools`, `rpc`, `uncertainWrites`, `workerTools`, `leaseName`, `lifecycle`, `web`). Core ships Git and GitHub. See `PLUGINS.md`. `src/plugin-dev.ts` backs `projects plugin new` (scaffold) and `projects plugin check` (the same loader in a fresh temporary home); a private host for a plugin under development is the verify skill's `launch --plugin <dir>`. The context panel's Plugins section shows each plugin's status, including its declared `version`.
+`src/plugins.ts` loads modules listed in `$PI_PROJECTS_HOME/plugins.json` or `PI_PROJECTS_PLUGINS` at host start; `src/plugin-types.ts` defines the API. A plugin provides capabilities (`vcs`, `workspace`, `prs`, `follow`, `merge`, `coordinatorTools`, `rpc`, `uncertainWrites`, `workerTools`, `leaseName`, `lifecycle`, `web`). Core ships Git and GitHub. See `PLUGINS.md` and the author guide in `docs/plugins/`. `src/plugin-dev.ts` backs `projects plugin new` (scaffold) and `projects plugin check` (the same loader in a fresh temporary home); a private host for a plugin under development is the verify skill's `launch --plugin <dir>`. The context panel's Plugins section shows each plugin's status, including its declared `version`.
 
 Rules:
 - A plugin registers nothing until `register` returns, and a failing plugin is skipped and reported, never fatal.

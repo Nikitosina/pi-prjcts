@@ -1,4 +1,4 @@
-// Unit: `projects plugin new|check` (scripts/plugin-dev-failures.md 1-11). Temp directories only: no host, no model, no live home.
+// Unit: `projects plugin new|check` and the guide's example plugin (scripts/plugin-dev-failures.md 1-13). Temp directories only: no host, no model, no live home.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -46,6 +46,7 @@ try {
   const source = readFileSync(join(hello, "index.mjs"), "utf8");
   assert.ok(!source.includes(core), "4 the scaffold does not point into the core checkout");
   assert.match(source, /name: "hello"/, "3 the scaffold carries its name");
+  assert.match(readFileSync(join(hello, "README.md"), "utf8"), /docs\/plugins\/README\.md/, "13 the scaffold's README points at the guide");
   const ownTest = spawnSync(process.execPath, ["--test"], { cwd: hello, encoding: "utf8", env: { PATH: process.env.PATH, HOME: root } });
   assert.equal(ownTest.status, 0, `3/4 the scaffold's own test passes: ${ownTest.stdout}${ownTest.stderr}`);
 
@@ -98,6 +99,23 @@ try {
   assert.equal(hung.code, 0, `11 check finishes: ${hung.code} ${hung.stdout}${hung.stderr}`);
   assert.equal(hung.json?.plugins?.[0]?.state, "loaded", "11 the result is printed");
   assert.ok(!existsSync(hung.json.home), "11 the temporary home is removed");
+
+  // 12: the guide's example passes its own test (its tools run with the host's libraries) and the host loader.
+  const example = join(core, "docs", "plugins", "examples", "notes");
+  const exampleTest = spawnSync(process.execPath, ["--test"], {
+    cwd: example,
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, HOME: root },
+  });
+  assert.equal(exampleTest.status, 0, `12 the example's own test passes: ${exampleTest.stdout}${exampleTest.stderr}`);
+  const exampleCheck = projects("plugin", "check", example);
+  assert.equal(exampleCheck.code, 0, `12 the example loads: ${exampleCheck.stdout}${exampleCheck.stderr}`);
+  assert.deepEqual(
+    exampleCheck.json.plugins[0].provides.sort(),
+    ["coordinatorTools", "rpc", "rpcPolicy", "workerTools"],
+    "12 the example provides what the guide describes",
+  );
+  assert.equal(exampleCheck.json.plugins[0].version, "1.0.0", "12 the example's version");
 
   // Missing arguments print the usage.
   assert.equal(projects("plugin", "check").code, 1, "usage without a directory");

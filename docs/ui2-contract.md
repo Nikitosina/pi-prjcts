@@ -93,7 +93,7 @@ Notes:
 | `approvals-list` | `{}` | `{ approvals: Approval[] }` |
 | `approval-decide` | `{ id, decision: "approve" \| "deny", note? }` | `{ approval: Approval }` |
 
-- Approval is per request, not only per action: `deploy-settings` that turns on the nightly deploy, and a `plugin` call the plugin does not declare `read` or `write` in its `rpcPolicy` (PLUGINS.md), need approval like the dangerous actions.
+- Approval is per request, not only per action: `deploy-settings` that turns on the nightly deploy, and a `plugin` call the plugin does not declare `read` or `write` in its `rpcPolicy` (`docs/plugins/reference.md`), need approval like the dangerous actions.
 - Agent-facing results and approval outcomes redact secrets (`webhook.secret`, Telegram `pairing.code`, `secret`/`token`/`apiKey`/`password` fields) as `"[redacted]"`; the browser gets the real values.
 
 ```ts

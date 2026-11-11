@@ -18,3 +18,7 @@ Check (`plugin check <dir>`)
 Version
 9. A plugin without `version` stops loading: existing plugins must load unchanged, with `version: null`.
 10. A `version` that is not a short non-empty string is accepted silently: the plugin must fail to load with a reason naming `version`.
+
+Author guide (`docs/plugins/`)
+12. The guide's example plugin (`docs/plugins/examples/notes`) drifts from the contract: its own test fails, the host loader refuses it, or its tools do not build and run with the host's Durable and typebox libraries.
+13. The scaffold's README sends authors to a page that no longer holds the guide: it must point at `docs/plugins/README.md`.

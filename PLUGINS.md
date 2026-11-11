@@ -1,36 +1,21 @@
 # Plugins
 
-A plugin is a module the host loads at its start to add capabilities: a small RPC, coordinator or worker tools, a browser panel, or a whole provider for a checkout kind or PR service. There is one plugin mechanism; "extension" is only the upstream Pi and Pi Durable term (Pi packages, `defineExtension`), never a separate kind of pi-prjcts add-on.
+A plugin is a module the host loads at its start to add capabilities: RPC methods, coordinator or worker tools, cleanup and storage steps, browser routes, or a whole provider for a checkout kind or PR service. There is one plugin mechanism; "extension" is only the upstream Pi and Pi Durable term (Pi packages, `defineExtension`), never a separate kind of pi-prjcts add-on.
 
-Core ships Git and GitHub only. GitHub PR watching is a built-in `prs` provider on this same API (`src/github-prs.ts`, registered by the registry itself; no config). Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate modules loaded at host start.
+Core ships Git and GitHub only. GitHub PR watching is a built-in `prs` provider on this same API (`src/github-prs.ts`, registered by the registry itself; no config). Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
 
-## Developing a plugin
+## Author guide
 
-A plugin is a directory anywhere on disk; it does not need to live in this repository, and core needs no change per plugin. Commands run from the pi-prjcts checkout:
+Start with [`docs/plugins/README.md`](docs/plugins/README.md):
 
-1. Create: `npm run projects -- plugin new <dir> [--name <name>]` writes `index.mjs` (one `hello` RPC classified `read`, `version: "0.1.0"`), `index.test.mjs` and `README.md` into a new or empty directory. It refuses a directory with files and a name the loader would refuse.
-2. Test: `node --test` in the plugin directory. The scaffold's test needs no host, credentials or network.
-3. Check: `npm run projects -- plugin check <dir>` loads only that plugin through the host's loader in a fresh temporary home, prints the status a host would record (`name`, `version`, `state`, `provides`, `error`) and exits 1 when it failed. It ignores `PI_PROJECTS_HOME`, `plugins.json` and `PI_PROJECTS_PLUGINS`, and removes the temporary home.
-4. Load on a private host: `node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch --plugin <dir>` starts a host with its own scratch home, a fake model provider and the plugin (repeat `--plugin` for more). Open the printed origin, or run `drive --run <scratch> plugins` for screenshots and the host's `plugins` status. Run `cleanup --run <scratch>` afterwards.
-5. Inspect: every host shows what it loaded in the Plugins section of the context panel (name, version, state, capabilities; source and error for a failure), in the `plugins` RPC, in `/health` and in the host log (`plugin-loaded`, `plugin-failed`).
+- [Getting started](docs/plugins/getting-started.md): `npm run projects -- plugin new|check`, the scaffold's test, a private host with `--plugin`.
+- [Reference](docs/plugins/reference.md): the module shape, `HostPluginApi`, RPC methods versus `coordinatorTools` and `workerTools`, `rpcPolicy` and owner approval, state, resource leases, lifecycle, cleanup, storage and web routes.
+- [Development and activation](docs/plugins/development.md): testing, private verification, activation through `plugins.json` and a restart, troubleshooting, compatibility and current limits.
+- [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods and tools, tested by `scripts/plugin-dev-unit.mjs`.
 
-Activation is explicit. A host runs the plugins it loaded at its start, so editing a plugin's source changes nothing on a running host, and a private host never touches another host's home. To activate a checked version on a host, add its directory to that host's `plugins.json` and restart that host. On the owner's host that edit changes its configuration, so it needs the owner's go-ahead; the restart is the normal Deploy. After the restart the Plugins section shows the version that loaded. There is no hot reload.
+The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts`; the loader is `src/plugins.ts`. The rest of this file covers the provider capabilities for a new checkout kind or PR service.
 
-## Enabling
-
-Primary: `$PI_PROJECTS_HOME/plugins.json` (persistent, per host home)
-
-```json
-{ "plugins": ["/abs/path/to/plugin-dir-or-module.ts"] }
-```
-
-Additive: env `PI_PROJECTS_PLUGINS=/path/a:/path/b` (tests, one-off runs). A path is a module file, or a directory with `index.ts|mjs|js` or a package.json `main`; relative paths resolve against the home. Restart the host to apply. A plugin that is missing, throws, has the wrong shape, conflicts with another or hangs (`PI_PROJECTS_PLUGIN_TIMEOUT_MS`, 15 s) is recorded and skipped: see the `plugins` RPC, `/health`, the host log (`plugin-failed`) and the Plugins section of the context panel.
-
-## Writing one
-
-Export `{ name, version?, register(api) }` (default or named). `version` is optional, up to 40 characters without spaces, and shown with the plugin's status; a plugin without it loads as before. `register` calls `api.provide({...})` once or more; nothing is visible until it returns. Types: `src/plugin-types.ts` (`HostPluginApi`). Use `api.lib` (Durable, typebox, chord context) instead of importing your own copies.
-
-The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `content`; adapters for Pi coding-agent or MCP tools must map their `content` to `output`. Plugin document definitions need an explicit `checkpointWhen` policy (`() => false` keeps changes as deltas). Plugin tasks must replace `runtime.sleep()` with a phase-ending `sleepUntil(until, checkpoint, context)` and handle the `sleeping` status. Check external plugins against these APIs before deploying the upgraded host.
+## Provider capabilities
 
 | capability | purpose |
 |---|---|
@@ -39,28 +24,15 @@ The host uses Pi Durable and Chord 1.4.0. Durable tools return `output`, not `co
 | `prs` | PR provider: generic card data (checks, conflicts, optional draft/review/unresolved threads), detail, `#` refs, watch/hide validation, status, worker-published ids, watch document kind; optional `normalizeId` (number/URL input), `transitions`/`noticeFor` (monitor kinds), `followCovers` (what Follow PRs already announces) |
 | `follow` | Follow PRs for publication receipts: observe, fix brief (host supplies receipts) |
 | `merge` | result acceptance for the checkout kind (`MergeProvider`, `kind` matches the `vcs` kind): `inspect` the PR (state, draft, head, base, `mergeable` yes/later/no), `merge` exactly the approved head, `enableAutoMerge` pinned to that head, and `pullMain` for the main checkout. Approve calls it, and Follow PRs calls `pullMain` (with `inspect` for the base) when a followed PR becomes merged; without it a Job of this kind cannot be approved |
-| `coordinatorTools` | tools and an instruction snippet for matching projects |
-| `rpc` | namespaced host RPCs: `{ action: "plugin", plugin, method, id?, params? }`; context offers `withRoot`, `mutateIdle` |
-| `rpcPolicy` | per `rpc` method, what it does when an agent calls it: `"read"`, `"write"`, `"dangerous"` or `(params) => kind`. Reads and writes run; dangerous and unclassified methods need the owner's approval |
 | `uncertainWrites` | blocks automatic admission while a plugin write outcome is unknown |
-| `workerTools` | tools and an instruction snippet for whole-repository workers; offered to new threads, frozen with each thread's tool set |
-| `leaseName` | canonical name for lease resources the plugin owns, so aliases share one lease |
-| `lifecycle` | `pause(projectId)` around project pause/resume/archive/delete (throw to refuse; returns the resume) and `close()` at host shutdown |
-| `cleanup` | `({ projectId, unusedDays, signal })` runs as a step of the project's Workspace cleanup routine, after the core steps; resolves with a one-line summary (empty for nothing to say), throws to fail the run. Remove only what the plugin owns and nobody uses now. The simulator plugin erases owned clones that are shut down, unleased and unused for `unusedDays` |
-| `usage` | `({ projectId, unusedDays, signal })` resolves with the plugin's row in Settings → Storage, `{ label, count, bytes, reclaimableBytes, note? }`, or null when it keeps nothing for the project. `reclaimableBytes` is what its `cleanup` step would free now. A throw shows the row as unknown with the message; other rows still answer |
-| `web` | browser script and stylesheet (`/plugins/<name>/ui.js`, `ui.css`; read once when the plugin loads, so a change on disk waits for the restart like the plugin's code) and bearer-authenticated GET routes (`/plugins/<name>/<route>?project=<id>`) |
+
+A provider plugin can also use the general capabilities, for example `rpc` for the `connect` call of a setup card; the [reference](docs/plugins/reference.md) describes them.
 
 Since 2026-11-06 readers get their own worktree through `workspace.task`, so `vcs.readHeads`, `vcs.readHeadMarker` and `workspace.readHeadEntry` are no longer part of the contract; the host ignores them. A provider whose old snapshots still sit on disk removes them in its `cleanup` step.
 
 Merge contract (`src/plugin-types.ts`, used by `src/result-acceptance.ts`): `merge` must refuse when the PR head differs from `head`, and return `{ ok: false, refused }` when the provider answered and nothing merged. A throw means the outcome is unknown; Approve then reads the PR through `inspect` before deciding and reports `merge-uncertain` if it cannot confirm. `enableAutoMerge` returns `waiting: false` when the PR is already mergeable and nothing was armed. `pullMain` fast-forwards only a clean checkout on `base` and returns `{ pulled: false, reason }` for an expected skip instead of throwing; it must honor `signal` and be a no-op on a checkout already at the merge. A `follow` provider may set `base` in its PR state; otherwise Follow PRs reads it through `inspect`. The host resolves the provider with `plugins.mergeProvider(kind)`.
 
-Host API extras: `api.leases` (host-wide advisory leases; the plugin's own holds are not released by project stops), `api.projects.dir(id)`, `api.lib.value` (typebox `Value`).
-
-Browser plugins call `window.piProjects.register({ name, mount(slot), projectChanged, render, tick, hide, action(name, node) })`. `data-action` names starting with `<name>-` go to the plugin. `piProjects` offers `state()`, `rpc(plugin, method, id, params)`, authenticated `fetch`, and the dialog, toast and escaping helpers. A failing browser plugin is logged and skipped.
-
-Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
-
-State: `api.stateDir` = `$PI_PROJECTS_HOME/plugins/<name>/`; provider-owned top-level project records (`project.json` keys such as `<x>Authorization`) and Durable documents are kept verbatim by core even when the plugin is not loaded. Without the plugin the UI says "provider plugin not loaded", workers do not start, cleanup leaves the plugin's worktrees alone, and everything returns when the plugin is loaded again.
+Provider state: provider-owned top-level project records (`project.json` keys such as `<x>Authorization`, read with `api.projects.record`) and Durable documents are kept verbatim by core even when the plugin is not loaded. Without the plugin the UI says "provider plugin not loaded", workers do not start, cleanup leaves the plugin's worktrees alone, and everything returns when the plugin is loaded again.
 
 PR watch documents store ids as strings; documents written with numeric ids are read as strings.
 

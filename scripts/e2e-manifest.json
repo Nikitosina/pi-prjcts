@@ -42,6 +42,7 @@
     "plugins/simulator/test-products.ts": ["workspace-cleanup-unit"],
     "plugins/simulator/simulator.ts": ["simulator-worker-unit"],
     "plugins/simulator/tools.ts": ["simulator-worker-unit"],
+    "docs/plugins/examples/**": ["plugin-dev-unit"],
     "docs/**": [],
     "*.md": [],
     "src/routine-script.ts": ["routine-script-unit", "routine-script-e2e"],
