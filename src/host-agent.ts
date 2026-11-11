@@ -214,7 +214,7 @@ export async function openHostAgent(input: {
     const stopCommits = summaries ? opened.subscribeCommits((publication) => summaries.observe(HOST_AGENT_SCOPE, publication)) : () => {};
     const stopSummaryWatch = summaries?.watch(HOST_AGENT_SCOPE, () => input.publish({ topic: "host-agent" })) ?? (() => {});
     if (summaries)
-      await reconcileToolSummaries({ summaries, scope: HOST_AGENT_SCOPE, storage, context }).catch((error) =>
+      await reconcileToolSummaries({ summaries, scope: HOST_AGENT_SCOPE, storage, context, nested: new Set() }).catch((error) =>
         input.report(`The Host agent could not drop the summaries of ended turns: ${errorText(error)}`),
       );
     const liveWatchers = new Set<() => void>();

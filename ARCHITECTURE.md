@@ -129,6 +129,7 @@ Rules:
 
 Rules:
 - Summaries never enter an agent's conversation, context or prompt.
+- A worker's own subagents get none. `durable-runtime.ts` learns them from the Jobs document's `subagents` (written with the conversation) and passes them to `observe` and `reconcile`; a store's recovered summaries are queued only by its `reconcile`, after its nested ones are dropped.
 - Reads never queue or start a summary. Turning summaries on never summarizes calls made before, and turning them off cancels open rows.
 - Memory calls (`projects_knowledge_*`) are not summarized; they keep their own rows.
 

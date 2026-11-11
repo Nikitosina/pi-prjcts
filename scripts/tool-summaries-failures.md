@@ -1,8 +1,13 @@
 # Tool summaries and thinking visibility
 
-A summary is one or two sentences about the tools one assistant message called, written by a light model the owner picks after all of that message's results arrived. It is derived display data: it lives in `<home>/tool-summaries.sqlite`, never in a conversation, and the original calls stay one click away. Thinking visibility is a display switch in the host `ui` document. Both are host-wide and apply to Coordinator chats, worker transcripts and the Host agent.
+A summary is one or two sentences about the tools one assistant message called, written by a light model the owner picks after all of that message's results arrived. It is derived display data: it lives in `<home>/tool-summaries.sqlite`, never in a conversation, and the original calls stay one click away. Thinking visibility is a display switch in the host `ui` document. Both are host-wide. Summaries are made for Coordinator chats, the agents the Coordinator started (worker, scout, reviewer) and the Host agent, never for a worker's own subagents: those are not meant for the owner to read. Thinking visibility applies to every view.
 
 Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake runtime) and `tool-summaries-e2e.mjs` (a private host with the fake provider, RPCs, restart and the browser).
+
+## Which conversations
+
+- N1 A worker's own scout or reviewer (a nested conversation, listed in the Jobs document's `subagents`) opens a summary row, queues one or sends a request. Ownership comes from that document, written in the commit that creates the conversation, never from its role: a scout or reviewer the Coordinator started is summarized.
+- N2 After a restart, a summary of a nested conversation left queued, cut off while running or still collecting from before is sent. A store's recovered summaries are queued only when that store opens and has dropped its nested ones; a saved nested summary is kept, not purged.
 
 ## Grouping and triggering
 
@@ -52,5 +57,5 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 - D5 Turning summaries off keeps showing summaries.
 - D6 A summary arriving replaces or flashes the whole transcript, or animates again on later updates. In the worker transcript too: unchanged turns keep their nodes, the focused line keeps focus, an open line stays open, and a reader who scrolled up keeps the turn they are reading in place, even when an earlier turn changes height.
 - D7 Hidden thinking still shows in history, in the streaming turn or in the held step after a commit, or hiding it changes the model's thinking level or the agent's context.
-- D8 Worker transcripts or the Host agent ignore either setting. Every conversation type (Coordinator, worker, scout, reviewer, a worker's own scout and reviewer, the Host agent) gets summaries with the error mark and its thinking, and each view that shows it applies both settings without a reload; the Host agent's streaming turn shows its live thinking like the Coordinator's. Agents keep their own model and thinking; only summaries use the summary model.
+- D8 Worker transcripts or the Host agent ignore either setting. Every summarized conversation type (Coordinator, worker, scout, reviewer, the Host agent) gets summaries with the error mark and its thinking, a worker's own scout and reviewer keep their thinking, and each view that shows it applies both settings without a reload; the Host agent's streaming turn shows its live thinking like the Coordinator's. Agents keep their own model and thinking; only summaries use the summary model.
 - D9 The summary line is not reachable with the keyboard, overflows a narrow (390 px) screen, or animates with reduced motion.

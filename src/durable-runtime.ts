@@ -1563,7 +1563,27 @@ export async function openDurableProject(input: {
       for (const [conversation, job] of Object.entries(doc.subagents ?? {})) topicMap.agents.set(Number(conversation), job);
     };
     learnChats(await storedChats());
-    learnAgents((await openedHarness.snapshot(Jobs, root.id, context)) ?? {});
+    const summaries = input.toolSummaries;
+    // A worker's own subagents get no summaries; the Jobs document lists each one in the commit that creates its conversation.
+    const nested = new Set<number>();
+    const learnNested = (doc: { subagents?: Record<string, string> }) => {
+      for (const conversation of Object.keys(doc.subagents ?? {})) nested.add(Number(conversation));
+    };
+    // Commits seen before the stored Jobs document is read wait for it, so none reaches summaries without its nested conversations.
+    let heldCommits: Parameters<ToolSummaries["observe"]>[1][] | null = [];
+    const stopSummaryCommits = summaries
+      ? openedHarness.subscribeCommits((publication) => {
+          for (const change of publication.changes)
+            if (change.type === "document" && change.value && change.record.kind === JOBS_KIND) learnNested(change.value);
+          if (heldCommits) heldCommits.push(publication);
+          else summaries.observe(project.id, publication, nested);
+        })
+      : () => {};
+    const storedJobs = (await openedHarness.snapshot(Jobs, root.id, context)) ?? {};
+    learnAgents(storedJobs);
+    learnNested(storedJobs);
+    for (const publication of heldCommits.splice(0)) summaries?.observe(project.id, publication, nested);
+    heldCommits = null;
     const stopFeed = input.onChange
       ? openedHarness.subscribeCommits((publication) => {
           for (const change of publication.changes) {
@@ -1574,22 +1594,17 @@ export async function openDurableProject(input: {
           for (const event of topicsOfCommit(publication, topicMap)) input.onChange!(event);
         })
       : () => {};
-    const summaries = input.toolSummaries;
-    const stopSummaries = summaries
-      ? (() => {
-          const stopCommits = openedHarness.subscribeCommits((publication) => summaries.observe(project.id, publication));
-          const stopWatch = summaries.watch(project.id, (conversationId) => {
-            const event = topicOfConversation(conversationId, topicMap);
-            if (event) input.onChange?.(event);
-          });
-          return () => {
-            stopCommits();
-            stopWatch();
-          };
-        })()
-      : () => {};
+    const stopSummaryWatch =
+      summaries?.watch(project.id, (conversationId) => {
+        const event = topicOfConversation(conversationId, topicMap);
+        if (event) input.onChange?.(event);
+      }) ?? (() => {});
+    const stopSummaries = () => {
+      stopSummaryCommits();
+      stopSummaryWatch();
+    };
     if (summaries)
-      await reconcileToolSummaries({ summaries, scope: project.id, storage: openedStorage, context }).catch((error) =>
+      await reconcileToolSummaries({ summaries, scope: project.id, storage: openedStorage, context, nested }).catch((error) =>
         report(input.onReport, project.id, error),
       );
     // A Coordinator turn that failed on quota or a rate limit moves its chat to the tier's next model and continues; the request id

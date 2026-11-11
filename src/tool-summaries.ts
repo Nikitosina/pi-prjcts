@@ -11,7 +11,7 @@ import type { UiSettings } from "./ui-settings.ts";
 /**
  * Tool summaries (scripts/tool-summaries-failures.md): one or two sentences about the tools one assistant message called, written by a
  * light model after every result of that message arrived. Derived display data in its own database, never in a conversation. Only
- * commits seen while summaries are on start one; reads never do.
+ * commits seen while summaries are on start one; reads never do. A worker's own subagents (nested conversations) never get one.
  */
 export type ToolSummarySettings = UiSettings["toolSummaries"];
 export type ToolSummaryLimits = {
@@ -43,10 +43,13 @@ export type ToolSummaryUsage = { summaries: number; requests: number; interrupte
 type SummaryRuntime = Pick<ModelRuntime, "getModel" | "getProviderAuthStatus" | "streamSimple">;
 
 export interface ToolSummaries {
-  /** Feed one Pi Durable commit of the conversation store `scope` (a project id, or `host-agent`). */
-  observe(scope: string, publication: Pick<CommitPublication, "changes">): void;
-  /** Drops the open messages of `scope` written before `before` whose conversation is not in `running`. */
-  reconcile(query: { scope: string; running: ReadonlySet<number>; before: number }): void;
+  /** Feed one Pi Durable commit of the conversation store `scope` (a project id, or `host-agent`); `nested` conversations are skipped. */
+  observe(scope: string, publication: Pick<CommitPublication, "changes">, nested?: ReadonlySet<number>): void;
+  /**
+   * The store of `scope` opened: drops its open messages written before `before` whose conversation is not in `running`, and every
+   * open message of a `nested` conversation, then queues its summaries recovered from the last run. Nothing of `scope` is sent before.
+   */
+  reconcile(query: { scope: string; running: ReadonlySet<number>; before: number; nested: ReadonlySet<number> }): void;
   /** Calls `listener` with a conversation id when one of its summaries changed state. */
   watch(scope: string, listener: (conversationId: number) => void): () => void;
   /** The summaries of these assistant entries; empty while summaries are off. Writes nothing. */
@@ -62,12 +65,14 @@ export interface ToolSummaries {
 /** The scope of the Host agent's conversation store; project scopes are project ids (UUIDs), so it never collides. */
 export const HOST_AGENT_SCOPE = "host-agent";
 
-/** Drops the open messages of `scope` whose turn ended unobserved; call it once the store is open and its commits are observed. */
+/** Drops the open messages of `scope` whose turn ended unobserved or that are `nested`, and queues its recovered summaries; call it
+ * once the store is open and its commits are observed. */
 export async function reconcileToolSummaries(input: {
   summaries: ToolSummaries;
   scope: string;
   storage: Pick<Storage, "scanTasks">;
   context: Context;
+  nested: ReadonlySet<number>;
 }): Promise<void> {
   const before = Date.now();
   const running = new Set<number>();
@@ -79,7 +84,7 @@ export async function reconcileToolSummaries(input: {
       cursor = page.next;
     } while (cursor !== undefined);
   }
-  input.summaries.reconcile({ scope: input.scope, running, before });
+  input.summaries.reconcile({ scope: input.scope, running, before, nested: input.nested });
 }
 
 /** Adds the summaries of a transcript page's assistant entries, for owner views; agent-facing reads never call it. */
@@ -204,7 +209,6 @@ const UsageRow = Type.Object({
 const RowId = Type.Object({ id: Type.Integer() });
 const ScopeRow = Type.Object({ scope: Type.String() });
 const ConversationRow = Type.Object({ scope: Type.String(), conversation: Type.Integer() });
-const Count = Type.Object({ n: Type.Integer() });
 const check = {
   input: Compile(StoredInput),
   waiting: Compile(StoredWaiting),
@@ -216,7 +220,6 @@ const check = {
   rowId: Compile(RowId),
   scope: Compile(ScopeRow),
   conversation: Compile(ConversationRow),
-  count: Compile(Count),
 };
 type Input = Static<typeof StoredInput>;
 type StoredResult = Static<typeof StoredResult>;
@@ -442,6 +445,9 @@ export function openToolSummaries(options: {
     idle: db.prepare(
       `UPDATE summaries SET ${DROP} WHERE scope = :scope AND status = 'collecting' AND created < :before AND conversation NOT IN (SELECT value FROM json_each(:running))`,
     ),
+    nested: db.prepare(
+      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND status IN ('collecting','pending','running') AND conversation IN (SELECT value FROM json_each(:nested))`,
+    ),
     get: db.prepare(`${ROW} WHERE rowid = :id`),
     collect: db.prepare(
       "UPDATE summaries SET waiting = :waiting, calls = :calls, updated = :now WHERE rowid = :id AND status = 'collecting'",
@@ -449,7 +455,6 @@ export function openToolSummaries(options: {
     damaged: db.prepare(
       "UPDATE summaries SET status = 'failed', error = :error, calls = NULL, waiting = NULL, updated = :now WHERE rowid = :id RETURNING scope, conversation",
     ),
-    active: db.prepare("SELECT COUNT(*) AS n FROM summaries WHERE status IN ('pending','running')"),
     queue: db.prepare("UPDATE summaries SET status = 'pending', updated = :now WHERE rowid = :id"),
     start: db.prepare(
       "UPDATE summaries SET status = 'running', model = :model, attempts = attempts + 1, requests = requests + 1, updated = :now WHERE rowid = :id",
@@ -469,7 +474,7 @@ export function openToolSummaries(options: {
     exhaust: db.prepare(
       "UPDATE summaries SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = :now WHERE status = 'running'",
     ),
-    pending: db.prepare("SELECT rowid AS id FROM summaries WHERE status = 'pending' ORDER BY updated"),
+    pending: db.prepare("SELECT rowid AS id FROM summaries WHERE scope = :scope AND status = 'pending' ORDER BY updated"),
     read: db.prepare(
       "SELECT entry, status, text, error, model FROM summaries WHERE scope = :scope AND conversation = :conversation AND entry IN (SELECT value FROM json_each(:entries))",
     ),
@@ -488,9 +493,12 @@ export function openToolSummaries(options: {
   };
   // In-memory schedule over the durable rows: the queue order, retry timers and running requests. Rows are the truth after a restart.
   const queue: number[] = [];
-  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const timers = new Map<number, ReturnType<typeof setTimeout>>();
   const running = new Map<number, AbortController>();
   const work = new Set<Promise<void>>();
+  // Rows a request is being prepared or made for; with the queue and retry timers, everything scheduled in this run.
+  const working = new Set<number>();
+  const scheduled = (id: number) => queue.includes(id) || timers.has(id) || working.has(id);
 
   /** A stored row checked against its schema; a damaged one is failed and loses its copy (Q13), so it is read once as damaged. */
   const rowOf = (raw: unknown): Row | undefined => {
@@ -539,14 +547,18 @@ export function openToolSummaries(options: {
     notify(row.scope, row.conversation);
   };
   const enqueue = (id: number) => {
+    if (scheduled(id)) return;
     queue.push(id);
     pump();
   };
   const pump = () => {
     while (!closed && settings.enabled && work.size < limits.concurrency && queue.length) {
-      const row = load(queue.shift()!);
+      const id = queue.shift()!;
+      const row = load(id);
       if (row?.status !== "pending") continue;
+      working.add(id);
       const task = summarize(row).finally(() => {
+        working.delete(id);
         work.delete(task);
         pump();
       });
@@ -608,19 +620,18 @@ export function openToolSummaries(options: {
     finish(current, { status: "pending", ...spent });
     const timer = setTimeout(
       () => {
-        timers.delete(timer);
+        timers.delete(row.id);
         enqueue(row.id);
       },
       limits.retryMs * 2 ** (current.attempts - 1),
     );
     timer.unref?.();
-    timers.add(timer);
+    timers.set(row.id, timer);
   }
 
   /** The message has every result: queue it, or fail it quietly when the queue is full. */
   const ready = (row: RowBase) => {
-    const active = sql.active.get();
-    if (check.count.Check(active) && active.n >= limits.queue)
+    if (queue.length + timers.size + working.size >= limits.queue)
       return finish(row, { status: "failed", error: "The summary queue is full", model: null, usage: null, interrupted: 0 });
     sql.queue.run({ id: row.id, now: now() });
     notify(row.scope, row.conversation);
@@ -629,7 +640,7 @@ export function openToolSummaries(options: {
 
   const cancelAll = () => {
     queue.length = 0;
-    for (const timer of timers) clearTimeout(timer);
+    for (const timer of timers.values()) clearTimeout(timer);
     timers.clear();
     for (const abort of running.values()) abort.abort();
     const touched = sql.cancel.all({ now: now() }).filter((row) => check.conversation.Check(row));
@@ -675,22 +686,22 @@ export function openToolSummaries(options: {
     }
   };
 
-  // Recovery: requests cut off by the last exit are counted as interrupted and asked again.
+  // Recovery: requests cut off by the last exit are counted as interrupted and asked again once their store opens (`reconcile`).
   sql.recover.run({ now: now(), attempts: limits.attempts });
   sql.exhaust.run({ now: now() });
-  if (settings.enabled) for (const row of sql.pending.all()) if (check.rowId.Check(row)) queue.push(row.id);
   if (!settings.enabled) cancelAll();
-  pump();
 
   return {
-    observe(scope, publication) {
+    observe(scope, publication, nested) {
       if (closed || !settings.enabled) return;
       guarded({
         what: "read a commit",
         run: () => {
           const ended = new Set<ConversationId>();
           for (const change of publication.changes) {
-            if (change.type === "entry") observeEntry({ scope, entry: change.value });
+            if (change.type === "entry") {
+              if (!nested?.has(Number(change.value.conversationId))) observeEntry({ scope, entry: change.value });
+            }
             // A turn that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this commit.
             else if (
               change.type === "task" &&
@@ -704,11 +715,15 @@ export function openToolSummaries(options: {
         },
       });
     },
-    reconcile({ scope, running, before }) {
+    reconcile({ scope, running, before, nested }) {
       if (closed) return;
       guarded({
         what: "drop messages of ended turns",
-        run: () => sql.idle.run({ scope, before, running: JSON.stringify([...running]), now: now() }),
+        run: () => {
+          sql.idle.run({ scope, before, running: JSON.stringify([...running]), now: now() });
+          sql.nested.run({ scope, nested: JSON.stringify([...nested]), now: now() });
+          if (settings.enabled) for (const row of sql.pending.all({ scope })) if (check.rowId.Check(row)) enqueue(row.id);
+        },
       });
     },
     watch(scope, listener) {
@@ -759,7 +774,7 @@ export function openToolSummaries(options: {
     async close() {
       if (closed) return;
       closed = true;
-      for (const timer of timers) clearTimeout(timer);
+      for (const timer of timers.values()) clearTimeout(timer);
       for (const abort of running.values()) abort.abort();
       await Promise.allSettled([...work]);
       db.close();
