@@ -34,3 +34,5 @@ since the browser may deliver it after the layout already changed. Each transcri
   next chunk. (Red on the first follower, which ignored every scroll event: the verify skill's ui2 drive timed out on "worker missing
   artifact note".)
 - F11 A summary going from pending to ready moves the place of a reader who scrolled up with the wheel (tool-summaries-e2e D6).
+- F13 A change of height inside the turn being read, above the line read (its thinking hidden, a summary arriving), moves that line:
+  only the turn's top is kept. (Red in tool-summaries-e2e D6: the reply moved from 10 px to -22 px.)

@@ -489,16 +489,34 @@ await kit.run(async () => {
   check("D6 the open worker summary stays open", after.open, after);
   check("D6 the focused worker summary line keeps focus", after.focus === before.focus, { before, after });
   check("D6 a reader who scrolled up stays in place", after.scrollTop === 0, after);
-  // A reader inside a later turn keeps it in place when an earlier turn changes height (here its thinking is hidden).
-  const offsetOfLast = `(() => { const feed = document.querySelector('#worker-feed'); return feed.querySelector(':scope > .turn:last-of-type').getBoundingClientRect().top - feed.getBoundingClientRect().top; })()`;
-  await page.evaluate(
-    `(() => { const feed = document.querySelector('#worker-feed'); feed.scrollTop += feed.querySelector(':scope > .turn:last-of-type').getBoundingClientRect().top - feed.getBoundingClientRect().top - 10; })()`,
+  // A reader of a reply keeps it in place when the turns above it change height, its own turn too (its thinking is hidden).
+  const readKey = await page.evaluate(
+    `[...document.querySelectorAll('#worker-feed > .turn')].findLast((turn) => turn.querySelector('.thinking ~ * p, .thinking ~ p'))?.dataset.key ?? null`,
   );
-  const reading = await page.evaluate(offsetOfLast);
+  const offsetOfReading = `(() => {
+    const feed = document.querySelector('#worker-feed'), turn = feed.querySelector(':scope > .turn[data-key="${readKey}"]');
+    const line = [...(turn?.querySelectorAll('p') ?? [])].findLast((p) => p.innerText === 'Listed.');
+    return line ? line.getBoundingClientRect().top - feed.getBoundingClientRect().top : null;
+  })()`;
+  await page.evaluate(`document.querySelector('#worker-feed').scrollTop += ${offsetOfReading} - 10`);
+  const place = await page.evaluate(`(() => {
+    const feed = document.querySelector('#worker-feed'), turn = feed.querySelector(':scope > .turn[data-key="${readKey}"]');
+    return { turn: turn.getBoundingClientRect().top - feed.getBoundingClientRect().top, gap: feed.scrollHeight - feed.scrollTop - feed.clientHeight, thinking: turn.querySelectorAll('.thinking').length };
+  })()`);
+  const reading = await page.evaluate(offsetOfReading);
+  check(
+    "D6 the reader reads a reply below its turn's thinking",
+    Math.abs(reading - 10) < 2 && place.turn < 0 && place.gap > 2 && place.thinking > 0,
+    {
+      readKey,
+      reading,
+      place,
+    },
+  );
   await setUi({ showThinking: false });
   await page.waitFor(`!document.querySelector('#worker-feed .thinking')`, "worker thinking hidden");
-  const kept = await page.evaluate(offsetOfLast);
-  check("D6 the turn being read stays put when an earlier turn shrinks", Math.abs(kept - reading) < 2, { reading, kept });
+  const kept = await page.evaluate(offsetOfReading);
+  check("D6 the reply being read stays put when the turns above it shrink", Math.abs(kept - reading) < 2, { reading, kept });
   await setUi({ showThinking: true });
   await page.waitFor(`document.querySelector('#worker-feed .thinking')`, "worker thinking back");
   await page.evaluate(`document.querySelector('#worker-feed').removeAttribute('style')`);
