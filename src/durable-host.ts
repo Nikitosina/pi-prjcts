@@ -186,7 +186,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     jobs: ledgerOf(view.chatId),
     messages: view.coordinator.history.items,
     before: view.coordinator.history.before,
-    ...(view.coordinator.history.toolSummaries ? { toolSummaries: view.coordinator.history.toolSummaries } : {}),
+    ...(view.coordinator.history.toolGroups ? { toolGroups: view.coordinator.history.toolGroups } : {}),
     inbox: inbox(dir),
     notes: notes(dir),
     evidence: evidence(dir),

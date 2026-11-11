@@ -45,6 +45,16 @@ const deps = {
       if (cwd !== clone && !existsSync(join(cwd, "node_modules"))) symlinkSync(join(repo, "node_modules"), join(cwd, "node_modules"));
       return "";
     }
+    // The same typecheck as `npm run check`, incremental across the deploys: a cold one per deploy fills the CI budget.
+    if (command === "npm" && args.join(" ") === "run check")
+      return execFileSync(
+        join(cwd, "node_modules", ".bin", "tsc"),
+        ["--noEmit", "--incremental", "--tsBuildInfoFile", join(base, "tsbuildinfo")],
+        {
+          cwd,
+          encoding: "utf8",
+        },
+      ).trim();
     return execFileSync(command, args, { cwd, encoding: "utf8" }).trim();
   },
 };
@@ -174,6 +184,7 @@ try {
   result = await deploy(deps);
   assert.equal(result.ok, false);
   assert.equal(result.rolledBack, true, JSON.stringify(result));
+  assert.match(result.reason, /^Projects host exited with code 1 before it answered/, "the start ends when the new host dies");
   assert.equal(git("rev-parse", "HEAD"), good);
   assert.ok((await health()).pid > 0);
   assert.match(told.at(-1), /Rolled back/);

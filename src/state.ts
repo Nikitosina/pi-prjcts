@@ -476,8 +476,10 @@ export const Snapshot = Type.Object({
   /** The newest page of the chat's transcript (`TranscriptItem`s, oldest first); `before` is the cursor of the next older page, null at the start. */
   messages: Type.Array(Type.Unknown()),
   before: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
-  /** Tool summaries of the page's assistant entries by entry id (`ToolSummaryView`); absent while summaries are off. */
-  toolSummaries: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  /** Tool groups of the page's calls (`ToolGroupsView`: `groups` by id, `calls` by `<entryId>:<callId>`); absent while summaries are off. */
+  toolGroups: Type.Optional(
+    Type.Object({ groups: Type.Record(Type.String(), Type.Unknown()), calls: Type.Record(Type.String(), Type.String()) }),
+  ),
   inbox: Type.Array(InboxEntry),
   notes: Type.Array(Note),
   evidence: Type.Array(Evidence),

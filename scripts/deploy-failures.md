@@ -14,6 +14,8 @@ Deploy no longer waits for idle projects: it gives running tool calls a short wi
 - A rollback leaves `projects_redeploy` without an answer, or reports success.
 - A coordinator of another project gets `projects_redeploy`, or the pi-prjcts Coordinator still asks the owner to approve a deploy.
 - A checkout change during preparation is silently deployed, or requeued forever; it must fail the deploy and say so.
+- A new host that crashes at start is polled for the whole start budget (30 s in `deploy-e2e`) before the rollback begins, and the reason does not say it exited. The start must end when the spawned host exits, unless another host answers. Proof: `deploy-e2e.mjs` step 3; this wait pushed the script past its 240 s CI budget.
+- `deploy-e2e` runs a cold `tsc` for each of its ten deploys; at about 20 s per check on the CI runner that alone fills the 240 s budget (run 43056858316 timed out in step 6). The script's check reuses one incremental build info outside the checkout, so every deploy is still typechecked and a failing check still fails (B2).
 
 ## Following a branch
 

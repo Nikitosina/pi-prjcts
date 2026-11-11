@@ -65,17 +65,25 @@ export async function ensureHost(options: { repo?: string; attempts?: number } =
     env,
     cwd: repo,
   });
+  let exited: string | undefined;
   child.on("error", () => {});
+  // A host that finds another one holding the lock exits 0 while that one may still be starting, so only a failure ends the wait.
+  child.on("exit", (code, signal) => {
+    if (signal || code) exited = signal ? `signal ${signal}` : `code ${code}`;
+  });
   child.unref();
   closeSync(log);
   for (let attempt = 0; attempt < attempts; attempt++) {
     await sleep(100);
+    // Read before the health call, so a host that answers first still counts and a dead one gets one last look.
+    const dead = exited;
     try {
       await health();
       return;
     } catch {
       /* The host may still be loading the SDK. */
     }
+    if (dead) throw new Error(`Projects host exited with ${dead} before it answered. Read ${join(home(), "host.log")}`);
   }
   throw new Error(`Projects host did not start. Read ${join(home(), "host.log")}`);
 }
