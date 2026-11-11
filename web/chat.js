@@ -6,17 +6,19 @@ import { hydrateMedia } from "./media.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
+import { follower } from "./follow.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
-  form = document.querySelector("#composer");
+  form = document.querySelector("#composer"),
+  follow = follower(feed);
 let live = null,
   liveKey = "",
   older = [],
+  olderSummaries = {},
   olderBefore = null,
   loading = null,
-  held = null, // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
-  stick = true;
+  held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -57,7 +59,8 @@ export async function loadChat() {
 }
 on("select", () => {
   older = [];
-  stick = true;
+  olderSummaries = {};
+  follow.follow();
   expanded.clear();
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
@@ -66,6 +69,12 @@ on("select", () => {
   live?.stop();
   live = null;
   liveKey = "";
+});
+
+on("chat-display", (ui) => {
+  if (!state.view) return;
+  if (ui.toolSummaries.enabled) void loadChat();
+  else renderFeed();
 });
 
 function ensureLive() {
@@ -145,38 +154,19 @@ export function renderFeed() {
     html.push(
       `<div class="empty-chat" data-key="empty"><p class="empty-title">${esc(state.view.project?.name ?? "")}</p><p class="muted">Ask the coordinator for something. It plans, delegates to workers and reports back here.</p><div class="starters" role="list" aria-label="Starter prompts">${STARTERS.map((text, index) => `<button type="button" role="listitem" class="starter" data-starter="${index}"><span class="starter-glyph" aria-hidden="true">❯</span>${esc(text)}</button>`).join("")}</div><p class="muted small">A starter fills the composer; <kbd>Enter</kbd> sends it.</p></div>`,
     );
-  html.push(transcriptHtml(all, busy));
+  html.push(transcriptHtml(all, busy, "Coordinator", { summaries: { ...olderSummaries, ...state.view.toolSummaries } }));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
-  const anchor = stick ? null : readingAnchor();
-  morph(feed, html.join(""));
-  renderLive();
-  if (stick) feed.scrollTop = feed.scrollHeight;
-  else if (anchor) keepAnchor(anchor);
+  follow.render(() => {
+    morph(feed, html.join(""));
+    renderLive();
+  });
 }
 /** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
 function failureHtml() {
   const job = (state.view.jobs ?? []).at(-1);
   if (!job || (job.state !== "failed" && job.state !== "interrupted")) return "";
   return `<div class="turn-failure" data-key="f${esc(job.id)}" role="status"><span class="st err" aria-hidden="true">✕</span><span class="tf-text">Turn ${esc(job.state)}: ${esc(clip(oneLine(job.error ?? "no reason recorded"), 300))}</span><button type="button" class="link-btn" data-retry-job="${esc(job.id)}">Retry</button></div>`;
-}
-// A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
-// `show` returns (streaming-scroll-viewport-failures.md R1).
-function readingAnchor() {
-  const top = feed.getBoundingClientRect().top;
-  return [...feed.querySelectorAll(":scope > .turn[data-key]")]
-    .filter((node) => node.getBoundingClientRect().bottom > top)
-    .slice(0, 8)
-    .map((node) => ({ key: node.dataset.key, offset: node.getBoundingClientRect().top - top }));
-}
-function keepAnchor(anchor) {
-  const top = feed.getBoundingClientRect().top;
-  for (const { key, offset } of anchor) {
-    const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);
-    if (!node) continue;
-    feed.scrollTop += node.getBoundingClientRect().top - top - offset;
-    return;
-  }
 }
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
@@ -200,22 +190,28 @@ export function morph(parent, html) {
   });
 }
 
-/** Turn sections for a list of transcript items (also used for worker transcripts in the center). */
-export function transcriptHtml(items, busy, who = "Coordinator", { fold = true } = {}) {
+/** Turn sections for a list of transcript items (also used for worker transcripts in the center). `summaries` are the page's
+ * tool summaries by assistant entry id; they show only while the owner has summaries on. */
+export function transcriptHtml(items, busy, who = "Coordinator", { fold = true, summaries = null } = {}) {
   const all = Array.isArray(items[0]?.items) ? items : turns(items);
-  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold)).join("");
+  const shown = state.ui?.toolSummaries?.enabled ? (summaries ?? {}) : {};
+  return all.map((turn, index) => turnHtml(turn, busy && index === all.length - 1, who, fold, shown)).join("");
 }
-function turnHtml(turn, liveTurn, who, fold = true) {
+function turnHtml(turn, liveTurn, who, fold = true, summaries = {}) {
   const { start } = turn,
     key = `t${start.entryId ?? start.at}`;
   // A turn that does not open with an input (a page starting mid-turn) has its first item in `items` too.
   const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : "";
   const body = [];
-  let run = [];
+  let run = [],
+    block = null; // the calls of one summarized assistant message
+  const runHtml = (entries) =>
+    entries.length >= 2 && !liveTurn && fold ? groupHtml(entries) : entries.map((entry) => toolRowHtml(entry, callStatus(entry))).join("");
   const flush = () => {
-    if (!run.length) return;
-    body.push(run.length >= 2 && !liveTurn && fold ? groupHtml(run) : run.map((entry) => toolRowHtml(entry, callStatus(entry))).join(""));
+    if (run.length) body.push(runHtml(run));
+    if (block) body.push(summaryHtml(block, runHtml));
     run = [];
+    block = null;
   };
   const results = new Map(turn.items.filter((item) => item.kind === "tool-result").map((item) => [item.callId, item]));
   // A call without a result runs only in this transcript's own live turn (a worker's, not the coordinator's).
@@ -223,11 +219,19 @@ function turnHtml(turn, liveTurn, who, fold = true) {
   for (const item of turn.items) {
     // Memory rows never fold: what the agent remembered or relied on stays visible.
     if (item.kind === "tool-call" && MEMORY.test(item.name)) {
-      flush();
+      // A memory row next to a summarized message stays out of its line and does not split it.
+      if (run.length) body.push(runHtml(run));
+      run = [];
       const entry = { call: item, result: results.get(item.callId) };
       body.push(toolRowHtml(entry, callStatus(entry)));
-    } else if (item.kind === "tool-call") run.push({ call: item, result: results.get(item.callId) });
-    else if (item.kind === "tool-result") continue;
+    } else if (item.kind === "tool-call" && summaries[item.entryId]) {
+      if (run.length || block?.entryId !== item.entryId) flush();
+      block ??= { entryId: item.entryId, view: summaries[item.entryId], entries: [] };
+      block.entries.push({ call: item, result: results.get(item.callId) });
+    } else if (item.kind === "tool-call") {
+      if (block) flush();
+      run.push({ call: item, result: results.get(item.callId) });
+    } else if (item.kind === "tool-result") continue;
     else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking && !item.images?.length) continue;
     else {
       flush();
@@ -287,9 +291,11 @@ function itemHtml(item, who = "Coordinator") {
   if (item.kind === "message" && item.role === "user") return inputHtml(item, who);
   if (item.kind !== "message") return "";
   const text = item.text?.trim() ? `<div class="prose">${markdown(item.text)}</div>` : "";
-  return `${item.thinking ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
+  return `${item.thinking && showThinking() ? thinkingHtml(item.thinking, `th${item.entryId}`) : ""}${text || item.images?.length ? `<article class="msg agent"><div class="msg-meta"><span class="who">${esc(who)}</span><time>${esc(clock(item.at))}</time></div>${text}${imagesHtml(item.images)}</article>` : ""}`;
 }
-function thinkingHtml(text, key, running = false) {
+/** Thinking is display-only: hiding it changes nothing the model gets. */
+export const showThinking = () => state.ui?.showThinking !== false;
+export function thinkingHtml(text, key, running = false) {
   const open = expanded.has(key);
   return `<div class="thinking${running ? " running" : ""}"><button type="button" class="thinking-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="th-mark" aria-hidden="true">∴</span>Thinking<span class="th-preview">${esc(clip(oneLine(text), 90))}</span></button>${open ? `<div class="thinking-body">${esc(text)}</div>` : ""}</div>`;
 }
@@ -350,6 +356,35 @@ function groupHtml(run) {
   const label = [...counts].map(([name, count]) => `${name} ×${count}`).join(", ");
   return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
+const seenSummaries = new Map(); // toggle key -> last drawn status, so only a summary that just arrived fades in
+/** One assistant message's calls as one quiet line: its summary, a failure mark, the call count and time; it opens to the calls.
+ * A pending summary waits with its own glyph, unlike a running call's spinner; a failed one shows the calls with a quiet note. */
+function summaryHtml({ entries, view }, runHtml) {
+  const key = `s${entries[0].call.callId}`,
+    open = expanded.has(key),
+    previous = seenSummaries.get(key);
+  seenSummaries.set(key, view.status);
+  const failed = entries.filter(({ result }) => result?.isError).length,
+    first = entries[0].call.at,
+    last = Math.max(...entries.map(({ call: item, result }) => result?.at ?? item.at));
+  const count = `${entries.length} ${entries.length === 1 ? "call" : "calls"}`,
+    took = Number.isFinite(first) && Number.isFinite(last) ? ` · ${dur(last - first)}` : "";
+  const names = new Map();
+  for (const { call: item } of entries) names.set(item.name, (names.get(item.name) ?? 0) + 1);
+  const label = [...names].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(", ");
+  const by = view.model ? `<p class="ts-by">Summary by ${esc(view.model)}</p>` : "";
+  if (view.status === "failed")
+    return `<div class="tool-summary" data-status="failed" data-errors="${failed}"><p class="ts-note" title="${esc(clip(oneLine(view.error), 300))}"><span class="ts-glyph" aria-hidden="true">·</span>No summary for ${esc(label)}; showing the calls</p>${runHtml(entries)}</div>`;
+  const glyph =
+    view.status === "pending"
+      ? `<span class="ts-pending" aria-label="summary pending"></span>`
+      : failed
+        ? `<span class="st err" aria-label="a call failed">✕</span>`
+        : `<span class="st ok" aria-label="done">✓</span>`;
+  const text = view.status === "pending" ? `${esc(label)} · writing summary…` : esc(view.text);
+  const fresh = view.status === "ready" && previous === "pending" ? " fresh" : "";
+  return `<div class="tool-summary${open ? " open" : ""}${fresh}" data-status="${view.status}" data-errors="${failed}"><button type="button" class="ts-line" data-toggle="${esc(key)}" aria-expanded="${open}">${glyph}<span class="ts-text">${text}</span><span class="ts-meta">${failed ? `<span class="ts-err">${failed} failed</span>` : ""}<span>${count}${esc(took)}</span><span class="chev" aria-hidden="true">›</span></span></button>${open ? `<div class="ts-body">${entries.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}${by}</div>` : imagesHtml(entries.flatMap(({ result }) => result?.images ?? []))}</div>`;
+}
 function memoryRowHtml(item, result, args, status) {
   const path = args?.path ?? "",
     title = path ? (memoryEntry(path)?.title ?? memoryTitle(path)) : "memory index";
@@ -391,7 +426,7 @@ function renderLive() {
   document.querySelector("#send-mode").hidden = !frame?.running;
   document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
   const kept = held
-    ? `${held.thinkingText ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
+    ? `${held.thinkingText && showThinking() ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
     : "";
   if (!frame?.running) {
     node.innerHTML = kept;
@@ -417,9 +452,9 @@ function renderLive() {
           : tools
             ? "Using tools"
             : "Working";
-  node.innerHTML = `${kept}${frame.thinking && frame.thinkingText ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
+  node.innerHTML = `${kept}${frame.thinking && frame.thinkingText && showThinking() ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
   hydrateMedia(feed, mediaSource());
-  if (stick) feed.scrollTop = feed.scrollHeight;
+  follow.settle();
 }
 
 // ---------------------------------------------------------------------------------------------------------------- questions
@@ -491,7 +526,7 @@ form.addEventListener("submit", async (event) => {
   const gen = state.generation;
   input.value = "";
   grow();
-  stick = true;
+  follow.follow();
   const slash = slashCommand(text);
   if (slash) {
     try {
@@ -532,43 +567,19 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
-// Following stops on the owner's own upward scroll (wheel, keys, touch), however small, and resumes once they are back at the
-// bottom. A scroll the page makes itself only stops it when it leaves the bottom band (streaming-follow-intent-failures.md).
-let touchY = null;
-feed.addEventListener(
-  "wheel",
-  (event) => {
-    if (event.deltaY < 0) stick = false;
-  },
-  { passive: true },
-);
-feed.addEventListener("touchstart", (event) => void (touchY = event.touches[0]?.clientY ?? null), { passive: true });
-feed.addEventListener(
-  "touchmove",
-  (event) => {
-    const y = event.touches[0]?.clientY ?? null;
-    if (touchY !== null && y !== null && y > touchY) stick = false;
-    touchY = y;
-  },
-  { passive: true },
-);
-feed.addEventListener("keydown", (event) => {
-  if (["ArrowUp", "PageUp", "Home"].includes(event.key)) stick = false;
-});
-feed.addEventListener("scroll", () => {
-  const gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
-  if (gap < 2) stick = true;
-  else if (gap >= 40) stick = false;
-});
-/** Clicks inside any transcript (chat feed or a worker in the center); `rerender` repaints that transcript. */
-export async function transcriptClick(event, root, rerender) {
+/** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
+export async function transcriptClick(event, root, rerender, follow) {
   const toggle = event.target.closest("[data-toggle]");
   if (toggle) {
-    const key = toggle.dataset.toggle;
+    const key = toggle.dataset.toggle,
+      top = toggle.getBoundingClientRect().top;
     expanded.has(key) ? expanded.delete(key) : expanded.add(key);
-    stick = false;
+    // Opening a detail is reading: following stops, and the line stays under the pointer (streaming-follow-intent-failures.md F8).
+    follow?.stop();
     rerender();
-    root.querySelector(`[data-toggle="${CSS.escape(key)}"]`)?.focus();
+    const line = root.querySelector(`[data-toggle="${CSS.escape(key)}"]`);
+    if (line) follow?.keepAt(line, top);
+    line?.focus({ preventScroll: true });
     return true;
   }
   const worker = event.target.closest("[data-open-worker]");
@@ -618,7 +629,7 @@ feed.addEventListener("click", async (event) => {
     box.setSelectionRange(box.value.length, box.value.length);
     return;
   }
-  if (await transcriptClick(event, feed, renderFeed)) return;
+  if (await transcriptClick(event, feed, renderFeed, follow)) return;
   const retry = event.target.closest("[data-retry-job]");
   if (retry) {
     const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
@@ -626,7 +637,7 @@ feed.addEventListener("click", async (event) => {
     retry.disabled = true; // a second click must not resend
     try {
       await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
-      stick = true;
+      follow.follow();
     } catch (error) {
       retry.disabled = false;
       fail(error);
@@ -640,8 +651,9 @@ feed.addEventListener("click", async (event) => {
     const page = await call("chat-history", { id: state.projectId, ...chatArgs(), before, limit: 100, messageText: "full" }).catch(fail);
     if (stale(gen) || !page) return;
     older = [...page.items, ...older];
+    olderSummaries = { ...page.toolSummaries, ...olderSummaries };
     olderBefore = page.before;
-    stick = false;
+    follow.stop();
     renderFeed();
     feed.scrollTop = 0;
   }

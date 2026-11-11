@@ -54,13 +54,15 @@ const serial = <T>(operation: () => Promise<T> | T): Promise<T> => {
 export function readUi(): { revision: string; ui: UiSettings } {
   const ui =
     readDocument(uiPath(), (value) => {
-      // Documents saved before `font`, `statusItems` or a status item existed read with today's defaults for them.
+      // Documents saved before `font`, `statusItems`, a status item or the transcript display fields existed read with today's defaults for them.
       const record = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
       const ui = parse(
         UiSettings,
         record
           ? {
               font: DEFAULT_UI.font,
+              showThinking: DEFAULT_UI.showThinking,
+              toolSummaries: DEFAULT_UI.toolSummaries,
               ...record,
               statusItems: Array.isArray(record.statusItems) ? withNewStatusItems(record.statusItems) : DEFAULT_UI.statusItems,
             }
@@ -72,7 +74,7 @@ export function readUi(): { revision: string; ui: UiSettings } {
   return { revision: revisionOf(ui), ui };
 }
 export const setUi = (revision: string, patch: Static<typeof UiPatch>) =>
-  serial(() => {
+  serial(async () => {
     const current = readUi();
     if (current.revision !== revision) throw new Error("UI settings revision conflict; reread before updating");
     if (patch.statusItems) checkStatusItems(patch.statusItems);
@@ -81,10 +83,20 @@ export const setUi = (revision: string, patch: Static<typeof UiPatch>) =>
       ...patch,
       hotkeys: patch.hotkeys ?? current.ui.hotkeys,
       panels: { ...current.ui.panels, ...patch.panels },
+      toolSummaries: { ...current.ui.toolSummaries, ...patch.toolSummaries },
     });
+    // Only a change to the summary settings is checked, so a model that lost its credentials later does not block other UI changes.
+    if (patch.toolSummaries && ui.toolSummaries.enabled) await checkSummaryModel(ui.toolSummaries.model);
     saveJson(uiPath(), ui);
     return { revision: revisionOf(ui), ui };
   });
+
+async function checkSummaryModel(model: string | null): Promise<void> {
+  if (!model) throw new Error("Choose a summary model before turning tool summaries on");
+  const entry = (await tierCatalog()).find((item) => item.ref === model);
+  if (!entry) throw new Error(`Summary model ${model} is not installed`);
+  if (!entry.available) throw new Error(`Summary model ${model} has no configured credentials; sign in to ${entry.provider} first`);
+}
 
 /** Host storage settings: where workspace caches live (src/workspace-cache.ts). */
 export const StorageSettings = Type.Object({ cacheRoot: Type.Union([Type.String(), Type.Null()]) }, { additionalProperties: false });

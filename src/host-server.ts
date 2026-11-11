@@ -111,6 +111,7 @@ import { settingsApplication } from "./settings-application.ts";
 import { libraryImport, libraryList, libraryRead } from "./project-library.ts";
 import { attachmentContent, deleteUpload, listUploads, saveUpload, uploadRecord, uploadText } from "./uploads.ts";
 import { createModelRuntime, loadProviderExtensions } from "./provider-extensions.ts";
+import { openToolSummaries } from "./tool-summaries.ts";
 import { projectModelCatalog, projectModelPicker } from "./project-models.ts";
 import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
@@ -165,6 +166,31 @@ const requireHostAgent = (): HostAgent => {
   if (!hostAgent) throw new Error("The Host agent is not available on this host; see the event log");
   return hostAgent;
 };
+// Host-wide, like the `ui` document that configures it; a damaged `ui` document leaves summaries off until it is fixed.
+const toolSummaries = openToolSummaries({
+  path: join(home(), "tool-summaries.sqlite"),
+  settings: (() => {
+    try {
+      return readUi().ui.toolSummaries;
+    } catch {
+      return { enabled: false, model: null };
+    }
+  })(),
+  runtime: summaryModels(),
+  report: (detail) => recordHostEvent("tool-summaries", detail),
+});
+/** The installed catalog with credentials, rebuilt at most once a minute so a sign-in or a removed provider is seen without a restart. */
+function summaryModels(): () => Promise<Awaited<ReturnType<typeof createModelRuntime>>> {
+  let cached: { at: number; runtime: Promise<Awaited<ReturnType<typeof createModelRuntime>>> } | undefined;
+  return () => {
+    if (!cached || Date.now() - cached.at > 60_000) {
+      const runtime = createModelRuntime();
+      runtime.catch(() => (cached = undefined));
+      cached = { at: Date.now(), runtime };
+    }
+    return cached.runtime;
+  };
+}
 const hostStartedAt = Date.now();
 const hostEvents: Array<{ at: number; kind: string; detail: string }> = [];
 function recordHostEvent(kind: string, detail: string): void {
@@ -316,7 +342,7 @@ function durable(id: string, duringLifecycle = false): Promise<DurableProjectRun
     ? (requestId: string, taskId: string) => startDeploy({ requestId, projectId: id, taskId })
     : undefined;
   const opening = loadProjectResourceLoader(project).then((loader) =>
-    openDurableHost(project, loader, () => configuredSkills(id), redeploy),
+    openDurableHost(project, loader, () => configuredSkills(id), redeploy, toolSummaries),
   );
   durableRuntimes.set(id, opening);
   opening.catch(() => {
@@ -696,8 +722,11 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     }
     case "ui-get":
       return readUi();
+    case "tool-summaries-usage":
+      return toolSummaries.totals();
     case "ui-set": {
       const result = await setUi(input.revision, input.patch);
+      toolSummaries.configure(result.ui.toolSummaries);
       publishHost("ui");
       return result;
     }
@@ -1961,6 +1990,7 @@ hostAgent = await openHostAgent({
   },
   publish: (event) => feed.publish(HOST_FEED, event),
   report: (detail) => recordHostEvent("host-agent", detail),
+  toolSummaries,
 }).catch((error: unknown) => {
   recordHostEvent("host-agent", `The Host agent could not open: ${errorText(error)}`);
   return null;
@@ -2113,6 +2143,11 @@ function shutdown(): Promise<void> {
       }
     }
     await Promise.allSettled([...activeRequests]);
+    try {
+      await toolSummaries.close();
+    } catch (error) {
+      report(error);
+    }
     try {
       if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
     } catch (error) {

@@ -459,6 +459,22 @@ try {
     "chat two's Workers list",
   );
   result.checks.push("F12 switching chats swaps the transcript and the Workers list shows only that chat's work");
+  // F12: the jobs read can land before the chat's view; the Workers list must still follow the selected chat.
+  await evaluate(
+    `(() => { window.__realFetch = window.fetch; window.fetch = async (url, init) => { if (/"action":"show"/.test(String(init?.body ?? ''))) await new Promise((done) => setTimeout(done, 800)); return window.__realFetch(url, init); }; })()`,
+    s,
+  );
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${feed}.includes('Done MARK-MAIN')`, s, "main selected, slow view");
+  await click(s, `#tree [data-chat="${chatId}"]`);
+  await waitFor(`${feed}.includes('REPORT-ACK')`, s, "chat two selected, slow view");
+  await evaluate(`window.fetch = window.__realFetch`, s);
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), (document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB'))`,
+    s,
+    "chat two's Workers list after a slow view",
+  );
+  result.checks.push("F12 the Workers list follows the selected chat when its view arrives after the jobs");
   // Other projects' rows in the tree are drawn from the host's list: it must carry each chat's own activity.
   await new Promise((done) => setTimeout(done, 1700));
   const listed = (await rpc({ action: "list" })).find((project) => project.id === id);
@@ -545,6 +561,19 @@ try {
   await hover(`#tree [data-chat="${spare}"]`);
   await waitFor(shown(spare), s, "archive button on hover");
   await shot("05-archive-hover", s);
+  // F31: hovering the tree shows no 1–9 badges; the digits still switch chats of the selected project in tree order.
+  if (await evaluate(`!!document.querySelector('#tree kbd')`, s)) throw Error("Tree rows still show shortcut badges");
+  await evaluate(`document.activeElement?.blur()`, s);
+  for (const [key, chat] of [
+    ["3", spare],
+    ["1", "main"],
+    ["2", chatId],
+  ]) {
+    await press(key, `Digit${key}`);
+    await waitFor(`${current}?.dataset.chat === ${JSON.stringify(chat)}`, s, `digit ${key} opens its chat`);
+  }
+  await hover(`#tree [data-chat="${spare}"]`);
+  result.checks.push("F31 hovering the tree shows no shortcut badges; digits 1–9 still switch chats");
   await evaluate(`document.querySelector('#tree [data-chat="main"]').focus()`, s);
   await press("ArrowDown", "ArrowDown");
   if ((await evaluate(`document.activeElement?.dataset.chat ?? document.activeElement?.className`, s)) !== chatId)
@@ -770,6 +799,8 @@ try {
     for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20);
     if (!cdpEnded) chrome.kill("SIGTERM");
   }
+  // Chrome's updater inherits its output pipes and can outlive it; open pipes would keep this script alive until the runner's timeout.
+  for (const stream of chrome?.stdio ?? []) stream?.destroy();
   try {
     if (!hostEnded) await stopHost();
   } catch {

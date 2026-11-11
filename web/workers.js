@@ -3,7 +3,8 @@
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, transcriptClick, transcriptHtml } from "./chat.js";
+import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
 import { pluginRow } from "./plugins.js";
 
@@ -11,7 +12,10 @@ const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
 let tiers = null; // tiers-get result, re-read when the host publishes `tiers`
 let armed = null; // job id whose Approve was clicked once
+let jobsBeforeView = false; // the jobs read landed before the selected chat's view, so its per-worker reads still wait for it
 const contexts = new Map(); // agent id -> worker-contexts entry ({ tokens, window } or null when unknown)
+const places = new Map(); // `${project}/${thread}` -> the follower place of that worker's last view (F14)
+let shown = null; // { key, follow } of the newest worker view, whose place is saved when the next one opens
 const CONTEXT_GAP_MS = 5000; // at most one worker-contexts read per this interval
 let contextsAsked = 0, // sequence of the newest worker-contexts request; older answers are dropped
   contextsAt = 0,
@@ -53,6 +57,7 @@ export async function loadJobs() {
     if (stale(gen)) return;
     tiers = tierData;
     state.jobs = jobs;
+    jobsBeforeView = !state.view;
     renderWorkers();
     emit("jobs", jobs);
     void loadLastTools(gen);
@@ -72,12 +77,22 @@ on("select", () => {
   box.replaceChildren();
 });
 
+// Selecting a chat reads its view and the jobs at once; whichever lands second draws the list (multi-chat-failures.md 12).
+on("view", () => {
+  if (!state.jobs) return;
+  renderWorkers();
+  if (!jobsBeforeView) return;
+  jobsBeforeView = false;
+  void loadLastTools(state.generation);
+  queueContexts();
+});
+
 function chatConversation() {
   return (state.view?.chats ?? []).find((chat) => chat.id === state.chatId)?.conversationId ?? 1;
 }
 /** Workers spawned from the selected chat: Jobs first (newest first), then scouts and reviewers that are not part of a Job. */
 export function chatWorkers() {
-  if (!state.jobs) return [];
+  if (!state.jobs || !state.view) return [];
   const conversation = chatConversation();
   const jobs = state.jobs.jobs
     .filter((job) => job.chat === conversation && !job.dismissedAt)
@@ -139,17 +154,45 @@ function renderWorkers() {
     active = list.filter(isActive),
     ended = list.filter((worker) => !isActive(worker));
   document.querySelector("#workers-count").textContent = active.length ? String(active.length) : "";
-  if (!list.length) {
-    box.innerHTML = `<p class="muted small empty-line">No workers in this chat yet.</p>`;
-    return;
-  }
+  if (!list.length) return paint(`<p class="muted small empty-line">No workers in this chat yet.</p>`);
   const open = historyOpen(),
     tally = historyTally(ended);
-  box.innerHTML =
+  paint(
     (active.length ? active.map(workerHtml).join("") : `<p class="muted small empty-line">No active workers.</p>`) +
-    (ended.length
-      ? `<button type="button" class="w-history" data-worker-history aria-expanded="${open}" aria-controls="workers-history"><span class="chev" aria-hidden="true">${open ? "▾" : "▸"}</span>Ended <span class="count">${ended.length}</span>${tally ? `<span class="w-history-tally">${tally}</span>` : ""}</button>${open ? `<div id="workers-history">${ended.map(workerHtml).join("")}</div>` : ""}`
-      : "");
+      (ended.length
+        ? `<button type="button" class="w-history" data-key="history" data-worker-history aria-expanded="${open}" aria-controls="workers-history"><span class="chev" aria-hidden="true">${open ? "▾" : "▸"}</span>Ended <span class="count">${ended.length}</span>${tally ? `<span class="w-history-tally">${tally}</span>` : ""}</button>${open ? `<div id="workers-history" data-key="ended">${ended.map(workerHtml).join("")}</div>` : ""}`
+        : ""),
+  );
+}
+/** Redraws the panel keeping keyed nodes, so a card mounts and animates in once and later pushes change it in place
+ * (coordinator-workers-ui-failures.md F1). */
+function paint(html) {
+  const next = document.createElement("div");
+  next.innerHTML = html;
+  sync(box, next);
+}
+function sync(parent, next) {
+  const old = new Map([...parent.children].filter((node) => node.dataset.key).map((node) => [node.dataset.key, node]));
+  const nodes = [...next.children].map((node) => {
+    const keep = node.dataset.key && old.get(node.dataset.key);
+    if (!keep || keep.tagName !== node.tagName) return node;
+    for (const { name } of [...keep.attributes]) if (!node.hasAttribute(name)) keep.removeAttribute(name);
+    for (const { name, value } of node.attributes) if (keep.getAttribute(name) !== value) keep.setAttribute(name, value);
+    if ([...node.children].some((child) => child.dataset.key)) sync(keep, node);
+    else if (keep.innerHTML !== node.innerHTML) {
+      const focused = keep.contains(document.activeElement) ? document.activeElement : null;
+      keep.replaceChildren(...node.childNodes);
+      if (focused) [...keep.querySelectorAll(focused.tagName)].find((item) => item.className === focused.className)?.focus();
+    }
+    return keep;
+  });
+  // Moving a node restarts its animation, so kept nodes move only when out of order.
+  const wanted = new Set(nodes);
+  for (const child of [...parent.childNodes]) if (!wanted.has(child)) child.remove();
+  nodes.forEach((node, index) => {
+    const at = parent.children[index];
+    if (at !== node) parent.insertBefore(node, at ?? null);
+  });
 }
 
 /** The share of the context window an active worker uses, as a ring; unknown (no entry, no window) is never drawn as 0 %. */
@@ -215,7 +258,7 @@ function workerHtml(worker) {
         : worker.status === "failed" || worker.status === "checkpoint"
           ? `<button type="button" class="ghost-btn small" data-open-worker="${esc(worker.id)}">Open</button>`
           : "";
-  return `<article class="worker${worker.working ? " working" : ""}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
+  return `<article class="worker${worker.working ? " working" : ""}" data-key="w:${esc(worker.id)}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
 }
 async function loadLastTools(gen) {
   const running = chatWorkers()
@@ -434,21 +477,34 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
-  let items = [];
+  let items = [],
+    summaries = {};
   // The focus view is reused: this render lives only while its own feed is on the page.
-  const node = root.querySelector("#worker-feed"),
+  if (shown) places.set(shown.key, shown.follow.place);
+  const key = `${state.projectId}/${id}`,
+    node = root.querySelector("#worker-feed"),
+    follow = follower(node, places.get(key)),
     alive = () => node.isConnected && !stale(gen);
+  shown = { key, follow };
   const paint = () => {
     if (!alive()) return;
     const worker = find();
-    node.innerHTML =
-      transcriptHtml(
-        items,
-        !!worker?.working,
-        worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
-      ) || `<p class="muted">No transcript yet.</p>`;
-    hydrateMedia(node, { project: state.projectId, threadId: id });
-    node.scrollTop = node.scrollHeight;
+    // Unchanged turns keep their nodes, so a summary arriving keeps focus, open lines and the reader's place (tool-summaries D6).
+    const focused = node.contains(document.activeElement) ? document.activeElement.dataset.toggle : undefined;
+    follow.render(() => {
+      morph(
+        node,
+        transcriptHtml(
+          items,
+          !!worker?.working,
+          worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
+          { summaries },
+        ) || `<p class="muted">No transcript yet.</p>`,
+      );
+      hydrateMedia(node, { project: state.projectId, threadId: id });
+    });
+    if (focused && !node.contains(document.activeElement))
+      node.querySelector(`[data-toggle="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   };
   const load = async () => {
     const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }).catch((error) => {
@@ -457,6 +513,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     });
     if (!page || !alive()) return;
     items = page.items;
+    summaries = page.toolSummaries ?? {};
     root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card"[\s\S]*$/, "");
     const line = promptLine(find()),
       old = root.querySelector(".w-prompt");
@@ -492,9 +549,13 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   });
   await load();
   if (!alive()) return;
-  node.addEventListener("click", (event) => void transcriptClick(event, root, paint));
+  node.addEventListener("click", (event) => void transcriptClick(event, root, paint, follow));
   const unsub = on("jobs", () => {
     if (!alive()) return unsub();
+    void load();
+  });
+  const undisplay = on("chat-display", () => {
+    if (!alive()) return undisplay();
     void load();
   });
   root.addEventListener("click", async (event) => {

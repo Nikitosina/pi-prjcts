@@ -486,14 +486,6 @@ a {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tree-chat kbd {
-  opacity: 0;
-  transition: opacity var(--t-fast);
-}
-#tree:hover .tree-chat kbd,
-#tree:focus-within .tree-chat kbd {
-  opacity: 1;
-}
 .tree-row {
   position: relative;
 }
@@ -777,6 +769,86 @@ a {
 .prose .media-img {
   margin: 4px 0;
 }
+.media-open {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-s);
+  background: none;
+  cursor: zoom-in;
+}
+.media-open .media-img {
+  transition: border-color var(--t-fast);
+}
+.media-open:hover .media-img {
+  border-color: var(--line-strong);
+}
+/* Image viewer: the image fills the viewport keeping its aspect (--ar), up to twice its own width (--w) so small ones stay sharp. */
+#lightbox {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+  cursor: zoom-out;
+}
+#lightbox[open] {
+  display: grid;
+  place-items: center;
+  animation: none;
+}
+#lightbox::backdrop {
+  background: rgb(0 0 0 / 0.82);
+  backdrop-filter: blur(6px);
+}
+#lightbox figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+#lightbox img {
+  display: block;
+  aspect-ratio: var(--ar);
+  width: min(92vw, calc((100dvh - 96px) * var(--ar)), calc(var(--w) * 2));
+  height: auto;
+  border-radius: var(--r-m);
+  background: var(--code-bg);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.5);
+}
+#lightbox figcaption {
+  max-width: 92vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--mono);
+  color: rgb(255 255 255 / 0.72);
+}
+.lightbox-x {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgb(255 255 255 / 0.24);
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.45);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.lightbox-x:hover {
+  background: rgb(255 255 255 / 0.16);
+}
 .artifact-open.failed {
   text-decoration: line-through;
 }
@@ -1021,6 +1093,107 @@ pre.code,
   margin-left: 14px;
   border-left: 1px solid var(--line);
   padding-left: 4px;
+}
+/* Tool summaries: one quiet prose line per assistant message's calls, opening to the calls. */
+.tool-summary {
+  margin-left: -8px;
+  border-radius: var(--r-s);
+}
+.tool-summary.fresh .ts-text {
+  animation: fade-in var(--t-med) var(--ease) both;
+}
+.ts-line {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 28px;
+  padding: 6px 8px;
+  border-radius: var(--r-s);
+  font: 13px/1.45 var(--font);
+  color: var(--muted);
+  text-align: left;
+}
+.ts-line:hover {
+  background: var(--raised);
+}
+.ts-line > .st,
+.ts-line > .ts-pending {
+  flex: none;
+  margin-top: 3px;
+}
+.ts-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tool-summary[data-status="pending"] .ts-text {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.ts-meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 11.5px/1.7 var(--mono);
+  color: var(--faint);
+}
+.ts-err {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: var(--bad);
+}
+.tool-summary.open .chev {
+  transform: rotate(90deg);
+}
+/* Waiting for a summary is not a running call: a still ring that breathes, not the spinner. */
+.ts-pending {
+  width: 9px;
+  height: 9px;
+  margin-inline: 2.5px;
+  border-radius: 50%;
+  border: 1.5px solid var(--faint);
+  animation: ts-wait 1.8s ease-in-out infinite;
+}
+@keyframes ts-wait {
+  50% {
+    opacity: 0.35;
+  }
+}
+.ts-body {
+  margin-left: 14px;
+  border-left: 1px solid var(--line);
+  padding-left: 4px;
+}
+.ts-body .tool-row {
+  margin-left: 0;
+}
+.ts-by,
+.ts-note {
+  margin: 2px 8px 4px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.ts-note .ts-glyph {
+  margin-right: 6px;
+}
+.ts-model-row .label {
+  white-space: nowrap;
+}
+.ts-model-row select {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .ts-line {
+    flex-wrap: wrap;
+  }
+  .ts-meta {
+    margin-left: auto;
+  }
 }
 .memory-row,
 .report-row {

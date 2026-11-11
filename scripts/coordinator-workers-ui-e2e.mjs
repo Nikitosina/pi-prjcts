@@ -28,6 +28,11 @@ let releaseHold;
 const hold = new Promise((ok) => {
   releaseHold = ok;
 });
+const STEPS = 4;
+let releaseSteps;
+const stepsSeen = new Promise((ok) => {
+  releaseSteps = ok;
+});
 const chunk = (delta, finish) =>
   `data: ${JSON.stringify({ id: "fake", object: "chat.completion.chunk", created: 0, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
 const call = (name, args) =>
@@ -77,6 +82,7 @@ const model = createServer((req, res) => {
         "MARK-REVIEW": { role: "reviewer", task: "MARK-REVIEWTASK grep the code" },
         "MARK-FAIL": { role: "worker", task: "MARK-FAILTASK will fail" },
         "MARK-HOLD": { role: "worker", task: "MARK-HOLDTASK waits" },
+        "MARK-STEPS": { role: "worker", task: "MARK-STEPSTASK runs commands" },
         "MARK-SCOPED": { role: "scout", task: "MARK-SCOPEDTASK", scopeId: randomUUID() },
         "MARK-WEBSCOUT": { role: "scout", task: "MARK-WEBSCOUTTASK search" },
       }[marker];
@@ -127,6 +133,14 @@ const model = createServer((req, res) => {
     if (marker === "MARK-HOLDTASK") {
       await hold;
       return reply(say("Hold done"));
+    }
+    // Several commands in a row, slow enough for the Workers panel to show each one as the current command.
+    if (marker === "MARK-STEPSTASK") {
+      await delay(900);
+      result.steps = stage;
+      if (stage < STEPS) return reply(call("bash", { command: `echo STEP-${stage}` }));
+      await stepsSeen;
+      return reply(say("Steps done"));
     }
     return reply(say(`Worker ${marker}`));
   });
@@ -630,6 +644,41 @@ try {
   await rpc({ action: "thread-dismiss", id, threadId: thread });
   await waitFor(`!${workers}.includes('MARK-FAILTASK')`, s, "dismissed Job leaves the list");
   result.checks.push("A2 a dismissed Job leaves the Workers list");
+
+  // F1: a worker running several commands in a row keeps one card that animates in once; only its current command changes.
+  await evaluate(
+    `(() => {
+      const cards = (window.__cards = { enters: 0, mounts: 0, tools: [], node: null });
+      const mine = (node) => node?.matches?.('#workers > .worker') && node.innerText.includes('MARK-STEPSTASK');
+      document.addEventListener('animationstart', (event) => { if (event.animationName === 'row-in' && mine(event.target)) cards.enters++; });
+      new MutationObserver(() => {
+        const card = [...document.querySelectorAll('#workers > .worker')].find(mine);
+        if (!card) return;
+        if (card !== cards.node) { cards.node = card; cards.mounts++; }
+        const tool = card.querySelector('.w-tool')?.innerText;
+        if (tool && cards.tools.at(-1) !== tool) cards.tools.push(tool);
+      }).observe(document.querySelector('#workers'), { childList: true, subtree: true, characterData: true });
+    })()`,
+    s,
+  );
+  await rpc({ action: "message", id, text: "MARK-STEPS" });
+  // The keyboard stays on the card's title while its command line changes.
+  await waitFor(`!!__cards.node?.querySelector('.w-tool')`, s, "steps card with its first command");
+  await evaluate(`__cards.node.querySelector('.w-title').focus()`, s);
+  await eventually(() => result.steps === STEPS, "steps worker did not run its commands");
+  await delay(1200);
+  const cards = await evaluate(
+    `({ enters: __cards.enters, mounts: __cards.mounts, tools: __cards.tools, focused: document.activeElement === __cards.node.querySelector('.w-title') })`,
+    s,
+  );
+  await shot("01e-steps-card", s);
+  releaseSteps();
+  result.cards = cards;
+  if (cards.tools.length < 2) throw Error("F1 setup: the card never showed a changing current command: " + JSON.stringify(cards));
+  if (cards.enters !== 1 || cards.mounts !== 1 || !cards.focused)
+    throw Error("F1 the worker card flashed on command updates: " + JSON.stringify(cards));
+  result.checks.push(`F1 one card through ${cards.tools.length} current commands: mounted once, animated in once`);
+  await eventually(async () => (await workFor(id, "MARK-STEPSTASK")).status !== "running", "steps Job did not finish");
 
   // Inline streaming with sticky auto-scroll.
   await waitFor(`!document.querySelector('#composer-input').disabled`, s, "composer ready");

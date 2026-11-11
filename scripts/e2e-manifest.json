@@ -65,11 +65,12 @@
     "src/host-documents.ts": ["ui2-settings-e2e", "worker-quota", "host-agent-e2e"],
     "src/prompt-sections.ts": ["ui2-settings-e2e", "workspace-defaults"],
     "src/prompt-blocks.ts": ["prompt-blocks-*", "settings-prompts-refresh", "workspace-defaults", "ui2-worker-prompt*"],
-    "web/workers.js": ["ui2-worker-prompt*"],
+    "web/workers.js": ["ui2-worker-prompt*", "coordinator-workers-ui-e2e", "tool-summaries-e2e"],
+    "web/media.js": ["artifacts-e2e", "worker-artifacts-browser-e2e"],
     "web/tree.js": ["multi-chat-e2e", "status-dots-e2e"],
     "web/hotkeys.js": ["multi-chat-e2e", "ui2-settings-e2e", "ui-polish-e2e"],
-    "src/ui-settings.ts": ["ui2-settings-e2e"],
-    "src/change-feed.ts": ["ui2-settings-e2e", "host-agent-e2e"],
+    "src/ui-settings.ts": ["ui2-settings-e2e", "tool-summaries-e2e"],
+    "src/change-feed.ts": ["ui2-settings-e2e", "host-agent-e2e", "tool-summaries-e2e"],
     "src/memory.ts": ["memory-e2e", "durable-knowledge"],
     "src/knowledge.ts": ["memory-e2e", "durable-knowledge"],
     "src/durable-workspace-binding.ts": ["worktree-lifecycle-e2e", "codemode-native-tools-e2e"],
@@ -81,7 +82,14 @@
     "scripts/ui2-trial*.mjs": ["ui2-trial-e2e"],
     ".agents/skills/pr-review/**": ["repo-skill-overrides-unit"],
     ".agents/skills/code-review/**": ["repo-skill-overrides-unit"],
-    ".agents/skills/ask-user/**": ["repo-skill-overrides-unit"]
+    ".agents/skills/ask-user/**": ["repo-skill-overrides-unit"],
+    "web/chat.js": ["tool-summaries-e2e", "streaming-*", "coordinator-workers-ui-e2e"],
+    "web/follow.js": ["streaming-*", "coordinator-workers-ui-e2e", "worker-chat-ui-e2e", "tool-summaries-e2e"],
+    "web/ui.js": ["tool-summaries-e2e"],
+    "web/settings.js": ["tool-summaries-e2e"],
+    "web/hostagent.js": ["tool-summaries-e2e"],
+    "src/transcript-reader.ts": ["tool-summaries-e2e"],
+    "src/host-agent.ts": ["tool-summaries-e2e"]
   },
   "knownFailing": []
 }

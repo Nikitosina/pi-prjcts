@@ -11,6 +11,8 @@ export const DEFAULT_UI = {
   hotkeys: {},
   panels: { list: true, context: true, hostAgent: false },
   statusLine: true,
+  showThinking: true,
+  toolSummaries: { enabled: false, model: null },
   statusItems: ["activity", "model", "thinking", "context", "cost", "limits", "spacer", "machine", "connection", "hints"].map((id) => ({
     id,
     enabled: true,
@@ -31,6 +33,7 @@ function normalize(ui) {
     ...(ui ?? {}),
     panels: { ...DEFAULT_UI.panels, ...(ui?.panels ?? {}) },
     hotkeys: { ...(ui?.hotkeys ?? {}) },
+    toolSummaries: { ...DEFAULT_UI.toolSummaries, ...(ui?.toolSummaries ?? {}) },
     // A cache from before the field, or from an older host, draws today's bar.
     statusItems: Array.isArray(ui?.statusItems) ? ui.statusItems : DEFAULT_UI.statusItems,
   };
@@ -47,7 +50,13 @@ function apply(ui) {
   app.dataset.statusline = ui.statusLine ? "1" : "0";
   setOverrides(ui.hotkeys);
   emit("ui", ui);
+  const display = JSON.stringify([ui.showThinking, ui.toolSummaries]);
+  if (display !== chatDisplay) {
+    chatDisplay = display;
+    emit("chat-display", ui); // transcripts redraw; turning summaries on needs a read, since the host hides them while off
+  }
 }
+let chatDisplay = "";
 
 /** Reads the host's settings. A change notice that arrives while this page still has writes queued is left to the last write's
  * answer, which carries the host's full settings. */
@@ -70,7 +79,12 @@ let writing = Promise.resolve(),
 /** Applies the patch at once, then writes it to the host; a stale revision re-reads and retries once. Resolves true when the
  * host kept it. While later writes wait, the page keeps its own copy: the host's answer predates them and would undo them. */
 export function setUi(patch) {
-  const next = normalize({ ...state.ui, ...patch, panels: { ...state.ui.panels, ...(patch.panels ?? {}) } });
+  const next = normalize({
+    ...state.ui,
+    ...patch,
+    panels: { ...state.ui.panels, ...(patch.panels ?? {}) },
+    toolSummaries: { ...state.ui.toolSummaries, ...(patch.toolSummaries ?? {}) },
+  });
   apply(next);
   queued++;
   const done = writing.then(async () => {

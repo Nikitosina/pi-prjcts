@@ -20,7 +20,7 @@ Owner decision: each chat is its own durable coordinator conversation. All chats
 11. Owner messages land in the wrong chat, or the job ledger shows another chat's messages.
 
 ## UI
-12. The chat list is missing or does not mark the selected chat; switching keeps the previous chat's transcript, draft or live bubble.
+12. The chat list is missing or does not mark the selected chat; switching keeps the previous chat's transcript, draft or live bubble. The Workers list shows Main's workers (or none) when the jobs read lands before the chat's view: it must follow the selected chat whichever read arrives first.
 13. The live stream shows another chat's in-flight generation.
 14. Rename does not persist or is not shown; archive leaves the chat selectable for new messages; Main can be archived.
 15. The selected chat is lost on reload (it must survive in the URL).
@@ -43,6 +43,7 @@ The runtime refuses to archive Main and aborts a busy chat's turn when it is arc
 28. The archive does not survive a reload.
 29. Arrow keys in the tree stop on archive buttons.
 30. The button or the shortcut archives without a confirmation dialog naming the chat; Cancel or Escape archives or moves the selection; a repeated shortcut stacks dialogs or archives; focus is lost when the dialog closes.
+31. Hovering the tree shows 1–9 badges on chat rows (noise the owner removed), or removing them also breaks the digit shortcuts that switch chats.
 
 ## Regressions to keep
 19. live-chain, ui-polish, coordinator-live, github-quick-ui, coordinator-workers-ui, projects-chat-md, workers-card-ui, worker-chat-ui and coordinator-github-skills keep passing.

@@ -1,0 +1,158 @@
+// Following a transcript's newest line. Each transcript (the Coordinator feed, a worker view) has its own follower.
+// The owner's own input stops it: an upward wheel, touch or key, a drag up, or opening a detail. Otherwise only a scroll that moves
+// the view far up while the transcript kept its height on screen does (find in page, F12); content growing never moves the view up,
+// and a scroll event after a resize may be a late one (scripts/streaming-follow-intent-failures.md F5).
+
+/** Keeps `node` at its newest line while following, and the turn a reader reads in place otherwise, across renders, resizes and hiding.
+ * `from` is the `place` of an earlier view of the same transcript, which the first render returns to. */
+export function follower(node, from = { following: true, anchor: [] }) {
+  let following = from.following,
+    top = node.scrollTop,
+    pressed = false,
+    shown = node.clientHeight > 0,
+    saved = from.anchor,
+    touchY = null,
+    view = node.clientHeight; // the height on screen last seen, so a scroll event can tell a resize from a scroll
+  const watched = new Set();
+  // Where the view was last put, by a scroll event or by this follower: the browser merges the event of its own move with a later
+  // scroll in the same frame, which would otherwise read as a move down.
+  const placed = () => void (top = node.scrollTop);
+  const pin = () => {
+    node.scrollTop = node.scrollHeight;
+    placed();
+  };
+  // Upward input only stops following when the transcript can scroll, so a short one still follows once it grows. Not scrollTop:
+  // the compositor may have applied a big wheel before the event reaches the page.
+  const leave = () => {
+    if (node.scrollHeight > node.clientHeight + 1) following = false;
+  };
+  const resized = new ResizeObserver(() => {
+    if (!node.isConnected) return resized.disconnect();
+    view = node.clientHeight;
+    // A hidden transcript (the Coordinator's while a worker is open) keeps its place until it shows again.
+    if (!view) return void (shown = false);
+    if (following) pin();
+    else if (!shown) (keepAnchor(node, saved), placed());
+    shown = true;
+  });
+  const watch = () => {
+    for (const child of watched) if (!child.isConnected) (resized.unobserve(child), watched.delete(child));
+    for (const child of node.children) if (!watched.has(child)) (resized.observe(child), watched.add(child));
+  };
+  resized.observe(node);
+  watch();
+  node.addEventListener("wheel", (event) => event.deltaY < 0 && leave(), { passive: true });
+  node.addEventListener("touchstart", (event) => void (touchY = event.touches[0]?.clientY ?? null), { passive: true });
+  node.addEventListener(
+    "touchmove",
+    (event) => {
+      const y = event.touches[0]?.clientY ?? null;
+      if (touchY !== null && y !== null && y > touchY) leave();
+      touchY = y;
+    },
+    { passive: true },
+  );
+  node.addEventListener("keydown", (event) => ["ArrowUp", "PageUp", "Home"].includes(event.key) && leave());
+  // A press on the transcript (its scrollbar, or a selection that drags past the edge) followed by an upward scroll is a drag up.
+  node.addEventListener("pointerdown", () => {
+    pressed = true;
+    addEventListener("pointerup", () => void (pressed = false), { once: true });
+  });
+  node.addEventListener("scroll", () => {
+    const now = node.scrollTop,
+      gap = node.scrollHeight - now - node.clientHeight,
+      up = now < top - 1;
+    if (up && (pressed || (node.clientHeight === view && gap >= 40))) following = false;
+    else if (!up && gap < 2) following = true;
+    top = now;
+    view = node.clientHeight;
+    if (!following && view) saved = readingAnchor(node);
+  });
+  return {
+    get following() {
+      return following;
+    },
+    /** Whether it follows and where the reader was, for a later view of the same transcript. */
+    get place() {
+      return { following, anchor: saved };
+    },
+    /** Follows again from the newest line: a sent message, another chat. */
+    follow() {
+      following = true;
+      pin();
+    },
+    stop() {
+      following = false;
+    },
+    /** Pins while following; for updates below the reader, such as the live turn. */
+    settle() {
+      if (following) pin();
+    },
+    /** Scrolls so that `element`, a line the owner just used, is back at viewport offset `at`. */
+    keepAt(element, at) {
+      node.scrollTop += element.getBoundingClientRect().top - at;
+      placed();
+    },
+    /** Runs `paint`, which may replace any turn, then pins while following or keeps the turn being read where it was. */
+    render(paint) {
+      const visible = node.clientHeight > 0,
+        here = following || !visible ? [] : readingAnchor(node),
+        anchor = here.length ? here : saved; // before the first turn shows, the place of an earlier view
+      paint();
+      watch();
+      if (!visible) return;
+      if (following) return pin();
+      keepAnchor(node, anchor);
+      placed();
+      saved = readingAnchor(node);
+    },
+  };
+}
+
+// A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
+// `show` returns (streaming-scroll-viewport-failures.md R1). Inside the first turn in view it keeps the line read, as a change above
+// it in the same turn (thinking hidden, a summary arriving) would move it otherwise (F13).
+export function readingAnchor(feed) {
+  const top = feed.getBoundingClientRect().top;
+  return [...feed.querySelectorAll(":scope > .turn[data-key]")]
+    .filter((node) => node.getBoundingClientRect().bottom > top)
+    .slice(0, 8)
+    .map((node, index) => ({
+      key: node.dataset.key,
+      offset: node.getBoundingClientRect().top - top,
+      line: index ? null : lineIn(node, top),
+    }));
+}
+export function keepAnchor(feed, anchor) {
+  const top = feed.getBoundingClientRect().top;
+  for (const { key, offset, line } of anchor) {
+    const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);
+    if (!node) continue;
+    const read = line && find(node, line.path);
+    feed.scrollTop += read ? read.getBoundingClientRect().top - top - line.offset : node.getBoundingClientRect().top - top - offset;
+    return;
+  }
+}
+
+// The line read is the innermost element at the top of the view, found again by kind (tag and first class) and its count among
+// siblings of that kind: a turn re-rendered with an element added or removed before it still finds it.
+const kind = (element) => `${element.tagName}.${element.classList[0] ?? ""}`;
+function lineIn(turn, top) {
+  const path = [];
+  let at = turn;
+  for (let depth = 0; depth < 6; depth++) {
+    const next = [...at.children].find((child) => child.getBoundingClientRect().bottom > top);
+    if (!next) break;
+    path.push([kind(next), [...at.children].filter((child) => kind(child) === kind(next)).indexOf(next)]);
+    at = next;
+  }
+  return path.length ? { path, offset: at.getBoundingClientRect().top - top } : null;
+}
+function find(turn, path) {
+  let at = turn;
+  for (const [type, nth] of path) {
+    at = [...at.children].filter((child) => kind(child) === type)[nth];
+    if (!at) return null;
+  }
+  return at;
+}

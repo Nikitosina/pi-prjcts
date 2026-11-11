@@ -46,6 +46,9 @@ type UiSettings = {
   //             | "spacer" (pushes later items right) | "machine" (memory, CPU, free disk, battery; disk warns below
   //             50 GB free) | "connection" | "hints". A missing field reads as the default; a stored list without a newer
   //             id gains it, shown, after its default predecessor; ui-set refuses an unknown, duplicate or missing id.
+  showThinking: boolean;                // display only, default true; the model's thinking level and context do not change
+  toolSummaries: { enabled: boolean; model: string | null }; // default off; ui-set refuses turning it on (or changing the model
+  //             while on) unless the model is installed and its provider has credentials. A patch may set either field.
 };
 ```
 
