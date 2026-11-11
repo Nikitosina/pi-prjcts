@@ -3,13 +3,14 @@
 // the view far up while the transcript kept its height on screen does (find in page, F12); content growing never moves the view up,
 // and a scroll event after a resize may be a late one (scripts/streaming-follow-intent-failures.md F5).
 
-/** Keeps `node` at its newest line while following, and the turn a reader reads in place otherwise, across renders, resizes and hiding. */
-export function follower(node) {
-  let following = true,
+/** Keeps `node` at its newest line while following, and the turn a reader reads in place otherwise, across renders, resizes and hiding.
+ * `from` is the `place` of an earlier view of the same transcript, which the first render returns to. */
+export function follower(node, from = { following: true, anchor: [] }) {
+  let following = from.following,
     top = node.scrollTop,
     pressed = false,
     shown = node.clientHeight > 0,
-    saved = [],
+    saved = from.anchor,
     touchY = null,
     view = node.clientHeight; // the height on screen last seen, so a scroll event can tell a resize from a scroll
   const watched = new Set();
@@ -71,6 +72,10 @@ export function follower(node) {
     get following() {
       return following;
     },
+    /** Whether it follows and where the reader was, for a later view of the same transcript. */
+    get place() {
+      return { following, anchor: saved };
+    },
     /** Follows again from the newest line: a sent message, another chat. */
     follow() {
       following = true;
@@ -91,7 +96,8 @@ export function follower(node) {
     /** Runs `paint`, which may replace any turn, then pins while following or keeps the turn being read where it was. */
     render(paint) {
       const visible = node.clientHeight > 0,
-        anchor = following || !visible ? [] : readingAnchor(node);
+        here = following || !visible ? [] : readingAnchor(node),
+        anchor = here.length ? here : saved; // before the first turn shows, the place of an earlier view
       paint();
       watch();
       if (!visible) return;

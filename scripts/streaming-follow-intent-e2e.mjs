@@ -418,8 +418,10 @@ await k.run(async () => {
   journey.wake?.();
   await k.settle(journeyId);
 
-  // F10: the worker transcript follows its new turns at the bottom and leaves a reader who scrolled up a little.
+  // F10: the worker transcript follows its new turns at the bottom and leaves a reader who scrolled up a little. The detail opened in
+  // F9 stopped its following, and the view returns there (F14), so the reader first goes to the bottom.
   await openWorker();
+  await wheel("#worker-feed", 100000);
   const workerTurn = async (n) => {
     await k.rpc({ action: "thread-send", id: journeyId, threadId: worker.id, requestId: randomUUID(), text: `JOURNEY-W ${n}` });
     await page.waitFor(`document.querySelector('#worker-feed').innerText.includes('W-REPLY ${n} part 3')`, `worker reply ${n}`);

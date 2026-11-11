@@ -13,6 +13,8 @@ let tiers = null; // tiers-get result, re-read when the host publishes `tiers`
 let armed = null; // job id whose Approve was clicked once
 let jobsBeforeView = false; // the jobs read landed before the selected chat's view, so its per-worker reads still wait for it
 const contexts = new Map(); // agent id -> worker-contexts entry ({ tokens, window } or null when unknown)
+const places = new Map(); // `${project}/${thread}` -> the follower place of that worker's last view (F14)
+let shown = null; // { key, follow } of the newest worker view, whose place is saved when the next one opens
 const CONTEXT_GAP_MS = 5000; // at most one worker-contexts read per this interval
 let contextsAsked = 0, // sequence of the newest worker-contexts request; older answers are dropped
   contextsAt = 0,
@@ -479,9 +481,12 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   let items = [],
     summaries = {};
   // The focus view is reused: this render lives only while its own feed is on the page.
-  const node = root.querySelector("#worker-feed"),
-    follow = follower(node),
+  if (shown) places.set(shown.key, shown.follow.place);
+  const key = `${state.projectId}/${id}`,
+    node = root.querySelector("#worker-feed"),
+    follow = follower(node, places.get(key)),
     alive = () => node.isConnected && !stale(gen);
+  shown = { key, follow };
   const paint = () => {
     if (!alive()) return;
     const worker = find();
