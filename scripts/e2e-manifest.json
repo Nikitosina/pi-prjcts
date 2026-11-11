@@ -38,6 +38,7 @@
     "src/workspace-*.ts": ["workspace-*", "durable-workspace-*", "coordinator-workspace-e2e"],
     "src/worktree-*.ts": ["worktree-lifecycle-e2e", "workspace-*"],
     "plugins/**": ["vcs-plugins-e2e", "host-agent-e2e"],
+    "plugins/github/**": ["github-plugin-e2e", "coordinator-github-skills-e2e", "local-models-unit"],
     "plugins/simulator/idle.ts": ["workspace-cleanup-unit"],
     "plugins/simulator/test-products.ts": ["workspace-cleanup-unit"],
     "plugins/simulator/simulator.ts": ["simulator-worker-unit"],
