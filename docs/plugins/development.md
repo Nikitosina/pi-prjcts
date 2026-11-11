@@ -24,7 +24,7 @@ node .agents/skills/verify-pi-prjcts/scripts/verify.mjs cleanup --run <scratch>
 
 - `launch` starts a host with a scratch home, a fake model provider and the plugins through `PI_PROJECTS_PLUGINS`. The scratch home has no `plugins.json`. Several `--plugin` flags load several plugins, which shows conflicts between them.
 - `drive ... plugins` opens the inbox in headless Chrome, screenshots the Plugins section and saves the host's `plugins` status next to it. It fails when a launched plugin's row does not show its name, version, state and error. It then opens Settings → Plugins and fails when a launched plugin's panel does not mount.
-- Open Settings → Plugins (⌘, then L) on the private host to use your panel yourself. A panel error shows in red in the plugin's card; the browser console has the stack.
+- Open Settings → Plugins (⌘, then X) on the private host to use your panel yourself. A panel error shows in red in the plugin's card; the browser console has the stack.
 - `rpc --run <scratch> plugins` prints the same status. The skill's `rpc` command only allows read-only core actions, so call your own methods over the socket as shown in [Getting started](getting-started.md#4-try-it-on-a-private-host).
 - Coordinator tools: `profile-tools` over the same socket, with `{"action":"profile-tools","projectId":"<id>","profile":"coordinator"}`, lists them in the `plugin` group. `prompt-render` with the same fields shows a `prompt` block's text.
 - The fake model does not call your tools. Prove tool behavior in tests; on the private host, prove that the tools are offered.

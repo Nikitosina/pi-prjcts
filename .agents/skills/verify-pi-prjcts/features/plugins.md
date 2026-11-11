@@ -12,7 +12,7 @@ A plugin author starts a private host with a plugin under development and checks
 ## How to get to it (user POV)
 
 - Open the inbox and select any chat; the Plugins section is at the bottom of the right context panel, under Pull requests. It lists the plugins the host loaded at its start, the same in every project.
-- Settings (⌘,), then Plugins (L). Each card has the plugin's status and, when it has a browser script, its panel for the selected project.
+- Settings (⌘,), then Plugins (X). Each card has the plugin's status and, when it has a browser script, its panel for the selected project.
 
 ## Driving it with browser CDP
 
