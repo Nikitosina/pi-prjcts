@@ -230,7 +230,7 @@ const handover = (conversationId) => [task(conversationId), task(conversationId,
   service.observe("p1", commit(m1));
   const collecting = groupOf(service, "p1", 7, m1);
   assert.deepEqual([collecting?.status, collecting?.calls], ["collecting", 1], "D3: a group collecting calls reads as collecting");
-  service.observe("p1", commit(result(7, a, "TS-RESULT-A step approve failed"), handover(7)));
+  service.observe("p1", commit(result(7, a, "TS-RESULT-A step approve failed", { isError: true }), handover(7)));
   // G7: an empty thinking block and whitespace text are not a boundary.
   const m2 = message(7, ["think:", "text:  \n", b]);
   service.observe("p1", commit(m2));
@@ -283,12 +283,12 @@ const handover = (conversationId) => [task(conversationId), task(conversationId,
   assert.ok(!secondText.includes("TS-RESULT-A"), "G1: the second summary covers only its own group");
   const page = pageOf(service, "p1", 7, m1, m2, m3, m4, m5, m6);
   assert.deepEqual(
-    Object.values(page.groups).map((group) => [group.status, group.calls]),
+    Object.values(page.groups).map((group) => [group.status, group.calls, group.failed]),
     [
-      ["ready", 3],
-      ["ready", 2],
+      ["ready", 3, 1],
+      ["ready", 2, 0],
     ],
-    "two groups on the page, of three calls and of two",
+    "two groups on the page, of three calls and of two, with the whole group's failed calls",
   );
   assert.equal(new Set(Object.values(page.calls)).size, 2, "G10: every call belongs to one of the two groups");
   assert.equal(Object.keys(page.calls).length, 5, "G10: each original call keeps its own entry and call id");
@@ -304,9 +304,9 @@ const handover = (conversationId) => [task(conversationId), task(conversationId,
   const before = db.prepare("SELECT COUNT(*) AS n, MAX(updated) AS u FROM tool_groups").get();
   const partial = pageOf(service, "p1", 7, m3);
   assert.deepEqual(
-    Object.values(partial.groups).map((group) => group.calls),
-    [3],
-    "D10: a partial page reads the group's whole count",
+    Object.values(partial.groups).map((group) => [group.calls, group.failed]),
+    [[3, 1]],
+    "D10: a partial page reads the group's whole count and its failure on an earlier page",
   );
   service.read({ scope: "p1", conversationId: 7, calls: [{ entry: 9999, call: "nope", name: "bash" }] });
   service.usage("p1");

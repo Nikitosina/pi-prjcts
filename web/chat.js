@@ -190,10 +190,17 @@ export function morph(parent, html) {
   });
 }
 
-/** The tool groups of two pages read at different times; a group on both takes `newer`'s state. */
+const PROGRESS = { collecting: 0, pending: 1, ready: 2, failed: 2 };
+/** The tool groups of two pages; a group on both keeps the state it reached later (a page read earlier may be stale), `newer`'s on a tie. */
 export function mergeGroups(older, newer) {
   if (!older || !newer) return newer ?? older ?? null;
-  return { groups: { ...older.groups, ...newer.groups }, calls: { ...older.calls, ...newer.calls } };
+  const groups = { ...older.groups, ...newer.groups };
+  for (const [id, view] of Object.entries(older.groups)) {
+    const other = newer.groups[id];
+    if (other && (PROGRESS[view.status] > PROGRESS[other.status] || (view.status === other.status && view.calls > other.calls)))
+      groups[id] = view;
+  }
+  return { groups, calls: { ...older.calls, ...newer.calls } };
 }
 /** Turn sections for a list of transcript items (also used for worker transcripts in the center). `groups` are the host's tool
  * groups of the loaded calls (`{ groups, calls }`); they show only while the owner has summaries on. */
@@ -207,16 +214,14 @@ function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
     key = `t${start.entryId ?? start.at}`;
   // A turn that does not open with an input (a page starting mid-turn) has its first item in `items` too.
   const head = start.kind === "message" && start.role === "user" ? inputHtml(start, who) : "";
-  const body = [];
-  let run = [],
-    block = null; // the calls of one host tool group
+  const body = []; // html, or a host tool group drawn once at its first call
+  const blocks = new Map();
+  let run = [];
   const runHtml = (entries) =>
     entries.length >= 2 && !liveTurn && fold ? groupHtml(entries) : entries.map((entry) => toolRowHtml(entry, callStatus(entry))).join("");
   const flush = () => {
     if (run.length) body.push(runHtml(run));
-    if (block) body.push(summaryHtml(block, runHtml));
     run = [];
-    block = null;
   };
   const results = new Map(turn.items.filter((item) => item.kind === "tool-result").map((item) => [item.callId, item]));
   // A call without a result runs only in this transcript's own live turn (a worker's, not the coordinator's).
@@ -225,17 +230,19 @@ function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
     // Memory rows never fold: what the agent remembered or relied on stays visible.
     if (item.kind === "tool-call" && MEMORY.test(item.name)) {
       // A memory row inside a group stays out of its line and does not split it.
-      if (run.length) body.push(runHtml(run));
-      run = [];
+      flush();
       const entry = { call: item, result: results.get(item.callId) };
       body.push(toolRowHtml(entry, callStatus(entry)));
     } else if (item.kind === "tool-call" && groups?.groups[groups.calls[`${item.entryId}:${item.callId}`]]) {
+      // A message's thinking and text come before its calls, so a later call can follow the item that closed its group.
       const id = groups.calls[`${item.entryId}:${item.callId}`];
-      if (run.length || block?.id !== id) flush();
-      block ??= { id, view: groups.groups[id], entries: [] };
-      block.entries.push({ call: item, result: results.get(item.callId) });
+      flush();
+      if (!blocks.has(id)) {
+        blocks.set(id, { id, view: groups.groups[id], entries: [] });
+        body.push(blocks.get(id));
+      }
+      blocks.get(id).entries.push({ call: item, result: results.get(item.callId) });
     } else if (item.kind === "tool-call") {
-      if (block) flush();
       run.push({ call: item, result: results.get(item.callId) });
     } else if (item.kind === "tool-result") continue;
     else if (item.kind === "message" && item.role === "assistant" && !item.text?.trim() && !item.thinking?.trim() && !item.images?.length)
@@ -246,7 +253,7 @@ function turnHtml(turn, liveTurn, who, fold = true, groups = null) {
     }
   }
   flush();
-  const html = head + body.join("");
+  const html = head + body.map((part) => (typeof part === "string" ? part : summaryHtml(part, runHtml))).join("");
   return `<section class="turn${liveTurn ? " live" : ""}" data-key="${esc(key)}" data-sig="${hash(html + liveTurn)}">${html}</section>`;
 }
 function hash(text) {
@@ -364,15 +371,13 @@ function groupHtml(run) {
   return `<div class="tool-group${open ? " open" : ""}"><button type="button" class="group-head" data-toggle="${esc(key)}" aria-expanded="${open}"><span class="st ${failed ? "err" : "ok"}" aria-hidden="true">${failed ? "✕" : "✓"}</span><span class="tool-name">${esc(label)}</span><span class="tool-args">${failed ? `${failed} failed` : ""}</span><span class="tool-dur">${esc(dur(last - first))}</span><span class="chev" aria-hidden="true">›</span></button>${open ? `<div class="group-body">${run.map((entry) => toolRowHtml(entry, entry.result ? undefined : "ok")).join("")}</div>` : imagesHtml(run.flatMap(({ result }) => result?.images ?? []))}</div>`;
 }
 const seenSummaries = new Map(); // toggle key -> last drawn status, so only a summary that just arrived fades in
-/** One tool group's calls as one quiet line: its summary, a failure mark, the call count and time; it opens to the calls. A group
- * still collecting calls shows a spinner and "running…"; a pending summary waits with its own glyph; a failed one shows the calls
- * with a quiet note. `view.calls` counts the whole group, also the calls on pages not loaded yet. */
+/** One tool group as one quiet line that opens to its calls; `view` counts the whole group, also calls on pages not loaded yet. */
 function summaryHtml({ id, entries, view }, runHtml) {
   const key = `s${id}`,
     open = expanded.has(key),
     previous = seenSummaries.get(key);
   seenSummaries.set(key, view.status);
-  const failed = entries.filter(({ result }) => result?.isError).length,
+  const failed = Math.max(view.failed ?? 0, entries.filter(({ result }) => result?.isError).length),
     first = entries[0].call.at,
     last = Math.max(...entries.map(({ call: item, result }) => result?.at ?? item.at));
   const total = Math.max(view.calls ?? 0, entries.length),

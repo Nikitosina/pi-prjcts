@@ -479,6 +479,40 @@ await kit.run(async () => {
     drawn.joined.lines === 1 && /3 calls/.test(drawn.joined.meta) && !/earlier/.test(drawn.joined.meta),
     drawn,
   );
+  // A message shows its thinking before its calls, though a call came first: `[call B, thinking]` after `[call A]` is still one
+  // group of A and B. A failure on an earlier page stays marked, and pages merge by the group's progress, not by their order.
+  const edge = await page.evaluate(`(async () => {
+    const { transcriptHtml, mergeGroups } = await import('/chat.js');
+    const call = (entryId, callId) => ({ kind: 'tool-call', entryId, at: entryId, callId, name: 'bash', argsPreview: '{}' });
+    const done = (entryId, callId) => ({ kind: 'tool-result', entryId, at: entryId, callId, isError: false, preview: 'ok' });
+    const items = [
+      { kind: 'message', role: 'user', entryId: 1, at: 1, text: 'go', images: [] },
+      call(2, 'a'), done(3, 'a'),
+      { kind: 'message', role: 'assistant', entryId: 4, at: 4, text: '', thinking: 'later thought', images: [] },
+      call(4, 'b'), done(5, 'b'),
+    ];
+    const view = { status: 'ready', text: 'EDGE-SUMMARY', calls: 3, failed: 1, model: null };
+    const groups = { groups: { gx: view }, calls: { '2:a': 'gx', '4:b': 'gx' } };
+    const box = document.createElement('div');
+    box.innerHTML = transcriptHtml(items, false, 'Coordinator', { groups });
+    const lines = [...box.querySelectorAll('.tool-summary')];
+    const pending = { groups: { gx: { status: 'pending', calls: 3, failed: 1, model: null } }, calls: {} };
+    const ready = { groups: { gx: view }, calls: {} };
+    return {
+      lines: lines.length,
+      errors: lines[0]?.dataset.errors,
+      meta: lines[0]?.querySelector('.ts-meta').innerText,
+      order: [...box.querySelector('.turn').children].map((node) => node.className.split(' ')[0]),
+      merged: [mergeGroups(ready, pending).groups.gx.status, mergeGroups(pending, ready).groups.gx.status],
+    };
+  })()`);
+  check("D1 a group whose message shows thinking before a joined call is still one line", edge.lines === 1, edge);
+  check("D10 a failure on an earlier page stays marked", edge.errors === "1" && /1 failed/.test(edge.meta), edge);
+  check(
+    "D10 merged pages keep the group's later state",
+    edge.merged.every((status) => status === "ready"),
+    edge,
+  );
 
   // D9 narrow: the group lines fit, scroll with the wheel and the keyboard, and open with Enter.
   await page.viewport(390, 844, true);

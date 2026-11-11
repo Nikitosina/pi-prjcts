@@ -38,8 +38,9 @@ export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = {
 };
 
 /** What a page shows of one group: `collecting` until it closed with every result, `pending` while queued or running; `calls` is
- * the group's whole count, also when the page holds only some of them. Cancelled groups read as none. */
-export type ToolGroupView = { calls: number; model: string | null } & (
+ * the group's whole count, also when the page holds only some of them, and `failed` its failed calls (absent on summaries from
+ * before groups). Cancelled groups read as none. */
+export type ToolGroupView = { calls: number; failed?: number; model: string | null } & (
   { status: "collecting" } | { status: "pending" } | { status: "ready"; text: string } | { status: "failed"; error: string }
 );
 /** The groups of a page by their stable id, and the group of each call by `<entryId>:<callId>`; calls in no group are absent. */
@@ -215,6 +216,7 @@ const ReadRow = Type.Object({
   grp: Type.Integer(),
   status: Status,
   size: Type.Integer({ minimum: 0 }),
+  failed: Type.Integer({ minimum: 0 }),
   text: Nullable(Type.String()),
   error: Nullable(Type.String()),
   model: Nullable(Type.String()),
@@ -466,7 +468,7 @@ export function openToolSummaries(options: {
       id INTEGER PRIMARY KEY, scope TEXT NOT NULL, conversation INTEGER NOT NULL,
       first_entry INTEGER NOT NULL, first_call TEXT NOT NULL, last_entry INTEGER NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('open','collecting','pending','running','ready','failed','cancelled')),
-      size INTEGER NOT NULL DEFAULT 0, waiting TEXT, calls TEXT, text TEXT, error TEXT, model TEXT,
+      size INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, waiting TEXT, calls TEXT, text TEXT, error TEXT, model TEXT,
       attempts INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0, usage TEXT,
       created INTEGER NOT NULL, updated INTEGER NOT NULL,
       UNIQUE (scope, first_entry, first_call));
@@ -503,7 +505,7 @@ export function openToolSummaries(options: {
       "UPDATE tool_groups SET size = size + 1, last_entry = :entry, waiting = :waiting, calls = :calls, updated = :now WHERE id = :id AND status = 'open'",
     ),
     collect: db.prepare(
-      "UPDATE tool_groups SET waiting = :waiting, calls = :calls, updated = :now WHERE id = :id AND status IN ('open','collecting')",
+      "UPDATE tool_groups SET waiting = :waiting, calls = :calls, failed = failed + :failed, updated = :now WHERE id = :id AND status IN ('open','collecting')",
     ),
     shut: db.prepare("UPDATE tool_groups SET status = 'collecting', updated = :now WHERE id = :id AND status = 'open'"),
     drop: db.prepare(`UPDATE tool_groups SET ${DROP} WHERE id = :id`),
@@ -535,7 +537,7 @@ export function openToolSummaries(options: {
     ),
     pending: db.prepare("SELECT id FROM tool_groups WHERE scope = :scope AND status = 'pending' ORDER BY updated"),
     read: db.prepare(
-      "SELECT m.entry, m.call, m.grp, g.status, g.size, g.text, g.error, g.model FROM tool_group_calls m JOIN tool_groups g ON g.id = m.grp WHERE m.scope = :scope AND m.conversation = :conversation AND m.entry IN (SELECT value FROM json_each(:entries))",
+      "SELECT m.entry, m.call, m.grp, g.status, g.size, g.failed, g.text, g.error, g.model FROM tool_group_calls m JOIN tool_groups g ON g.id = m.grp WHERE m.scope = :scope AND m.conversation = :conversation AND m.entry IN (SELECT value FROM json_each(:entries))",
     ),
     legacy: db.prepare(
       "SELECT entry, status, text, error, model FROM summaries WHERE scope = :scope AND conversation = :conversation AND status IN ('ready','failed') AND entry IN (SELECT value FROM json_each(:entries))",
@@ -753,7 +755,13 @@ export function openToolSummaries(options: {
       const result = resultOf(record);
       const input = { ...row.input, calls: row.input.calls.map((call) => (call.id === record.toolCallId ? { ...call, result } : call)) };
       const waiting = row.waiting.filter((id) => id !== record.toolCallId);
-      sql.collect.run({ id: row.id, waiting: JSON.stringify(waiting), calls: JSON.stringify(input), now: now() });
+      sql.collect.run({
+        id: row.id,
+        waiting: JSON.stringify(waiting),
+        calls: JSON.stringify(input),
+        failed: Number(result.isError),
+        now: now(),
+      });
       if (!waiting.length && row.status === "collecting") ready(row);
       return;
     }
@@ -855,17 +863,16 @@ export function openToolSummaries(options: {
       const found = new Map<string, { id: string; view: ToolGroupView }>();
       for (const row of sql.read.all({ scope, conversation: conversationId, entries })) {
         if (!check.read.Check(row)) continue;
-        const model = row.model;
-        const calls = row.size;
+        const base = { calls: row.size, failed: row.failed, model: row.model };
         const view: ToolGroupView | undefined =
           row.status === "open" || row.status === "collecting"
-            ? { status: "collecting", calls, model }
+            ? { status: "collecting", ...base }
             : row.status === "pending" || row.status === "running"
-              ? { status: "pending", calls, model }
+              ? { status: "pending", ...base }
               : row.status === "ready" && row.text !== null
-                ? { status: "ready", text: row.text, calls, model }
+                ? { status: "ready", text: row.text, ...base }
                 : row.status === "ready" || row.status === "failed"
-                  ? { status: "failed", error: row.error ?? (row.status === "ready" ? DAMAGED : "Summary failed"), calls, model }
+                  ? { status: "failed", error: row.error ?? (row.status === "ready" ? DAMAGED : "Summary failed"), ...base }
                   : undefined;
         if (view) found.set(`${row.entry}:${row.call}`, { id: `g${row.grp}`, view });
       }
