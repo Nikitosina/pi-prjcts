@@ -10,6 +10,7 @@ const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
 let tiers = null; // tiers-get result, re-read when the host publishes `tiers`
 let armed = null; // job id whose Approve was clicked once
+let jobsBeforeView = false; // the jobs read landed before the selected chat's view, so its per-worker reads still wait for it
 const contexts = new Map(); // agent id -> worker-contexts entry ({ tokens, window } or null when unknown)
 const CONTEXT_GAP_MS = 5000; // at most one worker-contexts read per this interval
 let contextsAsked = 0, // sequence of the newest worker-contexts request; older answers are dropped
@@ -52,6 +53,7 @@ export async function loadJobs() {
     if (stale(gen)) return;
     tiers = tierData;
     state.jobs = jobs;
+    jobsBeforeView = !state.view;
     renderWorkers();
     emit("jobs", jobs);
     void loadLastTools(gen);
@@ -71,12 +73,22 @@ on("select", () => {
   box.replaceChildren();
 });
 
+// Selecting a chat reads its view and the jobs at once; whichever lands second draws the list (multi-chat-failures.md 12).
+on("view", () => {
+  if (!state.jobs) return;
+  renderWorkers();
+  if (!jobsBeforeView) return;
+  jobsBeforeView = false;
+  void loadLastTools(state.generation);
+  queueContexts();
+});
+
 function chatConversation() {
   return (state.view?.chats ?? []).find((chat) => chat.id === state.chatId)?.conversationId ?? 1;
 }
 /** Workers spawned from the selected chat: Jobs first (newest first), then scouts and reviewers that are not part of a Job. */
 export function chatWorkers() {
-  if (!state.jobs) return [];
+  if (!state.jobs || !state.view) return [];
   const conversation = chatConversation();
   const jobs = state.jobs.jobs
     .filter((job) => job.chat === conversation && !job.dismissedAt)

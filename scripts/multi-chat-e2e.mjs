@@ -459,6 +459,22 @@ try {
     "chat two's Workers list",
   );
   result.checks.push("F12 switching chats swaps the transcript and the Workers list shows only that chat's work");
+  // F12: the jobs read can land before the chat's view; the Workers list must still follow the selected chat.
+  await evaluate(
+    `(() => { window.__realFetch = window.fetch; window.fetch = async (url, init) => { if (/"action":"show"/.test(String(init?.body ?? ''))) await new Promise((done) => setTimeout(done, 800)); return window.__realFetch(url, init); }; })()`,
+    s,
+  );
+  await click(s, '#tree [data-chat="main"]');
+  await waitFor(`${feed}.includes('Done MARK-MAIN')`, s, "main selected, slow view");
+  await click(s, `#tree [data-chat="${chatId}"]`);
+  await waitFor(`${feed}.includes('REPORT-ACK')`, s, "chat two selected, slow view");
+  await evaluate(`window.fetch = window.__realFetch`, s);
+  await waitFor(
+    `(document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click(), (document.querySelector('#workers')?.innerText ?? '').includes('MARK-SCOUTJOB'))`,
+    s,
+    "chat two's Workers list after a slow view",
+  );
+  result.checks.push("F12 the Workers list follows the selected chat when its view arrives after the jobs");
   // Other projects' rows in the tree are drawn from the host's list: it must carry each chat's own activity.
   await new Promise((done) => setTimeout(done, 1700));
   const listed = (await rpc({ action: "list" })).find((project) => project.id === id);
