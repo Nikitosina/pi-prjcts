@@ -6,18 +6,19 @@ import { hydrateMedia } from "./media.js";
 import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
+import { follower } from "./follow.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
-  form = document.querySelector("#composer");
+  form = document.querySelector("#composer"),
+  follow = follower(feed);
 let live = null,
   liveKey = "",
   older = [],
   olderSummaries = {},
   olderBefore = null,
   loading = null,
-  held = null, // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
-  stick = true;
+  held = null; // live text and thinking of a step the host just committed, shown until a transcript read that includes it renders
 const expanded = new Set(); // tool callIds and group keys the owner opened
 const reportPattern = /^\[(worker|scout|reviewer) ([0-9a-f-]{36}) ([\w-]+(?: to start)?): ([^\]\n]*)\]([\s\S]*)$/;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -59,7 +60,7 @@ export async function loadChat() {
 on("select", () => {
   older = [];
   olderSummaries = {};
-  stick = true;
+  follow.follow();
   expanded.clear();
   feed.replaceChildren();
   document.querySelector("#questions").replaceChildren();
@@ -156,35 +157,16 @@ export function renderFeed() {
   html.push(transcriptHtml(all, busy, "Coordinator", { summaries: { ...olderSummaries, ...state.view.toolSummaries } }));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
-  const anchor = stick ? null : readingAnchor(feed);
-  morph(feed, html.join(""));
-  renderLive();
-  if (stick) feed.scrollTop = feed.scrollHeight;
-  else if (anchor) keepAnchor(feed, anchor);
+  follow.render(() => {
+    morph(feed, html.join(""));
+    renderLive();
+  });
 }
 /** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
 function failureHtml() {
   const job = (state.view.jobs ?? []).at(-1);
   if (!job || (job.state !== "failed" && job.state !== "interrupted")) return "";
   return `<div class="turn-failure" data-key="f${esc(job.id)}" role="status"><span class="st err" aria-hidden="true">✕</span><span class="tf-text">Turn ${esc(job.state)}: ${esc(clip(oneLine(job.error ?? "no reason recorded"), 300))}</span><button type="button" class="link-btn" data-retry-job="${esc(job.id)}">Retry</button></div>`;
-}
-// A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
-// `show` returns (streaming-scroll-viewport-failures.md R1).
-export function readingAnchor(feed) {
-  const top = feed.getBoundingClientRect().top;
-  return [...feed.querySelectorAll(":scope > .turn[data-key]")]
-    .filter((node) => node.getBoundingClientRect().bottom > top)
-    .slice(0, 8)
-    .map((node) => ({ key: node.dataset.key, offset: node.getBoundingClientRect().top - top }));
-}
-export function keepAnchor(feed, anchor) {
-  const top = feed.getBoundingClientRect().top;
-  for (const { key, offset } of anchor) {
-    const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);
-    if (!node) continue;
-    feed.scrollTop += node.getBoundingClientRect().top - top - offset;
-    return;
-  }
 }
 /** Where this chat's images come from (see media.js). */
 const mediaSource = () => (state.projectId ? { project: state.projectId, chatId: state.chatId } : null);
@@ -472,7 +454,7 @@ function renderLive() {
             : "Working";
   node.innerHTML = `${kept}${frame.thinking && frame.thinkingText && showThinking() ? thinkingHtml(frame.thinkingText, "live-thinking", true) : ""}${tools}${frame.text ? `<article class="msg agent streaming"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(frame.text)}</div></article>` : ""}<div class="live-status"><span class="pulse" aria-hidden="true"></span>${esc(status)}…</div>`;
   hydrateMedia(feed, mediaSource());
-  if (stick) feed.scrollTop = feed.scrollHeight;
+  follow.settle();
 }
 
 // ---------------------------------------------------------------------------------------------------------------- questions
@@ -544,7 +526,7 @@ form.addEventListener("submit", async (event) => {
   const gen = state.generation;
   input.value = "";
   grow();
-  stick = true;
+  follow.follow();
   const slash = slashCommand(text);
   if (slash) {
     try {
@@ -585,43 +567,19 @@ export function toggleSteer() {
 
 // ---------------------------------------------------------------------------------------------------------------- clicks
 
-// Following stops on the owner's own upward scroll (wheel, keys, touch), however small, and resumes once they are back at the
-// bottom. A scroll the page makes itself only stops it when it leaves the bottom band (streaming-follow-intent-failures.md).
-let touchY = null;
-feed.addEventListener(
-  "wheel",
-  (event) => {
-    if (event.deltaY < 0) stick = false;
-  },
-  { passive: true },
-);
-feed.addEventListener("touchstart", (event) => void (touchY = event.touches[0]?.clientY ?? null), { passive: true });
-feed.addEventListener(
-  "touchmove",
-  (event) => {
-    const y = event.touches[0]?.clientY ?? null;
-    if (touchY !== null && y !== null && y > touchY) stick = false;
-    touchY = y;
-  },
-  { passive: true },
-);
-feed.addEventListener("keydown", (event) => {
-  if (["ArrowUp", "PageUp", "Home"].includes(event.key)) stick = false;
-});
-feed.addEventListener("scroll", () => {
-  const gap = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
-  if (gap < 2) stick = true;
-  else if (gap >= 40) stick = false;
-});
-/** Clicks inside any transcript (chat feed or a worker in the center); `rerender` repaints that transcript. */
-export async function transcriptClick(event, root, rerender) {
+/** Clicks inside any transcript (chat feed, a worker in the center, the Host agent); `rerender` repaints that transcript, `follow` is its follower. */
+export async function transcriptClick(event, root, rerender, follow) {
   const toggle = event.target.closest("[data-toggle]");
   if (toggle) {
-    const key = toggle.dataset.toggle;
+    const key = toggle.dataset.toggle,
+      top = toggle.getBoundingClientRect().top;
     expanded.has(key) ? expanded.delete(key) : expanded.add(key);
-    stick = false;
+    // Opening a detail is reading: following stops, and the line stays under the pointer (streaming-follow-intent-failures.md F8).
+    follow?.stop();
     rerender();
-    root.querySelector(`[data-toggle="${CSS.escape(key)}"]`)?.focus();
+    const line = root.querySelector(`[data-toggle="${CSS.escape(key)}"]`);
+    if (line) follow?.keepAt(line, top);
+    line?.focus({ preventScroll: true });
     return true;
   }
   const worker = event.target.closest("[data-open-worker]");
@@ -671,7 +629,7 @@ feed.addEventListener("click", async (event) => {
     box.setSelectionRange(box.value.length, box.value.length);
     return;
   }
-  if (await transcriptClick(event, feed, renderFeed)) return;
+  if (await transcriptClick(event, feed, renderFeed, follow)) return;
   const retry = event.target.closest("[data-retry-job]");
   if (retry) {
     const job = (state.view?.jobs ?? []).find((item) => item.id === retry.dataset.retryJob);
@@ -679,7 +637,7 @@ feed.addEventListener("click", async (event) => {
     retry.disabled = true; // a second click must not resend
     try {
       await call("message", { id: state.projectId, text: job.text, requestId: uuid(), ...chatArgs() });
-      stick = true;
+      follow.follow();
     } catch (error) {
       retry.disabled = false;
       fail(error);
@@ -695,7 +653,7 @@ feed.addEventListener("click", async (event) => {
     older = [...page.items, ...older];
     olderSummaries = { ...page.toolSummaries, ...olderSummaries };
     olderBefore = page.before;
-    stick = false;
+    follow.stop();
     renderFeed();
     feed.scrollTop = 0;
   }

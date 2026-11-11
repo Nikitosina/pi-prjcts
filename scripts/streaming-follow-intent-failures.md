@@ -20,7 +20,8 @@ the layout already changed. Each transcript keeps its own following state.
   stream stops at the old bottom. (Red: coordinator-workers-ui-e2e S1 failed 2 of 6 runs under load with `gap 882`; the trace showed
   the event of a programmatic pin dispatched after the 390 px resize, read as the owner leaving the bottom.) A transcript that
   changes size while following is not re-pinned to the newest line.
-- F6 Dragging the scrollbar up while a reply streams is pulled back to the bottom by the next chunk.
+- F6 A drag up while a reply streams (the scrollbar, or a text selection past the top edge) is pulled back to the bottom by the next
+  chunk. Headless Chrome on macOS has overlay scrollbars, so the test drags a selection.
 - F7 Returning to the bottom (End, or scrolling down to the end) does not resume following.
 - F8 Opening a detail (a tool group or summary line) jumps: the line moves away from the pointer, or the next chunk pulls the view to
   the bottom.

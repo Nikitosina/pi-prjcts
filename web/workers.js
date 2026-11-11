@@ -3,7 +3,8 @@
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { keepAnchor, morph, readingAnchor, transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, transcriptClick, transcriptHtml } from "./chat.js";
+import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
 
 const box = document.querySelector("#workers");
@@ -479,27 +480,25 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     summaries = {};
   // The focus view is reused: this render lives only while its own feed is on the page.
   const node = root.querySelector("#worker-feed"),
+    follow = follower(node),
     alive = () => node.isConnected && !stale(gen);
   const paint = () => {
     if (!alive()) return;
     const worker = find();
     // Unchanged turns keep their nodes, so a summary arriving keeps focus, open lines and the reader's place (tool-summaries D6).
-    const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40,
-      top = node.scrollTop,
-      anchor = bottom ? null : readingAnchor(node),
-      focused = node.contains(document.activeElement) ? document.activeElement.dataset.toggle : undefined;
-    morph(
-      node,
-      transcriptHtml(
-        items,
-        !!worker?.working,
-        worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
-        { summaries },
-      ) || `<p class="muted">No transcript yet.</p>`,
-    );
-    hydrateMedia(node, { project: state.projectId, threadId: id });
-    node.scrollTop = bottom ? node.scrollHeight : top;
-    if (anchor) keepAnchor(node, anchor);
+    const focused = node.contains(document.activeElement) ? document.activeElement.dataset.toggle : undefined;
+    follow.render(() => {
+      morph(
+        node,
+        transcriptHtml(
+          items,
+          !!worker?.working,
+          worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
+          { summaries },
+        ) || `<p class="muted">No transcript yet.</p>`,
+      );
+      hydrateMedia(node, { project: state.projectId, threadId: id });
+    });
     if (focused && !node.contains(document.activeElement))
       node.querySelector(`[data-toggle="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   };
@@ -546,7 +545,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   });
   await load();
   if (!alive()) return;
-  node.addEventListener("click", (event) => void transcriptClick(event, root, paint));
+  node.addEventListener("click", (event) => void transcriptClick(event, root, paint, follow));
   const unsub = on("jobs", () => {
     if (!alive()) return unsub();
     void load();
