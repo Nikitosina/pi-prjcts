@@ -418,11 +418,12 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     const { sessionId: s } = await send("Target.attachToTarget", { targetId, flatten: true });
     for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
-    await send("Page.navigate", { url }, s);
+    // Started on the blank page: during a navigation Chrome refuses it as not attached to an active page.
     if (videoEnabled()) {
       mkdirSync(join(artifacts, "frames"), { recursive: true });
       await send("Page.startScreencast", { format: "jpeg", quality: 70 }, s);
     }
+    await send("Page.navigate", { url }, s);
     const page = {
       evaluate: async (expression) => {
         const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, s);
