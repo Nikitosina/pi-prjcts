@@ -72,6 +72,8 @@ export async function waitFor(fn, description = "condition", { timeout = 30000, 
 }
 /** Screenshots that no assertion reads are only written when E2E_SHOTS=1. */
 export const shotsEnabled = () => process.env.E2E_SHOTS === "1";
+/** E2E_VIDEO=1 records the page as `video.mp4` in the artifacts (needs ffmpeg on PATH); proof media only, no assertion reads it. */
+const videoEnabled = () => process.env.E2E_VIDEO === "1";
 
 /** `handler({ role, user, results, tools, system, msgs })` returns a response string (say/call) or nothing (default: "DONE <role>"). */
 export async function createKit(name, { env: extraEnv = {}, handler = () => undefined } = {}) {
@@ -343,6 +345,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     cdpId = 0,
     buffer = "";
   const pending = new Map();
+  const frames = [];
   const send = (method, params = {}, sessionId) =>
     new Promise((resolve, reject) => {
       const key = ++cdpId;
@@ -397,6 +400,11 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
             pending.delete(msg.id);
             msg.error ? p.reject(Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
           }
+        } else if (msg.method === "Page.screencastFrame") {
+          const file = join(artifacts, "frames", `${String(frames.length).padStart(5, "0")}.jpg`);
+          writeFileSync(file, Buffer.from(msg.params.data, "base64"));
+          frames.push({ file, at: msg.params.metadata.timestamp });
+          send("Page.screencastFrameAck", { sessionId: msg.params.sessionId }, msg.sessionId).catch(() => {});
         } else if (msg.method === "Runtime.exceptionThrown")
           result.errors.push(redact(msg.params.exceptionDetails.exception?.description ?? msg.params.exceptionDetails.text));
         else if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") result.errors.push(redact(msg.params.entry.text));
@@ -411,6 +419,10 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     for (const method of ["Runtime.enable", "Log.enable", "Network.enable", "Page.enable"]) await send(method, {}, s);
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, s);
     await send("Page.navigate", { url }, s);
+    if (videoEnabled()) {
+      mkdirSync(join(artifacts, "frames"), { recursive: true });
+      await send("Page.startScreencast", { format: "jpeg", quality: 70 }, s);
+    }
     const page = {
       evaluate: async (expression) => {
         const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, s);
@@ -473,6 +485,7 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
         for (let i = 0; i < 50 && !cdpEnded; i++) await delay(20);
         if (!cdpEnded) chrome.kill("SIGTERM");
       }
+      if (frames.length > 1) encodeVideo(frames, artifacts);
       await kit.stopHost().catch(() => host?.kill("SIGKILL"));
       model.closeAllConnections();
       model.close();
@@ -484,4 +497,27 @@ export async function createKit(name, { env: extraEnv = {}, handler = () => unde
     if (result.status !== "passed") process.exitCode = 1;
   };
   return kit;
+}
+
+/** Screencast frames to `video.mp4`: each frame lasts until the next one, as the page changed; sizes differ across viewports, so they are padded. */
+function encodeVideo(frames, artifacts) {
+  const list = frames.map((frame, index) => {
+    const next = frames[index + 1]?.at ?? frame.at + 1;
+    return `file '${frame.file}'\nduration ${Math.min(Math.max(next - frame.at, 0.04), 3).toFixed(3)}`;
+  });
+  const listFile = join(artifacts, "frames", "list.txt");
+  writeFileSync(listFile, `${list.join("\n")}\nfile '${frames.at(-1).file}'\n`);
+  try {
+    execFileSync(
+      "ffmpeg",
+      [
+        ...["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listFile],
+        ...["-vf", "scale=1440:1000:force_original_aspect_ratio=decrease,pad=1440:1000:(ow-iw)/2:(oh-ih)/2,format=yuv420p"],
+        ...["-r", "25", "-c:v", "libx264", join(artifacts, "video.mp4")],
+      ],
+      { stdio: "inherit" },
+    );
+  } catch (error) {
+    console.error(`video not written: ${error.message}`);
+  }
 }

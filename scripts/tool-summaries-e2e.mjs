@@ -354,9 +354,11 @@ await kit.run(async () => {
     `[...document.querySelectorAll('#feed .thinking')].some((node) => node.innerText.includes('TS-THOUGHT'))`,
     "thinking shown",
   );
+  await page.shot("desktop-thinking-shown");
   const reasoningBefore = kit.result.calls.filter((item) => item.role === "coordinator").at(-1).reasoning;
   await setUi({ showThinking: false });
   await page.waitFor(`!document.querySelector('#feed .thinking')`, "thinking hidden");
+  await page.shot("desktop-thinking-hidden");
   await kit.ask(id, "TS-THINK two");
   const coordinatorCall = kit.result.calls.filter((item) => item.role === "coordinator").at(-1);
   check("D7 hiding thinking does not change the model request", coordinatorCall.reasoning === reasoningBefore);
@@ -466,6 +468,7 @@ await kit.run(async () => {
   check("D6 the open worker summary stays open", after.open, after);
   check("D6 the focused worker summary line keeps focus", after.focus === before.focus, { before, after });
   check("D6 a reader who scrolled up stays in place", after.scrollTop === 0, after);
+  await page.evaluate(`document.querySelector('#worker-feed').removeAttribute('style')`);
   await page.shot("worker-summary-stable", { force: true });
 
   // D8: the Host agent.
@@ -609,8 +612,19 @@ await kit.run(async () => {
     `!document.querySelector('#ha-live .thinking') && document.querySelector('#ha-live .live-status')`,
     "live thinking hidden",
   );
+  await page.shot("role-host-agent-live-hidden");
   await setUi({ showThinking: true });
   hostHold.release();
+  await page.viewport(390, 844, true);
+  await page.waitFor(`document.querySelector('#host-agent .ha-body .tool-summary[data-status="ready"]')`, "narrow Host agent");
+  await page.shot("narrow-host-agent");
+  await page.evaluate(`document.querySelector('[data-cmd="host-agent"]').click()`);
+  await page.waitFor(`document.querySelector('#host-agent').dataset.open !== '1'`, "drawer closed");
+  await delay(400);
+  await openAgent(worker.id);
+  await page.waitFor(`document.querySelector('#worker-feed .tool-summary[data-status="ready"]')`, "narrow worker view");
+  await page.shot("narrow-worker");
+  await page.viewport(1440, 1000);
 
   // Every agent request used the agent's own model, never the summary model; summary requests used only the summary model.
   const roles = new Set(agentRequests.map((item) => item.role));
