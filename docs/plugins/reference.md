@@ -15,7 +15,7 @@ export type PluginModule = {
 
 Export it as the default export, or export `name`, `version` and `register` by name. The loader enforces these rules:
 
-- `name` matches `/^[a-z][a-z0-9-]{0,39}$/` and is unique on the host. `github` is taken by the built-in provider.
+- `name` matches `/^[a-z][a-z0-9-]{0,39}$/` and is unique on the host. `github` is reserved for the built-in GitHub plugin (`plugins/github`), which loads first on every host with source `built-in`; the `plugins` RPC and Settings → Plugins list it too.
 - `version` is optional. When present it is 1 to 40 characters without spaces. A plugin without it shows `version: null`.
 - Import and `register` each have to finish within `PI_PROJECTS_PLUGIN_TIMEOUT_MS` (15 seconds by default).
 - `register` calls `api.provide({...})` once or more, each capability at most once. Nothing is visible until `register` returns. If it throws, nothing it provided stays registered.

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as chord from "@earendil-works/chord/context";
 import * as durable from "@earendil-works/pi-durable";
 import type { Conversation, Tx } from "@earendil-works/pi-durable";
@@ -40,20 +40,30 @@ import {
 import { command } from "./workspace-isolation.ts";
 
 /*
- * Plugin loader and registry. Sources, in order: `plugins.json` in the host home (primary, persistent: `{ "plugins": ["/abs/path/to/plugin", ...] }`)
+ * Plugin loader and registry. Bundled built-in plugins (BUNDLED) load first with source "built-in". Configured sources, in order: `plugins.json` in the host home (primary, persistent: `{ "plugins": ["/abs/path/to/plugin", ...] }`)
  * and the environment variable PI_PROJECTS_PLUGINS (":"-separated paths, additive; used by tests and one-off runs).
  * A path is a module file or a directory with index.ts / index.mjs / index.js (or a package.json "main"). Relative paths resolve against the host home.
  * A plugin that fails to import, has the wrong shape, throws in register, conflicts with another plugin or times out is recorded
  * (status(), the `plugins` RPC, the UI) and contributes nothing; the host keeps running.
  */
 /** `web` holds the declared browser files as they were at load, so a later change on disk waits for the restart like the plugin's code. */
-type Loaded = { plugin: string; capabilities: PluginCapabilities; web?: { "ui.js"?: WebFile; "ui.css"?: WebFile } };
+type Loaded = { plugin: string; builtIn?: true; capabilities: PluginCapabilities; web?: { "ui.js"?: WebFile; "ui.css"?: WebFile } };
 const loaded: Loaded[] = [];
 const statuses: PluginStatus[] = [];
 let loading: Promise<PluginStatus[]> | undefined;
 
-/** Built-in providers go through the same registry as loaded plugins (core ships Git and GitHub); built lazily because the provider modules import this one. */
-const builtins = (): Loaded[] => [{ plugin: "github", capabilities: { prs: githubPrProvider } }];
+/** Status source of a built-in plugin. */
+export const BUILT_IN = "built-in";
+/** Bundled plugins core loads first on every host, without configuration; their names are reserved, so a configured copy is refused. */
+const BUNDLED = [{ name: "github", path: fileURLToPath(new URL("../plugins/github/index.ts", import.meta.url)) }];
+/** Capabilities core still implements for a built-in identity; they join the bundled plugin's own when it loads, and stay without it. Lazy: the provider modules import this one. */
+const coreCapabilities = (name: string): PluginCapabilities => (name === "github" ? { prs: githubPrProvider } : {});
+const builtins = (): Loaded[] =>
+  BUNDLED.filter((item) => !loaded.some((other) => other.plugin === item.name)).map((item) => ({
+    plugin: item.name,
+    builtIn: true,
+    capabilities: coreCapabilities(item.name),
+  }));
 const each = <T>(pick: (capabilities: PluginCapabilities) => T | undefined): T[] =>
   [...builtins(), ...loaded].flatMap((item) => {
     const value = pick(item.capabilities);
@@ -85,6 +95,11 @@ export const plugins = {
   followProviders: (): FollowProvider[] => each((caps) => caps.follow),
   mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
   coordinatorTools: (): CoordinatorToolsProvider[] => each((caps) => caps.coordinatorTools),
+  /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. */
+  coordinatorToolSources: (): Array<{ provider: CoordinatorToolsProvider; builtIn: boolean }> =>
+    [...builtins(), ...loaded].flatMap((item) =>
+      item.capabilities.coordinatorTools ? [{ provider: item.capabilities.coordinatorTools, builtIn: item.builtIn === true }] : [],
+    ),
   workerTools: (): WorkerToolsProvider[] => each((caps) => caps.workerTools),
   /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
   pauseLifecycle: (projectId: string): (() => void) => {
@@ -273,8 +288,9 @@ function validate(caps: PluginCapabilities): void {
     if (!caps.rpc?.[method] || !(typeof policy === "function" || policy === "read" || policy === "write" || policy === "dangerous"))
       throw new Error(`rpcPolicy.${method} must name an rpc method and be "read", "write", "dangerous" or a function of params`);
 }
-function conflict(name: string, caps: PluginCapabilities): string | undefined {
-  if (name === "github" || loaded.some((item) => item.plugin === name)) return `a plugin named "${name}" is already loaded`;
+function conflict(name: string, caps: PluginCapabilities, builtIn: boolean): string | undefined {
+  if ((!builtIn && BUNDLED.some((item) => item.name === name)) || loaded.some((item) => item.plugin === name))
+    return `a plugin named "${name}" is already loaded`;
   const clash = (what: string, id: string | undefined, existing: Array<string | undefined>) =>
     id !== undefined && existing.includes(id) ? `${what} "${id}" is already provided by another plugin` : undefined;
   return (
@@ -376,7 +392,7 @@ function webFiles(web: WebContribution | undefined): Loaded["web"] {
   return { "ui.js": read(web?.script, "text/javascript; charset=utf-8"), "ui.css": read(web?.style, "text/css; charset=utf-8") };
 }
 
-async function loadOne(source: string, path: string): Promise<PluginStatus> {
+async function loadOne(source: string, path: string, builtIn = false): Promise<PluginStatus> {
   const status: PluginStatus = { source, name: null, version: null, state: "failed", provides: [], loadedAtMs: Date.now() };
   try {
     const imported = await withTimeout(import(pathToFileURL(entryOf(path)).href) as Promise<Record<string, unknown>>, "import");
@@ -395,12 +411,13 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
     );
     dropRetired(module.name, stage);
     validate(stage);
-    const clash = conflict(module.name, stage);
+    const clash = conflict(module.name, stage, builtIn);
     if (clash) throw new Error(clash);
-    loaded.push({ plugin: module.name, capabilities: stage, web: webFiles(stage.web) });
+    const capabilities = builtIn ? { ...coreCapabilities(module.name), ...stage } : stage;
+    loaded.push({ plugin: module.name, ...(builtIn ? { builtIn: true as const } : {}), capabilities, web: webFiles(stage.web) });
     if (stage.leaseName) hostLeases.addNaming(stage.leaseName);
     status.state = "loaded";
-    status.provides = provides(stage);
+    status.provides = provides(capabilities);
   } catch (error) {
     status.error = message(error);
   }
@@ -410,6 +427,7 @@ async function loadOne(source: string, path: string): Promise<PluginStatus> {
 /** Loads every configured plugin once per host process; later callers share the result. Never throws. */
 export function loadPlugins(): Promise<PluginStatus[]> {
   return (loading ??= (async () => {
+    for (const item of BUNDLED) statuses.push(await loadOne(BUILT_IN, item.path, true));
     for (const item of configured()) {
       if ("problem" in item) {
         statuses.push({

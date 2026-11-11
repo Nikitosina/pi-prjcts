@@ -68,7 +68,6 @@ import { coordinatorGhTools, ghEnabled } from "./coordinator-gh.ts";
 import { coordinatorJobReadTools } from "./job-read-tools.ts";
 import { resolveContinuationBranch } from "./branch-continuation.ts";
 import { workerChanges, type DiffPage } from "./code-diff.ts";
-import { COORDINATOR_GITHUB_TOOLS, coordinatorGithubTools } from "./coordinator-github-tools.ts";
 import { prMonitorRuntime } from "./pr-monitor.ts";
 import { plugins } from "./plugins.ts";
 import type { PrCardData } from "./plugin-types.ts";
@@ -796,8 +795,6 @@ export async function openDurableProject(input: {
       isCoordinator,
       catalog: () => catalog(loadProject(project.id)),
     });
-    // Installed always so recorded calls still resolve; offered only while the project has a GitHub authorization.
-    const github = coordinatorGithubTools({ projectId: project.id, root: () => rootReference, isCoordinator });
     const workspaces = coordinatorWorkspaces({
       project: () => loadProject(project.id),
       root: () => {
@@ -829,13 +826,16 @@ export async function openDurableProject(input: {
     const shell = coordinatorShellTools(bash);
     // Installed always so recorded calls still resolve; offered unless the owner turned gh access off.
     const gh = coordinatorGhTools({ cwd: async (api, context) => (await coordinatorTarget(api, context)).cwd, dir, isCoordinator });
-    // Plugin tools are installed always so recorded calls still resolve; offered only where the provider applies to the project.
-    const pluginCoordinator = plugins
-      .coordinatorTools()
-      .map((provider) => ({ provider, ...provider.create({ projectId: project.id, root: () => rootReference, isCoordinator }) }));
+    // Plugin tools (the built-in GitHub tools among them) are installed always so recorded calls still resolve; offered only where the provider applies to the project.
+    const pluginCoordinator = plugins.coordinatorToolSources().map(({ provider, builtIn }) => ({
+      provider,
+      builtIn,
+      ...provider.create({ projectId: project.id, root: () => rootReference, isCoordinator }),
+    }));
     const pluginExtensions = pluginCoordinator.map((item) => item.extension);
+    // A built-in plugin's tools keep their built-in group, so saved Tools/access switches (`group:github`) still apply.
     const pluginGroupOf = (name: string) =>
-      pluginCoordinator.some((item) => item.tools.some((tool) => tool.name === name)) ? "group:plugin" : undefined;
+      pluginCoordinator.some((item) => !item.builtIn && item.tools.some((tool) => tool.name === name)) ? "group:plugin" : undefined;
     // Prompts carry only the index of each role's effective set; projects_skill_file reads a body on demand, restricted to the caller's set.
     // Two sets, both built from the owner's current profiles: the coordinator's follows /reload; the other roles follow the catalog at each delegation. A thread's own set is frozen in its instructions.
     type SkillLoader = Parameters<typeof effectiveSkills>[1];
@@ -987,7 +987,6 @@ export async function openDurableProject(input: {
     const offeredTools = (current: Project) => [
       ...(current.libraryAccess === "coordinator" ? libraryTools : []),
       ...(current.decisionAccess === "coordinator" ? decisions.tools : []),
-      ...(current.githubAuthorization?.length ? github.tools : []),
       ...(ghEnabled(current) ? gh.tools : []),
       ...pluginCoordinator.filter((item) => item.provider.applies(current)).flatMap((item) => item.tools),
     ];
@@ -1425,7 +1424,6 @@ export async function openDurableProject(input: {
     registry.install(proof.extension);
     jobs.install(registry);
     registry.install(workerManagement.extension);
-    registry.install(github.extension);
     registry.install(execution.extension);
     registry.install(shell.extension);
     registry.install(gh.extension);
@@ -1477,7 +1475,6 @@ export async function openDurableProject(input: {
           libraryPolicy,
           decisions.extension,
           workerManagement.extension,
-          github.extension,
           execution.extension,
           gh.extension,
           ...pluginExtensions,
@@ -1982,7 +1979,6 @@ export async function openDurableProject(input: {
     ]);
     const workerManagementNames = new Set([...workerManagement.tools, ...jobs.tools.coordinator].map((tool) => tool.name));
     const ownedNames = new Set<string>([
-      ...COORDINATOR_GITHUB_TOOLS,
       ...shell.tools.map((tool) => tool.name),
       ...execution.tools.map((tool) => tool.name),
       ...gh.tools.map((tool) => tool.name),
@@ -2026,7 +2022,6 @@ export async function openDurableProject(input: {
     const ownedExtensions = new Set([
       workerManagement.extension.name,
       jobs.coordinator.name,
-      github.extension.name,
       shell.extension.name,
       execution.extension.name,
       gh.extension.name,
@@ -2043,7 +2038,6 @@ export async function openDurableProject(input: {
       ...agent.extensions.filter((extension) => !ownedExtensions.has(extension.name)),
       workerManagement.extension,
       jobs.coordinator,
-      github.extension,
       execution.extension,
       gh.extension,
       ...pluginExtensions,
@@ -2060,7 +2054,6 @@ export async function openDurableProject(input: {
       recoveredAgent.cwd !== rootCwd ||
       !recoveredAgent.extensions.some((extension) => extension.name === execution.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === gh.extension.name) ||
-      !recoveredAgent.extensions.some((extension) => extension.name === github.extension.name) ||
       pluginExtensions.some((plugin) => !recoveredAgent.extensions.some((extension) => extension.name === plugin.name)) ||
       !recoveredAgent.extensions.some((extension) => extension.name === artifacts.extension.name) ||
       !recoveredAgent.extensions.some((extension) => extension.name === ownerApproval.name) ||

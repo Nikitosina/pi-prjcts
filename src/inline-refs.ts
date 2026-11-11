@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { gh } from "./coordinator-github-tools.ts";
+import { githubApi } from "./github-authorization.ts";
 import { listKnowledge } from "./knowledge.ts";
 import { clip, createListCache } from "./pr-cache.ts";
 import type { Project } from "./state.ts";
@@ -166,7 +166,7 @@ const labelsOf = (issue: RestIssue) =>
 const issueCache = createListCache<IssueRow>({
   label: "GitHub",
   async fetch(repository) {
-    const items = (await gh(
+    const items = (await githubApi(
       "GET",
       `repos/${repository}/issues?state=all&sort=updated&direction=desc&per_page=100`,
       undefined,
@@ -190,7 +190,7 @@ async function issue(project: Project, number: string): Promise<RestIssue & { re
   const repository = repoOf(project);
   if (!repository) throw new Error("This project has no GitHub repository authorized");
   if (!ISSUE.test(number.replace(/^#/, ""))) throw new Error("Invalid issue number");
-  const found = (await gh("GET", `repos/${repository}/issues/${number.replace(/^#/, "")}`, undefined)) as RestIssue;
+  const found = (await githubApi("GET", `repos/${repository}/issues/${number.replace(/^#/, "")}`, undefined)) as RestIssue;
   return { ...found, repository };
 }
 

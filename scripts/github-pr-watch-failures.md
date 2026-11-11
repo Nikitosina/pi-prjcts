@@ -1,6 +1,6 @@
 # GitHub PR watching: failure modes (written before the code)
 
-Scope: built-in `github` PR provider (`src/github-prs.ts`, registered through the plugin registry's built-in path), the generic monitor additions in `src/pr-monitor.ts` (CI recovered, changes requested, approved, new review threads; `followCovers`), the coordinator tool `projects_github_pr` (`src/coordinator-github-tools.ts`), the failed-check detail in the Follow PRs auto-fix brief (`src/durable-follow.ts`). E2E: `scripts/github-pr-watch-e2e.mjs` (fake `gh` with a stateful JSON store and a call log, fake model, headless Chrome; no real gh, network or live host). Artifact: `artifacts/github-pr-watch-<stamp>/`.
+Scope: built-in `github` PR provider (`src/github-prs.ts`, registered through the plugin registry's built-in path), the generic monitor additions in `src/pr-monitor.ts` (CI recovered, changes requested, approved, new review threads; `followCovers`), the coordinator tool `projects_github_pr` (`plugins/github/coordinator-tools.ts` since the GitHub plugin's stage 1), the failed-check detail in the Follow PRs auto-fix brief (`src/durable-follow.ts`). E2E: `scripts/github-pr-watch-e2e.mjs` (fake `gh` with a stateful JSON store and a call log, fake model, headless Chrome; no real gh, network or live host). Artifact: `artifacts/github-pr-watch-<stamp>/`.
 
 Data source
 1. gh binary missing (`PI_PROJECTS_GH_CLI` points nowhere): the card shows one visible error line ("GitHub CLI not found"), no crash, host keeps serving; recovers on the next refresh once gh exists.

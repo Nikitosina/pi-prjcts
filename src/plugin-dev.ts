@@ -66,8 +66,9 @@ export async function checkPlugin(path: string): Promise<{ ok: boolean; home: st
   process.env.PI_PROJECTS_PLUGINS = source;
   let deadline: NodeJS.Timeout | undefined;
   try {
-    const { plugins } = await import("./plugins.ts");
-    const statuses = await plugins.load();
+    const { BUILT_IN, plugins } = await import("./plugins.ts");
+    // Built-in plugins load first in every home; the check reports only the plugin under test.
+    const statuses = (await plugins.load()).filter((item) => item.source !== BUILT_IN);
     // A hanging close hook must not delay the result; the timer stays referenced, or a hook holding no handle ends the process mid-await.
     await Promise.race([plugins.close(), new Promise((done) => (deadline = setTimeout(done, 5_000)))]);
     return { ok: statuses.every((item) => item.state === "loaded"), home, plugins: statuses };

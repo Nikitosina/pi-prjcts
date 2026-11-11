@@ -30,6 +30,44 @@ export async function githubRead(path: string, signal?: AbortSignal): Promise<un
     throw safeGithubError(error);
   }
 }
+/** Runs one `gh api` call. Errors keep gh's own one-line reason (status and message) so the coordinator can tell 404 from 422. */
+export function githubApi(
+  method: "GET" | "POST" | "PATCH",
+  path: string,
+  body: object | undefined,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return new Promise((accept, reject) => {
+    const args = ["api", "--hostname", "github.com", "--method", method, path, ...(body ? ["--input", "-"] : [])];
+    const child = execFile(
+      githubCli(),
+      args,
+      { encoding: "utf8", timeout: 20000, maxBuffer: 4 * 1048576, signal },
+      (error, stdout, stderr) => {
+        if (error) {
+          const reason =
+            String(stderr || error.message)
+              .split("\n")
+              .map((line) => line.trim())
+              .find(Boolean) ?? "unknown failure";
+          reject(
+            new Error(
+              `GitHub ${method} ${path.split("?")[0]} failed: ${reason.replace(/gh[pousr]_[A-Za-z0-9_]+/g, "[token]").slice(0, 300)}`,
+            ),
+          );
+          return;
+        }
+        try {
+          accept(stdout.trim() ? JSON.parse(stdout) : null);
+        } catch {
+          reject(new Error(`GitHub ${method} ${path.split("?")[0]} returned unreadable JSON`));
+        }
+      },
+    );
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(body ? JSON.stringify(body) : undefined);
+  });
+}
 export function safeGithubError(error: unknown): Error {
   const message = error instanceof Error ? error.message : "Unknown GitHub failure";
   return new Error(`GitHub operation failed; fingerprint ${createHash("sha256").update(message).digest("hex")}`);

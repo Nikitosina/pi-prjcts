@@ -2,7 +2,7 @@
 
 A plugin is a module the host loads at its start to add capabilities: RPC methods, coordinator or worker tools, cleanup and storage steps, browser routes, or a whole provider for a checkout kind or PR service. There is one plugin mechanism; "extension" is only the upstream Pi and Pi Durable term (Pi packages, `defineExtension`), never a separate kind of pi-prjcts add-on.
 
-Core ships Git and GitHub only. GitHub PR watching is a built-in `prs` provider on this same API (`src/github-prs.ts`, registered by the registry itself; no config). Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
+Core ships Git and GitHub only. GitHub is the built-in `github` plugin (see [The built-in GitHub plugin](#the-built-in-github-plugin)); no config. Other checkout kinds and PR services (an internal VCS, GitLab, ...) are separate plugins loaded at host start. Bundled: `plugins/simulator` (iOS simulators per project; not loaded unless configured).
 
 ## Author guide
 
@@ -49,6 +49,16 @@ Isolated task helpers require the separate optional `workspace.task` adapter. `p
 `helperGuard(command)` is the optional shell policy of every task helper, shared or isolated. Helpers never publish, so it should keep the provider's safety rules and refuse pushes and PR writes with a message that sends the work back to the Coordinator. Without it, core's Git helper policy applies.
 
 Absent task support visibly refuses isolated task allocation. Existing independent `plan`/`attach` behavior remains unchanged. Task helpers receive core execution tools without independent worker publication hooks. Neither adapter gives permission to merge main, deploy or perform destructive actions.
+
+## The built-in GitHub plugin
+
+One plugin identity, `github`, holds GitHub. Core loads the bundled module `plugins/github` on every host before configured plugins, through the same loader and `register(api)` contract, with status source `built-in`. It needs no `plugins.json` entry, so existing authorized projects keep their tools with no migration. The name is reserved: a configured plugin named `github`, including a second listing of `plugins/github`, is refused and the built-in stays loaded.
+
+What moved (stage 1): the Coordinator GitHub tools `projects_github_issue_read`, `projects_github_issues`, `projects_github_issue_write` and `projects_github_pr` (`plugins/github/coordinator-tools.ts`, its `coordinatorTools`). Names, schemas, replay policies and the Durable extension `projects.coordinator-github` are unchanged (`scripts/fixtures/github-coordinator-tools.json`), so recorded calls still resolve. They are offered while the project has a GitHub authorization and re-check it on every call: Coordinator caller, active project, the trusted owner, the current workspace fingerprint, an authorized repository, and for writes the pinned numeric repository id. Because the plugin is built in, its tools keep the GitHub group in Tools/access, and their rules stay the built-in `github` integration block (`src/role-prompts.ts`).
+
+What remains built in for now: the `prs` provider below (`src/github-prs.ts`; joined to the same `github` entry, and kept even when the bundled module fails to load), the `gh api` transport (`githubApi` in `src/github-authorization.ts`, shared with `#` refs), GitHub authorization and the one-click grant, worker publication tools (`src/github-worker.ts`), Follow PRs, result acceptance (`githubMergeProvider`) and `projects_gh`. The bundled module imports those core modules directly; it is not a pattern for external plugins.
+
+Without the bundled module (a failed load), the PR card still works, the GitHub tools are not offered, a call ends as unavailable without contacting GitHub, and the tools return when it loads again. Tests: `scripts/github-plugin-e2e.mjs` (failure modes: `scripts/github-plugin-failures.md`).
 
 ## GitHub PR watching (built in)
 
