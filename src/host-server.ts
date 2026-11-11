@@ -177,6 +177,7 @@ const toolSummaries = openToolSummaries({
     }
   })(),
   runtime: summaryModels(),
+  report: (detail) => recordHostEvent("tool-summaries", detail),
 });
 /** The installed catalog with credentials, rebuilt at most once a minute so a sign-in or a removed provider is seen without a restart. */
 function summaryModels(): () => Promise<Awaited<ReturnType<typeof createModelRuntime>>> {

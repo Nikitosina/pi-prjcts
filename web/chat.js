@@ -156,11 +156,11 @@ export function renderFeed() {
   html.push(transcriptHtml(all, busy, "Coordinator", { summaries: { ...olderSummaries, ...state.view.toolSummaries } }));
   html.push(failureHtml());
   html.push(`<div id="live-turn"></div>`);
-  const anchor = stick ? null : readingAnchor();
+  const anchor = stick ? null : readingAnchor(feed);
   morph(feed, html.join(""));
   renderLive();
   if (stick) feed.scrollTop = feed.scrollHeight;
-  else if (anchor) keepAnchor(anchor);
+  else if (anchor) keepAnchor(feed, anchor);
 }
 /** The chat's newest turn when it failed or was interrupted: the provider error and Retry (coordinator-stability-failures.md S4-S6). */
 function failureHtml() {
@@ -170,14 +170,14 @@ function failureHtml() {
 }
 // A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
 // `show` returns (streaming-scroll-viewport-failures.md R1).
-function readingAnchor() {
+export function readingAnchor(feed) {
   const top = feed.getBoundingClientRect().top;
   return [...feed.querySelectorAll(":scope > .turn[data-key]")]
     .filter((node) => node.getBoundingClientRect().bottom > top)
     .slice(0, 8)
     .map((node) => ({ key: node.dataset.key, offset: node.getBoundingClientRect().top - top }));
 }
-function keepAnchor(anchor) {
+export function keepAnchor(feed, anchor) {
   const top = feed.getBoundingClientRect().top;
   for (const { key, offset } of anchor) {
     const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);

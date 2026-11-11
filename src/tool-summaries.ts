@@ -1,10 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 import type { AssistantMessage, ImageContent, NestedToolCalls, TextContent, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { CommitPublication, ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord";
+import type { CommitPublication, ConversationId, Cursor, EntryId, EntryRecord, Storage, TaskQuery } from "@earendil-works/pi-durable";
 import { Type, type Static, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { guardedStream } from "./model-guard.ts";
+import { boundedJson } from "./transcript-reader.ts";
 import type { UiSettings } from "./ui-settings.ts";
 
 /**
@@ -24,10 +26,6 @@ export type ToolSummaryLimits = {
   timeoutMs: number;
   /** Wait before the second attempt; doubles each time. */
   retryMs: number;
-  /** A message still waiting for results after this long, with no result in between, is dropped with its copy of the calls. */
-  abandonMs: number;
-  /** How often open messages are checked against `abandonMs`; they are also checked at open. */
-  sweepMs: number;
 };
 export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = {
   concurrency: 2,
@@ -35,8 +33,6 @@ export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = {
   attempts: 3,
   timeoutMs: 60_000,
   retryMs: 2_000,
-  abandonMs: 24 * 60 * 60_000,
-  sweepMs: 60 * 60_000,
 };
 
 /** What a page shows: `pending` covers queued and running; cancelled and collecting summaries read as none. */
@@ -50,6 +46,11 @@ type SummaryRuntime = Pick<ModelRuntime, "getModel" | "getProviderAuthStatus" | 
 export interface ToolSummaries {
   /** Feed one Pi Durable commit of the conversation store `scope` (a project id, or `host-agent`). */
   observe(scope: string, publication: Pick<CommitPublication, "changes">): void;
+  /**
+   * Drops the messages of `scope` still waiting for results whose conversation has no running turn, written before `before`; a
+   * store calls it when it opens, for turns that ended while the host was not observing.
+   */
+  reconcile(query: { scope: string; running: ReadonlySet<number>; before: number }): void;
   /** Calls `listener` with a conversation id when one of its summaries changed state. */
   watch(scope: string, listener: (conversationId: number) => void): () => void;
   /** The summaries of these assistant entries; empty while summaries are off. Writes nothing. */
@@ -64,6 +65,26 @@ export interface ToolSummaries {
 
 /** The scope of the Host agent's conversation store; project scopes are project ids (UUIDs), so it never collides. */
 export const HOST_AGENT_SCOPE = "host-agent";
+
+/** Drops the open messages of `scope` whose turn ended unobserved; call it once the store is open and its commits are observed. */
+export async function reconcileToolSummaries(input: {
+  summaries: ToolSummaries;
+  scope: string;
+  storage: Pick<Storage, "scanTasks">;
+  context: Context;
+}): Promise<void> {
+  const before = Date.now();
+  const running = new Set<number>();
+  for (const status of LIVE_TURN) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await input.storage.scanTasks({ kind: TURN_TASK, status }, 100, cursor, input.context);
+      for (const task of page.items) if (!task.owner) running.add(Number(task.conversationId));
+      cursor = page.next;
+    } while (cursor !== undefined);
+  }
+  input.summaries.reconcile({ scope: input.scope, running, before });
+}
 
 /** Adds the summaries of a transcript page's assistant entries, for owner views; agent-facing reads never call it. */
 export function withToolSummaries<T extends { conversationId: number; items: readonly { kind: string; entryId: number }[] }>(
@@ -93,15 +114,14 @@ export function summaryUsageTotal(byConversation: ReadonlyMap<number, ToolSummar
 const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
 /** The task of one turn: its tool calls run as its children, so once it ends no result of its calls is still coming. */
 const TURN_TASK = "pi.generation";
+// `completing` is a finished turn waiting for its owned work; its results may still arrive.
+const LIVE_TURN = ["pending", "running", "waiting", "sleeping", "completing"] as const satisfies readonly TaskQuery["status"][];
 const MAX_CALLS = 16,
   ARGS_CHARS = 400,
   NESTED_ARGS_CHARS = 160,
   RESULT_CHARS = 600,
   RESULT_PARTS = 32,
   NESTED_CALLS = 8,
-  JSON_DEPTH = 6,
-  JSON_ITEMS = 32,
-  KEY_CHARS = 80,
   PROMPT_CHARS = 20_000,
   OUTPUT_TOKENS = 200,
   SUMMARY_CHARS = 400,
@@ -262,55 +282,6 @@ export function twoSentences(text: string): string {
   return kept.length > SUMMARY_CHARS ? `${kept.slice(0, SUMMARY_CHARS - 1)}…` : kept;
 }
 
-/**
- * JSON of `value` written by a bounded walk (Q12): at most `JSON_DEPTH` levels and `JSON_ITEMS` items or keys per level, and about
- * `max` characters, so a huge or deeply nested value costs no more than a small one. Each cut is marked where it happened.
- */
-export function boundedJson(value: unknown, max: number): string {
-  const out: string[] = [];
-  let length = 0;
-  const put = (text: string) => {
-    out.push(text);
-    length += text.length;
-  };
-  const visit = (item: unknown, depth: number): void => {
-    const room = max - length;
-    if (typeof item === "string") {
-      if (item.length <= room) return put(JSON.stringify(item));
-      const kept = item.slice(0, Math.max(0, room));
-      return put(`${JSON.stringify(kept)}…[${item.length - kept.length} more chars]`);
-    }
-    if (typeof item === "number" || typeof item === "boolean" || item === null) return put(JSON.stringify(item));
-    if (typeof item !== "object") return put("null");
-    if (depth === JSON_DEPTH) return put(Array.isArray(item) ? "[…]" : "{…}");
-    if (Array.isArray(item)) {
-      put("[");
-      let index = 0;
-      for (; index < Math.min(item.length, JSON_ITEMS) && length < max; index++) {
-        if (index) put(",");
-        visit(item[index], depth + 1);
-      }
-      if (index < item.length) put(`${index ? "," : ""}…[${item.length - index} more items]`);
-      return put("]");
-    }
-    put("{");
-    let index = 0;
-    for (const key in item) {
-      if (!Object.hasOwn(item, key)) continue;
-      if (index === JSON_ITEMS || length >= max) {
-        put(`${index ? "," : ""}…[more keys]`);
-        break;
-      }
-      if (index++) put(",");
-      put(`${JSON.stringify(key.length > KEY_CHARS ? `${key.slice(0, KEY_CHARS)}…` : key)}:`);
-      visit(Reflect.get(item, key), depth + 1);
-    }
-    put("}");
-  };
-  visit(value, 0);
-  return out.join("");
-}
-
 /** The non-memory calls of an assistant message, bounded, and the ids of every call whose result the summary waits for. */
 function callsOf(record: AssistantMessage): { input: Input; waiting: string[] } | undefined {
   const calls = (Array.isArray(record.content) ? record.content : []).flatMap((part) =>
@@ -423,7 +394,9 @@ export function openToolSummaries(options: {
       `UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting' AND entry < :entry`,
     ),
     turnEnded: db.prepare(`UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting'`),
-    stale: db.prepare(`UPDATE summaries SET ${DROP} WHERE status = 'collecting' AND updated < :before`),
+    idle: db.prepare(
+      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND status = 'collecting' AND created < :before AND conversation NOT IN (SELECT value FROM json_each(:running))`,
+    ),
     get: db.prepare(`${ROW} WHERE rowid = :id`),
     collect: db.prepare(
       "UPDATE summaries SET waiting = :waiting, calls = :calls, updated = :now WHERE rowid = :id AND status = 'collecting'",
@@ -489,7 +462,9 @@ export function openToolSummaries(options: {
       const usage = base.usage;
       if (row.status === "ready" || row.status === "failed" || row.status === "cancelled") return { ...base, usage, status: row.status };
       const input = parsed(check.input, row.calls);
-      if (input && (row.status === "pending" || row.status === "running")) return { ...base, usage, status: row.status, input };
+      // A queued message has every result; one without is damaged, never summarized as incomplete.
+      if (input?.calls.every((call) => call.result) && (row.status === "pending" || row.status === "running"))
+        return { ...base, usage, status: row.status, input };
       const waiting = parsed(check.waiting, row.waiting);
       if (input && waiting && row.status === "collecting") return { ...base, usage, status: row.status, input, waiting };
     }
@@ -618,7 +593,7 @@ export function openToolSummaries(options: {
   };
 
   /** One result arrived: it joins the copy of the message waiting for it, which is queued once nothing is missing. */
-  const collect = (scope: string, conversation: ConversationId, record: ToolResultMessage) => {
+  const collect = ({ scope, conversation, record }: { scope: string; conversation: ConversationId; record: ToolResultMessage }) => {
     for (const raw of sql.collecting.all({ scope, conversation })) {
       const row = rowOf(raw);
       if (row?.status !== "collecting" || !row.waiting.includes(record.toolCallId)) continue;
@@ -630,7 +605,7 @@ export function openToolSummaries(options: {
       return;
     }
   };
-  const observeEntry = (scope: string, entry: EntryRecord) => {
+  const observeEntry = ({ scope, entry }: { scope: string; entry: EntryRecord }) => {
     const record = entry.model?.[0];
     if (record?.role === "assistant") {
       // A new message means the earlier ones of this conversation got every result they ever will.
@@ -645,11 +620,9 @@ export function openToolSummaries(options: {
           calls: JSON.stringify(found.input),
           now: now(),
         });
-    } else if (record?.role === "toolResult") collect(scope, entry.conversationId, record);
+    } else if (record?.role === "toolResult") collect({ scope, conversation: entry.conversationId, record });
   };
-  /** Messages of conversations that never ran again: dropped once nothing arrived for `abandonMs`, also across restarts. */
-  const sweep = () => sql.stale.run({ before: now() - limits.abandonMs, now: now() });
-  const guarded = (what: string, run: () => void) => {
+  const guarded = ({ what, run }: { what: string; run: () => void }) => {
     try {
       run();
     } catch (error) {
@@ -660,30 +633,37 @@ export function openToolSummaries(options: {
   // Recovery: requests cut off by the last exit are counted as interrupted and asked again.
   sql.recover.run({ now: now(), attempts: limits.attempts });
   sql.exhaust.run({ now: now() });
-  sweep();
   if (settings.enabled) for (const row of sql.pending.all()) if (check.rowId.Check(row)) queue.push(row.id);
   if (!settings.enabled) cancelAll();
   pump();
-  const sweeper = setInterval(() => guarded("drop abandoned messages", sweep), limits.sweepMs);
-  sweeper.unref?.();
 
   return {
     observe(scope, publication) {
       if (closed || !settings.enabled) return;
-      guarded("read a commit", () => {
-        const ended = new Set<ConversationId>();
-        for (const change of publication.changes) {
-          if (change.type === "entry") observeEntry(scope, change.value);
-          // A turn that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this commit.
-          else if (
-            change.type === "task" &&
-            change.value.kind === TURN_TASK &&
-            !change.value.owner &&
-            change.value.state.status === "terminal"
-          )
-            ended.add(change.value.conversationId);
-        }
-        for (const conversation of ended) sql.turnEnded.run({ scope, conversation, now: now() });
+      guarded({
+        what: "read a commit",
+        run: () => {
+          const ended = new Set<ConversationId>();
+          for (const change of publication.changes) {
+            if (change.type === "entry") observeEntry({ scope, entry: change.value });
+            // A turn that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this commit.
+            else if (
+              change.type === "task" &&
+              change.value.kind === TURN_TASK &&
+              !change.value.owner &&
+              change.value.state.status === "terminal"
+            )
+              ended.add(change.value.conversationId);
+          }
+          for (const conversation of ended) sql.turnEnded.run({ scope, conversation, now: now() });
+        },
+      });
+    },
+    reconcile({ scope, running, before }) {
+      if (closed) return;
+      guarded({
+        what: "drop messages of ended turns",
+        run: () => sql.idle.run({ scope, before, running: JSON.stringify([...running]), now: now() }),
       });
     },
     watch(scope, listener) {
@@ -734,7 +714,6 @@ export function openToolSummaries(options: {
     async close() {
       if (closed) return;
       closed = true;
-      clearInterval(sweeper);
       for (const timer of timers) clearTimeout(timer);
       for (const abort of running.values()) abort.abort();
       await Promise.allSettled([...work]);

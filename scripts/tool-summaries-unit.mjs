@@ -566,31 +566,29 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   await service.close();
 }
 
-// Q11: a conversation that never runs again: its group is dropped after `abandonMs`, at open after a restart and on the timer.
+// Q11: after a restart, a store reopening drops the groups of its conversations with no running turn; however old, a group whose
+// turn still runs is kept, as are other stores' groups and groups written after the store read its running turns.
 {
   fresh();
   const runtime = fakeRuntime();
-  let service = open(runtime, undefined, { abandonMs: 100, sweepMs: 1_000_000 });
-  const old = nextCall("bash", { command: "never returns" });
-  const oldMessage = assistant(22, [old]);
-  service.observe("p1", commit(oldMessage));
+  let service = open(runtime);
+  const ended = assistant(22, [nextCall("bash", { command: "never returns" })]);
+  const running = assistant(23, [nextCall("bash", { command: "runs for days" })]);
+  const other = assistant(22, [nextCall("bash", { command: "other store" })]);
+  service.observe("p1", commit(ended, running));
+  service.observe("p2", commit(other));
   await service.close();
-  await delay(150);
-  service = open(runtime, undefined, { abandonMs: 100, sweepMs: 1_000_000 });
-  assert.equal(stored(oldMessage.value.id).status, "cancelled", "Q11: an old group is dropped at open after a restart");
-  assert.equal(stored(oldMessage.value.id).calls, null);
-  await service.close();
-  service = open(runtime, undefined, { abandonMs: 400, sweepMs: 20 });
-  const quiet = nextCall("bash", { command: "quiet" });
-  const quietMessage = assistant(23, [quiet]);
-  service.observe("p1", commit(quietMessage));
-  await service.close();
-  service = open(runtime, undefined, { abandonMs: 400, sweepMs: 20 });
-  await delay(100);
-  assert.equal(stored(quietMessage.value.id).status, "collecting", "a recent group survives a restart and the timer");
-  await waitFor(() => stored(quietMessage.value.id).status === "cancelled", "Q11: dropped by the timer with no new message", 3000);
-  assert.equal(stored(quietMessage.value.id).calls, null);
-  assert.equal(runtime.requests.length, 0);
+  service = open(runtime);
+  const before = Date.now();
+  await delay(5);
+  const late = assistant(24, [nextCall("bash", { command: "started during the scan" })]);
+  service.observe("p1", commit(late));
+  service.reconcile({ scope: "p1", running: new Set([23]), before });
+  assert.deepEqual([stored(ended.value.id).status, stored(ended.value.id).calls], ["cancelled", null], "Q11: dropped at reopen");
+  assert.equal(stored(running.value.id).status, "collecting", "Q11: a running turn's group is kept");
+  assert.equal(stored(other.value.id).status, "collecting", "another store's group is kept");
+  assert.equal(stored(late.value.id).status, "collecting", "a group written after the scan is kept");
+  assert.equal(runtime.requests.length, 0, "Q11: nothing incomplete is summarized");
   await service.close();
 }
 
@@ -626,7 +624,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   const text = userText(runtime.requests[0]);
   assert.ok(reads < 500, `Q12: only the head of large arrays is read (${reads} reads)`);
   assert.ok(!text.includes("TS-DEEP-LEAF") && !text.includes("TS-LONG-TAIL"), "cut values do not reach the model");
-  assert.match(text, /more items/, "Q12: a cut array says so");
+  assert.match(text, /more\]/, "Q12: a cut array says so");
   assert.match(text, /\{…\}/, "Q12: levels past the depth limit are marked");
   assert.match(text, /more parts/, "Q12: unread result parts are counted");
   await service.close();
@@ -646,6 +644,17 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   insert.run(27, 9003, "ready", null, null, "Fine summary.", '{"input":"lots"}', 1, Date.now());
   insert.run(28, 9004, "collecting", '{"not":"a list"}', '{"calls":[],"more":0}', null, null, 0, Date.now());
   insert.run(29, 9005, "ready", null, null, null, null, 0, 1);
+  insert.run(
+    31,
+    9006,
+    "pending",
+    null,
+    '{"calls":[{"id":"c","name":"bash","args":"TS-DAMAGED-OPEN","result":null}],"more":0}',
+    null,
+    null,
+    0,
+    Date.now(),
+  );
   db.close();
   const service = open(runtime);
   service.observe("p1", commit(result(25, { id: "call-x", name: "bash" }, "x")));
@@ -655,6 +664,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
     [25, 9001],
     [26, 9002],
     [28, 9004],
+    [31, 9006],
   ]) {
     assert.match(statusOf(service, "p1", conversation, entry)?.error ?? "", /damaged/, `Q13: entry ${entry} fails as damaged`);
     assert.equal(stored(entry).calls, null, `Q13: entry ${entry} drops its copy`);

@@ -2,6 +2,7 @@
 // the RPCs, a host restart and the browser: Coordinator chat, worker transcript and the Host agent.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { createKit, delay, randomUUID, say } from "./lib/e2e-kit.mjs";
 
 const SUMMARY_SYSTEM = "You summarize what an AI agent's tool calls did";
@@ -322,7 +323,22 @@ await kit.run(async () => {
   );
   await page.shot("desktop-pending", { force: true });
   summary.mode = "ok";
+  // Q11: groups of conversations with no running turn (a turn that ended while the host was down) are dropped when each store opens.
+  const summariesDb = join(kit.home, "tool-summaries.sqlite");
+  const orphan = (scope, entry) =>
+    `INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES ('${scope}', 999999, ${entry}, 'collecting', '["gone"]', '{"calls":[{"id":"gone","name":"bash","args":"TS-ORPHAN","result":null}],"more":0}', 0, 0)`;
+  {
+    const db = new DatabaseSync(summariesDb);
+    db.exec(`${orphan(id, 999999)}; ${orphan("host-agent", 999998)}`);
+    db.close();
+  }
   await kit.restartHost();
+  await waitFor(() => {
+    const db = new DatabaseSync(summariesDb, { readOnly: true });
+    const rows = db.prepare("SELECT status, calls FROM summaries WHERE conversation = 999999").all();
+    db.close();
+    return rows.length === 2 && rows.every((row) => row.status === "cancelled" && row.calls === null);
+  }, "Q11 orphaned groups of the project and the Host agent dropped after a restart");
   await waitFor(async () => (await summariesOf("TS-ONE pending"))[0]?.status === "ready", "Q1 summary after restart", { timeout: 60000 });
   const afterRestart = await rpc({ action: "usage-snapshot", id, limit: 1 });
   check("Q2 the cut-off request is counted with an unknown cost", afterRestart.toolSummaries.interrupted >= 1, afterRestart.toolSummaries);
@@ -468,6 +484,18 @@ await kit.run(async () => {
   check("D6 the open worker summary stays open", after.open, after);
   check("D6 the focused worker summary line keeps focus", after.focus === before.focus, { before, after });
   check("D6 a reader who scrolled up stays in place", after.scrollTop === 0, after);
+  // A reader inside a later turn keeps it in place when an earlier turn changes height (here its thinking is hidden).
+  const offsetOfLast = `(() => { const feed = document.querySelector('#worker-feed'); return feed.querySelector(':scope > .turn:last-of-type').getBoundingClientRect().top - feed.getBoundingClientRect().top; })()`;
+  await page.evaluate(
+    `(() => { const feed = document.querySelector('#worker-feed'); feed.scrollTop += feed.querySelector(':scope > .turn:last-of-type').getBoundingClientRect().top - feed.getBoundingClientRect().top - 10; })()`,
+  );
+  const reading = await page.evaluate(offsetOfLast);
+  await setUi({ showThinking: false });
+  await page.waitFor(`!document.querySelector('#worker-feed .thinking')`, "worker thinking hidden");
+  const kept = await page.evaluate(offsetOfLast);
+  check("D6 the turn being read stays put when an earlier turn shrinks", Math.abs(kept - reading) < 2, { reading, kept });
+  await setUi({ showThinking: true });
+  await page.waitFor(`document.querySelector('#worker-feed .thinking')`, "worker thinking back");
   await page.evaluate(`document.querySelector('#worker-feed').removeAttribute('style')`);
   await page.shot("worker-summary-stable", { force: true });
 

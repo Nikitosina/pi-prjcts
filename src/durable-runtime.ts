@@ -156,7 +156,13 @@ import { localTelemetry, type LocalTelemetry } from "./local-telemetry.ts";
 import { KnowledgeMetadata } from "./knowledge-types.ts";
 import { listUploads, uploadImageResult, uploadText } from "./uploads.ts";
 import { CHATS_KIND, JOBS_KIND, topicOfConversation, topicsOfCommit, type FeedEvent, type TopicMap } from "./change-feed.ts";
-import { summaryUsageTotal, withToolSummaries, type ToolSummaries, type ToolSummaryUsage } from "./tool-summaries.ts";
+import {
+  reconcileToolSummaries,
+  summaryUsageTotal,
+  withToolSummaries,
+  type ToolSummaries,
+  type ToolSummaryUsage,
+} from "./tool-summaries.ts";
 import {
   readTranscriptImage,
   readTranscriptPage,
@@ -1582,6 +1588,10 @@ export async function openDurableProject(input: {
           };
         })()
       : () => {};
+    if (summaries)
+      await reconcileToolSummaries({ summaries, scope: project.id, storage: openedStorage, context }).catch((error) =>
+        report(input.onReport, project.id, error),
+      );
     // A Coordinator turn that failed on quota or a rate limit moves its chat to the tier's next model and continues; the request id
     // is the failed submission's, so a commit seen twice still continues once. Without a tier the failure stays as it is.
     const advanceCoordinator = async (conversationId: Conversation["id"], submissionId: string, failure: ProviderFailure) => {
