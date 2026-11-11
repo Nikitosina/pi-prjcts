@@ -112,7 +112,7 @@ try {
   assert.equal(exampleCheck.code, 0, `12 the example loads: ${exampleCheck.stdout}${exampleCheck.stderr}`);
   assert.deepEqual(
     exampleCheck.json.plugins[0].provides.sort(),
-    ["coordinatorTools", "rpc", "rpcPolicy", "workerTools"],
+    ["coordinatorTools", "rpc", "rpcPolicy", "web", "workerTools"],
     "12 the example provides what the guide describes",
   );
   assert.equal(exampleCheck.json.plugins[0].version, "1.0.0", "12 the example's version");

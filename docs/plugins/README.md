@@ -1,13 +1,13 @@
 # Writing pi-prjcts plugins
 
-A plugin is a JavaScript or TypeScript module that a host loads at its start. It adds capabilities to that host: RPC methods, tools for coordinators and workers, cleanup and storage steps, browser routes, or a whole provider for another checkout kind or PR service. Core ships Git and GitHub; everything else is a plugin. A plugin can live in any directory and needs no change to core.
+A plugin is a JavaScript or TypeScript module that a host loads at its start. It adds capabilities to that host: RPC methods, tools for coordinators and workers, cleanup and storage steps, a panel in Settings → Plugins, browser routes, or a whole provider for another checkout kind or PR service. Core ships Git and GitHub; everything else is a plugin. A plugin can live in any directory and needs no change to core.
 
 ## Pages
 
 - [Getting started](getting-started.md): create a plugin, test it, check it with the host's loader, try it on a private host.
 - [Reference](reference.md): the module shape, `HostPluginApi`, and every capability an ordinary plugin uses, with signatures and examples. It explains RPC methods versus agent tools, the approval policy, state, lifecycle and leases.
 - [Development and activation](development.md): testing, private verification, activation on a host, troubleshooting, compatibility and current limits.
-- [Example plugin](examples/notes/): `notes`, a working plugin with RPC methods, coordinator tools and worker tools, and its test.
+- [Example plugin](examples/notes/): `notes`, a working plugin with RPC methods, coordinator tools, worker tools and a Settings panel, and its test.
 - [`PLUGINS.md`](../../PLUGINS.md): provider capabilities (`vcs`, `workspace`, `prs`, `follow`, `merge`) for a new checkout kind or PR service, and the built-in GitHub provider.
 
 The source of truth is `HostPluginApi` and `PluginCapabilities` in [`src/plugin-types.ts`](../../src/plugin-types.ts) and the loader in [`src/plugins.ts`](../../src/plugins.ts). When this guide and those files disagree, the files win.

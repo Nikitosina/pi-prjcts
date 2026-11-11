@@ -18,7 +18,7 @@ Old `/ui2/` links answer `308` to the same place at the root (`/ui2/?q` → `/?q
 | Composer uploads, upload viewer | Not available in the browser; the `upload-*` RPCs and the coordinator's search tools are unchanged. |
 | Per-project worker quota fallback picker, Coordinator `gh` access select, verification settings | Not in the browser; `settings-update` or the Host agent. |
 | MCP per-profile picker and probe button | Not in the browser; `settings-update` (`mcp`) and `mcp-probe`. |
-| Plugin web UI (script/style a plugin registers) | Not loaded by the new client. |
+| Plugin web UI (script/style a plugin registers) | Settings → Plugins mounts each plugin's panel (`docs/plugins/reference.md#settings-panel`). The classic card hooks (`render`, `tick`, `projectChanged`, `hide`) and page helpers are retired, so the simulator card is not shown until it is ported. |
 
 ## Tests
 

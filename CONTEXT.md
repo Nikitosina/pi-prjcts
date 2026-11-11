@@ -36,6 +36,7 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Archive**: read-only view of chats and transcripts from the pre-Job host.
 - **Plugin**: a module a host loads at its start from `plugins.json` or `PI_PROJECTS_PLUGINS` to add capabilities (an RPC, tools, a browser panel, a checkout kind or PR provider). It may live in any directory. The one add-on concept of pi-prjcts: do not call it an extension.
 - **Plugin version**: the optional `version` a plugin declares, shown with its status so the owner can tell which version a host runs.
+- **Plugin panel**: a plugin's own UI in its card in Settings → Plugins, registered by the plugin's browser script and mounted for the selected project. A plugin has no other place in the inbox.
 - **Activation**: making a plugin version run on a host: list it in that host's `plugins.json` and restart the host. Source changes never activate on a running host by themselves.
 
 ## Pi Durable terms used as-is

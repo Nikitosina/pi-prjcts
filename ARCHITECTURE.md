@@ -153,7 +153,7 @@ Rule: Telegram never decides. Its buttons call host actions that re-check the Jo
 
 ## Web feature modules
 
-The inbox is one client, served flat from `web/` at `/` (`src/web.ts` reads the files present at start into memory, about 0.4 MB, and never reads them again, so a pulled change waits for the deploy that restarts the host; old `/ui2/` links answer `308` to the root, see `docs/classic-retirement.md`). `web/index.html` runs `web/theme.js` before first paint, then loads `web/app.js`, which owns selection, the center focus, the `/live` and `/changes` streams and the hotkeys. One module per area: `tree` (projects, chats, Memory), `chat` (Coordinator transcript), `workers` (context panel and worker view), `memory`, `settings` (with `prompts` and `limits`), `palette`, `slash`, `statusline`, `limit-detail`, `hostagent`, `media`, `ui` (the host `ui` document). `web/api.js` is the only module that talks to the host (`call`); `web/state.js` holds shared state, the request `generation` and a small event bus (`on`, `emit`) that host topics feed.
+The inbox is one client, served flat from `web/` at `/` (`src/web.ts` reads the files present at start into memory, about 0.4 MB, and never reads them again, so a pulled change waits for the deploy that restarts the host; old `/ui2/` links answer `308` to the root, see `docs/classic-retirement.md`). `web/index.html` runs `web/theme.js` before first paint, then loads `web/app.js`, which owns selection, the center focus, the `/live` and `/changes` streams and the hotkeys. One module per area: `tree` (projects, chats, Memory), `chat` (Coordinator transcript), `workers` (context panel and worker view), `memory`, `settings` (with `prompts`, `limits` and `plugins`), `palette`, `slash`, `statusline`, `limit-detail`, `hostagent`, `media`, `ui` (the host `ui` document). `web/api.js` is the only module that talks to the host (`call`); `web/state.js` holds shared state, the request `generation` and a small event bus (`on`, `emit`) that host topics feed.
 
 Rules:
 - Code that awaits compares the generation afterwards (`stale(gen)`) before touching the page, so a late response cannot render into another project.
@@ -163,11 +163,12 @@ Rules:
 
 ## Plugins
 
-`src/plugins.ts` loads modules listed in `$PI_PROJECTS_HOME/plugins.json` or `PI_PROJECTS_PLUGINS` at host start; `src/plugin-types.ts` defines the API. A plugin provides capabilities (`vcs`, `workspace`, `prs`, `follow`, `merge`, `coordinatorTools`, `rpc`, `uncertainWrites`, `workerTools`, `leaseName`, `lifecycle`, `web`). Core ships Git and GitHub. See `PLUGINS.md` and the author guide in `docs/plugins/`. `src/plugin-dev.ts` backs `projects plugin new` (scaffold) and `projects plugin check` (the same loader in a fresh temporary home); a private host for a plugin under development is the verify skill's `launch --plugin <dir>`. The context panel's Plugins section shows each plugin's status, including its declared `version`.
+`src/plugins.ts` loads modules listed in `$PI_PROJECTS_HOME/plugins.json` or `PI_PROJECTS_PLUGINS` at host start; `src/plugin-types.ts` defines the API. A plugin provides capabilities (`vcs`, `workspace`, `prs`, `follow`, `merge`, `coordinatorTools`, `rpc`, `uncertainWrites`, `workerTools`, `leaseName`, `lifecycle`, `web`). Core ships Git and GitHub. See `PLUGINS.md` and the author guide in `docs/plugins/`. `src/plugin-dev.ts` backs `projects plugin new` (scaffold) and `projects plugin check` (the same loader in a fresh temporary home); a private host for a plugin under development is the verify skill's `launch --plugin <dir>`. The context panel's Plugins section shows each plugin's status, including its declared `version`. Settings → Plugins shows the same status and each plugin's panel: `web/plugins.js` loads a plugin's `web.script` and `web.style` once per page and mounts the panel its script registers (`window.piProjects.register`) in that plugin's card, again for each project and each opening of the section.
 
 Rules:
 - A plugin registers nothing until `register` returns, and a failing plugin is skipped and reported, never fatal.
 - Core keeps a plugin's provider-owned project records verbatim when the plugin is not loaded.
+- A plugin panel gets only its slot and a `panel` bound to its own plugin and project (`rpc`, `fetch`, an abort `signal`); the browser API is `register` and `esc`. A panel's errors stay in its card. Plugin browser code is trusted, not isolated.
 
 ## Workspaces, knowledge and other modules
 

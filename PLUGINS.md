@@ -9,9 +9,9 @@ Core ships Git and GitHub only. GitHub PR watching is a built-in `prs` provider 
 Start with [`docs/plugins/README.md`](docs/plugins/README.md):
 
 - [Getting started](docs/plugins/getting-started.md): `npm run projects -- plugin new|check`, the scaffold's test, a private host with `--plugin`.
-- [Reference](docs/plugins/reference.md): the module shape, `HostPluginApi`, RPC methods versus `coordinatorTools` and `workerTools`, `rpcPolicy` and owner approval, state, resource leases, lifecycle, cleanup, storage and web routes.
+- [Reference](docs/plugins/reference.md): the module shape, `HostPluginApi`, RPC methods versus `coordinatorTools` and `workerTools`, `rpcPolicy` and owner approval, state, resource leases, lifecycle, cleanup, storage, web routes and the panel in Settings → Plugins.
 - [Development and activation](docs/plugins/development.md): testing, private verification, activation through `plugins.json` and a restart, troubleshooting, compatibility and current limits.
-- [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods and tools, tested by `scripts/plugin-dev-unit.mjs`.
+- [Example plugin](docs/plugins/examples/notes/): a checked-in plugin with RPC methods, tools and a Settings panel, tested by `scripts/plugin-dev-unit.mjs` and `scripts/plugin-panels-e2e.mjs`.
 
 The contract is `HostPluginApi` and `PluginCapabilities` in `src/plugin-types.ts`; the loader is `src/plugins.ts`. The rest of this file covers the provider capabilities for a new checkout kind or PR service.
 

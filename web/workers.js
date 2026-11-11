@@ -5,6 +5,7 @@ import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
+import { pluginRow } from "./plugins.js";
 
 const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
@@ -324,14 +325,6 @@ export async function loadSide() {
   renderPrs();
   const list = plugins?.plugins ?? [];
   document.querySelector("#plugin-cards").innerHTML = list.length ? `<h2>Plugins</h2>${list.map(pluginRow).join("")}` : "";
-}
-/** What the host loaded at its start: a change on disk shows here only after the next restart. */
-function pluginRow(plugin) {
-  const loaded = plugin.state === "loaded";
-  const detail = loaded
-    ? `<p class="small muted">${esc(plugin.provides.join(", ") || "no capabilities")}</p>`
-    : `<p class="small plugin-error">${esc(clip(plugin.error ?? "failed", 300))}</p>${plugin.error?.includes(plugin.source) ? "" : `<p class="small muted mono">${esc(clip(plugin.source, 160))}</p>`}`;
-  return `<div class="plugin-row" data-plugin="${esc(plugin.name ?? "")}" data-state="${esc(plugin.state)}" title="${esc(plugin.source)}"><div class="plugin-head"><span class="mono">${esc(plugin.name ?? "unnamed")}</span>${plugin.version ? `<span class="muted small mono">${esc(plugin.version)}</span>` : ""}<span class="badge"${loaded ? "" : ' data-tone="bad"'}>${loaded ? "loaded" : "failed"}</span></div>${detail}</div>`;
 }
 
 // Merge never merges here: it sends the owner's request to the Coordinator of the chat named in the confirmation.

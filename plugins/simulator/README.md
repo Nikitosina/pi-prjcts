@@ -25,7 +25,7 @@ The cleanup routine's plugin step erases idle owned clones, and, hourly and in t
 - `leaseName`: bare clone UUIDs and `simulator:<uuid>` share one lease.
 - `lifecycle`: refuses project lifecycle changes during an operation, pauses management during them, aborts commands at host shutdown.
 - `rpc`: `snapshot`, `configure`, `action`, `recover`.
-- `web`: the card (`web/ui.js`, `web/ui.css`) and the authenticated screenshot route `/plugins/simulator/frame`.
+- `web`: the card (`web/ui.js`, `web/ui.css`) and the authenticated screenshot route `/plugins/simulator/frame`. The card uses the classic inbox's retired hooks, so Settings → Plugins shows its panel as failed until it is ported to `mount(slot, panel)`.
 
 Rotation: `rotate.swift` sends the device-orientation event to the clone (headless, no Simulator.app window); it is compiled with `xcrun swiftc` on first use into the ignored `.build/`.
 

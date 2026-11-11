@@ -1608,6 +1608,26 @@ a.pr-link:hover .pr-title {
 .plugin-error {
   color: var(--bad);
 }
+/* Settings → Plugins: one card per plugin; a panel's slot belongs to the plugin. */
+.plugin-card {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.plugin-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.plugin-panel[data-state="loading"] .plugin-slot:empty::before {
+  content: "Loading…";
+  color: var(--muted);
+}
+.plugin-panel .plugin-error {
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
 
 /* ------------------------------------------------------------------------------------------------ focus views */
 #focus-view {

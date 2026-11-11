@@ -1,6 +1,6 @@
 # Failure modes: developing a plugin (`projects plugin new|check`)
 
-Written before the code. Test: `scripts/plugin-dev-unit.mjs` (temp directories only, no host, no model, no live home). Loading the scaffold on a private host and the browser panel are cases 27-29 of `scripts/vcs-plugins-failures.md`.
+Written before the code. Test: `scripts/plugin-dev-unit.mjs` (temp directories only, no host, no model, no live home). Loading the scaffold on a private host and the plugin status rows are cases 27-29 of `scripts/vcs-plugins-failures.md`; plugin panels in Settings are `scripts/plugin-panels-failures.md`.
 
 Scaffold (`plugin new <dir> --name <name>`)
 1. `plugin new` writes into a directory that already has files, overwriting the author's work. It must refuse and write nothing.

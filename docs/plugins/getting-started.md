@@ -108,5 +108,5 @@ coordinatorTools: {
 
 ## Next
 
-- [Reference](reference.md) for every capability.
+- [Reference](reference.md) for every capability, including a [panel in Settings → Plugins](reference.md#settings-panel).
 - [Development and activation](development.md) to load the plugin on a real host.

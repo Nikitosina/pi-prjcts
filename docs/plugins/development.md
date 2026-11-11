@@ -23,7 +23,8 @@ node .agents/skills/verify-pi-prjcts/scripts/verify.mjs cleanup --run <scratch>
 ```
 
 - `launch` starts a host with a scratch home, a fake model provider and the plugins through `PI_PROJECTS_PLUGINS`. The scratch home has no `plugins.json`. Several `--plugin` flags load several plugins, which shows conflicts between them.
-- `drive ... plugins` opens the inbox in headless Chrome, screenshots the Plugins section and saves the host's `plugins` status next to it. It fails when a launched plugin's row does not show its name, version, state and error.
+- `drive ... plugins` opens the inbox in headless Chrome, screenshots the Plugins section and saves the host's `plugins` status next to it. It fails when a launched plugin's row does not show its name, version, state and error. It then opens Settings → Plugins and fails when a launched plugin's panel does not mount.
+- Open Settings → Plugins (⌘, then L) on the private host to use your panel yourself. A panel error shows in red in the plugin's card; the browser console has the stack.
 - `rpc --run <scratch> plugins` prints the same status. The skill's `rpc` command only allows read-only core actions, so call your own methods over the socket as shown in [Getting started](getting-started.md#4-try-it-on-a-private-host).
 - Coordinator tools: `profile-tools` over the same socket, with `{"action":"profile-tools","projectId":"<id>","profile":"coordinator"}`, lists them in the `plugin` group. `prompt-render` with the same fields shows a `prompt` block's text.
 - The fake model does not call your tools. Prove tool behavior in tests; on the private host, prove that the tools are offered.
@@ -32,9 +33,10 @@ The full verification procedure, including proof for a change to core, is the [`
 
 ## Inspecting a host
 
-Every host shows what it loaded at its start, in four places:
+Every host shows what it loaded at its start, in five places:
 
 - the Plugins section of the context panel: name, version, state and capabilities, or the source and error of a failure;
+- Settings → Plugins: the same rows, each with the plugin's panel or the panel's error;
 - the `plugins` RPC: `{ plugins: PluginStatus[], labels, web }`;
 - `/health`;
 - the host log: `plugin-loaded` and `plugin-failed` lines.
@@ -85,6 +87,17 @@ To deactivate, remove the entry and restart. The plugin's files in `api.stateDir
 | `a plugin named "<name>" is already loaded`, `... is already provided by another plugin` | two plugins with one name, or one provider id or checkout kind |
 | `plugins.json is unreadable: ...` | the file is not `{ "plugins": ["/path", ...] }` |
 
+Panel errors show in the plugin's card in Settings → Plugins:
+
+| panel error | cause |
+| --- | --- |
+| `ui.js did not register a panel ...` | the script never called `window.piProjects.register` while it first ran |
+| `ui.js registered as "<other>"; ...` | `name` is not the plugin's own name |
+| `ui.js uses the retired context-panel hooks ...` | a card written for the classic inbox; port it to `mount(slot, panel)` |
+| `piProjects.register must be called while its ui.js runs` | `register` was called later, for example after an `await` |
+| `ui.js could not be loaded from ...` | the host could not read the file at its start (it answers 404) |
+| any other message | what your script, `mount` or `action` threw |
+
 ## Compatibility
 
 - There is no published type package. The types are `src/plugin-types.ts` at the host's commit. A TypeScript plugin inside this repository can `import type { HostPluginApi } from "../../src/plugin-types.ts"`, as `plugins/simulator` does; a plugin elsewhere reads that file for the types.
@@ -97,6 +110,6 @@ To deactivate, remove the entry and restart. The plugin's files in `api.stateDir
 - No hot reload. Every change waits for a host restart.
 - No per-project installation. `plugins.json` is per host home, and a loaded plugin is loaded for every project on that host. Limit it with `coordinatorTools.applies`, `workerTools.offered` and your own checks of `projectId`.
 - No sandbox. A plugin is trusted code in the host process (see [Trust](README.md#trust)).
-- No browser panel. The host serves `web.script`, `web.style` and routes, but the current inbox does not load plugin browser files ([`docs/classic-retirement.md`](../classic-retirement.md)). The simulator plugin's card is not shown for that reason.
+- A browser panel lives only in Settings → Plugins. A plugin cannot add UI anywhere else in the inbox. The simulator plugin's card was written for the classic inbox and its retired hooks, so its panel shows an error until it is ported.
 - No published type package (see Compatibility).
 - `plugin check` does not run your RPC methods or tools, and the private host's fake model does not call your tools.

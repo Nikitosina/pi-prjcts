@@ -10,7 +10,7 @@ function paint(slot, notes) {
 window.piProjects.register({
   name: "notes",
   async mount(slot, panel) {
-    slot.innerHTML = `<div class="notes-panel"><ul data-notes-list><li class="notes-empty">Loading…</li></ul><div class="notes-add"><input type="text" maxlength="500" placeholder="A short note" aria-label="New note" data-notes-text><button type="button" data-action="notes-add">Add note</button></div></div>`;
+    slot.innerHTML = `<div class="notes-panel"><ul data-notes-list><li class="notes-empty">Loading…</li></ul><div class="notes-add"><input type="text" maxlength="500" placeholder="A short note" aria-label="New note" data-notes-text><button type="button" class="ghost-btn small" data-action="notes-add">Add note</button></div></div>`;
     paint(slot, (await panel.rpc("list")).notes);
   },
   async action(name, node, panel) {

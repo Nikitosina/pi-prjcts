@@ -2581,6 +2581,29 @@ const journeys = {
         throw Error(`Plugins section does not show ${JSON.stringify(item)}: ${JSON.stringify(row)}`);
       record("visible", `Plugins section shows ${JSON.stringify(row.text.replace(/\s+/g, " "))}`);
     }
+    // Settings → Plugins: every launched plugin with a browser script mounts its panel, or shows why it could not.
+    const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
+    await page.click('[data-cmd="settings"]');
+    await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
+    await page.click('#settings nav [data-section="plugins"]');
+    await page.waitFor(
+      `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => ['ready', 'failed'].includes(document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]')?.dataset.state))`,
+      "plugin panels settled",
+    );
+    record("entry", "opened Settings → Plugins");
+    await page.shot(dir, "02-settings-plugins");
+    const panels = await page.evaluate(
+      `[...document.querySelectorAll('#settings .plugin-panel')].map((panel) => ({ name: panel.dataset.plugin, state: panel.dataset.state, error: panel.querySelector('.plugin-error')?.hidden ? null : panel.querySelector('.plugin-error')?.textContent, text: panel.querySelector('.plugin-slot')?.innerText ?? '' }))`,
+    );
+    writeFileSync(join(dir, "panels-dom.json"), JSON.stringify(panels, null, 2));
+    for (const item of withPanel) {
+      const panel = panels.find((candidate) => candidate.name === item.name);
+      if (panel?.state !== "ready") throw Error(`the ${item.name} panel did not mount: ${JSON.stringify(panel)}`);
+      record(
+        "visible",
+        `Settings → Plugins mounts the ${item.name} panel: ${JSON.stringify(panel.text.replace(/\s+/g, " ").slice(0, 200))}`,
+      );
+    }
   },
   // Feature: features/message-coordinator.md
   async "message-coordinator"(run, page, record, dir) {

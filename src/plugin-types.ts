@@ -470,7 +470,7 @@ export type LifecycleHooks = {
 };
 export type PluginRoute = (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>;
 export type WebContribution = {
-  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css. */
+  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css; the script registers the plugin's Settings panel. */
   script?: string;
   style?: string;
   /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */

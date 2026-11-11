@@ -80,7 +80,7 @@ Use these instead of importing your own copies. Durable tools and documents only
 | `leaseName` | canonical names for resources the plugin owns | [Resource leases](#resource-leases) |
 | `lifecycle` | hooks around project pause, resume, archive, delete and host shutdown | [Lifecycle](#lifecycle) |
 | `cleanup`, `usage` | a step of the Workspace cleanup routine and a row in Settings → Storage | [Cleanup and storage](#cleanup-and-storage) |
-| `web` | authenticated GET routes and browser files | [Web](#web) |
+| `web` | a panel in Settings → Plugins and authenticated GET routes | [Web](#web) |
 | `vcs`, `workspace`, `prs`, `follow`, `merge`, `uncertainWrites` | a checkout kind or PR service | [`PLUGINS.md`](../../PLUGINS.md) |
 
 ## RPC methods and agent tools
@@ -234,4 +234,42 @@ web?: {
 ```
 
 - A route answers bearer-authenticated `GET /plugins/<name>/<route>?project=<id>`. The host checks that the project exists before calling it, and refuses a malformed `mime`.
-- The host reads `script` and `style` once at load. The current inbox does not load plugin browser files, so a plugin panel does not appear today; see [current limits](development.md#current-limits).
+- The host reads `script` and `style` once at load and serves them without authentication. A change to them shows after a host restart and a page reload.
+
+### Settings panel
+
+Settings → Plugins lists every plugin the host loaded, one card each. A loaded plugin with a `script` gets a panel in its card. The inbox loads each `ui.js` and `ui.css` once per page, the first time the owner opens the section. The panel is mounted while the section shows: again after Settings closes and reopens, and again for each project the owner selects.
+
+`ui.js` is a classic script. While it first runs, it registers its panel:
+
+```js
+window.piProjects.register({
+  name: "notes",                       // the plugin's own name
+  async mount(slot, panel) { ... },    // fill `slot`; may return a promise
+  async action(name, node, panel) { ... }, // optional: a click on [data-action="notes-..."] inside the slot
+});
+```
+
+`panel` belongs to one mount:
+
+| field | |
+| --- | --- |
+| `projectId` | the project selected when the panel mounted |
+| `signal` | an `AbortSignal` that aborts when the panel goes away: Settings closes, the owner leaves the section, or selects another project |
+| `rpc(method, params?)` | calls this plugin's RPC method for `projectId` with the owner's token; resolves to the method's result |
+| `fetch(route, query?)` | a `GET` of this plugin's route with `project=<projectId>`, the `query` fields and the token; resolves to the `Response` |
+
+`window.piProjects.esc(text)` escapes text for HTML. It and `register` are the whole browser API.
+
+Rules:
+
+- Render only into `slot`. It is a fresh element on every mount. Listeners on it and its children go away with it, so a mount never stacks on an earlier one. Clicks inside it do not reach the inbox's own handlers.
+- After `signal` aborts, `rpc` and `fetch` reject with an `AbortError`, even when the answer arrives later. Let it propagate: the inbox ignores it, so an answer for the previous project never renders. Stop your own timers on `abort`.
+- Escape everything you put into HTML that came from a project, a user or the host, with `esc` or `textContent`.
+- `ui.css` applies to the whole page. Scope its selectors to your panel, as the example does with `.notes-panel`.
+- The inbox shows errors in the plugin's card: a `ui.js` that throws while it loads or never registers, a refused registration, a `mount` that throws or rejects, and an `action` that throws or rejects. An exception your file leaves uncaught while the panel is mounted shows there too; an unhandled promise rejection does not, so return or await your promises. Other panels and Settings sections keep working.
+- `register` refuses a second call, a name other than the plugin's own, a call after `ui.js` finished its first run, and the hooks of the retired context-panel card (`render`, `tick`, `projectChanged`, `hide`).
+
+The code is trusted, not isolated: it runs in the owner's page with the owner's token. The API keeps a well-behaved panel to its own slot, plugin and project; it does not stop code that ignores it. There is no hot reload, and a panel cannot place anything elsewhere in the inbox.
+
+The [example plugin](examples/notes/ui.js) lists the project's notes and adds one.
