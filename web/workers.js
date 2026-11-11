@@ -3,7 +3,7 @@
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
-import { transcriptClick, transcriptHtml } from "./chat.js";
+import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
 
 const box = document.querySelector("#workers");
@@ -483,15 +483,23 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   const paint = () => {
     if (!alive()) return;
     const worker = find();
-    node.innerHTML =
+    // Unchanged turns keep their nodes, so a summary arriving keeps focus, open lines and the reader's place (tool-summaries D6).
+    const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40,
+      top = node.scrollTop,
+      focused = node.contains(document.activeElement) ? document.activeElement.dataset.toggle : undefined;
+    morph(
+      node,
       transcriptHtml(
         items,
         !!worker?.working,
         worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
         { summaries },
-      ) || `<p class="muted">No transcript yet.</p>`;
+      ) || `<p class="muted">No transcript yet.</p>`,
+    );
     hydrateMedia(node, { project: state.projectId, threadId: id });
-    node.scrollTop = node.scrollHeight;
+    node.scrollTop = bottom ? node.scrollHeight : top;
+    if (focused && !node.contains(document.activeElement))
+      node.querySelector(`[data-toggle="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   };
   const load = async () => {
     const page = await call("thread-history", { id: state.projectId, threadId: id, limit: 200, messageText: "full" }).catch((error) => {

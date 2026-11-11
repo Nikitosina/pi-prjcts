@@ -374,6 +374,49 @@ await kit.run(async () => {
   await page.waitFor(`document.querySelector('#worker-feed .tool-summary[data-status="ready"]')`, "worker summary line");
   await page.shot("worker-summary", { force: true });
 
+  // D6 in the worker transcript: a summary arriving keeps unchanged turns, the open line, focus and a reader's scroll place.
+  summary.mode = "hold";
+  const heldFrom = summary.requests.length;
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: randomUUID(), text: "TS-WORKTASK again" });
+  await page.waitFor(`document.querySelector('#worker-feed .tool-summary[data-status="pending"]')`, "worker pending summary");
+  await page.evaluate(`document.querySelector('#worker-feed .tool-summary[data-status="ready"] .ts-line').click()`);
+  await page.waitFor(`document.querySelector('#worker-feed .tool-summary.open')`, "worker summary opened");
+  const before = await page.evaluate(`(() => {
+    const feed = document.querySelector('#worker-feed');
+    feed.style.height = '140px';
+    feed.style.flex = 'none';
+    for (const turn of feed.querySelectorAll(':scope > .turn')) turn.__kept = true;
+    const line = feed.querySelector('.tool-summary[data-status="pending"] .ts-line');
+    line.focus();
+    feed.scrollTop = 0;
+    return { focus: line.dataset.toggle, scrollable: feed.scrollHeight > feed.clientHeight + 40 };
+  })()`);
+  check("D6 the worker feed can scroll for this check", before.scrollable, before);
+  await waitFor(() => summary.requests.length > heldFrom, "held worker summary request");
+  summary.mode = "ok";
+  summary.release();
+  await page.waitFor(
+    `!document.querySelector('#worker-feed .tool-summary[data-status="pending"]') && document.querySelectorAll('#worker-feed .tool-summary[data-status="ready"]').length >= 2`,
+    "worker summary arrives",
+  );
+  const after = await page.evaluate(`(() => {
+    const feed = document.querySelector('#worker-feed');
+    const turns = [...feed.querySelectorAll(':scope > .turn')];
+    return {
+      firstKept: turns[0]?.__kept === true,
+      replayed: turns.filter((turn) => !turn.__kept && !turn.classList.contains('no-enter')).length,
+      open: !!feed.querySelector('.tool-summary.open'),
+      focus: document.activeElement?.dataset?.toggle ?? null,
+      scrollTop: feed.scrollTop,
+    };
+  })()`);
+  check("D6 an unchanged worker turn keeps its node", after.firstKept, after);
+  check("D6 no worker turn animates in again", after.replayed === 0, after);
+  check("D6 the open worker summary stays open", after.open, after);
+  check("D6 the focused worker summary line keeps focus", after.focus === before.focus, { before, after });
+  check("D6 a reader who scrolled up stays in place", after.scrollTop === 0, after);
+  await page.shot("worker-summary-stable", { force: true });
+
   // D8: the Host agent.
   await rpc({ action: "host-agent-send", requestId: randomUUID(), text: "TS-HOSTAGENT check" });
   const hostPage = await waitFor(
