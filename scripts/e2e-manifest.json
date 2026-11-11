@@ -45,7 +45,6 @@
     "plugins/simulator/tools.ts": ["simulator-worker-unit"],
     "docs/plugins/examples/**": ["plugin-dev-unit", "plugin-panels-e2e"],
     "web/plugins.js": ["plugin-panels-e2e", "vcs-plugins-e2e"],
-    "web/settings.js": ["plugin-panels-e2e"],
     "docs/**": [],
     "*.md": [],
     "src/routine-script.ts": ["routine-script-unit", "routine-script-e2e"],
@@ -86,7 +85,7 @@
     "web/chat.js": ["tool-summaries-e2e", "streaming-*", "coordinator-workers-ui-e2e"],
     "web/follow.js": ["streaming-*", "coordinator-workers-ui-e2e", "worker-chat-ui-e2e", "tool-summaries-e2e"],
     "web/ui.js": ["tool-summaries-e2e"],
-    "web/settings.js": ["tool-summaries-e2e"],
+    "web/settings.js": ["tool-summaries-e2e", "plugin-panels-e2e"],
     "web/hostagent.js": ["tool-summaries-e2e"],
     "src/transcript-reader.ts": ["tool-summaries-e2e"],
     "src/host-agent.ts": ["tool-summaries-e2e"]
