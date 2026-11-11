@@ -6,7 +6,6 @@ import type { CommitPublication, ConversationId, Cursor, EntryId, EntryRecord, S
 import { Type, type Static, type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { guardedStream } from "./model-guard.ts";
-import { boundedJson } from "./transcript-reader.ts";
 import type { UiSettings } from "./ui-settings.ts";
 
 /**
@@ -46,10 +45,7 @@ type SummaryRuntime = Pick<ModelRuntime, "getModel" | "getProviderAuthStatus" | 
 export interface ToolSummaries {
   /** Feed one Pi Durable commit of the conversation store `scope` (a project id, or `host-agent`). */
   observe(scope: string, publication: Pick<CommitPublication, "changes">): void;
-  /**
-   * Drops the messages of `scope` still waiting for results whose conversation has no running turn, written before `before`; a
-   * store calls it when it opens, for turns that ended while the host was not observing.
-   */
+  /** Drops the open messages of `scope` written before `before` whose conversation is not in `running`. */
   reconcile(query: { scope: string; running: ReadonlySet<number>; before: number }): void;
   /** Calls `listener` with a conversation id when one of its summaries changed state. */
   watch(scope: string, listener: (conversationId: number) => void): () => void;
@@ -122,6 +118,9 @@ const MAX_CALLS = 16,
   RESULT_CHARS = 600,
   RESULT_PARTS = 32,
   NESTED_CALLS = 8,
+  JSON_DEPTH = 6,
+  JSON_ITEMS = 32,
+  KEY_CHARS = 80,
   PROMPT_CHARS = 20_000,
   OUTPUT_TOKENS = 200,
   SUMMARY_CHARS = 400,
@@ -280,6 +279,52 @@ export function twoSentences(text: string): string {
     .slice(0, 2)
     .join(" ");
   return kept.length > SUMMARY_CHARS ? `${kept.slice(0, SUMMARY_CHARS - 1)}…` : kept;
+}
+
+// Not transcript-reader's walker: that one's output reaches agents and must not change, and it can end a cut without a marker (Q12).
+function boundedJson(value: unknown, max: number): string {
+  const out: string[] = [];
+  let length = 0;
+  const put = (text: string) => {
+    out.push(text);
+    length += text.length;
+  };
+  const visit = (item: unknown, depth: number): void => {
+    const room = max - length;
+    if (typeof item === "string") {
+      if (item.length <= room) return put(JSON.stringify(item));
+      const kept = item.slice(0, Math.max(0, room));
+      return put(`${JSON.stringify(kept)}…[${item.length - kept.length} more chars]`);
+    }
+    if (typeof item === "number" || typeof item === "boolean" || item === null) return put(JSON.stringify(item));
+    if (typeof item !== "object") return put("null");
+    if (depth === JSON_DEPTH) return put(Array.isArray(item) ? "[…]" : "{…}");
+    if (Array.isArray(item)) {
+      put("[");
+      let index = 0;
+      for (; index < Math.min(item.length, JSON_ITEMS) && length < max; index++) {
+        if (index) put(",");
+        visit(item[index], depth + 1);
+      }
+      if (index < item.length) put(`${index ? "," : ""}…[${item.length - index} more]`);
+      return put("]");
+    }
+    put("{");
+    let index = 0;
+    for (const key in item) {
+      if (!Object.hasOwn(item, key)) continue;
+      if (index === JSON_ITEMS || length >= max) {
+        put(`${index ? "," : ""}…[more keys]`);
+        break;
+      }
+      if (index++) put(",");
+      put(`${JSON.stringify(key.length > KEY_CHARS ? `${key.slice(0, KEY_CHARS)}…` : key)}:`);
+      visit(Reflect.get(item, key), depth + 1);
+    }
+    put("}");
+  };
+  visit(value, 0);
+  return out.join("");
 }
 
 /** The non-memory calls of an assistant message, bounded, and the ids of every call whose result the summary waits for. */
