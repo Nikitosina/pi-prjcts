@@ -12,6 +12,7 @@ Deploy no longer waits for idle projects: it gives running tool calls a short wi
 - `projects_redeploy` waits forever when the deploy child dies without writing a result.
 - A failed preparation (`npm ci`, `npm run check`) stops the host anyway, or `projects_redeploy` reports it as deployed.
 - A rollback leaves `projects_redeploy` without an answer, or reports success.
+- A host that crashes at start is not noticed: the deploy polls health for every start attempt (30 s and more) before it rolls back, and the reason does not say the host exited. A host that exits 0 because another host holds the lock is not a crash.
 - A coordinator of another project gets `projects_redeploy`, or the pi-prjcts Coordinator still asks the owner to approve a deploy.
 - A checkout change during preparation is silently deployed, or requeued forever; it must fail the deploy and say so.
 
