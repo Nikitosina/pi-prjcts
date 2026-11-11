@@ -25,7 +25,9 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 - Q8 A stored summary row keeps its bounded copy of the calls after it finished (state grows with history).
 - Q9 Summaries are turned off while a summary waits for the model catalog, and its request is still sent afterwards.
 - Q10 Restarts during the last attempt start more requests than the attempt limit.
-- Q11 A message whose results never arrive (a turn cut off mid-call) keeps its row and its copy of the calls forever.
+- Q11 A message whose results never arrive (a turn cut off mid-call) keeps its row and its copy of the calls forever. Its row must be dropped with its copy when the conversation moves on, when the turn that made the calls ends (finished or stopped), and, for a conversation that never runs again, after a fixed time checked at open and on a timer, so a restart does not keep it. A group whose tools are still running is not dropped by a restart, by another task ending or by another conversation's turn ending; a stopped turn whose calls all got their aborted results is complete and is summarized.
+- Q12 A large or deeply nested argument, nested-call argument or result is serialized or walked whole before it is cut: memory and time grow with the input, and deep nesting overflows the stack. Arguments are written by a bounded walk (depth, items, characters) with a marker where it cut; only the first result parts are read.
+- Q13 A damaged row in the summary database (bad JSON, wrong shape) crashes the host, blocks other summaries, or its content reaches the model. It must fail that summary quietly and drop its stored copy; usage ignores a damaged usage record; reads still write nothing.
 
 ## Settings and models
 
@@ -48,7 +50,7 @@ Covered by `tool-summaries-unit.mjs` (store, queue and model call with a fake ru
 - D3 A running call and a summary still being written look the same.
 - D4 A failed summary hides the calls or shows a loud error; it must fall back to the original calls with a quiet note.
 - D5 Turning summaries off keeps showing summaries.
-- D6 A summary arriving replaces or flashes the whole transcript, or animates again on later updates.
+- D6 A summary arriving replaces or flashes the whole transcript, or animates again on later updates. In the worker transcript too: unchanged turns keep their nodes, the focused line keeps focus, an open line stays open, and a reader who scrolled up stays where they were.
 - D7 Hidden thinking still shows in history, in the streaming turn or in the held step after a commit, or hiding it changes the model's thinking level or the agent's context.
 - D8 Worker transcripts or the Host agent ignore either setting.
 - D9 The summary line is not reachable with the keyboard, overflows a narrow (390 px) screen, or animates with reduced motion.

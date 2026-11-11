@@ -1,7 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, NestedToolCalls, TextContent, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { CommitPublication } from "@earendil-works/pi-durable";
+import type { CommitPublication, ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable";
+import { Type, type Static, type TSchema } from "typebox";
+import { Compile } from "typebox/compile";
 import { guardedStream } from "./model-guard.ts";
 import type { UiSettings } from "./ui-settings.ts";
 
@@ -22,8 +24,20 @@ export type ToolSummaryLimits = {
   timeoutMs: number;
   /** Wait before the second attempt; doubles each time. */
   retryMs: number;
+  /** A message still waiting for results after this long, with no result in between, is dropped with its copy of the calls. */
+  abandonMs: number;
+  /** How often open messages are checked against `abandonMs`; they are also checked at open. */
+  sweepMs: number;
 };
-export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = { concurrency: 2, queue: 64, attempts: 3, timeoutMs: 60_000, retryMs: 2_000 };
+export const DEFAULT_SUMMARY_LIMITS: ToolSummaryLimits = {
+  concurrency: 2,
+  queue: 64,
+  attempts: 3,
+  timeoutMs: 60_000,
+  retryMs: 2_000,
+  abandonMs: 24 * 60 * 60_000,
+  sweepMs: 60 * 60_000,
+};
 
 /** What a page shows: `pending` covers queued and running; cancelled and collecting summaries read as none. */
 export type ToolSummaryView =
@@ -39,7 +53,7 @@ export interface ToolSummaries {
   /** Calls `listener` with a conversation id when one of its summaries changed state. */
   watch(scope: string, listener: (conversationId: number) => void): () => void;
   /** The summaries of these assistant entries; empty while summaries are off. Writes nothing. */
-  read(scope: string, conversationId: number, entries: readonly number[]): Map<number, ToolSummaryView>;
+  read(query: { scope: string; conversationId: number; entries: readonly number[] }): Map<number, ToolSummaryView>;
   /** Summary model usage per conversation of `scope`, including cancelled and failed summaries. */
   usage(scope: string): Map<number, ToolSummaryUsage>;
   /** Host-wide usage: the total and one line per scope. Cut-off requests have an unknown cost that is not in `usage`. */
@@ -58,7 +72,7 @@ export function withToolSummaries<T extends { conversationId: number; items: rea
   page: T,
 ): T & { toolSummaries?: Record<string, ToolSummaryView> } {
   const entries = [...new Set(page.items.filter((item) => item.kind === "tool-call").map((item) => item.entryId))];
-  const found = service?.read(scope, page.conversationId, entries);
+  const found = service?.read({ scope, conversationId: page.conversationId, entries });
   return found?.size ? { ...page, toolSummaries: Object.fromEntries(found) } : page;
 }
 
@@ -77,14 +91,22 @@ export function summaryUsageTotal(byConversation: ReadonlyMap<number, ToolSummar
 
 /** Memory calls keep their own Remembered / Used memory rows (web/chat.js), so they are never summarized. */
 const MEMORY = /^projects_knowledge_(read|write|history|list)$/;
+/** The task of one turn: its tool calls run as its children, so once it ends no result of its calls is still coming. */
+const TURN_TASK = "pi.generation";
 const MAX_CALLS = 16,
   ARGS_CHARS = 400,
+  NESTED_ARGS_CHARS = 160,
   RESULT_CHARS = 600,
+  RESULT_PARTS = 32,
   NESTED_CALLS = 8,
+  JSON_DEPTH = 6,
+  JSON_ITEMS = 32,
+  KEY_CHARS = 80,
   PROMPT_CHARS = 20_000,
   OUTPUT_TOKENS = 200,
   SUMMARY_CHARS = 400,
   ERROR_CHARS = 300;
+const DAMAGED = "Stored summary data is damaged";
 const SYSTEM_PROMPT = [
   "You summarize what an AI agent's tool calls did, for a person skimming its transcript.",
   "Write one or two sentences, at most two sentences: the action and its outcome. Mention failures plainly. No preamble, lists or markdown.",
@@ -92,21 +114,105 @@ const SYSTEM_PROMPT = [
   "Describe only what the records show. When a record is cut off or incomplete, do not guess the missing outcome.",
 ].join("\n");
 
-type Call = { id: string; name: string; args: string; result?: string; isError?: boolean; images?: number; nested?: string };
-type Input = { calls: Call[]; more: number };
-type Row = {
-  scope: string;
-  conversation: number;
-  entry: number;
-  status: "collecting" | "pending" | "running" | "ready" | "failed" | "cancelled";
-  waiting: string | null;
-  calls: string | null;
-  text: string | null;
-  error: string | null;
-  model: string | null;
-  attempts: number;
-  usage: string | null;
+// Persisted shapes: every column and JSON copy read back from the database is checked against these before use (Q13).
+const Nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
+const StoredResult = Type.Object(
+  { text: Type.String(), isError: Type.Boolean(), images: Type.Integer({ minimum: 0 }), nested: Nullable(Type.String()) },
+  { additionalProperties: false },
+);
+const StoredCall = Type.Object(
+  { id: Type.String(), name: Type.String(), args: Type.String(), result: Nullable(StoredResult) },
+  { additionalProperties: false },
+);
+/** The bounded copy of a message's calls: at most `MAX_CALLS`, and how many more it made. */
+const StoredInput = Type.Object(
+  { calls: Type.Array(StoredCall, { maxItems: MAX_CALLS }), more: Type.Integer({ minimum: 0 }) },
+  { additionalProperties: false },
+);
+/** The ids of every call of the message whose result has not arrived, including calls past `MAX_CALLS`. */
+const StoredWaiting = Type.Array(Type.String());
+const StoredCost = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  total: Type.Number(),
+});
+const StoredUsage = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  totalTokens: Type.Number(),
+  cost: StoredCost,
+});
+const Status = Type.Union([
+  Type.Literal("collecting"),
+  Type.Literal("pending"),
+  Type.Literal("running"),
+  Type.Literal("ready"),
+  Type.Literal("failed"),
+  Type.Literal("cancelled"),
+]);
+const StoredRow = Type.Object({
+  id: Type.Integer(),
+  scope: Type.String(),
+  conversation: Type.Integer(),
+  entry: Type.Integer(),
+  status: Status,
+  waiting: Nullable(Type.String()),
+  calls: Nullable(Type.String()),
+  text: Nullable(Type.String()),
+  error: Nullable(Type.String()),
+  model: Nullable(Type.String()),
+  attempts: Type.Integer({ minimum: 0 }),
+  usage: Nullable(Type.String()),
+});
+const ReadRow = Type.Object({
+  entry: Type.Integer(),
+  status: Status,
+  text: Nullable(Type.String()),
+  error: Nullable(Type.String()),
+  model: Nullable(Type.String()),
+});
+const UsageRow = Type.Object({
+  conversation: Type.Integer(),
+  summaries: Type.Integer(),
+  requests: Type.Integer(),
+  interrupted: Type.Integer(),
+  usage: Type.String(),
+});
+const RowId = Type.Object({ id: Type.Integer() });
+const ScopeRow = Type.Object({ scope: Type.String() });
+const ConversationRow = Type.Object({ scope: Type.String(), conversation: Type.Integer() });
+const Count = Type.Object({ n: Type.Integer() });
+const check = {
+  input: Compile(StoredInput),
+  waiting: Compile(StoredWaiting),
+  usage: Compile(StoredUsage),
+  usageList: Compile(Type.Array(Nullable(Type.String()))),
+  row: Compile(StoredRow),
+  read: Compile(ReadRow),
+  usageRow: Compile(UsageRow),
+  rowId: Compile(RowId),
+  scope: Compile(ScopeRow),
+  conversation: Compile(ConversationRow),
+  count: Compile(Count),
 };
+type Input = Static<typeof StoredInput>;
+type StoredResult = Static<typeof StoredResult>;
+/** A summary row as the scheduler sees it; a state carries only the fields that state has. */
+type RowBase = { id: number; scope: string; conversation: ConversationId; entry: EntryId; attempts: number; usage: Usage | null };
+type Row =
+  | (RowBase & { status: "collecting"; waiting: string[]; input: Input })
+  | (RowBase & { status: "pending"; input: Input })
+  | (RowBase & { status: "running"; input: Input })
+  | (RowBase & { status: "ready" | "failed" | "cancelled" });
+/** How a request ended: a summary, a retry later, or a failure. Every outcome but a retry drops the stored copy of the calls. */
+type Outcome =
+  | { status: "ready"; text: string; model: string; usage: Usage }
+  | { status: "pending"; error: string; model: string; usage: Usage | null; interrupted: number }
+  | { status: "failed"; error: string; model: string | null; usage: Usage | null; interrupted: number };
 
 const ZERO_USAGE = (): Usage => ({
   input: 0,
@@ -132,6 +238,19 @@ const addUsage = (sum: Usage, more: Usage): Usage => ({
 });
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}… [${text.length - max} more chars]` : text);
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, ERROR_CHARS);
+/** The JSON in `text` when it has the shape `validator` checks; undefined for no text, bad JSON or another shape. */
+function parsed<T>(validator: { Check(value: unknown): value is T }, text: string | null): T | undefined {
+  if (text === null) return undefined;
+  try {
+    const value: unknown = JSON.parse(text);
+    return validator.Check(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+// Only called on integers the row schema checked: SQLite stores what it is given, so a stored id is branded after that check.
+const conversationId = (value: number) => value as ConversationId;
+const entryId = (value: number) => value as EntryId;
 
 /** The first one or two sentences, whatever the model returned. */
 export function twoSentences(text: string): string {
@@ -143,37 +262,88 @@ export function twoSentences(text: string): string {
   return kept.length > SUMMARY_CHARS ? `${kept.slice(0, SUMMARY_CHARS - 1)}…` : kept;
 }
 
-type ModelMessage = { role?: unknown; content?: unknown; toolCallId?: unknown; isError?: unknown; nestedCalls?: unknown };
-const modelMessage = (value: { model?: unknown }): ModelMessage | undefined => {
-  const first = Array.isArray(value.model) ? value.model[0] : undefined;
-  return first && typeof first === "object" ? (first as ModelMessage) : undefined;
-};
+/**
+ * JSON of `value` written by a bounded walk (Q12): at most `JSON_DEPTH` levels and `JSON_ITEMS` items or keys per level, and about
+ * `max` characters, so a huge or deeply nested value costs no more than a small one. Each cut is marked where it happened.
+ */
+export function boundedJson(value: unknown, max: number): string {
+  const out: string[] = [];
+  let length = 0;
+  const put = (text: string) => {
+    out.push(text);
+    length += text.length;
+  };
+  const visit = (item: unknown, depth: number): void => {
+    const room = max - length;
+    if (typeof item === "string") {
+      if (item.length <= room) return put(JSON.stringify(item));
+      const kept = item.slice(0, Math.max(0, room));
+      return put(`${JSON.stringify(kept)}…[${item.length - kept.length} more chars]`);
+    }
+    if (typeof item === "number" || typeof item === "boolean" || item === null) return put(JSON.stringify(item));
+    if (typeof item !== "object") return put("null");
+    if (depth === JSON_DEPTH) return put(Array.isArray(item) ? "[…]" : "{…}");
+    if (Array.isArray(item)) {
+      put("[");
+      let index = 0;
+      for (; index < Math.min(item.length, JSON_ITEMS) && length < max; index++) {
+        if (index) put(",");
+        visit(item[index], depth + 1);
+      }
+      if (index < item.length) put(`${index ? "," : ""}…[${item.length - index} more items]`);
+      return put("]");
+    }
+    put("{");
+    let index = 0;
+    for (const key in item) {
+      if (!Object.hasOwn(item, key)) continue;
+      if (index === JSON_ITEMS || length >= max) {
+        put(`${index ? "," : ""}…[more keys]`);
+        break;
+      }
+      if (index++) put(",");
+      put(`${JSON.stringify(key.length > KEY_CHARS ? `${key.slice(0, KEY_CHARS)}…` : key)}:`);
+      visit(Reflect.get(item, key), depth + 1);
+    }
+    put("}");
+  };
+  visit(value, 0);
+  return out.join("");
+}
 
-/** The non-memory calls of an assistant entry, bounded. */
-function callsOf(content: unknown): Input | undefined {
-  if (!Array.isArray(content)) return undefined;
-  const calls = content.filter(
-    (part): part is { type: "toolCall"; id: string; name: string; arguments?: unknown } =>
-      part?.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string" && !MEMORY.test(part.name),
+/** The non-memory calls of an assistant message, bounded, and the ids of every call whose result the summary waits for. */
+function callsOf(record: AssistantMessage): { input: Input; waiting: string[] } | undefined {
+  const calls = (Array.isArray(record.content) ? record.content : []).flatMap((part) =>
+    part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string" && !MEMORY.test(part.name) ? [part] : [],
   );
   if (!calls.length) return undefined;
   return {
-    calls: calls.map((call) => ({ id: call.id, name: call.name, args: clip(JSON.stringify(call.arguments ?? {}), ARGS_CHARS) })),
-    more: 0,
+    // Every call is awaited, even past the limit, so the summary starts after the message's last result.
+    waiting: calls.map((call) => call.id),
+    input: {
+      calls: calls
+        .slice(0, MAX_CALLS)
+        .map((call) => ({ id: call.id, name: call.name, args: boundedJson(call.arguments, ARGS_CHARS), result: null })),
+      more: Math.max(0, calls.length - MAX_CALLS),
+    },
   };
 }
 
-/** The bounded text of one result: text parts only; images are counted, never sent. */
-function resultOf(record: ModelMessage): Pick<Call, "result" | "isError" | "images" | "nested"> {
-  const parts = Array.isArray(record.content)
-    ? record.content
-    : typeof record.content === "string"
-      ? [{ type: "text", text: record.content }]
+/** The bounded text of one result: the text of its first parts only; images are counted, never sent. */
+function resultOf(record: ToolResultMessage): StoredResult {
+  // Older results may carry their text as a plain string.
+  const content: unknown = record.content;
+  const parts: readonly (TextContent | ImageContent)[] = Array.isArray(content)
+    ? content
+    : typeof content === "string"
+      ? [{ type: "text", text: content }]
       : [];
+  const read = Math.min(parts.length, RESULT_PARTS);
   const texts: string[] = [];
   let images = 0,
     length = 0;
-  for (const part of parts as { type?: unknown; text?: unknown }[]) {
+  for (let index = 0; index < read; index++) {
+    const part = parts[index];
     if (part?.type === "image") images++;
     else if (part?.type === "text" && typeof part.text === "string") {
       // Only the head of each part is copied; the full length is still reported.
@@ -182,44 +352,36 @@ function resultOf(record: ModelMessage): Pick<Call, "result" | "isError" | "imag
     }
   }
   const head = texts.join("\n").slice(0, RESULT_CHARS);
-  const nested = nestedOf(record.nestedCalls);
-  return {
-    result: length - 1 > RESULT_CHARS ? `${head}… [${length - 1 - RESULT_CHARS} more chars]` : head,
-    ...(record.isError === true ? { isError: true } : {}),
-    ...(images ? { images } : {}),
-    ...(nested ? { nested } : {}),
-  };
+  const cut = length - 1 > RESULT_CHARS ? `… [${length - 1 - RESULT_CHARS} more chars]` : "";
+  const unread = parts.length > read ? ` [${parts.length - read} more parts not read]` : "";
+  const nested = Array.isArray(record.nestedCalls?.calls) ? nestedOf(record.nestedCalls) : null;
+  return { text: `${head}${cut}${unread}`, isError: record.isError === true, images, nested };
 }
 
 /** Codemode's record of the calls it made: names, arguments and status only, as recorded; results were never kept. */
-function nestedOf(value: unknown): string | undefined {
-  const record = value as { calls?: unknown; complete?: unknown } | undefined;
-  if (!record || !Array.isArray(record.calls)) return undefined;
-  const lines = (record.calls as { name?: unknown; arguments?: unknown; argumentsBytes?: unknown; status?: unknown; error?: unknown }[])
-    .slice(0, NESTED_CALLS)
-    .map((call) => {
-      const args =
-        call.arguments !== undefined
-          ? clip(JSON.stringify(call.arguments), 160)
-          : typeof call.argumentsBytes === "number"
-            ? `(arguments omitted, ${call.argumentsBytes} bytes)`
-            : "";
-      const error = typeof call.error === "string" ? ` error: ${clip(call.error, 120)}` : "";
-      return `${String(call.name)} ${args} -> ${String(call.status)}${error}`;
-    });
+function nestedOf(record: NestedToolCalls): string {
+  const lines = record.calls.slice(0, NESTED_CALLS).map((call) => {
+    const args =
+      call.arguments !== undefined
+        ? boundedJson(call.arguments, NESTED_ARGS_CHARS)
+        : typeof call.argumentsBytes === "number"
+          ? `(arguments omitted, ${call.argumentsBytes} bytes)`
+          : "";
+    const error = typeof call.error === "string" ? ` error: ${clip(call.error, 120)}` : "";
+    return `${clip(String(call.name), 80)} ${args} -> ${String(call.status)}${error}`;
+  });
   const dropped = record.calls.length - lines.length;
   if (dropped > 0) lines.push(`${dropped} more nested calls`);
-  if (record.complete === false)
-    lines.push("(this record is incomplete: calls were dropped, cut or still running; their outcomes are unknown)");
+  if (!record.complete) lines.push("(this record is incomplete: calls were dropped, cut or still running; their outcomes are unknown)");
   return lines.join("\n");
 }
 
 function prompt(input: Input): string {
   const blocks = input.calls.map((call, index) => {
-    const lines = [`### Call ${index + 1}: ${call.name}${call.isError ? " (failed)" : ""}`, `Arguments: ${call.args}`];
-    if (call.nested) lines.push(`Nested calls it made (results not recorded):\n${call.nested}`);
-    lines.push(`Result:\n${call.result ?? "(no result)"}`);
-    if (call.images) lines.push(`(${call.images} image${call.images === 1 ? "" : "s"} omitted)`);
+    const lines = [`### Call ${index + 1}: ${call.name}${call.result?.isError ? " (failed)" : ""}`, `Arguments: ${call.args}`];
+    if (call.result?.nested) lines.push(`Nested calls it made (results not recorded):\n${call.result.nested}`);
+    lines.push(`Result:\n${call.result?.text ?? "(no result)"}`);
+    if (call.result?.images) lines.push(`(${call.result.images} image${call.result.images === 1 ? "" : "s"} omitted)`);
     return lines.join("\n");
   });
   const more = input.more ? `\n(${input.more} more calls of this message are not shown)` : "";
@@ -231,6 +393,8 @@ export function openToolSummaries(options: {
   settings: ToolSummarySettings;
   runtime: () => Promise<SummaryRuntime>;
   limits?: Partial<ToolSummaryLimits>;
+  /** Where an unexpected failure of the store goes; summaries never break the commit that fed them. */
+  report?: (detail: string) => void;
 }): ToolSummaries {
   const limits = { ...DEFAULT_SUMMARY_LIMITS, ...options.limits };
   let settings = options.settings,
@@ -247,40 +411,53 @@ export function openToolSummaries(options: {
     CREATE INDEX IF NOT EXISTS summaries_open ON summaries (scope, conversation, status);
     CREATE INDEX IF NOT EXISTS summaries_status ON summaries (status);`);
   const now = () => Date.now();
+  const ROW = "SELECT rowid AS id, scope, conversation, entry, status, waiting, calls, text, error, model, attempts, usage FROM summaries";
+  // Dropping a message's copy of its calls: it can hold whatever the tools were given or returned.
+  const DROP = "status = 'cancelled', calls = NULL, waiting = NULL, updated = :now";
   const sql = {
     insert: db.prepare(
-      "INSERT OR IGNORE INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES (?, ?, ?, 'collecting', ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO summaries (scope, conversation, entry, status, waiting, calls, created, updated) VALUES (:scope, :conversation, :entry, 'collecting', :waiting, :calls, :now, :now)",
     ),
-    collecting: db.prepare("SELECT * FROM summaries WHERE scope = ? AND conversation = ? AND status = 'collecting'"),
-    abandon: db.prepare(
-      "UPDATE summaries SET status = 'cancelled', calls = NULL, waiting = NULL, updated = ? WHERE scope = ? AND conversation = ? AND status = 'collecting' AND entry < ?",
+    collecting: db.prepare(`${ROW} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting'`),
+    movedOn: db.prepare(
+      `UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting' AND entry < :entry`,
     ),
-    get: db.prepare("SELECT * FROM summaries WHERE scope = ? AND entry = ?"),
-    collect: db.prepare("UPDATE summaries SET waiting = ?, calls = ?, updated = ? WHERE scope = ? AND entry = ? AND status = 'collecting'"),
+    turnEnded: db.prepare(`UPDATE summaries SET ${DROP} WHERE scope = :scope AND conversation = :conversation AND status = 'collecting'`),
+    stale: db.prepare(`UPDATE summaries SET ${DROP} WHERE status = 'collecting' AND updated < :before`),
+    get: db.prepare(`${ROW} WHERE rowid = :id`),
+    collect: db.prepare(
+      "UPDATE summaries SET waiting = :waiting, calls = :calls, updated = :now WHERE rowid = :id AND status = 'collecting'",
+    ),
+    damaged: db.prepare(
+      "UPDATE summaries SET status = 'failed', error = :error, calls = NULL, waiting = NULL, updated = :now WHERE rowid = :id RETURNING scope, conversation",
+    ),
     active: db.prepare("SELECT COUNT(*) AS n FROM summaries WHERE status IN ('pending','running')"),
-    status: db.prepare("UPDATE summaries SET status = ?, updated = ? WHERE scope = ? AND entry = ?"),
+    queue: db.prepare("UPDATE summaries SET status = 'pending', updated = :now WHERE rowid = :id"),
     start: db.prepare(
-      "UPDATE summaries SET status = 'running', model = ?, attempts = attempts + 1, requests = requests + 1, updated = ? WHERE scope = ? AND entry = ?",
+      "UPDATE summaries SET status = 'running', model = :model, attempts = attempts + 1, requests = requests + 1, updated = :now WHERE rowid = :id",
     ),
-    finish: db.prepare(
-      "UPDATE summaries SET status = ?, text = ?, error = ?, model = COALESCE(?, model), usage = ?, interrupted = interrupted + ?, calls = CASE WHEN ? = 'pending' THEN calls ELSE NULL END, waiting = NULL, updated = ? WHERE scope = ? AND entry = ?",
+    retry: db.prepare(
+      "UPDATE summaries SET status = 'pending', error = :error, model = :model, usage = :usage, interrupted = interrupted + :interrupted, updated = :now WHERE rowid = :id",
+    ),
+    settle: db.prepare(
+      "UPDATE summaries SET status = :status, text = :text, error = :error, model = COALESCE(:model, model), usage = :usage, interrupted = interrupted + :interrupted, calls = NULL, waiting = NULL, updated = :now WHERE rowid = :id",
     ),
     cancel: db.prepare(
-      "UPDATE summaries SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = ? WHERE status IN ('collecting','pending','running') RETURNING scope, conversation",
+      "UPDATE summaries SET status = 'cancelled', interrupted = interrupted + (status = 'running'), calls = NULL, waiting = NULL, updated = :now WHERE status IN ('collecting','pending','running') RETURNING scope, conversation",
     ),
     recover: db.prepare(
-      "UPDATE summaries SET status = 'pending', interrupted = interrupted + 1, updated = ? WHERE status = 'running' AND attempts < ?",
+      "UPDATE summaries SET status = 'pending', interrupted = interrupted + 1, updated = :now WHERE status = 'running' AND attempts < :attempts",
     ),
     exhaust: db.prepare(
-      "UPDATE summaries SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = ? WHERE status = 'running'",
+      "UPDATE summaries SET status = 'failed', error = 'The last attempt was cut off by a host restart', interrupted = interrupted + 1, calls = NULL, waiting = NULL, updated = :now WHERE status = 'running'",
     ),
-    pending: db.prepare("SELECT scope, entry FROM summaries WHERE status = 'pending' ORDER BY updated"),
+    pending: db.prepare("SELECT rowid AS id FROM summaries WHERE status = 'pending' ORDER BY updated"),
     read: db.prepare(
-      "SELECT entry, status, text, error, model FROM summaries WHERE scope = ? AND conversation = ? AND entry IN (SELECT value FROM json_each(?))",
+      "SELECT entry, status, text, error, model FROM summaries WHERE scope = :scope AND conversation = :conversation AND entry IN (SELECT value FROM json_each(:entries))",
     ),
     scopes: db.prepare("SELECT DISTINCT scope FROM summaries WHERE requests > 0"),
     usage: db.prepare(
-      "SELECT conversation, SUM(status = 'ready') AS summaries, SUM(requests) AS requests, SUM(interrupted) AS interrupted, json_group_array(usage) AS usage FROM summaries WHERE scope = ? AND requests > 0 GROUP BY conversation",
+      "SELECT conversation, SUM(status = 'ready') AS summaries, SUM(requests) AS requests, SUM(interrupted) AS interrupted, json_group_array(usage) AS usage FROM summaries WHERE scope = :scope AND requests > 0 GROUP BY conversation",
     ),
   };
   const listeners = new Map<string, Set<(conversationId: number) => void>>();
@@ -291,42 +468,64 @@ export function openToolSummaries(options: {
       } catch {}
     }
   };
-  const key = (scope: string, entry: number) => JSON.stringify([scope, entry]);
   // In-memory schedule over the durable rows: the queue order, retry timers and running requests. Rows are the truth after a restart.
-  const queue: [string, number][] = [];
+  const queue: number[] = [];
   const timers = new Set<ReturnType<typeof setTimeout>>();
-  const running = new Map<string, AbortController>();
+  const running = new Map<number, AbortController>();
   const work = new Set<Promise<void>>();
 
-  const finish = (
-    row: Row,
-    status: Row["status"],
-    fields: { text?: string; error?: string; model?: string; usage?: Usage; interrupted?: number },
-  ) => {
-    const usage = fields.usage ? addUsage(row.usage ? (JSON.parse(row.usage) as Usage) : ZERO_USAGE(), fields.usage) : undefined;
-    sql.finish.run(
-      status,
-      fields.text ?? null,
-      fields.error ?? null,
-      fields.model ?? null,
-      usage ? JSON.stringify(usage) : row.usage,
-      fields.interrupted ?? 0,
-      status,
-      now(),
-      row.scope,
-      row.entry,
-    );
+  /** A stored row checked against its schema; a damaged one is failed and loses its copy (Q13), so it is read once as damaged. */
+  const rowOf = (raw: unknown): Row | undefined => {
+    const row = check.row.Check(raw) ? raw : undefined;
+    const base = row && {
+      id: row.id,
+      scope: row.scope,
+      conversation: conversationId(row.conversation),
+      entry: entryId(row.entry),
+      attempts: row.attempts,
+      usage: row.usage === null ? null : parsed(check.usage, row.usage),
+    };
+    if (row && base && base.usage !== undefined) {
+      const usage = base.usage;
+      if (row.status === "ready" || row.status === "failed" || row.status === "cancelled") return { ...base, usage, status: row.status };
+      const input = parsed(check.input, row.calls);
+      if (input && (row.status === "pending" || row.status === "running")) return { ...base, usage, status: row.status, input };
+      const waiting = parsed(check.waiting, row.waiting);
+      if (input && waiting && row.status === "collecting") return { ...base, usage, status: row.status, input, waiting };
+    }
+    if (!check.rowId.Check(raw)) return undefined;
+    for (const touched of sql.damaged.all({ id: raw.id, error: DAMAGED, now: now() }))
+      if (check.conversation.Check(touched)) notify(touched.scope, touched.conversation);
+    return undefined;
+  };
+  const load = (id: number) => rowOf(sql.get.get({ id }));
+
+  const finish = (row: RowBase, outcome: Outcome) => {
+    const spent = outcome.usage ? addUsage(row.usage ?? ZERO_USAGE(), outcome.usage) : row.usage;
+    const usage = spent ? JSON.stringify(spent) : null;
+    if (outcome.status === "pending")
+      sql.retry.run({ id: row.id, error: outcome.error, model: outcome.model, usage, interrupted: outcome.interrupted, now: now() });
+    else
+      sql.settle.run({
+        id: row.id,
+        status: outcome.status,
+        text: outcome.status === "ready" ? outcome.text : null,
+        error: outcome.status === "failed" ? outcome.error : null,
+        model: outcome.model,
+        usage,
+        interrupted: outcome.status === "failed" ? outcome.interrupted : 0,
+        now: now(),
+      });
     notify(row.scope, row.conversation);
   };
-  const enqueue = (scope: string, entry: number) => {
-    queue.push([scope, entry]);
+  const enqueue = (id: number) => {
+    queue.push(id);
     pump();
   };
   const pump = () => {
     while (!closed && settings.enabled && work.size < limits.concurrency && queue.length) {
-      const [scope, entry] = queue.shift()!;
-      const row = sql.get.get(scope, entry) as Row | undefined;
-      if (!row || row.status !== "pending") continue;
+      const row = load(queue.shift()!);
+      if (row?.status !== "pending") continue;
       const task = summarize(row).finally(() => {
         work.delete(task);
         pump();
@@ -335,7 +534,7 @@ export function openToolSummaries(options: {
     }
   };
 
-  async function summarize(row: Row): Promise<void> {
+  async function summarize(row: Extract<Row, { status: "pending" }>): Promise<void> {
     let runtime: SummaryRuntime | undefined, loadError: unknown;
     try {
       runtime = await options.runtime();
@@ -343,28 +542,26 @@ export function openToolSummaries(options: {
       loadError = error;
     }
     // Settings may have changed while the catalog loaded: a cancelled row stays cancelled.
-    if (closed || !settings.enabled || (sql.get.get(row.scope, row.entry) as Row | undefined)?.status !== "pending") return;
+    if (closed || !settings.enabled || load(row.id)?.status !== "pending") return;
     const ref = settings.model ?? "";
     const slash = ref.indexOf("/");
-    const fail = (error: string) => finish(row, "failed", { error, model: ref || undefined });
+    const fail = (error: string) => finish(row, { status: "failed", error, model: ref || null, usage: null, interrupted: 0 });
     if (!runtime) return fail(`Model catalog failed to load: ${message(loadError)}`);
     const model = slash > 0 ? runtime.getModel(ref.slice(0, slash), ref.slice(slash + 1)) : undefined;
     if (!model) return fail(ref ? `Summary model ${ref} is not installed` : "No summary model is selected");
     if (!runtime.getProviderAuthStatus(model.provider).configured) return fail(`Summary model ${ref} has no configured credentials`);
-    const id = key(row.scope, row.entry);
     const abort = new AbortController();
-    running.set(id, abort);
-    sql.start.run(ref, now(), row.scope, row.entry);
+    running.set(row.id, abort);
+    sql.start.run({ id: row.id, model: ref, now: now() });
     notify(row.scope, row.conversation);
     let reply: AssistantMessage | undefined, thrown: unknown;
     try {
       const dispatch: ModelRuntime["streamSimple"] = (target, context, streamOptions) =>
         runtime.streamSimple(target, context, streamOptions);
-      const input = JSON.parse(row.calls ?? '{"calls":[],"more":0}') as Input;
       reply = await guardedStream(
         dispatch,
         model,
-        { systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: prompt(input), timestamp: now() }] },
+        { systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: prompt(row.input), timestamp: now() }] },
         { maxTokens: OUTPUT_TOKENS, signal: abort.signal },
         abort.signal,
         limits.timeoutMs,
@@ -372,27 +569,27 @@ export function openToolSummaries(options: {
     } catch (error) {
       thrown = error;
     } finally {
-      running.delete(id);
+      running.delete(row.id);
     }
     // Closing leaves the row running; the next open counts it as interrupted and asks again.
     if (closed) return;
-    const current = { ...row, ...(sql.get.get(row.scope, row.entry) as Row) };
-    if (current.status !== "running") return;
+    const current = load(row.id);
+    if (current?.status !== "running") return;
     const text =
       reply?.stopReason === "stop" || reply?.stopReason === "length"
         ? twoSentences(reply.content.map((part) => (part.type === "text" ? part.text : "")).join(""))
         : "";
-    if (text) return finish(current, "ready", { text, model: ref, usage: reply!.usage });
+    if (reply && text) return finish(current, { status: "ready", text, model: ref, usage: reply.usage });
     // A cut-off or thrown request reported no usage the host can trust: its cost is unknown, not zero.
     const timedOut = !reply || reply.stopReason === "aborted" || /timed out/i.test(reply.errorMessage ?? "");
     const error = thrown ? message(thrown) : reply?.errorMessage ? message(reply.errorMessage) : "The model returned no text";
-    const spent = { usage: timedOut ? undefined : reply?.usage, interrupted: timedOut ? 1 : 0, model: ref };
-    if (current.attempts >= limits.attempts) return finish(current, "failed", { error, ...spent });
-    finish(current, "pending", { error, ...spent });
+    const spent = { error, model: ref, usage: timedOut ? null : (reply?.usage ?? null), interrupted: timedOut ? 1 : 0 };
+    if (current.attempts >= limits.attempts) return finish(current, { status: "failed", ...spent });
+    finish(current, { status: "pending", ...spent });
     const timer = setTimeout(
       () => {
         timers.delete(timer);
-        enqueue(row.scope, row.entry);
+        enqueue(row.id);
       },
       limits.retryMs * 2 ** (current.attempts - 1),
     );
@@ -401,11 +598,13 @@ export function openToolSummaries(options: {
   }
 
   /** The message has every result: queue it, or fail it quietly when the queue is full. */
-  const ready = (row: Row) => {
-    if ((sql.active.get() as { n: number }).n >= limits.queue) return finish(row, "failed", { error: "The summary queue is full" });
-    sql.status.run("pending", now(), row.scope, row.entry);
+  const ready = (row: RowBase) => {
+    const active = sql.active.get();
+    if (check.count.Check(active) && active.n >= limits.queue)
+      return finish(row, { status: "failed", error: "The summary queue is full", model: null, usage: null, interrupted: 0 });
+    sql.queue.run({ id: row.id, now: now() });
     notify(row.scope, row.conversation);
-    enqueue(row.scope, row.entry);
+    enqueue(row.id);
   };
 
   const cancelAll = () => {
@@ -413,52 +612,79 @@ export function openToolSummaries(options: {
     for (const timer of timers) clearTimeout(timer);
     timers.clear();
     for (const abort of running.values()) abort.abort();
-    const touched = sql.cancel.all(now()) as { scope: string; conversation: number }[];
+    const touched = sql.cancel.all({ now: now() }).filter((row) => check.conversation.Check(row));
     for (const item of new Map(touched.map((row) => [`${row.scope}:${row.conversation}`, row])).values())
       notify(item.scope, item.conversation);
   };
 
+  /** One result arrived: it joins the copy of the message waiting for it, which is queued once nothing is missing. */
+  const collect = (scope: string, conversation: ConversationId, record: ToolResultMessage) => {
+    for (const raw of sql.collecting.all({ scope, conversation })) {
+      const row = rowOf(raw);
+      if (row?.status !== "collecting" || !row.waiting.includes(record.toolCallId)) continue;
+      const result = resultOf(record);
+      const input = { ...row.input, calls: row.input.calls.map((call) => (call.id === record.toolCallId ? { ...call, result } : call)) };
+      const waiting = row.waiting.filter((id) => id !== record.toolCallId);
+      sql.collect.run({ id: row.id, waiting: JSON.stringify(waiting), calls: JSON.stringify(input), now: now() });
+      if (!waiting.length) ready(row);
+      return;
+    }
+  };
+  const observeEntry = (scope: string, entry: EntryRecord) => {
+    const record = entry.model?.[0];
+    if (record?.role === "assistant") {
+      // A new message means the earlier ones of this conversation got every result they ever will.
+      sql.movedOn.run({ scope, conversation: entry.conversationId, entry: entry.id, now: now() });
+      const found = callsOf(record);
+      if (found)
+        sql.insert.run({
+          scope,
+          conversation: entry.conversationId,
+          entry: entry.id,
+          waiting: JSON.stringify(found.waiting),
+          calls: JSON.stringify(found.input),
+          now: now(),
+        });
+    } else if (record?.role === "toolResult") collect(scope, entry.conversationId, record);
+  };
+  /** Messages of conversations that never ran again: dropped once nothing arrived for `abandonMs`, also across restarts. */
+  const sweep = () => sql.stale.run({ before: now() - limits.abandonMs, now: now() });
+  const guarded = (what: string, run: () => void) => {
+    try {
+      run();
+    } catch (error) {
+      options.report?.(`Tool summaries could not ${what}: ${message(error)}`);
+    }
+  };
+
   // Recovery: requests cut off by the last exit are counted as interrupted and asked again.
-  sql.recover.run(now(), limits.attempts);
-  sql.exhaust.run(now());
-  if (settings.enabled) for (const row of sql.pending.all() as { scope: string; entry: number }[]) queue.push([row.scope, row.entry]);
-  else cancelAll();
+  sql.recover.run({ now: now(), attempts: limits.attempts });
+  sql.exhaust.run({ now: now() });
+  sweep();
+  if (settings.enabled) for (const row of sql.pending.all()) if (check.rowId.Check(row)) queue.push(row.id);
+  if (!settings.enabled) cancelAll();
   pump();
+  const sweeper = setInterval(() => guarded("drop abandoned messages", sweep), limits.sweepMs);
+  sweeper.unref?.();
 
   return {
     observe(scope, publication) {
       if (closed || !settings.enabled) return;
-      for (const change of publication.changes) {
-        if (change.type !== "entry") continue;
-        const entry = change.value as { id: number; conversationId: unknown; model?: unknown };
-        const record = modelMessage(entry);
-        const conversation = Number(entry.conversationId);
-        if (record?.role === "assistant") {
-          // A new message means the earlier ones of this conversation got every result they ever will.
-          sql.abandon.run(now(), scope, conversation, Number(entry.id));
-          const input = callsOf(record.content);
-          if (!input) continue;
-          // Every call is awaited, even past the limit, so the summary starts after the message's last result.
-          const waiting = input.calls.map((call) => call.id);
-          if (input.calls.length > MAX_CALLS) {
-            input.more = input.calls.length - MAX_CALLS;
-            input.calls = input.calls.slice(0, MAX_CALLS);
-          }
-          sql.insert.run(scope, conversation, Number(entry.id), JSON.stringify(waiting), JSON.stringify(input), now(), now());
-        } else if (record?.role === "toolResult" && typeof record.toolCallId === "string") {
-          for (const row of sql.collecting.all(scope, conversation) as Row[]) {
-            const waiting = JSON.parse(row.waiting ?? "[]") as string[];
-            if (!waiting.includes(record.toolCallId)) continue;
-            const input = JSON.parse(row.calls ?? '{"calls":[],"more":0}') as Input;
-            const call = input.calls.find((item) => item.id === record.toolCallId);
-            if (call) Object.assign(call, resultOf(record));
-            const left = waiting.filter((id) => id !== record.toolCallId);
-            sql.collect.run(JSON.stringify(left), JSON.stringify(input), now(), scope, row.entry);
-            if (!left.length) ready({ ...row, calls: JSON.stringify(input) });
-            break;
-          }
+      guarded("read a commit", () => {
+        const ended = new Set<ConversationId>();
+        for (const change of publication.changes) {
+          if (change.type === "entry") observeEntry(scope, change.value);
+          // A turn that ended (finished, failed or stopped) gets no more results; its results were committed before, or in this commit.
+          else if (
+            change.type === "task" &&
+            change.value.kind === TURN_TASK &&
+            !change.value.owner &&
+            change.value.state.status === "terminal"
+          )
+            ended.add(change.value.conversationId);
         }
-      }
+        for (const conversation of ended) sql.turnEnded.run({ scope, conversation, now: now() });
+      });
     },
     watch(scope, listener) {
       const set = listeners.get(scope) ?? new Set();
@@ -466,38 +692,37 @@ export function openToolSummaries(options: {
       set.add(listener);
       return () => set.delete(listener);
     },
-    read(scope, conversationId, entries) {
+    read({ scope, conversationId, entries }) {
       const out = new Map<number, ToolSummaryView>();
       if (!settings.enabled || !entries.length) return out;
-      for (const row of sql.read.all(scope, conversationId, JSON.stringify(entries)) as Pick<
-        Row,
-        "entry" | "status" | "text" | "error" | "model"
-      >[]) {
-        if (row.status === "pending" || row.status === "running") out.set(row.entry, { status: "pending", model: row.model });
-        else if (row.status === "ready") out.set(row.entry, { status: "ready", text: row.text ?? "", model: row.model });
-        else if (row.status === "failed") out.set(row.entry, { status: "failed", error: row.error ?? "Summary failed", model: row.model });
+      for (const row of sql.read.all({ scope, conversation: conversationId, entries: JSON.stringify(entries) })) {
+        if (!check.read.Check(row)) continue;
+        const model = row.model;
+        if (row.status === "pending" || row.status === "running") out.set(row.entry, { status: "pending", model });
+        else if (row.status === "ready" && row.text !== null) out.set(row.entry, { status: "ready", text: row.text, model });
+        else if (row.status === "ready" || row.status === "failed")
+          out.set(row.entry, { status: "failed", error: row.error ?? (row.status === "ready" ? DAMAGED : "Summary failed"), model });
       }
       return out;
     },
     usage(scope) {
       const out = new Map<number, ToolSummaryUsage>();
-      for (const row of sql.usage.all(scope) as {
-        conversation: number;
-        summaries: number;
-        requests: number;
-        interrupted: number;
-        usage: string;
-      }[]) {
-        const usage = (JSON.parse(row.usage) as (string | null)[]).reduce<Usage>(
-          (sum, item) => (item ? addUsage(sum, JSON.parse(item) as Usage) : sum),
-          ZERO_USAGE(),
-        );
+      for (const row of sql.usage.all({ scope })) {
+        if (!check.usageRow.Check(row)) continue;
+        // A damaged usage record counts as nothing rather than hiding the conversation's other summaries.
+        const usage = (parsed(check.usageList, row.usage) ?? []).reduce<Usage>((sum, item) => {
+          const spent = parsed(check.usage, item);
+          return spent ? addUsage(sum, spent) : sum;
+        }, ZERO_USAGE());
         out.set(row.conversation, { summaries: row.summaries, requests: row.requests, interrupted: row.interrupted, usage });
       }
       return out;
     },
     totals() {
-      const scopes = (sql.scopes.all() as { scope: string }[]).map(({ scope }) => ({ scope, ...summaryUsageTotal(this.usage(scope)) }));
+      const scopes = sql.scopes
+        .all()
+        .flatMap((row) => (check.scope.Check(row) ? [row.scope] : []))
+        .map((scope) => ({ scope, ...summaryUsageTotal(this.usage(scope)) }));
       return { ...summaryUsageTotal(new Map(scopes.map((item, index) => [index, item]))), scopes };
     },
     configure(next) {
@@ -509,6 +734,7 @@ export function openToolSummaries(options: {
     async close() {
       if (closed) return;
       closed = true;
+      clearInterval(sweeper);
       for (const timer of timers) clearTimeout(timer);
       for (const abort of running.values()) abort.abort();
       await Promise.allSettled([...work]);

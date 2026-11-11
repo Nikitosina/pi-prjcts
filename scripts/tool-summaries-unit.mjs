@@ -150,7 +150,29 @@ const open = (runtime, settings = { enabled: true, model: MODEL }, limits = {}) 
   openToolSummaries({ path, settings, runtime: async () => runtime, limits: { ...LIMITS, ...limits } });
 const userText = (request) =>
   request.context.messages.map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text).join(""))).join("\n");
-const statusOf = (service, scope, conversationId, entry) => service.read(scope, conversationId, [entry]).get(entry);
+const statusOf = (service, scope, conversationId, entry) => service.read({ scope, conversationId, entries: [entry] }).get(entry);
+/** The stored row of an entry, read straight from the database. */
+const stored = (entry) => {
+  const db = new DatabaseSync(path, { readOnly: true });
+  const row = db.prepare("SELECT status, calls, waiting, updated FROM summaries WHERE entry = ?").get(entry);
+  db.close();
+  return row && { ...row };
+};
+/** A Pi Durable task change of `conversationId`: by default its turn (`pi.generation`) ending. */
+const task = (conversationId, { kind = "pi.generation", owner, status = "terminal" } = {}) => ({
+  type: "task",
+  value: {
+    id: 5_000 + seq,
+    conversationId,
+    kind,
+    version: 1,
+    input: {},
+    background: false,
+    abortRequested: status === "terminal",
+    ...(owner ? { owner } : {}),
+    state: status === "terminal" ? { status, outcome: { status: "aborted" } } : { status, checkpoint: {} },
+  },
+});
 
 // G1 G2 Q6 Q7: one summary per assistant message, only after every result; no tools; untrusted data framing; one or two sentences.
 {
@@ -199,7 +221,7 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   // G6: reads have no side effects.
   const db = new DatabaseSync(path, { readOnly: true });
   const before = db.prepare("SELECT COUNT(*) AS n, MAX(updated) AS u FROM summaries").get();
-  service.read("p1", 7, [first.value.id, second.value.id, 9999]);
+  service.read({ scope: "p1", conversationId: 7, entries: [first.value.id, second.value.id, 9999] });
   service.usage("p1");
   assert.deepEqual(db.prepare("SELECT COUNT(*) AS n, MAX(updated) AS u FROM summaries").get(), before, "G6: reads write nothing");
   // Q8: a finished row keeps no copy of the calls.
@@ -249,7 +271,7 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   service.observe("p1", commit(result(9, straddle, "done")));
   await delay(30);
   assert.equal(runtime.requests.length, 0, "G5: enabling summarizes nothing that started while summaries were off");
-  assert.equal(service.read("p1", 9, [offMessage.value.id]).size, 0);
+  assert.equal(service.read({ scope: "p1", conversationId: 9, entries: [offMessage.value.id] }).size, 0);
 
   // Enabled at the call, disabled before its results: cancelled, and re-enabling does not bring it back.
   const late = nextCall("bash", { command: "echo late" });
@@ -277,7 +299,11 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   await delay(30);
   assert.equal(runtime.requests.length, 1, "S3: queued work does not run after disabling");
   service.configure({ enabled: true, model: MODEL });
-  assert.equal(service.read("p1", 9, [busyMessage.value.id, queuedMessage.value.id]).size, 0, "cancelled summaries read as none");
+  assert.equal(
+    service.read({ scope: "p1", conversationId: 9, entries: [busyMessage.value.id, queuedMessage.value.id] }).size,
+    0,
+    "cancelled summaries read as none",
+  );
 
   // S4: the next summary uses the new model without reopening.
   service.configure({ enabled: true, model: OTHER });
@@ -290,7 +316,11 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
 
   // D5: while off, reads attach nothing even for cached summaries; turning on shows them again.
   service.configure({ enabled: false, model: OTHER });
-  assert.equal(service.read("p1", 9, [nextMessage.value.id]).size, 0, "D5: summaries off reads as none");
+  assert.equal(
+    service.read({ scope: "p1", conversationId: 9, entries: [nextMessage.value.id] }).size,
+    0,
+    "D5: summaries off reads as none",
+  );
   service.configure({ enabled: true, model: OTHER });
   assert.equal(statusOf(service, "p1", 9, nextMessage.value.id)?.status, "ready", "cached summaries come back");
   await service.close();
@@ -451,7 +481,11 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   await delay(30);
   assert.equal(runtime.requests.length, 0, "Q9: no request after summaries were turned off");
   service.configure({ enabled: true, model: MODEL });
-  assert.equal(service.read("p1", 15, [message.value.id]).size, 0, "Q9: the cancelled summary stays cancelled");
+  assert.equal(
+    service.read({ scope: "p1", conversationId: 15, entries: [message.value.id] }).size,
+    0,
+    "Q9: the cancelled summary stays cancelled",
+  );
   await service.close();
 }
 
@@ -504,6 +538,136 @@ const statusOf = (service, scope, conversationId, entry) => service.read(scope, 
   const row = db.prepare("SELECT status, calls FROM summaries WHERE entry = ?").get(lostMessage.value.id);
   db.close();
   assert.deepEqual({ ...row }, { status: "cancelled", calls: null }, "Q11: the abandoned message keeps nothing");
+  await service.close();
+}
+
+// Q11: the turn that made the calls ending drops a group still collecting; another task, another conversation's turn or a turn
+// still running keep it. A stopped turn whose calls got their aborted results in the same commit is complete.
+{
+  fresh();
+  const runtime = fakeRuntime(),
+    service = open(runtime);
+  const running = nextCall("bash", { command: "TS-SECRET-ARG long build" });
+  const message = assistant(19, [running]);
+  service.observe("p1", commit(message));
+  service.observe("p1", commit(task(19, { kind: "pi.tool", owner: 5 }), task(19, { kind: "pi.compaction" }), task(20)));
+  service.observe("p1", commit(task(19, { status: "running" })));
+  assert.equal(stored(message.value.id).status, "collecting", "Q11: other tasks and other conversations keep a running group");
+  service.observe("p1", commit(task(19)));
+  const dropped = stored(message.value.id);
+  assert.deepEqual([dropped.status, dropped.calls, dropped.waiting], ["cancelled", null, null], "Q11: the ended turn drops the group");
+  const stopped = nextCall("bash", { command: "sleep 100" });
+  const stoppedMessage = assistant(21, [stopped]);
+  service.observe("p1", commit(stoppedMessage));
+  service.observe("p1", commit(task(21), result(21, stopped, "Tool bash was aborted", { isError: true })));
+  await waitFor(() => statusOf(service, "p1", 21, stoppedMessage.value.id)?.status === "ready", "stopped group summarized");
+  assert.equal(runtime.requests.length, 1, "only the complete group asks the model");
+  assert.ok(!userText(runtime.requests[0]).includes("TS-SECRET-ARG"), "the dropped group never reaches the model");
+  await service.close();
+}
+
+// Q11: a conversation that never runs again: its group is dropped after `abandonMs`, at open after a restart and on the timer.
+{
+  fresh();
+  const runtime = fakeRuntime();
+  let service = open(runtime, undefined, { abandonMs: 100, sweepMs: 1_000_000 });
+  const old = nextCall("bash", { command: "never returns" });
+  const oldMessage = assistant(22, [old]);
+  service.observe("p1", commit(oldMessage));
+  await service.close();
+  await delay(150);
+  service = open(runtime, undefined, { abandonMs: 100, sweepMs: 1_000_000 });
+  assert.equal(stored(oldMessage.value.id).status, "cancelled", "Q11: an old group is dropped at open after a restart");
+  assert.equal(stored(oldMessage.value.id).calls, null);
+  await service.close();
+  service = open(runtime, undefined, { abandonMs: 400, sweepMs: 20 });
+  const quiet = nextCall("bash", { command: "quiet" });
+  const quietMessage = assistant(23, [quiet]);
+  service.observe("p1", commit(quietMessage));
+  await service.close();
+  service = open(runtime, undefined, { abandonMs: 400, sweepMs: 20 });
+  await delay(100);
+  assert.equal(stored(quietMessage.value.id).status, "collecting", "a recent group survives a restart and the timer");
+  await waitFor(() => stored(quietMessage.value.id).status === "cancelled", "Q11: dropped by the timer with no new message", 3000);
+  assert.equal(stored(quietMessage.value.id).calls, null);
+  assert.equal(runtime.requests.length, 0);
+  await service.close();
+}
+
+// Q12: arguments, nested arguments and results are cut by a bounded walk; nothing is serialized or read whole.
+{
+  fresh();
+  const runtime = fakeRuntime(),
+    service = open(runtime);
+  let reads = 0;
+  const counted = (length, item) =>
+    new Proxy([], {
+      get(target, key) {
+        if (key === "length") return length;
+        if (typeof key === "string" && /^\d+$/.test(key)) {
+          reads++;
+          return item(Number(key));
+        }
+        return Reflect.get(target, key);
+      },
+    });
+  let deep = { leaf: "TS-DEEP-LEAF" };
+  for (let i = 0; i < 100_000; i++) deep = { next: deep };
+  const wide = counted(1_000_000, (i) => i);
+  const call = nextCall("codemode", { deep, wide, long: "z".repeat(2_000_000) + "TS-LONG-TAIL" });
+  const message = assistant(24, [call]);
+  const done = result(24, call, "", {
+    nestedCalls: { complete: true, calls: [{ id: "n1", name: "bash", arguments: { deep, wide }, status: "ok" }] },
+  });
+  done.value.model[0].content = counted(1_000_000, () => ({ type: "text", text: "r" }));
+  service.observe("p1", commit(message));
+  service.observe("p1", commit(done));
+  await waitFor(() => runtime.requests.length === 1, "bounded request");
+  const text = userText(runtime.requests[0]);
+  assert.ok(reads < 500, `Q12: only the head of large arrays is read (${reads} reads)`);
+  assert.ok(!text.includes("TS-DEEP-LEAF") && !text.includes("TS-LONG-TAIL"), "cut values do not reach the model");
+  assert.match(text, /more items/, "Q12: a cut array says so");
+  assert.match(text, /\{…\}/, "Q12: levels past the depth limit are marked");
+  assert.match(text, /more parts/, "Q12: unread result parts are counted");
+  await service.close();
+}
+
+// Q13: damaged rows fail quietly, drop their copy and block nothing; usage skips a damaged record; reads write nothing.
+{
+  fresh();
+  const runtime = fakeRuntime();
+  await open(runtime).close();
+  const db = new DatabaseSync(path);
+  const insert = db.prepare(
+    "INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, text, usage, requests, created, updated) VALUES ('p1', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+  );
+  insert.run(25, 9001, "collecting", '["call-x"]', "TS-DAMAGED not json", null, null, 0, Date.now());
+  insert.run(26, 9002, "pending", null, '{"calls":5,"more":0}', null, null, 0, Date.now());
+  insert.run(27, 9003, "ready", null, null, "Fine summary.", '{"input":"lots"}', 1, Date.now());
+  insert.run(28, 9004, "collecting", '{"not":"a list"}', '{"calls":[],"more":0}', null, null, 0, Date.now());
+  insert.run(29, 9005, "ready", null, null, null, null, 0, 1);
+  db.close();
+  const service = open(runtime);
+  service.observe("p1", commit(result(25, { id: "call-x", name: "bash" }, "x")));
+  service.observe("p1", commit(result(28, { id: "call-y", name: "bash" }, "y")));
+  await waitFor(() => statusOf(service, "p1", 26, 9002)?.status === "failed", "Q13: a damaged queued row fails");
+  for (const [conversation, entry] of [
+    [25, 9001],
+    [26, 9002],
+    [28, 9004],
+  ]) {
+    assert.match(statusOf(service, "p1", conversation, entry)?.error ?? "", /damaged/, `Q13: entry ${entry} fails as damaged`);
+    assert.equal(stored(entry).calls, null, `Q13: entry ${entry} drops its copy`);
+  }
+  assert.equal(statusOf(service, "p1", 27, 9003)?.text, "Fine summary.", "a sound row next to damaged ones still reads");
+  assert.equal(service.usage("p1").get(27)?.usage.cost.total, 0, "Q13: a damaged usage record counts as nothing");
+  assert.equal(statusOf(service, "p1", 29, 9005)?.status, "failed", "Q13: a ready row without text reads as failed");
+  assert.equal(stored(9005).updated, 1, "reading a damaged row writes nothing");
+  const fine = nextCall("bash", { command: "fine" });
+  const fineMessage = assistant(30, [fine]);
+  service.observe("p1", commit(fineMessage, result(30, fine, "ok")));
+  await waitFor(() => statusOf(service, "p1", 30, fineMessage.value.id)?.status === "ready", "Q13: damaged rows block nothing");
+  assert.ok(!runtime.requests.some((request) => userText(request).includes("TS-DAMAGED")), "Q13: damaged data never reaches the model");
   await service.close();
 }
 
