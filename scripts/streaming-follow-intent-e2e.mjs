@@ -356,6 +356,20 @@ await k.run(async () => {
   await wheel("#feed", 100000);
   await more(1);
 
+  // F12: a scroll the browser makes far up on the reader's behalf (find in page, a link into the transcript) stops following.
+  const found = await page.evaluate(
+    `(() => { const t = document.querySelector('#feed'), line = [...t.querySelectorAll('.msg.agent p')].find((node) => node.innerText.startsWith('Seed para 12:')); const was = Math.round(line.getBoundingClientRect().top - t.getBoundingClientRect().top); line.scrollIntoView({ block: 'start' }); return { was, top: Math.round(t.scrollTop), gap: Math.round(t.scrollHeight - t.clientHeight - t.scrollTop) }; })()`,
+  );
+  k.check("F12 fixture: the found line took the view far up", found.gap > 300, found);
+  await rest("#feed");
+  await more(1);
+  journeyCheck("F12 the next chunk leaves the found line in view", Math.abs((await at("#feed")).top - found.top) < 2, {
+    found,
+    after: await at("#feed"),
+  });
+  await wheel("#feed", 100000);
+  await more(1);
+
   // F9: a worker visit leaves the Coordinator transcript as it was, following or read.
   const openWorker = async () => {
     await page.waitFor(

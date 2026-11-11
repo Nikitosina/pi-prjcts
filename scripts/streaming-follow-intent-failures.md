@@ -12,9 +12,10 @@
 
 ## Following in the Coordinator and worker transcripts (2026-11-11)
 
-Only the owner's own input stops following: an upward wheel, touch or navigation key, a drag that starts on the transcript (its
-scrollbar or a text selection), or opening a detail. A scroll event never stops it by itself, since the browser may deliver it after
-the layout already changed. Each transcript keeps its own following state.
+The owner's own input stops following: an upward wheel, touch or navigation key, a drag that starts on the transcript (its scrollbar
+or a text selection), or opening a detail. Besides input, only a scroll that moves the view up past the 40 px band while the
+transcript keeps its size stops it (find in page, a link into the transcript). A scroll event that follows a layout change never does,
+since the browser may deliver it after the layout already changed. Each transcript keeps its own following state.
 
 - F5 A scroll event that arrives after the transcript changed size (the window narrows, a panel opens) stops following, so the
   stream stops at the old bottom. (Red: coordinator-workers-ui-e2e S1 failed 2 of 6 runs under load with `gap 882`; the trace showed
@@ -29,4 +30,7 @@ the layout already changed. Each transcript keeps its own following state.
   reader of earlier turns returns to another place. Opening a detail in the worker transcript stops the Coordinator's following.
 - F10 The worker transcript does not follow its new turns at the bottom, pulls back a reader who scrolled up a little (inside the old
   40 px band), or does not resume after they return to the bottom.
+- F12 A scroll the browser makes far up on the reader's behalf (find in page, `scrollIntoView`) is pulled back to the bottom by the
+  next chunk. (Red on the first follower, which ignored every scroll event: the verify skill's ui2 drive timed out on "worker missing
+  artifact note".)
 - F11 A summary going from pending to ready moves the place of a reader who scrolled up with the wheel (tool-summaries-e2e D6).
