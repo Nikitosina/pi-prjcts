@@ -155,7 +155,14 @@ import { fitJson, jsonResult } from "./response-limit.ts";
 import { localTelemetry, type LocalTelemetry } from "./local-telemetry.ts";
 import { KnowledgeMetadata } from "./knowledge-types.ts";
 import { listUploads, uploadImageResult, uploadText } from "./uploads.ts";
-import { CHATS_KIND, JOBS_KIND, topicsOfCommit, type FeedEvent, type TopicMap } from "./change-feed.ts";
+import { CHATS_KIND, JOBS_KIND, topicOfConversation, topicsOfCommit, type FeedEvent, type TopicMap } from "./change-feed.ts";
+import {
+  reconcileToolSummaries,
+  summaryUsageTotal,
+  withToolSummaries,
+  type ToolSummaries,
+  type ToolSummaryUsage,
+} from "./tool-summaries.ts";
 import {
   readTranscriptImage,
   readTranscriptPage,
@@ -494,7 +501,11 @@ export type DurableProjectRuntime = {
     kind: string;
     payload: string;
   }): ReturnType<ReturnType<typeof scheduleRuntime>["ingest"]>;
-  usageSnapshot(options?: { offset?: number; limit?: number }): ReturnType<typeof durableUsageSnapshot>;
+  usageSnapshot(options?: { offset?: number; limit?: number }): Promise<
+    Awaited<ReturnType<typeof durableUsageSnapshot>> & {
+      toolSummaries?: ToolSummaryUsage & { conversations: (ToolSummaryUsage & { conversationId: number })[]; accounting: string };
+    }
+  >;
   /** Durable's phase timing, report and active-task metrics since this host started; metadata only. */
   telemetrySnapshot(): ReturnType<LocalTelemetry["snapshot"]>;
   /** Durable's live task graph (at most 200 tasks, oldest first) and the last 20 reports' metadata; read-only, no content. */
@@ -627,6 +638,8 @@ export async function openDurableProject(input: {
   onReport?: (report: DurableRuntimeReport) => void;
   /** Receives one event per read model that a commit changed (chat, jobs); see change-feed.ts. */
   onChange?: (event: FeedEvent) => void;
+  /** Host-wide tool summaries: fed this project's commits, read by owner views, and their changes go out as `onChange` topics. */
+  toolSummaries?: ToolSummaries;
   onModelRequest?: (request: DurableModelRequest) => void;
   /** Aggregate actual-stream observer; trace IDs are local and never Durable conversation/generation IDs. */ onGenerationLifecycle?: DurableGenerationLifecycleObserver;
   /** Direct-runtime fault rendezvous; never model/host exposed. */ afterScheduleIntentRecorded?: (
@@ -1550,7 +1563,27 @@ export async function openDurableProject(input: {
       for (const [conversation, job] of Object.entries(doc.subagents ?? {})) topicMap.agents.set(Number(conversation), job);
     };
     learnChats(await storedChats());
-    learnAgents((await openedHarness.snapshot(Jobs, root.id, context)) ?? {});
+    const summaries = input.toolSummaries;
+    // A worker's own subagents get no summaries; the Jobs document lists each one in the commit that creates its conversation.
+    const nested = new Set<number>();
+    const learnNested = (doc: { subagents?: Record<string, string> }) => {
+      for (const conversation of Object.keys(doc.subagents ?? {})) nested.add(Number(conversation));
+    };
+    // Commits seen before the stored Jobs document is read wait for it, so none reaches summaries without its nested conversations.
+    let heldCommits: Parameters<ToolSummaries["observe"]>[1][] | null = [];
+    const stopSummaryCommits = summaries
+      ? openedHarness.subscribeCommits((publication) => {
+          for (const change of publication.changes)
+            if (change.type === "document" && change.value && change.record.kind === JOBS_KIND) learnNested(change.value);
+          if (heldCommits) heldCommits.push(publication);
+          else summaries.observe(project.id, publication, nested);
+        })
+      : () => {};
+    const storedJobs = (await openedHarness.snapshot(Jobs, root.id, context)) ?? {};
+    learnAgents(storedJobs);
+    learnNested(storedJobs);
+    for (const publication of heldCommits.splice(0)) summaries?.observe(project.id, publication, nested);
+    heldCommits = null;
     const stopFeed = input.onChange
       ? openedHarness.subscribeCommits((publication) => {
           for (const change of publication.changes) {
@@ -1561,6 +1594,19 @@ export async function openDurableProject(input: {
           for (const event of topicsOfCommit(publication, topicMap)) input.onChange!(event);
         })
       : () => {};
+    const stopSummaryWatch =
+      summaries?.watch(project.id, (conversationId) => {
+        const event = topicOfConversation(conversationId, topicMap);
+        if (event) input.onChange?.(event);
+      }) ?? (() => {});
+    const stopSummaries = () => {
+      stopSummaryCommits();
+      stopSummaryWatch();
+    };
+    if (summaries)
+      await reconcileToolSummaries({ summaries, scope: project.id, storage: openedStorage, context, nested }).catch((error) =>
+        report(input.onReport, project.id, error),
+      );
     // A Coordinator turn that failed on quota or a rate limit moves its chat to the tier's next model and continues; the request id
     // is the failed submission's, so a commit seen twice still continues once. Without a tier the failure stays as it is.
     const advanceCoordinator = async (conversationId: Conversation["id"], submissionId: string, failure: ProviderFailure) => {
@@ -2809,7 +2855,7 @@ export async function openDurableProject(input: {
         const subagents = view.jobs.flatMap((job) =>
           job.children.map((child) => ({ threadId: `${job.id}/${child.id}`, conversationId: child.id })),
         );
-        return durableUsageSnapshot(
+        const usage = await durableUsageSnapshot(
           openedHarness,
           root,
           [...(await threadIdentities()), ...subagents],
@@ -2817,6 +2863,17 @@ export async function openDurableProject(input: {
           view.agents.map((agent) => ({ threadId: agent.id, role: agent.role, text: agent.title })),
           await chatList(),
         );
+        if (!summaries) return usage;
+        const byConversation = summaries.usage(project.id);
+        return {
+          ...usage,
+          toolSummaries: {
+            ...summaryUsageTotal(byConversation),
+            conversations: [...byConversation].map(([conversationId, item]) => ({ conversationId, ...item })),
+            accounting:
+              "Tool summary requests, kept apart from the agents' own usage and not in their totals. `interrupted` requests were cut off by a timeout or a host restart: their cost is unknown and not included.",
+          },
+        };
       },
       commandIntentsSnapshot: (options) => commandIntentsSnapshot(root, options),
       commandIntentInspect: (key, confirm) => {
@@ -2845,6 +2902,7 @@ export async function openDurableProject(input: {
           },
           messageText,
         );
+        view.coordinator.history = withToolSummaries(summaries, project.id, view.coordinator.history);
         const workspace = await workspaces.inspect({ chatId: selected.chat.id, conversationId: Number(selected.conversation.id) });
         view.coordinator.access = {
           chatId: selected.chat.id,
@@ -2885,18 +2943,26 @@ export async function openDurableProject(input: {
         assertOpen();
         const conversation = (await resolveChat(id)).conversation;
         const admitted = await openedHarness.snapshot(AdmittedInputs, conversation.id, context);
-        return readTranscriptPage(coordinatorStorageSource(openedStorage, context, admitted?.ids ?? []), Number(conversation.id), {
-          ...options,
-          display: displayText,
-        });
+        return withToolSummaries(
+          summaries,
+          project.id,
+          await readTranscriptPage(coordinatorStorageSource(openedStorage, context, admitted?.ids ?? []), Number(conversation.id), {
+            ...options,
+            display: displayText,
+          }),
+        );
       },
       threadHistory: async (id, options = {}) => {
         assertOpen();
         const conversationId = await agentConversation(id),
-          page = await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
-            ...options,
-            display: displayText,
-          });
+          page = withToolSummaries(
+            summaries,
+            project.id,
+            await readTranscriptPage(storageSource(openedStorage, context), Number(conversationId), {
+              ...options,
+              display: displayText,
+            }),
+          );
         if (!options.context) return page;
         const child = await openedHarness.conversation(conversationId, context);
         if (!child) throw new Error("Owned durable worker conversation is missing");
@@ -2959,6 +3025,7 @@ export async function openDurableProject(input: {
         closed = true;
         mergeFlows.abort();
         stopFeed();
+        stopSummaries();
         stopTierRecovery();
         for (const stop of [...liveWatchers]) stop();
         dispatchReady = false;

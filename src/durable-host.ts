@@ -5,6 +5,7 @@ import { attachmentContent, listUploads } from "./uploads.ts";
 import { plugins } from "./plugins.ts";
 import { feed } from "./change-feed.ts";
 import type { MessageText } from "./transcript-reader.ts";
+import type { ToolSummaries } from "./tool-summaries.ts";
 import { jobs, loadProject, notes, projectDir, saveJob, saveProject, type Project, type Snapshot } from "./state.ts";
 
 export async function openDurableHost(
@@ -12,6 +13,7 @@ export async function openDurableHost(
   configuredSkillLoader?: import("@earendil-works/pi-coding-agent").DefaultResourceLoader,
   discoverSkills?: () => Promise<import("@earendil-works/pi-coding-agent").DefaultResourceLoader>,
   redeploy?: (requestId: string, taskId: string) => void,
+  toolSummaries?: ToolSummaries,
 ): Promise<DurableProjectRuntime> {
   // Settling is driven by commits, so reads never write. The owner is not yet known while the first commits arrive; they are caught up below.
   let settling: Promise<void> = Promise.resolve(),
@@ -29,6 +31,7 @@ export async function openDurableHost(
     configuredSkillLoader,
     discoverSkills,
     redeploy,
+    toolSummaries,
     onChange: (event) => {
       // The ledger is settled before the browser is told, so its next read already shows the new state.
       if (event.topic === "chat") void settle().then(() => feed.publish(project.id, event));
@@ -183,6 +186,7 @@ export async function durableHostSnapshot(owner: DurableProjectRuntime, chatId?:
     jobs: ledgerOf(view.chatId),
     messages: view.coordinator.history.items,
     before: view.coordinator.history.before,
+    ...(view.coordinator.history.toolSummaries ? { toolSummaries: view.coordinator.history.toolSummaries } : {}),
     inbox: inbox(dir),
     notes: notes(dir),
     evidence: evidence(dir),

@@ -20,7 +20,7 @@ Owner decision: each chat is its own durable coordinator conversation. All chats
 11. Owner messages land in the wrong chat, or the job ledger shows another chat's messages.
 
 ## UI
-12. The chat list is missing or does not mark the selected chat; switching keeps the previous chat's transcript, draft or live bubble.
+12. The chat list is missing or does not mark the selected chat; switching keeps the previous chat's transcript, draft or live bubble. The Workers list shows Main's workers (or none) when the jobs read lands before the chat's view: it must follow the selected chat whichever read arrives first.
 13. The live stream shows another chat's in-flight generation.
 14. Rename does not persist or is not shown; archive leaves the chat selectable for new messages; Main can be archived.
 15. The selected chat is lost on reload (it must survive in the URL).

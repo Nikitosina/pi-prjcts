@@ -10,6 +10,7 @@ import { liveModelRuntime } from "./live-models.ts";
 import { durableGuardedStream } from "./model-guard.ts";
 import { liveFrame, type DurableLiveFrame } from "./durable-runtime.ts";
 import { readTranscriptPage, storageSource, type TranscriptPage } from "./transcript-reader.ts";
+import { HOST_AGENT_SCOPE, reconcileToolSummaries, withToolSummaries, type ToolSummaries } from "./tool-summaries.ts";
 import { normalizePromptBlocks, PromptBlockList, resolvePromptBlocks, type PromptBlock } from "./prompt-blocks.ts";
 import { configureWhenIdle } from "./durable-idle-configure.ts";
 import { agentActions, hostAgentTools, type HostToolDeps } from "./host-agent-tools.ts";
@@ -82,6 +83,8 @@ export async function openHostAgent(input: {
   tools: HostToolDeps;
   publish(event: FeedEvent): void;
   report(detail: string): void;
+  /** Host-wide tool summaries; this conversation store's scope is `HOST_AGENT_SCOPE`. */
+  toolSummaries?: ToolSummaries;
 }): Promise<HostAgent> {
   const dir = join(home(), "host-agent");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -207,6 +210,13 @@ export async function openHostAgent(input: {
         void apply(settings).catch((error) => input.report(`The Host agent could not adopt its saved prompt: ${errorText(error)}`));
       input.publish({ topic: "host-agent" });
     });
+    const summaries = input.toolSummaries;
+    const stopCommits = summaries ? opened.subscribeCommits((publication) => summaries.observe(HOST_AGENT_SCOPE, publication)) : () => {};
+    const stopSummaryWatch = summaries?.watch(HOST_AGENT_SCOPE, () => input.publish({ topic: "host-agent" })) ?? (() => {});
+    if (summaries)
+      await reconcileToolSummaries({ summaries, scope: HOST_AGENT_SCOPE, storage, context, nested: new Set() }).catch((error) =>
+        input.report(`The Host agent could not drop the summaries of ended turns: ${errorText(error)}`),
+      );
     const liveWatchers = new Set<() => void>();
     let closed = false,
       closing: Promise<void> | undefined;
@@ -249,7 +259,11 @@ export async function openHostAgent(input: {
       },
       async history(before) {
         assertOpen();
-        return readTranscriptPage(storageSource(storage, context), Number(root.id), { before, messageText: "full" });
+        return withToolSummaries(
+          summaries,
+          HOST_AGENT_SCOPE,
+          await readTranscriptPage(storageSource(storage, context), Number(root.id), { before, messageText: "full" }),
+        );
       },
       async settings(revision, patch) {
         assertOpen();
@@ -336,6 +350,8 @@ export async function openHostAgent(input: {
         closing ??= (async () => {
           closed = true;
           for (const stop of [...liveWatchers]) stop();
+          stopCommits();
+          stopSummaryWatch();
           unsubscribe();
           view.dispose();
           await opened.close(context);
