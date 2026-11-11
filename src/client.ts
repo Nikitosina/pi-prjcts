@@ -66,10 +66,16 @@ export async function ensureHost(options: { repo?: string; attempts?: number } =
     cwd: repo,
   });
   child.on("error", () => {});
+  // Exit 0 means another host holds the lock, so only a failing exit ends the wait.
+  let crashed: string | undefined;
+  child.on("exit", (code, signal) => {
+    if (code !== 0) crashed = signal ? `signal ${signal}` : `code ${code}`;
+  });
   child.unref();
   closeSync(log);
   for (let attempt = 0; attempt < attempts; attempt++) {
     await sleep(100);
+    if (crashed) throw new Error(`Projects host exited with ${crashed} before it answered. Read ${join(home(), "host.log")}`);
     try {
       await health();
       return;
