@@ -799,6 +799,8 @@ try {
     for (let i = 0; i < 500 / 20 && !cdpEnded; i++) await delay(20);
     if (!cdpEnded) chrome.kill("SIGTERM");
   }
+  // Chrome's updater inherits its output pipes and can outlive it; open pipes would keep this script alive until the runner's timeout.
+  for (const stream of chrome?.stdio ?? []) stream?.destroy();
   try {
     if (!hostEnded) await stopHost();
   } catch {
