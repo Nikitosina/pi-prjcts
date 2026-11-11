@@ -7,7 +7,7 @@ const definition = {
   async mount(slot, panel) {
     probe.mounts++;
     panel.signal.addEventListener("abort", () => probe.aborts++);
-    slot.innerHTML = `<div class="probe-box"><p data-probe-project>…</p><p data-probe-clicks></p><p data-probe-echo></p><button type="button" data-action="panel-probe-click">Count</button><button type="button" data-action="panel-probe-boom">Boom</button><button type="button" data-profile="worker">Not core</button></div>`;
+    slot.innerHTML = `<div class="probe-box"><p data-probe-project>…</p><p data-probe-clicks></p><p data-probe-echo></p><button type="button" data-action="panel-probe-click">Count</button><button type="button" data-action="panel-probe-boom">Boom</button><button type="button" data-action="panel-probe-late">Late</button><button type="button" data-profile="worker">Not core</button></div>`;
     const answer = await panel.rpc("who", { slow: panel.projectId === probe.slowProject });
     probe.projects.push(answer.projectId);
     box().querySelector("[data-probe-project]").textContent = answer.projectId;
@@ -16,6 +16,14 @@ const definition = {
   },
   async action(name, node, panel) {
     if (name === "panel-probe-boom") throw new Error('<img src=x onerror="window.__pwned=2"> boom in action');
+    // 18: a write that starts after the panel went away.
+    if (name === "panel-probe-late") {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      probe.lateAttempted = true;
+      return panel.rpc("click").catch((error) => {
+        probe.lateError = error.name;
+      });
+    }
     const answer = await panel.rpc("click");
     node.closest(".probe-box").querySelector("[data-probe-clicks]").textContent = `clicks ${answer.clicks}`;
   },

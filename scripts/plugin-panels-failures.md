@@ -26,5 +26,11 @@ Host access
 15. `panel.rpc` calls another plugin's methods or another project: it always sends `plugin: <own name>` and `id: <panel's projectId>`.
 16. `panel.fetch` loses the bearer token or the project: a route answers through it, and the same route without the token answers 401.
 
+Found in review (red before the fix)
+18. An action still running when its panel goes away calls `panel.rpc` afterwards: the write reaches the host for the old project although the caller gets an `AbortError`. A call made after the signal aborted must never be sent.
+19. A `ui.js` that registers and then throws while it loads shows a ready panel and hides the error. Any uncaught error while the script first runs fails the panel.
+20. A declared `ui.css` that cannot be loaded is invisible: the card must say so (the panel still mounts).
+21. Settings → Plugins with no project selected leaves panels loading forever: they must say that a project is needed.
+
 Example
 17. The example plugin's panel drifts from the contract or does not save: adding a note through the panel stores it for that project only, and it is shown again after Settings is reopened.

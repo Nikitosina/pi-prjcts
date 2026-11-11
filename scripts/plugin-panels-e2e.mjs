@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { createKit, delay } from "./lib/e2e-kit.mjs";
 
 const fixtures = new URL("./fixtures/", import.meta.url).pathname;
-const panelFixtures = ["probe", "broken", "throws", "silent", "impostor", "retired"].map((name) => join(fixtures, "panels", `${name}.mjs`));
+const panelFixtures = ["probe", "broken", "throws", "silent", "impostor", "retired", "late-throw", "no-style"].map((name) =>
+  join(fixtures, "panels", `${name}.mjs`),
+);
 const plugins = [
   join(process.cwd(), "docs/plugins/examples/notes"),
   ...panelFixtures,
@@ -15,7 +17,7 @@ const plugins = [
 ];
 const kit = await createKit("plugin-panels", { env: { PI_PROJECTS_PLUGINS: plugins.join(":") } });
 // Errors the broken fixtures raise on purpose, and the 401 of the unauthenticated route probe (16).
-const EXPECTED_ERRORS = [/broken at load/, /registered as "notes"/, /retired context-panel hooks/];
+const EXPECTED_ERRORS = [/broken at load/, /registered as "notes"/, /retired context-panel hooks/, /thrown after register/];
 
 await kit.run(async () => {
   const { check, rpc, result } = kit;
@@ -71,7 +73,7 @@ await kit.run(async () => {
     "probe echo",
   );
   await page.waitFor(
-    `["panel-broken", "panel-throws", "panel-silent", "panel-impostor", "panel-retired"].every((name) => document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]')?.dataset.state === "failed")`,
+    `["panel-broken", "panel-throws", "panel-silent", "panel-impostor", "panel-retired", "panel-late-throw"].every((name) => document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]')?.dataset.state === "failed")`,
     "broken panels failed",
   );
   await shot("01-settings-plugins");
@@ -131,6 +133,18 @@ await kit.run(async () => {
       /Add note/.test((await panelState("notes")).slot) &&
       !/impostor/.test((await panelState("notes")).slot),
     { impostor, retired, late, probe: await probe() },
+  );
+  const lateThrow = await panelState("panel-late-throw"),
+    noStyle = await panelState("panel-no-style");
+  check(
+    "19 a script that registers and then throws while it loads fails its panel with the error",
+    /thrown after register/.test(lateThrow?.error) && !/late throw mounted/.test(lateThrow?.slot),
+    lateThrow,
+  );
+  check(
+    "20 a stylesheet that cannot be loaded is reported in the card; the panel still mounts",
+    noStyle?.state === "ready" && /ui\.css could not be loaded/.test(noStyle.error) && /unstyled panel/.test(noStyle.slot),
+    noStyle,
   );
   check(
     "2 the browser API hands out only register and esc",
@@ -208,6 +222,18 @@ await kit.run(async () => {
   await closeSettings();
   const closed = await probe();
   check("12 closing Settings aborts every mount", closed.aborts === closed.mounts && closed.mounts >= 3, closed);
+  const clicksBefore = (await rpc({ action: "plugin", plugin: "panel-probe", method: "stats", id: alpha })).click;
+  await openPlugins();
+  await click(`${panel("panel-probe")} [data-action="panel-probe-late"]`);
+  await closeSettings();
+  await page.waitFor(`window.__probe.lateAttempted === true`, "late write attempted");
+  await delay(500);
+  check(
+    "18 a write an action starts after its panel went away is never sent",
+    (await rpc({ action: "plugin", plugin: "panel-probe", method: "stats", id: alpha })).click === clicksBefore &&
+      (await probe()).lateError === "AbortError",
+    await probe(),
+  );
   await openPlugins();
   await page.waitFor(
     `/ship<\\/b> on Friday/.test(document.querySelector(${js(`${panel("notes")} [data-notes-list]`)})?.innerText ?? "")`,
@@ -268,6 +294,26 @@ await kit.run(async () => {
   );
   await shot("06-project-alpha-again");
 
+  // ---- No project selected
+  await closeSettings();
+  await page.evaluate(`import("/state.js").then((bus) => { bus.state.projectId = null; })`);
+  await click(`[data-cmd="settings"]`);
+  await page.waitFor(`document.querySelector("#settings").open`, "settings open");
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(`!!document.querySelector(${js(panel("notes"))})`, "plugin cards without a project");
+  await delay(500);
+  const unselected = await page.evaluate(
+    `[...document.querySelectorAll("#settings .plugin-panel")].map((node) => ({ name: node.dataset.plugin, state: node.dataset.state, text: node.innerText }))`,
+  );
+  check(
+    "21 without a selected project every panel says it needs one instead of loading forever",
+    unselected.length > 0 && unselected.every((item) => item.state === "idle" && /Select a project/.test(item.text)),
+    unselected,
+  );
+
   result.errors = result.errors.filter((error) => !EXPECTED_ERRORS.some((pattern) => pattern.test(error)));
-  result.httpErrors = result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/panel-probe/echo") && error.status === 401));
+  result.httpErrors = result.httpErrors.filter(
+    (error) =>
+      !(error.url.endsWith("/plugins/panel-probe/echo") && error.status === 401) && !error.url.endsWith("/plugins/panel-no-style/ui.css"),
+  );
 });
