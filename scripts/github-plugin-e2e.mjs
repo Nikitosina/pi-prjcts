@@ -188,6 +188,29 @@ try {
   await runtime.close();
   runtime = undefined;
 
+  // ---- The plugin goes missing after GitHub calls were recorded, then returns ----
+  plugins.reset();
+  runtime = await open();
+  {
+    clearGh();
+    const { answer, request } = await ask(readIssue);
+    assert.match(answer.text, /not available/, answer.text);
+    assert.ok(!request.tools.some((name) => GITHUB_TOOLS.includes(name)));
+    assert.equal(ghLog().length, 0);
+  }
+  await runtime.close();
+  runtime = undefined;
+  await plugins.load();
+  runtime = await open();
+  {
+    const { answer, request } = await ask(readIssue);
+    assert.match(answer.text, /ISSUE-TITLE-95/, answer.text);
+    assert.ok(GITHUB_TOOLS.every((name) => request.tools.includes(name)));
+  }
+  await runtime.close();
+  runtime = undefined;
+  pass("6/7 a project with recorded GitHub calls reopens without the plugin, offers nothing, and gets the tools back when it loads");
+
   // ---- Revocation through the runtime: history with GitHub calls reopens; the tools are no longer offered ----
   saveProject({ ...loadProject(id), githubAuthorization: [] });
   runtime = await open();
