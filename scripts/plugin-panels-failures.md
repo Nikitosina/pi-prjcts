@@ -31,6 +31,7 @@ Found in review (red before the fix)
 19. A `ui.js` that registers and then throws while it loads shows a ready panel and hides the error. Any uncaught error while the script first runs fails the panel.
 20. A declared `ui.css` that cannot be loaded is invisible: the card must say so (the panel still mounts).
 21. Settings → Plugins with no project selected leaves panels loading forever: they must say that a project is needed.
+22. The Plugins letter is shared with another Settings section (after the merge with main both Plugins and Chat display defaulted to L), so ⌘, then L does not open Plugins and the Hotkeys page shows a conflict. Every Settings section keeps its own default letter.
 
 Example
 17. The example plugin's panel drifts from the contract or does not save: adding a note through the panel stores it for that project only, and it is shown again after Settings is reopened.

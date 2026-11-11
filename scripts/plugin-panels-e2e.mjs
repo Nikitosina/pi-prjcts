@@ -72,6 +72,29 @@ await kit.run(async () => {
     page.evaluate(`import("/state.js").then((bus) => bus.emit("select-request", { projectId: ${js(projectId)} }))`);
   const notesOf = async (id) => (await rpc({ action: "plugin", plugin: "notes", method: "list", id })).notes.map((note) => note.text);
 
+  // ---- Letter: ⌘, then L opens Plugins, and no default Settings letter is shared (22)
+  await click(`[data-cmd="settings"]`);
+  await page.waitFor(`document.querySelector("#settings").open`, "settings open");
+  await click(`#settings nav [data-section="general"]`);
+  await page.waitFor(`document.querySelector("#settings").dataset.section === "general"`, "general section");
+  for (const type of ["keyDown", "keyUp"])
+    await page.cdp("Input.dispatchKeyEvent", {
+      type,
+      key: "l",
+      code: "KeyL",
+      text: type === "keyDown" ? "l" : undefined,
+      windowsVirtualKeyCode: 76,
+    });
+  await delay(300);
+  const lettered = await page.evaluate(
+    `import("/hotkeys.js").then((keys) => ({ section: document.querySelector("#settings").dataset.section, conflicts: [...keys.conflicts()] }))`,
+  );
+  check(
+    "22 the letter L opens Plugins and no two Settings sections share a default letter",
+    lettered.section === "plugins" && !lettered.conflicts.length,
+    lettered,
+  );
+
   // ---- First open
   await openPlugins();
   await page.waitFor(
