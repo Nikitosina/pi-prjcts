@@ -174,6 +174,7 @@ try {
   result = await deploy(deps);
   assert.equal(result.ok, false);
   assert.equal(result.rolledBack, true, JSON.stringify(result));
+  assert.match(result.reason, /^Projects host exited with code 1 before it answered/, "the start ends when the new host dies");
   assert.equal(git("rev-parse", "HEAD"), good);
   assert.ok((await health()).pid > 0);
   assert.match(told.at(-1), /Rolled back/);

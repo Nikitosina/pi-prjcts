@@ -14,6 +14,7 @@ Deploy no longer waits for idle projects: it gives running tool calls a short wi
 - A rollback leaves `projects_redeploy` without an answer, or reports success.
 - A coordinator of another project gets `projects_redeploy`, or the pi-prjcts Coordinator still asks the owner to approve a deploy.
 - A checkout change during preparation is silently deployed, or requeued forever; it must fail the deploy and say so.
+- A new host that crashes at start is polled for the whole start budget (30 s in `deploy-e2e`) before the rollback begins, and the reason does not say it exited. The start must end when the spawned host exits, unless another host answers. Proof: `deploy-e2e.mjs` step 3; this wait pushed the script past its 240 s CI budget.
 
 ## Following a branch
 
