@@ -104,20 +104,49 @@ export function follower(node) {
 }
 
 // A reader who scrolled up keeps the turn they are reading in place, even when new messages push older ones out of the window
-// `show` returns (streaming-scroll-viewport-failures.md R1).
+// `show` returns (streaming-scroll-viewport-failures.md R1). Inside the first turn in view it keeps the line read, as a change above
+// it in the same turn (thinking hidden, a summary arriving) would move it otherwise (F13).
 export function readingAnchor(feed) {
   const top = feed.getBoundingClientRect().top;
   return [...feed.querySelectorAll(":scope > .turn[data-key]")]
     .filter((node) => node.getBoundingClientRect().bottom > top)
     .slice(0, 8)
-    .map((node) => ({ key: node.dataset.key, offset: node.getBoundingClientRect().top - top }));
+    .map((node, index) => ({
+      key: node.dataset.key,
+      offset: node.getBoundingClientRect().top - top,
+      line: index ? null : lineIn(node, top),
+    }));
 }
 export function keepAnchor(feed, anchor) {
   const top = feed.getBoundingClientRect().top;
-  for (const { key, offset } of anchor) {
+  for (const { key, offset, line } of anchor) {
     const node = feed.querySelector(`:scope > .turn[data-key="${CSS.escape(key)}"]`);
     if (!node) continue;
-    feed.scrollTop += node.getBoundingClientRect().top - top - offset;
+    const read = line && find(node, line.path);
+    feed.scrollTop += read ? read.getBoundingClientRect().top - top - line.offset : node.getBoundingClientRect().top - top - offset;
     return;
   }
+}
+
+// The line read is the innermost element at the top of the view, found again by kind (tag and first class) and its count among
+// siblings of that kind: a turn re-rendered with an element added or removed before it still finds it.
+const kind = (element) => `${element.tagName}.${element.classList[0] ?? ""}`;
+function lineIn(turn, top) {
+  const path = [];
+  let at = turn;
+  for (let depth = 0; depth < 6; depth++) {
+    const next = [...at.children].find((child) => child.getBoundingClientRect().bottom > top);
+    if (!next) break;
+    path.push([kind(next), [...at.children].filter((child) => kind(child) === kind(next)).indexOf(next)]);
+    at = next;
+  }
+  return path.length ? { path, offset: at.getBoundingClientRect().top - top } : null;
+}
+function find(turn, path) {
+  let at = turn;
+  for (const [type, nth] of path) {
+    at = [...at.children].filter((child) => kind(child) === type)[nth];
+    if (!at) return null;
+  }
+  return at;
 }
