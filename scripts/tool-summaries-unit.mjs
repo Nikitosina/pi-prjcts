@@ -150,6 +150,9 @@ const open = (runtime, settings = { enabled: true, model: MODEL }, limits = {}) 
   openToolSummaries({ path, settings, runtime: async () => runtime, limits: { ...LIMITS, ...limits } });
 const userText = (request) =>
   request.context.messages.map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text).join(""))).join("\n");
+/** What a host does once a conversation store opened: drop its ended groups and queue its recovered summaries. */
+const admit = (service, scope, { running = [], nested = [] } = {}) =>
+  service.reconcile({ scope, running: new Set(running), before: Date.now(), nested: new Set(nested) });
 const statusOf = (service, scope, conversationId, entry) => service.read({ scope, conversationId, entries: [entry] }).get(entry);
 /** The stored row of an entry, read straight from the database. */
 const stored = (entry) => {
@@ -340,6 +343,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   // A crash leaves the row running; the next open finds it, too.
   const runtime = fakeRuntime();
   service = open(runtime);
+  admit(service, "p1", { running: [10] });
   await waitFor(() => statusOf(service, "p1", 10, message.value.id)?.status === "ready", "Q1: the summary finishes after the restart");
   const spent = service.usage("p1").get(10);
   assert.equal(spent.interrupted, 1, "U2: the cut-off request is counted as unknown cost");
@@ -353,6 +357,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   service.observe("p1", commit(split, result(10, x, "x done")));
   await service.close();
   service = open(runtime);
+  admit(service, "p1", { running: [10] });
   service.observe("p1", commit(result(10, y, "y done")));
   await waitFor(() => statusOf(service, "p1", 10, split.value.id)?.status === "ready", "collecting survives restart");
   assert.ok(userText(runtime.requests.at(-1)).includes("x done"), "the result committed before the restart is part of the input");
@@ -517,6 +522,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   await service.close();
   const runtime = fakeRuntime();
   service = open(runtime, undefined, { attempts: 1 });
+  admit(service, "p1");
   await delay(30);
   assert.equal(runtime.requests.length, 0, "Q10: no request past the attempt limit");
   assert.equal(statusOf(service, "p1", 17, message.value.id)?.status, "failed");
@@ -583,12 +589,58 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   await delay(5);
   const late = assistant(24, [nextCall("bash", { command: "started during the scan" })]);
   service.observe("p1", commit(late));
-  service.reconcile({ scope: "p1", running: new Set([23]), before });
+  service.reconcile({ scope: "p1", running: new Set([23]), before, nested: new Set() });
   assert.deepEqual([stored(ended.value.id).status, stored(ended.value.id).calls], ["cancelled", null], "Q11: dropped at reopen");
   assert.equal(stored(running.value.id).status, "collecting", "Q11: a running turn's group is kept");
   assert.equal(stored(other.value.id).status, "collecting", "another store's group is kept");
   assert.equal(stored(late.value.id).status, "collecting", "a group written after the scan is kept");
   assert.equal(runtime.requests.length, 0, "Q11: nothing incomplete is summarized");
+  await service.close();
+}
+
+// N1 N2: a worker's own subagents (`nested`) never queue or send a summary, live or recovered after a restart; the Coordinator's
+// direct agents still do. Saved summaries of nested conversations are kept, and a store opening twice asks once.
+{
+  fresh();
+  const runtime = fakeRuntime();
+  let service = open(runtime);
+  const nestedCall = nextCall("code_ls", { path: "TS-NESTED-LIVE" }),
+    directCall = nextCall("code_ls", { path: "TS-DIRECT-LIVE" });
+  const nestedMessage = assistant(40, [nestedCall]),
+    directMessage = assistant(41, [directCall]);
+  service.observe("p1", commit(nestedMessage, result(40, nestedCall, "listed")), new Set([40]));
+  service.observe("p1", commit(directMessage, result(41, directCall, "listed")), new Set([40]));
+  await waitFor(() => statusOf(service, "p1", 41, directMessage.value.id)?.status === "ready", "N1: a direct agent's summary");
+  await delay(20);
+  assert.equal(stored(nestedMessage.value.id), undefined, "N1: a nested message opens no row");
+  await service.close();
+  // Rows written before nested conversations were left out: queued, cut off while running, and still collecting.
+  const db = new DatabaseSync(path);
+  const insert = db.prepare(
+    "INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, text, attempts, requests, created, updated) VALUES ('p1', ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+  );
+  const input = (marker, result) => JSON.stringify({ calls: [{ id: `c-${marker}`, name: "bash", args: marker, result }], more: 0 });
+  const done = { text: "ok", isError: false, images: 0, nested: null };
+  insert.run(42, 9101, "pending", null, input("TS-NESTED-PENDING", done), null, 0, 0);
+  insert.run(42, 9102, "running", null, input("TS-NESTED-RUNNING", done), null, 1, 1);
+  insert.run(42, 9103, "collecting", '["c-TS-NESTED-COLLECTING"]', input("TS-NESTED-COLLECTING", null), null, 0, 0);
+  insert.run(42, 9104, "ready", null, null, "Saved nested summary.", 1, 1);
+  insert.run(43, 9105, "pending", null, input("TS-DIRECT-PENDING", done), null, 0, 0);
+  db.close();
+  const before = runtime.requests.length;
+  service = open(runtime);
+  await delay(30);
+  assert.equal(runtime.requests.length, before, "N2: nothing recovered is sent before its store opens");
+  admit(service, "p1", { running: [42, 43], nested: [42] });
+  admit(service, "p1", { running: [42, 43], nested: [42] });
+  await waitFor(() => statusOf(service, "p1", 43, 9105)?.status === "ready", "N2: a direct agent's recovered summary");
+  service.observe("p1", commit(result(42, { id: "c-TS-NESTED-COLLECTING", name: "bash" }, "late")), new Set([42]));
+  await delay(30);
+  for (const entry of [9101, 9102, 9103])
+    assert.deepEqual([stored(entry).status, stored(entry).calls], ["cancelled", null], `N2: recovered nested entry ${entry} is dropped`);
+  assert.equal(statusOf(service, "p1", 42, 9104)?.text, "Saved nested summary.", "N2: a saved nested summary is kept");
+  assert.equal(runtime.requests.length, before + 1, "N2: one request, for the direct agent only, though its store opened twice");
+  assert.ok(!runtime.requests.some((request) => userText(request).includes("TS-NESTED")), "N1 N2: no nested call reaches the model");
   await service.close();
 }
 
@@ -657,6 +709,7 @@ const task = (conversationId, { kind = "pi.generation", owner, status = "termina
   );
   db.close();
   const service = open(runtime);
+  admit(service, "p1", { running: [25, 28] });
   service.observe("p1", commit(result(25, { id: "call-x", name: "bash" }, "x")));
   service.observe("p1", commit(result(28, { id: "call-y", name: "bash" }, "y")));
   await waitFor(() => statusOf(service, "p1", 26, 9002)?.status === "failed", "Q13: a damaged queued row fails");

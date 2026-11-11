@@ -596,7 +596,7 @@ await kit.run(async () => {
     await openAgent(agent.id);
     await display(label, "#worker-feed", `${marker}TASK-THOUGHT`);
   }
-  // A worker's own scout and reviewer: summarized in the project store; the browser has no view of a nested transcript.
+  // N1: a worker's own scout and reviewer get no summaries; the worker that started them still does, and their thinking stays.
   await kit.ask(id, "TS-NEST go");
   const nester = await agentOf("TS-NESTTASK");
   const children = await waitFor(
@@ -607,20 +607,54 @@ await kit.run(async () => {
     "nested scout and reviewer",
     { timeout: 60000 },
   );
+  // The worker's calls that started them end after both answered, so every nested summary would have been asked by then.
+  await readyPage(() => rpc({ action: "thread-history", id, threadId: nester.id, messageText: "full" }), "nesting worker summary");
+  // Only the nested agents' own calls read `missing-<task>.md`; the worker's `subagent` calls name the task too.
+  const nestedRequests = () => summary.requests.filter((item) => /missing-TS-N(?:SCOUT|REVIEW)TASK/.test(item.user)).length;
+  check("N1 no summary request for a nested scout or reviewer", nestedRequests() === 0, nestedRequests());
   for (const child of children) {
     const label = `nested-${child.role}`;
-    const history = await readyPage(
-      () => rpc({ action: "thread-history", id, threadId: `${nester.id}/${child.id}`, messageText: "full" }),
-      `${label} summary`,
-    );
-    const failed =
-      Object.values(history.toolSummaries).length >= 1 && history.items.some((item) => item.kind === "tool-result" && item.isError);
-    check(`${label} gets a summary of a failing call`, failed);
+    const history = await rpc({ action: "thread-history", id, threadId: `${nester.id}/${child.id}`, messageText: "full" });
+    const ran = toolEntries(history.items).length >= 1 && history.items.some((item) => item.kind === "tool-result" && item.isError);
+    check(`${label} made its calls, failing one included`, ran);
+    check(`N1 ${label} has no summaries`, history.toolSummaries === undefined, history.toolSummaries);
     check(
       `${label} thinking is in its transcript`,
       thoughtIn(history, child.role === "scout" ? "TS-NSCOUTTASK-THOUGHT" : "TS-NREVIEWTASK-THOUGHT"),
     );
-    matrix[label] = { summaryRpc: true, errorRpc: true, thinkingRpc: true, browserView: "none" };
+    matrix[label] = { summaryRequests: 0, toolSummaries: "none", thinkingRpc: true, browserView: "none" };
+  }
+  // N2: summary rows of nested conversations left over from before (queued, cut off while running, still collecting) send nothing
+  // after a restart and drop their copy of the calls; a saved nested summary is kept.
+  {
+    const db = new DatabaseSync(summariesDb);
+    const insert = db.prepare(
+      "INSERT INTO summaries (scope, conversation, entry, status, waiting, calls, text, attempts, requests, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+    );
+    const input = (marker, result) => JSON.stringify({ calls: [{ id: `c-${marker}`, name: "bash", args: marker, result }], more: 0 });
+    const done = { text: "ok", isError: false, images: 0, nested: null };
+    const [scout] = children;
+    insert.run(id, scout.id, 990001, "pending", null, input("TS-NPENDING", done), null, 0, 0);
+    insert.run(id, scout.id, 990002, "running", null, input("TS-NRUNNING", done), null, 1, 1);
+    insert.run(id, scout.id, 990003, "collecting", '["c-TS-NCOLLECTING"]', input("TS-NCOLLECTING", null), null, 0, 0);
+    insert.run(id, scout.id, 990004, "ready", null, null, "Saved nested summary.", 1, 1);
+    db.close();
+    await kit.restartHost();
+    const rows = await waitFor(() => {
+      const db = new DatabaseSync(summariesDb, { readOnly: true });
+      const found = db.prepare("SELECT entry, status, calls FROM summaries WHERE entry >= 990001 AND entry <= 990004 ORDER BY entry").all();
+      db.close();
+      return found.slice(0, 3).every((row) => row.status === "cancelled" && row.calls === null) && found;
+    }, "N2 recovered nested rows dropped");
+    check("N2 a saved nested summary is kept", rows[3]?.status === "ready", rows);
+    await delay(1000);
+    check(
+      "N2 recovered nested rows send no summary request",
+      !summary.requests.some((item) => /TS-N(?:PENDING|RUNNING|COLLECTING)/.test(item.user)),
+    );
+    matrix["nested-recovered"] = { summaryRequests: 0, rowsDropped: 3, savedKept: true };
+    await page.reload();
+    await page.waitFor(`document.body.dataset.ready === "1"`, "page ready after the nested restart");
   }
 
   // Host agent: its summaries, thinking, error mark, original calls and toggles in the drawer, and its live thinking.
