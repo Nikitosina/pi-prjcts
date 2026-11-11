@@ -45,6 +45,16 @@ const deps = {
       if (cwd !== clone && !existsSync(join(cwd, "node_modules"))) symlinkSync(join(repo, "node_modules"), join(cwd, "node_modules"));
       return "";
     }
+    // The same typecheck as `npm run check`, incremental across the deploys: a cold one per deploy fills the CI budget.
+    if (command === "npm" && args.join(" ") === "run check")
+      return execFileSync(
+        join(cwd, "node_modules", ".bin", "tsc"),
+        ["--noEmit", "--incremental", "--tsBuildInfoFile", join(base, "tsbuildinfo")],
+        {
+          cwd,
+          encoding: "utf8",
+        },
+      ).trim();
     return execFileSync(command, args, { cwd, encoding: "utf8" }).trim();
   },
 };
