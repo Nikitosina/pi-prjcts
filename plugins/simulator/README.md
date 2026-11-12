@@ -6,11 +6,11 @@ Optional iOS simulators per project, loaded through the host plugin API (`src/pl
 { "plugins": ["/abs/path/to/pi-prjcts/plugins/simulator"] }
 ```
 
-in `$PI_PROJECTS_HOME/plugins.json`, then restart the host. Without it, projects keep their `simulator.json` untouched and show no simulator card or tools.
+in `$PI_PROJECTS_HOME/plugins.json`, then restart the host. Without it, projects keep their `simulator.json` untouched and show no simulator panel or tools.
 
-The coordinator screen has an optional Simulator card above Workers. Choose a shut-down iOS simulator as a clone source, enable management, then create the project's simulator. The source is not changed. The host uses `simslim` to slim and boot the clone, and XcodeBuildMCP to capture its screen. Both commands and Xcode must be installed on the Mac; missing tools do not prevent ordinary projects from working.
+Settings → Plugins shows the Simulator panel for the selected project. Choose a shut-down iOS simulator as a clone source, enable management, then create the project's simulator. The source is not changed. The host uses `simslim` to slim and boot the clone, and XcodeBuildMCP to capture its screen. Both commands and Xcode must be installed on the Mac; missing tools do not prevent ordinary projects from working.
 
-The card shows polled screenshots, not video, and can expand the image. It never sends taps, gestures or keyboard input. Screenshot fetching pauses when the page is hidden or another project/tab is selected. Screenshots use the existing browser authentication.
+The panel shows polled screenshots, not video, and can enlarge the image. It never sends taps, gestures or keyboard input. Polling and screenshot fetching run only while the panel is mounted and the page is visible; closing Settings, leaving the section or selecting another project stops them. Reset, delete, turning management off and acknowledging an unknown outcome ask for confirmation inside the panel. Screenshots use the existing browser authentication.
 
 Owner enablement grants coordinators `projects_simulator_status`, `projects_simulator_action` and `projects_simulator_screenshot`. Coordinators can create, boot, shut down, reset or delete only their project's recorded clones. Shutdown frees simulator resources without erasing app data. Reset erases that clone's apps and data; deletion permanently removes the clone. New whole-repository worker threads created after enablement can discover the assigned device and inspect screenshots with the worker simulator tools, and must acquire its `simulator:<UDID>` lease before use. Existing threads retain their frozen tool bindings. Worker activity and held leases block destructive maintenance. Existing devices, source simulators, shared runtimes and global caches are outside this grant.
 
@@ -25,8 +25,8 @@ The cleanup routine's plugin step erases idle owned clones, and, hourly and in t
 - `leaseName`: bare clone UUIDs and `simulator:<uuid>` share one lease.
 - `lifecycle`: refuses project lifecycle changes during an operation, pauses management during them, aborts commands at host shutdown.
 - `rpc`: `snapshot`, `configure`, `action`, `recover`.
-- `web`: the card (`web/ui.js`, `web/ui.css`) and the authenticated screenshot route `/plugins/simulator/frame`. The card uses the classic inbox's retired hooks, so Settings → Plugins shows its panel as failed until it is ported to `mount(slot, panel)`.
+- `web`: the Settings → Plugins panel (`web/ui.js`, `web/ui.css`, `mount(slot, panel)`) and the authenticated screenshot route `/plugins/simulator/frame`.
 
 Rotation: `rotate.swift` sends the device-orientation event to the clone (headless, no Simulator.app window); it is compiled with `xcrun swiftc` on first use into the ignored `.build/`.
 
-Failure cases: `FAILURES.md`. Card design notes: `NOTES.md`.
+Failure cases: `FAILURES.md`. Panel design notes: `NOTES.md`.

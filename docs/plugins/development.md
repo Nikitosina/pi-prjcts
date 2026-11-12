@@ -111,6 +111,6 @@ Panel errors show in the plugin's card in Settings → Plugins:
 - No hot reload. Every change waits for a host restart.
 - No per-project installation. `plugins.json` is per host home, and a loaded plugin is loaded for every project on that host. Limit it with `coordinatorTools.applies`, `workerTools.offered` and your own checks of `projectId`.
 - No sandbox. A plugin is trusted code in the host process (see [Trust](README.md#trust)).
-- A browser panel lives only in Settings → Plugins. A plugin cannot add UI anywhere else in the inbox. The simulator plugin's card was written for the classic inbox and its retired hooks, so its panel shows an error until it is ported.
+- A browser panel lives only in Settings → Plugins. A plugin cannot add UI anywhere else in the inbox. The simulator plugin's panel is a fuller example: polling, screenshots through a route and inline confirmations.
 - No published type package (see Compatibility).
 - `plugin check` does not run your RPC methods or tools, and the private host's fake model does not call your tools.
