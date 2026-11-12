@@ -52,7 +52,7 @@ type Record = {
   marker: string;
   taskId: number;
   callId: string;
-} & ({ state: "uncertain" } | { state: "done"; effect: Effect });
+} & ({ state: "uncertain" } | { state: "done"; effect: Effect } | { state: "moot"; closedPr: number });
 const Writes = defineDoc<{ items: Record[] }>({
   kind: "projects.github-writes",
   version: 1,
@@ -117,6 +117,70 @@ type ReadRecord = ReadIdentity &
 export async function hasUncertainGithubWrites(tx: Tx, root: Conversation["id"]): Promise<boolean> {
   return (await tx.doc(Writes, root)).items.some((item) => item.state === "uncertain");
 }
+const PrState = Type.Object({ number: Type.Integer({ minimum: 1 }), state: Type.String() });
+/** The PRs an uncertain write touched: by number from its target, or every PR whose head is its branch. */
+async function writePulls(repositoryId: string, record: Record, signal: AbortSignal) {
+  const branch =
+    record.operation === "create-pr"
+      ? record.target.slice("pr:".length)
+      : record.target.startsWith("branch:")
+        ? record.target.slice("branch:".length)
+        : null;
+  if (branch !== null) {
+    const head = encodeURIComponent(`${repositoryId.split("/")[0]}:${branch}`);
+    return parse(
+      Type.Array(PrState, { maxItems: 100 }),
+      await githubRead(`repos/${repositoryId}/pulls?state=all&head=${head}&per_page=100`, signal),
+    );
+  }
+  const number =
+    record.operation === "update-pr"
+      ? record.target.slice("pr-update:".length)
+      : record.operation === "comment"
+        ? record.target.slice("comment:".length)
+        : record.operation === "reply-review"
+          ? (record.target.split(":")[1] ?? "")
+          : "";
+  if (!/^[1-9][0-9]*$/.test(number)) return [];
+  return [parse(PrState, await githubRead(`repos/${repositoryId}/pulls/${number}`, signal))];
+}
+export type GithubWriteWait = { operation: string; target: string; openPr: number | null };
+/** An uncertain write stops blocking automatic admission once its PR is merged or closed, where nothing automatic repeats it; a found marker settles it as done. Returns the writes still uncertain. */
+export async function settleClosedGithubWrites(
+  root: Conversation,
+  repo: Pick<GithubAuthorization, "repositoryId" | "numericId">,
+  signal: AbortSignal,
+): Promise<GithubWriteWait[]> {
+  const uncertain = await root.commit(
+    async (tx) =>
+      (await tx.doc(Writes, root.id)).items
+        .filter((item) => item.state === "uncertain" && item.resource.startsWith(`${repo.numericId}:`))
+        .map((item) => ({ ...item })),
+    BACKGROUND_CONTEXT,
+  );
+  const waits: GithubWriteWait[] = [];
+  for (const record of uncertain) {
+    // A local publication has no marker on GitHub to look for.
+    const effect =
+      record.operation === "verify-local-publication" ? null : (await observeEffect(repo.repositoryId, record, 1, signal)).effect;
+    const pulls = effect ? [] : await writePulls(repo.repositoryId, record, signal);
+    const open = pulls.find((pr) => pr.state === "open");
+    const closedPr = open ? undefined : pulls[0]?.number;
+    const settled = effect ? { state: "done" as const, effect } : closedPr !== undefined ? { state: "moot" as const, closedPr } : null;
+    if (!settled) {
+      waits.push({ operation: record.operation, target: record.target, openPr: open?.number ?? null });
+      continue;
+    }
+    await root.commit(async (tx) => {
+      const ledger = await tx.doc(Writes, root.id),
+        index = ledger.items.findIndex((item) => item.key === record.key);
+      const current = ledger.items[index];
+      if (current?.state !== "uncertain") return;
+      ledger.items[index] = { ...current, ...settled };
+    }, BACKGROUND_CONTEXT);
+  }
+  return waits;
+}
 
 const Reads = defineDoc<{ items: ReadRecord[] }>({
   kind: "projects.github-reads",
@@ -179,7 +243,11 @@ export async function githubWriteSnapshot(root: Conversation, options: { offset?
         taskId: row.taskId,
         callId: row.callId,
       };
-      return row.state === "done" ? { ...record, state: "done", effect: { ...row.effect } } : { ...record, state: "uncertain" };
+      return row.state === "done"
+        ? { ...record, state: "done", effect: { ...row.effect } }
+        : row.state === "moot"
+          ? { ...record, state: "moot", closedPr: row.closedPr }
+          : { ...record, state: "uncertain" };
     });
     return { items, total: rows.length, nextOffset: offset + items.length < rows.length ? offset + items.length : null };
   }, BACKGROUND_CONTEXT);
@@ -249,6 +317,7 @@ export function githubWriteInspector(root: Conversation, projectId: string) {
     }
     const binding = authorization();
     if (record.state === "done") return { key: record.key, state: "done", effect: { ...record.effect } };
+    if (record.state === "moot") return { key: record.key, state: "moot", closedPr: record.closedPr };
     const before = parse(Repository, await githubRead(`repos/${input.repositoryId}`, signal));
     if (before.id !== input.expectedRepositoryId || before.full_name !== input.repositoryId)
       throw new Error("GitHub repository identity changed");
@@ -456,6 +525,8 @@ export async function githubWorkerTools(input: {
       const ledger = await tx.doc(Writes, root.id);
       const same = ledger.items.find((item) => item.key === id);
       if (same?.state === "done") return { ...same.effect };
+      if (same?.state === "moot")
+        throw new Error(`GitHub effect ${id} was settled after PR #${same.closedPr} closed; it will not be repeated`);
       if (ledger.items.some((item) => item.resource === resource && item.state === "uncertain"))
         throw new Error("Uncertain GitHub effect must be inspected; publication will not be repeated");
       if (ledger.items.length >= 4096) throw new Error("GitHub write receipt limit reached");
@@ -1067,6 +1138,8 @@ export async function githubWorkerTools(input: {
         return { ...row };
       }, context);
       if (record.state === "done") return result({ ...record.effect });
+      if (record.state === "moot")
+        return { output: [{ type: "text", text: JSON.stringify({ key: record.key, state: "moot", closedPr: record.closedPr }) }] };
       const page = args.page ?? 1;
       const { effect, nextPage } = await observeEffect(publication.repositoryId, record, page, context.abortSignal);
       await check(api, context);

@@ -5,7 +5,7 @@ import { defineDoc, type Conversation } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { githubCli } from "./github-authorization.ts";
 import { failedCheckDetail } from "./github-prs.ts";
-import { githubPublishedPullRequests } from "./github-worker.ts";
+import { githubPublishedPullRequests, settleClosedGithubWrites, type GithubWriteWait } from "./github-worker.ts";
 import { Jobs } from "./jobs.ts";
 import { loadAutomations } from "./project-automations.ts";
 import { loadProject, type GithubAuthorization } from "./state.ts";
@@ -339,7 +339,14 @@ export function followRuntime(
     }
     return owners;
   }
-  async function recordBatch(batch: FollowBatch) {
+  async function recordBatch(batch: FollowBatch, waits: GithubWriteWait[]) {
+    // The batch stays pending, so nothing is lost while a write waits.
+    if (batch.groups.length && waits.length)
+      throw new Error(
+        `Follow PRs holds its events until GitHub writes with an unknown outcome are settled: ${waits
+          .map((wait) => `${wait.operation} ${wait.target} (${wait.openPr ? `PR #${wait.openPr} is open` : "no PR found"})`)
+          .join("; ")}. Merging or closing the PR settles its write.`,
+      );
     const target = await fixer.target();
     let eventId = "";
     for (const group of batch.groups) {
@@ -385,8 +392,9 @@ export function followRuntime(
     const controller = new AbortController();
     controllers.add(controller);
     try {
+      const waits = (await Promise.all(repos.map((repo) => settleClosedGithubWrites(root, repo, controller.signal)))).flat();
       const state = await read();
-      if (state.pending) return await recordBatch(state.pending);
+      if (state.pending) return await recordBatch(state.pending, waits);
       if (!repos.length && !connected.length)
         throw new Error("Follow PRs needs a GitHub authorization or a connected provider plugin; connect one in Owner setup");
       const items: Item[] = [],
@@ -500,7 +508,7 @@ export function followRuntime(
         const doc = await tx.doc(Follow, root.id);
         doc.pending = batch;
       }, BACKGROUND_CONTEXT);
-      return await recordBatch(batch);
+      return await recordBatch(batch, waits);
     } finally {
       controllers.delete(controller);
     }

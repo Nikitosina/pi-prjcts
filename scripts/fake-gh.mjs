@@ -31,6 +31,8 @@ const head = (branch) => {
 if (command !== "api" || hostname !== "github.com") fail(400, "unsupported invocation");
 // Fault injection: any target containing one of state.failPaths answers 502.
 if ((state.failPaths ?? []).some((part) => target.includes(part))) fail(502, "Bad Gateway");
+// state.failWrites does the same for writes only, so reads of the same path still answer.
+if (method !== "GET" && (state.failWrites ?? []).some((part) => target.includes(part))) fail(502, "Bad Gateway");
 const url = new URL(target, "https://api.github.invalid/"),
   parts = url.pathname.slice(1).split("/");
 const repo = state.repo,
