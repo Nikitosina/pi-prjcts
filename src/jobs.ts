@@ -20,6 +20,7 @@ import {
   type Extension,
   type Harness,
   type Session,
+  type SubmissionRecord,
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
@@ -127,7 +128,7 @@ type JobFacts = {
   /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
   scopeId: string | null;
   /** Verifier, reviewer and scout subagents the worker started, oldest first; a reviewer keeps its review kind (absent before 2026-11-11). */
-  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind }[];
+  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind; modelMoves?: ModelMove[] }[];
   branch: string | null;
   candidate: string | null;
   plan: PlanStep[];
@@ -193,10 +194,12 @@ export type Agent = {
   latestInput?: { seq: number; requestId: string };
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
-  modelMoves: { at: number; from: string; to: string }[];
+  modelMoves: ModelMove[];
   /** An ended scout or reviewer cleared from view (a Job's worker is dismissed through its Job). */
   dismissedAt?: number;
 };
+/** A move to another model after a quota or rate-limit failure. */
+type ModelMove = { at: number; from: string; to: string };
 export type JobsState = {
   paused: boolean;
   jobs: Record<string, Job>;
@@ -428,6 +431,8 @@ export type JobsHost = {
   }): { label: string; change: AgentChange } | null;
   /** Cached provider reset time for a model label, if known. */
   quotaResetAt?(model: string, now: number): number | undefined;
+  /** A turn on this model failed on quota, so new agents and moves skip it for a while. */
+  quotaFailed?(model: string): void;
   /** Why these proof references cannot back a Ready report, or null. */
   checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
@@ -498,6 +503,22 @@ async function treeCost(
       total = (total ?? 0) + entry.cost.total;
   }
   return total;
+}
+
+/** Why a settled input failed, aborts aside: its unanswered reason, or an empty answer right after a quota or rate-limit error. */
+async function turnFailure(
+  settled: SubmissionRecord,
+  entriesTo: (answer: EntryId) => Promise<readonly { model?: readonly unknown[] }[]>,
+): Promise<string | undefined> {
+  if (settled.status === "unanswered") return settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
+  return settled.status === "done" && settled.type === "input" ? emptyAnswerFailure(await entriesTo(settled.answer)) : undefined;
+}
+
+/** After a turn on `from` failed on quota or a rate limit: the model to move to, never one already left so a tier ends instead of cycling. */
+function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonly ModelMove[], failure: ProviderFailure) {
+  if (failure === "quota_exceeded") host.quotaFailed?.(from);
+  const offered = host.fallbackModel?.({ role, from, moves: moves.length, failure });
+  return offered && offered.label !== from && !moves.some((move) => move.from === offered.label) ? offered : null;
 }
 
 /** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
@@ -610,24 +631,14 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           taskContext,
         );
         const settled = await submission.wait(taskContext);
-        const failure =
-          settled.status === "unanswered"
-            ? settled.reason !== "aborted"
-              ? unansweredReason(settled)
-              : undefined
-            : settled.type === "input"
-              ? emptyAnswerFailure((await runtime.context(conversationId, taskContext, { at: settled.answer })).entries)
-              : undefined;
+        const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
         const kind = failure ? providerFailure(failure) : undefined;
         if (failure && kind) {
           const record = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId];
           const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
           const from = current ? `${current.provider}/${current.modelId}` : "";
-          const offered = record ? host.fallbackModel?.({ role: record.role, from, moves: record.modelMoves.length, failure: kind }) : null;
-          // Never back to a model this agent already left, so a chain ends instead of cycling.
-          const switched =
-            offered && offered.label !== from && !record?.modelMoves.some((move) => move.from === offered.label) ? offered : null;
+          const switched = record ? nextModel(host, record.role, from, record.modelMoves, kind) : null;
           const previous = record?.quota?.attempts ?? 0;
           if (record && (switched || (kind === "quota_exceeded" && previous < QUOTA_RETRY_LIMIT))) {
             const now = runtime.now();
@@ -1362,12 +1373,36 @@ export function createJobs(host: JobsHost) {
       }, callContext);
       await api.details({ conversationId: child }, callContext);
       const handle = (await api.conversation(child, callContext))!;
-      const settled = await (
-        await handle.submit({ type: "input", content: args.task, requestId: `subagent:${api.taskId}` }, callContext)
-      ).wait(callContext);
-      if (settled.status !== "done" || settled.type !== "input") throw new Error(`The ${args.role} did not answer: ${settled.status}`);
-      const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
-      return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+      const childRecord = (doc: JobsState | undefined) =>
+        Object.values(doc?.jobs ?? {})
+          .flatMap((job) => job.children)
+          .find((item) => item.id === child);
+      for (;;) {
+        const moves = childRecord(await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.modelMoves ?? [];
+        // One request id per model, so a replay waits on the attempt it left instead of sending the task again.
+        const requestId = moves.length ? `subagent:${api.taskId}:${moves.at(-1)!.to}` : `subagent:${api.taskId}`;
+        const settled = await (await handle.submit({ type: "input", content: args.task, requestId }, callContext)).wait(callContext);
+        const failure = await turnFailure(
+          settled,
+          async (at) => (await (await bound?.conversation(child, callContext))?.context(callContext, { at }))?.entries ?? [],
+        );
+        if (!failure && settled.status === "done" && settled.type === "input") {
+          const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
+          return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+        }
+        // Quota or a rate limit moves along the tier like a worker; at its end the call fails at once instead of waiting out a quota.
+        const kind = failure ? providerFailure(failure) : undefined;
+        const current = (await api.snapshot(AgentDoc, child, callContext))?.model;
+        const from = current ? `${current.provider}/${current.modelId}` : "";
+        const next = kind ? nextModel(host, args.role, from, moves, kind) : null;
+        if (!next) throw new Error(`The ${args.role} did not answer: ${failure ?? settled.status}`);
+        await api.commit(async (tx) => {
+          const record = childRecord(await tx.doc(Jobs, ROOT_CONVERSATION_ID));
+          if (!record) throw new Error("subagent belongs to a worker's Job");
+          record.modelMoves = [...moves, { at: Date.now(), from, to: next.label }];
+          await configure(tx, child, next.change);
+        }, callContext);
+      }
     },
   });
 

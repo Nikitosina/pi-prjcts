@@ -1,8 +1,8 @@
 // E2E: quota fallback and bounded retries of a Job's worker. Three local fake models, a private host and a disposable worktree.
-// The tier chain cases are F1-F4 in scripts/ui2-backend-failures.md.
+// The tier chain cases are F1-F8 in scripts/ui2-backend-failures.md.
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createKit, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
+import { createKit, call, say, randomUUID, delay } from "./lib/e2e-kit.mjs";
 
 const RATE = {
   status: 429,
@@ -20,11 +20,12 @@ const SESSION_LIMIT = {
   },
 };
 const requests = [],
-  coordinator = [];
+  coordinator = [],
+  reviews = [];
 const callsFor = (marker) => requests.filter((call) => call.marker === marker);
 const kit = await createKit("worker-quota", {
   env: { PI_PROJECTS_QUOTA_RETRY_BASE_MS: "60" },
-  handler: ({ role, model, user, msgs }) => {
+  handler: ({ role, model, user, msgs, results }) => {
     if (role === "coordinator") {
       // Each case runs in its own chat, so the whole conversation names it.
       const marker = ["COEND", "COQUOTA", "COPLAIN"].find((value) => JSON.stringify(msgs ?? user).includes(value));
@@ -32,7 +33,13 @@ const kit = await createKit("worker-quota", {
       if (marker === "COEND" || (marker === "COQUOTA" && model === "fake-model")) return QUOTA;
       return say(marker === "COQUOTA" ? "Coordinator recovered." : "Noted.");
     }
+    if (role === "reviewer" && user.includes("SUBQUOTA")) {
+      reviews.push(model);
+      return model === "fake-model" ? QUOTA : say(`REVIEW-ON-${model}`);
+    }
     if (role !== "worker") return say("Noted.");
+    if (user.includes("SUBQUOTA"))
+      return results.length ? say("Reviewed.") : call("subagent", { role: "reviewer", kind: "full", task: "SUBQUOTA review" });
     const marker = ["FALLBACK", "EXHAUST", "UNKNOWN", "CHAINEND", "CHAIN", "RATE", "EMPTY"].find((value) => user.includes(value));
     requests.push({ marker, model, at: Date.now() });
     if (marker === "FALLBACK" && model === "fallback-model") return say("Finished on the fallback model.");
@@ -64,6 +71,8 @@ await kit.run(async () => {
   const scopeId = (await kit.rpc({ action: "workspace-catalog", id })).find((scope) => scope.wholeRepository).id;
   const submit = async (text) =>
     (await kit.rpc({ action: "work-submit", id, threadId: randomUUID(), requestId: randomUUID(), workspaceScopeId: scopeId, text })).id;
+  // F8 skips models with a quota failure in the last retry window (60 ms here); a case that walks a tier from its start waits it out.
+  const pastQuotaWindow = () => delay(200);
   const settled = (jobId) =>
     kit.eventually(
       async () => {
@@ -149,6 +158,7 @@ await kit.run(async () => {
       JSON.stringify(callsFor("CHAIN").map((call) => call.model)) === JSON.stringify(["fake-model", "fallback-model", "third-model"]),
     { chain, calls: callsFor("CHAIN") },
   );
+  await pastQuotaWindow();
   const chainEnd = await settled(await submit("CHAINEND every model"));
   kit.check(
     "F2 the exhausted last tier model retries a bounded number of times, never earlier models, then fails",
@@ -172,6 +182,35 @@ await kit.run(async () => {
     JSON.stringify(empty.modelMoves.map((move) => move.to)) === JSON.stringify(["fake/fallback-model"]) &&
       callsFor("EMPTY").at(-1).model === "fallback-model",
     { empty, calls: callsFor("EMPTY").map((call) => call.model) },
+  );
+  const reviewerProfile = await kit.rpc({ action: "profiles-get", projectId: id });
+  await kit.rpc({
+    action: "profiles-set",
+    projectId: id,
+    revision: reviewerProfile.revision,
+    profile: "reviewer",
+    patch: { tier: "chain" },
+  });
+  await pastQuotaWindow();
+  await settled(await submit("SUBQUOTA review on a spent model"));
+  kit.check(
+    "F7 a worker's reviewer that hits quota moves to the next tier model and answers the same subagent call",
+    JSON.stringify(reviews) === JSON.stringify(["fake-model", "fallback-model"]) &&
+      kit.toolResult("worker", "SUBQUOTA").includes("REVIEW-ON-fallback-model"),
+    { reviews, result: kit.toolResult("worker", "SUBQUOTA") },
+  );
+  const { noteQuotaFailure, tierStart, tierNext } = await import("../src/tier-models.ts");
+  const now = Date.now();
+  noteQuotaFailure("x/a", now + 60_000);
+  noteQuotaFailure("x/b", now + 60_000);
+  kit.check(
+    "F8 the start and a move skip models with a recent quota failure; with none left the tier's order stands",
+    tierStart(["x/a", "x/b", "x/c"], now) === "x/c" &&
+      tierNext(["x/a", "x/b", "x/c"], "x/a", now) === "x/c" &&
+      tierStart(["x/a", "x/b"], now) === "x/a" &&
+      tierNext(["x/a", "x/b"], "x/a", now) === "x/b" &&
+      tierNext(["x/a", "x/b"], "x/b", now) === undefined &&
+      tierStart(["x/a", "x/b"], now + 61_000) === "x/a",
   );
   // F5: the snapshot names the model each agent runs on, not the project's legacy role model.
   const snapshot = await kit.rpc({ action: "jobs-snapshot", id });

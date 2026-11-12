@@ -34,6 +34,8 @@ Contract: `docs/ui2-contract.md`. Scripts: `ui2-settings-e2e` (tiers, profiles, 
 - F4 A rate limit (after Durable's own retries) moves on only when the profile has a tier.
 - F5 `jobs-snapshot` names each Job's and agent's own current model (its conversation's agent model), so a tier move or a tier that differs from the legacy `models.worker` is not hidden behind the project setting.
 - F6 A provider can answer Durable's retry of a failed turn with an empty reply (the Claude bridge did, on a five-hour limit at a tool boundary): the turn settles done, the worker reports nothing and the tier never moves. An empty answer right after a quota or rate-limit error is that failure: a tiered worker moves to the next model.
+- F7 A reviewer or scout a worker starts with `subagent` that fails on quota or a rate limit ends the call with "did not answer" and never moves along its tier (live 2026-11-11: three reviewers on an exhausted Claude bridge, no review). It must move like a worker, and answer the same call; a restart mid-move must not deliver the task twice. Its end of the tier fails the call at once: a subagent does not wait out a quota.
+- F8 A model that just failed on quota is offered again: a new agent of the same tier starts on it, and a move lands on it, so every agent pays one failed turn per spent model. A model with a quota failure in the last retry window, or a known spent window, is skipped by the start and by every move while another tier model has quota; with none left the tier's order stands.
 
 ## Profile tools (`profile-tools`)
 
