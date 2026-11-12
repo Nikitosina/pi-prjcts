@@ -297,8 +297,8 @@
       v.notice = intent.label;
       if (!ready(v)) clearFrame(v);
     } catch (error) {
-      // After the panel went away the answer is unknown; the intent stays for the next mount to retry.
-      if (isAbort(error)) return;
+      // After the panel went away the answer belongs to no mount (a refusal arrives unwrapped); the intent stays for the next mount.
+      if (isAbort(error) || v.panel.signal.aborted) return;
       if (answered(error)) {
         if (intents.get(v.projectId) === intent) intents.delete(v.projectId);
         v.intent = null;

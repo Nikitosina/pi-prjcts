@@ -96,4 +96,4 @@ Written before the port. The browser card moves from the classic context-panel h
 Found in review (red before the fix):
 
 - S12 A request still waiting for its answer when the panel goes away keeps the next mount locked until that answer arrives. The next mount offers Retry exact request at once; the retry resends the same request id, and the host's receipt makes it run once.
-- S13 A slow screenshot blocks the next capture: selecting another clone waits for the old answer, and a capture that never answers freezes the screenshot. Selecting another clone captures it at once, and a capture gives up after 60 seconds.
+- S13 A slow screenshot blocks the next capture: selecting another clone waits for the old answer, and a capture that never answers freezes the screenshot. Selecting another clone captures it at once, and a capture gives up after 60 seconds. The e2e covers the first; the timeout is not scripted, since it would hold the run for a minute.
