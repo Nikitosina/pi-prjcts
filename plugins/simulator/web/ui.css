@@ -54,10 +54,30 @@
   display: none;
 }
 .simulator-panel .simulator-tool {
+  position: relative;
   justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
+}
+/* The keyboard sees an icon's name too, not only a pointer's title tooltip. */
+.simulator-panel .simulator-tool:focus-visible::after {
+  content: attr(aria-label);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 6;
+  padding: 3px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-s);
+  background: var(--raised);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.simulator-panel .simulator-more[open] > summary::after {
+  display: none;
 }
 .simulator-panel .simulator-tab {
   position: relative;

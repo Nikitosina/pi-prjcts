@@ -299,8 +299,21 @@ await kit.run(async () => {
   );
 
   // ---- S15 the More actions menu: keyboard, polls, a press outside, a choice
-  check("S15 the menu items are hidden until the menu opens", !(await primary(`[data-action="simulator-delete"]`)) && !(await menuOpen()));
-  await page.evaluate(`document.querySelector(${js(inPanel(`${MORE} > summary`))}).focus()`);
+  check(
+    "S15 the menu items are hidden until the menu opens",
+    !(await page.evaluate(`document.querySelector(${js(inPanel(`${MORE} [data-action="simulator-delete"]`))}).checkVisibility()`)) &&
+      !(await menuOpen()),
+  );
+  // Tab from Boot reaches the menu button by keyboard, so its focus ring and name show.
+  await page.evaluate(`document.querySelector(${js(inPanel(`[data-action="simulator-boot"]`))}).focus()`);
+  await key("Tab", "Tab", 9);
+  await page.waitFor(
+    `document.activeElement === document.querySelector(${js(inPanel(`${MORE} > summary`))})`,
+    "menu button focused by Tab",
+  );
+  const label = await page.evaluate(`getComputedStyle(document.querySelector(${js(inPanel(`${MORE} > summary`))}), "::after").content`);
+  check("S16 a focused icon-only button shows its name to the keyboard", label === '"More actions"', label);
+  await shot("03-focus-label", MORE);
   await key("Enter", "Enter", 13, "\r");
   await waitPanel(`slot.querySelector(${js(MORE)}).open`, "menu opened by Enter");
   await shot("03-menu", MORE);
