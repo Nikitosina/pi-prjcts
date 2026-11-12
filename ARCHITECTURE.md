@@ -81,6 +81,8 @@ Rules:
 
 `stallTick` in `jobs.ts`, called every 30 s per project from `durable-runtime.ts` (`PI_PROJECTS_STALL_TICK_MS`). For each running Job it follows the active leaf of the ownership tree and flags no new entry or live tool output for `stallMinutes` (default 20), or the same tool call with the same result five times. Background silence alone does not flag a progressing agent. A worker waiting on an active verifier is judged by the verifier, and a worker inside a `projects_bg_status` wait by its background command's output. It posts one notice with the last three steps to the Job's chat per stall and sets `stalledAt` until progress resumes; sending instructions alone does not reset the notice.
 
+`waitingTick` runs on the same timer for chats whose independent workers wait in checkpoint (not dismissed). When nothing started from the chat runs (no running Job, live reader or report on its way), the Coordinator has no turn or queued input, and the chat stayed unchanged for 5 minutes, it posts one `[waiting]` notice listing those workers. Its request id hashes the waiting set (each worker with its latest answer), so the notice comes once per set, also across restarts; a worker that checkpoints again with a new answer is a new set. A paused project gets none.
+
 Rule: the detector only notifies. It never steers, stops or restarts an agent.
 
 ## Settings application

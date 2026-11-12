@@ -1729,10 +1729,12 @@ export async function openDurableProject(input: {
     prMonitorWake.unref();
     const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
     followWake.unref();
-    // Stall detector: one notice per stalled Job to its chat; it never steers or stops.
+    // Stall detector: one notice per stalled Job to its chat, and one per set of workers left waiting by an idle chat; it never steers or stops.
     const stallWake = setInterval(
       () => {
-        if (!closed && dispatchReady) void jobs.stallTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
+        if (closed || !dispatchReady) return;
+        void jobs.stallTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
+        void jobs.waitingTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
       },
       Number(process.env.PI_PROJECTS_STALL_TICK_MS) || 30_000,
     );

@@ -111,6 +111,7 @@ export const ROLE_BLOCKS = {
 - Completed is not verified. Check changed files, checks, artifacts, the review result and gaps.
 - Integrate isolated helper branches into your task branch and verify the combined result.
 - A checkpoint is unfinished work, not Ready. One that says the worker stopped without a Ready report may hold a question: answer it or ask the owner.
+- A checkpointed worker waits for you. Before ending a turn, answer it, stop or dismiss it, or ask the owner. Never end a turn saying you continue while nothing you started runs: start it now or report the blocker.
 - Send a ready-with-gaps result back to the worker at most once, and only for a concrete P0 or P1 or a failed check. Otherwise pass it to the owner.
 - On failure, inspect the evidence. Retry the same agent when the fix is clear; otherwise dismiss it and state the blocker.
 - A stall notice is information, not an order to stop.

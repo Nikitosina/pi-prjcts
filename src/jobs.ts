@@ -333,6 +333,8 @@ export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: nu
   };
 }
 
+/** How long a Coordinator stays idle with waiting workers before it is woken: time for the owner to answer first. */
+const WAITING_QUIET_MS = 5 * 60_000;
 const AUTO_CHECKPOINT = "The worker stopped without a Ready report or checkpoint; it may be waiting for a decision.";
 const reportList = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
 const notificationPreview = (report: string, agentId: string, ref: EntryId): string => {
@@ -1782,6 +1784,61 @@ export function createJobs(host: JobsHost) {
     return notified;
   }
 
+  const chatSeen = new Map<ConversationId, { signature: string; since: number }>();
+  /**
+   * One pass over chats whose independent workers wait in checkpoint. A chat whose Coordinator stayed idle for
+   * WAITING_QUIET_MS while nothing it started runs gets one notice per waiting set; never steers or stops.
+   */
+  async function waitingTick(harness: Harness, now = clock()): Promise<ConversationId[]> {
+    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+    if (!doc || doc.paused) return [];
+    const waiting = new Map<ConversationId, Job[]>();
+    for (const job of Object.values(doc.jobs))
+      if (job.status === "checkpoint" && !job.dismissedAt) waiting.set(job.chat, [...(waiting.get(job.chat) ?? []), job]);
+    if (!waiting.size) return [];
+    const live = await harness.inspect(context);
+    const reporting = reportedAgents(live);
+    const notified: ConversationId[] = [];
+    for (const [chat, parked] of waiting) {
+      // A running Job, a live reader or a report on its way will wake the Coordinator by itself.
+      const inFlight =
+        Object.values(doc.jobs).some((job) => job.chat === chat && isLive(job.status)) ||
+        Object.values(doc.agents).some(
+          (agent) => agent.chat === chat && (reporting.has(agent.id) || (!agent.jobId && agent.endedAt === null)),
+        );
+      const busy = (await working(harness, chat)) || live.submissions.some((item) => item.conversationId === chat && item.type === "input");
+      if (inFlight || busy) {
+        chatSeen.delete(chat);
+        continue;
+      }
+      const set = parked
+        .map((job) => `${job.id}:${doc.agents[job.id]?.reported.at(-1) ?? ""}`)
+        .sort()
+        .join(",");
+      const conversation = (await harness.conversation(chat, context))!;
+      const latest = (await conversation.entries({}, 1, undefined, context)).items[0];
+      const signature = `${set}|${latest?.id ?? ""}`;
+      const previous = chatSeen.get(chat);
+      if (!previous || previous.signature !== signature) chatSeen.set(chat, { signature, since: now });
+      if (now - chatSeen.get(chat)!.since < WAITING_QUIET_MS) continue;
+      const requestId = `waiting:${chat}:${createHash("sha256").update(set).digest("hex").slice(0, 16)}`;
+      if (await harness.commit((tx) => tx.submissionByRequest(chat, requestId), context)) continue;
+      const list = parked.map((job) => `- worker ${job.id}: ${job.title}`).join("\n");
+      await conversation.submit(
+        {
+          type: "input",
+          content: `[waiting] These workers wait for you in checkpoint, and nothing started from this chat is running:\n${list}\nAnswer each one (agents send), stop or dismiss it, or ask the owner with projects_question. If you already asked the owner, end the turn without a message.`,
+          whenBusy: "followUp",
+          requestId,
+          entry: { kind: "projects.internal-input" },
+        },
+        context,
+      );
+      notified.push(chat);
+    }
+    return notified;
+  }
+
   return {
     doc: Jobs,
     coordinator: Coordinator,
@@ -1810,6 +1867,7 @@ export function createJobs(host: JobsHost) {
     approve,
     finishApproval,
     stallTick,
+    waitingTick,
     pause,
     resume,
     busy,

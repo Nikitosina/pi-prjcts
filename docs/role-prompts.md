@@ -13,6 +13,8 @@ Each prompt states the outcome the role owns, not a procedure:
 
 After asking the owner for a decision, the Coordinator ends its turn without acknowledgment-only messages to workers. It still processes new results and failures, but reports to the owner only when the result, blocker or decision changes. Compact handbacks point to `agents report` for the full evidence; a short notification is not proof of acceptance.
 
+A checkpointed worker waits for the Coordinator. It answers, stops or dismisses it, or asks the owner before ending its turn, and never ends a turn saying it continues while nothing it started runs. The host backs this up: an idle chat with waiting workers gets one `[waiting]` notice (see ARCHITECTURE.md, Stall detector).
+
 Independent Job verification and review are worker-owned. The host checks that a Ready report's proof ids are passing runs on the candidate commit. A task helper's `completed` status only means it returned control and an answer. It is not a verification verdict or approval.
 
 Coverage: `durable-runtime-e2e` (quiet-wait and checkpoint instructions in actual model requests), `jobs-e2e` (engine), `repo-skill-overrides-unit` (skill discovery). Instruction checks do not prove that a real model will follow them.

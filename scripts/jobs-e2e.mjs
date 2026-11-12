@@ -192,6 +192,7 @@ function route(request) {
       return step ? call(...step) : say("Reviewed.");
     }
     if (tag === "BRIEF-NOREPORT" && user.includes("BRIEF-NOREPORT")) return say("Should I keep the old API or remove it?");
+    if (tag?.startsWith("BRIEF-PARKED") && user.includes("BRIEF-PARKED")) return say("Which storage should I use?");
     if (user === "Hold helper response") return call("gate", {});
     if (tag === "BRIEF-HELPER" && user.includes("BRIEF-HELPER"))
       return call("subagent", { role: "reviewer", kind: "full", task: "REVIEW" });
@@ -1033,6 +1034,79 @@ assert.equal(deliveredCheckpoint.checkpoint, undefined, "a Ready delivery replac
   await jobs.steer(harness, held.id, "Continue checkpoint");
   await quiet(harness);
   assert.equal((await jobsOf(harness)).find((item) => item.id === held.id).status, "ready", "an answer resumes the same worker");
+}
+
+// I1-I7 (jobs-failures.md "Waiting workers wake the Coordinator"): an idle chat whose workers wait in checkpoint is woken once per waiting set.
+{
+  for (const job of await jobsOf(harness)) if (job.status === "checkpoint" && !job.dismissedAt) await jobs.dismiss(harness, job.id);
+  const W = T + 1000 * 60_000,
+    minute = 60_000;
+  const wakes = async () => (await chatText(root)).filter((line) => line.startsWith("[waiting"));
+  await say_(root, "Start PARKED");
+  await quiet(harness);
+  const parked = (await jobsOf(harness)).find((item) => item.title === "Job PARKED");
+  assert.equal(parked.status, "checkpoint");
+  assert.deepEqual(await jobs.waitingTick(harness, W), [], "I4 no wake as the turn ends");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 4 * minute), [], "I4 the owner gets a few minutes first");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 6 * minute), [root.id], "I1 a parked worker wakes the idle Coordinator");
+  await quiet(harness);
+  const [wake] = await wakes();
+  assert.ok(wake?.includes(parked.id) && wake.includes("Job PARKED"), "I1 the wake names the waiting worker");
+  const notWaiting = (await jobsOf(harness)).filter((item) => item.status === "ready" || item.workspace || item.dismissedAt);
+  assert.ok(notWaiting.length && notWaiting.every((item) => !wake.includes(item.id)), "I5 Ready, helper and dismissed Jobs do not wait");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 20 * minute), [], "I2 an answered wake does not repeat");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 40 * minute), [], "I2 nor on a later tick");
+  await harness.close(context);
+  ({ harness, root, jobs, killed } = await open());
+  await jobs.recover(harness);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 41 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 60 * minute), [], "I2 nor after a restart");
+  assert.equal((await wakes()).length, 1);
+
+  // A new answer from the same worker is a new waiting set; a busy Coordinator holds it.
+  await jobs.steer(harness, parked.id, "Still unsure");
+  await quiet(harness);
+  gateOpen = false;
+  gateEntered = false;
+  const busyOwner = await root.submit({ type: "input", content: "Hold owner response" }, context);
+  await until(() => gateEntered, "coordinator busy with the owner");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 61 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 90 * minute), [], "I3 a busy Coordinator is not woken");
+  gateOpen = true;
+  await busyOwner.wait(context);
+  await quiet(harness);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 91 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 97 * minute), [root.id], "I7 a new checkpoint answer wakes again");
+  await quiet(harness);
+  assert.equal((await wakes()).length, 2);
+
+  // A running Job of the same chat will report, so it holds the wake.
+  await say_(root, "Start PARKEDB");
+  await quiet(harness);
+  const other = (await jobsOf(harness)).find((item) => item.title === "Job PARKEDB");
+  assert.equal(other.status, "checkpoint");
+  gateOpen = false;
+  gateEntered = false;
+  await jobs.steer(harness, other.id, "Hold helper response");
+  await until(() => gateEntered, "PARKEDB holds at the gate");
+  assert.deepEqual(await jobs.waitingTick(harness, W + 98 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 130 * minute), [], "I3 a running Job of the chat holds the wake");
+  gateOpen = true;
+  await quiet(harness);
+  assert.equal((await jobsOf(harness)).find((item) => item.id === other.id).status, "ready");
+
+  // A paused project wakes nobody; the wake comes after the resume.
+  await jobs.steer(harness, parked.id, "Still unsure");
+  await quiet(harness);
+  await jobs.pause(harness);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 131 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 160 * minute), [], "I6 a paused project is not woken");
+  await jobs.resume(harness);
+  await quiet(harness);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 161 * minute), []);
+  assert.deepEqual(await jobs.waitingTick(harness, W + 167 * minute), [root.id], "I6 the wake follows the resume");
+  await quiet(harness);
+  await jobs.dismiss(harness, parked.id);
 }
 
 // S1: a failure while preparing the worker reads "did not start", apart from a model failure.

@@ -47,3 +47,15 @@ Owner rule: one full review, then at most `review.rechecks` re-checks (project s
 - C2 The automatic checkpoint is indistinguishable from one the worker recorded, or offers Approve, or drops the worker's workspace.
 - C3 The automatic checkpoint notifies the Coordinator twice, or not at all.
 - S1 A failure in workspace preparation reads like a model failure ("failed"); the Job card and report must say "did not start" with the cause.
+
+## Waiting workers wake the Coordinator (live 2026-11-09, Mari: owner "исполнители ждут координатора, а он не отвечает ни им, ни спрашивает у меня")
+
+Live cause: the Coordinator answered "yes, I continue, next I start the full check" and ended its turn without a tool call. Every worker of the chat was parked in checkpoint, waiting for it, and nothing it started was running, so no report could wake it. The chat stayed silent for nine hours until the owner asked for progress. The same happened after a turn the owner stopped.
+
+- I1 The Coordinator ends its turn while independent workers of its chat wait in checkpoint and nothing started from that chat runs; nobody wakes it.
+- I2 The wake repeats for an unchanged waiting set: on every tick, after the Coordinator answered it, or after a host restart.
+- I3 It wakes while something started from the chat still runs (a running Job, a live scout or reviewer, a report on its way) or while the Coordinator is busy or has queued input.
+- I4 It wakes right after the turn ends, before the owner had a few minutes to answer.
+- I5 A dismissed checkpoint, a Ready Job (it waits for the owner, not the Coordinator) or a completed task helper counts as waiting.
+- I6 A paused project wakes its chats.
+- I7 A worker that returns to checkpoint with a new answer after the wake is never announced again.

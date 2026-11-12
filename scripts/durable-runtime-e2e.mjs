@@ -103,6 +103,7 @@ try {
   pass("Fake-model coordinator answers");
   assert.ok(modelRequests.some((request) => request.includes("After asking the owner for a decision, end the turn")));
   assert.ok(modelRequests.some((request) => request.includes("agents report")));
+  assert.ok(modelRequests.some((request) => request.includes("A checkpointed worker waits for you")));
   pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();
   assert.equal(ownerHistory.items.find((item) => item.kind === "message" && item.role === "user").origin, "owner");
