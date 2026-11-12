@@ -25,4 +25,4 @@ Preconditions: `launch --plugin <dir>` succeeded, doctor `ok: true`. A scaffold 
 
 - The list is what the host loaded at its start. Edit the plugin and launch again (or restart the host) to see a change; nothing reloads live.
 - A page loads each plugin script once. After a host restart, reload the page too.
-- The built-in GitHub provider is part of core and is not listed.
+- The built-in `github` plugin (source `built-in`, `prs` and `coordinatorTools`) loads on every host and is listed first, also without `--plugin`; the drive checks only the launched plugins.
