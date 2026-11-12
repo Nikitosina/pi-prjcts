@@ -6,7 +6,8 @@
   const intents = new Map();
   const views = new WeakMap(); // panel -> its mount's state
   const POLL_MS = 3000,
-    FRAME_MS = 4000;
+    FRAME_MS = 4000,
+    CAPTURE_TIMEOUT_MS = 60000;
   const isAbort = (error) => error?.name === "AbortError";
   // A refusal the host answered carries its HTTP status; any other failure may have reached the host.
   const answered = (error) => typeof error?.status === "number";
@@ -19,7 +20,8 @@
     const devices = v.snapshot?.devices ?? [];
     return devices.find((item) => item.udid === v.selected) ?? devices.find((item) => item.state === "Booted") ?? devices[0] ?? null;
   }
-  const pending = (v) => !!v.intent?.pending;
+  // `sender` is the mount waiting for the intent's answer; it lets go when its panel goes away, so the next mount can retry.
+  const pending = (v) => !!v.intent?.sender;
   function ready(v) {
     const s = v.snapshot;
     return !pending(v) && s?.enabled && !s.operation && !s.error && device(v)?.state === "Booted";
@@ -217,17 +219,27 @@
     }
   }
 
+  // One capture per frame epoch: a new epoch (another clone, a request) captures at once, and a late answer of an old one is dropped.
   async function capture(v) {
-    if (!ready(v) || v.capturing) return;
+    if (!ready(v) || v.capturing === v.frameEpoch) return;
     const udid = device(v).udid,
       epoch = v.frameEpoch;
-    v.capturing = true;
+    v.capturing = epoch;
+    let timer;
     try {
-      const response = await v.panel.fetch("frame", { udid });
-      if (!response.ok) throw new Error(`Screenshot unavailable (${response.status})`);
-      const type = response.headers.get("content-type")?.split(";")[0];
-      if (!["image/png", "image/jpeg"].includes(type)) throw new Error("Simulator returned an unsupported image");
-      const blob = await response.blob();
+      // panel.fetch takes no signal of its own, so a stalled capture is abandoned rather than aborted.
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Screenshot timed out")), CAPTURE_TIMEOUT_MS);
+      });
+      const blob = await Promise.race([
+        v.panel.fetch("frame", { udid }).then((response) => {
+          if (!response.ok) throw new Error(`Screenshot unavailable (${response.status})`);
+          const type = response.headers.get("content-type")?.split(";")[0];
+          if (!["image/png", "image/jpeg"].includes(type)) throw new Error("Simulator returned an unsupported image");
+          return response.blob();
+        }),
+        timeout,
+      ]);
       if (epoch !== v.frameEpoch || v.panel.signal.aborted || !ready(v) || device(v)?.udid !== udid) return;
       const old = v.url;
       v.url = URL.createObjectURL(blob);
@@ -239,8 +251,11 @@
     } catch (error) {
       if (!isAbort(error) && epoch === v.frameEpoch) v.frameError = error.message;
     } finally {
-      v.capturing = false;
-      v.nextFrame = Date.now() + FRAME_MS;
+      clearTimeout(timer);
+      if (v.capturing === epoch) {
+        v.capturing = null;
+        v.nextFrame = Date.now() + FRAME_MS;
+      }
       render(v);
     }
   }
@@ -262,9 +277,9 @@
       return;
     const intent = retry
       ? v.intent
-      : { input: { method: input.method, params: { ...input.params, requestId: crypto.randomUUID() } }, label, pending: false };
-    if (!intent || intent.pending) return;
-    intent.pending = true;
+      : { input: { method: input.method, params: { ...input.params, requestId: crypto.randomUUID() } }, label, sender: null };
+    if (!intent || intent.sender) return;
+    intent.sender = v;
     intents.set(v.projectId, intent);
     v.epoch++;
     v.intent = intent;
@@ -291,7 +306,7 @@
         v.error = error.message;
       } else v.error = `${error.message}. Response unconfirmed. Inspect the simulator state, then retry the exact request if needed.`;
     } finally {
-      intent.pending = false;
+      if (intent.sender === v) intent.sender = null;
       render(v);
     }
   }
@@ -371,12 +386,13 @@
       default:
         throw new Error(`Unknown simulator action ${name}`);
     }
+    panel.signal.throwIfAborted();
     render(v);
   }
 
   window.piProjects.register({
     name: "simulator",
-    mount(slot, panel) {
+    async mount(slot, panel) {
       slot.innerHTML = `<section class="simulator-panel" aria-label="Project simulator">
   <div class="simulator-head"><b>Simulator</b><span class="badge" data-simulator-status>Loading</span></div>
   <p class="small muted" data-simulator-description></p>
@@ -401,7 +417,7 @@
         intent,
         confirm: null,
         polling: false,
-        capturing: false,
+        capturing: null,
         epoch: 0,
         frameEpoch: 0,
         nextPoll: 0,
@@ -420,11 +436,13 @@
           clearInterval(timer);
           if (v.url) URL.revokeObjectURL(v.url);
           v.url = null;
+          if (v.intent?.sender === v) v.intent.sender = null;
         },
         { once: true },
       );
       render(v);
-      return load(v);
+      await load(v);
+      panel.signal.throwIfAborted();
     },
     action,
   });

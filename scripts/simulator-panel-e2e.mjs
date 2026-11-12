@@ -124,7 +124,9 @@ await kit.run(async () => {
       }
       const answer = send.apply(this, arguments);
       if (entry) answer.then((response) => { entry.status = response.status; }, () => {});
-      return answer;
+      // __simHold(entry) returns milliseconds to hold a sent request's answer (S12, S13).
+      const hold = (entry && window.__simHold?.(entry)) || 0;
+      return hold ? new Promise((resolve) => setTimeout(() => resolve(answer), hold)) : answer;
     };
     const make = URL.createObjectURL, revoke = URL.revokeObjectURL;
     URL.createObjectURL = (blob) => { const url = make(blob); if (blob.type.startsWith("image/")) window.__blobs.made.push(url); return url; };
@@ -383,6 +385,54 @@ await kit.run(async () => {
   );
   await waitPanel(`!slot.querySelector('[data-action="simulator-retry"]')`, "retry cleared");
 
+  // ---- S13 a slow screenshot does not hold up another clone's capture
+  await waitStatus(/^2\/2 running$/, "both clones running for S13");
+  await page.evaluate(`window.__simHold = (entry) => entry.kind === "frame" && entry.url.includes(${js(CLONE_A)}) ? 8000 : 0`);
+  await selectTab(CLONE_A);
+  await page.waitFor(
+    `window.__sim.some((entry) => entry.kind === "frame" && entry.url.includes(${js(CLONE_A)}) && !entry.status)`,
+    "held capture of A",
+  );
+  mark = (await sim()).length;
+  await selectTab(created.udid);
+  await page.waitFor(
+    `window.__sim.slice(${mark}).some((entry) => entry.kind === "frame" && entry.url.includes(${js(created.udid)}))`,
+    "capture of the selected clone while A's answer is held",
+    12,
+  );
+  check("S13 selecting another clone captures it at once while a slow capture is outstanding", true);
+  await page.evaluate(`window.__simHold = null`);
+
+  // ---- S12 a request outstanding at unmount does not lock the next mount
+  await page.evaluate(`window.__simHold = (entry) => entry.kind === "action" && entry.params.operation === "shutdown" ? 8000 : 0`);
+  mark = (await sim()).length;
+  const shutdownsBefore = fakeCalls().filter((call) => call.args[0] === "shutdown").length;
+  await click(inPanel(`[data-action="simulator-shutdown"]`));
+  await page.waitFor(`window.__sim.slice(${mark}).some((entry) => entry.kind === "action")`, "held shutdown sent");
+  await closeSettings();
+  await openPlugins();
+  await page.waitFor(
+    `!!document.querySelector(${js(inPanel('[data-action="simulator-retry"]'))})`,
+    "Retry exact request offered at once after reopening",
+    12,
+  );
+  const held = (await actions(mark, "action"))[0];
+  await page.evaluate(`window.__simHold = null`);
+  await click(inPanel(`[data-action="simulator-retry"]`));
+  await kit.eventually(() => store().receipts[held.params.requestId]?.status === "done", "held shutdown done");
+  await settled();
+  const resent = await actions(mark, "action");
+  check(
+    "S12 the next mount offers Retry exact request at once; the retry resends the same id and the shutdown runs once",
+    resent.length === 2 &&
+      resent.every((entry) => entry.params.requestId === held.params.requestId) &&
+      fakeCalls().filter((call) => call.args[0] === "shutdown").length === shutdownsBefore + 1 &&
+      deviceState(created.udid) === "Shutdown",
+    { resent, calls: fakeCalls().slice(-6) },
+  );
+  await waitPanel(`!slot.querySelector('[data-action="simulator-retry"]')`, "retry cleared after S12");
+  await waitStatus(/^1\/2 running$/, "one clone running after S12");
+
   // ---- S6 errors: simslim failing, then the snapshot itself failing
   setFail({ list: "simslim: CoreSimulator is not available (fixture)" });
   await waitStatus(/^Error$/, "simslim error shown");
@@ -392,7 +442,7 @@ await kit.run(async () => {
   );
   await shot("10-simslim-error");
   setFail({});
-  await waitStatus(/^2\/2 running$/, "recovered after simslim answers");
+  await waitStatus(/^1\/2 running$/, "recovered after simslim answers");
   await page.evaluate(`window.__simFail = (entry) => entry.kind === "snapshot"`);
   await waitStatus(/^Unavailable$/, "snapshot failure shown");
   check(
@@ -405,7 +455,7 @@ await kit.run(async () => {
   await page.evaluate(`window.__simFail = null`);
   mark = (await sim()).length;
   await click(inPanel(`[data-action="simulator-refresh"]`));
-  await waitStatus(/^2\/2 running$/, "retry recovers");
+  await waitStatus(/^1\/2 running$/, "retry recovers");
   check(
     "S6 Retry asks for a snapshot at once",
     (await since(mark)).some((entry) => entry.kind === "snapshot"),
@@ -429,7 +479,7 @@ await kit.run(async () => {
   );
   await shot("12-project-beta");
   await select(alpha);
-  await waitStatus(/^2\/2 running$/, "Alpha again");
+  await waitStatus(/^1\/2 running$/, "Alpha again");
   await waitPanel(`slot.querySelector("[data-simulator-screen] img")?.naturalWidth > 0`, "Alpha screenshot again");
   const quiet = async (label) => {
     await delay(300);
@@ -443,7 +493,7 @@ await kit.run(async () => {
   await page.waitFor(`document.querySelector("#settings").dataset.section === "general"`, "General section");
   await quiet("S10 leaving the section stops polling and captures");
   await openPlugins();
-  await waitStatus(/^2\/2 running$/, "Alpha after returning");
+  await waitStatus(/^1\/2 running$/, "Alpha after returning");
   await closeSettings();
   await quiet("S10 closing Settings stops polling and captures");
   const blobs = await page.evaluate(`window.__blobs`);
@@ -457,11 +507,11 @@ await kit.run(async () => {
     await closeSettings();
   }
   await openPlugins();
-  await waitStatus(/^2\/2 running$/, "Alpha after reopenings");
+  await waitStatus(/^1\/2 running$/, "Alpha after reopenings");
   await selectTab(created.udid);
   mark = (await sim()).length;
-  await click(inPanel(`[data-action="simulator-shutdown"]`));
-  await kit.eventually(() => deviceState(created.udid) === "Shutdown", "shut down after reopenings");
+  await click(inPanel(`[data-action="simulator-boot"]`));
+  await kit.eventually(() => deviceState(created.udid) === "Booted", "booted after reopenings");
   await settled();
   await delay(1000);
   const once = await actions(mark, "action");
@@ -470,7 +520,7 @@ await kit.run(async () => {
     once.length === 1 && Object.values(store().receipts).length === new Set(Object.keys(store().receipts)).size,
     once,
   );
-  await waitStatus(/^1\/2 running$/, "one running after shutdown");
+  await waitStatus(/^2\/2 running$/, "both running after the boot");
   await shot("13-after-reopenings");
   check(
     "S11 no script or stylesheet was inserted twice",

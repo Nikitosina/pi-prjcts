@@ -92,3 +92,8 @@ Written before the port. The browser card moves from the classic context-panel h
 - S9 A booted clone shows no screenshot, or the screenshot uses a request without the token. The panel polls `panel.fetch("frame", { udid })` and shows the image; a shut-down clone shows none.
 - S10 Closing Settings, leaving the section or selecting another project leaves polling or captures running, or a late answer renders into the next mount. After the signal aborts, no snapshot or frame request is sent and object URLs are revoked.
 - S11 A project change shows the previous project's clones, or reopening stacks timers and handlers. Each mount shows only its own project's state, and one click sends one request after several reopenings.
+
+Found in review (red before the fix):
+
+- S12 A request still waiting for its answer when the panel goes away keeps the next mount locked until that answer arrives. The next mount offers Retry exact request at once; the retry resends the same request id, and the host's receipt makes it run once.
+- S13 A slow screenshot blocks the next capture: selecting another clone waits for the old answer, and a capture that never answers freezes the screenshot. Selecting another clone captures it at once, and a capture gives up after 60 seconds.
