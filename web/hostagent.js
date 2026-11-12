@@ -4,7 +4,7 @@
 import { call, stream, uuid } from "./api.js";
 import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
-import { morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
+import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
@@ -16,7 +16,7 @@ const drawer = document.querySelector("#host-agent"),
   form = drawer.querySelector("#ha-composer"),
   input = form.querySelector("textarea");
 let items = [],
-  summaries = {},
+  groups = null,
   before = null,
   live = null,
   frame = null,
@@ -92,8 +92,8 @@ export async function loadHostAgent() {
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
-  // Earlier pages keep the summaries they were read with; the newest page brings its own.
-  summaries = { ...summaries, ...history.toolSummaries };
+  // Earlier pages keep the groups they were read with; the newest page brings its own, also for a group both hold.
+  groups = mergeGroups(groups, history.toolGroups);
   before = history.before;
   paint();
   if (isOpen() && !live)
@@ -153,7 +153,7 @@ function offerSettings(section, before = () => {}) {
 // ---------------------------------------------------------------------------------------------------------------- transcript
 
 function paint() {
-  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, summaries });
+  const transcript = transcriptHtml(items, false, "Host agent", { fold: false, groups });
   morph(
     body,
     (before ? `<button type="button" class="earlier" data-ha-earlier>Show earlier</button>` : "") +
@@ -187,7 +187,7 @@ body.addEventListener("click", async (event) => {
     const page = await call("host-agent-history", { before }).catch(fail);
     if (load !== loads || !page) return;
     items = [...page.items, ...items];
-    summaries = { ...page.toolSummaries, ...summaries };
+    groups = mergeGroups(page.toolGroups, groups);
     before = page.before;
     const top = body.scrollHeight - body.scrollTop;
     paint();

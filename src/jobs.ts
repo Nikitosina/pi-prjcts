@@ -20,6 +20,7 @@ import {
   type Extension,
   type Harness,
   type Session,
+  type SubmissionRecord,
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
@@ -90,6 +91,21 @@ export function reviewRefusal(spent: ReviewSpend, kind: ReviewKind, rechecks: nu
   if (spent.rechecks >= rechecks) return `All ${rechecks} re-checks of this Job are spent.`;
   return null;
 }
+/** Reviewers that count against the budget: those started, less the ones whose subagent call ended without an answer. */
+async function countedReviews(tx: Tx, job: Job): Promise<ReviewSpend> {
+  const spent = { ...(job.reviews ?? { full: 0, rechecks: 0 }) };
+  for (const child of job.children) {
+    // Before the kind was kept, every reviewer was full until the first re-check; later kindless ones stay counted.
+    const kind = child.review ?? (child.role === "reviewer" && job.reviews?.rechecks === 0 ? "full" : undefined);
+    if (!kind) continue;
+    const owner = (await tx.conversation(child.id))?.owner;
+    const state = owner && (await tx.task(owner.taskId))?.state;
+    if (state?.status !== "terminal" || state.outcome.status === "completed") continue;
+    if (kind === "full") spent.full = Math.max(0, spent.full - 1);
+    else spent.rechecks = Math.max(0, spent.rechecks - 1);
+  }
+  return spent;
+}
 export type ReadyReport = {
   summary: string;
   proof: string[];
@@ -111,8 +127,8 @@ type JobFacts = {
   workerConversation: ConversationId;
   /** Workspace scope the worker runs in (host-persisted id), or null for a plain checkout. */
   scopeId: string | null;
-  /** Verifier, reviewer and scout subagents the worker started, oldest first. */
-  children: { id: ConversationId; role: AgentRole; title: string }[];
+  /** Verifier, reviewer and scout subagents the worker started, oldest first; a reviewer keeps its review kind (absent before 2026-11-11). */
+  children: { id: ConversationId; role: AgentRole; title: string; review?: ReviewKind; modelMoves?: ModelMove[] }[];
   branch: string | null;
   candidate: string | null;
   plan: PlanStep[];
@@ -178,10 +194,12 @@ export type Agent = {
   latestInput?: { seq: number; requestId: string };
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
-  modelMoves: { at: number; from: string; to: string }[];
+  modelMoves: ModelMove[];
   /** An ended scout or reviewer cleared from view (a Job's worker is dismissed through its Job). */
   dismissedAt?: number;
 };
+/** A move to another model after a quota or rate-limit failure. */
+type ModelMove = { at: number; from: string; to: string };
 export type JobsState = {
   paused: boolean;
   jobs: Record<string, Job>;
@@ -318,6 +336,8 @@ export function planEta(plan: readonly PlanStep[], now = Date.now()): { done: nu
   };
 }
 
+/** How long a Coordinator stays idle with waiting workers before it is woken: time for the owner to answer first. */
+const WAITING_QUIET_MS = 5 * 60_000;
 const AUTO_CHECKPOINT = "The worker stopped without a Ready report or checkpoint; it may be waiting for a decision.";
 const reportList = (items: readonly string[]) => (items.length ? items.map((item) => `\n- ${item}`).join("") : " none");
 const notificationPreview = (report: string, agentId: string, ref: EntryId): string => {
@@ -411,6 +431,8 @@ export type JobsHost = {
   }): { label: string; change: AgentChange } | null;
   /** Cached provider reset time for a model label, if known. */
   quotaResetAt?(model: string, now: number): number | undefined;
+  /** A turn on this model failed on quota, so new agents and moves skip it for a while. */
+  quotaFailed?(model: string): void;
   /** Why these proof references cannot back a Ready report, or null. */
   checkProof?(job: Job, refs: readonly string[]): Promise<string | null> | string | null;
   /** Merge a Ready Job's candidate. */
@@ -481,6 +503,22 @@ async function treeCost(
       total = (total ?? 0) + entry.cost.total;
   }
   return total;
+}
+
+/** Why a settled input failed, aborts aside: its unanswered reason, or an empty answer right after a quota or rate-limit error. */
+async function turnFailure(
+  settled: SubmissionRecord,
+  entriesTo: (answer: EntryId) => Promise<readonly { model?: readonly unknown[] }[]>,
+): Promise<string | undefined> {
+  if (settled.status === "unanswered") return settled.reason !== "aborted" ? unansweredReason(settled) : undefined;
+  return settled.status === "done" && settled.type === "input" ? emptyAnswerFailure(await entriesTo(settled.answer)) : undefined;
+}
+
+/** After a turn on `from` failed on quota or a rate limit: the model to move to, never one already left so a tier ends instead of cycling. */
+function nextModel(host: JobsHost, role: AgentRole, from: string, moves: readonly ModelMove[], failure: ProviderFailure) {
+  if (failure === "quota_exceeded") host.quotaFailed?.(from);
+  const offered = host.fallbackModel?.({ role, from, moves: moves.length, failure });
+  return offered && offered.label !== from && !moves.some((move) => move.from === offered.label) ? offered : null;
 }
 
 /** Prepares an agent, delivers one message and reports its answer once, with large handbacks read on demand. */
@@ -593,24 +631,14 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           taskContext,
         );
         const settled = await submission.wait(taskContext);
-        const failure =
-          settled.status === "unanswered"
-            ? settled.reason !== "aborted"
-              ? unansweredReason(settled)
-              : undefined
-            : settled.type === "input"
-              ? emptyAnswerFailure((await runtime.context(conversationId, taskContext, { at: settled.answer })).entries)
-              : undefined;
+        const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
         const kind = failure ? providerFailure(failure) : undefined;
         if (failure && kind) {
           const record = (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId];
           const current = (await runtime.snapshot(AgentDoc, conversationId, taskContext))?.model;
           const from = current ? `${current.provider}/${current.modelId}` : "";
-          const offered = record ? host.fallbackModel?.({ role: record.role, from, moves: record.modelMoves.length, failure: kind }) : null;
-          // Never back to a model this agent already left, so a chain ends instead of cycling.
-          const switched =
-            offered && offered.label !== from && !record?.modelMoves.some((move) => move.from === offered.label) ? offered : null;
+          const switched = record ? nextModel(host, record.role, from, record.modelMoves, kind) : null;
           const previous = record?.quota?.attempts ?? 0;
           if (record && (switched || (kind === "quota_exceeded" && previous < QUOTA_RETRY_LIMIT))) {
             const now = runtime.now();
@@ -1318,16 +1346,22 @@ export function createJobs(host: JobsHost) {
         const job = Object.values(doc.jobs).find((item) => item.workerConversation === api.conversationId);
         if (!job) throw new Error("subagent belongs to a worker's Job");
         if (args.role === "reviewer") {
-          const spent = job.reviews ?? { full: 0, rechecks: 0 };
+          const spent = await countedReviews(tx, job);
           const refusal = reviewRefusal(spent, args.kind, host.reviewRechecks?.() ?? DEFAULT_REVIEW_RECHECKS);
           if (refusal)
             throw new Error(
               `${refusal} No reviewer started. ${job.workspace ? "Return your answer" : "Report with job ready"} and list the still-open P0/P1 findings as gaps for the owner, P2/P3 under Not fixed.`,
             );
-          job.reviews = args.kind === "full" ? { ...spent, full: spent.full + 1 } : { ...spent, rechecks: spent.rechecks + 1 };
+          const started = job.reviews ?? { full: 0, rechecks: 0 };
+          job.reviews = args.kind === "full" ? { ...started, full: started.full + 1 } : { ...started, rechecks: started.rechecks + 1 };
         }
         const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-        job.children.push({ id: created.id, role: args.role, title: clip(args.task, 80) });
+        job.children.push({
+          id: created.id,
+          role: args.role,
+          title: clip(args.task, 80),
+          ...(args.role === "reviewer" ? { review: args.kind } : {}),
+        });
         doc.subagents[String(created.id)] = job.id;
         await configure(
           tx,
@@ -1339,12 +1373,36 @@ export function createJobs(host: JobsHost) {
       }, callContext);
       await api.details({ conversationId: child }, callContext);
       const handle = (await api.conversation(child, callContext))!;
-      const settled = await (
-        await handle.submit({ type: "input", content: args.task, requestId: `subagent:${api.taskId}` }, callContext)
-      ).wait(callContext);
-      if (settled.status !== "done" || settled.type !== "input") throw new Error(`The ${args.role} did not answer: ${settled.status}`);
-      const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
-      return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+      const childRecord = (doc: JobsState | undefined) =>
+        Object.values(doc?.jobs ?? {})
+          .flatMap((job) => job.children)
+          .find((item) => item.id === child);
+      for (;;) {
+        const moves = childRecord(await api.snapshot(Jobs, ROOT_CONVERSATION_ID, callContext))?.modelMoves ?? [];
+        // One request id per model, so a replay waits on the attempt it left instead of sending the task again.
+        const requestId = moves.length ? `subagent:${api.taskId}:${moves.at(-1)!.to}` : `subagent:${api.taskId}`;
+        const settled = await (await handle.submit({ type: "input", content: args.task, requestId }, callContext)).wait(callContext);
+        const failure = await turnFailure(
+          settled,
+          async (at) => (await (await bound?.conversation(child, callContext))?.context(callContext, { at }))?.entries ?? [],
+        );
+        if (!failure && settled.status === "done" && settled.type === "input") {
+          const entry = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), callContext);
+          return { output: [{ type: "text" as const, text: textOfAnswer(entry) }], details: { conversationId: child } };
+        }
+        // Quota or a rate limit moves along the tier like a worker; at its end the call fails at once instead of waiting out a quota.
+        const kind = failure ? providerFailure(failure) : undefined;
+        const current = (await api.snapshot(AgentDoc, child, callContext))?.model;
+        const from = current ? `${current.provider}/${current.modelId}` : "";
+        const next = kind ? nextModel(host, args.role, from, moves, kind) : null;
+        if (!next) throw new Error(`The ${args.role} did not answer: ${failure ?? settled.status}`);
+        await api.commit(async (tx) => {
+          const record = childRecord(await tx.doc(Jobs, ROOT_CONVERSATION_ID));
+          if (!record) throw new Error("subagent belongs to a worker's Job");
+          record.modelMoves = [...moves, { at: Date.now(), from, to: next.label }];
+          await configure(tx, child, next.change);
+        }, callContext);
+      }
     },
   });
 
@@ -1761,6 +1819,61 @@ export function createJobs(host: JobsHost) {
     return notified;
   }
 
+  const chatSeen = new Map<ConversationId, { signature: string; since: number }>();
+  /**
+   * One pass over chats whose independent workers wait in checkpoint. A chat whose Coordinator stayed idle for
+   * WAITING_QUIET_MS while nothing it started runs gets one notice per waiting set; never steers or stops.
+   */
+  async function waitingTick(harness: Harness, now = clock()): Promise<ConversationId[]> {
+    const doc = await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context);
+    if (!doc || doc.paused) return [];
+    const waiting = new Map<ConversationId, Job[]>();
+    for (const job of Object.values(doc.jobs))
+      if (job.status === "checkpoint" && !job.dismissedAt) waiting.set(job.chat, [...(waiting.get(job.chat) ?? []), job]);
+    if (!waiting.size) return [];
+    const live = await harness.inspect(context);
+    const reporting = reportedAgents(live);
+    const notified: ConversationId[] = [];
+    for (const [chat, parked] of waiting) {
+      // A running Job, a live reader or a report on its way will wake the Coordinator by itself.
+      const inFlight =
+        Object.values(doc.jobs).some((job) => job.chat === chat && isLive(job.status)) ||
+        Object.values(doc.agents).some(
+          (agent) => agent.chat === chat && (reporting.has(agent.id) || (!agent.jobId && agent.endedAt === null)),
+        );
+      const busy = (await working(harness, chat)) || live.submissions.some((item) => item.conversationId === chat && item.type === "input");
+      if (inFlight || busy) {
+        chatSeen.delete(chat);
+        continue;
+      }
+      const set = parked
+        .map((job) => `${job.id}:${doc.agents[job.id]?.reported.at(-1) ?? ""}`)
+        .sort()
+        .join(",");
+      const conversation = (await harness.conversation(chat, context))!;
+      const latest = (await conversation.entries({}, 1, undefined, context)).items[0];
+      const signature = `${set}|${latest?.id ?? ""}`;
+      const previous = chatSeen.get(chat);
+      if (!previous || previous.signature !== signature) chatSeen.set(chat, { signature, since: now });
+      if (now - chatSeen.get(chat)!.since < WAITING_QUIET_MS) continue;
+      const requestId = `waiting:${chat}:${createHash("sha256").update(set).digest("hex").slice(0, 16)}`;
+      if (await harness.commit((tx) => tx.submissionByRequest(chat, requestId), context)) continue;
+      const list = parked.map((job) => `- worker ${job.id}: ${job.title}`).join("\n");
+      await conversation.submit(
+        {
+          type: "input",
+          content: `[waiting] These workers wait for you in checkpoint, and nothing started from this chat is running:\n${list}\nAnswer each one (agents send), stop or dismiss it, or ask the owner with projects_question. If you already asked the owner, end the turn without a message.`,
+          whenBusy: "followUp",
+          requestId,
+          entry: { kind: "projects.internal-input" },
+        },
+        context,
+      );
+      notified.push(chat);
+    }
+    return notified;
+  }
+
   return {
     doc: Jobs,
     coordinator: Coordinator,
@@ -1789,6 +1902,7 @@ export function createJobs(host: JobsHost) {
     approve,
     finishApproval,
     stallTick,
+    waitingTick,
     pause,
     resume,
     busy,

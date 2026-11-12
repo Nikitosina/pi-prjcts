@@ -111,7 +111,7 @@ const model = createServer((req, res) => {
       return res.end(
         call("bash", {
           command:
-            "printf 'fix\\n' > login.txt && git add -A && git commit -qm 'Fix login copy' && git push -q -u origin HEAD && git rev-parse HEAD",
+            "printf 'fix %s\\n' \"$$\" > login.txt && git add -A && git commit -qm 'Fix login copy' && git push -q -u origin HEAD && git rev-parse HEAD",
         }),
       );
     if (!coordinator && /MARK-PUBLISH-FIX/.test(userText) && results.length === 1)
@@ -942,6 +942,66 @@ try {
   if (!narrow) throw Error("Automations overflow at 390px");
   await shot("03-settings-mobile", s);
   result.checks.push("F20 Automations fits a 390 px screen");
+  await send("Emulation.clearDeviceMetricsOverride", {}, s);
+
+  // F27-F30: a GitHub write with an unknown outcome blocks Follow PRs only while its PR is open.
+  ghSet((state) => {
+    state.failWrites = ["/pulls"];
+  });
+  await rpc({ action: "message", id, text: "MARK-PUBLISH open the login fix again" });
+  const writes = async () => (await rpc({ action: "github-write-snapshot", id })).items;
+  await eventually(async () => (await writes()).some((item) => item.state === "uncertain"), "the lost PR write is not uncertain", 1200);
+  await settleAll();
+  ghSet((state) => {
+    delete state.failWrites;
+  });
+  const lost = (await writes()).find((item) => item.state === "uncertain");
+  const lostBranch = lost.target.slice("pr:".length);
+  const beforeBlock = (await events()).length;
+  // The owner opens the PR by hand, without the write's marker, as happened in Mari.
+  ghSet((state) => {
+    state.pulls.push({ number: 40, title: "Blocked PR", head: "frank/blocked", base: "main", sha: sha("U1"), user: "frank" });
+    state.pulls.push({ number: 41, title: "Login fix by hand", head: lostBranch, base: "main", body: "Opened by hand.", user: "pi-bot" });
+  });
+  const blockedPoll = () =>
+    poll().then(
+      () => null,
+      (error) => error.message,
+    );
+  const waits = [await blockedPoll(), await blockedPoll()];
+  const waiting = (await snap()).follow.lastError ?? "";
+  if (
+    waits.some((message) => !/#41/.test(message ?? "")) ||
+    !/#41/.test(waiting) ||
+    (await events()).length !== beforeBlock ||
+    (await writes()).find((item) => item.key === lost.key).state !== "uncertain"
+  )
+    throw Error("An open PR's uncertain write did not hold the batch visibly: " + JSON.stringify({ waits, waiting }));
+  result.checks.push("F28/F30 an uncertain write on an open PR holds the batch, names the PR, and loses nothing");
+  await send("Page.reload", {}, s);
+  await waitFor(`document.body.dataset.ready === "1"`, s, "inbox after reload");
+  await evaluate(`document.querySelector('[data-cmd="settings"]').click()`, s);
+  await waitFor(`!!document.querySelector('dialog#settings[open] nav [data-section="automations"]')`, s, "settings again");
+  await evaluate(`document.querySelector('dialog#settings nav [data-section="automations"]').click()`, s);
+  await waitFor(`!!document.querySelector('.auto-card[data-kind="follow"] [data-follow-error]')`, s, "Follow PRs problem");
+  const shown = await evaluate(`document.querySelector('.auto-card[data-kind="follow"] [data-follow-error]').innerText`, s);
+  if (!/#41/.test(shown)) throw Error("The Follow PRs card does not name the open PR: " + shown);
+  await shot("04-follow-waiting", s);
+  result.checks.push("F30 the Follow PRs card shows what it waits on");
+  ghSet((state) => Object.assign(pull(state, 41), { state: "closed", merged: true }));
+  await poll();
+  const delivered = (await events()).slice(beforeBlock);
+  const settled = (await writes()).find((item) => item.key === lost.key);
+  if (
+    delivered.length !== 1 ||
+    !delivered[0].text.includes("PR #40 “Blocked PR” opened") ||
+    (await snap()).follow.lastError ||
+    settled.state !== "moot" ||
+    settled.closedPr !== 41
+  )
+    throw Error("A merged PR did not release the batch: " + JSON.stringify({ delivered: delivered.map((e) => e.text), settled }));
+  result.checks.push("F27/F29 once the PR is merged the write reads as moot and the held batch arrives once");
+  await settleAll();
 
   result.errors = result.errors.filter((e) => !/Failed to load resource/.test(e));
   result.httpErrors = result.httpErrors.filter((e) => !e.url.endsWith("/api"));

@@ -133,7 +133,7 @@ import {
   type Project,
 } from "./state.ts";
 import { catalog } from "./workspace-authorization.ts";
-import { providerFailure, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
+import { providerFailure, QUOTA_RETRY_BASE_MS, unansweredReason, type ProviderFailure } from "./provider-failure.ts";
 import { AdmissionMutex, scheduleRuntime, type DurableScheduleSnapshot } from "./durable-schedule.ts";
 import { followRuntime } from "./durable-follow.ts";
 import { COORDINATOR_CONTEXT_RULES, type WorkerMode } from "./role-prompts.ts";
@@ -174,6 +174,7 @@ import {
 } from "./transcript-reader.ts";
 import { durableDecisions } from "./durable-decisions.ts";
 import { observeLimitHeaders, quotaResetAt } from "./usage-limits.ts";
+import { noteQuotaFailure, tierNext, tierStart } from "./tier-models.ts";
 import { githubReadSnapshot, githubWriteSnapshot, githubWriteInspector, type GithubWriteInspectionInput } from "./github-worker.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -750,6 +751,12 @@ export async function openDurableProject(input: {
     const opened = resolveSelection(project, tiersFor(project), usableIn(models));
     let chains = opened.chains,
       coordinatorThinking = thinkingOf(project, "coordinator");
+    // A model whose quota just ran out is skipped until its known reset, else for one retry window.
+    const noteSpentQuota = (model: string) =>
+      noteQuotaFailure(
+        model,
+        quotaResetAt(model) ?? Date.now() + (Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || QUOTA_RETRY_BASE_MS),
+      );
     let coordinatorModel = modelRef(opened.model);
     // Per-project context window override (coordinator model only); pi-durable reads getModel().contextWindow for its thresholds.
     let contextSettings = project.contextSettings;
@@ -1073,7 +1080,6 @@ export async function openDurableProject(input: {
     const binder = durableWorkspaceBinding({
       project,
       configuredSkillLoader: input.configuredSkillLoader,
-      projectStanding: standing,
       commands,
       isClosed: () => closed,
       environment: { leases: hostLeases, background },
@@ -1213,7 +1219,12 @@ export async function openDurableProject(input: {
       if (spec.role === "verifier") throw new Error("The verifier role was removed: workers run the verify skill with projects_verify_run");
       const role = spec.role,
         current = loadProject(project.id);
-      const base = { model: roleModelNow[role], thinkingLevel: thinkingOf(current, role), instructions: instructionsFor(role) };
+      const chain = chains[role];
+      const base = {
+        model: chain ? modelRef(tierStart(chain)) : roleModelNow[role],
+        thinkingLevel: thinkingOf(current, role),
+        instructions: instructionsFor(role),
+      };
       if (role === "worker")
         return {
           ...base,
@@ -1397,12 +1408,13 @@ export async function openDurableProject(input: {
         if (role === "verifier") return null;
         const chain = chains[role];
         // A tier walks its models in order; without one, only quota moves, once, to the legacy fallback.
-        const reference = chain ? chain[chain.indexOf(from) + 1] : failure === "quota_exceeded" ? fallbackModels[role] : undefined;
+        const reference = chain ? tierNext(chain, from) : failure === "quota_exceeded" ? fallbackModels[role] : undefined;
         if (!reference) return null;
         const selected = modelRef(reference);
         return { label: `${selected.provider}/${selected.modelId}`, change: { model: selected } };
       },
       quotaResetAt,
+      quotaFailed: noteSpentQuota,
       quotaRetryBaseMs: Number(process.env.PI_PROJECTS_QUOTA_RETRY_BASE_MS) || undefined,
       checkProof: (job, refs) => checkProofRefs(dir, job, refs),
       stallMinutes: () => loadProject(project.id).stallMinutes ?? DEFAULT_STALL_MINUTES,
@@ -1612,7 +1624,8 @@ export async function openDurableProject(input: {
       if (!chain || !conversation) return;
       const current = (await conversation.agent(context)).model;
       const from = current ? `${current.provider}/${current.modelId}` : "";
-      const next = chain[chain.indexOf(from) + 1];
+      if (failure === "quota_exceeded") noteSpentQuota(from);
+      const next = tierNext(chain, from);
       if (!next) return;
       await conversation.configure({ model: modelRef(next), thinkingLevel: coordinatorThinking }, context);
       await conversation.submit(
@@ -1727,10 +1740,12 @@ export async function openDurableProject(input: {
     prMonitorWake.unref();
     const followWake = setInterval(follow.tick, Number(process.env.PI_PROJECTS_FOLLOW_TICK_MS) || 15_000);
     followWake.unref();
-    // Stall detector: one notice per stalled Job to its chat; it never steers or stops.
+    // Stall detector: one notice per stalled Job to its chat, and one per set of workers left waiting by an idle chat; it never steers or stops.
     const stallWake = setInterval(
       () => {
-        if (!closed && dispatchReady) void jobs.stallTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
+        if (closed || !dispatchReady) return;
+        void jobs.stallTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
+        void jobs.waitingTick(openedHarness).catch((error) => report(input.onReport, project.id, error));
       },
       Number(process.env.PI_PROJECTS_STALL_TICK_MS) || 30_000,
     );

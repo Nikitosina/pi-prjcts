@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -11,7 +21,10 @@ import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 // no memory index and no MEMORY.md, docs/ui2-contract.md "Memory");
 // unsafe path/symlink traversal; read-only coordinator write; stale/concurrent CAS; history
 // byte loss; migration overwrite; restart loss; and SQLite contention/SIGKILL release.
-const root = resolve("artifacts", `durable-knowledge-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
+const runDir = resolve("artifacts", `durable-knowledge-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}`);
+mkdirSync(runDir, { recursive: true, mode: 0o700 });
+// Durable storage refuses symlinked paths, and artifacts/ may be a symlink to a cache outside the worktree.
+const root = realpathSync(runDir);
 const sourceRoot = resolve(process.env.PI_DURABLE_E2E_SOURCE_ROOT ?? new URL("..", import.meta.url).pathname);
 const source = (name) => pathToFileURL(join(sourceRoot, "src", name)).href;
 const fixture = join(root, "fixture-source"),

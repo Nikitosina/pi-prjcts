@@ -478,7 +478,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   };
   root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
   let items = [],
-    summaries = {};
+    groups = null;
   // The focus view is reused: this render lives only while its own feed is on the page.
   if (shown) places.set(shown.key, shown.follow.place);
   const key = `${state.projectId}/${id}`,
@@ -498,7 +498,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
           items,
           !!worker?.working,
           worker?.role === "worker" ? "Worker" : worker?.role ? worker.role[0].toUpperCase() + worker.role.slice(1) : "Worker",
-          { summaries },
+          { groups },
         ) || `<p class="muted">No transcript yet.</p>`,
       );
       hydrateMedia(node, { project: state.projectId, threadId: id });
@@ -513,7 +513,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     });
     if (!page || !alive()) return;
     items = page.items;
-    summaries = page.toolSummaries ?? {};
+    groups = page.toolGroups ?? null;
     root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card"[\s\S]*$/, "");
     const line = promptLine(find()),
       old = root.querySelector(".w-prompt");

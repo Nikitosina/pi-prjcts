@@ -40,7 +40,7 @@ const pluginUi = join(kit.root, "fake-ui.js");
 writeFileSync(pluginUi, "// fake plugin ui, as loaded\n");
 kit.hostEnv.FAKE_PLUGIN_UI = pluginUi;
 const { check, rpc, result } = kit;
-// 29: a plugin scaffolded by the CLI in a directory outside the core repository, loaded through the env list.
+// 30: a plugin scaffolded by the CLI in a directory outside the core repository, loaded through the env list.
 const helloPath = join(kit.root, "elsewhere", "hello");
 const scaffold = spawnSync(process.execPath, [join(kit.core, "src", "cli.ts"), "plugin", "new", helloPath, "--name", "hello"], {
   encoding: "utf8",
@@ -131,12 +131,12 @@ await kit.run(async () => {
     byName("fake").provides,
   );
   check(
-    "27 the plugins RPC reports a declared version, and null without one",
+    "28 the plugins RPC reports a declared version, and null without one",
     byName("fake")?.version === "1.2.3" && byName("second")?.version === null,
     [byName("fake"), byName("second")],
   );
   check(
-    "29 the scaffolded plugin loads from outside the core repository and its read RPC answers",
+    "30 the scaffolded plugin loads from outside the core repository and its read RPC answers",
     scaffold.status === 0 &&
       byName("hello")?.state === "loaded" &&
       byName("hello")?.version === "0.1.0" &&
@@ -360,6 +360,16 @@ await kit.run(async () => {
       existsSync(join(fakeTree.path, ".fake-worktree")),
     inventory.items,
   );
+  // 27: a worker started after AGENTS.md changed reads it afresh.
+  writeFileSync(join(checkout, "AGENTS.md"), "Standing v2: changed after the host started.\n");
+  await kit.ask(id, `MARK-DELEGATE ${JSON.stringify({ title: "After standing change", brief: "STANDING-V2 worker task" })}`);
+  const standingJob = (await kit.jobs(id)).at(-1);
+  const standingCall = result.calls.findLast((item) => item.role === "worker" && item.user.includes("STANDING-V2"));
+  check(
+    "27 a worker started after the checkout's AGENTS.md changed runs with the current instructions",
+    standingJob.status !== "failed" && /Standing v2: changed after the host started/.test(standingCall?.system ?? ""),
+    { status: standingJob.status, error: standingJob.error },
+  );
   const treePath = fakeTree.path;
   const receiptsBefore = JSON.stringify(readdirSync(join(kit.home, id)));
 
@@ -552,7 +562,7 @@ await kit.run(async () => {
   );
   const rowOf = (name) => pluginRows.find((row) => row.name === name);
   check(
-    "28 the context panel lists each plugin with name, version, state and capabilities, and failures with their reason",
+    "29 the context panel lists each plugin with name, version, state and capabilities, and failures with their reason",
     /fake/.test(rowOf("fake")?.text) &&
       /1\.2\.3/.test(rowOf("fake")?.text) &&
       rowOf("fake")?.state === "loaded" &&

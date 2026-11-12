@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, readFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, realpathSync, symlinkSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { FAKE_MODEL, startFakeModel } from "./fake-model.mjs";
 
 // Failure cases: blocked admission, duplicate/replayed messages, lost identities,
 // cross-project submission access, unsafe storage, ignored memory denial, hidden mutation.
-const base = resolve("artifacts", `durable-runtime-${new Date().toISOString().replaceAll(":", "-")}`);
-mkdirSync(base, { recursive: true });
+const runDir = resolve("artifacts", `durable-runtime-${new Date().toISOString().replaceAll(":", "-")}`);
+mkdirSync(runDir, { recursive: true });
+// Durable storage refuses symlinked paths, and artifacts/ may be a symlink to a cache outside the worktree.
+const base = realpathSync(runDir);
 const fake = await startFakeModel(base); // offline: private SDK home with only the fake model
 process.env.PI_PROJECTS_HOME = join(base, "state");
 const { openDurableProject, durableReport } = await import("../src/durable-runtime.ts");
@@ -101,6 +103,7 @@ try {
   pass("Fake-model coordinator answers");
   assert.ok(modelRequests.some((request) => request.includes("After asking the owner for a decision, end the turn")));
   assert.ok(modelRequests.some((request) => request.includes("agents report")));
+  assert.ok(modelRequests.some((request) => request.includes("A checkpointed worker waits for you")));
   pass("Coordinator receives quiet-wait and on-demand evidence instructions");
   const ownerHistory = await runtime.chatHistory();
   assert.equal(ownerHistory.items.find((item) => item.kind === "message" && item.role === "user").origin, "owner");

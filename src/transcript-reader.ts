@@ -2,7 +2,7 @@ import type { Context } from "@earendil-works/chord";
 import type { ConversationId, EntryId, Storage } from "@earendil-works/pi-durable";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
-import type { ToolSummaryView } from "./tool-summaries.ts";
+import type { ToolGroupsView } from "./tool-summaries.ts";
 
 /**
  * Reads a conversation's entries for display: newest page first, bounded text, images by reference.
@@ -136,8 +136,8 @@ export type TranscriptPage = {
   /** Pass as `before` for the next older page; null at the start of the conversation. */
   before: number | null;
   entries: number;
-  /** Owner views only: the tool summary of an assistant entry whose calls are on this page, by entry id. Absent while summaries are off. */
-  toolSummaries?: Record<string, ToolSummaryView>;
+  /** Owner views only: the tool groups of this page's calls, with each group's whole count. Absent while summaries are off. */
+  toolGroups?: ToolGroupsView;
 };
 
 /** Shared default-limit trimming: keep newest whole entries and point `before` at the first omitted one. */

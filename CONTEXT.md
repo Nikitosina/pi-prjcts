@@ -38,7 +38,8 @@ pi-prjcts runs long-lived coding agents for the owner's projects on Pi Durable. 
 - **Plugin version**: the optional `version` a plugin declares, shown with its status so the owner can tell which version a host runs.
 - **Plugin panel**: a plugin's own UI in its card in Settings → Plugins, registered by the plugin's browser script and mounted for the selected project. A plugin has no other place in the inbox.
 - **Activation**: making a plugin version run on a host: list it in that host's `plugins.json` and restart the host. Source changes never activate on a running host by themselves.
-- **Tool summary**: one or two sentences, written by the owner's chosen summary model, on what one assistant message's tool calls did and how they ended. Shown to the owner in place of the calls; never seen by any agent. Made for the Coordinator, the agents it started and the Host agent, not for a worker's own subagents.
+- **Tool summary**: one or two sentences, written by the owner's chosen summary model, on what one tool group's calls did and how they ended. Shown to the owner in place of the calls; never seen by any agent. Made for the Coordinator, the agents it started and the Host agent, not for a worker's own subagents.
+- **Tool group**: the consecutive tool calls of one run, across assistant messages, that one Tool summary covers. Text or thinking, an input, a compaction, a reset or the end of the run closes it; showing or hiding thinking never changes it. The host forms groups; the browser only draws them.
 
 ## Pi Durable terms used as-is
 
