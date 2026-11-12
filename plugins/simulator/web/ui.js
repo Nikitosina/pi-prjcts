@@ -38,16 +38,59 @@
   }
   const recoverable = (v) => v.snapshot?.status === "uncertain" && !v.intent;
   const sourceName = (v, udid) => v.snapshot?.sources.find((source) => source.udid === udid)?.name;
-  const button = (label, action, disabled = false, cls = "ghost-btn small", data = {}) =>
+  // A clone's short name: its source's name, numbered when several clones share it.
+  function label(v, item) {
+    const devices = v.snapshot?.devices ?? [];
+    const name = (other) => sourceName(v, other.sourceUdid) ?? other.name.replace(/^pi-projects \S+ /, "");
+    const same = devices.filter((other) => name(other) === name(item));
+    return same.length > 1 ? `${name(item)} ${same.indexOf(item) + 1}` : name(item);
+  }
+  // Inline 16 px stroke icons in the inbox's own style (web/tree.js, web/statusline.js).
+  const PATHS = {
+    boot: "M5.5 3.6v8.8L12.4 8z",
+    shutdown: "M8 2.4v5M4.7 4.4a4.9 4.9 0 1 0 6.6 0",
+    new: "M8 3.2v9.6M3.2 8h9.6",
+    expand: "M9.6 2.6h3.8v3.8M6.4 13.4H2.6V9.6M13.4 2.6 9.2 6.8M2.6 13.4l4.2-4.2",
+    shrink: "M13.4 6.6H9.4V2.6M2.6 9.4h4v4M9.4 6.6l4-4M6.6 9.4l-4 4",
+    reset: "M2.8 8a5.2 5.2 0 1 0 1.6-3.7M2.6 2.2v3.2h3.2",
+    delete: "M2.8 4.4h10.4M6.3 4.4V2.8h3.4v1.6M4.3 4.4l.6 8.8h6.2l.6-8.8",
+    disable: "M5.2 4.6h5.6a3.4 3.4 0 0 1 0 6.8H5.2a3.4 3.4 0 0 1 0-6.8zM5.4 8h.1",
+    refresh: "M13.2 8a5.2 5.2 0 1 0-1.6 3.7M13.4 13.8v-3.2h-3.2",
+    info: "M8 1.9a6.1 6.1 0 1 1 0 12.2A6.1 6.1 0 0 1 8 1.9zM8 7.2v4M8 4.9v.1",
+    more: "M3.4 8h.1M8 8h.1M12.6 8h.1",
+  };
+  const icon = (name) =>
+    `<svg class="simulator-glyph" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="${PATHS[name]}" fill="none" stroke="currentColor" stroke-width="${name === "more" ? 2.4 : 1.5}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const button = (label, action, disabled = false, cls = "ghost-btn small", data = {}, glyph = "") =>
     `<button type="button" class="${cls}" data-action="simulator-${action}"${Object.entries(data)
       .map(([key, value]) => ` data-${key}="${esc(value)}"`)
-      .join("")}${disabled ? " disabled" : ""}>${label}</button>`;
+      .join("")}${disabled ? " disabled" : ""}>${glyph ? icon(glyph) : ""}${label}</button>`;
+  // An icon-only button: its name is the aria-label, and the same title for a pointer.
+  const tool = (glyph, name, action, disabled = false) =>
+    `<button type="button" class="icon-btn simulator-tool" data-action="simulator-${action}" aria-label="${esc(name)}" title="${esc(name)}"${disabled ? " disabled" : ""}>${icon(glyph)}</button>`;
+  const item = (glyph, name, action, disabled, danger = false) =>
+    button(name, action, disabled, `simulator-item${danger ? " danger-text" : ""}`, {}, glyph);
   // Replaces a region only when its markup changed, so a polled render keeps focus, selection and open details.
   function patch(node, html) {
     if (node.dataset.html === html) return false;
     node.innerHTML = html;
     node.dataset.html = html;
     return true;
+  }
+
+  const TONES = {
+    Running: "good",
+    Error: "bad",
+    Unavailable: "bad",
+    "Needs inspection": "bad",
+    Off: "",
+    "Shut down": "",
+    "No simulator": "",
+  };
+  function toneOf(status) {
+    if (status in TONES) return TONES[status];
+    if (/running$/.test(status)) return status.startsWith("0/") ? "" : "good";
+    return "work";
   }
 
   function statusOf(v) {
@@ -102,7 +145,13 @@
       d = device(v),
       lock = locked(v);
     const $ = (name) => slot.querySelector(`[data-simulator-${name}]`);
-    $("status").textContent = statusOf(v);
+    // A patched region drops the focused button; the same action (and clone) gets it back.
+    const held = document.activeElement?.closest(".simulator-panel button"),
+      focused = held && slot.contains(held) ? held.dataset.action : null,
+      focusedUdid = held?.dataset.udid;
+    const status = statusOf(v);
+    $("status").textContent = status;
+    $("status").dataset.tone = toneOf(status);
     $("description").textContent = !s
       ? v.error
         ? "The simulator state could not be read."
@@ -111,48 +160,62 @@
         ? "Off. Agents cannot create or manage simulators for this project."
         : !d
           ? "No simulator yet. The coordinator creates the ones its workers need."
-          : `${sourceName(v, d.sourceUdid) ?? d.name} clone · iOS ${d.osVersion}. View only; no clicks or keyboard input are sent to the simulator.`;
+          : "";
+    $("description").hidden = !$("description").textContent;
     const tabs =
       s?.devices.length > 1
         ? s.devices
             .map(
               (item) =>
-                `<button type="button" class="simulator-tab${item.udid === d?.udid ? " on" : ""}" data-action="simulator-select" data-udid="${esc(item.udid)}" title="${esc(`${item.udid} · ${item.state}`)}">${esc(sourceName(v, item.sourceUdid) ?? item.name.replace(/^pi-projects \S+ /, "").slice(0, 8))}<small>${item.state === "Booted" ? "on" : "off"}</small></button>`,
+                `<button type="button" class="simulator-tab${item.udid === d?.udid ? " on" : ""}" aria-pressed="${item.udid === d?.udid}" data-action="simulator-select" data-udid="${esc(item.udid)}" title="${esc(item.udid)}"><span class="simulator-dot"${item.state === "Booted" ? " data-on" : ""} aria-hidden="true"></span>${esc(label(v, item))}<span class="simulator-sr">, ${item.state === "Booted" ? "running" : "shut down"}</span></button>`,
             )
             .join("")
-        : "";
+        : d
+          ? `<span class="simulator-name" title="${esc(d.udid)}">${esc(label(v, d))}</span>`
+          : "";
     patch($("devices"), tabs);
-    $("devices").hidden = !tabs;
+    $("devices").setAttribute("role", s?.devices.length > 1 ? "group" : "none");
     const live = ready(v),
       showFrame = live && v.url && v.frameUdid === d.udid;
-    $("screen").hidden = !showFrame;
+    $("screen").hidden = !live;
+    $("screen").classList.toggle("waiting", !showFrame);
     $("screen").classList.toggle("expanded", !!v.expanded);
+    $("frame").hidden = !showFrame;
     const caption = $("caption");
     caption.hidden = !live;
     caption.textContent = v.capturedAt
-      ? `Screenshot ${ago(v.capturedAt)}. Refreshes about every 4 seconds.${v.frameError ? " Last capture failed; showing the previous frame." : ""}`
+      ? `Updated ${ago(v.capturedAt)}${v.frameError ? " · showing the previous frame" : ""}`
       : "Waiting for a screenshot…";
-    let actions = "";
-    if (!s) actions = button("Retry", "refresh");
+    let actions = "",
+      menu = "";
+    if (!s) actions = button("Retry", "refresh", false, "ghost-btn small", {}, "refresh");
     else if (!s.enabled) actions = button("Turn on", "add", lock, "primary small");
     else {
-      if (s.devices.length < s.maxOwned)
-        actions += button(d ? "New clone…" : "Create simulator…", "new", locked(v, true), d ? "ghost-btn small" : "primary small");
       if (d) {
-        if (showFrame) actions += button(v.expanded ? "Smaller" : "Expand", "expand");
-        actions += button(d.state === "Booted" ? "Shut down" : "Boot", d.state === "Booted" ? "shutdown" : "boot", lock);
-        actions += button("Reset…", "reset", lock, "ghost-btn small danger") + button("Delete…", "delete", lock, "ghost-btn small danger");
-      }
-      actions += button("Turn off…", "disable", locked(v, true));
+        const booted = d.state === "Booted";
+        if (showFrame) actions += tool(v.expanded ? "shrink" : "expand", v.expanded ? "Shrink screenshot" : "Enlarge screenshot", "expand");
+        if (s.devices.length < s.maxOwned) actions += tool("new", "New clone…", "new", locked(v, true));
+        actions += button(
+          booted ? "Shut down" : "Boot",
+          booted ? "shutdown" : "boot",
+          lock,
+          "ghost-btn small",
+          {},
+          booted ? "shutdown" : "boot",
+        );
+        menu += item("reset", "Reset…", "reset", lock, true) + item("delete", "Delete…", "delete", lock, true);
+      } else if (s.devices.length < s.maxOwned) actions += button("Create simulator…", "new", locked(v, true), "primary small", {}, "new");
+      menu += item("disable", "Turn off management…", "disable", locked(v, true));
     }
-    if (s?.status === "uncertain") actions += button("Inspect / acknowledge…", "recover", !recoverable(v), "primary small");
-    if (v.intent && !pending(v)) actions += button("Retry exact request", "retry", false, "primary small");
-    const controls = $("actions"),
-      focused = document.activeElement?.closest("[data-simulator-actions] button")?.dataset.action;
-    if (patch(controls, actions) && focused)
-      (controls.querySelector(`[data-action="${focused}"]:not(:disabled)`) ?? controls.querySelector("button:not(:disabled)"))?.focus({
-        preventScroll: true,
-      });
+    patch($("actions"), actions);
+    patch($("menu"), menu);
+    $("more").hidden = !menu;
+    if (!menu) $("more").open = false;
+    let fix = "";
+    if (s?.status === "uncertain") fix += button("Inspect / acknowledge…", "recover", !recoverable(v), "primary small");
+    if (v.intent && !pending(v)) fix += button("Retry exact request", "retry", false, "primary small", {}, "refresh");
+    patch($("fix"), fix);
+    $("fix").hidden = !fix;
     const confirm = $("confirm"),
       chosen = confirm.querySelector("[data-simulator-source]")?.value;
     if (patch(confirm, confirmation(v))) {
@@ -177,14 +240,20 @@
       .join(" ");
     $("error").textContent = issue;
     $("error").hidden = !issue;
+    $("alert").hidden = !issue && !fix;
     $("notice").textContent = v.notice ?? "";
     $("notice").hidden = !v.notice;
     $("facts").hidden = !s;
     if (s)
       patch(
         $("details"),
-        `<p class="small muted">Agents create, boot, shut down, reset and delete up to ${esc(s.maxOwned)} clones for this project while management is on. Source simulators, shared runtimes and global caches are never changed.</p><dl class="simulator-facts"><dt>Default source</dt><dd>${esc(sourceName(v, s.defaultSourceUdid) ?? "Newest shut-down iPhone")}</dd>${d ? `<dt>Cloned from</dt><dd>${esc(sourceName(v, d.sourceUdid) ?? d.sourceUdid)}</dd><dt>Device</dt><dd class="mono">${esc(d.udid)}</dd><dt>Slimming</dt><dd>${d.slim ? `${esc(d.slim.managedDisabled)}/${esc(d.slim.managedTotal)} services disabled${d.slim.persistent ? ", persistent" : ""}` : "Not reported"}</dd>` : ""}</dl>`,
+        `${d ? `<p class="small muted">View only: the screenshot refreshes about every 4 seconds, and no clicks or keyboard input are sent to the simulator.</p>` : ""}<p class="small muted">Agents create, boot, shut down, reset and delete up to ${esc(s.maxOwned)} clones for this project while management is on. Source simulators, shared runtimes and global caches are never changed.</p><dl class="simulator-facts"><dt>Default source</dt><dd>${esc(sourceName(v, s.defaultSourceUdid) ?? "Newest shut-down iPhone")}</dd>${d ? `<dt>Cloned from</dt><dd>${esc(sourceName(v, d.sourceUdid) ?? d.sourceUdid)}</dd><dt>iOS</dt><dd>${esc(d.osVersion)}</dd><dt>Device</dt><dd class="mono">${esc(d.udid)}</dd><dt>Slimming</dt><dd>${d.slim ? `${esc(d.slim.managedDisabled)}/${esc(d.slim.managedTotal)} services disabled${d.slim.persistent ? ", persistent" : ""}` : "Not reported"}</dd>` : ""}</dl>`,
       );
+    if (focused && !slot.contains(document.activeElement))
+      (
+        slot.querySelector(`[data-action="${focused}"]${focusedUdid ? `[data-udid="${CSS.escape(focusedUdid)}"]` : ""}:not(:disabled)`) ??
+        $("actions").querySelector("button:not(:disabled)")
+      )?.focus({ preventScroll: true });
   }
 
   function clearFrame(v) {
@@ -315,7 +384,9 @@
     const v = views.get(panel);
     if (!v) return;
     const s = v.snapshot,
-      d = device(v);
+      d = device(v),
+      asked = v.confirm;
+    v.slot.querySelector("[data-simulator-more]").open = false;
     switch (name) {
       case "simulator-refresh":
         v.nextPoll = 0;
@@ -388,23 +459,36 @@
     }
     panel.signal.throwIfAborted();
     render(v);
+    // A confirmation opened from the menu takes the keyboard, since the menu item it came from is now hidden.
+    if (v.confirm && v.confirm !== asked) v.slot.querySelector('[data-simulator-confirm] [data-action="simulator-cancel"]')?.focus();
   }
 
   window.piProjects.register({
     name: "simulator",
     async mount(slot, panel) {
       slot.innerHTML = `<section class="simulator-panel" aria-label="Project simulator">
-  <div class="simulator-head"><b>Simulator</b><span class="badge" data-simulator-status>Loading</span></div>
+  <div class="simulator-bar">
+    <div class="simulator-devices" aria-label="Project simulators" data-simulator-devices></div>
+    <span class="badge simulator-status" data-simulator-status>Loading</span>
+    <div class="simulator-tools" data-simulator-actions></div>
+    <details class="simulator-more" data-simulator-more hidden><summary class="icon-btn simulator-tool" aria-label="More actions" title="More actions">${icon("more")}</summary><div class="simulator-menu" data-simulator-menu></div></details>
+  </div>
   <p class="small muted" data-simulator-description></p>
-  <div class="simulator-devices" role="group" aria-label="Project simulators" data-simulator-devices hidden></div>
-  <div class="simulator-screen" data-simulator-screen hidden><img data-simulator-frame alt="Current project simulator screenshot" draggable="false"></div>
-  <p class="small muted" data-simulator-caption hidden></p>
-  <div class="simulator-actions" data-simulator-actions></div>
+  <div class="simulator-screen" data-simulator-screen hidden><img data-simulator-frame alt="Current project simulator screenshot" draggable="false" hidden></div>
+  <p class="small muted simulator-caption" data-simulator-caption hidden></p>
+  <div class="simulator-alert" data-simulator-alert hidden>
+    <p class="small simulator-error" role="status" data-simulator-error hidden></p>
+    <div class="simulator-actions" data-simulator-fix hidden></div>
+  </div>
   <div class="simulator-confirm" data-simulator-confirm hidden></div>
-  <p class="small simulator-error" role="status" data-simulator-error hidden></p>
   <p class="small muted" role="status" data-simulator-notice hidden></p>
-  <details data-simulator-facts hidden><summary>Details</summary><div data-simulator-details></div></details>
+  <details class="simulator-details" data-simulator-facts hidden><summary>${icon("info")}Details</summary><div data-simulator-details></div></details>
 </section>`;
+      // The menu closes on a press anywhere outside it (touch included); its own summary toggles it.
+      const more = slot.querySelector("[data-simulator-more]");
+      document.addEventListener("pointerdown", (event) => more.open && !more.contains(event.target) && (more.open = false), {
+        signal: panel.signal,
+      });
       const intent = intents.get(panel.projectId) ?? null;
       const v = {
         panel,

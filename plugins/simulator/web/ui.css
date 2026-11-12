@@ -1,17 +1,149 @@
 /* The simulator panel in Settings → Plugins. The screenshot is read-only, not a remote input surface. */
-.simulator-panel .simulator-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
 .simulator-panel p {
   margin: 6px 0;
+}
+.simulator-panel .simulator-glyph {
+  flex: none;
+}
+/* One row: the clones on the left, then the status, the tools and the More actions menu; it wraps on a narrow card. */
+.simulator-panel .simulator-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.simulator-panel .simulator-devices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.simulator-panel .simulator-devices:empty {
+  display: none;
+}
+.simulator-panel .simulator-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.simulator-panel .simulator-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.8;
+}
+.simulator-panel .simulator-status[data-tone="good"] {
+  color: var(--ready);
+}
+.simulator-panel .simulator-status[data-tone="work"] {
+  color: var(--work);
+}
+.simulator-panel .simulator-status[data-tone="bad"] {
+  color: var(--bad);
+}
+.simulator-panel .simulator-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.simulator-panel .simulator-tools:empty {
+  display: none;
+}
+.simulator-panel .simulator-tool {
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.simulator-panel .simulator-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.simulator-panel .simulator-tab.on {
+  background: var(--raised);
+  border-color: var(--line-strong);
+  color: var(--text);
+  font-weight: 600;
+}
+.simulator-panel .simulator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--faint);
+}
+.simulator-panel .simulator-dot[data-on] {
+  background: var(--ready);
+  border-color: var(--ready);
+}
+.simulator-panel .simulator-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* More actions: a disclosure, so a click, Enter or a tap opens it; never hover. */
+.simulator-panel .simulator-more {
+  position: relative;
+}
+.simulator-panel .simulator-more > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.simulator-panel .simulator-more > summary::-webkit-details-marker {
+  display: none;
+}
+.simulator-panel .simulator-more[open] > summary {
+  background: var(--raised);
+  color: var(--text);
+}
+.simulator-panel .simulator-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 210px;
+  padding: 4px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow);
+}
+.simulator-panel .simulator-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-s);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+.simulator-panel .simulator-item:hover:not(:disabled) {
+  background: var(--panel);
+}
+.simulator-panel .simulator-item.danger-text {
+  color: var(--bad);
 }
 .simulator-panel .simulator-screen {
   display: flex;
   justify-content: center;
-  margin: 12px 0;
+  margin: 12px 0 4px;
 }
 .simulator-panel .simulator-screen img {
   display: block;
@@ -24,8 +156,24 @@
   background: var(--text);
   user-select: none;
 }
+.simulator-panel .simulator-screen img[hidden] {
+  display: none;
+}
+/* While the first frame is on its way, a phone-shaped outline keeps the layout still. */
+.simulator-panel .simulator-screen.waiting::before {
+  content: "";
+  width: 138px;
+  height: 300px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 24px;
+}
 .simulator-panel .simulator-screen.expanded img {
   max-height: 70dvh;
+}
+.simulator-panel .simulator-caption {
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
 }
 .simulator-panel .simulator-actions {
   display: flex;
@@ -33,31 +181,15 @@
   gap: 6px;
   margin-top: 8px;
 }
-.simulator-panel .simulator-devices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 6px 0 2px;
+.simulator-panel .simulator-alert {
+  margin-top: 10px;
+  padding: 6px 10px 8px;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
 }
-.simulator-panel .simulator-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 9px;
-  border: 1px solid var(--line);
-  border-radius: 99px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12px;
-}
-.simulator-panel .simulator-tab small {
-  color: var(--muted);
-  font-size: 10.5px;
-}
-.simulator-panel .simulator-tab.on {
-  background: var(--raised);
-  border-color: var(--text);
-  font-weight: 600;
+.simulator-panel .simulator-alert .simulator-error {
+  margin: 0;
 }
 .simulator-panel .simulator-confirm {
   margin-top: 10px;
@@ -66,18 +198,25 @@
   border-radius: 8px;
   background: var(--raised);
 }
+.simulator-panel .simulator-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .simulator-panel .simulator-field select {
-  margin-left: 6px;
   max-width: 100%;
 }
 .simulator-panel button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.simulator-panel details {
+.simulator-panel .simulator-details {
   margin-top: 10px;
 }
-.simulator-panel summary {
+.simulator-panel .simulator-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--muted);
   font-size: 12px;
   cursor: pointer;

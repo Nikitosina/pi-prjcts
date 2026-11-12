@@ -97,3 +97,11 @@ Found in review (red before the fix):
 
 - S12 A request still waiting for its answer when the panel goes away keeps the next mount locked until that answer arrives. The next mount offers Retry exact request at once; the retry resends the same request id, and the host's receipt makes it run once.
 - S13 A slow screenshot blocks the next capture: selecting another clone waits for the old answer, and a capture that never answers freezes the screenshot. Selecting another clone captures it at once, and a capture gives up after 60 seconds. The e2e covers the first; the timeout is not scripted, since it would hold the run for a minute.
+
+Layout refresh (written before the change; the e2e covers each):
+
+- S14 The primary view repeats the device name and status, or shows technical metadata. It shows the device (a tab per clone, or its name), one status badge, the screenshot and Boot or Shut down. UDID, source, slimming, the clone limit and the view-only note sit in a closed Details disclosure that opens by click or keyboard.
+- S15 Reset, delete and turning management off sit in a menu that opens only on hover, loses its open state on a polled render, stays open after a choice, or skips the confirmation. The More actions menu opens by click or Enter, stays open across polls, closes after a choice and on a press outside; each item still opens the inline confirmation. Escape keeps its app-wide meaning and closes Settings.
+- S16 An icon-only button has no accessible name, or its name is only a hover tooltip. Every icon-only button has an `aria-label` and a matching `title`; clone tabs say their state in text, not only by a colour dot.
+- S17 Errors, an unknown outcome or Retry exact request end up inside the Details disclosure or the menu. They stay visible in the primary view.
+- S18 At 390 px the panel overflows sideways or pushes its controls out of view. The toolbar wraps inside the card and every control stays on screen.
