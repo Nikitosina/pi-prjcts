@@ -1181,6 +1181,34 @@ async function ui2Prompts(run, page, record, dir, sinks) {
 const EXPAND_HISTORY = `document.querySelector('#workers [data-worker-history][aria-expanded="false"]')?.click()`;
 
 const journeys = {
+  // Feature: features/storage.md; failure list: scripts/workspace-cleanup-failures.md (R22).
+  async "storage-clean"(run, page, record, dir) {
+    // Precondition, not the journey: more than 30 routine runs, so history's oldest-first page cannot hold the next one.
+    for (let i = 0; i < 31; i++) {
+      const { requestId } = await rpc(run, { action: "schedule-run", id: run.projectId, scheduleId: "workspace-cleanup" });
+      for (let tries = 0; ; tries++) {
+        const [item] = (await rpc(run, { action: "schedule-history", id: run.projectId, kind: "intents", requestId, limit: 1 })).items;
+        if (item?.outcome != null) break;
+        if (tries > 600) throw Error(`Seed run ${i} never ended`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    record("setup", "31 cleanup runs recorded through schedule-run");
+    await page.navigate(run.webUrl);
+    await page.waitFor(`document.body.dataset.ready === "1"`, "UI ready");
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-section="storage"]')`, "settings open");
+    await page.click(`dialog[open] [data-section="storage"]`);
+    await page.waitFor(`!!document.querySelector('dialog[open] [data-storage-clean]:not([disabled])')`, "Clean up ready", 60000);
+    await page.shot(dir, "01-storage");
+    await page.click(`dialog[open] [data-storage-clean]`);
+    await page.waitFor(`!!document.querySelector('dialog[open] .storage-outcome')`, "Clean up outcome", 60000);
+    const shown = await page.evaluate(`document.querySelector('dialog[open] .storage-outcome').innerText`);
+    await page.shot(dir, "02-cleaned");
+    if (!/^Removed \d+ worktree/.test(shown)) throw Error(`Clean up showed: ${shown}`);
+    const history = await rpc(run, { action: "schedule-history", id: run.projectId, kind: "intents", limit: 1 });
+    record("visible", `Clean up ended with "${shown}" after ${history.total} routine runs`);
+  },
   // Feature: features/ui2-prompts.md; failure list: scripts/ui2-prompt-editor-failures.md (E1-E23).
   async "ui2-prompts"(run, page, record, dir, sinks) {
     await ui2Prompts(run, page, record, dir, sinks);

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { globSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { globSync, lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
@@ -85,6 +85,21 @@ export async function gitIgnored(worktree: string, paths: readonly string[]): Pr
     if (!tracked) ignored.push(path);
   }
   return ignored;
+}
+
+/** Removes each path; one that cannot go is reported as `path: reason` and the rest still go. Retries ride out a file written
+ * meanwhile (Finder's .DS_Store, an indexer). */
+export function removePaths(paths: readonly string[]): { removed: string[]; failed: string[] } {
+  const removed: string[] = [],
+    failed: string[] = [];
+  for (const path of paths)
+    try {
+      rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      removed.push(path);
+    } catch (error) {
+      failed.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  return { removed, failed };
 }
 
 export type CacheUse = { bytes: number; lastWriteMs: number };

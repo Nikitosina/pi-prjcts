@@ -3,7 +3,7 @@
 Written before the code. Owner decision (2026-11-06, /tmp/storage-plan.md): the hardcoded 30-minute worktree cleanup timer becomes a
 routine (a schedule whose action is cleanup), on by default in every project, daily, also run once right after Approve. Besides the
 safe worktree rule it trims workspace caches, removes ignored disposable paths in live worktrees and deletes videos of old Jobs.
-Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9, R18, R19), `scripts/worktree-lifecycle-e2e.mjs` (R10-R13, R17, R20),
+Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9, R18, R19, R21), `scripts/worktree-lifecycle-e2e.mjs` (R10-R13, R17, R20, R22),
 `scripts/jobs-e2e.mjs` (R14).
 
 ## Settings
@@ -31,6 +31,14 @@ keeps at most 50 GB of caches by default.
 - R19 Stored cleanup settings from before the budget have no `budgetGb`, so a run or a settings change fails validation.
 - R20 Settings → Storage counts as reclaimable only the caches the old rules free, so the caches of settled or over-budget workspaces
   show 0.
+
+## Removal and the Clean up button
+Seen live (2026-11-13): Finder wrote a `.DS_Store` into a cache while it was being removed, `rmSync` threw `ENOTEMPTY`, and the run
+failed before trimming any cache; the Storage button kept spinning because it looked for its run among the 30 oldest.
+- R21 One path that cannot be removed (a file written into it meanwhile, no permission) ends the run, so nothing after it is removed;
+  or the failure is swallowed and the run reports success.
+- R22 Clean up never ends once the project has more than 30 routine runs: history pages oldest first, so the button never sees its
+  own run.
 
 ## Routine
 - R10 A project has no cleanup routine by default, or gets a second one on every open, or the timer still runs beside the routine.

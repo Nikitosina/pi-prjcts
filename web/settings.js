@@ -470,19 +470,16 @@ async function storage(body, alive) {
       return measure();
     }
     if (!event.target.closest("[data-storage-clean]") || cleaning) return;
-    const runs = async () =>
-      (await call("schedule-history", { id: state.projectId, kind: "intents" })).items.filter((item) => item.stableId === CLEANUP_ID);
     cleaning = true;
     outcome = null;
     draw();
     try {
-      const before = (await runs()).length;
-      await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
+      const { requestId } = await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
       let done = null;
       while (alive() && !done) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        const items = await runs();
-        if (items.length > before && items.at(-1).outcome !== null) done = items.at(-1);
+        const [run] = (await call("schedule-history", { id: state.projectId, kind: "intents", requestId, limit: 1 })).items;
+        if (run?.outcome != null) done = run;
       }
       if (done) outcome = { ok: done.outcome === "completed", text: done.summary || done.outcome };
     } catch (error) {

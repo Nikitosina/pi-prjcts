@@ -55,7 +55,7 @@ try {
   make(join(custom, other)); // gone, under the set root
   make(join(defaults, "not-a-cache")); // not an intent id
   writeFileSync(join(defaults, "12345678-bbbb-5ccc-addd-eeeeeeeeeeee"), "a file, not a folder");
-  const removed = sweepWorkspaceCaches({ roots: [defaults, custom, join(root, "missing")], live: new Set([intent]) });
+  const { removed } = sweepWorkspaceCaches({ roots: [defaults, custom, join(root, "missing")], live: new Set([intent]) });
   assert.deepEqual(removed.sort(), [join(custom, other), join(defaults, other)].sort());
   assert.ok(existsSync(join(defaults, intent)) && existsSync(join(defaults, "not-a-cache")));
   assert.ok(existsSync(join(defaults, "12345678-bbbb-5ccc-addd-eeeeeeeeeeee")));

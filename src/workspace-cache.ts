@@ -1,7 +1,8 @@
-import { mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { workspaceReceipts } from "./workspace-isolation.ts";
+import { removePaths } from "./workspace-cleanup.ts";
 
 /** Workspace cache folders (scripts/workspace-cache-failures.md): one per workspace, outside its worktree, for build caches, test
  * results, browser profiles and logs. The host names it in `$PI_WORKSPACE_CACHE` and removes it once the workspace is gone. */
@@ -37,8 +38,11 @@ export function mcpEnvWithCache(env: Record<string, string>, cache: string | und
 }
 
 /** Removes intent-named folders under the roots whose workspace no longer exists; anything else is left alone. */
-export function sweepWorkspaceCaches(input: { roots: readonly string[]; live: ReadonlySet<string> }): string[] {
-  const removed: string[] = [];
+export function sweepWorkspaceCaches(input: { roots: readonly string[]; live: ReadonlySet<string> }): {
+  removed: string[];
+  failed: string[];
+} {
+  const orphans: string[] = [];
   for (const root of new Set(input.roots)) {
     let names: string[];
     try {
@@ -48,12 +52,10 @@ export function sweepWorkspaceCaches(input: { roots: readonly string[]; live: Re
     }
     for (const name of names) {
       const path = join(root, name);
-      if (!INTENT_ID.test(name) || input.live.has(name) || !statSync(path, { throwIfNoEntry: false })?.isDirectory()) continue;
-      rmSync(path, { recursive: true, force: true });
-      removed.push(path);
+      if (INTENT_ID.test(name) && !input.live.has(name) && statSync(path, { throwIfNoEntry: false })?.isDirectory()) orphans.push(path);
     }
   }
-  return removed;
+  return removePaths(orphans);
 }
 
 export const COORDINATOR_CACHE_RULE = `Your bash has $${CACHE_VARIABLE}, this chat workspace's cache folder outside the worktree, removed with it. Put build output and caches there, never in the worktree: DerivedData (-derivedDataPath "$${CACHE_VARIABLE}/DerivedData"), test results, browser profiles, logs.`;
@@ -97,7 +99,7 @@ export function workspaceCaches(input: {
     const intentId = workspaceIntentFor(await existing(), real(cwd));
     return intentId ? forIntent(intentId) : undefined;
   }
-  async function sweep(): Promise<string[]> {
+  async function sweep(): Promise<{ removed: string[]; failed: string[] }> {
     const live = new Set((await existing()).map((item) => item.intentId));
     const set = input.cacheRoot();
     return sweepWorkspaceCaches({

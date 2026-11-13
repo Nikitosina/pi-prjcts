@@ -2,7 +2,18 @@
 // Failure cases: scripts/workspace-cleanup-failures.md.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,10 +24,11 @@ import {
   disposableCandidates,
   gitIgnored,
   oldJobVideos,
+  removePaths,
   settledWorkspaces,
   withCleanupDefaults,
 } from "../src/workspace-cleanup.ts";
-import { workspaceCaches } from "../src/workspace-cache.ts";
+import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
 import { pruneTestProducts } from "../plugins/simulator/test-products.ts";
 
@@ -170,6 +182,35 @@ try {
     ].sort(),
     ["approved", "dismissed", "merged"],
   );
+
+  // R21 a path that cannot be removed is reported, and the paths after it still go.
+  const removals = join(root, "removals"),
+    stuck = join(removals, "stuck"),
+    gone = join(removals, "gone");
+  mkdirSync(join(stuck, "locked"), { recursive: true });
+  mkdirSync(gone, { recursive: true });
+  writeFileSync(join(stuck, "locked", "file"), "x");
+  chmodSync(join(stuck, "locked"), 0o500);
+  try {
+    const result = removePaths([stuck, gone]);
+    assert.deepEqual(result.removed, [gone]);
+    assert.equal(result.failed.length, 1);
+    assert.match(result.failed[0], new RegExp(`^${stuck}: `));
+    assert.ok(!existsSync(gone) && existsSync(stuck));
+    const orphanRoot = join(root, "orphans"),
+      orphan = join(orphanRoot, "aaaaaaaa-bbbb-5ccc-addd-000000000001"),
+      lockedOrphan = join(orphanRoot, "aaaaaaaa-bbbb-5ccc-addd-000000000002");
+    mkdirSync(orphan, { recursive: true });
+    mkdirSync(join(lockedOrphan, "locked"), { recursive: true });
+    writeFileSync(join(lockedOrphan, "locked", "file"), "x");
+    chmodSync(join(lockedOrphan, "locked"), 0o500);
+    const swept = sweepWorkspaceCaches({ roots: [orphanRoot], live: new Set() });
+    assert.deepEqual(swept.removed, [orphan]);
+    assert.equal(swept.failed.length, 1, "the sweep reports the orphan it could not remove instead of throwing");
+    chmodSync(join(lockedOrphan, "locked"), 0o700);
+  } finally {
+    chmodSync(join(stuck, "locked"), 0o700);
+  }
 
   // R7, R8 videos: approved or dismissed Jobs past the window lose videos only; others keep everything.
   const artifacts = join(controlRoot, "artifacts");

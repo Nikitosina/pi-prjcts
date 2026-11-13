@@ -62,7 +62,8 @@ export type DurableScheduleSnapshot = {
   | { historyIncluded?: true; events: Event[]; intents: ScheduleIntent[] }
   | { historyIncluded: false; historyCounts: { events: number; intents: number }; events: []; intents: [] }
 );
-export type ScheduleHistoryOptions = { offset?: number; limit?: number; textOffset?: number; textLimit?: number };
+/** `requestId` narrows intents to that one run: pages go oldest first, so a new run may lie past them. */
+export type ScheduleHistoryOptions = { offset?: number; limit?: number; textOffset?: number; textLimit?: number; requestId?: string };
 type TextRange = { offset: number; end: number; total: number; nextOffset: number | null; sha256: string };
 type HistoryPage = { offset: number; limit: number; total: number; nextOffset: number | null; observedAtMs: number };
 export type ScheduleHistoryPage = HistoryPage &
@@ -249,7 +250,8 @@ export function scheduleRuntime(
         };
       }
       const records = Object.values(state.intents),
-        selected = records.slice(offset, offset + limit);
+        matching = options.requestId === undefined ? records : records.filter((record) => record.requestId === options.requestId),
+        selected = matching.slice(offset, offset + limit);
       const routines = new Map<string, Array<{ at: number; outcome: "ok" | "failed" | "skipped" | "paused"; durationMs: number | null }>>();
       for (const intent of records) {
         if (intent.kind !== "schedule") continue;
@@ -272,8 +274,8 @@ export function scheduleRuntime(
         kind,
         offset,
         limit,
-        total: records.length,
-        nextOffset: offset + selected.length < records.length ? offset + selected.length : null,
+        total: matching.length,
+        nextOffset: offset + selected.length < matching.length ? offset + selected.length : null,
         observedAtMs: Date.now(),
         items: selected.map((record) => {
           const excerpt = historyText(record.text, textOffset, textLimit),

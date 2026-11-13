@@ -1516,6 +1516,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         limit: input.limit,
         textOffset: input.textOffset,
         textLimit: input.textLimit,
+        requestId: input.requestId,
       });
     case "event-opt-in":
       return withDurableOwner({ id: input.id, operation: (owner) => owner.scheduleSetEventOptIn(input.enabled) });

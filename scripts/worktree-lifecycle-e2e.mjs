@@ -863,8 +863,22 @@ try {
     interrupted.length === 1 && interrupted[0].status === "interrupted",
     interrupted,
   );
-  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  const started = await rpc({ action: "schedule-run", id, scheduleId: routine.id });
   await eventually(async () => !existsSync(w3Path) && !existsSync(results), "the cleanup routine did not remove W3 and e2e-results", 600);
+  // R22: Settings → Storage waits for its own run by request id; history pages oldest first and may not reach it.
+  const own = await eventually(
+    async () => {
+      const page = await rpc({ action: "schedule-history", id, kind: "intents", requestId: started.requestId, limit: 1 });
+      return page.items[0]?.outcome && page;
+    },
+    "the run was not found by its request id",
+    300,
+  );
+  check(
+    "R22 history filtered by request id answers exactly the started run",
+    own.total === 1 && own.items[0].requestId === started.requestId && own.items[0].outcome === "completed",
+    own,
+  );
   const runs = await eventually(
     async () => {
       const items = (await rpc({ action: "schedule-history", id, kind: "intents" })).items.filter((item) => item.stableId === routine.id);

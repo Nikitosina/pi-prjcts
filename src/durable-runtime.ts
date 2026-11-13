@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pruneRunLogs, runScript, type ScriptRun } from "./routine-script.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -103,6 +103,7 @@ import {
   DEFAULT_CLEANUP_SETTINGS,
   cachesToTrim,
   disposableCandidates,
+  removePaths,
   settledWorkspaces,
   gitIgnored,
   jobVideos,
@@ -1142,7 +1143,9 @@ export async function openDurableProject(input: {
       const cwd = (await api.agent(context)).cwd;
       return cwd && existsSync(cwd) ? cwd : project.cwd;
     });
-    let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => {
+    /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
+    type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
+    let cleanup: () => Promise<WorktreeCleanup> = async () => {
       throw new Error("Project runtime is not open");
     };
     // Verification runs: trusted runs on the candidate, tied to its commit, under the worker's own shell policy.
@@ -1752,7 +1755,7 @@ export async function openDurableProject(input: {
     );
     stallWake.unref();
     // Settled worktrees are removed automatically (same safe rule as the Settings action); paused or closing projects are left alone.
-    let cleaning: Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> | undefined;
+    let cleaning: Promise<WorktreeCleanup> | undefined;
     const untouchedThread = async (threadId: string) => {
       const owned = (await jobs.snapshot(openedHarness)).jobs.find((job) => job.id === threadId);
       const child = owned ? await openedHarness.conversation(owned.workerConversation, context) : undefined;
@@ -1776,8 +1779,8 @@ export async function openDurableProject(input: {
               untouched: untouchedThread,
             });
             // A cache outlives its workspace by at most one cleanup, whatever removed the workspace.
-            if (!closed) await caches.sweep();
-            return result;
+            const swept = closed ? undefined : await caches.sweep();
+            return { ...result, unremovedCaches: swept?.failed ?? [] };
           });
         } finally {
           cleaning = undefined;
@@ -1843,11 +1846,11 @@ export async function openDurableProject(input: {
         if (!closed && existsSync(worktree))
           disposable.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
       const videos = oldJobVideos({ controlRoot: dir, jobs: (await jobs.snapshot(openedHarness)).jobs, days: settings.videoDays });
-      for (const path of [...trimmed, ...disposable, ...videos]) if (!closed) rmSync(path, { recursive: true, force: true });
+      const removal = closed ? { removed: [], failed: [] } : removePaths([...trimmed, ...disposable, ...videos]);
       const notes = [
         `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
       ];
-      const failures: string[] = [];
+      const failures = [...worktrees.unremovedCaches, ...removal.failed].map((failure) => `could not remove ${failure}`);
       for (const step of plugins.cleanupSteps()) {
         if (closed) break;
         try {

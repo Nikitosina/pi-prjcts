@@ -1309,6 +1309,7 @@ export const Request = Type.Union([
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
       textOffset: Type.Optional(Type.Integer({ minimum: 0, maximum: 1000000 })),
       textLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 4000 })),
+      requestId: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
     },
     { additionalProperties: false },
   ),
