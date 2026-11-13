@@ -849,7 +849,13 @@ try {
   startHost();
   await waitHost();
   await rpc({ action: "show", id });
-  await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  const held = await rpc({ action: "schedule-run", id, scheduleId: routine.id });
+  const progress = (await rpc({ action: "schedule-history", id, kind: "intents", requestId: held.requestId, limit: 1 })).items[0]?.progress;
+  check(
+    "R24 a running cleanup's history entry carries its step, counts and bytes freed",
+    progress?.step === "worktrees" && progress.done === 0 && progress.freedBytes === 0,
+    progress,
+  );
   host.kill("SIGKILL");
   await stopHost().catch(() => {});
   delete env.PI_PROJECTS_CLEANUP_START_DELAY_MS;
@@ -876,7 +882,7 @@ try {
   );
   check(
     "R22 history filtered by request id answers exactly the started run",
-    own.total === 1 && own.items[0].requestId === started.requestId && own.items[0].outcome === "completed",
+    own.total === 1 && own.items[0].requestId === started.requestId && own.items[0].outcome === "completed" && !own.items[0].progress,
     own,
   );
   const runs = await eventually(

@@ -108,7 +108,11 @@ try {
     now,
     usageOf,
   });
-  assert.deepEqual(plan.trimmed.sort(), [join(caches, "big-idle"), join(caches, "settled-busy"), join(caches, "stale")]);
+  assert.deepEqual(plan.trimmed.map((item) => item.dir).sort(), [
+    join(caches, "big-idle"),
+    join(caches, "settled-busy"),
+    join(caches, "stale"),
+  ]);
   assert.deepEqual([plan.count, plan.bytes, plan.trimmedBytes], [5, 1025, 515], "a missing cache counts nothing");
 
   // R18 the budget: four 40-byte caches under a 100-byte budget lose the least recently written idle ones until under it.
@@ -130,7 +134,14 @@ try {
     now,
     usageOf,
   });
-  assert.deepEqual(overBudget.trimmed, [join(caches, "b-oldest"), join(caches, "b-old")], "oldest first, the busy one stays");
+  assert.deepEqual(
+    overBudget.trimmed,
+    [
+      { dir: join(caches, "b-oldest"), bytes: 40 },
+      { dir: join(caches, "b-old"), bytes: 40 },
+    ],
+    "oldest first, the busy one stays",
+  );
 
   // R9 the last use is the newest write anywhere inside, not the folder's own mtime; touching the folder is not a use.
   const controlRoot = join(root, "project"),
@@ -192,7 +203,7 @@ try {
   writeFileSync(join(stuck, "locked", "file"), "x");
   chmodSync(join(stuck, "locked"), 0o500);
   try {
-    const result = removePaths([stuck, gone]);
+    const result = await removePaths([stuck, gone]);
     assert.deepEqual(result.removed, [gone]);
     assert.equal(result.failed.length, 1);
     assert.match(result.failed[0], new RegExp(`^${stuck}: `));
@@ -204,13 +215,32 @@ try {
     mkdirSync(join(lockedOrphan, "locked"), { recursive: true });
     writeFileSync(join(lockedOrphan, "locked", "file"), "x");
     chmodSync(join(lockedOrphan, "locked"), 0o500);
-    const swept = sweepWorkspaceCaches({ roots: [orphanRoot], live: new Set() });
+    const swept = await sweepWorkspaceCaches({ roots: [orphanRoot], live: new Set() });
     assert.deepEqual(swept.removed, [orphan]);
     assert.equal(swept.failed.length, 1, "the sweep reports the orphan it could not remove instead of throwing");
     chmodSync(join(lockedOrphan, "locked"), 0o700);
   } finally {
     chmodSync(join(stuck, "locked"), 0o700);
   }
+
+  // R23 removing a large tree leaves the event loop free: the host keeps answering every project meanwhile.
+  const big = join(root, "big-cache");
+  for (let d = 0; d < 100; d++) {
+    mkdirSync(join(big, String(d)), { recursive: true });
+    for (let f = 0; f < 300; f++) writeFileSync(join(big, String(d), String(f)), "x");
+  }
+  let last = performance.now(),
+    worstGap = 0;
+  const ticker = setInterval(() => {
+    const now = performance.now();
+    worstGap = Math.max(worstGap, now - last);
+    last = now;
+  }, 5);
+  const removedBig = await removePaths([big]);
+  clearInterval(ticker);
+  worstGap = Math.max(worstGap, performance.now() - last);
+  assert.deepEqual(removedBig.removed, [big]);
+  assert.ok(worstGap < 250, `the event loop stalled ${Math.round(worstGap)} ms while removing 30000 files`);
 
   // R7, R8 videos: approved or dismissed Jobs past the window lose videos only; others keep everything.
   const artifacts = join(controlRoot, "artifacts");

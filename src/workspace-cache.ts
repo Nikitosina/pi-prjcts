@@ -38,10 +38,7 @@ export function mcpEnvWithCache(env: Record<string, string>, cache: string | und
 }
 
 /** Removes intent-named folders under the roots whose workspace no longer exists; anything else is left alone. */
-export function sweepWorkspaceCaches(input: { roots: readonly string[]; live: ReadonlySet<string> }): {
-  removed: string[];
-  failed: string[];
-} {
+export function sweepWorkspaceCaches(input: { roots: readonly string[]; live: ReadonlySet<string> }) {
   const orphans: string[] = [];
   for (const root of new Set(input.roots)) {
     let names: string[];
@@ -99,7 +96,7 @@ export function workspaceCaches(input: {
     const intentId = workspaceIntentFor(await existing(), real(cwd));
     return intentId ? forIntent(intentId) : undefined;
   }
-  async function sweep(): Promise<{ removed: string[]; failed: string[] }> {
+  async function sweep() {
     const live = new Set((await existing()).map((item) => item.intentId));
     const set = input.cacheRoot();
     return sweepWorkspaceCaches({

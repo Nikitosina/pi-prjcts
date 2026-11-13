@@ -6,7 +6,7 @@ import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
-import { cleanupSettingsError, withCleanupDefaults, type CleanupSettings } from "./workspace-cleanup.ts";
+import { cleanupSettingsError, withCleanupDefaults, type CleanupProgress, type CleanupSettings } from "./workspace-cleanup.ts";
 import { scriptError } from "./routine-script.ts";
 /** What a routine does when it fires: send its text to a chat, or a host action that runs without a model. */
 export type RoutineAction =
@@ -71,7 +71,8 @@ export type ScheduleHistoryPage = HistoryPage &
     | { kind: "events"; items: Array<Event & { payloadRange: TextRange }> }
     | {
         kind: "intents";
-        items: Array<ScheduleIntent & { textRange: TextRange; outcomeRange: TextRange | null }>;
+        /** `progress`: where a running cleanup is (src/workspace-cleanup.ts). */
+        items: Array<ScheduleIntent & { textRange: TextRange; outcomeRange: TextRange | null; progress?: CleanupProgress }>;
         routines: Array<{
           routineId: string;
           recentRuns: Array<{ at: number; outcome: "ok" | "failed" | "skipped" | "paused"; durationMs: number | null }>;

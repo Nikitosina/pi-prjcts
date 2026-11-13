@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Verification helper for pi-prjcts. Run from the repo root (or any checkout root):
-//   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch  [--evidence <dir>] [--plugin <dir-or-module>]...
+//   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch  [--evidence <dir>] [--plugin <dir-or-module>]... [--cleanup-delay-ms <ms>]
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs doctor  --run <scratch>
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc     --run <scratch> <action> [json-fields]
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive   --run <scratch> <feature>
@@ -182,6 +182,8 @@ function hostEnv(run) {
     PI_OFFLINE: "1",
     // Plugins under development load through the env list only; the scratch home has no plugins.json.
     ...(run.plugins?.length ? { PI_PROJECTS_PLUGINS: run.plugins.join(":") } : {}),
+    // The host's test seam that holds each cleanup run at its first step, so a journey can watch its progress.
+    ...(run.cleanupDelayMs ? { PI_PROJECTS_CLEANUP_START_DELAY_MS: String(run.cleanupDelayMs) } : {}),
   };
 }
 
@@ -206,11 +208,14 @@ async function launch() {
     if (path.includes(":")) fail(`a plugin path cannot contain ":": ${path}`);
     if (!existsSync(path)) fail(`plugin path does not exist: ${path}`);
   }
+  const cleanupDelayMs = Number(flag("cleanup-delay-ms") ?? 0);
+  if (!Number.isSafeInteger(cleanupDelayMs) || cleanupDelayMs < 0 || cleanupDelayMs > 60_000) fail("--cleanup-delay-ms must be 0 to 60000");
   const run = {
     id,
     scratch,
     evidence,
     repo,
+    cleanupDelayMs,
     home: join(scratch, "home"),
     workspace: join(scratch, "workspace"),
     agentDir: join(scratch, "agent"),
@@ -1194,6 +1199,7 @@ const journeys = {
       }
     }
     record("setup", "31 cleanup runs recorded through schedule-run");
+    if (!run.cleanupDelayMs) throw Error("launch with --cleanup-delay-ms 2500 so the run stays long enough to show its progress");
     await page.navigate(run.webUrl);
     await page.waitFor(`document.body.dataset.ready === "1"`, "UI ready");
     await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
@@ -1202,9 +1208,17 @@ const journeys = {
     await page.waitFor(`!!document.querySelector('dialog[open] [data-storage-clean]:not([disabled])')`, "Clean up ready", 60000);
     await page.shot(dir, "01-storage");
     await page.click(`dialog[open] [data-storage-clean]`);
+    // R24: while the run is held at its first step the button shows a bar and the step.
+    await page.waitFor(
+      `/Step 1 of 4: Checking worktrees/.test(document.querySelector('dialog[open] .storage-progress')?.innerText ?? '') && !!document.querySelector('dialog[open] .storage-bar span')`,
+      "Clean up progress",
+      30000,
+    );
+    await page.shot(dir, "02-progress");
+    record("visible", `progress: ${await page.evaluate(`document.querySelector('dialog[open] .storage-progress').innerText`)}`);
     await page.waitFor(`!!document.querySelector('dialog[open] .storage-outcome')`, "Clean up outcome", 60000);
     const shown = await page.evaluate(`document.querySelector('dialog[open] .storage-outcome').innerText`);
-    await page.shot(dir, "02-cleaned");
+    await page.shot(dir, "03-cleaned");
     if (!/^Removed \d+ worktree/.test(shown)) throw Error(`Clean up showed: ${shown}`);
     const history = await rpc(run, { action: "schedule-history", id: run.projectId, kind: "intents", limit: 1 });
     record("visible", `Clean up ended with "${shown}" after ${history.total} routine runs`);

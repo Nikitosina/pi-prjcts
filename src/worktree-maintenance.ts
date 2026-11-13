@@ -367,6 +367,8 @@ export async function cleanupWorktrees(input: {
   signal?: AbortSignal;
   stillAllowed?: () => boolean;
   untouched?: (threadId: string) => Promise<boolean>;
+  /** Called before each removable worktree and once at the end. */
+  onProgress?: (done: number, total: number) => void;
 }): Promise<{
   removed: Array<{ path: string; sizeKb: number }>;
   kept: WorktreeItem[];
@@ -376,7 +378,9 @@ export async function cleanupWorktrees(input: {
   const before = await worktreeInventory(input);
   const removed: Array<{ path: string; sizeKb: number }> = [],
     failed: Array<{ path: string; error: string }> = [];
-  for (const item of before.items.filter((entry) => entry.removable)) {
+  const removable = before.items.filter((entry) => entry.removable);
+  for (const [index, item] of removable.entries()) {
+    input.onProgress?.(index, removable.length);
     if (input.stillAllowed && !input.stillAllowed()) break;
     const again = (await worktreeInventory(input)).items.find((entry) => entry.path === item.path);
     if (!again?.removable) continue;
@@ -417,6 +421,7 @@ export async function cleanupWorktrees(input: {
     }
     removed.push({ path: item.path, sizeKb: item.sizeKb });
   }
+  input.onProgress?.(removable.length, removable.length);
   return {
     removed,
     kept: before.items.filter((entry) => !entry.removable),
