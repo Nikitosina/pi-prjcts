@@ -181,10 +181,18 @@ try {
   const hostFile = join(clone, "src", "host.ts");
   writeFileSync(hostFile, readFileSync(hostFile, "utf8") + '\nif (Date.now() > 0) throw new Error("broken deploy");\n');
   commit("broken");
-  result = await deploy(deps);
+  const startMs = [];
+  result = await deploy({
+    ...deps,
+    startHost: async () => {
+      const startedAt = Date.now();
+      await real.startHost().finally(() => startMs.push(Date.now() - startedAt));
+    },
+  });
   assert.equal(result.ok, false);
   assert.equal(result.rolledBack, true, JSON.stringify(result));
   assert.match(result.reason, /^Projects host exited with code 1 before it answered/, "the start ends when the new host dies");
+  assert.ok(startMs[0] < 20_000, `the crash is noticed when the host exits, not after every start attempt: ${startMs[0]} ms`);
   assert.equal(git("rev-parse", "HEAD"), good);
   assert.ok((await health()).pid > 0);
   assert.match(told.at(-1), /Rolled back/);

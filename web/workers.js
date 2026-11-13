@@ -6,6 +6,7 @@ import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
+import { pluginRow } from "./plugins.js";
 
 const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
@@ -365,10 +366,8 @@ export async function loadSide() {
     )
     .slice(0, 12);
   renderPrs();
-  const cards = (plugins?.web ?? []).filter((card) => card.title || card.label);
-  document.querySelector("#plugin-cards").innerHTML = cards.length
-    ? `<h2>Plugins</h2>${cards.map((card) => `<div class="plugin-card"><b>${esc(card.title ?? card.label)}</b>${card.text ? `<p class="small muted">${esc(clip(card.text, 160))}</p>` : ""}</div>`).join("")}`
-    : "";
+  const list = plugins?.plugins ?? [];
+  document.querySelector("#plugin-cards").innerHTML = list.length ? `<h2>Plugins</h2>${list.map(pluginRow).join("")}` : "";
 }
 
 // Merge never merges here: it sends the owner's request to the Coordinator of the chat named in the confirmation.

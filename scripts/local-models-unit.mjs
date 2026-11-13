@@ -42,13 +42,15 @@ try {
   assert.equal(requests, 0, "offline registry creation and refresh never fetch, even without PI_OFFLINE");
   // Both adapters must see object arguments; Anthropic drops a root anyOf, so root properties matter too.
   const { createJobs } = await import("../src/jobs.ts");
-  const { coordinatorGithubTools } = await import("../src/coordinator-github-tools.ts");
+  const { plugins } = await import("../src/plugins.ts");
+  await plugins.load();
+  const github = plugins
+    .coordinatorTools()
+    .map((provider) => provider.create({ projectId: "unused", root: () => undefined, isCoordinator: () => false }))
+    .find((item) => item.extension.name === "projects.coordinator-github");
   const { Check } = await import("typebox/value");
   const { normalizeContext } = await import("@earendil-works/pi-ai");
-  const tools = [
-    ...createJobs({ agentChange: () => ({}) }).tools.worker,
-    ...coordinatorGithubTools({ projectId: "unused", root: () => undefined, isCoordinator: () => false }).tools,
-  ];
+  const tools = [...createJobs({ agentChange: () => ({}) }).tools.worker, ...github.tools];
   for (const api of ["anthropic-messages", "openai-completions"]) {
     const { streamSimple } = await import(`@earendil-works/pi-ai/api/${api}`);
     let payload;

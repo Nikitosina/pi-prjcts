@@ -1,0 +1,17 @@
+/* Scoped to the notes panel; a plugin stylesheet applies to the whole page. */
+.notes-panel ul {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.notes-panel .notes-empty {
+  list-style: none;
+  margin-left: -18px;
+  opacity: 0.7;
+}
+.notes-panel .notes-add {
+  display: flex;
+  gap: 8px;
+}
+.notes-panel .notes-add input {
+  flex: 1;
+}

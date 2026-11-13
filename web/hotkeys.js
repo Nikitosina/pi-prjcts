@@ -21,6 +21,7 @@ export const DEFAULTS = {
   "settings-tools": "T",
   "settings-automations": "R",
   "settings-storage": "U",
+  "settings-plugins": "X",
   "settings-tiers": "I",
   "settings-theme": "H",
   "settings-animations": "A",

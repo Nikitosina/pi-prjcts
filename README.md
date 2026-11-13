@@ -84,7 +84,7 @@ Settings, Quota recovery selects an optional fallback model for worker, scout an
 
 ## Plugins
 
-Non-GitHub checkouts and PR services are plugins: `PLUGINS.md`. The iOS simulator plugin is `plugins/simulator`; it loads only when listed in `$PI_PROJECTS_HOME/plugins.json` (`plugins/simulator/README.md`).
+Non-GitHub checkouts, PR services and other add-ons are plugins (`PLUGINS.md`). To write one, follow the author guide in [`docs/plugins/`](docs/plugins/README.md): `npm run projects -- plugin new|check`, a private host with `--plugin`, then explicit activation through `plugins.json` and a restart. The iOS simulator plugin is `plugins/simulator`; it loads only when listed in `$PI_PROJECTS_HOME/plugins.json` (`plugins/simulator/README.md`).
 
 ## Development
 

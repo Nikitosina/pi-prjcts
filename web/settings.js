@@ -8,6 +8,7 @@ import { setUi } from "./ui.js";
 import { STATUS_ITEMS } from "./statusline.js";
 import { promptSection } from "./prompts.js";
 import { connectCursor, limitShown, loadLimits, refreshLimits, setLimitShown } from "./limits.js";
+import { mountPanels, pluginCards } from "./plugins.js";
 
 const dialog = document.querySelector("#settings");
 const PROFILES = [
@@ -25,6 +26,7 @@ export const SECTIONS = [
   { id: "tools", label: "Tools", scope: "project", group: "Core four", profile: true, render: tools },
   { id: "automations", label: "Automations", scope: "project", group: "Project", render: automations },
   { id: "storage", label: "Storage", scope: "project", group: "Project", render: storage },
+  { id: "plugins", label: "Plugins", scope: "project", group: "Project", render: pluginsSection },
   { id: "tiers", label: "Model tiers", scope: "host", group: "Host", render: tiersSection },
   { id: "theme", label: "Theme", scope: "host", group: "Host", render: theme },
   { id: "animations", label: "Animations", scope: "host", group: "Host", render: animations },
@@ -40,7 +42,8 @@ let section = "general",
   profile = "coordinator",
   paintGen = 0,
   prompts = null, // the open Prompt section: back() for Esc, refresh() for writes from elsewhere
-  back = null; // another open section's own Esc step (an inline edit); true when it stepped back
+  back = null, // another open section's own Esc step (an inline edit); true when it stepped back
+  unmount = null; // the open Plugins section's panels, unmounted before a repaint and when Settings closes
 
 export const settingsOpen = () => dialog.open;
 export function openSettings(id) {
@@ -49,6 +52,7 @@ export function openSettings(id) {
   paint();
 }
 export function closeSettings() {
+  leaveSection();
   if (dialog.open) dialog.close();
 }
 /** Esc inside Settings: a section with its own inner view (the Prompt editor) steps back first; true when it did. */
@@ -64,6 +68,11 @@ export function showSection(id) {
 }
 on("select", () => dialog.open && paint());
 dialog.addEventListener("cancel", (event) => event.preventDefault()); // Esc goes through the hotkey registry (leave-focus)
+dialog.addEventListener("close", () => leaveSection());
+function leaveSection() {
+  unmount?.();
+  unmount = null;
+}
 dialog.addEventListener("click", (event) => {
   if (event.target === dialog) closeSettings();
   const nav = event.target.closest("nav [data-section]");
@@ -82,6 +91,7 @@ function paint(keepScroll = false) {
   if (profile === "host" && section !== "prompt") profile = "coordinator";
   prompts = null;
   back = null;
+  leaveSection();
   const scope = current.profile && profile === "host" ? "host" : current.scope;
   const tabs = section === "prompt" ? [...PROFILES, { id: "host", label: "Host agent" }] : PROFILES;
   const groups = [...new Set(SECTIONS.map((item) => item.group))];
@@ -484,6 +494,16 @@ async function storage(body, alive) {
     draw();
     await measure();
   });
+}
+
+// ---------------------------------------------------------------------------------------------------------------- Plugins
+
+/** Every plugin the host loaded, and the panels plugins provide for this project (web/plugins.js). */
+async function pluginsSection(body, alive) {
+  const status = await call("plugins");
+  if (!alive()) return;
+  body.innerHTML = `${line("Plugins this host loaded at its start, and the panels they provide for this project.", "A panel is the plugin's own code running in this page. A changed plugin shows here after a host restart and a page reload.")}${pluginCards(status) || `<p class="muted">No plugins are loaded. List one in plugins.json and restart the host.</p>`}`;
+  unmount = mountPanels(body, state.projectId, status.web);
 }
 
 // ---------------------------------------------------------------------------------------------------------------- Automations

@@ -2018,7 +2018,9 @@ const server = createServer(async (request, response) => {
           data: {
             pid: process.pid,
             home: home(),
-            plugins: plugins.status().map(({ source, name, state, error }) => ({ source, name, state, ...(error ? { error } : {}) })),
+            plugins: plugins
+              .status()
+              .map(({ source, name, version, state, error }) => ({ source, name, version, state, ...(error ? { error } : {}) })),
           },
         }),
       );
@@ -2040,6 +2042,7 @@ for (const status of await plugins.load())
       event: status.state === "loaded" ? "plugin-loaded" : "plugin-failed",
       source: status.source,
       name: status.name,
+      version: status.version,
       provides: status.provides,
       ...(status.error ? { error: status.error } : {}),
     }) + "\n",

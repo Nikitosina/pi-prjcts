@@ -1,30 +1,18 @@
-import { objectUnion } from "./tool-schema.ts";
-import { execFile } from "node:child_process";
-import { defineExtension, defineTool, type Conversation, type ToolExecutionApi } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
-import { loadProject, type GithubAuthorization } from "./state.ts";
-import { authorizationFingerprint, trustedOwner } from "./workspace-authorization.ts";
-import { githubCli } from "./github-authorization.ts";
-import { githubOwnPrs, githubPrDetail } from "./github-prs.ts";
+import type { Conversation, CoordinatorToolsProvider, HostPluginApi, ToolExecutionApi } from "../../src/plugin-types.ts";
+import type { GithubAuthorization, Project } from "../../src/state.ts";
+import { githubApi as gh } from "../../src/github-authorization.ts";
+import { githubOwnPrs, githubPrDetail } from "../../src/github-prs.ts";
+import { objectUnion } from "../../src/tool-schema.ts";
 
-/** Coordinator-only GitHub issue and PR tools. The owner's repository authorization covers every call; nothing merges, deletes or touches code. */
-export const COORDINATOR_GITHUB_TOOLS = [
-  "projects_github_issue_read",
-  "projects_github_issues",
-  "projects_github_issue_write",
-  "projects_github_pr",
-] as const;
+/** The GitHub integration block (`src/role-prompts.ts`, id `github`) describes these tools; it stays built in so owner edits keep applying. */
+export function githubCoordinatorTools(host: HostPluginApi): CoordinatorToolsProvider {
+  return {
+    // Installed always (recorded calls resolve); offered only while the project has a GitHub authorization.
+    applies: (project: Project) => !!project.githubAuthorization?.length,
+    create: (input) => coordinatorGithubTools(host, input),
+  };
+}
 
-const Repository = Type.Optional(
-  Type.String({
-    pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
-    description: "owner/name; optional when exactly one repository is authorized",
-  }),
-);
-const IssueNumber = Type.Integer({ minimum: 1, maximum: 100000000 });
-const Labels = Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 });
-const Logins = Type.Array(Type.String({ pattern: "^[A-Za-z0-9-]{1,39}$" }), { maxItems: 10 });
-const Body = Type.String({ minLength: 1, maxLength: 60000 });
 const json = (value: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(value) }] });
 const clip = (value: unknown, limit: number) => {
   const text = typeof value === "string" ? value : "";
@@ -49,40 +37,6 @@ type Issue = {
   pull_request?: unknown;
 };
 
-/** Runs one `gh api` call. Errors keep gh's own one-line reason (status and message) so the coordinator can tell 404 from 422. */
-export function gh(method: "GET" | "POST" | "PATCH", path: string, body: object | undefined, signal?: AbortSignal): Promise<unknown> {
-  return new Promise((accept, reject) => {
-    const args = ["api", "--hostname", "github.com", "--method", method, path, ...(body ? ["--input", "-"] : [])];
-    const child = execFile(
-      githubCli(),
-      args,
-      { encoding: "utf8", timeout: 20000, maxBuffer: 4 * 1048576, signal },
-      (error, stdout, stderr) => {
-        if (error) {
-          const reason =
-            String(stderr || error.message)
-              .split("\n")
-              .map((line) => line.trim())
-              .find(Boolean) ?? "unknown failure";
-          reject(
-            new Error(
-              `GitHub ${method} ${path.split("?")[0]} failed: ${reason.replace(/gh[pousr]_[A-Za-z0-9_]+/g, "[token]").slice(0, 300)}`,
-            ),
-          );
-          return;
-        }
-        try {
-          accept(stdout.trim() ? JSON.parse(stdout) : null);
-        } catch {
-          reject(new Error(`GitHub ${method} ${path.split("?")[0]} returned unreadable JSON`));
-        }
-      },
-    );
-    child.stdin?.on("error", () => {});
-    child.stdin?.end(body ? JSON.stringify(body) : undefined);
-  });
-}
-
 function summary(issue: Issue) {
   return {
     number: issue.number,
@@ -101,19 +55,31 @@ function summary(issue: Issue) {
   };
 }
 
-export function coordinatorGithubTools(input: {
-  projectId: string;
-  root: () => Conversation | undefined;
-  isCoordinator: (id: Conversation["id"]) => boolean;
-}) {
+/** Coordinator-only GitHub issue and PR tools. The owner's repository authorization covers every call; nothing merges, deletes or touches code. */
+function coordinatorGithubTools(
+  host: HostPluginApi,
+  input: { projectId: string; root: () => Conversation | undefined; isCoordinator: (id: Conversation["id"]) => boolean },
+) {
+  const { defineExtension, defineTool } = host.lib.durable,
+    { Type } = host.lib.typebox;
+  const Repository = Type.Optional(
+    Type.String({
+      pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      description: "owner/name; optional when exactly one repository is authorized",
+    }),
+  );
+  const IssueNumber = Type.Integer({ minimum: 1, maximum: 100000000 });
+  const Labels = Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 });
+  const Logins = Type.Array(Type.String({ pattern: "^[A-Za-z0-9-]{1,39}$" }), { maxItems: 10 });
+  const Body = Type.String({ minLength: 1, maxLength: 60000 });
   /** Re-read on every call: a revoked or stale grant (workspace changed since authorization) stops working immediately. */
   function grant(api: ToolExecutionApi, requested?: string): GithubAuthorization {
     const root = input.root();
     if (!root || !input.isCoordinator(api.conversationId)) throw new Error("GitHub issue tools are coordinator-only");
-    const project = loadProject(input.projectId);
+    const project = host.projects.load(input.projectId);
     if (project.archived || project.deleted) throw new Error("Project is archived or deleted");
-    const revision = authorizationFingerprint(project),
-      owner = trustedOwner();
+    const revision = host.projects.authorizationFingerprint(project),
+      owner = host.projects.trustedOwner();
     const grants = (project.githubAuthorization ?? []).filter((item) => item.owner === owner && item.workspaceRevision === revision);
     const names = grants.map((item) => item.repositoryId).join(", ");
     if (!grants.length) throw new Error("No current GitHub authorization. Ask the owner to connect GitHub in Settings.");

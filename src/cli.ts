@@ -53,6 +53,23 @@ if (command === "remote") {
   }
   process.exit(process.exitCode ?? 0);
 }
+if (command === "plugin") {
+  // Local development commands: they never start or call a host.
+  try {
+    const { checkPlugin, scaffoldPlugin } = await import("./plugin-dev.ts");
+    if (first === "new" && second && (rest.length === 0 || (rest.length === 2 && rest[0] === "--name"))) {
+      process.stdout.write(JSON.stringify(scaffoldPlugin(second, rest[1]), null, 2) + "\n");
+    } else if (first === "check" && second && rest.length === 0) {
+      const result = await checkPlugin(second);
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      if (!result.ok) process.exitCode = 1;
+    } else throw new Error("Usage: plugin new <dir> [--name <name>] | plugin check <dir-or-module>");
+  } catch (error) {
+    process.stderr.write(errorText(error) + "\n");
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode ?? 0);
+}
 if (command === "deploy") {
   try {
     if (!startHost) throw new Error("--no-start is not supported for deploy");
@@ -338,7 +355,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: projects [--no-start] <ui|ui-url|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
+      "Usage: projects [--no-start] <ui|ui-url|plugin|list|create|create-once|show|send|submit-scoped|thread-send|thread-steer|thread-stop|thread-history|schedules|schedule-history|schedule-once|schedule-interval|schedule-daily|schedule-weekly|schedule-enable|event-opt-in|owner-setup|owner-workspaces|owner-command-profiles|owner-workspace-grant|owner-workspace-revoke|owner-github-inspect|owner-github-authorize|owner-github-revoke|owner-profile-read|owner-profile-set|notes|jobs|pause|resume|archive|restore|delete|host-stop> ...\n",
     );
     process.exit(1);
 }

@@ -13,7 +13,7 @@ import type { WorkspaceIntent, WorkspaceLease, WorkspaceReceipt, WorkspaceScope 
 import type { WorkspaceAuthority } from "./workspace-capabilities.ts";
 
 /*
- * Host plugin API. A plugin is a module that exports `{ name, register(api) }` (default export or named exports); the host calls
+ * Host plugin API. A plugin is a module that exports `{ name, version?, register(api) }` (default export or named exports); the host calls
  * `register` once at start with a HostPluginApi and the plugin hands back its capabilities through `api.provide(...)`.
  * Nothing a plugin registers is visible until `register` returns: a throwing plugin leaves no partial registrations.
  *
@@ -470,7 +470,7 @@ export type LifecycleHooks = {
 };
 export type PluginRoute = (input: { projectId: string; query: URLSearchParams }) => Promise<{ mime: string; bytes: Uint8Array }>;
 export type WebContribution = {
-  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css. */
+  /** Absolute paths of the browser script and stylesheet, served unauthenticated as /plugins/<name>/ui.js and /plugins/<name>/ui.css; the script registers the plugin's Settings panel. */
   script?: string;
   style?: string;
   /** Bearer-authenticated GET /plugins/<name>/<route>?project=<id>. */
@@ -577,10 +577,16 @@ export type ListCache<T> = {
   ): Promise<{ items: T[]; fetchedAtMs: number | null; error: string | null; rateLimitedUntilMs: number | null }>;
 };
 
-export type PluginModule = { name: string; register(api: HostPluginApi): void | Promise<void> };
+export type PluginModule = {
+  name: string;
+  /** Shown with the plugin's status so the owner can tell which version a host runs; up to 40 characters without spaces. */
+  version?: string;
+  register(api: HostPluginApi): void | Promise<void>;
+};
 export type PluginStatus = {
   source: string;
   name: string | null;
+  version: string | null;
   state: "loaded" | "failed";
   error?: string;
   provides: string[];

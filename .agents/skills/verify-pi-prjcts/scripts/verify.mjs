@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Verification helper for pi-prjcts. Run from the repo root (or any checkout root):
-//   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch  [--evidence <dir>]
+//   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs launch  [--evidence <dir>] [--plugin <dir-or-module>]...
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs doctor  --run <scratch>
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs rpc     --run <scratch> <action> [json-fields]
 //   node .agents/skills/verify-pi-prjcts/scripts/verify.mjs drive   --run <scratch> <feature>
@@ -31,13 +31,17 @@ const RPC_ALLOWLIST = new Set([
   "knowledge-history",
   "search",
   "settings-snapshot",
+  "plugins",
 ]);
+// Host-wide actions that take no project id.
+const HOST_ACTIONS = new Set(["list", "plugins"]);
 
 const [command, ...rest] = process.argv.slice(2);
 const flag = (name) => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? rest[i + 1] : undefined;
 };
+const flags = (name) => rest.flatMap((arg, i) => (arg === `--${name}` && rest[i + 1] !== undefined ? [rest[i + 1]] : []));
 const positional = rest.filter((arg, i) => !arg.startsWith("--") && !rest[i - 1]?.startsWith("--"));
 const redact = (value) =>
   String(value)
@@ -176,6 +180,8 @@ function hostEnv(run) {
     PI_PROJECTS_HOST: "1",
     PI_CODING_AGENT_DIR: run.agentDir,
     PI_OFFLINE: "1",
+    // Plugins under development load through the env list only; the scratch home has no plugins.json.
+    ...(run.plugins?.length ? { PI_PROJECTS_PLUGINS: run.plugins.join(":") } : {}),
   };
 }
 
@@ -195,6 +201,11 @@ async function launch() {
   const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 6)}`;
   const scratch = join(realpathSync(tmpdir()), `pi-verify-${id}`);
   const evidence = resolve(flag("evidence") ?? join(repo, "artifacts", "verify-pi-prjcts", id));
+  const plugins = flags("plugin").map((path) => resolve(path));
+  for (const path of plugins) {
+    if (path.includes(":")) fail(`a plugin path cannot contain ":": ${path}`);
+    if (!existsSync(path)) fail(`plugin path does not exist: ${path}`);
+  }
   const run = {
     id,
     scratch,
@@ -204,6 +215,7 @@ async function launch() {
     workspace: join(scratch, "workspace"),
     agentDir: join(scratch, "agent"),
     userHome: join(scratch, "userhome"),
+    plugins,
     pids: {},
     revision: execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
   };
@@ -311,6 +323,7 @@ async function launch() {
       origin: new URL(run.webUrl).origin,
       hostPid: host.pid,
       fakeProvider: `127.0.0.1:${run.fakePort}`,
+      plugins: run.plugins,
     });
   } catch (error) {
     console.error(`launch failed: ${redact(error.message)}\nrunning cleanup on ${scratch}`);
@@ -369,7 +382,7 @@ async function rpcCommand() {
   if (!RPC_ALLOWLIST.has(action))
     fail(`rpc action ${JSON.stringify(action)} is not allowed; read-only actions: ${[...RPC_ALLOWLIST].join(", ")}`);
   const fields = json ? JSON.parse(json) : {};
-  out(await rpc(run, { action, ...(action === "list" ? {} : { id: run.projectId }), ...fields }));
+  out(await rpc(run, { action, ...(HOST_ACTIONS.has(action) ? {} : { id: run.projectId }), ...fields }));
 }
 
 // Raw CDP over a pipe, as scripts/lib/e2e-kit.mjs does. Chrome is tracked in run.json before any CDP call, so a crash anywhere still leaves it recorded for cleanup.
@@ -2537,6 +2550,61 @@ const journeys = {
     dropMissingArtifact(sinks, 4);
     if (sinks.errors.length) throw Error(`browser errors: ${sinks.errors.slice(0, 3).join(" | ")}`);
   },
+  // Feature: features/plugins.md
+  async plugins(run, page, record, dir) {
+    if (!run.plugins?.length) throw Error("no plugin under development: launch with --plugin <dir>");
+    const status = await rpc(run, { action: "plugins" });
+    writeFileSync(join(dir, "host-plugins.json"), JSON.stringify(status.plugins, null, 2));
+    const mine = status.plugins.filter((item) => run.plugins.includes(item.source));
+    if (mine.length !== run.plugins.length) throw Error(`host did not record every launched plugin: ${JSON.stringify(status.plugins)}`);
+    record(
+      "side-effect",
+      `plugins RPC: ${mine.map((item) => `${item.name ?? item.source} ${item.version ?? "-"} ${item.state}`).join("; ")}`,
+    );
+    await page.navigate(run.webUrl);
+    await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "UI ready on Main");
+    await page.waitFor(`document.querySelectorAll('#plugin-cards .plugin-row').length >= ${mine.length}`, "Plugins section");
+    record("entry", `opened ${new URL(run.webUrl).origin}/; Main of "${PROJECT_NAME}" is selected`);
+    await page.evaluate(`document.querySelector('#plugin-cards').scrollIntoView()`);
+    await page.shot(dir, "01-plugins");
+    const rows = await page.evaluate(
+      `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
+    );
+    writeFileSync(join(dir, "plugins-dom.json"), JSON.stringify(rows, null, 2));
+    // A long error is clipped with "…": the shown text must be the error itself or its first 100 characters at least.
+    const showsError = (shown, error) =>
+      !error || shown === error || (!!shown && shown.length > 100 && shown.endsWith("…") && error.startsWith(shown.slice(0, -1)));
+    for (const item of mine) {
+      const row = rows.find((candidate) => candidate.source === item.source);
+      const expected = [item.name, item.version, item.state].filter(Boolean);
+      if (!row || row.state !== item.state || expected.some((text) => !row.text.includes(text)) || !showsError(row.error, item.error))
+        throw Error(`Plugins section does not show ${JSON.stringify(item)}: ${JSON.stringify(row)}`);
+      record("visible", `Plugins section shows ${JSON.stringify(row.text.replace(/\s+/g, " "))}`);
+    }
+    // Settings → Plugins: every launched plugin with a browser script mounts its panel, or shows why it could not.
+    const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
+    await page.click('[data-cmd="settings"]');
+    await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
+    await page.click('#settings nav [data-section="plugins"]');
+    await page.waitFor(
+      `${JSON.stringify(withPanel.map((item) => item.name))}.every((name) => ['ready', 'failed'].includes(document.querySelector('#settings .plugin-panel[data-plugin="' + name + '"]')?.dataset.state))`,
+      "plugin panels settled",
+    );
+    record("entry", "opened Settings → Plugins");
+    await page.shot(dir, "02-settings-plugins");
+    const panels = await page.evaluate(
+      `[...document.querySelectorAll('#settings .plugin-panel')].map((panel) => ({ name: panel.dataset.plugin, state: panel.dataset.state, error: panel.querySelector('.plugin-error')?.hidden ? null : panel.querySelector('.plugin-error')?.textContent, text: panel.querySelector('.plugin-slot')?.innerText ?? '' }))`,
+    );
+    writeFileSync(join(dir, "panels-dom.json"), JSON.stringify(panels, null, 2));
+    for (const item of withPanel) {
+      const panel = panels.find((candidate) => candidate.name === item.name);
+      if (panel?.state !== "ready") throw Error(`the ${item.name} panel did not mount: ${JSON.stringify(panel)}`);
+      record(
+        "visible",
+        `Settings → Plugins mounts the ${item.name} panel: ${JSON.stringify(panel.text.replace(/\s+/g, " ").slice(0, 200))}`,
+      );
+    }
+  },
   // Feature: features/message-coordinator.md
   async "message-coordinator"(run, page, record, dir) {
     const prompt = `VERIFY-PING ${run.id}`,
@@ -2725,5 +2793,5 @@ else if (command === "drive") await drive();
 else if (command === "cleanup") process.exit((await cleanup()).length ? 1 : 0);
 else
   fail(
-    "usage: verify.mjs <launch [--evidence dir] | doctor --run dir | rpc --run dir <action> [json] | drive --run dir <feature> | cleanup --run dir>",
+    "usage: verify.mjs <launch [--evidence dir] [--plugin path]... | doctor --run dir | rpc --run dir <action> [json] | drive --run dir <feature> | cleanup --run dir>",
   );
