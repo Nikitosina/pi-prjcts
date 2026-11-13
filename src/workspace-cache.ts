@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, realpathSync, rmSync, statSync, utimesSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import type { Conversation } from "@earendil-works/pi-durable";
 import { workspaceReceipts } from "./workspace-isolation.ts";
@@ -88,10 +88,8 @@ export function workspaceCaches(input: {
   /** One workspace's cache, created on first use. Frozen prompts use this: it needs no committed receipt. */
   function forIntent(intentId: string): string {
     const dir = workspaceCacheDir({ ...input, intentId, cacheRoot: input.cacheRoot() });
+    // Handing it out is not a use: cleanup reads the newest write inside (src/workspace-cleanup.ts).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // The folder's mtime is its last use: cleanup removes caches unused for days (src/workspace-cleanup.ts).
-    const now = new Date();
-    utimesSync(dir, now, now);
     return dir;
   }
   /** The cache of the workspace `cwd` is in; none outside a workspace. */

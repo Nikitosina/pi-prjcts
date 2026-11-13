@@ -3,7 +3,8 @@
 Written before the code. Owner decision (2026-11-06, /tmp/storage-plan.md): the hardcoded 30-minute worktree cleanup timer becomes a
 routine (a schedule whose action is cleanup), on by default in every project, daily, also run once right after Approve. Besides the
 safe worktree rule it trims workspace caches, removes ignored disposable paths in live worktrees and deletes videos of old Jobs.
-Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9), `scripts/worktree-lifecycle-e2e.mjs` (R10-R13), `scripts/jobs-e2e.mjs` (R14).
+Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9, R18, R19), `scripts/worktree-lifecycle-e2e.mjs` (R10-R13, R17, R20),
+`scripts/jobs-e2e.mjs` (R14).
 
 ## Settings
 - R1 A disposable path that is absolute, starts with `~`, or climbs out with `..` is accepted, so cleanup can delete outside the
@@ -13,11 +14,23 @@ Proof: `scripts/workspace-cleanup-unit.mjs` (R1-R9), `scripts/worktree-lifecycle
 - R2 A disposable glob matches through a symlink and deletes a folder outside the worktree.
 - R3 A disposable match that git does not ignore (tracked or untracked work) is deleted.
 - R4 A disposable match written in the last day (a verification run in progress) is deleted.
-- R5 A workspace cache used within the unused window is removed, or one unused for longer stays.
+- R5 A workspace cache written within the unused window is removed, or one not written for longer stays.
 - R6 A cache over the size cap is removed while its workspace is using it (a build in progress); one over the cap and idle stays.
 - R7 Videos of a running, ready or recently ended Job are deleted, or screenshots, logs and reports of an old Job go with its videos.
 - R8 A dismissed Job's videos stay forever because only approved Jobs count.
-- R9 Using a cache does not mark it used, so a cache in daily use looks stale.
+- R9 A cache's last use is read from its folder's own mtime, so a build writing deep inside looks stale, and any tool call in the
+  workspace (a `ls`, an MCP read) keeps a cache nobody builds in alive forever. Its last use is the newest write anywhere inside.
+
+## Settled workspaces and the project budget
+Owner decision (2026-11-13): clean caches more boldly. A cache is rebuildable, so it goes as soon as its work is over, and a project
+keeps at most 50 GB of caches by default.
+- R17 A worker's cache stays while its worktree is kept (dirty, unpushed, `arc status` failing), although its Job is approved or
+  dismissed, or its PRs are all merged or closed. Or a running thread's cache, or a Coordinator chat's cache, is taken as settled.
+- R18 A project's caches together exceed the budget and nothing goes because each is under the per-cache cap; or the budget removes
+  the most recently written cache first, or one written in the last hour (a build in progress).
+- R19 Stored cleanup settings from before the budget have no `budgetGb`, so a run or a settings change fails validation.
+- R20 Settings → Storage counts as reclaimable only the caches the old rules free, so the caches of settled or over-budget workspaces
+  show 0.
 
 ## Routine
 - R10 A project has no cleanup routine by default, or gets a second one on every open, or the timer still runs beside the routine.

@@ -7,11 +7,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEFAULT_CLEANUP_SETTINGS,
+  cacheUsage,
   cachesToTrim,
   cleanupSettingsError,
   disposableCandidates,
   gitIgnored,
   oldJobVideos,
+  settledWorkspaces,
+  withCleanupDefaults,
 } from "../src/workspace-cleanup.ts";
 import { workspaceCaches } from "../src/workspace-cache.ts";
 import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
@@ -23,15 +26,19 @@ const DAY = 86_400_000,
 const root = realpathSync(mkdtempSync(join(tmpdir(), "workspace-cleanup-unit-")));
 try {
   // R1 settings: relative globs only, sane bounds.
-  assert.deepEqual(DEFAULT_CLEANUP_SETTINGS, { cacheCapGb: 20, unusedDays: 7, videoDays: 14, disposable: [] });
+  assert.deepEqual(DEFAULT_CLEANUP_SETTINGS, { cacheCapGb: 20, budgetGb: 50, unusedDays: 7, videoDays: 14, disposable: [] });
   assert.equal(
     cleanupSettingsError({ ...DEFAULT_CLEANUP_SETTINGS, disposable: ["verification-results", "e2e-results/*", "a/**/tmp"] }),
     null,
   );
   for (const glob of ["/tmp", "~/x", "../x", "a/../../x", "", "."])
     assert.match(cleanupSettingsError({ ...DEFAULT_CLEANUP_SETTINGS, disposable: [glob] }) ?? "", /relative/i, glob);
-  for (const bad of [{ cacheCapGb: 0 }, { unusedDays: 0 }, { videoDays: 0 }, { disposable: Array(65).fill("x") }])
+  for (const bad of [{ cacheCapGb: 0 }, { budgetGb: 0 }, { unusedDays: 0 }, { videoDays: 0 }, { disposable: Array(65).fill("x") }])
     assert.notEqual(cleanupSettingsError({ ...DEFAULT_CLEANUP_SETTINGS, ...bad }), null, JSON.stringify(bad).slice(0, 80));
+  // R19 settings stored before the budget get it by default and stay valid; set values are kept.
+  const stored = { cacheCapGb: 30, unusedDays: 3, videoDays: 14, disposable: ["x"] };
+  assert.deepEqual(withCleanupDefaults(stored), { ...stored, budgetGb: 50 });
+  assert.equal(cleanupSettingsError(withCleanupDefaults(stored)), null);
 
   // R2-R4 disposable paths: matches inside the worktree, not through symlinks, not written in the last day, and only when git ignores them.
   const worktree = join(root, "wt"),
@@ -68,42 +75,101 @@ try {
   );
   assert.deepEqual(await gitIgnored(join(root, "not-a-repo"), [join(root, "not-a-repo", "x")]), [], "without git nothing is ignored");
 
-  // R5, R6 caches: unused past the window go; over the cap go only when idle for an hour.
+  // R5, R6, R18 caches: unused past the window go; over the cap or the project budget go only when idle for an hour, oldest first.
   const caches = join(root, "caches");
-  const cache = (name, usedAgo, bytes) => {
-    const dir = join(caches, name);
-    mkdirSync(dir, { recursive: true });
-    ago(dir, usedAgo);
-    return { dir, bytes };
-  };
+  const cache = (name, usedAgo, bytes, settled = false) => ({ dir: join(caches, name), usedAgo, bytes, settled });
   const set = [
     cache("fresh-small", DAY, 10),
     cache("stale", 8 * DAY, 10),
     cache("big-busy", 10 * 60_000, 500),
     cache("big-idle", 2 * 3_600_000, 500),
+    cache("settled-busy", 60_000, 5, true),
   ];
-  const sizes = new Map(set.map((item) => [item.dir, item.bytes]));
-  assert.deepEqual(
-    (
-      await cachesToTrim({
-        dirs: [...set.map((item) => item.dir), join(caches, "missing")],
-        capBytes: 100,
-        unusedMs: 7 * DAY,
-        now,
-        sizeOf: async (dir) => sizes.get(dir) ?? 0,
-      })
-    ).sort(),
-    [join(caches, "big-idle"), join(caches, "stale")],
-  );
+  for (const item of set) mkdirSync(item.dir, { recursive: true });
+  const uses = new Map(set.map((item) => [item.dir, { bytes: item.bytes, lastWriteMs: now - item.usedAgo }]));
+  const usageOf = async (dir) => uses.get(dir);
+  const plan = await cachesToTrim({
+    caches: [...set.map(({ dir, settled }) => ({ dir, settled })), { dir: join(caches, "missing"), settled: true }],
+    capBytes: 100,
+    budgetBytes: 10_000,
+    unusedMs: 7 * DAY,
+    now,
+    usageOf,
+  });
+  assert.deepEqual(plan.trimmed.sort(), [join(caches, "big-idle"), join(caches, "settled-busy"), join(caches, "stale")]);
+  assert.deepEqual([plan.count, plan.bytes, plan.trimmedBytes], [5, 1025, 515], "a missing cache counts nothing");
 
-  // R9 using a cache marks it used.
+  // R18 the budget: four 40-byte caches under a 100-byte budget lose the least recently written idle ones until under it.
+  const budgeted = [
+    cache("b-oldest", 3 * DAY, 40),
+    cache("b-busy", 10 * 60_000, 40),
+    cache("b-old", 2 * DAY, 40),
+    cache("b-new", 2 * 3_600_000, 40),
+  ];
+  for (const item of budgeted) {
+    mkdirSync(item.dir, { recursive: true });
+    uses.set(item.dir, { bytes: item.bytes, lastWriteMs: now - item.usedAgo });
+  }
+  const overBudget = await cachesToTrim({
+    caches: budgeted.map(({ dir }) => ({ dir, settled: false })),
+    capBytes: 1000,
+    budgetBytes: 100,
+    unusedMs: 7 * DAY,
+    now,
+    usageOf,
+  });
+  assert.deepEqual(overBudget.trimmed, [join(caches, "b-oldest"), join(caches, "b-old")], "oldest first, the busy one stays");
+
+  // R9 the last use is the newest write anywhere inside, not the folder's own mtime; touching the folder is not a use.
   const controlRoot = join(root, "project"),
     intent = "aaaaaaaa-bbbb-5ccc-addd-eeeeeeeeeeee";
   const resolver = workspaceCaches({ projectId: "p", controlRoot, root: () => undefined, cacheRoot: () => null });
   const used = resolver.forIntent(intent);
-  ago(used, 30 * DAY);
+  mkdirSync(join(used, "DerivedData", "Build"), { recursive: true });
+  writeFileSync(join(used, "DerivedData", "Build", "app.o"), Buffer.alloc(8192));
+  for (const path of [join(used, "DerivedData", "Build", "app.o"), join(used, "DerivedData", "Build"), join(used, "DerivedData"), used])
+    ago(path, 30 * DAY);
   resolver.forIntent(intent);
-  assert.ok(now - statSync(used).mtimeMs < 60_000, "forIntent marks the cache used");
+  const stale = await cacheUsage(used);
+  assert.ok(now - stale.lastWriteMs > 29 * DAY, "handing out the cache is not a use");
+  assert.ok(stale.bytes >= 8192, "the walk counts the bytes on disk");
+  writeFileSync(join(used, "DerivedData", "Build", "app.o"), Buffer.alloc(8192, 1));
+  assert.ok(now - (await cacheUsage(used)).lastWriteMs < 60_000, "a write deep inside is a use");
+  assert.deepEqual(await cacheUsage(join(root, "absent")), { bytes: 0, lastWriteMs: 0 });
+
+  // R17 settled workspaces: a worker's whose Job is approved or dismissed, or whose PRs are all merged or closed, and not running.
+  const item = (intentId, threadId, pullRequests = [], kind = "worker") => ({ kind, intentId, threadId, pullRequests });
+  assert.deepEqual(
+    [
+      ...settledWorkspaces({
+        items: [
+          item("approved", "j-approved"),
+          item("dismissed", "j-dismissed"),
+          item("merged", "j-ready", [
+            { number: 1, state: "merged" },
+            { number: 2, state: "closed" },
+          ]),
+          item("open-pr", "j-ready", [
+            { number: 1, state: "merged" },
+            { number: 3, state: "open" },
+          ]),
+          item("ready", "j-ready"),
+          item("running-merged", "j-running", [{ number: 4, state: "merged" }]),
+          item("reader-merged", "live-reader", [{ number: 5, state: "merged" }]),
+          item("chat", "coordinator:main", [{ number: 6, state: "merged" }], "coordinator"),
+          item(undefined, "j-approved"),
+        ],
+        jobs: [
+          { id: "j-approved", status: "approved" },
+          { id: "j-dismissed", status: "failed", dismissedAt: now },
+          { id: "j-ready", status: "ready" },
+          { id: "j-running", status: "running", dismissedAt: now },
+        ],
+        live: new Set(["live-reader"]),
+      }),
+    ].sort(),
+    ["approved", "dismissed", "merged"],
+  );
 
   // R7, R8 videos: approved or dismissed Jobs past the window lose videos only; others keep everything.
   const artifacts = join(controlRoot, "artifacts");

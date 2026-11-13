@@ -703,7 +703,7 @@ try {
     { row: rows.worktrees, items: inv.items.length },
   );
   check(
-    "U5 the cache row frees exactly the cache unused past the window (W1's), not the live ones",
+    "U5/R20 the cache row frees exactly the settled W1's cache (its PR merged), though written just now, not the live ones",
     rows.caches.count >= 2 &&
       rows.caches.bytes >= rows.caches.reclaimableBytes &&
       rows.caches.reclaimableBytes === duBytes(cacheOf(w1Path)),
@@ -818,7 +818,10 @@ try {
   check(
     "R11 cleanup settings change without the owner and keep the defaults they do not name",
     JSON.stringify(routine.action) ===
-      JSON.stringify({ kind: "cleanup", settings: { cacheCapGb: 20, unusedDays: 7, videoDays: 14, disposable: ["e2e-results"] } }),
+      JSON.stringify({
+        kind: "cleanup",
+        settings: { cacheCapGb: 20, budgetGb: 50, unusedDays: 7, videoDays: 14, disposable: ["e2e-results"] },
+      }),
     routine.action,
   );
 
@@ -835,6 +838,11 @@ try {
   writeFileSync(join(results, "run-1", "video.mp4"), "x");
   const twoDays = new Date(Date.now() - 2 * 86_400_000);
   utimesSync(results, twoDays, twoDays);
+  // R17: a merged PR settles W2's work; its worktree stays (dirty) but its cache goes with the next run.
+  const w2Cache = cacheOf(w2Path);
+  writeFileSync(join(w2Cache, "DerivedData.bin"), "x");
+  const w2Branch = git(w2Path, "rev-parse", "--abbrev-ref", "HEAD");
+  ghSet((state) => state.pulls.push({ number: 900, title: "W2", body: "", head: w2Branch, base: "main", state: "closed", merged: true }));
   // R13: a run that dies with the host is recorded as interrupted and does not block the next one.
   await stopHost();
   env.PI_PROJECTS_CLEANUP_START_DELAY_MS = "60000";
@@ -870,6 +878,10 @@ try {
     !existsSync(w3Path) && !existsSync(results) && existsSync(join(w2Path, "wip-note.txt")),
     runs,
   );
+  check("R17 the run removed settled W2's cache and kept its dirty worktree", !existsSync(w2Cache) && existsSync(w2Path), {
+    caches: existsSync(caches) ? readdirSync(caches) : null,
+  });
+  ghSet((state) => (state.pulls = state.pulls.filter((pull) => pull.number !== 900)));
 
   // K12: after the restart, a follow-up to the finished W2 keeps its worktree, branch and tools (bash is how the fake model sees a worker).
   await ask(`MARK-FOLLOW2 ${w2.threadId}`);

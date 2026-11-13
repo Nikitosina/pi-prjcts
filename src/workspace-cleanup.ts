@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { globSync, lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { globSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { lstat, opendir } from "node:fs/promises";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -7,27 +8,32 @@ import { promisify } from "node:util";
  * the runtime decides what to remove and removes it. */
 const run = promisify(execFile);
 const DAY_MS = 86_400_000;
-/** A cache used this recently may be in a build right now; the size cap waits. */
+/** A cache written this recently may be in a build right now; the size cap and the budget wait. */
 const ACTIVE_MS = 3_600_000;
 const VIDEO = /\.(mp4|mov|m4v|webm|mkv|avi)$/i;
 
 export type CleanupSettings = {
   /** A live workspace's cache over this size is removed once it has been idle for an hour. */
   cacheCapGb: number;
-  /** A live workspace's cache unused this long is removed. */
+  /** All of a project's caches together; over it, the least recently written idle ones are removed. */
+  budgetGb: number;
+  /** A live workspace's cache not written this long is removed. */
   unusedDays: number;
   /** Videos of Jobs approved or dismissed this long ago are removed; screenshots, logs and reports stay. */
   videoDays: number;
   /** Globs relative to each worktree; a match not written for a day is removed once git confirms it is ignored. */
   disposable: string[];
 };
-export const DEFAULT_CLEANUP_SETTINGS: CleanupSettings = { cacheCapGb: 20, unusedDays: 7, videoDays: 14, disposable: [] };
+export const DEFAULT_CLEANUP_SETTINGS: CleanupSettings = { cacheCapGb: 20, budgetGb: 50, unusedDays: 7, videoDays: 14, disposable: [] };
+/** Stored settings with the fields added since they were written. */
+export const withCleanupDefaults = (stored: Partial<CleanupSettings>): CleanupSettings => ({ ...DEFAULT_CLEANUP_SETTINGS, ...stored });
 /** Every project's cleanup routine: daily, first run an hour after it is created. */
 export const CLEANUP_ROUTINE = { id: "workspace-cleanup", name: "Workspace cleanup", everyMs: 86_400_000, firstDelayMs: 3_600_000 };
 
 export function cleanupSettingsError(settings: CleanupSettings): string | null {
   const whole = (value: number, max: number) => Number.isSafeInteger(value) && value >= 1 && value <= max;
   if (!whole(settings.cacheCapGb, 10_000)) return "The cache cap must be 1 to 10000 GB";
+  if (!whole(settings.budgetGb, 100_000)) return "The cache budget must be 1 to 100000 GB";
   if (!whole(settings.unusedDays, 365) || !whole(settings.videoDays, 3650)) return "Day counts must be whole numbers from 1";
   if (settings.disposable.length > 64) return "At most 64 disposable paths";
   for (const glob of settings.disposable) {
@@ -81,26 +87,91 @@ export async function gitIgnored(worktree: string, paths: readonly string[]): Pr
   return ignored;
 }
 
-const duBytes = async (dir: string) => Number((await run("du", ["-sk", dir])).stdout.split("\t")[0]) * 1024;
+export type CacheUse = { bytes: number; lastWriteMs: number };
 
-/** Live workspace caches to remove: unused past the window, or over the cap and idle for an hour. A folder's mtime is its last use. */
+/** Disk use and newest write anywhere in a cache (symlinks not followed); a missing cache is empty and never written. */
+export async function cacheUsage(dir: string): Promise<CacheUse> {
+  const use: CacheUse = { bytes: 0, lastWriteMs: 0 };
+  const count = (stat: { blocks: number; mtimeMs: number }) => {
+    use.bytes += stat.blocks * 512;
+    use.lastWriteMs = Math.max(use.lastWriteMs, stat.mtimeMs);
+  };
+  const walk = async (path: string) => {
+    let entries;
+    try {
+      count(await lstat(path));
+      entries = await opendir(path);
+    } catch {
+      return;
+    }
+    const files: string[] = [];
+    for await (const entry of entries) {
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) await walk(child);
+      else files.push(child);
+    }
+    // Batched so a cache of a million files neither blocks the host nor floods the thread pool.
+    for (let at = 0; at < files.length; at += 64)
+      for (const stat of await Promise.all(files.slice(at, at + 64).map((file) => lstat(file).catch(() => null)))) if (stat) count(stat);
+  };
+  await walk(dir);
+  return use;
+}
+
+type WorkspaceItem = { kind: string; intentId?: string; threadId: string | null; pullRequests: readonly { state: string }[] };
+/** Workers whose work is over: Job approved or dismissed, or every PR merged or closed; never a running thread or a chat's workspace. */
+export function settledWorkspaces(input: {
+  items: readonly WorkspaceItem[];
+  jobs: readonly { id: string; status: string; dismissedAt?: number }[];
+  live: ReadonlySet<string>;
+}): Set<string> {
+  const jobs = new Map(input.jobs.map((job) => [job.id, job]));
+  const settled = new Set<string>();
+  for (const item of input.items) {
+    if (item.kind !== "worker" || !item.intentId || !item.threadId || input.live.has(item.threadId)) continue;
+    const job = jobs.get(item.threadId);
+    if (job?.status === "running") continue;
+    const merged = item.pullRequests.length > 0 && item.pullRequests.every((pr) => pr.state !== "open");
+    if (job?.status === "approved" || job?.dismissedAt !== undefined || merged) settled.add(item.intentId);
+  }
+  return settled;
+}
+
+/** Live workspace caches to remove: settled ones, ones not written past the window, ones over the cap, then the least recently
+ * written until the project is under its budget. Only the first two may go while written in the last hour. */
 export async function cachesToTrim(input: {
-  dirs: readonly string[];
+  caches: readonly { dir: string; settled: boolean }[];
   capBytes: number;
+  budgetBytes: number;
   unusedMs: number;
   now?: number;
-  sizeOf?: (dir: string) => Promise<number>;
-}): Promise<string[]> {
+  usageOf?: (dir: string) => Promise<CacheUse>;
+}): Promise<{ count: number; bytes: number; trimmed: string[]; trimmedBytes: number }> {
   const now = input.now ?? Date.now(),
-    sizeOf = input.sizeOf ?? duBytes;
-  const trimmed: string[] = [];
-  for (const dir of input.dirs) {
-    const stat = statSync(dir, { throwIfNoEntry: false });
-    if (!stat?.isDirectory()) continue;
-    const idle = now - stat.mtimeMs;
-    if (idle > input.unusedMs || (idle > ACTIVE_MS && (await sizeOf(dir)) > input.capBytes)) trimmed.push(dir);
+    usageOf = input.usageOf ?? cacheUsage;
+  const plan = { count: 0, bytes: 0, trimmed: [] as string[], trimmedBytes: 0 };
+  const trim = (dir: string, bytes: number) => {
+    plan.trimmed.push(dir);
+    plan.trimmedBytes += bytes;
+  };
+  const kept: { dir: string; bytes: number; lastWriteMs: number }[] = [];
+  for (const { dir, settled } of input.caches) {
+    if (!lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
+    const use = await usageOf(dir);
+    plan.count++;
+    plan.bytes += use.bytes;
+    const idle = now - use.lastWriteMs;
+    if (settled || idle > input.unusedMs || (idle > ACTIVE_MS && use.bytes > input.capBytes)) trim(dir, use.bytes);
+    else kept.push({ dir, ...use });
   }
-  return trimmed;
+  let total = kept.reduce((sum, item) => sum + item.bytes, 0);
+  for (const item of kept.sort((a, b) => a.lastWriteMs - b.lastWriteMs)) {
+    if (total <= input.budgetBytes) break;
+    if (now - item.lastWriteMs <= ACTIVE_MS) continue;
+    trim(item.dir, item.bytes);
+    total -= item.bytes;
+  }
+  return plan;
 }
 
 /** Video files in the artifacts of these Jobs. */

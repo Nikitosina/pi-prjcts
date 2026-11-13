@@ -51,7 +51,7 @@ import { pullMainCheckout } from "./main-pull.ts";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { effectiveSkills, invokedSkills, skillIndex, SKILL_ROLES, type SkillRole } from "./skill-profiles.ts";
 import { readOnlyCodeTools } from "./durable-code-tools.ts";
-import { cleanupWorktrees, worktreeInventory, type WorktreeInventory } from "./worktree-maintenance.ts";
+import { cleanupWorktrees, worktreeInventory, type WorktreeInventory, type WorktreeItem } from "./worktree-maintenance.ts";
 import { coordinatorArtifactTools } from "./artifacts.ts";
 import { approvals } from "./approvals.ts";
 import { ownerApprovalTool } from "./host-agent-tools.ts";
@@ -103,6 +103,7 @@ import {
   DEFAULT_CLEANUP_SETTINGS,
   cachesToTrim,
   disposableCandidates,
+  settledWorkspaces,
   gitIgnored,
   jobVideos,
   oldJobVideos,
@@ -1836,11 +1837,7 @@ export async function openDurableProject(input: {
       if (closed) throw new Error("Project closed");
       const worktrees = await cleanup();
       const live = await caches.live();
-      const trimmed = await cachesToTrim({
-        dirs: live.map((item) => item.cache),
-        capBytes: settings.cacheCapGb * 1024 ** 3,
-        unusedMs: settings.unusedDays * 86_400_000,
-      });
+      const { trimmed } = await trimPlan(live, worktrees.kept, settings);
       const disposable: string[] = [];
       for (const worktree of settings.disposable.length ? live.map((item) => item.workspacePath) : [])
         if (!closed && existsSync(worktree))
@@ -1863,25 +1860,34 @@ export async function openDurableProject(input: {
       if (failures.length) throw new Error(`Cleanup step failed (${failures.join("; ")}). ${summary}`);
       return summary;
     }
+    /** The live caches cleanup removes under these settings; a settled worker's goes even while its worktree is kept. */
+    async function trimPlan(live: { intentId: string; cache: string }[], items: readonly WorktreeItem[], settings: CleanupSettings) {
+      const settled = settledWorkspaces({ items, jobs: (await jobs.snapshot(openedHarness)).jobs, live: await retainedLeaseThreads() });
+      return cachesToTrim({
+        caches: live.map((item) => ({ dir: item.cache, settled: settled.has(item.intentId) })),
+        capBytes: settings.cacheCapGb * 1024 ** 3,
+        budgetBytes: settings.budgetGb * 1024 ** 3,
+        unusedMs: settings.unusedDays * 86_400_000,
+      });
+    }
     // Storage (scripts/storage-usage-failures.md): each row measured on its own, reclaimable under the cleanup routine's current settings.
     async function storageUsage(): Promise<StorageUsage> {
       const routine = (await schedules.snapshot({ includeHistory: false })).schedules.find((item) => item.id === CLEANUP_ROUTINE.id);
       const settings = routine?.action.kind === "cleanup" ? routine.action.settings : DEFAULT_CLEANUP_SETTINGS;
       const live = (await caches.live()).filter((item) => existsSync(item.workspacePath));
+      // The worktree and cache rows share one inventory: it reads the VCS state of every worktree.
+      let inventoryRun: ReturnType<typeof worktreeInventory> | undefined;
+      const inventory = () =>
+        (inventoryRun ??= worktreeInventory({ project: loadProject(project.id), root, controlRoot: dir, untouched: untouchedThread }));
       const rows = await measureRows([
         {
           id: "worktrees",
           kind: "worktrees",
           label: "Worktrees",
           measure: async () => {
-            const inventory = await worktreeInventory({
-              project: loadProject(project.id),
-              root,
-              controlRoot: dir,
-              untouched: untouchedThread,
-            });
+            const { items, reclaimableKb } = await inventory();
             const sizes = await Promise.all(
-              inventory.items.map((item) =>
+              items.map((item) =>
                 item.sizeKb >= 0
                   ? item.sizeKb * 1024
                   : item.provider && plugins.workspaceProvider(item.provider)?.virtualMount
@@ -1891,9 +1897,9 @@ export async function openDurableProject(input: {
             );
             const unmeasured = sizes.filter((size) => size === null).length;
             return {
-              count: inventory.items.length,
+              count: items.length,
               bytes: sizes.reduce<number>((sum, size) => sum + (size ?? 0), 0),
-              reclaimableBytes: inventory.reclaimableKb * 1024,
+              reclaimableBytes: reclaimableKb * 1024,
               ...(unmeasured ? { note: `${unmeasured} on a virtual mount, not measured` } : {}),
             };
           },
@@ -1903,13 +1909,8 @@ export async function openDurableProject(input: {
           kind: "caches",
           label: "Workspace caches",
           measure: async () => {
-            const dirs = live.map((item) => item.cache).filter((path) => existsSync(path));
-            const trimmed = await cachesToTrim({
-              dirs,
-              capBytes: settings.cacheCapGb * 1024 ** 3,
-              unusedMs: settings.unusedDays * 86_400_000,
-            });
-            return { count: dirs.length, bytes: await diskBytes(dirs), reclaimableBytes: await diskBytes(trimmed) };
+            const plan = await trimPlan(live, (await inventory()).items, settings);
+            return { count: plan.count, bytes: plan.bytes, reclaimableBytes: plan.trimmedBytes };
           },
         },
         {

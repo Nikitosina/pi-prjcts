@@ -1272,6 +1272,7 @@ export const Request = Type.Union([
         Type.Object(
           {
             cacheCapGb: Type.Optional(Type.Integer()),
+            budgetGb: Type.Optional(Type.Integer()),
             unusedDays: Type.Optional(Type.Integer()),
             videoDays: Type.Optional(Type.Integer()),
             disposable: Type.Optional(Type.Array(Type.String({ maxLength: 256 }), { maxItems: 64 })),

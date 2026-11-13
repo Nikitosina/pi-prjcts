@@ -6,7 +6,7 @@ import { hasUncertainGithubWrites } from "./github-worker.ts";
 import { plugins } from "./plugins.ts";
 import { hasUncertainCommands } from "./command-runtime.ts";
 import { nextCalendarOccurrence, latestCalendarOccurrence, copyCalendarRule, type CalendarRule } from "./schedule-calendar.ts";
-import { cleanupSettingsError, type CleanupSettings } from "./workspace-cleanup.ts";
+import { cleanupSettingsError, withCleanupDefaults, type CleanupSettings } from "./workspace-cleanup.ts";
 import { scriptError } from "./routine-script.ts";
 /** What a routine does when it fires: send its text to a chat, or a host action that runs without a model. */
 export type RoutineAction =
@@ -90,7 +90,7 @@ function own<T>(record: Record<string, T>, key: string): T | undefined {
 }
 const actionCopy = (action: HostAction): HostAction =>
   action.kind === "cleanup"
-    ? { kind: action.kind, settings: { ...action.settings, disposable: [...action.settings.disposable] } }
+    ? { kind: action.kind, settings: { ...withCleanupDefaults(action.settings), disposable: [...action.settings.disposable] } }
     : { ...action };
 function scheduleCopy(value: Schedule): ScheduleView {
   const copy = storedCopy(value);
@@ -367,7 +367,7 @@ export function scheduleRuntime(
         if (change.cleanup && current.action?.kind !== "cleanup") throw new Error("Only the cleanup routine has cleanup settings");
         const action =
           change.cleanup && current.action?.kind === "cleanup"
-            ? { kind: current.action.kind, settings: { ...current.action.settings, ...change.cleanup } }
+            ? { kind: current.action.kind, settings: withCleanupDefaults({ ...current.action.settings, ...change.cleanup }) }
             : undefined;
         const refused = action && cleanupSettingsError(action.settings);
         if (refused) throw new Error(refused);
