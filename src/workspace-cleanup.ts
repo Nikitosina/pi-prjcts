@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { globSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { lstat, opendir } from "node:fs/promises";
+import { lstat, opendir, rm } from "node:fs/promises";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -29,6 +29,11 @@ export const DEFAULT_CLEANUP_SETTINGS: CleanupSettings = { cacheCapGb: 20, budge
 export const withCleanupDefaults = (stored: Partial<CleanupSettings>): CleanupSettings => ({ ...DEFAULT_CLEANUP_SETTINGS, ...stored });
 /** Every project's cleanup routine: daily, first run an hour after it is created. */
 export const CLEANUP_ROUTINE = { id: "workspace-cleanup", name: "Workspace cleanup", everyMs: 86_400_000, firstDelayMs: 3_600_000 };
+/** A run's steps in order: removing settled worktrees, measuring caches, removing caches, paths and videos, then plugin steps. */
+export const CLEANUP_STEPS = ["worktrees", "measure", "remove", "plugins"] as const;
+export type CleanupStep = (typeof CLEANUP_STEPS)[number];
+/** Where a running cleanup is: `total` is null until the step knows it; `freedBytes` counts the caches removed so far. */
+export type CleanupProgress = { step: CleanupStep; done: number; total: number | null; freedBytes: number };
 
 export function cleanupSettingsError(settings: CleanupSettings): string | null {
   const whole = (value: number, max: number) => Number.isSafeInteger(value) && value >= 1 && value <= max;
@@ -85,6 +90,26 @@ export async function gitIgnored(worktree: string, paths: readonly string[]): Pr
     if (!tracked) ignored.push(path);
   }
   return ignored;
+}
+
+/** Removes each path off the event loop; one that cannot go is reported as `path: reason` and the rest still go. Retries ride out
+ * a file written meanwhile (Finder's .DS_Store, an indexer). */
+export async function removePaths(
+  paths: readonly string[],
+  onDone?: (path: string) => void,
+): Promise<{ removed: string[]; failed: string[] }> {
+  const removed: string[] = [],
+    failed: string[] = [];
+  for (const path of paths) {
+    try {
+      await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      removed.push(path);
+    } catch (error) {
+      failed.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    onDone?.(path);
+  }
+  return { removed, failed };
 }
 
 export type CacheUse = { bytes: number; lastWriteMs: number };
@@ -146,16 +171,18 @@ export async function cachesToTrim(input: {
   unusedMs: number;
   now?: number;
   usageOf?: (dir: string) => Promise<CacheUse>;
-}): Promise<{ count: number; bytes: number; trimmed: string[]; trimmedBytes: number }> {
+  onMeasured?: (done: number, total: number) => void;
+}): Promise<{ count: number; bytes: number; trimmed: { dir: string; bytes: number }[]; trimmedBytes: number }> {
   const now = input.now ?? Date.now(),
     usageOf = input.usageOf ?? cacheUsage;
-  const plan = { count: 0, bytes: 0, trimmed: [] as string[], trimmedBytes: 0 };
+  const plan = { count: 0, bytes: 0, trimmed: [] as { dir: string; bytes: number }[], trimmedBytes: 0 };
   const trim = (dir: string, bytes: number) => {
-    plan.trimmed.push(dir);
+    plan.trimmed.push({ dir, bytes });
     plan.trimmedBytes += bytes;
   };
   const kept: { dir: string; bytes: number; lastWriteMs: number }[] = [];
-  for (const { dir, settled } of input.caches) {
+  for (const [index, { dir, settled }] of input.caches.entries()) {
+    input.onMeasured?.(index, input.caches.length);
     if (!lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
     const use = await usageOf(dir);
     plan.count++;

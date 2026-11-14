@@ -36,3 +36,4 @@ Each file: H1, one paragraph, then exactly four H2s in order: `Sub-features`, `H
 - [The inbox](./ui2.md) — serving at `/`, tree, tool rows, worker focus, Memory, settings overlay with host themes, profiles, tiers, Context bar, prompt and tools, Host agent drawer with Approve/Deny, coordinator approvals and focus, toasts, narrow layout. Scripted.
 - [Plugins](./plugins.md) — a plugin under development on the private host (`launch --plugin`), its row in the Plugins section and the `plugins` RPC. Scripted.
 - [UI 2.0 Prompt blocks](./ui2-prompts.md) — Settings → Prompt: block list with switches, badges and tokens, one editor, custom blocks, reorder, restore default, drafts, stale-write conflicts, preview, Host agent, 390 px. Scripted.
+- [Storage and Clean up](./storage.md) — Settings → Storage rows and the Clean up button ending with its run summary. Scripted.

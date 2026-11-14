@@ -3213,6 +3213,21 @@ table.storage tfoot td {
 .storage-outcome {
   margin-top: 8px;
 }
+.storage-progress {
+  margin-top: 10px;
+}
+.storage-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--raised);
+  overflow: hidden;
+}
+.storage-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
 table.hotkeys tr.clash td {
   background: color-mix(in srgb, var(--bad) 8%, transparent);
 }

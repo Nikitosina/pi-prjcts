@@ -434,11 +434,32 @@ async function tools(body, alive) {
 // ---------------------------------------------------------------------------------------------------------------- Storage
 
 const CLEANUP_ID = "workspace-cleanup";
+// The run's steps in order (CLEANUP_STEPS in src/workspace-cleanup.ts) and what each says while it runs.
+const CLEANUP_STEPS = {
+  worktrees: (p) => (p.total === null ? "Checking worktrees" : `Removing settled worktrees ${p.done}/${p.total}`),
+  measure: (p) => `Measuring caches ${p.done}/${p.total}`,
+  remove: (p) => `Removing caches and old files ${p.done}/${p.total}`,
+  plugins: (p) => `Plugin cleanup ${p.done}/${p.total}`,
+};
+/** Steps done plus the share of the current one, 0 to 1. */
+function cleanupShare(progress) {
+  const steps = Object.keys(CLEANUP_STEPS),
+    index = steps.indexOf(progress.step);
+  return (index + (progress.total ? progress.done / progress.total : 0)) / steps.length;
+}
+function cleanupLine(progress, lost) {
+  if (!progress) return lost ? "Waiting for the host…" : "Starting…";
+  const steps = Object.keys(CLEANUP_STEPS);
+  const freed = progress.freedBytes ? ` · ${size(progress.freedBytes)} freed` : "";
+  return `Step ${steps.indexOf(progress.step) + 1} of ${steps.length}: ${CLEANUP_STEPS[progress.step](progress)}${freed}${lost ? " · waiting for the host…" : ""}`;
+}
 async function storage(body, alive) {
   let usage = null,
     failure = null,
     outcome = null,
-    cleaning = false;
+    cleaning = false,
+    progress = null,
+    lost = false;
   const measure = async () => {
     try {
       usage = await call("storage-usage", { id: state.projectId });
@@ -459,7 +480,11 @@ async function storage(body, alive) {
         : failure
           ? `<p class="error-line">${esc(failure)}</p>`
           : `<p class="loading-line">Measuring…</p>`
-    }<div class="row"><button type="button" class="primary small" data-storage-clean ${cleaning ? "disabled" : ""}>${cleaning ? "Cleaning up…" : "Clean up"}</button><button type="button" class="ghost-btn small" data-storage-measure ${cleaning ? "disabled" : ""}>Measure again</button></div>${outcome ? `<p class="storage-outcome ${outcome.ok ? "muted" : "error-line"}" role="status">${esc(outcome.text)}</p>` : ""}`;
+    }<div class="row"><button type="button" class="primary small" data-storage-clean ${cleaning ? "disabled" : ""}>${cleaning ? "Cleaning up…" : "Clean up"}</button><button type="button" class="ghost-btn small" data-storage-measure ${cleaning ? "disabled" : ""}>Measure again</button></div>${
+      cleaning
+        ? `<div class="storage-progress" role="status"><div class="storage-bar"><span style="width:${Math.round(100 * (progress ? cleanupShare(progress) : 0))}%"></span></div><p class="muted small">${esc(cleanupLine(progress, lost))}</p></div>`
+        : ""
+    }${outcome ? `<p class="storage-outcome ${outcome.ok ? "muted" : "error-line"}" role="status">${esc(outcome.text)}</p>` : ""}`;
   };
   draw();
   await measure();
@@ -470,19 +495,29 @@ async function storage(body, alive) {
       return measure();
     }
     if (!event.target.closest("[data-storage-clean]") || cleaning) return;
-    const runs = async () =>
-      (await call("schedule-history", { id: state.projectId, kind: "intents" })).items.filter((item) => item.stableId === CLEANUP_ID);
     cleaning = true;
     outcome = null;
+    progress = null;
+    lost = false;
     draw();
     try {
-      const before = (await runs()).length;
-      await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
-      let done = null;
+      const { requestId } = await call("schedule-run", { id: state.projectId, scheduleId: CLEANUP_ID });
+      let done = null,
+        misses = 0;
+      // A failed poll is not the run failing: keep waiting, and give up only after two minutes without an answer.
       while (alive() && !done) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        const items = await runs();
-        if (items.length > before && items.at(-1).outcome !== null) done = items.at(-1);
+        try {
+          const [run] = (await call("schedule-history", { id: state.projectId, kind: "intents", requestId, limit: 1 })).items;
+          misses = 0;
+          lost = false;
+          if (run?.outcome != null) done = run;
+          else progress = run?.progress ?? progress;
+        } catch (error) {
+          if (++misses >= 120) throw error;
+          lost = true;
+        }
+        if (alive() && !done) draw();
       }
       if (done) outcome = { ok: done.outcome === "completed", text: done.summary || done.outcome };
     } catch (error) {

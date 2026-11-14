@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { pruneRunLogs, runScript, type ScriptRun } from "./routine-script.ts";
 import { setTimeout as sleep } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
@@ -103,7 +103,10 @@ import {
   DEFAULT_CLEANUP_SETTINGS,
   cachesToTrim,
   disposableCandidates,
+  removePaths,
   settledWorkspaces,
+  type CleanupProgress,
+  type CleanupStep,
   gitIgnored,
   jobVideos,
   oldJobVideos,
@@ -1142,7 +1145,9 @@ export async function openDurableProject(input: {
       const cwd = (await api.agent(context)).cwd;
       return cwd && existsSync(cwd) ? cwd : project.cwd;
     });
-    let cleanup: () => Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> = async () => {
+    /** The safe worktree rule and the cache sweep; caches the sweep could not remove are listed. */
+    type WorktreeCleanup = Awaited<ReturnType<typeof cleanupWorktrees>> & { unremovedCaches: string[] };
+    let cleanup: (onProgress?: (done: number, total: number) => void) => Promise<WorktreeCleanup> = async () => {
       throw new Error("Project runtime is not open");
     };
     // Verification runs: trusted runs on the candidate, tied to its commit, under the worker's own shell policy.
@@ -1657,7 +1662,9 @@ export async function openDurableProject(input: {
       afterScheduleIntentRecorded: input.afterScheduleIntentRecorded,
       beforeScheduleReceiptCommit: input.beforeScheduleReceiptCommit,
       runAction: async (action, run) =>
-        action.kind === "cleanup" ? { ok: true, summary: await cleanupRoutine(action.settings) } : scriptRoutine(action, run),
+        action.kind === "cleanup"
+          ? { ok: true, summary: await cleanupRoutine(action.settings, run.requestId) }
+          : scriptRoutine(action, run),
     });
     const worktreeMutex = new AdmissionMutex();
     // Events from outside go to the chat chosen in Settings; an archived or unknown chat falls back to Main.
@@ -1752,7 +1759,7 @@ export async function openDurableProject(input: {
     );
     stallWake.unref();
     // Settled worktrees are removed automatically (same safe rule as the Settings action); paused or closing projects are left alone.
-    let cleaning: Promise<Awaited<ReturnType<typeof cleanupWorktrees>>> | undefined;
+    let cleaning: Promise<WorktreeCleanup> | undefined;
     const untouchedThread = async (threadId: string) => {
       const owned = (await jobs.snapshot(openedHarness)).jobs.find((job) => job.id === threadId);
       const child = owned ? await openedHarness.conversation(owned.workerConversation, context) : undefined;
@@ -1764,7 +1771,8 @@ export async function openDurableProject(input: {
         view.dispose();
       }
     };
-    cleanup = () =>
+    // A caller joining a cleanup already in flight gets no progress of it.
+    cleanup = (onProgress) =>
       (cleaning ??= (async () => {
         try {
           return await worktreeMutex.run(async () => {
@@ -1774,10 +1782,11 @@ export async function openDurableProject(input: {
               controlRoot: dir,
               stillAllowed: () => !closed,
               untouched: untouchedThread,
+              onProgress,
             });
             // A cache outlives its workspace by at most one cleanup, whatever removed the workspace.
-            if (!closed) await caches.sweep();
-            return result;
+            const swept = closed ? undefined : await caches.sweep();
+            return { ...result, unremovedCaches: swept?.failed ?? [] };
           });
         } finally {
           cleaning = undefined;
@@ -1830,25 +1839,48 @@ export async function openDurableProject(input: {
       }
       return { ok, summary };
     }
-    async function cleanupRoutine(settings: CleanupSettings): Promise<string> {
+    /** Running cleanup runs by request id; history shows it on the run (R24). Memory only: a run the host dies in is interrupted. */
+    const cleanupProgress = new Map<string, CleanupProgress>();
+    async function cleanupRoutine(settings: CleanupSettings, requestId: string): Promise<string> {
+      const progress: CleanupProgress = { step: "worktrees", done: 0, total: null, freedBytes: 0 };
+      cleanupProgress.set(requestId, progress);
+      try {
+        return await cleanupSteps(settings, progress);
+      } finally {
+        cleanupProgress.delete(requestId);
+      }
+    }
+    async function cleanupSteps(settings: CleanupSettings, progress: CleanupProgress): Promise<string> {
+      const at = (step: CleanupStep, done: number, total: number | null) => Object.assign(progress, { step, done, total });
       // Test seam: a run the host dies in.
       const hold = Date.now() + (Number(process.env.PI_PROJECTS_CLEANUP_START_DELAY_MS) || 0);
       while (!closed && Date.now() < hold) await sleep(100);
       if (closed) throw new Error("Project closed");
-      const worktrees = await cleanup();
+      const worktrees = await cleanup((done, total) => at("worktrees", done, total));
       const live = await caches.live();
-      const { trimmed } = await trimPlan(live, worktrees.kept, settings);
+      at("measure", 0, live.length);
+      const { trimmed } = await trimPlan(live, worktrees.kept, settings, (done, total) => at("measure", done, total));
       const disposable: string[] = [];
       for (const worktree of settings.disposable.length ? live.map((item) => item.workspacePath) : [])
         if (!closed && existsSync(worktree))
           disposable.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
       const videos = oldJobVideos({ controlRoot: dir, jobs: (await jobs.snapshot(openedHarness)).jobs, days: settings.videoDays });
-      for (const path of [...trimmed, ...disposable, ...videos]) if (!closed) rmSync(path, { recursive: true, force: true });
+      const sizes = new Map(trimmed.map((item) => [item.dir, item.bytes]));
+      const doomed = [...sizes.keys(), ...disposable, ...videos];
+      at("remove", 0, doomed.length);
+      const removal = closed
+        ? { removed: [], failed: [] }
+        : await removePaths(doomed, (path) => {
+            progress.freedBytes += sizes.get(path) ?? 0;
+            at("remove", progress.done + 1, doomed.length);
+          });
       const notes = [
         `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
       ];
-      const failures: string[] = [];
-      for (const step of plugins.cleanupSteps()) {
+      const failures = [...worktrees.unremovedCaches, ...removal.failed].map((failure) => `could not remove ${failure}`);
+      const pluginSteps = plugins.cleanupSteps();
+      for (const [index, step] of pluginSteps.entries()) {
+        at("plugins", index, pluginSteps.length);
         if (closed) break;
         try {
           notes.push(await step.run({ projectId: project.id, unusedDays: settings.unusedDays, signal: cleanupAbort.signal }));
@@ -1861,13 +1893,19 @@ export async function openDurableProject(input: {
       return summary;
     }
     /** The live caches cleanup removes under these settings; a settled worker's goes even while its worktree is kept. */
-    async function trimPlan(live: { intentId: string; cache: string }[], items: readonly WorktreeItem[], settings: CleanupSettings) {
+    async function trimPlan(
+      live: { intentId: string; cache: string }[],
+      items: readonly WorktreeItem[],
+      settings: CleanupSettings,
+      onMeasured?: (done: number, total: number) => void,
+    ) {
       const settled = settledWorkspaces({ items, jobs: (await jobs.snapshot(openedHarness)).jobs, live: await retainedLeaseThreads() });
       return cachesToTrim({
         caches: live.map((item) => ({ dir: item.cache, settled: settled.has(item.intentId) })),
         capBytes: settings.cacheCapGb * 1024 ** 3,
         budgetBytes: settings.budgetGb * 1024 ** 3,
         unusedMs: settings.unusedDays * 86_400_000,
+        onMeasured,
       });
     }
     // Storage (scripts/storage-usage-failures.md): each row measured on its own, reclaimable under the cleanup routine's current settings.
@@ -2574,7 +2612,15 @@ export async function openDurableProject(input: {
       },
       scheduleHistory: async (kind, options) => {
         await schedules.reconcile();
-        return schedules.history(kind, options);
+        const page = await schedules.history(kind, options);
+        if (page.kind !== "intents") return page;
+        return {
+          ...page,
+          items: page.items.map((item) => {
+            const progress = cleanupProgress.get(item.requestId);
+            return progress ? { ...item, progress: { ...progress } } : item;
+          }),
+        };
       },
       followPoll: () => {
         assertOpen();
