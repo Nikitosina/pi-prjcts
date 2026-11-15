@@ -1627,7 +1627,7 @@ const journeys = {
     if (!scopes.length || scopes.some((scope) => scope !== "project" && scope !== "host"))
       throw Error(`nav items without scope: ${scopes}`);
     await page.press("h", { keyCode: 72 });
-    await page.waitFor(`document.querySelector('#settings').dataset.section === 'theme'`, "theme section by letter H");
+    await page.waitFor(`document.querySelector('#settings').dataset.section === 'appearance'`, "Appearance section by letter H");
     await page.click('#settings [data-theme-option="midnight"]');
     await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "midnight applied");
     await delay(300); // let the open transition finish before the screenshot
@@ -1825,7 +1825,7 @@ const journeys = {
       );
       await page.click('[data-verify="open-settings"]');
       await page.waitFor(
-        `document.querySelector('#settings')?.open === true && document.querySelector('#settings').dataset.section === 'statusline' && !!document.querySelector('#settings .sl-order')`,
+        `document.querySelector('#settings')?.open === true && document.querySelector('#settings').dataset.section === 'appearance' && !!document.querySelector('#settings .sl-order')`,
         "the owner's click opens Settings at Status line",
       );
       record("visible", "the toast's Open settings opened Settings → Status line");

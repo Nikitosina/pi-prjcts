@@ -1175,6 +1175,7 @@ export const Request = Type.Union([
         Type.Literal("cursor"),
         Type.Literal("eliza"),
         Type.Literal("kimi"),
+        Type.Literal("ollama"),
       ]),
       visible: Type.Boolean(),
     },

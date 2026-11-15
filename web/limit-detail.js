@@ -44,10 +44,22 @@ function costRows(usage) {
       .join(" · "),
   )}</small></div>`;
 }
+function creditRows(credits) {
+  const facts = [
+    credits.includedUsd !== null && credits.allowanceUsd !== null
+      ? `${usd(credits.includedUsd)} of ${usd(credits.allowanceUsd)} included left`
+      : "",
+    credits.purchasedUsd !== null ? `${usd(credits.purchasedUsd)} purchased credits left` : "",
+    read(credits.observedAt),
+  ].filter(Boolean);
+  return facts.length > 1 ? `<p class="muted">${esc(facts.join(" · "))}</p>` : "";
+}
 /** What the retired classic inbox's popup said: each window's use and reset, the reading's age and source, the cost, and failures. */
 function detailHtml(item) {
-  const has = item.samples?.length || item.usage;
-  const rows = item.usage ? costRows(item.usage) : (item.samples ?? []).map(windowRow).join("");
+  const has = item.samples?.length || item.usage || item.credits;
+  const rows = item.usage
+    ? costRows(item.usage)
+    : (item.samples ?? []).map(windowRow).join("") + (item.credits ? creditRows(item.credits) : "");
   const tried = item.lastAttemptAt ? ` · ${read(item.lastAttemptAt).replace("read", "tried")}` : "";
   const note = has
     ? item.reason

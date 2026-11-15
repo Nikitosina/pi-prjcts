@@ -107,7 +107,7 @@ await kit.run(async () => {
   // T9: picking a theme in Settings applies at once, is saved on the host and survives a reload.
   await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
   await page.waitFor(`document.querySelector('#settings').open`, "settings open");
-  await page.evaluate(`document.querySelector('nav [data-section="theme"]')?.click()`);
+  await page.evaluate(`document.querySelector('nav [data-section="appearance"]')?.click()`);
   await page.waitFor(`!!document.querySelector('[data-theme-option="midnight"]')`, "theme cards");
   await page.evaluate(`document.querySelector('[data-theme-option="midnight"]').click()`);
   await page.waitFor(`document.documentElement.dataset.theme === 'midnight'`, "applied at once");

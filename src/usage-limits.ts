@@ -12,7 +12,7 @@ import { home, saveJson } from "./state.ts";
  *   headers  - rate-limit headers on responses Pi already receives (pi-ai `onResponse`)
  *   endpoint - read-only GET of the provider's own usage endpoint with the login Pi or the Codex CLI already holds
  */
-export type LimitProvider = "claude" | "codex" | "cursor" | "eliza" | "kimi";
+export type LimitProvider = "claude" | "codex" | "cursor" | "eliza" | "kimi" | "ollama";
 /** "mo" is Cursor's monthly billing cycle. */
 export type LimitWindow = "5h" | "7d" | "mo";
 export type LimitSample = {
@@ -31,6 +31,8 @@ export type ElizaUsage = {
   pool: string | null;
   observedAt: number;
 };
+/** What Ollama's balance endpoint reports in dollars, next to the percent windows. */
+export type OllamaCredits = { includedUsd: number | null; allowanceUsd: number | null; purchasedUsd: number | null; observedAt: number };
 export type ProviderLimits = {
   provider: LimitProvider;
   label: string;
@@ -41,12 +43,20 @@ export type ProviderLimits = {
   nextAttemptAt: number | null;
   /** Cursor only: the in-page sign-in flow. */ connect?: CursorConnect;
   /** Eliza only: actual month-to-date cost from its usage endpoint. */ usage?: ElizaUsage | null;
+  /** Ollama only: remaining credits in USD from its balance endpoint. */ credits?: OllamaCredits | null;
 };
 export type CursorConnect = { state: "idle" | "waiting" | "failed"; loginUrl: string | null; error: string | null };
 
-const LABELS: Record<LimitProvider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", eliza: "Eliza", kimi: "Kimi" };
+const LABELS: Record<LimitProvider, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
+  eliza: "Eliza",
+  kimi: "Kimi",
+  ollama: "Ollama",
+};
 export type LimitVisibility = Record<LimitProvider, boolean>;
-const DEFAULT_VISIBILITY: LimitVisibility = { claude: true, codex: true, cursor: true, eliza: true, kimi: true };
+const DEFAULT_VISIBILITY: LimitVisibility = { claude: true, codex: true, cursor: true, eliza: true, kimi: true, ollama: true };
 const visibilityPath = () => join(home(), "limits-visibility.json");
 /** Display only: hidden providers are refreshed with the others, so a later re-enable shows the same numbers. */
 export function limitsVisibility(): LimitVisibility {
@@ -73,11 +83,13 @@ const WINDOW_SECONDS = { "5h": 5 * 3600, "7d": 7 * 86400 };
 
 type Polled = Array<Omit<LimitSample, "provider" | "observedAt">>;
 type ElizaReading = Omit<ElizaUsage, "observedAt">;
-type PollResult = { samples: Polled; usage?: ElizaReading | null };
+type OllamaReading = Omit<OllamaCredits, "observedAt">;
+type PollResult = { samples: Polled; usage?: ElizaReading | null; credits?: OllamaReading | null };
 type Stored = LimitSample & { source: LimitSource };
 type OwnState = {
   samples: Map<LimitWindow, Stored>;
   usage: ElizaUsage | null;
+  credits: OllamaCredits | null;
   reason: string | null;
   unavailable: boolean;
   lastAttemptAt: number | null;
@@ -94,6 +106,7 @@ const entry = (provider: LimitProvider) => {
       (value = {
         samples: new Map(),
         usage: null,
+        credits: null,
         reason: null,
         unavailable: false,
         lastAttemptAt: null,
@@ -325,6 +338,62 @@ async function pollKimi(): Promise<Polled> {
   return parseKimiUsage(data);
 }
 
+/**
+ * Ollama Cloud's `GET /api/balance` (documented in ollama/docs/openapi.yaml, bearer API key). `included` has two shapes: current plans report
+ * remaining and allowance dollars for a period (a monthly window; used = 1 - balance / allowance), legacy plans report the remaining percent and reset
+ * of a session (the 5-hour window) and a week (the 7-day window). `/api/usage` only counts requests and is not a quota.
+ */
+export function parseOllamaBalance(data: unknown): { samples: Polled; credits: OllamaReading } {
+  const unreadable = () => new Retry("Ollama returned an unreadable balance response");
+  const record = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value)) : null;
+  const root = record(data),
+    included = record(root?.included);
+  if (!root || !included) throw unreadable();
+  const purchasedRaw = record(root.purchased)?.balance_usd,
+    purchasedUsd = purchasedRaw === undefined ? null : finite(purchasedRaw);
+  const date = (value: unknown) => (typeof value === "string" ? Date.parse(value) || null : null);
+  const samples: Polled = [];
+  let includedUsd: number | null = null,
+    allowanceUsd: number | null = null;
+  if ("session" in included || "weekly" in included) {
+    for (const [window, key] of [
+      ["5h", "session"],
+      ["7d", "weekly"],
+    ] as const) {
+      const raw = record(included[key]),
+        remaining = finite(raw?.remaining_percent);
+      if (!raw || remaining === null) throw unreadable();
+      samples.push({ window, usedPercent: clamp(100 - remaining), resetsAt: date(raw.resets_at) });
+    }
+  } else {
+    includedUsd = finite(included.balance_usd);
+    allowanceUsd = finite(included.allowance_usd);
+    if (includedUsd === null || allowanceUsd === null) throw unreadable();
+    // A plan with no included allowance has no percent to show; the dollars still reach the details.
+    if (allowanceUsd > 0)
+      samples.push({
+        window: "mo",
+        usedPercent: clamp((1 - includedUsd / allowanceUsd) * 100),
+        resetsAt: date(record(included.period)?.until),
+      });
+  }
+  return { samples, credits: { includedUsd, allowanceUsd, purchasedUsd } };
+}
+const ollamaBalanceUrl = () => process.env.PI_PROJECTS_OLLAMA_BALANCE_URL ?? "https://ollama.com/api/balance";
+/** The API key of the Ollama Cloud connection Pi already holds; the host wires it to Pi's model runtime. Never cached, never sent anywhere else. */
+export type OllamaKeyResolver = () => Promise<string | undefined>;
+let resolveOllamaKey: OllamaKeyResolver | null = null;
+export function setOllamaKeyResolver(resolver: OllamaKeyResolver | null): void {
+  resolveOllamaKey = resolver;
+}
+async function pollOllama(): Promise<PollResult> {
+  const key = await resolveOllamaKey?.().catch(() => undefined);
+  if (!key) throw new Retry("No Ollama Cloud connection found in Pi. Add an Ollama Cloud provider with its API key to Pi", null, true);
+  const data = await getJson(ollamaBalanceUrl(), { Authorization: `Bearer ${key}` }, "Ollama", "Check the Ollama Cloud API key in Pi");
+  return parseOllamaBalance(data);
+}
+
 const claudeUsageUrl = () => process.env.PI_PROJECTS_CLAUDE_USAGE_URL ?? "https://api.anthropic.com/api/oauth/usage";
 const codexUsageUrl = () => process.env.PI_PROJECTS_CODEX_USAGE_URL ?? "https://chatgpt.com/backend-api/wham/usage";
 const storedAccess = async (key: string) => {
@@ -504,8 +573,16 @@ const fixture = (provider: LimitProvider): (() => Promise<PollResult>) | undefin
             true,
           );
         return {
-          samples: provider === "eliza" ? [] : (data?.[provider] ?? []),
+          samples:
+            provider === "eliza"
+              ? []
+              : provider === "ollama"
+                ? data?.ollama
+                  ? parseOllamaBalance(data.ollama).samples
+                  : []
+                : (data?.[provider] ?? []),
           ...(provider === "eliza" ? { usage: data?.eliza ? parseElizaUsage(data.eliza) : null } : {}),
+          ...(provider === "ollama" ? { credits: data?.ollama ? parseOllamaBalance(data.ollama).credits : null } : {}),
         };
       }
     : undefined;
@@ -515,6 +592,7 @@ const POLLERS: Record<LimitProvider, () => Promise<PollResult>> = {
   cursor: async () => ({ samples: await pollCursor() }),
   eliza: pollEliza,
   kimi: async () => ({ samples: await pollKimi() }),
+  ollama: pollOllama,
 };
 const pollerOf = (provider: LimitProvider): (() => Promise<PollResult>) => fixture(provider) ?? POLLERS[provider];
 
@@ -531,7 +609,8 @@ function refreshProvider(provider: LimitProvider, now: number): Promise<void> {
       (result) => {
         record(provider, "endpoint", result.samples);
         if (provider === "eliza") own.usage = result.usage ? { ...result.usage, observedAt: Date.now() } : null;
-        const hasData = result.samples.length > 0 || own.usage !== null;
+        if (provider === "ollama") own.credits = result.credits ? { ...result.credits, observedAt: Date.now() } : null;
+        const hasData = result.samples.length > 0 || own.usage !== null || own.credits !== null;
         own.holdUntil = 0;
         own.reason = hasData ? null : provider === "eliza" ? "Eliza returned no usage data" : "The provider returned no usage windows";
         own.unavailable = false;
@@ -634,7 +713,7 @@ export async function limitsSnapshot(
   const providers = (Object.keys(LABELS) as LimitProvider[]).map((provider): ProviderLimits => {
     const own = entry(provider),
       samples = [...own.samples.values()].sort((a, b) => a.window.localeCompare(b.window)),
-      hasData = samples.length > 0 || own.usage !== null;
+      hasData = samples.length > 0 || own.usage !== null || own.credits !== null;
     return {
       provider,
       label: LABELS[provider],
@@ -645,6 +724,7 @@ export async function limitsSnapshot(
       nextAttemptAt: own.holdUntil > now ? own.holdUntil : null,
       ...(provider === "cursor" ? { connect: { state: connect.state, loginUrl: connect.loginUrl, error: connect.error } } : {}),
       ...(provider === "eliza" ? { usage: own.usage } : {}),
+      ...(provider === "ollama" ? { credits: own.credits } : {}),
     };
   });
   return { providers, visibility: limitsVisibility(), observedAt: Date.now() };

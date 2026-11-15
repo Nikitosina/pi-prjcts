@@ -23,10 +23,7 @@ export const DEFAULTS = {
   "settings-storage": "U",
   "settings-plugins": "X",
   "settings-tiers": "I",
-  "settings-theme": "H",
-  "settings-animations": "A",
-  "settings-display": "L",
-  "settings-statusline": "S",
+  "settings-appearance": "H",
   "settings-hotkeys": "?",
   "settings-notifications": "N",
   "settings-remote": "O",
@@ -63,8 +60,10 @@ export function setOverrides(next) {
   paintHints();
 }
 export const onBindingsChange = (listener) => listeners.add(listener);
+/** Settings pages merged into another keep a binding the owner set before the merge. */
+const LEGACY = { "settings-appearance": "settings-theme" };
 export function binding(id) {
-  return overrides[id] ?? DEFAULTS[id] ?? "";
+  return overrides[id] ?? overrides[LEGACY[id]] ?? DEFAULTS[id] ?? "";
 }
 export function bindings() {
   return Object.keys(DEFAULTS).map((id) => ({ id, label: LABELS[id] ?? id, binding: binding(id), changed: id in overrides }));

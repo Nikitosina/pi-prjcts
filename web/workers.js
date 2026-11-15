@@ -1,4 +1,4 @@
-// Right context panel: the selected chat's workers (active ones on top, ended ones in a collapsed history), PRs and plugin cards;
+// Right context panel: the selected chat's workers (active ones on top, ended ones in a collapsed history, each with its collapsible subagents) and PRs;
 // and the worker transcript in the center.
 import { call, uuid } from "./api.js";
 import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
@@ -6,7 +6,6 @@ import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
 import { hydrateMedia } from "./media.js";
-import { pluginRow } from "./plugins.js";
 
 const box = document.querySelector("#workers");
 const lastTools = new Map(); // worker id -> { name, args } of its newest tool call
@@ -21,7 +20,7 @@ let contextsAsked = 0, // sequence of the newest worker-contexts request; older 
   contextsAt = 0,
   contextsTimer = 0;
 
-const ROLE_ICON = { worker: "⚒", scout: "⌕", reviewer: "◎" };
+const ROLE_ICON = { worker: "⚒", scout: "⌕", reviewer: "◎", verifier: "✓" };
 const STATE = {
   running: { label: "Working", tone: "work" },
   checkpoint: { label: "Checkpoint", tone: "needs" },
@@ -149,6 +148,37 @@ function historyTally(ended) {
     .map(([n, label, tone]) => `<span data-tone="${tone}">${n} ${label}</span>`)
     .join(" · ");
 }
+// Which workers have their subagent list open, per project and chat; kept for the browser tab like the history.
+const subsKey = (id) => `pi-workers-subagents:${state.projectId}:${state.chatId}:${id}`;
+function subsOpen(id) {
+  try {
+    return sessionStorage.getItem(subsKey(id)) === "1";
+  } catch {
+    return false;
+  }
+}
+function setSubsOpen(id, open) {
+  try {
+    open ? sessionStorage.setItem(subsKey(id), "1") : sessionStorage.removeItem(subsKey(id));
+  } catch {}
+}
+/** The id the transcript read and the center view use for a worker's subagent. */
+const subagentId = (worker, child) => `${worker.id}/${child.id}`;
+const subagentLook = (child) => (child.working ? { label: "Working", tone: "work" } : { label: "Done", tone: "done" });
+/** The worker's subagents (reviewers, scouts) as a collapsible list: role, title, status, and a button that opens the transcript. No summaries. */
+function subagentsHtml(worker) {
+  const children = worker.children ?? [];
+  if (!children.length) return "";
+  const open = subsOpen(worker.id),
+    live = children.filter((child) => child.working).length;
+  const rows = children
+    .map((child) => {
+      const look = subagentLook(child);
+      return `<li class="w-sub" data-status="${child.working ? "running" : "completed"}"><span class="w-role" aria-label="${esc(child.role)}">${ROLE_ICON[child.role] ?? "•"}</span><button type="button" class="w-sub-title" data-open-worker="${esc(subagentId(worker, child))}">${esc(clip(child.title, 60))}</button><span class="badge t-${look.tone}">${look.label}</span></li>`;
+    })
+    .join("");
+  return `<div class="w-subs"><button type="button" class="w-subs-toggle" data-worker-subs="${esc(worker.id)}" aria-expanded="${open}" aria-controls="subs-${esc(worker.id)}"><span class="chev" aria-hidden="true">${open ? "▾" : "▸"}</span>Subagents <span class="count">${children.length}</span>${live ? `<span class="w-subs-live">${live} working</span>` : ""}</button>${open ? `<ul id="subs-${esc(worker.id)}" class="w-sublist">${rows}</ul>` : ""}</div>`;
+}
 function renderWorkers() {
   const list = chatWorkers(),
     active = list.filter(isActive),
@@ -258,7 +288,7 @@ function workerHtml(worker) {
         : worker.status === "failed" || worker.status === "checkpoint"
           ? `<button type="button" class="ghost-btn small" data-open-worker="${esc(worker.id)}">Open</button>`
           : "";
-  return `<article class="worker${worker.working ? " working" : ""}" data-key="w:${esc(worker.id)}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div></article>`;
+  return `<article class="worker${worker.working ? " working" : ""}" data-key="w:${esc(worker.id)}" data-status="${esc(worker.status)}"${worker.checkpoint?.auto ? ` data-auto="1"` : ""}${worker.failure ? ` data-failure="${esc(worker.failure)}"` : ""} data-tone="${look.tone}"><div class="w-line1"><span class="w-role" aria-label="${esc(worker.role)}">${ROLE_ICON[worker.role] ?? "•"}</span><button type="button" class="w-title" data-open-worker="${esc(worker.id)}">${esc(clip(worker.title, 70))}</button>${modelChip(worker)}${isActive(worker) ? contextRing(worker) : ""}</div>${step}${toolLine}<div class="w-foot"><span class="badge t-${look.tone}">${esc(look.label)}</span>${worker.pr ? `<span class="muted small mono">PR #${esc(worker.pr)}</span>` : ""}<span class="grow"></span>${action}</div>${subagentsHtml(worker)}</article>`;
 }
 async function loadLastTools(gen) {
   const running = chatWorkers()
@@ -280,6 +310,14 @@ box.addEventListener("click", async (event) => {
     setHistoryOpen(!historyOpen());
     renderWorkers();
     box.querySelector("[data-worker-history]")?.focus();
+    return;
+  }
+  const subs = event.target.closest("[data-worker-subs]");
+  if (subs) {
+    const id = subs.dataset.workerSubs;
+    setSubsOpen(id, !subsOpen(id));
+    renderWorkers();
+    box.querySelector(`[data-worker-subs="${CSS.escape(id)}"]`)?.focus();
     return;
   }
   const approve = event.target.closest("[data-approve]");
@@ -313,7 +351,7 @@ box.addEventListener("click", async (event) => {
   if (open) emit("open", { kind: "worker", id: open.dataset.openWorker, steer: !!open.dataset.steer });
 });
 
-// ---------------------------------------------------------------------------------------------------------------- PRs, plugins
+// ---------------------------------------------------------------------------------------------------------------- PRs
 
 let prItems = []; // the PR rows on the page, in order: `data-merge-pr` is an index into it
 const merging = new Set(); // provider:id of merge requests being sent
@@ -358,7 +396,7 @@ function renderPrs() {
 export async function loadSide() {
   const gen = state.generation;
   const projectId = state.projectId;
-  const [prs, plugins] = await Promise.all([call("prs", { id: projectId }).catch(() => null), call("plugins").catch(() => null)]);
+  const prs = await call("prs", { id: projectId }).catch(() => null);
   if (stale(gen)) return;
   prItems = (prs?.providers ?? [])
     .flatMap((provider) =>
@@ -366,8 +404,6 @@ export async function loadSide() {
     )
     .slice(0, 12);
   renderPrs();
-  const list = plugins?.plugins ?? [];
-  document.querySelector("#plugin-cards").innerHTML = list.length ? `<h2>Plugins</h2>${list.map(pluginRow).join("")}` : "";
 }
 
 // Merge never merges here: it sends the owner's request to the Coordinator of the chat named in the confirmation.
@@ -465,18 +501,27 @@ function promptLine(worker) {
   if (!prompt || !PROMPT[prompt.state]) return "";
   return `<p class="w-prompt" data-prompt-state="${esc(prompt.state)}"><b>${PROMPT[prompt.state]}</b>${prompt.reason ? ` <span>${esc(prompt.reason)}</span>` : ""}</p>`;
 }
+/** A worker's subagent named by "<job id>/<conversation id>", shaped like a worker so the center view can show it. */
+function findSubagent(id) {
+  const [jobId, childId] = id.split("/");
+  const child = childId && state.jobs?.jobs.find((job) => job.id === jobId)?.children?.find((item) => String(item.id) === childId);
+  return child ? { ...child, status: child.working ? "running" : "completed", kind: "subagent" } : undefined;
+}
 export async function renderWorker(root, id, { steer = false } = {}) {
   const gen = state.generation;
   const find = () =>
+    findSubagent(id) ??
     chatWorkers().find((item) => item.id === id) ??
     state.jobs?.jobs.find((job) => job.id === id) ??
     state.jobs?.agents.find((agent) => agent.id === id);
+  // A subagent belongs to its tool call: it is read here, never messaged or stopped.
+  const nested = id.includes("/");
   const head = () => {
     const worker = find();
     const look = worker ? lookOf(worker) : null;
-    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
+    return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working && !nested ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
   };
-  root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`;
+  root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div>${nested ? "" : `<form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`}`;
   let items = [],
     groups = null;
   // The focus view is reused: this render lives only while its own feed is on the page.
