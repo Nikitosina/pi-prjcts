@@ -1,5 +1,5 @@
 // E2E: per-project plugin enable and disable (failure cases: plugin-enable-failures.md, numbers in check labels). Fake model, private HOME.
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
@@ -176,6 +176,25 @@ await kit.run(async () => {
   await click(toggle("gated"));
   await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
   check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);
+  // 14b: a disable whose project save fails changes nothing and does not leave the lifecycle pause held (the plugin is still on).
+  const projectFolder = join(kit.home, alpha);
+  chmodSync(projectFolder, 0o555);
+  const saveFailure = await refused(() => set(alpha, "gated", false));
+  chmodSync(projectFolder, 0o700);
+  check("14b a failed save refuses the disable", saveFailure !== "", saveFailure);
+  check("14b the plugin is still enabled", (await entry(alpha, "gated")).enabled === true);
+  check("14b the failed disable released the pause", !(await counters()).paused.includes(alpha), await counters());
+  check("14b the still-enabled plugin answers", (await call(alpha, "ping")).pong === alpha);
+  check(
+    "14b a later disable works and holds the pause again",
+    (await set(alpha, "gated", false)).enabled === false && (await counters()).paused.includes(alpha),
+  );
+  // 14c: after a host restart the flag is persistent: the disabled plugin runs nothing for the project (no tick, RPC or pause needed).
+  await kit.restartHost();
+  await kit.delay(1200);
+  check("14c the flag survives the restart", (await entry(alpha, "gated")).enabled === false);
+  check("14c no PR monitor or follow tick ran the disabled plugin", (await counters()).listCalls === 0, await counters());
+  check("14c its RPC is still refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
   // The refused route probes of 6 are the only expected HTTP errors.
   kit.result.httpErrors = kit.result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/gated/data") && error.status === 409));
 });
