@@ -1303,8 +1303,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         const project = loadProject(input.id);
         if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
         // Check and save in one synchronous step: no plugin call can start between the work check and the stored flag.
-        const next = plugins.setEnabled(project, input.plugin, input.enabled);
-        if (next !== project) saveProject(next);
+        plugins.setEnabled(project, input.plugin, input.enabled, saveProject);
         return { plugin: input.plugin, enabled: input.enabled };
       });
     case "plugin": {

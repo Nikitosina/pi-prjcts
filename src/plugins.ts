@@ -92,6 +92,13 @@ usePluginPromptBlocks(() =>
 );
 const disabledIn = (project: Pick<Project, "disabledPlugins">, plugin: string) => project.disabledPlugins?.includes(plugin) ?? false;
 /** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
+const release = (resume: (() => void) | undefined) => {
+  try {
+    resume?.();
+  } catch {
+    /* resuming never blocks the host */
+  }
+};
 /** Lifecycle pauses taken by a disable: held while the plugin is off, released by the enable. */
 const heldPauses = new Map<string, () => void>();
 const gate = createPluginGate((projectId, plugin) => {
@@ -154,21 +161,14 @@ export const plugins = {
    * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
    * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
    */
-  setEnabled: (project: Project, name: string, enabled: boolean): Project => {
+  setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void): Project => {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
     const off = new Set(project.disabledPlugins ?? []);
     if (enabled === !off.has(name)) return project;
     const held = `${project.id}\0${name}`;
-    if (enabled) {
-      off.delete(name);
-      const resume = heldPauses.get(held);
-      heldPauses.delete(held);
-      try {
-        resume?.();
-      } catch {
-        /* resuming never blocks the host */
-      }
-    } else {
+    let paused: (() => void) | undefined;
+    if (enabled) off.delete(name);
+    else {
       const required = requiredBy(project, name);
       if (required) throw new Error(`Cannot disable "${name}": ${required}`);
       const busy = gate.active(project.id, name);
@@ -176,15 +176,27 @@ export const plugins = {
         throw new Error(`Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.`);
       const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
       try {
-        const resume = lifecycle?.pause?.(project.id);
-        if (resume) heldPauses.set(held, resume);
+        paused = lifecycle?.pause?.(project.id);
       } catch (error) {
         throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
       }
       off.add(name);
     }
     const { disabledPlugins: _, ...rest } = project;
-    return off.size ? { ...rest, disabledPlugins: [...off].sort() } : rest;
+    const next = off.size ? { ...rest, disabledPlugins: [...off].sort() } : rest;
+    // The pause is kept only once the flag is stored: a failed save leaves the plugin as it was, running.
+    try {
+      save(next);
+    } catch (error) {
+      release(paused);
+      throw error;
+    }
+    if (paused) heldPauses.set(held, paused);
+    else if (enabled) {
+      release(heldPauses.get(held));
+      heldPauses.delete(held);
+    }
+    return next;
   },
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
