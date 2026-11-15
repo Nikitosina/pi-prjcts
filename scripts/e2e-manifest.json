@@ -75,7 +75,7 @@
     "src/host-documents.ts": ["ui2-settings-e2e", "worker-quota", "host-agent-e2e"],
     "src/prompt-sections.ts": ["ui2-settings-e2e", "workspace-defaults"],
     "src/prompt-blocks.ts": ["prompt-blocks-*", "settings-prompts-refresh", "workspace-defaults", "ui2-worker-prompt*"],
-    "web/workers.js": ["ui2-worker-prompt*", "coordinator-workers-ui-e2e", "tool-summaries-e2e"],
+    "web/workers.js": ["ui2-worker-prompt*", "coordinator-workers-ui-e2e", "tool-summaries-e2e", "worker-input-keys-e2e"],
     "web/media.js": ["artifacts-e2e", "worker-artifacts-browser-e2e"],
     "web/tree.js": ["multi-chat-e2e", "status-dots-e2e"],
     "web/theme.js": ["theme-e2e"],
@@ -97,7 +97,7 @@
     "web/follow.js": ["streaming-*", "coordinator-workers-ui-e2e", "worker-chat-ui-e2e", "tool-summaries-e2e"],
     "web/ui.js": ["tool-summaries-e2e"],
     "web/settings.js": ["tool-summaries-e2e", "plugin-panels-e2e", "plugin-enable-e2e"],
-    "web/hostagent.js": ["tool-summaries-e2e"],
+    "web/hostagent.js": ["tool-summaries-e2e", "worker-input-keys-e2e"],
     "src/transcript-reader.ts": ["tool-summaries-e2e"],
     "src/host-agent.ts": ["tool-summaries-e2e"]
   },

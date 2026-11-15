@@ -7,6 +7,14 @@ const workerHold = new Promise((ok) => (releaseWorker = ok));
 const hostHold = new Promise((ok) => (releaseHost = ok));
 const kit = await createKit("worker-input-keys", {
   handler: ({ role, user, results, tools }) => {
+    // The held turn ends in a tool call, so a steer lands in the request that follows it, inside the same turn.
+    if (tools.includes("host_call") && results.length && user.includes("HK-HOLD")) return say("HK-FIRST");
+    if (tools.includes("host_call") && user.includes("HK-HOLD"))
+      return (async function* () {
+        await hostHold;
+        yield kit.call("host_call", { action: "list", input: {} });
+      })();
+    if (tools.includes("host_call")) return say(`HK-ANSWER ${user.slice(0, 40)}`);
     if (role === "coordinator") {
       if (user.includes("KEYS-SPAWN") && !results.length)
         return kit.call("agents", {
@@ -27,12 +35,6 @@ const kit = await createKit("worker-input-keys", {
         })();
       return say(`W-ANSWER ${user.slice(0, 40)}`);
     }
-    if (tools.includes("host_call") && user.includes("HK-HOLD"))
-      return (async function* () {
-        await hostHold;
-        yield say("HK-FIRST");
-      })();
-    if (tools.includes("host_call")) return say(`HK-ANSWER ${user.slice(0, 40)}`);
     return undefined;
   },
 });
@@ -65,11 +67,12 @@ await kit.run(async () => {
   await page.waitFor(`!!document.querySelector(${JSON.stringify(box)})`, "worker composer");
 
   // 15: Enter on a running worker steers; Alt+Enter queues a follow-up.
+  await page.waitFor(
+    `!!document.querySelector("#focus-view .focus-head .badge.t-busy, #focus-view [data-stop-worker]")`,
+    "page shows the worker working",
+  );
   await type(box, "W-STEER now");
   await ENTER();
-  await kit.delay(1500);
-  await page.shot("dbg", { force: true });
-  console.log("DBG", await page.evaluate(`document.body.innerText.slice(-600) + " | VAL=" + document.querySelector(${JSON.stringify(box)})?.value`));
   await page.waitFor(`document.body.innerText.includes("Steer sent.")`, "steer toast");
   await type(box, "W-FOLLOW later");
   await ALT_ENTER();
@@ -92,14 +95,16 @@ await kit.run(async () => {
   await page.evaluate(`document.querySelector('[data-cmd="host-agent"]').click()`);
   const hbox = `#ha-composer textarea`;
   await page.waitFor(
-    `!!document.querySelector(${JSON.stringify(hbox)}) && document.querySelector("#host-agent").offsetParent !== null`,
+    `!!document.querySelector(${JSON.stringify(hbox)}) && document.querySelector("#host-agent").dataset.open === "1" && document.querySelector("#host-agent").dataset.available === "1"`,
     "drawer",
   );
   await type(hbox, "HK-HOLD start");
   await ENTER();
   await eventually(async () => kit.result.calls.some((call) => call.user.includes("HK-HOLD")), "host busy");
+  await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host composer free");
   await type(hbox, "HK-STEER now");
   await ENTER();
+  await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host composer free");
   await type(hbox, "HK-FOLLOW later");
   await ALT_ENTER();
   await page.shot("02-host-agent-keys", { force: true });
