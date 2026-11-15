@@ -101,16 +101,39 @@ const gate = createPluginGate((projectId, plugin) => {
 });
 const loadedName = (name: string) => loaded.some((item) => item.plugin === name) || builtins().some((item) => item.plugin === name);
 
-/** Why the project cannot turn the plugin off whatever else happens, or null. */
+/** What the project's folder really is (no grant needed), or null when it is not a checkout. */
+function checkoutKind(project: Project): string | null {
+  try {
+    return project.cwd && existsSync(project.cwd) ? (findVcsRoot(project.cwd)?.kind ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Why the project cannot turn the plugin off whatever else happens, or null. Looks at the real checkout, so it holds before a grant and after one is revoked. */
 function requiredBy(project: Project, name: string): string | null {
-  const provider = project.workspaceAuthorization?.provider;
   const item = [...builtins(), ...loaded].find((entry) => entry.plugin === name);
   if (!item) return null;
   const claims = [item.capabilities.workspace?.id, item.capabilities.vcs?.kind, item.capabilities.merge?.kind];
+  const provider = project.workspaceAuthorization?.provider;
   if (provider && (provider === name || claims.includes(provider)))
     return "required by this project's checkout (its workspace grant uses this plugin)";
+  const kind = checkoutKind(project);
+  if (kind && (claims.includes(kind) || (kind === "git" && name === "github")))
+    return `required by this project's checkout (its folder is a ${kind} checkout this plugin serves)`;
   if (name === "github" && project.githubAuthorization?.length) return "required by this project's GitHub authorizations";
   return null;
+}
+
+/** A copy of `provider` whose listed methods run through the project gate; everything else (and `this`) stays the provider's own. */
+const guards = new WeakMap<object, object>();
+/** One stable guarded copy per provider: callers that compare providers across calls keep working. */
+function guarded<T extends object>(provider: T, overrides: Partial<T>): T {
+  const known = guards.get(provider);
+  if (known) return known as T;
+  const made = Object.assign(Object.create(provider) as T, overrides);
+  guards.set(provider, made);
+  return made;
 }
 
 export const plugins = {
@@ -153,11 +176,55 @@ export const plugins = {
   },
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
-  workspaceProviders: (): WorkspaceProvider[] => each((caps) => caps.workspace),
-  workspaceProvider: (id: string): WorkspaceProvider | undefined => each((caps) => caps.workspace).find((item) => item.id === id),
-  prProviders: (): PrProvider[] => each((caps) => caps.prs),
-  prProvider: (id: string): PrProvider | undefined => each((caps) => caps.prs).find((item) => item.id === id),
-  followProviders: (): FollowProvider[] => each((caps) => caps.follow),
+  workspaceProviders: (): WorkspaceProvider[] => plugins.workspaceSources(),
+  workspaceProvider: (id: string): WorkspaceProvider | undefined => plugins.workspaceSources().find((item) => item.id === id),
+  /** Workspace providers: a project that turned the plugin off is offered no setup of it (a grant that uses it locks the plugin on). */
+  workspaceSources: (): WorkspaceProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.workspace;
+      if (!provider) return [];
+      return [
+        guarded(provider, {
+          quickPreview: (project, walkedRoot) =>
+            disabledIn(project, item.plugin)
+              ? { available: false, blocker: disabledMessage(item.plugin) }
+              : provider.quickPreview(project, walkedRoot),
+          setupCards: provider.setupCards
+            ? (project) => (disabledIn(project, item.plugin) ? [] : provider.setupCards!(project))
+            : undefined,
+        }),
+      ];
+    }),
+  prProviders: (): PrProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.prs,
+        plugin = item.plugin;
+      if (!provider) return [];
+      const run = <R>(project: Project, work: () => Promise<R>) => gate.run(project.id, plugin, work);
+      return [
+        guarded(provider, {
+          applies: (project) => !disabledIn(project, plugin) && provider.applies(project),
+          list: (project, options) => run(project, () => provider.list(project, options)),
+          touching: provider.touching ? (project) => run(project, () => provider.touching!(project)) : undefined,
+          detail: (project, id) => run(project, () => provider.detail(project, id)),
+          status: (project, id) => run(project, () => provider.status(project, id)),
+          published: (root, project) => run(project, () => provider.published(root, project)),
+        }),
+      ];
+    }),
+  prProvider: (id: string): PrProvider | undefined => plugins.prProviders().find((item) => item.id === id),
+  followProviders: (): FollowProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.follow,
+        plugin = item.plugin;
+      if (!provider) return [];
+      return [
+        guarded(provider, {
+          repository: (project) => (disabledIn(project, plugin) ? undefined : provider.repository(project)),
+          observe: (input) => gate.run(input.project.id, plugin, () => provider.observe(input)),
+        }),
+      ];
+    }),
   mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
   coordinatorTools: (): CoordinatorToolsProvider[] => plugins.coordinatorToolSources().map((source) => source.provider),
   /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. Their calls run through the project gate. */
@@ -165,15 +232,16 @@ export const plugins = {
     [...builtins(), ...loaded].flatMap((item) => {
       const provider = item.capabilities.coordinatorTools;
       if (!provider) return [];
-      const guarded: CoordinatorToolsProvider = {
-        ...provider,
+      const guard = guarded<CoordinatorToolsProvider>(provider, {
         applies: (project) => !disabledIn(project, item.plugin) && provider.applies(project),
         create: (input) => {
           const made = provider.create(input);
-          return { ...made, tools: gate.tools(input.projectId, item.plugin, made.tools) };
+          // The Durable registration is what a chat executes: gate its tools too, not only the offered list.
+          const extension = { ...made.extension, tools: gate.tools(input.projectId, item.plugin, [...(made.extension.tools ?? [])]) };
+          return { extension, tools: gate.tools(input.projectId, item.plugin, made.tools) };
         },
-      };
-      return [{ provider: guarded, builtIn: item.builtIn === true }];
+      });
+      return [{ provider: guard, builtIn: item.builtIn === true }];
     }),
   /** Worker tool providers: offered only while the project has the plugin on; tools a thread already froze stop at their next call after a disable. */
   workerTools: (): WorkerToolsProvider[] =>
@@ -181,11 +249,10 @@ export const plugins = {
       const provider = item.capabilities.workerTools;
       if (!provider) return [];
       return [
-        {
-          ...provider,
+        guarded<WorkerToolsProvider>(provider, {
           offered: (projectId: string) => !gate.isOff(projectId, item.plugin) && provider.offered(projectId),
           create: (input) => gate.tools(input.projectId, item.plugin, provider.create(input)),
-        },
+        }),
       ];
     }),
   /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
