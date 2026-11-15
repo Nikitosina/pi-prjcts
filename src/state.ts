@@ -188,6 +188,8 @@ export const Project = Type.Object(
     decisionAccess: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("coordinator")])),
     /** Coordinator gh access; absent means full. */
     githubCli: Type.Optional(Type.Union([Type.Literal("full"), Type.Literal("none")])),
+    /** Plugins this project turned off (src/plugin-gate.ts); absent = all on. Their stored data stays. */
+    disabledPlugins: Type.Optional(Type.Array(Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), { maxItems: 64, uniqueItems: true })),
     /** Optional host-only workspace grant. Projects without it receive no workspace scope. */
     workspaceAuthorization: Type.Optional(WorkspaceAuthorization),
     workspaceAuthorizationHistory: Type.Optional(WorkspaceAuthorizationHistory),
@@ -1351,6 +1353,10 @@ export const Request = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object({ action: Type.Literal("plugins"), id: Type.Optional(Id) }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("project-plugin"), id: Id, plugin: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), enabled: Type.Boolean() },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal("plugin"),

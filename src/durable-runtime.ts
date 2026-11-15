@@ -1914,7 +1914,7 @@ export async function openDurableProject(input: {
         `Removed ${worktrees.removed.length} worktree(s), ${trimmed.length} cache(s), ${disposable.length} disposable path(s) and ${videos.length} old Job video(s).`,
       ];
       const failures = [...worktrees.unremovedCaches, ...removal.failed].map((failure) => `could not remove ${failure}`);
-      const pluginSteps = plugins.cleanupSteps();
+      const pluginSteps = plugins.cleanupSteps(project.id);
       for (const [index, step] of pluginSteps.entries()) {
         at("plugins", index, pluginSteps.length);
         if (closed) break;
@@ -2018,7 +2018,7 @@ export async function openDurableProject(input: {
             };
           },
         },
-        ...plugins.usageSources().map((source) => ({
+        ...plugins.usageSources(project.id).map((source) => ({
           id: `plugin:${source.plugin}`,
           kind: "plugin" as const,
           label: source.plugin,

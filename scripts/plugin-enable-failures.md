@@ -1,0 +1,21 @@
+# Failure modes: per-project plugin enable and disable
+
+Written before the code. Unit: `scripts/plugin-gate-unit.mjs` (the gate in `src/plugin-gate.ts`, no host). E2E: `scripts/plugin-enable-e2e.mjs` (fake model, private HOME, fixture `scripts/fixtures/gated-plugin`; no live host). Owner decision: a plugin that has active work in the project, or that the project's checkout needs, cannot be disabled; nothing is force-stopped and nothing is unloaded globally.
+
+Refusal
+1. Disable is accepted while the plugin has a running RPC, tool call or lifecycle task in this project, so the work loses its plugin halfway. The call is refused with a reason naming the plugin and the work; the project record is unchanged.
+2. Disable is accepted for a plugin the project's workspace grant needs (provider `github`, or a provider plugin's workspace id). The call is refused with the reason "required by this project's checkout".
+3. A call starts in the same tick as the disable: the disable looks at the work count, then the call begins, and a call runs on a disabled plugin. The count check and the stored flag are one synchronous step, and a call after the flag is refused.
+4. An unknown or not loaded plugin name is stored. It is refused.
+
+Enforcement for existing threads
+5. A thread that already holds the plugin's tools (a frozen worker tool set, a coordinator chat) keeps running them after the disable. Every tool call checks the flag when it executes and fails with "plugin is disabled in this project".
+6. A plugin RPC or web route answers for a project that disabled it. Both refuse with the same reason.
+7. A background step (Workspace cleanup, Storage usage) of the plugin runs for a disabled project. It is skipped.
+8. New workers get the tools of a disabled plugin, or the coordinator prompt names them. Offers and prompt blocks follow the flag.
+
+Isolation and data
+9. Disabling in one project disables it in another. The flag is per project.
+10. Disabling deletes or rewrites the plugin's stored files for the project. Nothing is touched; enabling again restores the previous behavior.
+11. A failed disable (refused) changes the flag, or an enable of an enabled plugin writes again. Both are no-ops.
+12. The `plugins` snapshot for a project does not tell the UI which plugins are off or locked, so the toggle cannot explain itself. Each entry has `enabled` and `lock` (a reason or null).

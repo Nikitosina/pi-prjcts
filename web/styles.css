@@ -1818,7 +1818,11 @@ pre.code,
   fill: none;
   stroke-width: 3;
 }
-.ctx-ring .track {
+.ctx-ring .switch input:disabled + .track {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.track {
   stroke: color-mix(in srgb, var(--faint) 45%, transparent);
 }
 .ctx-ring[data-state="unknown"] .track {
@@ -2488,7 +2492,8 @@ dialog:focus-visible {
 .switch input[type="checkbox"] {
   accent-color: var(--accent);
 }
-.auto-card .switch input {
+.auto-card .switch input,
+.plugin-head .switch input {
   position: absolute;
   opacity: 0;
   width: 1px;

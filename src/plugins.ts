@@ -8,6 +8,7 @@ import type { Conversation, Tx } from "@earendil-works/pi-durable";
 import * as typebox from "typebox";
 import * as value from "typebox/value";
 import { githubPrProvider } from "./github-prs.ts";
+import { createPluginGate, disabledMessage } from "./plugin-gate.ts";
 import { clip, createListCache, RateLimitedError } from "./pr-cache.ts";
 import type {
   CoordinatorToolsProvider,
@@ -75,17 +76,81 @@ usePluginPromptBlocks(() =>
     const tools = item.capabilities.coordinatorTools,
       prompt = tools?.prompt;
     if (!tools || !prompt) return [];
+    const plugin = item.plugin;
     return [
       {
         id: `plugin:${item.plugin}`,
         name: prompt.name,
         text: prompt.text,
-        grant: { label: prompt.name, on: (project: Project) => tools.applies(project) && (prompt.on?.(project) ?? true) },
+        grant: {
+          label: prompt.name,
+          on: (project: Project) => !disabledIn(project, plugin) && tools.applies(project) && (prompt.on?.(project) ?? true),
+        },
       },
     ];
   }),
 );
+const disabledIn = (project: Pick<Project, "disabledPlugins">, plugin: string) => project.disabledPlugins?.includes(plugin) ?? false;
+/** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
+const gate = createPluginGate((projectId, plugin) => {
+  try {
+    return disabledIn(loadProject(projectId), plugin);
+  } catch {
+    return false;
+  }
+});
+const loadedName = (name: string) => loaded.some((item) => item.plugin === name) || builtins().some((item) => item.plugin === name);
+
+/** Why the project cannot turn the plugin off whatever else happens, or null. */
+function requiredBy(project: Project, name: string): string | null {
+  const provider = project.workspaceAuthorization?.provider;
+  const item = [...builtins(), ...loaded].find((entry) => entry.plugin === name);
+  if (!item) return null;
+  const claims = [item.capabilities.workspace?.id, item.capabilities.vcs?.kind, item.capabilities.merge?.kind];
+  if (provider && (provider === name || claims.includes(provider)))
+    return "required by this project's checkout (its workspace grant uses this plugin)";
+  if (name === "github" && project.githubAuthorization?.length) return "required by this project's GitHub authorizations";
+  return null;
+}
+
 export const plugins = {
+  gate,
+  /** One row per plugin for a project: whether it is on, and why it cannot be turned off now (null when it can). */
+  forProject: (project: Project): Array<PluginStatus & { enabled: boolean; lock: string | null }> =>
+    statuses.map((status) => {
+      const name = status.name;
+      const enabled = !(name && disabledIn(project, name));
+      const busy = name ? gate.active(project.id, name) : 0;
+      const lock =
+        name && status.state === "loaded" ? (requiredBy(project, name) ?? (busy ? `active work (${busy} running)` : null)) : null;
+      return { ...status, enabled, lock };
+    }),
+  /**
+   * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
+   * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
+   */
+  setEnabled: (project: Project, name: string, enabled: boolean): Project => {
+    if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
+    const off = new Set(project.disabledPlugins ?? []);
+    if (enabled === !off.has(name)) return project;
+    if (enabled) off.delete(name);
+    else {
+      const required = requiredBy(project, name);
+      if (required) throw new Error(`Cannot disable "${name}": ${required}`);
+      const busy = gate.active(project.id, name);
+      if (busy)
+        throw new Error(`Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.`);
+      const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
+      try {
+        lifecycle?.pause?.(project.id)();
+      } catch (error) {
+        throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
+      }
+      off.add(name);
+    }
+    const { disabledPlugins: _, ...rest } = project;
+    return off.size ? { ...rest, disabledPlugins: [...off].sort() } : rest;
+  },
   vcsProviders: (): VcsProvider[] => each((caps) => caps.vcs),
   vcsProvider: (kind: string): VcsProvider | undefined => each((caps) => caps.vcs).find((item) => item.kind === kind),
   workspaceProviders: (): WorkspaceProvider[] => each((caps) => caps.workspace),
@@ -94,13 +159,35 @@ export const plugins = {
   prProvider: (id: string): PrProvider | undefined => each((caps) => caps.prs).find((item) => item.id === id),
   followProviders: (): FollowProvider[] => each((caps) => caps.follow),
   mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
-  coordinatorTools: (): CoordinatorToolsProvider[] => each((caps) => caps.coordinatorTools),
-  /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. */
+  coordinatorTools: (): CoordinatorToolsProvider[] => plugins.coordinatorToolSources().map((source) => source.provider),
+  /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. Their calls run through the project gate. */
   coordinatorToolSources: (): Array<{ provider: CoordinatorToolsProvider; builtIn: boolean }> =>
-    [...builtins(), ...loaded].flatMap((item) =>
-      item.capabilities.coordinatorTools ? [{ provider: item.capabilities.coordinatorTools, builtIn: item.builtIn === true }] : [],
-    ),
-  workerTools: (): WorkerToolsProvider[] => each((caps) => caps.workerTools),
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.coordinatorTools;
+      if (!provider) return [];
+      const guarded: CoordinatorToolsProvider = {
+        ...provider,
+        applies: (project) => !disabledIn(project, item.plugin) && provider.applies(project),
+        create: (input) => {
+          const made = provider.create(input);
+          return { ...made, tools: gate.tools(input.projectId, item.plugin, made.tools) };
+        },
+      };
+      return [{ provider: guarded, builtIn: item.builtIn === true }];
+    }),
+  /** Worker tool providers: offered only while the project has the plugin on; tools a thread already froze stop at their next call after a disable. */
+  workerTools: (): WorkerToolsProvider[] =>
+    [...builtins(), ...loaded].flatMap((item) => {
+      const provider = item.capabilities.workerTools;
+      if (!provider) return [];
+      return [
+        {
+          ...provider,
+          offered: (projectId: string) => !gate.isOff(projectId, item.plugin) && provider.offered(projectId),
+          create: (input) => gate.tools(input.projectId, item.plugin, provider.create(input)),
+        },
+      ];
+    }),
   /** Runs every plugin's lifecycle pause; one refusal resumes the others and refuses the change. Returns the combined resume. */
   pauseLifecycle: (projectId: string): (() => void) => {
     const resumes: Array<() => void> = [];
@@ -122,10 +209,18 @@ export const plugins = {
     return resumeAll;
   },
   /** Cleanup routine steps of loaded plugins, by plugin name. */
-  cleanupSteps: () =>
-    loaded.flatMap((item) => (item.capabilities.cleanup ? [{ plugin: item.plugin, run: item.capabilities.cleanup }] : [])),
-  usageSources: () =>
-    loaded.flatMap((item) => (item.capabilities.usage ? [{ plugin: item.plugin, measure: item.capabilities.usage }] : [])),
+  cleanupSteps: (projectId: string) =>
+    loaded.flatMap((item) => {
+      const run = item.capabilities.cleanup;
+      if (!run || gate.isOff(projectId, item.plugin)) return [];
+      return [{ plugin: item.plugin, run: ((input) => gate.run(projectId, item.plugin, () => run(input))) as typeof run }];
+    }),
+  usageSources: (projectId: string) =>
+    loaded.flatMap((item) => {
+      const measure = item.capabilities.usage;
+      if (!measure || gate.isOff(projectId, item.plugin)) return [];
+      return [{ plugin: item.plugin, measure: ((input) => gate.run(projectId, item.plugin, () => measure(input))) as typeof measure }];
+    }),
   close: async (): Promise<void> => {
     await Promise.allSettled(each((caps) => caps.lifecycle).map((hooks) => hooks.close?.()));
   },
