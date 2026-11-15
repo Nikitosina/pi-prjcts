@@ -208,6 +208,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "memory-undo": allow("Undo one memory write (revision of the write to undo)."),
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
   "chat-dequeue": exclude("Withdrawing queued owner input is the owner's composer action."),
+  "chat-dequeue-ack": exclude("Part of the owner's composer restore."),
   "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
 };
 

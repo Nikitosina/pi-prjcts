@@ -14,6 +14,10 @@ request id. Both queues deliver one message at a time (Pi's default). Script: `c
 - Q8 Several queued follow-ups run in one turn (queue mode "all") instead of one turn each; same for steering.
 - Q9 Dequeue by request ids touches inputs it was not asked about, or another chat's queue.
 - Q10 An archived or deleted project, or an unknown chat, can be dequeued.
+- Q11 Alt+Up withdraws an internal input (a worker report or an approval result queued for the Coordinator) that the owner never typed. Only inputs in the owner's ledger are the owner's to withdraw; anything else stays queued and is answered.
+- Q12 The response with the restored text is lost (page closed, network drop) after the host withdrew it: the owner's text is gone. A withdrawn input stays in the ledger as withdrawn until the page acknowledges it, and the next `chat-dequeue` returns it again.
+- Q13 A restored message loses its attachments (or its Telegram origin), so resubmitting it sends a different message.
+- Q14 The page sends `delivery` only while its own copy of the chat says "running"; a turn that started a moment ago gets the message queued as a plain follow-up instead of steering. The page always sends the intended mode and the host decides.
 
 Browser keys (scripts/chat-input-keys-e2e.mjs)
 11. While a turn runs, Enter sends a steering message and Alt+Enter a follow-up; either sends the wrong mode or the pending list mixes them. The pending list groups "Steering:" lines before "Follow-up:" lines.

@@ -80,8 +80,8 @@ await kit.run(async () => {
     restored,
   );
   check(
-    "12 the pending list and the host ledger are empty",
-    (await pending()).length === 0 && !(await rpc({ action: "show", id })).jobs.some((job) => job.state === "queued"),
+    "12 the pending list and the host ledger are empty (the page acknowledged the restore)",
+    (await pending()).length === 0 && !(await rpc({ action: "show", id })).jobs.some((job) => ["queued", "withdrawn"].includes(job.state)),
   );
   await page.shot("02-restored", { force: true });
 
@@ -107,5 +107,7 @@ await kit.run(async () => {
     "idle Alt+Enter sent",
   );
   const after = (await rpc({ action: "show", id })).jobs.filter((job) => job.text === "plain after idle");
-  check("14 idle Alt+Enter is a plain message", after.length === 1 && !after[0].delivery, after);
+  // The page always sends the key's mode; the host runs an idle chat's message as a plain turn (Q14), so the ledger shows the mode and no queue.
+  check("14 idle Alt+Enter is a plain message: sent once, never queued", after.length === 1 && after[0].state !== "queued", after);
+  check("14 the page sent the key's mode without guessing the chat state", after[0].delivery === "followUp", after);
 });

@@ -252,6 +252,8 @@ export const Job = Type.Object(
       Type.Literal("done"),
       Type.Literal("failed"),
       Type.Literal("interrupted"),
+      /** Taken back by Alt+Up; the text stays until the page acknowledges the restore (`chat-dequeue-ack`), so a lost response loses nothing. */
+      Type.Literal("withdrawn"),
     ]),
     error: Type.Union([Type.String(), Type.Null()]),
     /** Coordinator chat the message went to; absent on older jobs and for Main. */
@@ -260,6 +262,8 @@ export const Job = Type.Object(
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
     /** How the message joins a running turn (Pi: Enter steers, Alt+Enter follows up); absent on older jobs. */
     delivery: Type.Optional(Delivery),
+    /** Where the message was typed, kept so a restored message is sent again as the same kind. */
+    origin: messageOrigin,
     /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
     settledAt: Type.Optional(Type.Number()),
   },
@@ -1208,6 +1212,14 @@ export const Request = Type.Union([
       projectId: Id,
       chatId: Type.Optional(ChatId),
       requestIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("chat-dequeue-ack"),
+      projectId: Id,
+      requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }),
     },
     { additionalProperties: false },
   ),

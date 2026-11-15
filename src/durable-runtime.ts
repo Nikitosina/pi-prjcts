@@ -427,10 +427,11 @@ export type DurableProjectRuntime = {
   /** Aborts the chat's running Coordinator turn like the other Stops: queued inputs withdrawn, history kept, background work left running. */
   chatStop(chatId?: string): Promise<{ stopped: boolean; chatId: string }>;
   /**
-   * Pi's Alt+Up: withdraws inputs of a chat that no turn has taken yet (all of them, or the given request ids) and says which request ids it
-   * withdrew. Atomic per input: one already placed in a turn is reported as kept and still answered once.
+   * Pi's Alt+Up: withdraws the given request ids of a chat that no turn has taken yet and says which it withdrew. Only the listed ids are touched:
+   * the caller names the owner's inputs, so internal inputs (worker reports, approval results) stay queued. Atomic per input: one already placed
+   * in a turn is reported as kept and still answered once.
    */
-  dequeue(chatId: string | undefined, requestIds?: readonly string[]): Promise<{ withdrawn: string[]; kept: string[]; chatId: string }>;
+  dequeue(chatId: string | undefined, requestIds: readonly string[]): Promise<{ withdrawn: string[]; kept: string[]; chatId: string }>;
   /**
    * "/reload" for one idle chat: rebuilds the skill catalog from disk and applies it, with the system prompt and tool bindings, to this chat's next turn.
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
@@ -2751,7 +2752,8 @@ export async function openDurableProject(input: {
           (item) =>
             item.type === "input" &&
             item.conversationId === conversation.id &&
-            (!requestIds || (item.requestId !== undefined && requestIds.includes(item.requestId))),
+            item.requestId !== undefined &&
+            requestIds.includes(item.requestId),
         );
         const withdrawn: string[] = [];
         const kept = new Set(requestIds);

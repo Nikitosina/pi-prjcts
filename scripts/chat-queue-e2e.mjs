@@ -5,9 +5,18 @@ let release;
 const hold = new Promise((ok) => (release = ok));
 const seen = [];
 const kit = await createKit("chat-queue", {
-  handler: ({ role, user }) => {
+  handler: ({ role, user, results }) => {
     if (role !== "coordinator") return undefined;
     seen.push(user);
+    if (user.includes("SPAWN-W") && !results.length)
+      return kit.call("agents", {
+        action: "spawn",
+        role: "worker",
+        title: "Q11-WORKER",
+        brief: "Q11-TASK answer at once",
+        acceptance: ["done"],
+        requestId: crypto.randomUUID(),
+      });
     if (user.includes("HOLD"))
       return (async function* () {
         await hold;
@@ -36,8 +45,22 @@ await kit.run(async () => {
     /chat/i.test((await rejects({ action: "chat-dequeue", projectId: id, chatId: crypto.randomUUID() })) ?? ""),
   );
 
+  // A worker that finished once; sending to it again while the Coordinator is busy queues its report as an internal input (Q11).
+  await send("SPAWN-W now");
+  const worker = await eventually(
+    async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === "Q11-WORKER" && !agent.working),
+    "worker finished",
+  );
+  await eventually(async () => !(await busy()), "idle after the worker's first report");
   await send("HOLD first turn");
   await eventually(busy, "main is running");
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: crypto.randomUUID(), text: "Q11-AGAIN" });
+  await eventually(
+    async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.id === worker.id && !agent.working),
+    "worker answered again",
+  );
+  await kit.delay(1000); // the report is queued behind the held turn
+  const reportsBefore = seen.filter((user) => user.startsWith("[worker ")).length;
   const f1 = await send("FOLLOW-A one", "followUp"),
     s1 = await send("STEER-A one", "steer"),
     f2 = await send("FOLLOW-B two", "followUp");
@@ -63,6 +86,7 @@ await kit.run(async () => {
     some.restored.length === 1 && some.restored[0].id === f2.id && some.restored[0].text === "FOLLOW-B two",
     some,
   );
+  await rpc({ action: "chat-dequeue-ack", projectId: id, requestIds: [f2.id] });
   check(
     "Q9 another chat's queue is untouched",
     (await ledger(other)).some((job) => job.id === otherJob.id),
@@ -74,8 +98,44 @@ await kit.run(async () => {
     all.restored.map((item) => `${item.delivery}:${item.text}`).join("|") === "steer:STEER-A one|followUp:FOLLOW-A one",
     all,
   );
-  check("Q3 withdrawn messages leave the ledger", !(await ledger()).some((job) => job.state === "queued"), await ledger());
+  check(
+    "Q11 Alt+Up never lists an internal input",
+    all.restored.every((item) => /^(STEER|FOLLOW)-/.test(item.text)),
+    all,
+  );
+  check("Q3 withdrawn messages are not queued any more", !(await ledger()).some((job) => job.state === "queued"), await ledger());
+  // Q12: the page never saw the response above; asking again returns the same text, and only an acknowledgement drops it.
+  const again2 = await rpc({ action: "chat-dequeue", projectId: id });
+  check("Q12 an unacknowledged restore is offered again", JSON.stringify(again2.restored) === JSON.stringify(all.restored), again2);
+  await rpc({ action: "chat-dequeue-ack", projectId: id, requestIds: all.restored.map((item) => item.id) });
+  check("Q12 an acknowledged restore leaves the ledger", !(await ledger()).some((job) => ["queued", "withdrawn"].includes(job.state)));
   check("Q6 a second dequeue returns nothing", (await rpc({ action: "chat-dequeue", projectId: id })).restored.length === 0);
+
+  // Q13: a queued Telegram-origin message with an upload comes back with both, so sending it again is the same message.
+  const web = new URL((await rpc({ action: "web" })).url);
+  const uploaded = await (
+    await fetch(`${web.origin}/upload?project=${id}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${web.hash.slice("#token=".length)}`, "x-filename": "notes.txt" },
+      body: "attached text\n",
+    })
+  ).json();
+  const withFile = await rpc({
+    action: "message",
+    id,
+    text: "FOLLOW-F with a file",
+    requestId: crypto.randomUUID(),
+    delivery: "followUp",
+    origin: "telegram",
+    attachments: [uploaded.data.id],
+  });
+  const back = (await rpc({ action: "chat-dequeue", projectId: id, requestIds: [withFile.id] })).restored[0];
+  check(
+    "Q13 a restored message keeps its attachments and origin",
+    back?.attachments?.join() === uploaded.data.id && back.origin === "telegram",
+    back,
+  );
+  await rpc({ action: "chat-dequeue-ack", projectId: id, requestIds: [withFile.id] });
 
   // Two follow-ups and a steer go through one at a time; the withdrawn ones never reach the model (Q7, Q8).
   const f3 = await send("FOLLOW-C three", "followUp"),
@@ -115,6 +175,11 @@ await kit.run(async () => {
       return /inactive|archived/i.test((await rejects({ action: "chat-dequeue", projectId: id })) ?? "");
     })(),
   );
+  await eventually(
+    async () => (await busy()) === false && seen.filter((user) => user.startsWith("[worker ")).length > reportsBefore,
+    "Q11 the worker's report was not withdrawn: the Coordinator still answered it",
+    80,
+  ).catch((error) => check(error.message, false, seen));
   void f4;
   void s2;
 });

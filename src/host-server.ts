@@ -850,16 +850,53 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "chat-dequeue": {
       const project = loadProject(input.projectId);
       if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
-      const result = await (await durable(input.projectId)).dequeue(input.chatId, input.requestIds);
-      // The ledger is the owner's record of what was typed: withdrawn messages leave it so a restart cannot admit them again.
-      const ledger = jobs(input.projectId).filter((job) => result.withdrawn.includes(job.id));
-      for (const job of ledger) deleteJob(input.projectId, job.id);
+      const owner = await durable(input.projectId),
+        chatKey = input.chatId ?? "main";
+      const mine = () => jobs(input.projectId).filter((job) => (job.chatId ?? "main") === chatKey);
+      // Only the owner's own ledger entries can be taken back; internal inputs (worker reports, approval results) have none and stay queued.
+      const asked = mine().filter((job) => job.state === "queued" && (!input.requestIds || input.requestIds.includes(job.id)));
+      // Marked before the abort: a crash between the two leaves the text recoverable, never lost.
+      for (const job of asked) saveJob(input.projectId, { ...job, state: "withdrawn" });
+      const result = await owner.dequeue(
+        input.chatId,
+        asked.map((job) => job.id),
+      );
+      for (const job of asked) if (!result.withdrawn.includes(job.id)) saveJob(input.projectId, { ...job, state: "queued" });
+      // Withdrawn earlier and never acknowledged: confirm the runtime really dropped it before offering it again.
+      const earlier = mine().filter((job) => job.state === "withdrawn" && !result.withdrawn.includes(job.id));
+      const live = earlier.length
+        ? await owner.ledgerSubmissions(
+            chatKey,
+            earlier.map((job) => job.id),
+          )
+        : [];
+      for (const job of earlier) {
+        const submission = live.find((item) => item.requestId === job.id);
+        if (submission && !(submission.status === "unanswered" && submission.reason === "aborted"))
+          saveJob(input.projectId, { ...job, state: "queued", error: null });
+      }
       const order = (job: import("./state.ts").Job) => (job.delivery === "steer" ? 0 : 1);
-      const restored = ledger
+      const restored = mine()
+        .filter((job) => job.state === "withdrawn" && (!input.requestIds || input.requestIds.includes(job.id)))
         .sort((a, b) => order(a) - order(b) || a.at.localeCompare(b.at))
-        .map((job) => ({ id: job.id, text: job.text, delivery: job.delivery ?? "followUp", attachments: job.attachments ?? [] }));
+        .map((job) => ({
+          id: job.id,
+          text: job.text,
+          delivery: job.delivery ?? "followUp",
+          attachments: job.attachments ?? [],
+          ...(job.origin ? { origin: job.origin } : {}),
+        }));
+      const restoredIds = new Set(restored.map((item) => item.id));
+      const kept = (input.requestIds ?? asked.map((job) => job.id)).filter((id) => !restoredIds.has(id));
       feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
-      return { restored, kept: result.kept };
+      return { restored, kept };
+    }
+    case "chat-dequeue-ack": {
+      const project = loadProject(input.projectId);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      for (const job of jobs(input.projectId))
+        if (job.state === "withdrawn" && input.requestIds.includes(job.id)) deleteJob(input.projectId, job.id);
+      return { acknowledged: input.requestIds };
     }
     case "memory-undo":
       return withProjectLock(input.projectId, async () => {
@@ -1693,6 +1730,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
           ...(input.delivery ? { delivery: input.delivery } : {}),
+          ...(input.origin ? { origin: input.origin } : {}),
         } satisfies import("./state.ts").Job;
       };
       return withDurableOwner({
