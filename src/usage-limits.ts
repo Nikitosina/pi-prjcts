@@ -561,7 +561,8 @@ async function pollEliza(): Promise<PollResult> {
 
 /** Browser e2e only: PI_PROJECTS_LIMITS_FIXTURE=<file> replaces provider endpoints with local data. Cursor always uses its own fake/real poller. */
 const fixture = (provider: LimitProvider): (() => Promise<PollResult>) | undefined =>
-  process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor"
+  // Cursor and Ollama (when its balance URL is set) read the test's fake endpoint instead of the fixture file.
+  process.env.PI_PROJECTS_LIMITS_FIXTURE && provider !== "cursor" && !(provider === "ollama" && process.env.PI_PROJECTS_OLLAMA_BALANCE_URL)
     ? async (): Promise<PollResult> => {
         const data = await readJson(process.env.PI_PROJECTS_LIMITS_FIXTURE!),
           fail = data?.[`${provider}Fail`];

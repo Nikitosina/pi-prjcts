@@ -79,7 +79,7 @@ await kit.run(async () => {
     const low = transcript.low.filter((entry) => !/^(time|button\.primary)\b/.test(entry));
     await page.shot(`01-${dark}`, { force: true });
     // Accent-filled buttons (Send, primary) are the brand color, not a light card.
-    const bright = found.bright.filter((entry) => !/^button\.(send|primary)\b/.test(entry));
+    const bright = found.bright.filter((entry) => !/^button(#[\w-]+)?\.(send|primary)\b/.test(entry));
     check(`T5 ${dark}: no bright surfaces in the inbox`, bright.length === 0, bright.slice(0, 8));
     check(`T6 ${dark}: transcript text contrast >= 4.5`, low.length === 0 && transcript.texts > 5, low.slice(0, 8));
     check(

@@ -1852,7 +1852,23 @@ setLimitsTokenResolver(async (providerId) => {
 setOllamaKeyResolver(async () => {
   limitsModels ??= createModelRuntime();
   const runtime = await limitsModels;
-  for (const id of ["ollama-cloud", "ollama"]) {
+  // Pi has no built-in Ollama provider: the owner's own entry is named ollama-cloud/ollama, or points its models at ollama.com.
+  const onOllama = (id: string) =>
+    runtime.getModels(id).some((model) => {
+      try {
+        return new URL(model.baseUrl).hostname === "ollama.com";
+      } catch {
+        return false;
+      }
+    });
+  for (const id of new Set([
+    "ollama-cloud",
+    "ollama",
+    ...runtime
+      .getProviders()
+      .map((provider) => provider.id)
+      .filter(onOllama),
+  ])) {
     const result = await runtime.getAuth(id).catch(() => undefined);
     if (result?.auth.apiKey) return result.auth.apiKey;
   }
