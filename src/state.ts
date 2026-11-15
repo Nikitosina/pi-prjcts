@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
@@ -237,6 +237,8 @@ export type Project = Static<typeof Project>;
 export const Note = Type.Object({ id: Id, at: text, author: text, text }, { additionalProperties: false });
 export type Note = Static<typeof Note>;
 const messageOrigin = Type.Optional(Type.Literal("telegram"));
+export const Delivery = Type.Union([Type.Literal("steer"), Type.Literal("followUp")]);
+export type Delivery = Static<typeof Delivery>;
 export const Job = Type.Object(
   {
     id: Id,
@@ -254,6 +256,8 @@ export const Job = Type.Object(
     chatId: Type.Optional(Id),
     /** Owner uploads attached to the message. */
     attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+    /** How the message joins a running turn (Pi: Enter steers, Alt+Enter follows up); absent on older jobs. */
+    delivery: Type.Optional(Delivery),
     /** When the host first saw the job settle (done or failed); drives the chat tab's "finished" dot. */
     settledAt: Type.Optional(Type.Number()),
   },
@@ -1192,6 +1196,16 @@ export const Request = Type.Union([
       chatId: Type.Optional(ChatId),
       requestId: Type.Optional(Id),
       attachments: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 10, uniqueItems: true })),
+      delivery: Type.Optional(Delivery),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: Type.Literal("chat-dequeue"),
+      projectId: Id,
+      chatId: Type.Optional(ChatId),
+      requestIds: Type.Optional(Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true })),
     },
     { additionalProperties: false },
   ),
@@ -1543,6 +1557,10 @@ export function jobs(id: string): Job[] {
     .filter((name) => name.endsWith(".json"))
     .map((name) => parse(Job, readJson(join(dir, name))))
     .sort((a, b) => a.at.localeCompare(b.at));
+}
+
+export function deleteJob(id: string, jobId: string): void {
+  rmSync(join(projectDir(id), "inbox", `${jobId}.json`), { force: true });
 }
 
 export function saveJob(id: string, job: Job): void {

@@ -34,6 +34,7 @@ import {
   parse,
   projectDir,
   saveJob,
+  deleteJob,
   saveProject,
   type GithubAuthorization,
   type Request as RequestData,
@@ -845,6 +846,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         );
       feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
       return result;
+    }
+    case "chat-dequeue": {
+      const project = loadProject(input.projectId);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      const result = await (await durable(input.projectId)).dequeue(input.chatId, input.requestIds);
+      // The ledger is the owner's record of what was typed: withdrawn messages leave it so a restart cannot admit them again.
+      const ledger = jobs(input.projectId).filter((job) => result.withdrawn.includes(job.id));
+      for (const job of ledger) deleteJob(input.projectId, job.id);
+      const order = (job: import("./state.ts").Job) => (job.delivery === "steer" ? 0 : 1);
+      const restored = ledger
+        .sort((a, b) => order(a) - order(b) || a.at.localeCompare(b.at))
+        .map((job) => ({ id: job.id, text: job.text, delivery: job.delivery ?? "followUp", attachments: job.attachments ?? [] }));
+      feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
+      return { restored, kept: result.kept };
     }
     case "memory-undo":
       return withProjectLock(input.projectId, async () => {
@@ -1661,6 +1676,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           error: null,
           ...(input.chatId && input.chatId !== "main" ? { chatId: input.chatId } : {}),
           ...(input.attachments ? { attachments: input.attachments } : {}),
+          ...(input.delivery ? { delivery: input.delivery } : {}),
         } satisfies import("./state.ts").Job;
       };
       return withDurableOwner({
@@ -1694,6 +1710,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             requestId: job.id,
             origin: input.origin,
             chatId: input.chatId,
+            steer: input.delivery === "steer",
             title: job.text,
           });
           return job;

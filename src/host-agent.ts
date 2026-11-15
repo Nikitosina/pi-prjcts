@@ -157,7 +157,13 @@ export async function openHostAgent(input: {
       {
         models,
         registry,
-        settings: { stream: { timeoutMs: 300_000 }, retry: { maxRetries: 3 }, followUpMode: "all", afterFailedRun: "continue" },
+        settings: {
+          stream: { timeoutMs: 300_000 },
+          retry: { maxRetries: 3 },
+          steeringMode: "one-at-a-time",
+          followUpMode: "one-at-a-time",
+          afterFailedRun: "continue",
+        },
         onReport: (error) => input.report(errorText(error)),
       },
       context,

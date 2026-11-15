@@ -427,6 +427,11 @@ export type DurableProjectRuntime = {
   /** Aborts the chat's running Coordinator turn like the other Stops: queued inputs withdrawn, history kept, background work left running. */
   chatStop(chatId?: string): Promise<{ stopped: boolean; chatId: string }>;
   /**
+   * Pi's Alt+Up: withdraws inputs of a chat that no turn has taken yet (all of them, or the given request ids) and says which request ids it
+   * withdrew. Atomic per input: one already placed in a turn is reported as kept and still answered once.
+   */
+  dequeue(chatId: string | undefined, requestIds?: readonly string[]): Promise<{ withdrawn: string[]; kept: string[]; chatId: string }>;
+  /**
    * "/reload" for one idle chat: rebuilds the skill catalog from disk and applies it, with the system prompt and tool bindings, to this chat's next turn.
    * History, permissions and every existing worker thread are untouched; nothing changes when the rebuild fails. Refused while the chat is working or compacting.
    */
@@ -1473,12 +1478,13 @@ export async function openDurableProject(input: {
         registry,
         conversationCreated: (tx, conversation) => refreshInstanceInstructions(tx, conversation.id),
         // Reasoning models can stay silent for minutes; Durable checkpoints retries and resends only the failed request.
-        // followUpMode "all": worker reports queued while the coordinator is busy are answered in one turn, not one turn each.
+        // Queued input is delivered one message at a time, as in the Pi coding agent (its steering and follow-up defaults).
         // Compaction is a getter: Durable reads settings on every resolution, so Settings changes apply to the next generation.
         settings: {
           stream: { timeoutMs: 300_000 },
           retry: { maxRetries: 3 },
-          followUpMode: "all",
+          steeringMode: "one-at-a-time",
+          followUpMode: "one-at-a-time",
           afterFailedRun: "continue",
           get compaction() {
             return compactionPolicy(contextSettings, contextSettings?.contextWindow ?? catalogWindow());
@@ -2737,6 +2743,27 @@ export async function openDurableProject(input: {
         }
         await conversation.abort(context);
         return { stopped: running || chat.busy, chatId: chat.id };
+      },
+      dequeue: async (id, requestIds) => {
+        assertOpen();
+        const { conversation, chat } = await resolveChat(id);
+        const queued = (await openedHarness.inspect(context)).submissions.filter(
+          (item) =>
+            item.type === "input" &&
+            item.conversationId === conversation.id &&
+            (!requestIds || (item.requestId !== undefined && requestIds.includes(item.requestId))),
+        );
+        const withdrawn: string[] = [];
+        const kept = new Set(requestIds);
+        for (const item of queued) {
+          if (!item.requestId) continue;
+          const submission = await ownedSubmission(openedHarness, conversation, Number(item.id));
+          if ((await submission.abort(context)) === "aborted") {
+            withdrawn.push(item.requestId);
+            kept.delete(item.requestId);
+          } else kept.add(item.requestId);
+        }
+        return { withdrawn, kept: [...kept].filter((requestId) => !withdrawn.includes(requestId)), chatId: chat.id };
       },
       reset: (id) =>
         admitting(async () => {
