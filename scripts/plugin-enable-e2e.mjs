@@ -1,10 +1,18 @@
 // E2E: per-project plugin enable and disable (failure cases: plugin-enable-failures.md, numbers in check labels). Fake model, private HOME.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createKit } from "./lib/e2e-kit.mjs";
 
-const gated = join(new URL("./fixtures/", import.meta.url).pathname, "gated-plugin");
-const kit = await createKit("plugin-enable", { env: { PI_PROJECTS_PLUGINS: gated } });
+const fixtures = new URL("./fixtures/", import.meta.url).pathname;
+const gated = join(fixtures, "gated-plugin"),
+  fakeVcs = join(fixtures, "fake-vcs-plugin");
+writeFileSync(join(tmpdir(), `plugin-enable-fake-${process.pid}.json`), JSON.stringify({ prs: [] }));
+const kit = await createKit("plugin-enable", {
+  env: { PI_PROJECTS_PLUGINS: `${gated}:${fakeVcs}`, FAKE_PLUGIN_DATA: join(tmpdir(), `plugin-enable-fake-${process.pid}.json`) },
+  handler: ({ role, user, results }) =>
+    role === "coordinator" && user.includes("GATED-CALL") && !results.length ? kit.call("gated_ping", {}) : undefined,
+});
 
 await kit.run(async () => {
   const { check, rpc } = kit;
@@ -39,6 +47,21 @@ await kit.run(async () => {
     "2 disabling the plugin the checkout needs is refused",
     /required by this project's checkout/.test(await refused(() => set(alpha, "github", false))),
   );
+  // 2: the checkout decides, by what the folder really is, before any grant exists and after one is revoked.
+  const third = join(kit.root, "workspace-c");
+  mkdirSync(join(third, ".fakevcs"), { recursive: true });
+  const gamma = await kit.createProject("Gamma", { cwd: third, grant: false });
+  check(
+    "2 a project without a grant: the plugin of its checkout kind is locked",
+    /checkout/.test((await entry(gamma, "fake"))?.lock ?? ""),
+    await entry(gamma, "fake"),
+  );
+  check(
+    "2 the plugin of the checkout kind cannot be disabled without a grant either",
+    /required by this project's checkout/.test(await refused(() => set(gamma, "fake", false))),
+  );
+  check("2 a plugin the checkout does not use can be turned off", (await set(alpha, "fake", false)).enabled === false);
+  await set(alpha, "fake", true);
   check("4 an unknown plugin is refused", /not loaded/.test(await refused(() => set(alpha, "nope", false))));
 
   // 1/3: a held RPC blocks the disable; releasing it allows it.
@@ -50,10 +73,39 @@ await kit.run(async () => {
   await held;
   check("11 enabling an enabled plugin is a no-op", (await set(alpha, "gated", true)).enabled === true);
 
+  // 5: an existing coordinator chat keeps the plugin's registered tool; after a disable the same call is refused at execution (the plugin's own
+  // `extension` registration, not only the offered tool list) and the plugin code does not run.
+  // Read through the other project: the disabled one refuses its RPCs.
+  const counters = async () => call(beta, "counters");
+  await rpc({ action: "message", id: alpha, text: "GATED-CALL one" });
+  await kit.eventually(async () => (await counters()).toolRuns === 1, "tool ran while enabled");
+  await kit.eventually(async () => !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy, "idle");
+  const prsOf = async (id) => (await rpc({ action: "prs", id, refresh: true })).providers.filter((item) => item.provider === "gatedprs");
+  check(
+    "8 the plugin's PR provider serves the project while enabled",
+    (await prsOf(alpha)).length === 1 && (await counters()).listCalls > 0,
+  );
+
   // Disable: RPC and route refuse, the other project is unaffected, data stays.
   const off = await set(alpha, "gated", false);
   check("5 disabled", off.enabled === false && (await entry(alpha, "gated")).enabled === false);
   check("6 an RPC for the disabled project is refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
+  await rpc({ action: "message", id: alpha, text: "GATED-CALL two" });
+  await kit.eventually(
+    async () => !(await rpc({ action: "show", id: alpha })).chats.find((chat) => chat.id === "main")?.busy,
+    "idle again",
+  );
+  check("5 a recorded tool call of an existing chat is refused after the disable", (await counters()).toolRuns === 1, await counters());
+  check(
+    "5 the refusal is the model's tool result",
+    /disabled in this project/.test(kit.toolResult("coordinator", "GATED-CALL two")),
+    kit.toolResult("coordinator", "GATED-CALL two"),
+  );
+  // 7/8: the PR provider no longer serves the disabled project, and none of its methods runs for it.
+  const listed = (await counters()).listCalls;
+  check("8 the PR provider is gone from the disabled project's PR list", (await prsOf(alpha)).length === 0);
+  check("8 the disabled plugin's PR code did not run", (await counters()).listCalls === listed, await counters());
+  check("9 the other project's PR list still has the provider", (await prsOf(beta)).length === 1);
   check("9 the other project still answers", (await call(beta, "ping")).pong === beta && (await entry(beta, "gated")).enabled === true);
   const page = await kit.openPage(await kit.webUrl(alpha));
   await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
