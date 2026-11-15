@@ -1462,7 +1462,10 @@ export async function openDurableProject(input: {
           const scope = authorization?.scopes.find((item) => item.id === record?.scopeId),
             repository = authorization?.repositories.find((item) => item.repositoryId === scope?.repositoryId);
           if (!authorization || !repository) throw new Error("The Job's workspace scope is no longer authorized");
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider)
             throw new Error(`The ${authorization.provider} plugin has no merge capability, so this Job cannot be approved here`);
           assertOpen();
@@ -1756,7 +1759,10 @@ export async function openDurableProject(input: {
           const authorization = loadProject(project.id).workspaceAuthorization,
             repository = authorization?.repositories.find((item) => item.repositoryId === repositoryId);
           if (!authorization || !repository) return { pulled: false, reason: `${repositoryId} has no authorized main checkout` };
-          const provider = authorization.provider === "github" ? githubMergeProvider() : plugins.mergeProvider(authorization.provider);
+          const provider =
+            authorization.provider === "github"
+              ? plugins.gatedMerge(project.id, "github", githubMergeProvider())
+              : plugins.mergeProvider(project.id, authorization.provider);
           if (!provider) return { pulled: false, reason: `the ${authorization.provider} plugin has no merge capability` };
           return pullMainCheckout({ provider, checkout: repository.ownerCheckout, base, pr: String(pr), signal });
         },

@@ -33,5 +33,28 @@ off.add("p1:x");
 await assert.rejects(() => gate.run("p1", "x", async () => "late"), /disabled in this project/);
 assert.equal(gate.active("p1", "x"), 1, "3 only the earlier call is counted");
 void before;
+// 13: a provider's listed methods run through the gate; the others stay the provider's own.
+{
+  const merges = [];
+  const provider = { kind: "k", note: "keep", merge: async (input) => (merges.push(input), "merged"), pull: async () => "pulled" };
+  const wrapped = gate.methods("p9", "m", provider, ["merge", "pull"]);
+  assert.equal(wrapped.kind, "k");
+  assert.equal(wrapped.note, "keep");
+  const held = never();
+  let release;
+  const slow = gate.methods("p9", "m", { merge: () => new Promise((resolve) => (release = resolve)) }, ["merge"]);
+  const inflight = slow.merge();
+  assert.equal(gate.active("p9", "m"), 1);
+  release("done");
+  assert.equal(await inflight, "done");
+  assert.equal(gate.active("p9", "m"), 0);
+  assert.equal(await wrapped.merge({ head: "h" }), "merged");
+  off.add("p9:m");
+  await assert.rejects(() => wrapped.merge({ head: "h2" }), /disabled in this project/);
+  await assert.rejects(() => wrapped.pull(), /disabled in this project/);
+  assert.equal(merges.length, 1);
+  void held;
+}
+
 console.log("plugin-gate-unit passed");
 process.exit(0);

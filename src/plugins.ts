@@ -92,6 +92,8 @@ usePluginPromptBlocks(() =>
 );
 const disabledIn = (project: Pick<Project, "disabledPlugins">, plugin: string) => project.disabledPlugins?.includes(plugin) ?? false;
 /** Every entry of a plugin into a project runs through this gate: a plugin the project turned off refuses, and work in flight is counted. */
+/** Lifecycle pauses taken by a disable: held while the plugin is off, released by the enable. */
+const heldPauses = new Map<string, () => void>();
 const gate = createPluginGate((projectId, plugin) => {
   try {
     return disabledIn(loadProject(projectId), plugin);
@@ -156,8 +158,17 @@ export const plugins = {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
     const off = new Set(project.disabledPlugins ?? []);
     if (enabled === !off.has(name)) return project;
-    if (enabled) off.delete(name);
-    else {
+    const held = `${project.id}\0${name}`;
+    if (enabled) {
+      off.delete(name);
+      const resume = heldPauses.get(held);
+      heldPauses.delete(held);
+      try {
+        resume?.();
+      } catch {
+        /* resuming never blocks the host */
+      }
+    } else {
       const required = requiredBy(project, name);
       if (required) throw new Error(`Cannot disable "${name}": ${required}`);
       const busy = gate.active(project.id, name);
@@ -165,7 +176,8 @@ export const plugins = {
         throw new Error(`Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.`);
       const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
       try {
-        lifecycle?.pause?.(project.id)();
+        const resume = lifecycle?.pause?.(project.id);
+        if (resume) heldPauses.set(held, resume);
       } catch (error) {
         throw new Error(`Cannot disable "${name}": it has active work in this project (${message(error)})`);
       }
@@ -225,7 +237,13 @@ export const plugins = {
         }),
       ];
     }),
-  mergeProvider: (kind: string): MergeProvider | undefined => each((caps) => caps.merge).find((item) => item.kind === kind),
+  /** The merge provider for a checkout kind, its methods counted and refused by the project gate (`plugin` is the provider's plugin). */
+  mergeProvider: (projectId: string, kind: string): MergeProvider | undefined => {
+    const item = [...builtins(), ...loaded].find((entry) => entry.capabilities.merge?.kind === kind);
+    return item?.capabilities.merge ? plugins.gatedMerge(projectId, item.plugin, item.capabilities.merge) : undefined;
+  },
+  gatedMerge: (projectId: string, plugin: string, provider: MergeProvider): MergeProvider =>
+    gate.methods(projectId, plugin, provider, ["inspect", "markReady", "merge", "enableAutoMerge", "pullMain"]),
   coordinatorTools: (): CoordinatorToolsProvider[] => plugins.coordinatorToolSources().map((source) => source.provider),
   /** Coordinator tool providers with their origin: a built-in plugin's tools keep their built-in tool group. Their calls run through the project gate. */
   coordinatorToolSources: (): Array<{ provider: CoordinatorToolsProvider; builtIn: boolean }> =>

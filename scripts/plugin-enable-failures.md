@@ -19,3 +19,10 @@ Isolation and data
 10. Disabling deletes or rewrites the plugin's stored files for the project. Nothing is touched; enabling again restores the previous behavior.
 11. A failed disable (refused) changes the flag, or an enable of an enabled plugin writes again. Both are no-ops.
 12. The `plugins` snapshot for a project does not tell the UI which plugins are off or locked, so the toggle cannot explain itself. Each entry has `enabled` and `lock` (a reason or null).
+
+Merge, lifecycle and background work (added in the PR53 repair pass, before the code)
+13. A merge call (inspect, markReady, merge, enableAutoMerge, pullMain) of a plugin runs outside the gate: a disable is accepted while an approval merges, and a disabled plugin still merges. Merge providers handed to the approver and to pull-main run each method through the project gate, GitHub's built-in included. Unit: `gate.methods`.
+14. The lifecycle pause taken to check a disable is resumed at once, so the plugin restarts its background work in a project that just turned it off. The pause stays held while the plugin is off and is released only by enabling it again. A plugin whose pause refuses blocks the disable and holds nothing.
+15. A held pause leaks into another project or survives the enable. It is keyed by project and plugin, and the enable releases it once.
+16. A PR monitor or follow tick runs plugin code for a disabled project. The PR and follow providers answer through the gate (a disabled plugin's list and observe never run); the fixture counts calls across a tick interval.
+17. Raw VCS access (`findVcsRoot`, `plugins.vcsProviders()`) is path-based, not per project; a project whose folder is a checkout of the plugin's kind cannot disable it (case 2), so a disabled VCS plugin is never one a project's checkout uses. A project with no such checkout never reaches it.

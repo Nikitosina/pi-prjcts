@@ -28,6 +28,17 @@ export function createPluginGate(isDisabled: (projectId: string, plugin: string)
         else running.delete(id);
       }
     },
+    /** A copy of `provider` whose listed async methods run through the gate; everything else stays the provider's own. */
+    methods<T extends object>(projectId: string, plugin: string, provider: T, names: ReadonlyArray<keyof T & string>): T {
+      const made = Object.create(provider) as Record<string, unknown>;
+      for (const name of names) {
+        const method = (provider as Record<string, unknown>)[name];
+        if (typeof method === "function")
+          made[name] = (...args: unknown[]) =>
+            gate.run(projectId, plugin, () => (method as (...a: unknown[]) => unknown).apply(provider, args));
+      }
+      return made as T;
+    },
     /** The same tools whose `execute` runs through the gate, so a thread that already holds them stops at once after a disable. */
     tools<T extends Executable>(projectId: string, plugin: string, tools: T[]): T[] {
       return tools.map((tool) => ({
