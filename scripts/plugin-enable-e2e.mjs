@@ -9,7 +9,11 @@ const gated = join(fixtures, "gated-plugin"),
   fakeVcs = join(fixtures, "fake-vcs-plugin");
 writeFileSync(join(tmpdir(), `plugin-enable-fake-${process.pid}.json`), JSON.stringify({ prs: [] }));
 const kit = await createKit("plugin-enable", {
-  env: { PI_PROJECTS_PLUGINS: `${gated}:${fakeVcs}`, FAKE_PLUGIN_DATA: join(tmpdir(), `plugin-enable-fake-${process.pid}.json`) },
+  env: {
+    PI_PROJECTS_FOLLOW_TICK_MS: "200",
+    PI_PROJECTS_PLUGINS: `${gated}:${fakeVcs}`,
+    FAKE_PLUGIN_DATA: join(tmpdir(), `plugin-enable-fake-${process.pid}.json`),
+  },
   handler: ({ role, user, results }) =>
     role === "coordinator" && user.includes("GATED-CALL") && !results.length ? kit.call("gated_ping", {}) : undefined,
 });
@@ -105,6 +109,12 @@ await kit.run(async () => {
   const listed = (await counters()).listCalls;
   check("8 the PR provider is gone from the disabled project's PR list", (await prsOf(alpha)).length === 0);
   check("8 the disabled plugin's PR code did not run", (await counters()).listCalls === listed, await counters());
+  // 16: the PR monitor and follow ticks (every 200 ms here) run none of the disabled plugin's code.
+  await kit.delay(1000);
+  check("16 a PR monitor tick ran no disabled plugin code", (await counters()).listCalls === listed, await counters());
+  // 14/15: the lifecycle pause taken for the disable stays held for this project only, and the enable releases it.
+  check("14 the plugin's pause stays held while it is off", (await counters()).paused.includes(alpha), await counters());
+  check("15 the pause is only this project's", !(await counters()).paused.includes(beta), await counters());
   check("9 the other project's PR list still has the provider", (await prsOf(beta)).length === 1);
   check("9 the other project still answers", (await call(beta, "ping")).pong === beta && (await entry(beta, "gated")).enabled === true);
   const page = await kit.openPage(await kit.webUrl(alpha));
@@ -123,6 +133,7 @@ await kit.run(async () => {
 
   // 10: re-enable restores behavior.
   await set(alpha, "gated", true);
+  check("15 the enable released the pause once", !(await counters()).paused.includes(alpha), await counters());
   check("10 re-enabled", (await call(alpha, "ping")).pong === alpha && (await route(alpha)) === `200:data:${alpha}`);
   // The Settings → Plugins switches: a locked plugin is on and disabled with its reason; a busy one refuses with a message.
   const js = JSON.stringify;

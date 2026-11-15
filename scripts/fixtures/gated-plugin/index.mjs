@@ -1,6 +1,7 @@
 // A plugin with a quick RPC, a held RPC, a web route and a cleanup step, for per-project enable/disable (plugin-enable-e2e).
 const waiting = [];
 export const calls = [];
+const paused = new Set();
 let toolRuns = 0,
   listCalls = 0;
 export default {
@@ -48,10 +49,11 @@ export default {
         hold: async () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true })),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
         waiting: async () => ({ count: waiting.length }),
-        counters: async () => ({ toolRuns, listCalls }),
+        counters: async () => ({ toolRuns, listCalls, paused: [...paused] }),
       },
       rpcPolicy: { ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
       web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
+      lifecycle: { pause: (projectId) => (paused.add(projectId), () => paused.delete(projectId)) },
       cleanup: async ({ projectId }) => (calls.push(projectId), ""),
     });
     api.stateDir;
