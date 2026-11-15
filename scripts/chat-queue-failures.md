@@ -14,3 +14,9 @@ request id. Both queues deliver one message at a time (Pi's default). Script: `c
 - Q8 Several queued follow-ups run in one turn (queue mode "all") instead of one turn each; same for steering.
 - Q9 Dequeue by request ids touches inputs it was not asked about, or another chat's queue.
 - Q10 An archived or deleted project, or an unknown chat, can be dequeued.
+
+Browser keys (scripts/chat-input-keys-e2e.mjs)
+11. While a turn runs, Enter sends a steering message and Alt+Enter a follow-up; either sends the wrong mode or the pending list mixes them. The pending list groups "Steering:" lines before "Follow-up:" lines.
+12. Alt+Up replaces the draft with the queued text, or loses queued text when the draft is not empty. All queued messages (steering first) return to the editor, followed by the draft; the host ledger is empty afterwards.
+13. Touch users have no keys: the follow-up and edit-queued buttons are visible while a turn runs and hidden when it is idle.
+14. A turn that has not started (idle chat) sends Alt+Enter as a plain message (no delivery) and restores nothing.
