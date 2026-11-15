@@ -2605,12 +2605,15 @@ const journeys = {
     );
     await page.navigate(run.webUrl);
     await page.waitFor(`document.body.dataset.ready === "1" && !!document.querySelector('#tree [data-chat="main"]')`, "UI ready on Main");
-    await page.waitFor(`document.querySelectorAll('#plugin-cards .plugin-row').length >= ${mine.length}`, "Plugins section");
+    await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+    await page.waitFor(`document.querySelector('#settings').open`, "settings open");
+    await page.evaluate(`document.querySelector('#settings nav [data-section="plugins"]').click()`);
+    await page.waitFor(`document.querySelectorAll('#settings .plugin-row').length >= ${mine.length}`, "Plugins section");
     record("entry", `opened ${new URL(run.webUrl).origin}/; Main of "${PROJECT_NAME}" is selected`);
-    await page.evaluate(`document.querySelector('#plugin-cards').scrollIntoView()`);
+    await page.evaluate(`document.querySelector('#settings .plugin-card').scrollIntoView()`);
     await page.shot(dir, "01-plugins");
     const rows = await page.evaluate(
-      `[...document.querySelectorAll('#plugin-cards .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
+      `[...document.querySelectorAll('#settings .plugin-row')].map((row) => ({ name: row.dataset.plugin, state: row.dataset.state, source: row.title, text: row.innerText, error: row.querySelector('.plugin-error')?.textContent ?? null }))`,
     );
     writeFileSync(join(dir, "plugins-dom.json"), JSON.stringify(rows, null, 2));
     // A long error is clipped with "…": the shown text must be the error itself or its first 100 characters at least.

@@ -155,6 +155,7 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "pr-watch": allow("Watch or unwatch a pull request."),
   "pr-hide": allow("Hide or show a pull request."),
   plugins: allow("Loaded plugins."),
+  "project-plugin": exclude("Turning a plugin on or off for a project is the owner's decision in Project settings → Plugins."),
   plugin: allow("Call a plugin method; methods the plugin does not declare as reads or safe writes need the owner's approval."),
   "work-submit": exclude("Worker-scoped admission path; the Host agent sends with message."),
   notes: allow("A project's notes."),

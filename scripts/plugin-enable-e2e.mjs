@@ -1,0 +1,118 @@
+// E2E: per-project plugin enable and disable (failure cases: plugin-enable-failures.md, numbers in check labels). Fake model, private HOME.
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { createKit } from "./lib/e2e-kit.mjs";
+
+const gated = join(new URL("./fixtures/", import.meta.url).pathname, "gated-plugin");
+const kit = await createKit("plugin-enable", { env: { PI_PROJECTS_PLUGINS: gated } });
+
+await kit.run(async () => {
+  const { check, rpc } = kit;
+  kit.initRepo();
+  const second = join(kit.root, "workspace-b");
+  mkdirSync(second);
+  kit.initRepo(second);
+  const alpha = await kit.createProject("Alpha");
+  const beta = await kit.createProject("Beta", { cwd: second });
+  const entry = async (id, name) => (await rpc({ action: "plugins", id })).plugins.find((plugin) => plugin.name === name);
+  const set = (id, plugin, enabled) => rpc({ action: "project-plugin", id, plugin, enabled });
+  const call = (id, method) => rpc({ action: "plugin", plugin: "gated", method, id });
+  const refused = async (work) => {
+    try {
+      await work();
+      return "";
+    } catch (error) {
+      return error.message;
+    }
+  };
+
+  check(
+    "12 the snapshot says enabled and not locked",
+    (await entry(alpha, "gated"))?.enabled === true && (await entry(alpha, "gated")).lock === null,
+  );
+  check(
+    "12 the github plugin is locked by the checkout",
+    /checkout/.test((await entry(alpha, "github"))?.lock ?? ""),
+    await entry(alpha, "github"),
+  );
+  check(
+    "2 disabling the plugin the checkout needs is refused",
+    /required by this project's checkout/.test(await refused(() => set(alpha, "github", false))),
+  );
+  check("4 an unknown plugin is refused", /not loaded/.test(await refused(() => set(alpha, "nope", false))));
+
+  // 1/3: a held RPC blocks the disable; releasing it allows it.
+  const held = call(alpha, "hold");
+  await kit.eventually(async () => (await call(alpha, "waiting")).count === 1, "hold did not start");
+  check("1 disable is refused while an RPC runs", /active work/.test(await refused(() => set(alpha, "gated", false))));
+  check("1 the refusal changed nothing", (await entry(alpha, "gated")).enabled === true && (await call(alpha, "ping")).pong === alpha);
+  await call(alpha, "release");
+  await held;
+  check("11 enabling an enabled plugin is a no-op", (await set(alpha, "gated", true)).enabled === true);
+
+  // Disable: RPC and route refuse, the other project is unaffected, data stays.
+  const off = await set(alpha, "gated", false);
+  check("5 disabled", off.enabled === false && (await entry(alpha, "gated")).enabled === false);
+  check("6 an RPC for the disabled project is refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
+  check("9 the other project still answers", (await call(beta, "ping")).pong === beta && (await entry(beta, "gated")).enabled === true);
+  const page = await kit.openPage(await kit.webUrl(alpha));
+  await page.waitFor(`document.body.dataset.ready === "1"`, "inbox ready");
+  const route = (id) =>
+    page.evaluate(
+      `import("/api.js").then((api) => api.authorizedFetch("/plugins/gated/data?project=${id}").then(async (answer) => answer.status + ":" + (await answer.text())))`,
+    );
+  check(
+    "6 the web route refuses the disabled project",
+    (await route(alpha)).startsWith("4") || (await route(alpha)).startsWith("5"),
+    await route(alpha),
+  );
+  check("9 the route answers the other project", (await route(beta)) === `200:data:${beta}`, await route(beta));
+  check("11 a disabled plugin disabled again is a no-op", (await set(alpha, "gated", false)).enabled === false);
+
+  // 10: re-enable restores behavior.
+  await set(alpha, "gated", true);
+  check("10 re-enabled", (await call(alpha, "ping")).pong === alpha && (await route(alpha)) === `200:data:${alpha}`);
+  // The Settings → Plugins switches: a locked plugin is on and disabled with its reason; a busy one refuses with a message.
+  const js = JSON.stringify;
+  const toggle = (name) => `#settings [data-plugin-toggle="${name}"]`;
+  const click = (selector) => page.evaluate(`document.querySelector(${js(selector)}).click()`);
+  await page.evaluate(`document.querySelector('[data-cmd="settings"]').click()`);
+  await page.waitFor(`document.querySelector("#settings").open`, "settings open");
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(`!!document.querySelector(${js(toggle("gated"))})`, "plugin switches");
+  check(
+    "12 the switch of a locked plugin is on, disabled and explained",
+    await page.evaluate(
+      `(() => { const input = document.querySelector(${js(toggle("github"))}); return input.checked && input.disabled && /checkout/.test(input.closest(".plugin-row").querySelector("[data-plugin-lock]")?.textContent ?? ""); })()`,
+    ),
+  );
+  const heldAgain = call(alpha, "hold");
+  await kit.eventually(async () => (await call(alpha, "waiting")).count === 1, "hold did not start");
+  await click(toggle("gated"));
+  await page.waitFor(`/active work/.test(document.body.innerText)`, "refusal shown");
+  check(
+    "1 the busy plugin stays on after the refused click",
+    await page.evaluate(`document.querySelector(${js(toggle("gated"))}).checked`),
+  );
+  await page.shot("01-refused", { force: true });
+  await call(alpha, "release");
+  await heldAgain;
+  // The section showed the lock while the call ran; reopening it reads the state again.
+  await click(`#settings nav [data-section="plugins"]`);
+  await page.waitFor(
+    `document.querySelector(${js(toggle("gated"))}) && !document.querySelector(${js(toggle("gated"))}).disabled`,
+    "switch free again",
+  );
+  await click(toggle("gated"));
+  await page.waitFor(`!document.querySelector(${js(toggle("gated"))}).checked`, "switch off");
+  check(
+    "5 the switch turns the plugin off for this project",
+    (await entry(alpha, "gated")).enabled === false && (await entry(beta, "gated")).enabled === true,
+  );
+  await page.shot("02-off", { force: true });
+  await click(toggle("gated"));
+  await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
+  check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);
+  // The refused route probes of 6 are the only expected HTTP errors.
+  kit.result.httpErrors = kit.result.httpErrors.filter((error) => !(error.url.endsWith("/plugins/gated/data") && error.status === 409));
+});
