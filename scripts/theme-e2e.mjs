@@ -114,6 +114,31 @@ await kit.run(async () => {
   await kit.eventually(async () => (await rpc({ action: "ui-get" })).ui.theme === "midnight", "theme not saved on the host", 100);
   check("T9 a theme picked in Settings applies at once and is saved on the host", true);
   await page.shot("03-settings-midnight", { force: true });
+  // A1: Theme, Animations, Chat display and Status line are four parts of one Appearance page; each keeps its own stored value.
+  check(
+    "A1 Appearance holds Theme, Animations, Chat display and Status line in that order, and the nav has no separate pages for them",
+    await page.evaluate(
+      `JSON.stringify([...document.querySelectorAll('#settings .appearance-part > h2')].map((h) => h.textContent)) === JSON.stringify(["Theme", "Animations", "Chat display", "Status line"]) && !document.querySelector('#settings nav [data-section="theme"], #settings nav [data-section="animations"], #settings nav [data-section="display"], #settings nav [data-section="statusline"]')`,
+    ),
+  );
+  await page.evaluate(`document.querySelector('[data-part="animations"] [data-motion="off"]').click()`);
+  await page.evaluate(`document.querySelector('#show-thinking').click()`);
+  await kit.eventually(
+    async () => {
+      const ui = (await rpc({ action: "ui-get" })).ui;
+      return ui.animations === "off" && ui.showThinking === false && ui.theme === "midnight";
+    },
+    "Appearance values not saved together",
+    100,
+  );
+  check("A1 each part saves its own value on the host: theme midnight, animations off, thinking hidden", true);
+  check(
+    "A2 a link to an old section id still opens Appearance",
+    await page.evaluate(
+      `import("/settings.js").then((settings) => { settings.openSettings("statusline"); return document.querySelector('#settings').dataset.section === "appearance" && !!document.querySelector('[data-part="statusline"]'); })`,
+    ),
+  );
+  await page.shot("04-appearance", { force: true });
   await page.reload();
   await page.waitFor(`document.body.dataset.ready === "1"`, "reloaded after pick");
   check(
