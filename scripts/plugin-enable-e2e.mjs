@@ -173,6 +173,9 @@ await kit.run(async () => {
     (await entry(alpha, "gated")).enabled === false && (await entry(beta, "gated")).enabled === true,
   );
   await page.shot("02-off", { force: true });
+  await page.viewport(390, 844, true);
+  await page.shot("02n-off-narrow-390", { force: true });
+  await page.viewport(1440, 1000);
   await click(toggle("gated"));
   await page.waitFor(`document.querySelector(${js(toggle("gated"))}).checked`, "switch on");
   check("10 the switch turns it back on", (await entry(alpha, "gated")).enabled === true);

@@ -182,6 +182,9 @@ await kit.run(async () => {
     wRows,
   );
   await page.shot("03-worker-pending", { force: true });
+  await page.viewport(390, 844, true);
+  await page.shot("03n-worker-pending-narrow-390", { force: true });
+  await page.viewport(1440, 1000);
 
   // W3/W4: the response can be lost; the withdrawn text is offered again until it is acknowledged; acknowledgments are idempotent and exact.
   const first = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
