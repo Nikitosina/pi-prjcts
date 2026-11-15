@@ -108,7 +108,19 @@ export async function loadHostAgent() {
 
 // ---------------------------------------------------------------------------------------------------------------- focus
 
-const FOCUS_SECTIONS = new Set(["appearance", "theme", "tiers", "hotkeys", "animations", "display", "statusline", "notifications", "remote", "deploy", "providers"]);
+const FOCUS_SECTIONS = new Set([
+  "appearance",
+  "theme",
+  "tiers",
+  "hotkeys",
+  "animations",
+  "display",
+  "statusline",
+  "notifications",
+  "remote",
+  "deploy",
+  "providers",
+]);
 /** `ui_focus { view, projectId?, chatId?, section? }` from the agent: move the page, say where in one line. Settings never open on
  * their own: the owner gets a toast and opens them with its button. */
 export function followFocus(focus) {
@@ -373,20 +385,25 @@ settingsBox.addEventListener("click", (event) => {
 
 // ---------------------------------------------------------------------------------------------------------------- composer
 
+// Pi's keys: Enter steers a working agent, Alt+Enter queues a follow-up.
+let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
+    nextDelivery = event.altKey ? "followUp" : "steer";
     form.requestSubmit();
   }
 });
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const delivery = nextDelivery;
+  nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !available || form.dataset.sending === "1") return;
   form.dataset.sending = "1";
   input.value = "";
   try {
-    await call("host-agent-send", { requestId: uuid(), text });
+    await call("host-agent-send", { requestId: uuid(), text, delivery });
     error = "";
     await loadHostAgent();
   } catch (reason) {

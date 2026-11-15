@@ -46,6 +46,7 @@
           <div id="feed" role="log" aria-live="polite" aria-relevant="additions"></div>
           <div id="dock">
             <div id="questions" aria-label="Questions waiting"></div>
+            <div id="pending" aria-label="Queued messages" hidden></div>
             <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
             <form id="composer" autocomplete="off">
               <span class="glyph" aria-hidden="true">❯</span>
@@ -57,16 +58,22 @@
                 placeholder="Message the coordinator…"
               ></textarea>
               <div class="composer-side">
-                <span class="mode" id="send-mode" hidden></span>
                 <button type="button" id="stop-btn" class="ghost-btn small" data-cmd="stop" hidden aria-label="Stop the current turn">
                   Stop <kbd data-hint="stop"></kbd>
                 </button>
-                <button type="submit" class="send" aria-label="Send">↵</button>
+                <button type="button" id="dequeue-btn" class="ghost-btn small" hidden aria-label="Edit all queued messages">
+                  Edit queued <kbd>⌥↑</kbd>
+                </button>
+                <button type="button" id="followup-btn" class="ghost-btn small" hidden aria-label="Queue as a follow-up after the turn">
+                  Follow-up <kbd>⌥↵</kbd>
+                </button>
+                <button type="submit" class="send" id="send-btn" aria-label="Send">↵</button>
               </div>
             </form>
             <p class="composer-hints" aria-hidden="true">
-              <span><kbd>↵</kbd> send</span><span><kbd>⇧↵</kbd> newline</span><span><kbd data-hint="focus-composer"></kbd> focus</span
-              ><span><kbd data-hint="toggle-steer"></kbd> queue/steer</span>
+              <span><kbd>↵</kbd> send, or steer while working</span><span><kbd>⌥↵</kbd> follow-up</span
+              ><span><kbd>⌥↑</kbd> edit queued</span><span><kbd>⇧↵</kbd> newline</span
+              ><span><kbd data-hint="focus-composer"></kbd> focus</span>
             </p>
           </div>
         </section>

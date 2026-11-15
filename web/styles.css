@@ -1408,12 +1408,32 @@ pre.code,
   align-items: center;
   gap: 6px;
 }
-.mode {
-  font: 11px var(--mono);
-  color: var(--work);
-  padding: 2px 6px;
-  border: 1px solid currentColor;
-  border-radius: 4px;
+/* Pi's pending list above the composer: steering lines, then follow-up lines. */
+#pending {
+  display: grid;
+  gap: 2px;
+  padding: 4px 4px 6px;
+  font: 12px var(--mono);
+  color: var(--muted);
+}
+#pending[hidden] {
+  display: none;
+}
+.pending-row {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.pending-kind {
+  flex: none;
+}
+.pending-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-hint kbd {
+  font-size: 11px;
 }
 .send {
   width: 30px;

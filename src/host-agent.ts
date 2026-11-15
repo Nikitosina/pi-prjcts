@@ -54,7 +54,8 @@ export type HostAgentPrompt = {
 };
 
 export type HostAgent = {
-  send(requestId: string, text: string): Promise<{ accepted: true }>;
+  /** Enter while the agent works steers it; `followUp` (Alt+Enter) waits for the turn to finish. */
+  send(requestId: string, text: string, delivery?: "steer" | "followUp"): Promise<{ accepted: true }>;
   stop(): Promise<{ stopped: boolean }>;
   reset(): Promise<{ ok: true }>;
   history(before?: number): Promise<TranscriptPage>;
@@ -242,13 +243,16 @@ export async function openHostAgent(input: {
     opened.resume();
 
     return {
-      async send(requestId, text) {
+      async send(requestId, text, delivery = "steer") {
         assertOpen();
         const model = effectiveModel(settings);
         if (!model) throw new Error("The Host agent has no model; choose one in its settings");
         if (!known(model)) throw new Error(`The Host agent's model ${model} is not in the model catalog; choose another in its settings`);
         await apply(settings);
-        await root.submit({ type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: "steer" }, context);
+        await root.submit(
+          { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
+          context,
+        );
         return { accepted: true };
       },
       async stop() {

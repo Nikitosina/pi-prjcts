@@ -19,7 +19,7 @@ import {
   requestArchive,
   visibleChats,
 } from "./tree.js";
-import { currentChat, loadChat, stopTurn, toggleSteer } from "./chat.js";
+import { currentChat, loadChat, stopTurn } from "./chat.js";
 import { closeMergeDialog, loadJobs, loadSide, mergeDialogOpen, renderWorker } from "./workers.js";
 import { renderMemoryEntry, renderMemoryList } from "./memory.js";
 import { closeSettings, openSettings, SECTIONS, settingsBack, settingsOpen, showSection } from "./settings.js";
@@ -291,7 +291,6 @@ for (const [id, run] of Object.entries(COMMANDS))
   register(id, run, {
     when: id === "leave-focus" ? () => true : overlays.has(id) ? () => !modal() : outside,
   });
-register("toggle-steer", () => toggleSteer(), { when: outside });
 // Only the chat in the center: not while typing, in the worker or Memory view, or with the Host agent drawer open.
 register("archive-chat", () => requestArchive(state.projectId, state.chatId), {
   when: (event) => outside() && !typing(event.target) && state.focus.kind === "chat" && !drawerOpen(),

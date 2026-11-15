@@ -1797,7 +1797,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "host-agent-history":
       return requireHostAgent().history(input.before);
     case "host-agent-send":
-      return requireHostAgent().send(input.requestId, input.text);
+      return requireHostAgent().send(input.requestId, input.text, input.delivery);
     case "host-agent-stop":
       return requireHostAgent().stop();
     case "host-agent-reset":

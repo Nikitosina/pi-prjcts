@@ -1414,7 +1414,10 @@ export const Request = Type.Union([
     { action: Type.Literal("host-agent-history"), before: Type.Optional(Type.Integer({ minimum: 1 })) },
     { additionalProperties: false },
   ),
-  Type.Object({ action: Type.Literal("host-agent-send"), requestId: Id, text }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-send"), requestId: Id, text, delivery: Type.Optional(Delivery) },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("host-agent-stop") }, { additionalProperties: false }),
   Type.Object({ action: Type.Literal("host-agent-reset") }, { additionalProperties: false }),
   Type.Object(

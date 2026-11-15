@@ -43,10 +43,17 @@ export async function loadChat() {
         // Another chat or project was selected meanwhile: drop this read, but still run the one that selection queued.
         if (stale(gen)) continue;
         state.view = view;
+        const back = stash.get(stashKey());
+        if (back) {
+          stash.delete(stashKey());
+          input.value = joinText(back, input.value);
+          grow();
+        }
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
         renderQuestions();
+        renderPending();
         ensureLive();
       } while (run.again);
     } catch (error) {
@@ -445,8 +452,7 @@ function renderLive() {
   const frame = state.live;
   emit("busy", !!frame?.running);
   document.querySelector("#stop-btn").hidden = !frame?.running;
-  document.querySelector("#send-mode").hidden = !frame?.running;
-  document.querySelector("#send-mode").textContent = state.steer ? "steer" : "queue";
+  paintComposerMode(!!frame?.running);
   const kept = held
     ? `${held.thinkingText && showThinking() ? thinkingHtml(held.thinkingText, "held-thinking") : ""}${held.text ? `<article class="msg agent"><div class="msg-meta"><span class="who">Coordinator</span></div><div class="prose">${markdown(held.text)}</div></article>` : ""}`
     : "";
@@ -534,15 +540,77 @@ function grow() {
   input.style.height = `${Math.min(input.scrollHeight, 240)}px`;
 }
 input.addEventListener("input", grow);
+// Pi's input keys: Enter sends (a running turn is steered), Alt+Enter queues a follow-up, Alt+Up takes every queued message back into the editor.
+let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
-  if (slashKey(event)) return;
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (slashKey(event) || event.isComposing) return;
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    nextDelivery = event.altKey ? "followUp" : "steer";
     form.requestSubmit();
+  } else if (event.key === "ArrowUp" && event.altKey) {
+    event.preventDefault();
+    void restoreQueued();
   }
 });
+document.querySelector("#followup-btn").addEventListener("click", () => {
+  nextDelivery = "followUp";
+  form.requestSubmit();
+});
+document.querySelector("#dequeue-btn").addEventListener("click", () => {
+  void restoreQueued();
+  input.focus();
+});
+const queuedJobs = () => (state.view?.jobs ?? []).filter((job) => job.state === "queued");
+/** The busy composer says what Enter does; the queue buttons only exist while there is something to act on. */
+function paintComposerMode(running) {
+  document.querySelector("#followup-btn").hidden = !running;
+  document.querySelector("#dequeue-btn").hidden = !queuedJobs().length;
+  document.querySelector("#send-btn").setAttribute("aria-label", running ? "Steer the running turn" : "Send");
+}
+/** Pi's pending list: steering first, then follow-up, one line each. */
+function renderPending() {
+  const box = document.querySelector("#pending"),
+    jobs = queuedJobs(),
+    rank = (job) => (job.delivery === "steer" ? 0 : 1);
+  box.hidden = !jobs.length;
+  box.innerHTML = jobs.length
+    ? [...jobs]
+        .sort((a, b) => rank(a) - rank(b))
+        .map(
+          (job) =>
+            `<div class="pending-row" data-pending="${esc(job.id)}"><span class="pending-kind">${job.delivery === "steer" ? "Steering" : "Follow-up"}:</span> <span class="pending-text">${esc(clip(oneLine(job.text), 200))}</span></div>`,
+        )
+        .join("") + `<div class="pending-hint muted small">↳ <kbd>⌥↑</kbd> to edit all queued messages</div>`
+    : "";
+  paintComposerMode(!!state.live?.running);
+}
+const stash = new Map(); // restored text of a chat the owner left before the host answered, shown when they return
+const stashKey = () => `${state.projectId}:${state.chatId ?? "main"}`;
+const joinText = (...parts) => parts.filter((part) => part.trim()).join("\n\n");
+/** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
+async function restoreQueued() {
+  const gen = state.generation,
+    key = stashKey();
+  try {
+    const result = await call("chat-dequeue", { projectId: state.projectId, ...chatArgs() });
+    const restored = result.restored.map((item) => item.text).join("\n\n");
+    if (!result.restored.length) toast(result.kept.length ? "Already delivered; nothing to restore" : "No queued messages to restore");
+    else if (stale(gen)) stash.set(key, joinText(restored, stash.get(key) ?? ""));
+    else {
+      input.value = joinText(restored, input.value);
+      grow();
+      toast(`Restored ${result.restored.length} queued message${result.restored.length > 1 ? "s" : ""} to editor`);
+    }
+    if (!stale(gen)) await loadChat();
+  } catch (error) {
+    fail(error);
+  }
+}
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const delivery = nextDelivery;
+  nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !state.projectId) return;
   const gen = state.generation;
@@ -561,7 +629,8 @@ form.addEventListener("submit", async (event) => {
     return;
   }
   try {
-    await call("message", { id: state.projectId, text, requestId: uuid(), ...chatArgs() });
+    // Idle chats take the message as a plain turn; `delivery` only matters while one is running.
+    await call("message", { id: state.projectId, text, requestId: uuid(), ...(state.live?.running ? { delivery } : {}), ...chatArgs() });
     if (stale(gen)) return;
     await loadChat();
   } catch (error) {
@@ -580,11 +649,6 @@ export async function stopTurn() {
   } catch (error) {
     fail(error);
   }
-}
-export function toggleSteer() {
-  if (!state.live?.running) return false;
-  toast("Steering a running coordinator turn needs a backend request; messages queue for now.");
-  return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------- clicks

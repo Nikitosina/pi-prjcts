@@ -921,7 +921,8 @@ const APPEARANCE_PARTS = [
 ];
 async function appearance(body, alive) {
   body.innerHTML = APPEARANCE_PARTS.map(
-    (part) => `<section class="appearance-part" data-part="${part.id}" aria-labelledby="appearance-${part.id}"><h2 id="appearance-${part.id}">${part.label}</h2><div class="appearance-body"></div></section>`,
+    (part) =>
+      `<section class="appearance-part" data-part="${part.id}" aria-labelledby="appearance-${part.id}"><h2 id="appearance-${part.id}">${part.label}</h2><div class="appearance-body"></div></section>`,
   ).join("");
   await Promise.all(APPEARANCE_PARTS.map((part) => part.render(body.querySelector(`[data-part="${part.id}"] .appearance-body`), alive)));
 }

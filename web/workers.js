@@ -568,24 +568,29 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   };
   // The composer works while the transcript loads: Enter right after opening sends (scripts/worker-chat-ui-failures.md C6).
   const form = root.querySelector(".worker-send"),
-    text = form.querySelector("textarea");
-  if (steer) text.focus();
-  text.addEventListener("keydown", (event) => {
+    text = form?.querySelector("textarea");
+  if (steer) text?.focus();
+  // Pi's keys: Enter steers a working worker, Alt+Enter queues a follow-up (a plain message the worker takes after its turn).
+  let followUp = false;
+  text?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
+      followUp = event.altKey;
       form.requestSubmit();
     }
   });
-  form.addEventListener("submit", async (event) => {
+  form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const value = text.value.trim();
     if (!value) return;
-    const worker = find();
+    const worker = find(),
+      steering = !!worker?.working && !followUp;
+    followUp = false;
     text.value = "";
     try {
-      await call(worker?.working ? "thread-steer" : "thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value });
+      await call(steering ? "thread-steer" : "thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value });
       if (stale(gen)) return;
-      toast(worker?.working ? "Steer sent." : "Sent to the worker.");
+      toast(steering ? "Steer sent." : worker?.working ? "Queued as a follow-up." : "Sent to the worker.");
       void load();
     } catch (error) {
       text.value = value;

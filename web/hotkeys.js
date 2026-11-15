@@ -10,7 +10,6 @@ export const DEFAULTS = {
   palette: "Mod+K",
   settings: "Mod+,",
   stop: "Mod+.",
-  "toggle-steer": "B",
   "archive-chat": "Mod+Shift+E",
   ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`chat-${i + 1}`, String(i + 1)])),
   // Settings sections, active only while the overlay is open.
@@ -39,7 +38,6 @@ export const LABELS = {
   palette: "Search and commands",
   settings: "Settings",
   stop: "Stop the current turn",
-  "toggle-steer": "Queue or steer while busy",
   "archive-chat": "Archive chat",
 };
 
