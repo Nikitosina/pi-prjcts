@@ -24,3 +24,13 @@ Browser keys (scripts/chat-input-keys-e2e.mjs)
 12. Alt+Up replaces the draft with the queued text, or loses queued text when the draft is not empty. All queued messages (steering first) return to the editor, followed by the draft; the host ledger is empty afterwards.
 13. Touch users have no keys: the follow-up and edit-queued buttons are visible while a turn runs and hidden when it is idle.
 14. A turn that has not started (idle chat) sends Alt+Enter as a plain message (no delivery) and restores nothing.
+
+Worker and Host agent queues (scripts/worker-input-keys-e2e.mjs, same protocol as the Coordinator: withdraw, then acknowledge)
+- W1 The worker or the Host agent keeps no list of what the owner sent while it was working, so the owner cannot see what is waiting. Each shows "Steering:" lines before "Follow-up:" lines, one per queued input.
+- W2 Alt+Up in the worker composer or the Host drawer does nothing, or the withdrawn text is still delivered to the agent afterwards (double send). The queued inputs return to the editor and the agent never sees them.
+- W3 The response with the restored text is lost after the withdrawal: the owner's text is gone. The withdrawn input stays recoverable (`thread-dequeue` / `host-agent-dequeue` return it again) until the page acknowledges it.
+- W4 An acknowledgment arrives twice, for an unknown id, or for an input that was never withdrawn: it removes a queued input or fails. Only withdrawn inputs are removed.
+- W5 Alt+Up takes an input the agent already took (placed in its turn): it is restored and also answered. A taken input is reported as kept, answered once, and never restored.
+- W6 A withdrawn follow-up leaves its worker stuck "running": the earlier turn's report defers to a newer message that no longer exists. After the withdrawal the worker's Job settles as it would have without the message.
+- W7 The coordinator's own `agents send` to a worker (no owner ledger entry) can be withdrawn by the owner's Alt+Up. Only the owner's inputs are listed and withdrawn.
+- W8 A message sent to an idle agent (it starts a turn at once) appears in the pending list and can be withdrawn, leaving the Job running with nothing to end it. Only inputs sent while the agent was working are queued.

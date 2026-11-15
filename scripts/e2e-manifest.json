@@ -56,6 +56,8 @@
     "docs/plugins/examples/**": ["plugin-dev-unit", "plugin-panels-e2e"],
     "web/plugins.js": ["plugin-panels-e2e", "vcs-plugins-e2e", "plugin-enable-e2e"],
     "src/plugin-gate.ts": ["plugin-gate-unit", "plugin-enable-e2e"],
+    "src/owner-input-queue.ts": ["owner-input-queue-unit", "worker-input-keys-e2e", "chat-queue-e2e"],
+    "web/queued-input.js": ["worker-input-keys-e2e", "chat-input-keys-e2e"],
     "docs/**": [],
     "*.md": [],
     "src/routine-script.ts": ["routine-script-unit", "routine-script-e2e"],

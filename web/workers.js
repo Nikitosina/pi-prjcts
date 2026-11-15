@@ -5,6 +5,7 @@ import { clip, dur, esc, oneLine, shortModel, tokens } from "./format.js";
 import { emit, fail, on, project, stale, state, toast } from "./state.js";
 import { morph, transcriptClick, transcriptHtml } from "./chat.js";
 import { follower } from "./follow.js";
+import { isAltUp, paintPending, restoreInto } from "./queued-input.js";
 import { hydrateMedia } from "./media.js";
 
 const box = document.querySelector("#workers");
@@ -521,7 +522,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     const look = worker ? lookOf(worker) : null;
     return `<div class="focus-head"><button type="button" class="back" data-cmd="leave-focus" aria-label="Back to chat">← <kbd>Esc</kbd></button><span class="w-role" aria-hidden="true">${ROLE_ICON[worker?.role ?? "worker"] ?? "⚒"}</span><h1>${esc(worker?.title ?? "Worker")}</h1>${look ? `<span class="badge t-${look.tone}">${esc(look.label)}</span>` : ""}<span class="grow"></span>${worker?.working && !nested ? `<button type="button" class="ghost-btn small" data-stop-worker>Stop</button>` : ""}</div>${promptLine(worker)}${worker?.ready ? `<div class="report-card"><b>Ready report</b><p>${esc(worker.ready.summary)}</p>${worker.ready.proof?.length ? `<ul>${worker.ready.proof.map((item) => `<li class="mono small">${esc(item)}</li>`).join("")}</ul>` : ""}</div>` : handbackCard(worker)}`;
   };
-  root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div>${nested ? "" : `<form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`}`;
+  root.innerHTML = `${head()}<div id="worker-feed" class="feed-inner"><p class="loading-line">Loading transcript…</p></div>${nested ? "" : `<div class="pending-box" aria-label="Queued messages" hidden></div><form class="worker-send"><span class="glyph" aria-hidden="true">❯</span><textarea rows="1" aria-label="Message this worker" placeholder="${steer ? "Steer this worker…" : "Message this worker…"}" maxlength="24000"></textarea><button type="submit" class="send" aria-label="Send to worker">↵</button></form>`}`;
   let items = [],
     groups = null;
   // The focus view is reused: this render lives only while its own feed is on the page.
@@ -559,6 +560,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     if (!page || !alive()) return;
     items = page.items;
     groups = page.toolGroups ?? null;
+    paintQueue();
     root.querySelector(".focus-head").outerHTML = head().replace(/<p class="w-prompt"[\s\S]*$|<div class="report-card"[\s\S]*$/, "");
     const line = promptLine(find()),
       old = root.querySelector(".w-prompt");
@@ -566,17 +568,37 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     else if (line) root.querySelector(".focus-head").insertAdjacentHTML("afterend", line);
     paint();
   };
+  const queueBox = root.querySelector(".pending-box");
+  const paintQueue = () => queueBox && paintPending(queueBox, find()?.pending);
+  paintQueue();
   // The composer works while the transcript loads: Enter right after opening sends (scripts/worker-chat-ui-failures.md C6).
   const form = root.querySelector(".worker-send"),
     text = form?.querySelector("textarea");
   if (steer) text?.focus();
   // Pi's keys: Enter steers a working worker, Alt+Enter queues a follow-up (a plain message the worker takes after its turn).
   let followUp = false;
+  // Alt+Up takes every message the worker has not taken yet back into the editor (the same two steps as the Coordinator's composer).
+  const restore = async () => {
+    try {
+      await restoreInto({
+        input: text,
+        toast,
+        grow: () => ((text.style.height = "auto"), (text.style.height = `${Math.min(text.scrollHeight, 240)}px`)),
+        dequeue: () => call("thread-dequeue", { id: state.projectId, threadId: id }),
+        acknowledge: (requestIds) => call("thread-dequeue-ack", { id: state.projectId, threadId: id, requestIds }),
+      });
+    } catch (error) {
+      fail(error);
+    }
+  };
   text?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       followUp = event.altKey;
       form.requestSubmit();
+    } else if (isAltUp(event)) {
+      event.preventDefault();
+      void restore();
     }
   });
   form?.addEventListener("submit", async (event) => {

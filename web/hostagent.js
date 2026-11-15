@@ -6,6 +6,7 @@ import { clip, esc, markdown, oneLine, shortModel } from "./format.js";
 import { emit, fail, inline, on, state, toast } from "./state.js";
 import { mergeGroups, morph, showThinking, thinkingHtml, transcriptClick, transcriptHtml } from "./chat.js";
 import { hydrateMedia } from "./media.js";
+import { isAltUp, paintPending, restoreInto } from "./queued-input.js";
 
 const THINKING = ["off", "low", "medium", "high", "max"];
 const drawer = document.querySelector("#host-agent"),
@@ -14,6 +15,7 @@ const drawer = document.querySelector("#host-agent"),
   settingsBox = drawer.querySelector("#ha-settings"),
   modelChip = drawer.querySelector("#ha-model"),
   form = drawer.querySelector("#ha-composer"),
+  pendingBox = drawer.querySelector("#ha-pending"),
   input = form.querySelector("textarea");
 let items = [],
   groups = null,
@@ -92,6 +94,7 @@ export async function loadHostAgent() {
   paintModel();
   if (!settingsBox.hidden) paintSettings();
   items = history.items ?? [];
+  paintPending(pendingBox, history.inputs);
   // Earlier pages keep the groups they were read with; the newest page brings its own, also for a group both hold.
   groups = mergeGroups(groups, history.toolGroups);
   before = history.before;
@@ -392,8 +395,26 @@ input.addEventListener("keydown", (event) => {
     event.preventDefault();
     nextDelivery = event.altKey ? "followUp" : "steer";
     form.requestSubmit();
+  } else if (isAltUp(event)) {
+    event.preventDefault();
+    void restoreQueued();
   }
 });
+// Alt+Up takes every message the Host agent has not taken yet back into the editor (the same two steps as the Coordinator's composer).
+async function restoreQueued() {
+  try {
+    await restoreInto({
+      input,
+      toast,
+      grow: () => ((input.style.height = "auto"), (input.style.height = `${Math.min(input.scrollHeight, 240)}px`)),
+      dequeue: () => call("host-agent-dequeue"),
+      acknowledge: (requestIds) => call("host-agent-dequeue-ack", { requestIds }),
+    });
+    await loadHostAgent();
+  } catch (error) {
+    fail(error);
+  }
+}
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const delivery = nextDelivery;

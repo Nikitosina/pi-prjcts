@@ -39,6 +39,14 @@ import { busyIn } from "./durable-idle-configure.ts";
 import { DEFAULT_REVIEW_RECHECKS } from "./state.ts";
 import { gluedWordsDiagnostic } from "./glued-words.ts";
 import { queuedInputNote, watchQueuedInput } from "./queued-input.ts";
+import {
+  acknowledgeInputs,
+  pendingInputs,
+  withdrawInputs,
+  type InputPort,
+  type InputStatus,
+  type QueuedInput,
+} from "./owner-input-queue.ts";
 import { BACKGROUND_WAIT_TOOL } from "./worker-environment-tools.ts";
 
 export const FULL_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -192,6 +200,10 @@ export type Agent = {
   sends?: number;
   /** The newest admitted delivery, so reporters can recognize a shared answer without scanning history. */
   latestInput?: { seq: number; requestId: string };
+  /** What the owner sent while this agent was working, until a turn takes it or the page acknowledges a withdrawal (`owner-input-queue.ts`). */
+  inputs?: Record<string, { text: string; delivery: "steer" | "followUp"; at: number; state: "queued" | "withdrawn"; seq: number }>;
+  /** `sends` numbers of inputs the owner took back: they no longer count as a newer message that keeps the Job running. */
+  withdrawnSeqs?: number[];
   /** Quota recovery in progress: the next automatic retry, and the model moves already made. */
   quota: { attempts: number; retryAt: number; lastError: string } | null;
   modelMoves: ModelMove[];
@@ -286,6 +298,11 @@ export const sharedHandoff = (state: Readonly<JobsState>, chat: ConversationId, 
       state.jobs[agent.jobId]?.workspace?.kind === "shared",
   );
 const isLive = (status: JobStatus) => status === "running";
+/** A message newer than `seq` still counts: one the owner withdrew never will be answered, so it does not keep an earlier turn's report from settling the Job. */
+const newerSend = (agent: Readonly<Agent>, seq: number) => {
+  for (let n = seq + 1; n <= (agent.sends ?? 0); n++) if (!agent.withdrawnSeqs?.includes(n)) return true;
+  return false;
+};
 
 /** An agent whose independent Job already ended (Ready, checkpoint, failed, stopped) but that was never marked ended. Helpers settle on their own. */
 const endedJobAgent = (doc: Readonly<JobsState>, agent: Readonly<Agent>) => {
@@ -610,6 +627,9 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
             const job = record?.jobId ? state.jobs[record.jobId] : undefined;
             if (!record || state.paused || (job ? job.status !== "running" : record.endedAt !== null))
               return { status: "running", checkpoint: { phase: "report" } } as const;
+            // Taken back by the owner before it reached the conversation: nothing to deliver.
+            if (requestId && record.inputs?.[requestId]?.state === "withdrawn")
+              return { status: "running", checkpoint: { phase: "report" } } as const;
             if (message.startsWith(record.brief)) record.briefed = true;
             if ((record.sends ?? 0) === (reporter.input.seq ?? 0))
               record.latestInput = { seq: reporter.input.seq ?? 0, requestId: deliveryRequestId };
@@ -630,6 +650,12 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           },
           taskContext,
         );
+        // A withdrawal that ran between the check above and this submission already gave the text back: take it out of the queue again.
+        if (
+          requestId &&
+          (await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.inputs?.[requestId]?.state === "withdrawn"
+        )
+          await submission.abort(taskContext);
         const settled = await submission.wait(taskContext);
         const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
@@ -647,8 +673,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               : (host.quotaResetAt?.(from, now) ?? now + quotaRetryDelay(previous + 1, host.quotaRetryBaseMs ?? QUOTA_RETRY_BASE_MS));
             await runtime.commit(async (tx) => {
               const doc = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
-              if (!doc || (doc.sends ?? 0) > (reporter.input.seq ?? 0))
-                return { status: "running", checkpoint: { phase: "report" } } as const;
+              if (!doc || newerSend(doc, reporter.input.seq ?? 0)) return { status: "running", checkpoint: { phase: "report" } } as const;
               doc.quota = { attempts: previous + 1, retryAt, lastError: failure.slice(0, 500) };
               if (switched) {
                 doc.modelMoves.push({ at: now, from, to: switched.label });
@@ -670,7 +695,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           const record = state.agents[agentId];
           if (!record) return next();
           // A newer send owns recovery and failure reporting for a turn shared by several inputs.
-          if (failure && (record.sends ?? 0) > (reporter.input.seq ?? 0)) return next();
+          if (failure && newerSend(record, reporter.input.seq ?? 0)) return next();
           record.quota = null;
           const job = record.jobId ? state.jobs[record.jobId] : undefined;
           const finished = (report: string) => {
@@ -698,7 +723,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           const answer = textOfAnswer(await tx.entry(AssistantEntry, settled.answer));
           record.reported.push(settled.answer);
           // A newer message is already queued for this agent: it keeps the Job running and decides how it ends.
-          if ((record.sends ?? 0) > (reporter.input.seq ?? 0))
+          if (newerSend(record, reporter.input.seq ?? 0))
             return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer.trim()}`);
           record.endedAt = Date.now();
           if (!job) return next(`[${record.role} ${record.id} answered: ${record.title}]\n${answer}`);
@@ -832,7 +857,7 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
       runtime.commit(async (tx) => {
         const state = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
         const agent = state.agents[reporter.input.agentId];
-        if (agent && endedJobAgent(state, agent) && (agent.sends ?? 0) <= (reporter.input.seq ?? 0)) agent.endedAt = Date.now();
+        if (agent && endedJobAgent(state, agent) && !newerSend(agent, reporter.input.seq ?? 0)) agent.endedAt = Date.now();
         return { status: "terminal", outcome: { status: "aborted" } };
       }, taskContext),
   });
@@ -856,11 +881,18 @@ export type JobsSnapshot = {
     children: (Job["children"][number] & { working: boolean })[];
     quota: Agent["quota"];
     modelMoves: Agent["modelMoves"];
+    pending: QueuedInput[];
     /** The model the worker's conversation runs on now (`provider/model`): its tier's model or where a quota move left it. */
     model: string | null;
   })[];
   /** `working`: its conversation runs now; `active`: a runnable reporter task still delivers to it (preparing, running or reporting). */
-  agents: (Agent & { working: boolean; active: boolean; model: string | null; prompt: AgentPromptStatus | null })[];
+  agents: (Omit<Agent, "inputs" | "withdrawnSeqs"> & {
+    pending: QueuedInput[];
+    working: boolean;
+    active: boolean;
+    model: string | null;
+    prompt: AgentPromptStatus | null;
+  })[];
 };
 
 export type SpawnArgs = {
@@ -1410,7 +1442,15 @@ export function createJobs(host: JobsHost) {
 
   // ── Operations ─────────────────────────────────────────────────────────────
   /** Send a message to an agent (steer, or queue after its answer); a finished Job runs again. */
-  async function sendTo(api: Pick<Session, "commit">, id: string, message: string, followUp: boolean, requestId?: string): Promise<string> {
+  async function sendTo(
+    api: Pick<Session, "commit">,
+    id: string,
+    message: string,
+    followUp: boolean,
+    requestId?: string,
+    /** The owner typed it (not the Coordinator): while the agent works it is queued, listed and can be taken back with Alt+Up. */
+    owner = false,
+  ): Promise<string> {
     return api.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
@@ -1426,6 +1466,8 @@ export function createJobs(host: JobsHost) {
       if (job?.workspace && job.status !== "running" && agent.endedAt === null)
         return "The task helper is still draining; wait for its workspace handoff to settle.";
       if (key) doc.requests[key] = id;
+      const wasWorking = agent.endedAt === null && (!job || job.status === "running");
+      const typed = message;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
       if (!agent.briefed && agent.brief && message !== agent.brief) message = `${agent.brief}\n\nOwner's follow-up: ${message}`;
       if (job) {
@@ -1453,6 +1495,15 @@ export function createJobs(host: JobsHost) {
       delete agent.dismissedAt;
       if (job) delete job.dismissedAt;
       agent.sends = (agent.sends ?? 0) + 1;
+      // An idle agent starts a turn at once, so only an input sent to a working one waits in a queue.
+      if (owner && requestId && wasWorking)
+        (agent.inputs ??= {})[requestId] = {
+          text: typed,
+          delivery: followUp ? "followUp" : "steer",
+          at: clock(),
+          state: "queued",
+          seq: agent.sends,
+        };
       const background = { ownership: { kind: "conversation" }, background: true, conversationId: agent.chat } as const;
       await tx.createTask(
         Reporter,
@@ -1470,6 +1521,82 @@ export function createJobs(host: JobsHost) {
       );
       return `Sent to ${id}.`;
     }, context);
+  }
+
+  /** The queue of one agent's owner inputs: the ledger is its Jobs record, the runtime's queue is the conversation's submissions. */
+  function inputPort(harness: Harness, agentId: string): InputPort {
+    const edit = (change: (agent: Agent) => void) =>
+      harness.commit(async (tx) => {
+        const agent = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId];
+        if (agent) change(agent);
+      }, context);
+    const read = async () => {
+      const agent = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agentId];
+      return agent ? { conversationId: agent.conversationId, inputs: agent.inputs ?? {} } : undefined;
+    };
+    // The reporter submits each delivery under `send:<request id>:<attempt>`; a retry after a model failure is the next attempt.
+    const submissionOf = async (conversationId: ConversationId, id: string) => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const record = await harness.commit((tx) => tx.submissionByRequest(conversationId, `send:${id}:${attempt}`), context);
+        if (record) return record;
+      }
+      return undefined;
+    };
+    return {
+      list: async (): Promise<QueuedInput[]> =>
+        Object.entries((await read())?.inputs ?? {}).map(([id, input]) => ({
+          id,
+          text: input.text,
+          delivery: input.delivery,
+          at: input.at,
+          state: input.state,
+        })),
+      setState: async (ids, state) =>
+        edit((agent) => {
+          for (const id of ids) {
+            const input = agent.inputs?.[id];
+            if (!input) continue;
+            input.state = state;
+            const seqs = new Set(agent.withdrawnSeqs ?? []);
+            if (state === "withdrawn") seqs.add(input.seq);
+            else seqs.delete(input.seq);
+            agent.withdrawnSeqs = [...seqs];
+          }
+        }),
+      remove: async (ids) =>
+        edit((agent) => {
+          for (const id of ids) delete agent.inputs?.[id];
+        }),
+      status: async (ids) => {
+        const found = new Map<string, InputStatus>();
+        const conversationId = (await read())?.conversationId;
+        for (const id of ids) {
+          const record = conversationId === undefined ? undefined : await submissionOf(conversationId, id);
+          found.set(
+            id,
+            !record
+              ? "unsent"
+              : record.status === "queued"
+                ? "queued"
+                : record.status === "unanswered" && record.reason === "aborted"
+                  ? "aborted"
+                  : "taken",
+          );
+        }
+        return found;
+      },
+      abort: async (ids) => {
+        const aborted: string[] = [];
+        const conversationId = (await read())?.conversationId;
+        if (conversationId === undefined) return aborted;
+        for (const id of ids) {
+          const record = await submissionOf(conversationId, id);
+          if (record?.status !== "queued") continue;
+          if ((await (await harness.submission(record.id, context))?.abort(context)) === "aborted") aborted.push(id);
+        }
+        return aborted;
+      },
+    };
   }
 
   const stops = new Map<string, Promise<string>>();
@@ -1618,20 +1745,28 @@ export function createJobs(host: JobsHost) {
           quota: doc.agents[job.id]?.quota ?? null,
           modelMoves: doc.agents[job.id]?.modelMoves ?? [],
           model: await agentModel(harness, job.workerConversation),
+          pending: await ownerInputs(harness, doc.agents[job.id]),
         };
       }),
     );
     const reported = reportedAgents(await harness.inspect(context));
     const agents = await Promise.all(
-      Object.values(doc.agents).map(async (agent) => ({
+      Object.values(doc.agents).map(async ({ inputs: _ledger, withdrawnSeqs: _seqs, ...agent }) => ({
         ...agent,
         working: await working(harness, agent.conversationId),
         active: reported.has(agent.id),
         model: await agentModel(harness, agent.conversationId),
+        pending: await ownerInputs(harness, doc.agents[agent.id]),
         prompt: await promptStatus(harness, agent as Agent, agent.jobId ? ((doc.jobs[agent.jobId] as Job | undefined) ?? null) : null),
       })),
     );
     return { paused: doc.paused, jobs, agents };
+  }
+
+  /** The owner's queued inputs of one agent for the page's pending list; a withdrawn one nobody acknowledged stays listed so Alt+Up offers it again. */
+  async function ownerInputs(harness: Harness, agent: Agent | undefined): Promise<QueuedInput[]> {
+    if (!agent || !Object.keys(agent.inputs ?? {}).length) return [];
+    return pendingInputs(inputPort(harness, agent.id));
   }
 
   async function promptStatus(harness: Harness, agent: Agent, job: Job | null): Promise<AgentPromptStatus | null> {
@@ -1896,8 +2031,13 @@ export function createJobs(host: JobsHost) {
     },
     steer: async (harness: Harness, id: string, message: string, followUp = false, requestId?: string) => {
       const root = await harness.root(context);
-      return sendTo(root, id, message, followUp, requestId);
+      return sendTo(root, id, message, followUp, requestId, true);
     },
+    /** What the owner sent this agent while it worked and no turn has taken (steering first), plus withdrawn text nobody acknowledged. */
+    inputs: (harness: Harness, id: string) => pendingInputs(inputPort(harness, id)),
+    /** Alt+Up: takes the queued inputs back; they stay recoverable until `acknowledgeInputs`. */
+    dequeueInputs: (harness: Harness, id: string) => withdrawInputs(inputPort(harness, id)),
+    acknowledgeInputs: (harness: Harness, id: string, ids: readonly string[]) => acknowledgeInputs(inputPort(harness, id), ids),
     dismiss: async (harness: Harness, id: string) => dismissAgent(await harness.root(context), id),
     approve,
     finishApproval,

@@ -1409,14 +1409,16 @@ pre.code,
   gap: 6px;
 }
 /* Pi's pending list above the composer: steering lines, then follow-up lines. */
-#pending {
+#pending,
+.pending-box {
   display: grid;
   gap: 2px;
   padding: 4px 4px 6px;
   font: 12px var(--mono);
   color: var(--muted);
 }
-#pending[hidden] {
+#pending[hidden],
+.pending-box[hidden] {
   display: none;
 }
 .pending-row {

@@ -1223,6 +1223,21 @@ export const Request = Type.Union([
     },
     { additionalProperties: false },
   ),
+  Type.Object({ action: Type.Literal("thread-dequeue"), id: Id, threadId: Id }, { additionalProperties: false }),
+  Type.Object(
+    {
+      action: Type.Literal("thread-dequeue-ack"),
+      id: Id,
+      threadId: Id,
+      requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ action: Type.Literal("host-agent-dequeue") }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal("host-agent-dequeue-ack"), requestIds: Type.Array(Id, { minItems: 1, maxItems: 100, uniqueItems: true }) },
+    { additionalProperties: false },
+  ),
   Type.Object({ action: Type.Literal("upload-list"), id: Id }, { additionalProperties: false }),
   Type.Object(
     {

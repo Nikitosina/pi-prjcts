@@ -209,6 +209,10 @@ export const ACTION_POLICY: Record<Action, ActionPolicy> = {
   "memory-recent": allow("A project's recent memory writes, each with whether it was undone and whether it is current."),
   "chat-dequeue": exclude("Withdrawing queued owner input is the owner's composer action."),
   "chat-dequeue-ack": exclude("Part of the owner's composer restore."),
+  "thread-dequeue": exclude("Withdrawing queued owner input is the owner's composer action."),
+  "thread-dequeue-ack": exclude("Part of the owner's composer restore."),
+  "host-agent-dequeue": exclude("The Host agent would withdraw the owner's input to itself."),
+  "host-agent-dequeue-ack": exclude("Part of the owner's composer restore."),
   "chat-stop": allow("Stop the running Coordinator turn of one chat of a project."),
 };
 

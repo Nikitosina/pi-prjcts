@@ -7,6 +7,7 @@ import { slashCommand, slashKey } from "./slash.js";
 import { chatArgs, emit, fail, on, stale, state, toast } from "./state.js";
 import { loadRecentMemory, markMemoryUndone, memoryEntry, memoryKind, memoryTitle, memoryWrite } from "./memory.js";
 import { follower } from "./follow.js";
+import { joinText, pendingHtml, queuedOf, unclaimedOf } from "./queued-input.js";
 
 const feed = document.querySelector("#feed"),
   input = document.querySelector("#composer-input"),
@@ -565,30 +566,20 @@ document.querySelector("#dequeue-btn").addEventListener("click", () => {
   void restoreQueued();
   input.focus();
 });
-const queuedJobs = () => (state.view?.jobs ?? []).filter((job) => job.state === "queued");
+const queuedJobs = () => queuedOf(state.view?.jobs);
 // A restore the page never acknowledged (closed or offline mid-answer): Alt+Up offers it again.
-const unclaimedJobs = () => (state.view?.jobs ?? []).filter((job) => job.state === "withdrawn");
+const unclaimedJobs = () => unclaimedOf(state.view?.jobs);
 /** The busy composer says what Enter does; the queue buttons only exist while there is something to act on. */
 function paintComposerMode(running) {
   document.querySelector("#followup-btn").hidden = !running;
   document.querySelector("#dequeue-btn").hidden = !queuedJobs().length && !unclaimedJobs().length;
   document.querySelector("#send-btn").setAttribute("aria-label", running ? "Steer the running turn" : "Send");
 }
-/** Pi's pending list: steering first, then follow-up, one line each. */
 function renderPending() {
   const box = document.querySelector("#pending"),
-    jobs = queuedJobs(),
-    rank = (job) => (job.delivery === "steer" ? 0 : 1);
+    jobs = queuedJobs();
   box.hidden = !jobs.length;
-  box.innerHTML = jobs.length
-    ? [...jobs]
-        .sort((a, b) => rank(a) - rank(b))
-        .map(
-          (job) =>
-            `<div class="pending-row" data-pending="${esc(job.id)}"><span class="pending-kind">${job.delivery === "steer" ? "Steering" : "Follow-up"}:</span> <span class="pending-text">${esc(clip(oneLine(job.text), 200))}</span></div>`,
-        )
-        .join("") + `<div class="pending-hint muted small">↳ <kbd>⌥↑</kbd> to edit all queued messages</div>`
-    : "";
+  box.innerHTML = pendingHtml(jobs);
   paintComposerMode(!!state.live?.running);
 }
 const stash = new Map(); // restored text of a chat the owner left before the host answered, shown when they return
@@ -602,7 +593,6 @@ const carry = (key, restored) => {
   if (attachments.length || origin) carried.set(key, { attachments, origin });
 };
 const stashKey = () => `${state.projectId}:${state.chatId ?? "main"}`;
-const joinText = (...parts) => parts.filter((part) => part.trim()).join("\n\n");
 /** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
 async function restoreQueued() {
   const gen = state.generation,

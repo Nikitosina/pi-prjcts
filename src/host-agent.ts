@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -17,6 +17,16 @@ import { agentActions, hostAgentTools, type HostToolDeps } from "./host-agent-to
 import { HostAgentSettingsPatch, ThinkingLevel, errorText, home, listProjects, parse, saveJson } from "./state.ts";
 import type { FeedEvent } from "./change-feed.ts";
 import { readTiers } from "./host-documents.ts";
+import {
+  acknowledgeInputs,
+  afterSubmit,
+  pendingInputs,
+  withdrawInputs,
+  type InputPort,
+  type InputStatus,
+  type QueuedInput,
+  type RestoredInput,
+} from "./owner-input-queue.ts";
 
 const context = BACKGROUND_CONTEXT;
 const EXTENSION = "projects.host-agent";
@@ -66,6 +76,11 @@ export type HostAgent = {
   setPrompt(revision: number, blocks: PromptBlock[] | null): Promise<HostAgentPrompt>;
   /** Internal input after the current turn (approval outcomes); `requestId` keeps it once across retries and restarts. */
   followUp(text: string, requestId: string): Promise<void>;
+  /** What the owner sent while it was working and no turn has taken yet (steering first), plus withdrawn text nobody acknowledged. */
+  inputs(): Promise<QueuedInput[]>;
+  /** Alt+Up: takes the queued inputs back. The text stays recoverable until `acknowledge`. */
+  dequeue(): Promise<{ restored: RestoredInput[]; kept: string[] }>;
+  acknowledge(requestIds: readonly string[]): Promise<string[]>;
   watchLive(onFrame: (frame: DurableLiveFrame) => void, onEnd: () => void): Promise<() => void>;
   close(): Promise<void>;
 };
@@ -224,6 +239,50 @@ export async function openHostAgent(input: {
       await reconcileToolSummaries({ summaries, scope: HOST_AGENT_SCOPE, storage, context, nested: new Set() }).catch((error) =>
         input.report(`The Host agent could not drop the summaries of ended turns: ${errorText(error)}`),
       );
+    // The owner's inputs, kept until a turn takes them or the page acknowledges a withdrawal (the runtime does not keep a queued input's text).
+    const inputsPath = join(dir, "owner-inputs.json");
+    const readInputs = (): QueuedInput[] => (existsSync(inputsPath) ? (JSON.parse(readFileSync(inputsPath, "utf8")) as QueuedInput[]) : []);
+    const writeInputs = (entries: QueuedInput[]) => {
+      writeFileSync(`${inputsPath}.tmp`, JSON.stringify(entries), { mode: 0o600 });
+      renameSync(`${inputsPath}.tmp`, inputsPath);
+    };
+    let inputsLock: Promise<unknown> = Promise.resolve();
+    const locked = <T>(work: () => Promise<T>): Promise<T> => {
+      const run = inputsLock.then(work, work);
+      inputsLock = run.catch(() => {});
+      return run;
+    };
+    const inputPort: InputPort = {
+      list: async () => readInputs(),
+      setState: async (ids, state) => writeInputs(readInputs().map((entry) => (ids.includes(entry.id) ? { ...entry, state } : entry))),
+      remove: async (ids) => writeInputs(readInputs().filter((entry) => !ids.includes(entry.id))),
+      status: async (ids) => {
+        const found = new Map<string, InputStatus>();
+        for (const id of ids) {
+          const record = await storage.submissionByRequest(root.id, id, context);
+          found.set(
+            id,
+            !record
+              ? "unsent"
+              : record.status === "queued"
+                ? "queued"
+                : record.status === "unanswered" && record.reason === "aborted"
+                  ? "aborted"
+                  : "taken",
+          );
+        }
+        return found;
+      },
+      abort: async (ids) => {
+        const aborted: string[] = [];
+        for (const id of ids) {
+          const record = await storage.submissionByRequest(root.id, id, context);
+          if (record?.status !== "queued") continue;
+          if ((await (await opened.submission(record.id, context))?.abort(context)) === "aborted") aborted.push(id);
+        }
+        return aborted;
+      },
+    };
     const liveWatchers = new Set<() => void>();
     let closed = false,
       closing: Promise<void> | undefined;
@@ -249,10 +308,22 @@ export async function openHostAgent(input: {
         if (!model) throw new Error("The Host agent has no model; choose one in its settings");
         if (!known(model)) throw new Error(`The Host agent's model ${model} is not in the model catalog; choose another in its settings`);
         await apply(settings);
-        await root.submit(
-          { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
-          context,
-        );
+        await locked(async () => {
+          if (!readInputs().some((entry) => entry.id === requestId))
+            writeInputs([...readInputs(), { id: requestId, text, delivery, at: Date.now(), state: "queued" }]);
+        });
+        try {
+          await root.submit(
+            { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
+            context,
+          );
+        } catch (error) {
+          await locked(() => inputPort.remove([requestId]));
+          throw error;
+        }
+        // An Alt+Up that ran between the record and the submission already gave this text back: do not deliver it as well.
+        await locked(() => afterSubmit(inputPort, requestId));
+        input.publish({ topic: "host-agent" });
         return { accepted: true };
       },
       async stop() {
@@ -323,6 +394,22 @@ export async function openHostAgent(input: {
         settings = next;
         input.publish({ topic: "host-agent" });
         return prompt();
+      },
+      async inputs() {
+        assertOpen();
+        return locked(() => pendingInputs(inputPort));
+      },
+      async dequeue() {
+        assertOpen();
+        const result = await locked(() => withdrawInputs(inputPort));
+        input.publish({ topic: "host-agent" });
+        return result;
+      },
+      async acknowledge(requestIds) {
+        assertOpen();
+        const acknowledged = await locked(() => acknowledgeInputs(inputPort, requestIds));
+        input.publish({ topic: "host-agent" });
+        return acknowledged;
       },
       async followUp(text, requestId) {
         assertOpen();

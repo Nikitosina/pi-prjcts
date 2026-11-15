@@ -374,6 +374,9 @@ export type DurableProjectRuntime = {
   dismissJob(id: string): Promise<string>;
   /** Message an agent; a finished Job runs again. `followUp` queues it after the agent's current answer. */
   steerJob(id: string, text: string, options?: { followUp?: boolean; requestId?: string }): Promise<string>;
+  /** Alt+Up on a worker: takes back what the owner sent it while it worked and no turn has taken; recoverable until acknowledged. */
+  dequeueJobInputs(id: string): ReturnType<JobsRuntime["dequeueInputs"]>;
+  acknowledgeJobInputs(id: string, requestIds: readonly string[]): Promise<string[]>;
   /** Approve a Ready Job: merge its candidate through result acceptance. */
   approveJob(id: string): ReturnType<JobsRuntime["approve"]>;
   /** Includes background approvals that may still pull after returning a pending answer. */
@@ -2505,6 +2508,14 @@ export async function openDurableProject(input: {
           if (refusal) throw new Error(refusal);
           return jobs.steer(openedHarness, id, text, options.followUp, options.requestId);
         }),
+      dequeueJobInputs: (id) => {
+        assertOpen();
+        return jobs.dequeueInputs(openedHarness, id);
+      },
+      acknowledgeJobInputs: (id, requestIds) => {
+        assertOpen();
+        return jobs.acknowledgeInputs(openedHarness, id, requestIds);
+      },
       approveJob: async (id) => {
         assertOpen();
         return jobs.approve(openedHarness, id);

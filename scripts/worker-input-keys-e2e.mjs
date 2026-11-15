@@ -1,12 +1,37 @@
-// E2E: Pi input keys in the Worker composer and the Host agent drawer (scripts/chat-queue-failures.md, cases 15-17). Real key events in headless
-// Chrome on a private host with the fake provider: Enter steers a running agent, Alt+Enter queues a follow-up delivered after its turn.
+// E2E: Pi input keys in the Worker composer and the Host agent drawer. Real key events in headless Chrome on a private host with the fake provider:
+// Enter steers a running agent, Alt+Enter queues a follow-up delivered after its turn, and Alt+Up takes the queued inputs back with the same
+// withdraw-then-acknowledge protocol as the Coordinator (scripts/chat-queue-failures.md, W1-W8).
 import { createKit, say } from "./lib/e2e-kit.mjs";
 
 let releaseWorker, releaseHost;
 const workerHold = new Promise((ok) => (releaseWorker = ok));
 const hostHold = new Promise((ok) => (releaseHost = ok));
+// Re-armable holds: a turn whose first request carries the marker waits here, so inputs queue behind it.
+const deferred = () => {
+  let open;
+  return { wait: new Promise((ok) => (open = ok)), open };
+};
+let gateW = deferred(),
+  gateH = deferred(),
+  workerId = "";
 const kit = await createKit("worker-input-keys", {
   handler: ({ role, user, results, tools }) => {
+    if (tools.includes("host_call") && user.includes("HK-GATE") && !results.length) {
+      const gate = gateH;
+      return (async function* () {
+        await gate.wait;
+        yield kit.call("host_call", { action: "list", input: {} });
+      })();
+    }
+    if (role === "worker" && user.includes("W-GATE") && !results.length) {
+      const gate = gateW;
+      return (async function* () {
+        await gate.wait;
+        yield kit.call("bash", { command: "echo GATE-STEP" });
+      })();
+    }
+    if (role === "coordinator" && user.includes("KEYS-NUDGE") && !results.length)
+      return kit.call("agents", { action: "send", id: workerId, message: "C-NUDGE from the coordinator", followUp: true });
     // The held turn ends in a tool call, so a steer lands in the request that follows it, inside the same turn.
     if (tools.includes("host_call") && results.length && user.includes("HK-HOLD")) return say("HK-FIRST");
     if (tools.includes("host_call") && user.includes("HK-HOLD"))
@@ -54,14 +79,30 @@ await kit.run(async () => {
       `(() => { const box = document.querySelector(${JSON.stringify(selector)}); box.focus(); box.value = ${JSON.stringify(text)}; box.dispatchEvent(new Event("input", { bubbles: true })); })()`,
     );
   const ENTER = () => key("Enter", "Enter", 13),
-    ALT_ENTER = () => key("Enter", "Enter", 13, 1);
+    ALT_ENTER = () => key("Enter", "Enter", 13, 1),
+    ALT_UP = () => key("ArrowUp", "ArrowUp", 38, 1);
+
+  const uuid = () => crypto.randomUUID();
+  const rowsOf = (scope) =>
+    page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${scope} .pending-row`)})].map((row) => row.textContent)`);
+  // The drawer holds its composer while a send is in flight, so a second Enter goes in only after the first settled.
+  const hostFree = async () => {
+    await free(hbox);
+    await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host send settled");
+  };
+  let worker;
+  const threadState = async () => (await rpc({ action: "jobs-snapshot", id })).jobs.find((job) => job.id === worker.id);
+  const workerCalls = () => kit.result.calls.filter((call) => call.role === "worker").map((call) => call.user);
+  const count = (list, text) => list.filter((user) => user.includes(text)).length;
+  const free = (selector) => page.waitFor(`document.querySelector(${JSON.stringify(selector)}).value === ""`, "composer cleared");
 
   // Spawn one held worker through the Coordinator, then open it in the browser.
   await rpc({ action: "message", id, text: "KEYS-SPAWN" });
-  const worker = await eventually(
+  worker = await eventually(
     async () => (await rpc({ action: "jobs-snapshot", id })).agents?.find((agent) => agent.title === "KEYS-WORKER" && agent.working),
     "worker running",
   );
+  workerId = worker.id;
   await page.evaluate(`document.querySelector('[data-open-worker="${worker.id}"]').click()`);
   const box = `#focus-view .worker-send textarea`;
   await page.waitFor(`!!document.querySelector(${JSON.stringify(box)})`, "worker composer");
@@ -98,8 +139,10 @@ await kit.run(async () => {
     `!!document.querySelector(${JSON.stringify(hbox)}) && document.querySelector("#host-agent").dataset.open === "1" && document.querySelector("#host-agent").dataset.available === "1"`,
     "drawer",
   );
+  await kit.delay(500); // the drawer finishes opening before keys go in
   await type(hbox, "HK-HOLD start");
   await ENTER();
+  await hostFree();
   await eventually(async () => kit.result.calls.some((call) => call.user.includes("HK-HOLD")), "host busy");
   await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host composer free");
   await type(hbox, "HK-STEER now");
@@ -117,4 +160,218 @@ await kit.run(async () => {
   const hs = hostUsers.findIndex((text) => text.includes("HK-STEER")),
     hf = hostUsers.findIndex((text) => text.includes("HK-FOLLOW"));
   check("17 the Host agent saw the steer, then the follow-up", hs >= 0 && hf > hs, hostUsers);
+
+  // ---- Alt+Up and the pending list: the Worker composer ----
+  await eventually(async () => (await threadState()).status !== "running", "worker 1 settled");
+  await page.waitFor(`!document.querySelector("#focus-view [data-stop-worker]")`, "page shows the worker idle");
+  await type(box, "W-GATE go");
+  await ENTER();
+  await eventually(() => workerCalls().some((user) => user.includes("W-GATE")), "gated turn started");
+  await page.waitFor(`!!document.querySelector("#focus-view [data-stop-worker]")`, "page shows the gated worker working");
+  await type(box, "W-Q-FOLLOW one");
+  await ALT_ENTER();
+  await free(box);
+  await type(box, "W-Q-STEER two");
+  await ENTER();
+  await free(box);
+  await page.waitFor(`document.querySelectorAll("#focus-view .pending-row").length === 2`, "two pending rows");
+  const wRows = await rowsOf("#focus-view");
+  check(
+    "W1 the worker lists steering before follow-up, one row per queued input",
+    /^Steering:.*W-Q-STEER two/.test(wRows[0]) && /^Follow-up:.*W-Q-FOLLOW one/.test(wRows[1]),
+    wRows,
+  );
+  await page.shot("03-worker-pending", { force: true });
+
+  // W3/W4: the response can be lost; the withdrawn text is offered again until it is acknowledged; acknowledgments are idempotent and exact.
+  const first = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+  const again = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+  check(
+    "W3 a withdrawal whose response was lost returns the same inputs again, steering first",
+    first.restored.length === 2 &&
+      first.restored[0].text === "W-Q-STEER two" &&
+      JSON.stringify(first.restored) === JSON.stringify(again.restored),
+    [first, again],
+  );
+  await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: [uuid()] });
+  check(
+    "W4 an acknowledgment for an unknown id removes nothing",
+    (await rpc({ action: "thread-dequeue", id, threadId: worker.id })).restored.length === 2,
+  );
+  const ids = first.restored.map((item) => item.id);
+  await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: ids });
+  await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: ids });
+  const empty = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+  check(
+    "W4 a repeated acknowledgment is harmless and the ledger is empty after it",
+    empty.restored.length === 0 && empty.kept.length === 0,
+    empty,
+  );
+  await page.waitFor(`document.querySelectorAll("#focus-view .pending-row").length === 0`, "pending cleared by the acknowledgment");
+
+  // W7: the Coordinator's own send is not the owner's to withdraw.
+  await rpc({ action: "message", id, text: "KEYS-NUDGE" });
+  await eventually(async () => (await rpc({ action: "jobs-snapshot", id })).agents.some((agent) => agent.id === worker.id), "nudge sent");
+  await kit.delay(800);
+  check(
+    "W7 an input the Coordinator sent is not listed or withdrawn",
+    (await rpc({ action: "thread-dequeue", id, threadId: worker.id })).restored.length === 0,
+  );
+
+  // W2: Alt+Up in the composer brings every queued input back, steering first, then the draft.
+  await type(box, "W-Q-FOLLOW one");
+  await ALT_ENTER();
+  await free(box);
+  await type(box, "W-Q-STEER two");
+  await ENTER();
+  await free(box);
+  await page.waitFor(`document.querySelectorAll("#focus-view .pending-row").length === 2`, "two pending rows again");
+  await type(box, "draft");
+  await ALT_UP();
+  await page.waitFor(`document.querySelector(${JSON.stringify(box)}).value.includes("W-Q-FOLLOW one")`, "restored into the editor");
+  const restored = await page.evaluate(`document.querySelector(${JSON.stringify(box)}).value`);
+  check("W2 Alt+Up restores steering, then follow-up, then the draft", restored === "W-Q-STEER two\n\nW-Q-FOLLOW one\n\ndraft", restored);
+  await page.waitFor(`document.querySelectorAll("#focus-view .pending-row").length === 0`, "pending list empty");
+  check(
+    "W2 the host ledger is empty after the page acknowledged",
+    (await rpc({ action: "thread-dequeue", id, threadId: worker.id })).restored.length === 0,
+  );
+  await page.shot("04-worker-restored", { force: true });
+  await ENTER(); // resend what was restored: it is delivered once
+  await free(box);
+  gateW.open();
+  await eventually(
+    () => count(workerCalls(), "W-Q-STEER two") >= 1 && count(workerCalls(), "C-NUDGE") >= 1,
+    "resent text and the nudge delivered",
+  );
+  await eventually(async () => (await threadState()).status !== "running", "worker settled after the withdrawal");
+  await kit.delay(1000);
+  const users = workerCalls();
+  check(
+    "W2 the withdrawn inputs were delivered once, as the one resent message",
+    count(users, "W-Q-FOLLOW one") === 1 && count(users, "W-Q-STEER two") === 1,
+    users,
+  );
+  check("W6 the worker's Job settled after the withdrawal", (await threadState()).status !== "running", await threadState());
+
+  // W5: an input the worker already took is kept and answered once, never restored.
+  gateW = deferred();
+  await type(box, "W-GATE again");
+  await ENTER();
+  await eventually(() => count(workerCalls(), "W-GATE again") >= 1, "second gated turn");
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: uuid(), text: "W-KEEP me" });
+  gateW.open();
+  await eventually(() => count(workerCalls(), "W-KEEP me") >= 1, "kept input taken");
+  const late = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+  await eventually(async () => (await threadState()).status !== "running", "worker settled again");
+  check("W5 a taken input is not restored and was answered once", late.restored.length === 0 && count(workerCalls(), "W-KEEP me") === 1, [
+    late,
+    workerCalls(),
+  ]);
+  // W8: a message to an idle worker starts a turn at once; it is never queued.
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: uuid(), text: "W-IDLE start" });
+  check(
+    "W8 a send to an idle worker is not a queued input",
+    (await rpc({ action: "thread-dequeue", id, threadId: worker.id })).restored.length === 0,
+  );
+  await eventually(async () => (await threadState()).status !== "running", "worker settled after the idle send");
+
+  // ---- Alt+Up and the pending list: the Host agent drawer ----
+  await type(hbox, "HK-GATE go");
+  await ENTER();
+  await eventually(() => kit.result.calls.some((call) => call.user.includes("HK-GATE")), "host gated turn started");
+  await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host composer free");
+  await type(hbox, "HK-Q-FOLLOW one");
+  await ALT_ENTER();
+  await hostFree();
+  await type(hbox, "HK-Q-STEER two");
+  await ENTER();
+  await hostFree();
+  await page.waitFor(`document.querySelectorAll("#host-agent .pending-row").length === 2`, "two host pending rows");
+  const hRows = await rowsOf("#host-agent");
+  check(
+    "W1 the Host agent lists steering before follow-up",
+    /^Steering:.*HK-Q-STEER two/.test(hRows[0]) && /^Follow-up:.*HK-Q-FOLLOW one/.test(hRows[1]),
+    hRows,
+  );
+  await page.shot("05-host-pending", { force: true });
+  const hFirst = await rpc({ action: "host-agent-dequeue" });
+  const hAgain = await rpc({ action: "host-agent-dequeue" });
+  check(
+    "W3 the Host agent offers a withdrawn input again until it is acknowledged",
+    hFirst.restored.length === 2 && JSON.stringify(hFirst.restored) === JSON.stringify(hAgain.restored),
+    [hFirst, hAgain],
+  );
+  await rpc({ action: "host-agent-dequeue-ack", requestIds: [uuid()] });
+  check(
+    "W4 the Host agent ignores an acknowledgment for an unknown id",
+    (await rpc({ action: "host-agent-dequeue" })).restored.length === 2,
+  );
+  const hIds = hFirst.restored.map((item) => item.id);
+  await rpc({ action: "host-agent-dequeue-ack", requestIds: hIds });
+  await rpc({ action: "host-agent-dequeue-ack", requestIds: hIds });
+  check(
+    "W4 the Host agent's ledger is empty after a repeated acknowledgment",
+    (await rpc({ action: "host-agent-dequeue" })).restored.length === 0,
+  );
+  await type(hbox, "HK-Q-FOLLOW one");
+  await ALT_ENTER();
+  await hostFree();
+  await type(hbox, "HK-Q-STEER two");
+  await ENTER();
+  await hostFree();
+  await page.waitFor(`document.querySelectorAll("#host-agent .pending-row").length === 2`, "two host pending rows again");
+  await type(hbox, "draft");
+  await ALT_UP();
+  await page.waitFor(`document.querySelector(${JSON.stringify(hbox)}).value.includes("HK-Q-FOLLOW one")`, "host restored");
+  const hRestored = await page.evaluate(`document.querySelector(${JSON.stringify(hbox)}).value`);
+  check(
+    "W2 Alt+Up in the drawer restores steering, then follow-up, then the draft",
+    hRestored === "HK-Q-STEER two\n\nHK-Q-FOLLOW one\n\ndraft",
+    hRestored,
+  );
+  await page.waitFor(`document.querySelectorAll("#host-agent .pending-row").length === 0`, "host pending empty");
+  await page.shot("06-host-restored", { force: true });
+  await ENTER();
+  await hostFree();
+  gateH.open();
+  await eventually(
+    () => kit.result.calls.some((call) => call.tools.includes("host_call") && call.user.includes("HK-Q-STEER two")),
+    "host resend delivered",
+  );
+  await kit.delay(1000);
+  const hUsers = kit.result.calls.filter((call) => call.tools.includes("host_call")).map((call) => call.user);
+  check(
+    "W2 the Host agent saw the withdrawn inputs once, as the resent message",
+    count(hUsers, "HK-Q-FOLLOW one") === 1 && count(hUsers, "HK-Q-STEER two") === 1,
+    hUsers,
+  );
+  gateH = deferred();
+  await type(hbox, "HK-GATE again");
+  await ENTER();
+  await eventually(
+    () =>
+      count(
+        kit.result.calls.map((call) => call.user),
+        "HK-GATE again",
+      ) >= 1,
+    "host second gated turn",
+  );
+  await page.waitFor(`!document.querySelector("#ha-composer").dataset.sending`, "host composer free");
+  await type(hbox, "HK-KEEP me");
+  await ALT_ENTER();
+  await hostFree();
+  gateH.open();
+  await eventually(
+    () => kit.result.calls.some((call) => call.tools.includes("host_call") && call.user.includes("HK-KEEP me")),
+    "host kept input taken",
+  );
+  const hLate = await rpc({ action: "host-agent-dequeue" });
+  await kit.delay(800);
+  const hFinal = kit.result.calls.filter((call) => call.tools.includes("host_call")).map((call) => call.user);
+  check(
+    "W5 a Host input already taken is not restored and was answered once",
+    hLate.restored.length === 0 && count(hFinal, "HK-KEEP me") === 1,
+    [hLate, hFinal],
+  );
 });

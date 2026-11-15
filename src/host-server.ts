@@ -1645,6 +1645,20 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
       return { result: await (await durable(input.id)).steerJob(input.threadId, input.text, { requestId: input.requestId }) };
     }
+    case "thread-dequeue": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      const result = await (await durable(input.id)).dequeueJobInputs(input.threadId);
+      feed.publish(input.id, { topic: "jobs" });
+      return result;
+    }
+    case "thread-dequeue-ack": {
+      const project = loadProject(input.id);
+      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+      const acknowledged = await (await durable(input.id)).acknowledgeJobInputs(input.threadId, input.requestIds);
+      feed.publish(input.id, { topic: "jobs" });
+      return { acknowledged };
+    }
     case "thread-dismiss": {
       const project = loadProject(input.id);
       if (project.deleted || project.archived) throw new Error("Inactive project cannot control worker threads");
@@ -1848,8 +1862,14 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return { settings: loadDeploySettings(), state: readDeployState(), running: true };
     case "deploy-shutdown":
       return stopForDeploy(input.sha);
-    case "host-agent-history":
-      return requireHostAgent().history(input.before);
+    case "host-agent-history": {
+      const agent = requireHostAgent();
+      return { ...(await agent.history(input.before)), inputs: await agent.inputs() };
+    }
+    case "host-agent-dequeue":
+      return requireHostAgent().dequeue();
+    case "host-agent-dequeue-ack":
+      return { acknowledged: await requireHostAgent().acknowledge(input.requestIds) };
     case "host-agent-send":
       return requireHostAgent().send(input.requestId, input.text, input.delivery);
     case "host-agent-stop":
