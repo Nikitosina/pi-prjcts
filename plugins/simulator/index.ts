@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi, PluginRpcContext } from "../../src/plugin-types.ts";
 import { createSimulators, leaseName } from "./simulator.ts";
-import { pruneEnabledProjects, pruneProjectProducts } from "./test-products.ts";
+import { pruneEnabledProjects } from "./test-products.ts";
 import { COORDINATOR_NOTE, WORKER_NOTE, createSimulatorTools } from "./tools.ts";
 
 const TEST_PRODUCTS_ROOT = join(homedir(), "Library", "Developer", "XcodeBuildMCP", "workspaces");
@@ -22,22 +22,22 @@ export default {
   register(api: HostPluginApi) {
     const simulators = createSimulators(api);
     // Each simulator test run leaves 2-4 GB of test products; a daily cleanup is too rare for a busy afternoon (FAILURES.md T1-T4).
-    // XcodeBuildMCP keys a workspace by its checkout, so a project owns its folder and its worktrees' (git worktree list); only those are pruned.
-    const rootsOf = async (cwd: string | undefined): Promise<string[]> => {
-      if (!cwd) return [];
-      const listed = await api.exec.run("git", ["worktree", "list", "--porcelain"], cwd).catch(() => null);
-      const trees = (listed?.stdout ?? "").split("\n").flatMap((line) => (line.startsWith("worktree ") ? [line.slice(9)] : []));
-      return [...new Set([cwd, ...trees])];
-    };
-    const pruneEnabled = async () =>
+    // XcodeBuildMCP keys a workspace by its checkout. A project's roots are the ones the host owns for it (its folder and its worker workspaces);
+    // a checkout two projects claim, and any workspace nobody claims, stay (some historical products remain on purpose).
+    const sweep = (only?: string) =>
       pruneEnabledProjects({
         root: TEST_PRODUCTS_ROOT,
         now: Date.now(),
         keepMs: TEST_PRODUCTS_KEEP_MS,
-        projects: await Promise.all(
-          api.projects.list().map(async (project) => ({ disabledPlugins: project.disabledPlugins, roots: await rootsOf(project.cwd) })),
-        ),
+        projects: api.projects.list().map((project) => ({
+          id: project.id,
+          disabledPlugins: project.disabledPlugins,
+          roots: api.projects.workspaceRoots(project.id),
+        })),
+        admit: api.projects.work,
+        only,
       });
+    const pruneEnabled = () => sweep();
     const pruning = setInterval(() => void pruneEnabled().catch(() => {}), 3600_000);
     pruning.unref();
     const tools = createSimulatorTools(api, simulators);
@@ -76,17 +76,7 @@ export default {
         },
       },
       cleanup: async (input) =>
-        [
-          await simulators.eraseIdle(input.projectId, input.unusedDays, input.signal),
-          summary(
-            await pruneProjectProducts({
-              root: TEST_PRODUCTS_ROOT,
-              now: Date.now(),
-              keepMs: TEST_PRODUCTS_KEEP_MS,
-              roots: await rootsOf(api.projects.load(input.projectId).cwd),
-            }),
-          ),
-        ]
+        [await simulators.eraseIdle(input.projectId, input.unusedDays, input.signal), summary(await sweep(input.projectId))]
           .filter(Boolean)
           .join(" "),
       usage: (input) => simulators.usage(input.projectId, input.unusedDays, input.signal),
