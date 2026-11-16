@@ -490,12 +490,19 @@ a {
   position: relative;
 }
 .tree-row .tree-chat {
-  padding-right: 32px;
+  padding-right: 46px; /* archive button, then the unread dot at the far edge */
+}
+/* Title, archive, unread dot: the dot keeps its edge slot whether or not the hover-only archive button shows. */
+.tree-row .unread {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
 }
 .tree-archive {
   position: absolute;
   top: 50%;
-  right: 3px;
+  right: 18px;
   transform: translateY(-50%);
   display: grid;
   place-items: center;
@@ -525,7 +532,7 @@ a {
 @media (hover: none) {
   .tree-row .tree-chat {
     min-height: 36px;
-    padding-right: 40px;
+    padding-right: 56px;
   }
   .tree-archive {
     opacity: 1;
@@ -1544,8 +1551,7 @@ pre.code,
 .ctx-section {
   margin-bottom: 16px;
 }
-.ctx-section h2,
-#plugin-cards h2 {
+.ctx-section h2 {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1664,6 +1670,55 @@ pre.code,
   align-items: center;
   gap: 8px;
   margin-top: 2px;
+}
+.w-subs {
+  margin-top: 2px;
+}
+.w-subs-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 2px;
+  border-radius: var(--r-s);
+  font-size: 12px;
+  color: var(--muted);
+  text-align: left;
+}
+.w-subs-toggle:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+.w-subs-live {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 11.5px;
+}
+.w-sublist {
+  list-style: none;
+  margin: 2px 0 0 7px;
+  padding: 0 0 0 8px;
+  border-left: 1px solid var(--line);
+}
+.w-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+}
+.w-sub-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text);
+}
+.w-sub-title:hover {
+  text-decoration: underline;
 }
 .w-history {
   display: flex;
@@ -3086,6 +3141,15 @@ input.pb-title {
 .compaction-failure summary {
   cursor: pointer;
   color: var(--bad);
+}
+.appearance-part + .appearance-part {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.appearance-part > h2 {
+  margin: 0 0 8px;
+  font: 600 13px var(--font);
 }
 .theme-grid {
   display: grid;

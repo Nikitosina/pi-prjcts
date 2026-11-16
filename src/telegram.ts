@@ -149,6 +149,18 @@ export function redactTelegramError(text: string, token: string | null, identifi
   return text.replace(/(\bchat(?:[_ -]?id)?["']?\s*(?:[:=]\s*)?["']?)-?\d+/gi, "$1[chat]").replace(/-100\d{6,}\b/g, "[chat]");
 }
 
+/** The menu Telegram shows for "/": exactly the commands `command()` answers. */
+const BOT_COMMANDS = [
+  { command: "projects", description: "Pick a project" },
+  { command: "project", description: "Pick a project by name" },
+  { command: "chats", description: "Pick a chat in the project" },
+  { command: "chat", description: "Pick a chat, or /chat new <title>" },
+  { command: "status", description: "Where your text goes, and subscription limits" },
+  { command: "models", description: "Project models, or find one" },
+  { command: "model", description: "Show or set a role's model" },
+];
+const COMMANDS_RETRY_MS = [1000, 5000, 30_000, 120_000];
+
 const UNCERTAIN_MEDIA =
   "Telegram attachment delivery is uncertain. Automatic resend blocked to avoid duplicates; verify in Telegram before resolving the outbox.";
 const PAIR_MS = 10 * 60_000,
@@ -757,7 +769,33 @@ export function startTelegram(options: {
     }
     polling = false;
   }
-  if (options.receiveUpdates !== false) void loop();
+  /** Registers the "/" menu for private chats once per bot; a failure retries on its own timer and never touches polling or pairing. */
+  let commandsFor: string | null = null,
+    commandsRun = 0;
+  async function registerCommands() {
+    const token = state.token,
+      botId = state.bot?.id;
+    if (!token || botId === undefined || commandsFor === `${botId}`) return;
+    const run = ++commandsRun;
+    for (let attempt = 0; !closed && run === commandsRun && token === state.token; attempt++) {
+      try {
+        await call("setMyCommands", { commands: BOT_COMMANDS, scope: { type: "all_private_chats" } }, undefined, token);
+        commandsFor = `${botId}`;
+        return;
+      } catch (error) {
+        if (error instanceof TelegramError && (error.code === 401 || error.code === 404)) return;
+        const wait =
+          error instanceof TelegramError && error.retryAfter
+            ? error.retryAfter * 1000
+            : COMMANDS_RETRY_MS[Math.min(attempt, COMMANDS_RETRY_MS.length - 1)];
+        await new Promise((resolve) => setTimeout(resolve, Number(process.env.PI_PROJECTS_TELEGRAM_BACKOFF_MS ?? wait)).unref());
+      }
+    }
+  }
+  if (options.receiveUpdates !== false) {
+    void loop();
+    void registerCommands();
+  }
 
   /** Notice text is model Markdown, sent as Telegram HTML; the header and footer are ours, escaped. */
   function format(notice: Notice): { text: string; buttons: Button[][] } {
@@ -1102,6 +1140,7 @@ export function startTelegram(options: {
       persist();
       restart();
       void flush();
+      if (options.receiveUpdates !== false) void registerCommands();
       return snapshot();
     },
     pair() {

@@ -117,7 +117,7 @@ import { commandProfilesSnapshot } from "./command-profiles.ts";
 import { type DurableProjectRuntime } from "./durable-runtime.ts";
 import { legacyEditorText, projectBehavior, promptBlocksView, resolvePromptBlocks } from "./prompt-blocks.ts";
 import { estimateTokens, promptSection } from "./prompt-sections.ts";
-import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, startCursorLogin } from "./usage-limits.ts";
+import { limitsSnapshot, setLimitVisibility, setLimitsTokenResolver, setOllamaKeyResolver, startCursorLogin } from "./usage-limits.ts";
 import { machineStatus } from "./machine-status.ts";
 import { storageTotal, type StorageTotal, type StorageUsage } from "./storage-usage.ts";
 import { DEFAULT_SCRIPT_TIMEOUT_MS } from "./routine-script.ts";
@@ -1814,6 +1814,32 @@ setLimitsTokenResolver(async (providerId) => {
   });
   const result = await (await limitsModels).getAuth(providerId);
   return result?.source === "OAuth" ? result.auth.apiKey : undefined;
+});
+// Ollama Cloud: the API key of the provider Pi already holds (never exposed to the browser; sent only to the balance endpoint).
+setOllamaKeyResolver(async () => {
+  limitsModels ??= createModelRuntime();
+  const runtime = await limitsModels;
+  // Pi has no built-in Ollama provider: the owner's own entry is named ollama-cloud/ollama, or points its models at ollama.com.
+  const onOllama = (id: string) =>
+    runtime.getModels(id).some((model) => {
+      try {
+        return new URL(model.baseUrl).hostname === "ollama.com";
+      } catch {
+        return false;
+      }
+    });
+  for (const id of new Set([
+    "ollama-cloud",
+    "ollama",
+    ...runtime
+      .getProviders()
+      .map((provider) => provider.id)
+      .filter(onOllama),
+  ])) {
+    const result = await runtime.getAuth(id).catch(() => undefined);
+    if (result?.auth.apiKey) return result.auth.apiKey;
+  }
+  return undefined;
 });
 const web = await startWeb(
   dispatch,
