@@ -2628,7 +2628,7 @@ const journeys = {
     }
     // Settings → Plugins: every launched plugin with a browser script mounts its panel, or shows why it could not.
     const withPanel = mine.filter((item) => status.web.some((entry) => entry.plugin === item.name && entry.script));
-    await page.click('[data-cmd="settings"]');
+    // The Plugins list lives in Settings, which the steps above already opened.
     await page.waitFor(`document.querySelector('#settings').open`, "Settings open");
     await page.click('#settings nav [data-section="plugins"]');
     await page.waitFor(
