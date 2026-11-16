@@ -5,7 +5,8 @@ const paused = new Set();
 let toolRuns = 0,
   listCalls = 0;
 const observed = new Map();
-const publishedBy = new Map(),
+const touchedBy = new Map(),
+  publishedBy = new Map(),
   listedBy = new Map();
 export default {
   name: "gated",
@@ -65,6 +66,14 @@ export default {
       rpc: {
         ping: async ({ projectId }) => ({ pong: projectId }),
         hold: async () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true })),
+        // An RPC without a project id that reaches into a project named in its params (a host-wide plugin working for one project).
+        touch: async ({ params, withRoot }) =>
+          withRoot(
+            params.projectId,
+            async () => (touchedBy.set(params.projectId, (touchedBy.get(params.projectId) ?? 0) + 1), { touched: params.projectId }),
+          ),
+        holdin: async ({ params, withRoot }) =>
+          withRoot(params.projectId, () => new Promise((resolve) => waiting.push(resolve)).then(() => ({ held: true }))),
         release: async () => (waiting.splice(0).forEach((resolve) => resolve()), { released: true }),
         waiting: async () => ({ count: waiting.length }),
         counters: async () => ({
@@ -73,10 +82,11 @@ export default {
           published: Object.fromEntries(publishedBy),
           listed: Object.fromEntries(listedBy),
           observed: Object.fromEntries(observed),
+          touched: Object.fromEntries(touchedBy),
           paused: [...paused],
         }),
       },
-      rpcPolicy: { ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
+      rpcPolicy: { touch: "write", holdin: "write", ping: "read", hold: "write", release: "write", waiting: "read", counters: "read" },
       web: { routes: { data: async ({ projectId }) => ({ mime: "text/plain", bytes: Buffer.from(`data:${projectId}`) }) } },
       lifecycle: { pause: (projectId) => (paused.add(projectId), () => paused.delete(projectId)) },
       cleanup: async ({ projectId }) => (calls.push(projectId), ""),

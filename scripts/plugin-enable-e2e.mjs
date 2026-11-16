@@ -29,6 +29,7 @@ await kit.run(async () => {
   const entry = async (id, name) => (await rpc({ action: "plugins", id })).plugins.find((plugin) => plugin.name === name);
   const set = (id, plugin, enabled) => rpc({ action: "project-plugin", id, plugin, enabled });
   const call = (id, method) => rpc({ action: "plugin", plugin: "gated", method, id });
+  const callFor = (target, method) => rpc({ action: "plugin", plugin: "gated", method, params: { projectId: target } });
   const refused = async (work) => {
     try {
       await work();
@@ -75,6 +76,18 @@ await kit.run(async () => {
   check("1 the refusal changed nothing", (await entry(alpha, "gated")).enabled === true && (await call(alpha, "ping")).pong === alpha);
   await call(alpha, "release");
   await held;
+  // 24: a host-wide RPC without a project id works for a project it names (withRoot). That work is counted for the project, so a disable waits it
+  // out, and once the project is off the plugin cannot reach it this way.
+  const heldIn = callFor(alpha, "holdin");
+  await kit.eventually(async () => (await call(alpha, "waiting")).count === 1, "holdin did not start");
+  const disableRefusal = await Promise.race([
+    refused(() => set(alpha, "gated", false)),
+    kit.delay(8000).then(() => "the disable request is still waiting behind the running work after 8 s"),
+  ]);
+  await call(beta, "release");
+  await heldIn;
+  check("24 disable is refused while an id-less RPC works inside the project", /active work/.test(disableRefusal), disableRefusal);
+  await set(alpha, "gated", true);
   check("11 enabling an enabled plugin is a no-op", (await set(alpha, "gated", true)).enabled === true);
 
   // 5: an existing coordinator chat keeps the plugin's registered tool; after a disable the same call is refused at execution (the plugin's own
@@ -100,6 +113,16 @@ await kit.run(async () => {
   // Disable: RPC and route refuse, the other project is unaffected, data stays.
   const off = await set(alpha, "gated", false);
   check("5 disabled", off.enabled === false && (await entry(alpha, "gated")).enabled === false);
+  check(
+    "24 an id-less RPC cannot reach the disabled project",
+    /disabled in this project/.test(await refused(() => callFor(alpha, "touch"))),
+  );
+  check("24 it still reaches the project that has the plugin on", (await callFor(beta, "touch")).touched === beta);
+  check(
+    "24 and did not run for the disabled one",
+    !("touched" in {}) && !((await call(beta, "counters")).touched ?? {})[alpha],
+    await call(beta, "counters"),
+  );
   check("6 an RPC for the disabled project is refused", /disabled in this project/.test(await refused(() => call(alpha, "ping"))));
   await rpc({ action: "message", id: alpha, text: "GATED-CALL two" });
   await kit.eventually(
