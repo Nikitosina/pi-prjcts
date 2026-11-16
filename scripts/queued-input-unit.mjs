@@ -12,8 +12,10 @@ globalThis.localStorage = {
   },
   removeItem: (key) => storage.delete(key),
 };
-const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, recoverSends, restoreInto } =
+const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, settleFailure, recoverSends, restoreInto } =
   await import("../web/queued-input.js");
+/** What the host's answer for a refusal looks like in the page (web/api.js HostError): the host recorded nothing. */
+const refusal = (message) => Object.assign(new Error(message), { refused: true });
 const { fresherSettings } = await import("../web/format.js");
 
 const item = (id, text, attachments = []) => ({ id, text, delivery: "followUp", attachments });
@@ -95,7 +97,7 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   assert.equal(readDraft("chat:p:main").text, "");
   // The host refuses it now: the owner gets the text back in the editor draft instead of losing it.
   beginSend("chat:p:main", { requestId: "r2", text: "again" });
-  await reload("chat:p:main", async () => Promise.reject(new Error("offline")));
+  await reload("chat:p:main", async () => Promise.reject(refusal("host refused")));
   assert.equal(readDraft("chat:p:main").text, "again");
   assert.deepEqual(readDraft("chat:p:main").sending, []);
 }
@@ -215,4 +217,134 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   assert.equal(fresherSettings(saved, { revision: 4, thinking: "low" }).thinking, "low");
   assert.deepEqual(fresherSettings(null, { revision: 1 }), { revision: 1 }, "nothing held yet");
 }
+
+// R4 (W20): a send whose record could not be kept is not a send: nothing is cleared, nothing is recorded, the caller sends nothing.
+{
+  storage.clear();
+  persistText("chat:p:main", "keep me");
+  failWrites = true;
+  const record = beginSend("chat:p:main", { requestId: "n1", text: "keep me", delivery: "steer" });
+  failWrites = false;
+  assert.equal(record, null, "R4 a refused write gives no record");
+  assert.equal(readDraft("chat:p:main").text, "keep me", "R4 the draft still holds the text");
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+  assert.equal(await recoverSends("chat:p:main", async () => assert.fail("nothing was recorded, so nothing is resent")), 0);
+}
+
+// R5 (W21): the refused send A goes back through the editor, which holds the newer text B. Typing on from the editor keeps A.
+{
+  storage.clear();
+  persistText("chat:p:main", "A text");
+  beginSend("chat:p:main", { requestId: "a1", text: "A text", delivery: "steer" });
+  const { box, editor } = live("");
+  box.value = "B typed meanwhile";
+  persistText("chat:p:main", box.value);
+  const kind = settleFailure("chat:p:main", "a1", refusal("paused"), editor);
+  assert.equal(kind, "refused");
+  assert.equal(box.value, "A text\n\nB typed meanwhile", "R5 the editor shows A in front of B");
+  persistText("chat:p:main", box.value + " more");
+  assert.equal(readDraft("chat:p:main").text, "A text\n\nB typed meanwhile more", "R5 the next keystroke does not drop A");
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+}
+
+// R6 (W22): an unknown outcome is not a refusal. The record keeps its id and payload and goes out again; the host's id check makes it once.
+{
+  storage.clear();
+  persistText("chat:p:main", "hello");
+  beginSend("chat:p:main", { requestId: "u1", text: "hello", delivery: "followUp" });
+  const { box, editor } = live("");
+  for (const lost of [new TypeError("Failed to fetch"), Object.assign(new Error("HTTP 502"), { status: 502 }), new Error("timeout")])
+    assert.equal(settleFailure("chat:p:main", "u1", lost, editor), "unknown");
+  assert.equal(box.value, "", "R6 the editor is not given the text back");
+  const [kept] = readDraft("chat:p:main").sending;
+  assert.deepEqual([kept.requestId, kept.text, kept.delivery], ["u1", "hello", "followUp"]);
+  const seen = [];
+  assert.equal(
+    await recoverSends(
+      "chat:p:main",
+      async (record) => {
+        seen.push([record.requestId, record.text, record.delivery]);
+        throw new TypeError("still offline");
+      },
+      editor,
+    ),
+    0,
+  );
+  assert.deepEqual(seen, [["u1", "hello", "followUp"]], "R6 the same id and payload are sent again");
+  assert.equal(readDraft("chat:p:main").sending.length, 1, "R6 still unknown: still kept");
+  assert.equal(await recoverSends("chat:p:main", async () => {}, editor), 1);
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+}
+
+// R7 (W28): messages of different origins never become one message. Only the origin the draft already has (or none) joins.
+{
+  storage.clear();
+  const { box, editor } = live();
+  const tg = { ...item("a", "from telegram"), origin: "telegram" },
+    web = item("b", "from the web"),
+    tg2 = { ...item("c", "telegram again"), origin: "telegram" };
+  const first = await run({ restored: [tg, web, tg2], editor });
+  assert.deepEqual(first.acked, ["a"], "R7 only the compatible prefix is acknowledged");
+  assert.equal(readDraft("chat:p:main").origin, "telegram");
+  assert.equal(box.value.includes("from the web"), false);
+  assert.match(toasts.at(-1), /origin|Telegram|send the editor first/i, "R7 the held message is told");
+}
+
+// R8 (W30): a refused send that cannot join the editor (uploads, origin) stays whole as a refused record; Alt+Up brings it back later.
+{
+  storage.clear();
+  const writeDraftRaw = (patch) =>
+    localStorage.setItem("pi-ui2-draft:chat:p:main", JSON.stringify({ ...readDraft("chat:p:main"), ...patch }));
+  const ids = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+  persistText("chat:p:main", "A text");
+  writeDraftRaw({ attachments: ids("x", 6), origin: "telegram" });
+  beginSend("chat:p:main", { requestId: "a1", text: "A text", delivery: "steer" });
+  persistText("chat:p:main", "B text");
+  writeDraftRaw({ attachments: ids("y", 6), origin: "telegram" });
+  const { box, editor } = live("B text");
+  settleFailure("chat:p:main", "a1", refusal("nope"), editor);
+  const held = readDraft("chat:p:main");
+  assert.equal(box.value, "B text", "R8 the editor is not forced past the upload limit");
+  assert.equal(held.attachments.length, 6);
+  assert.deepEqual(
+    held.sending.map((record) => [record.requestId, record.refused === true, record.attachments.length]),
+    [["a1", true, 6]],
+    "R8 the refused record is kept whole",
+  );
+  assert.equal(await recoverSends("chat:p:main", async () => assert.fail("a refused record is never resent"), editor), 0);
+  // The owner sends the editor; then Alt+Up brings the held record back, with its uploads.
+  const sent = beginSend("chat:p:main", { requestId: "b1", text: "B text", delivery: "steer" });
+  finishSend("chat:p:main", sent.requestId);
+  box.value = "";
+  const back = await run({ restored: [], editor });
+  assert.equal(back.count, 1, "R8 Alt+Up offers the refused record");
+  assert.equal(box.value, "A text");
+  assert.equal(readDraft("chat:p:main").attachments.length, 6);
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+}
+
+// R9 (W31): the host offers an input whose id is still an unknown send here: it leaves `sending` in the write that puts the text in the draft.
+{
+  storage.clear();
+  persistText("chat:p:main", "dup");
+  beginSend("chat:p:main", { requestId: "d1", text: "dup", delivery: "steer" });
+  settleFailure("chat:p:main", "d1", new TypeError("lost"), live().editor);
+  const { box, editor } = live();
+  const result = await run({ restored: [item("d1", "dup")], editor });
+  assert.equal(result.count, 1);
+  assert.equal(box.value, "dup");
+  assert.deepEqual(readDraft("chat:p:main").sending, [], "R9 one owner for the text");
+  assert.equal(await recoverSends("chat:p:main", async () => assert.fail("not resent: it is in the editor now")), 0);
+}
+
+// R10 (W29): one restore at a time per surface across tabs: the restore takes a Web Lock named for the surface.
+{
+  storage.clear();
+  const names = [];
+  globalThis.navigator = { locks: { request: async (name, work) => (names.push(name), work()) } };
+  await run({ restored: [item("z", "locked")], editor: live().editor });
+  delete globalThis.navigator;
+  assert.deepEqual(names, ["pi-ui2-restore:chat:p:main"], "R10 the restore holds the surface's lock");
+}
+
 console.log("queued-input-unit: ok");

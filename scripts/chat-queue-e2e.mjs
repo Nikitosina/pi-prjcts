@@ -7,7 +7,14 @@ const workerHold = new Promise((ok) => (releaseWorker = ok));
 const seen = [];
 // Every message the Coordinator's model was given: a steering turn carries the queued report with it, so the last message alone does not show it.
 const given = [];
+// Test seams (src/test-seams.ts): a `message` whose text carries the marker waits after its ledger write, or fails there once.
 const kit = await createKit("chat-queue", {
+  env: {
+    PI_PROJECTS_TEST_SEAMS: JSON.stringify({
+      "chat-admit-delay": { marker: "SLOW-ADMIT", ms: 1500 },
+      "chat-admit-fail": { marker: "FAIL-ADMIT", times: 1 },
+    }),
+  },
   handler: ({ role, user, results, msgs }) => {
     // The worker answers only when released, so its report reaches the Coordinator while the Coordinator is busy: an internal queued input.
     if (role === "worker" && user.includes("Q11-TASK"))
@@ -182,6 +189,95 @@ await kit.run(async () => {
     "Q11 the worker's report was not withdrawn: the Coordinator still answered it",
     80,
   ).catch((error) => check(error.message, false, seen));
+
+  // Third pass (scripts/chat-queue-failures.md W23-W25, W27, W33): one request protocol.
+  const token = web.hash.slice("#token=".length);
+  const raw = async (body) =>
+    (
+      await fetch(`${web.origin}/api`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ).json();
+  const idle = () => eventually(async () => !(await busy()), "idle", 120);
+  await idle();
+  const w23 = crypto.randomUUID();
+  await send("W23 first text", "followUp", w23);
+  const clash = await raw({ action: "message", id, text: "W23 other text", requestId: w23, delivery: "followUp" });
+  check(
+    "W23 the same id with other text is refused as a refusal",
+    clash.ok === false && clash.refused === true && /request/i.test(clash.error),
+    clash,
+  );
+  const clashMode = await raw({ action: "message", id, text: "W23 first text", requestId: w23, delivery: "steer" });
+  check("W23 the same id with another delivery is refused too", clashMode.ok === false && clashMode.refused === true, clashMode);
+  const same = await raw({ action: "message", id, text: "W23 first text", requestId: w23, delivery: "followUp" });
+  check("W23 the same id with the same payload returns the admitted job", same.ok === true && same.data.id === w23, same);
+  const unknownChat = await raw({ action: "message", id, text: "W33 refused", chatId: crypto.randomUUID() });
+  check(
+    "W33 a validation failure before any write is marked refused",
+    unknownChat.ok === false && unknownChat.refused === true,
+    unknownChat,
+  );
+  await idle();
+
+  // W24: the host died after the ledger write and before the runtime submission. The retry of the id runs the message; it is not returned as if it ran.
+  const w24 = crypto.randomUUID();
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(
+    `${kit.home}/${id}/inbox/${w24}.json`,
+    JSON.stringify({
+      id: w24,
+      text: "W24-TEXT crashed before submit",
+      at: new Date().toISOString(),
+      state: "queued",
+      error: null,
+      delivery: "followUp",
+    }),
+  );
+  await send("W24-TEXT crashed before submit", "followUp", w24);
+  await eventually(async () => seen.some((user) => user.includes("W24-TEXT")), "W24 the retried message ran", 120).catch((error) =>
+    check(error.message, false, seen),
+  );
+  await idle();
+  check("W24 the retried message settled in the ledger", (await ledger()).find((job) => job.id === w24)?.state === "done", await ledger());
+
+  // W27 (chat): the admission failed after the ledger write. The error is not a refusal, the ledger entry stays, and the retry of the id runs it once.
+  const w27 = crypto.randomUUID();
+  const failed = await raw({ action: "message", id, text: "W27-TEXT FAIL-ADMIT", requestId: w27, delivery: "followUp" });
+  check("W27 a failure after the ledger write is not marked refused", failed.ok === false && failed.refused !== true, failed);
+  check(
+    "W27 the ledger keeps the entry of an uncertain submission",
+    (await ledger()).some((job) => job.id === w27 && job.state === "queued"),
+    await ledger(),
+  );
+  await send("W27-TEXT FAIL-ADMIT", "followUp", w27);
+  await eventually(async () => seen.some((user) => user.includes("W27-TEXT")), "W27 the retry ran the message", 120).catch((error) =>
+    check(error.message, false, seen),
+  );
+  await idle();
+  check("W27 it ran once", seen.filter((user) => user.includes("W27-TEXT")).length === 1, seen);
+
+  // W25: two overlapping Alt+Up while the message handler is between its ledger write and its submission. The text is given back and never
+  // delivered, or kept and delivered once; never both.
+  const w25 = crypto.randomUUID();
+  const slow = send("W25-TEXT SLOW-ADMIT", "followUp", w25);
+  await kit.delay(300);
+  const [d1, d2] = await Promise.all([rpc({ action: "chat-dequeue", projectId: id }), rpc({ action: "chat-dequeue", projectId: id })]);
+  await slow;
+  await idle();
+  const offered = [...d1.restored, ...d2.restored].filter((item) => item.id === w25);
+  const delivered = seen.filter((user) => user.includes("W25-TEXT")).length;
+  check(
+    "W25 given back and never delivered, or kept and delivered once; never both",
+    (offered.length > 0 && delivered === 0) || (offered.length === 0 && delivered === 1),
+    {
+      offered,
+      delivered,
+    },
+  );
+  await rpc({ action: "chat-dequeue-ack", projectId: id, requestIds: offered.map((item) => item.id) }).catch(() => {});
   check(
     "Q10 an archived project is refused",
     await (async () => {

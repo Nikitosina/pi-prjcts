@@ -47,3 +47,57 @@ Second repair pass (PR 53): durable restore, cancellation and mode (`scripts/own
 - W17 The page clears the editor and the draft before the host accepted a send; a reload or a rejected or lost request loses the restored, acknowledged text and uploads. A send keeps its own record (text, uploads, origin, request id, delivery) in the surface's draft until the host accepted it; a page that finds such a record sends it again under the same id (the host takes an id once) and gives the text back when the host refuses it. Unit: `queued-input-unit` R1.
 - W18 Two sends overlap: the second inherits the first's uploads and origin, and finishing the first removes the second's. Each send owns its record; finishing or failing one touches only that record. Unit: R2.
 - W19 Two Alt+Up overlap and the second response carries ids the first already restored and acknowledged, so the text is added twice (also after a reload). One composer restores one at a time, and acknowledged ids are remembered per surface. Unit: R3.
+
+## Third pass (PR 53): one request protocol for all three surfaces
+
+Written before the code, after the second pass kept finding the same family of bugs one patch at a time. This section is the contract; W20-W33 are the
+failure modes it must close. Surfaces: a Coordinator chat (`message`, `chat-dequeue`), a worker (`thread-send`, `thread-dequeue`) and the Host agent
+(`host-agent-send`, `host-agent-dequeue`). Units: `queued-input-unit` (R4-R10), `owner-input-queue-unit` (P1-P3). E2E: `chat-queue-e2e`, `worker-input-keys-e2e`,
+`host-agent-e2e`, `chat-input-keys-e2e` (real browser loss, reload and concurrent typing).
+
+### Contract
+
+One request is `{ requestId, text, delivery, attachments, origin }`, immutable from the moment the owner presses Enter until the host forgets it.
+It moves through these owners, and each step has exactly one owner at a time:
+
+| step | owner | what the page may do |
+|---|---|---|
+| draft | the editor and the surface's draft in localStorage | edit freely |
+| `sending` record | the surface's draft (`sending[]`, one record per send, never shared) | nothing; the editor no longer holds it |
+| host ledger `queued` | the host (Job ledger, Jobs `inputs`, Host agent `owner-inputs.json`) | show it as pending; Alt+Up |
+| runtime queue or turn | pi-durable (`queued` -> `placed`/`done`) | show it; Alt+Up while it is still `queued` |
+| withdrawn | the host ledger, until the page acknowledges | the page copies it to its draft first, then acknowledges |
+
+Host acceptance and Durable acceptance are different steps: the ledger entry is written first, the runtime submission second. An accepted request is
+never "done" until the runtime holds it, so a retry of the same id re-submits (Durable takes an id once and returns the existing submission).
+
+Page side (`web/queued-input.js`):
+- Send: the `sending` record is written, and checked, before the editor is cleared or anything is sent. A refused write sends nothing and leaves the editor, uploads and origin untouched.
+- Outcome of the request: **accepted** (the host answered ok) drops the record. **Refused** (the host answered with `refused: true`: it recorded nothing) hands the record back to the owner (below). **Unknown** (a network error, a timeout, a 5xx, a response that cannot be read) keeps the record and its id; the page sends the same id again, after a reload and on a timer, and never treats it as refused.
+- A refused record goes back through the editor, never behind it: when the editor is shown, the text is put in front of what the editor holds now and the draft is written from the editor's own value. When it cannot be merged (more uploads than one message may carry, or another origin) it stays as a refused record that Alt+Up brings back, and the owner is told.
+- Restore (Alt+Up): one restore at a time per surface, across tabs (a Web Lock); messages join the draft in Pi's order only while their uploads fit one message and their origin matches the draft's; the rest stays withdrawn at the host (or refused in the draft) and is offered again. Nothing is truncated and nothing inaccessible is acknowledged. An id that is also a `sending` record moves from one to the other in one write.
+
+Host side:
+- The same id with a different payload (text, delivery, attachments or origin) is refused (`refused: true`) on every surface. Durable does not compare payloads, so the host does.
+- Admission, withdrawal and acknowledgment are serialized per surface. A request with a ledger entry and no runtime submission is re-submitted by a retry of its id, not returned as if it ran.
+- An exception after the ledger write keeps the ledger entry (the outcome is unknown); only a refusal before it leaves no entry.
+- Withdrawal returns text only when the runtime cannot deliver it and no producer can still submit it. "No submission seen" and "the agent ended" prove neither. A producer is: a message handler between its ledger write and its submission (chat, Host agent) and a live delivery task of the agent (worker); the second is read from the runtime's live task records, not from `endedAt`. An input with a producer stays queued ("kept") and is taken by the next Alt+Up.
+- All three surfaces use `src/owner-input-queue.ts`; the chat adapter is a port over the Job ledger. Internal reports and approvals have no owner ledger entry and are never withdrawn.
+- Uploads are not touched by any queue step (they are deleted only by the owner's explicit delete), so a restored or re-sent request keeps valid upload ids.
+
+### Failure modes
+
+- W20 `beginSend` ignores a failed storage write: the editor is cleared and the message is sent although nothing keeps it, so a reload or a refusal loses text and uploads. Nothing is cleared or sent unless the record was kept.
+- W21 A refused send A is merged into the stored draft while the editor holds a newer text B; the editor keeps typing from B and the next keystroke overwrites the merged draft, so A is gone. The merge goes through the editor.
+- W22 A response that never arrived (offline, timeout, 5xx) is treated as a refusal: the text is handed back and then also delivered when the host did get it, or the id is dropped and the same text is sent twice under two ids. An unknown outcome keeps the same id and payload and resends them.
+- W23 The same request id is sent with other text or uploads and the host answers with the first request as if it were this one. The host refuses it on every surface.
+- W24 The host wrote the ledger entry and then failed or crashed before the runtime submission; the retry with the same id finds the entry and returns it without submitting, so the message never runs. The retry submits (idempotent in Durable) unless the owner withdrew it.
+- W25 Two overlapping Alt+Up on a Coordinator chat: the second finds the first's withdrawn mark on an input whose message handler has not submitted yet, offers its text as safe, and the turn then takes the input as well. Admission and withdrawal are serialized and an input with a producer is kept.
+- W26 A worker is stopped (its `endedAt` set) after its delivery task passed its check and before it submitted: the withdrawal reads "ended" as "no producer", returns the text, and the delivery task then submits it. The producer is the live delivery task.
+- W27 The Host agent removes its ledger entry when `submit` throws, although the submission may exist: the text is lost or runs twice. The entry stays, and a retry of its id submits again.
+- W28 Restored messages with different origins (a Telegram message and a web message) are merged into one message that keeps one origin and drops the other. Only compatible origins join; the rest stays held.
+- W29 A restore in two tabs of one surface: each tab's in-memory queue is separate, so both add the same text. One restore at a time per surface across tabs.
+- W30 A refused record that cannot merge (too many uploads, another origin) is dropped or truncated. It stays as a refused record and Alt+Up brings it back whole.
+- W31 A withdrawn input whose id is also an unknown `sending` record: the retry sends it again (the host answers withdrawn) while the text also sits in the editor. The record leaves `sending` in the write that restores it.
+- W32 The editor is cleared and a record created for a slash command, so a reload resends `/command` as a message. Slash commands have no record and run only from the editor.
+- W33 A host that cannot tell a refusal from a failure: validation errors carry `refused: true` only when no ledger entry or runtime submission was written; everything after the first write is unknown.

@@ -1,8 +1,9 @@
 // E2E: Pi input keys in the browser composer (failure cases 11-14 in scripts/chat-queue-failures.md). Private host, fake model, headless Chrome.
 import { createKit, say } from "./lib/e2e-kit.mjs";
 
-let release;
+let release, release2;
 const hold = new Promise((ok) => (release = ok));
+const hold2 = new Promise((ok) => (release2 = ok));
 const kit = await createKit("chat-input-keys", {
   handler: ({ role, user }) => {
     if (role !== "coordinator") return undefined;
@@ -10,6 +11,11 @@ const kit = await createKit("chat-input-keys", {
       return (async function* () {
         await hold;
         yield say("released");
+      })();
+    if (user.includes("GATE2"))
+      return (async function* () {
+        await hold2;
+        yield say("released 2");
       })();
     return say("ACK");
   },
@@ -110,4 +116,159 @@ await kit.run(async () => {
   // The page always sends the key's mode; the host runs an idle chat's message as a plain turn (Q14), so the ledger shows the mode and no queue.
   check("14 idle Alt+Enter is a plain message: sent once, never queued", after.length === 1 && after[0].state !== "queued", after);
   check("14 the page sent the key's mode without guessing the chat state", after[0].delivery === "followUp", after);
+
+  // ---- Third pass (scripts/chat-queue-failures.md W20-W22, W28, W30): real loss, reload and concurrent typing ----
+  const draftOf = () => page.evaluate(`JSON.parse(localStorage.getItem("pi-ui2-draft:chat:${id}:main") ?? "null")`);
+  const messagesWith = async (text) => (await rpc({ action: "show", id })).messages.filter((message) => message.text === text).length;
+  const jobsWith = async (text) => (await rpc({ action: "show", id })).jobs.filter((job) => job.text === text);
+  const reload = async () => {
+    await page.evaluate(`window.__old = true`);
+    await page.reload();
+    await page.waitFor(`!window.__old && document.body.dataset.ready === "1"`, "inbox ready after reload");
+  };
+  // The page's fetch, replaced for one message: `mode` is "lose-response" (the host gets it, the page never hears), "lose-request" (it never leaves),
+  // or "refuse" (a typed refusal after `ms`, nothing reaches the host).
+  const patchFetch = (marker, mode, ms = 0) =>
+    page.evaluate(`(() => {
+      const real = window.fetch.bind(window);
+      window.fetch = async (url, init) => {
+        const body = typeof init?.body === "string" ? init.body : "";
+        if (!body.includes(${JSON.stringify(marker)}) || !body.includes('"action":"message"')) return real(url, init);
+        if (${JSON.stringify(mode)} === "lose-request") throw new TypeError("Failed to fetch");
+        if (${JSON.stringify(mode)} === "lose-response") { await real(url, init); throw new TypeError("Failed to fetch"); }
+        await new Promise((ok) => setTimeout(ok, ${ms}));
+        return new Response(JSON.stringify({ ok: false, error: "Project plan is paused; admission is denied", refused: true }), { status: 400 });
+      };
+    })()`);
+
+  // W20: the browser refuses to keep the send record: nothing is cleared and nothing is sent.
+  await page.evaluate(`(() => {
+    const set = Storage.prototype.setItem;
+    window.__failDrafts = true;
+    Storage.prototype.setItem = function (key, value) {
+      if (window.__failDrafts && String(key).startsWith("pi-ui2-draft:") && String(value).includes('"sending":[{')) throw new Error("QuotaExceededError");
+      return set.call(this, key, value);
+    };
+  })()`);
+  await type("J1 keep me");
+  await ENTER();
+  await kit.delay(800);
+  check("W20 the editor still holds the text when the record could not be kept", (await page.evaluate(`${input}.value`)) === "J1 keep me");
+  check("W20 nothing was sent", (await messagesWith("J1 keep me")) === 0 && (await jobsWith("J1 keep me")).length === 0);
+  await page.evaluate(`window.__failDrafts = false`);
+  await ENTER();
+  await eventually(async () => (await messagesWith("J1 keep me")) === 1, "W20 sent once the record could be kept");
+  check("W20 the editor clears after a kept record", (await page.evaluate(`${input}.value`)) === "");
+
+  // W22: the host got the message and the answer never reached the page. The record keeps its id; after a reload it is sent again and runs once.
+  await patchFetch("J2 lost answer", "lose-response");
+  await type("J2 lost answer");
+  await ENTER();
+  await eventually(async () => (await messagesWith("J2 lost answer")) === 1, "W22 the host received it");
+  await page.waitFor(
+    `JSON.parse(localStorage.getItem("pi-ui2-draft:chat:${id}:main") ?? "{}").sending?.length === 1`,
+    "record kept as unknown",
+  );
+  const unknown = (await draftOf()).sending[0];
+  check("W22 the editor is not given the text back for an unknown outcome", (await page.evaluate(`${input}.value`)) === "");
+  await reload();
+  await page.waitFor(
+    `JSON.parse(localStorage.getItem("pi-ui2-draft:chat:${id}:main") ?? "{}").sending?.length === 0`,
+    "record settled after reload",
+  );
+  await eventually(async () => (await jobsWith("J2 lost answer")).length >= 1, "ledger has it");
+  check(
+    "W22 the same id was sent again and the host ran it once",
+    (await messagesWith("J2 lost answer")) === 1 &&
+      (await jobsWith("J2 lost answer")).length === 1 &&
+      (await jobsWith("J2 lost answer"))[0].id === unknown.requestId,
+    await jobsWith("J2 lost answer"),
+  );
+  check("W22 the editor is still empty after the reload", (await page.evaluate(`${input}.value`)) === "");
+
+  // W22: the request never left the page; after the reload the same record is sent, once.
+  await patchFetch("J2b never left", "lose-request");
+  await type("J2b never left");
+  await ENTER();
+  await page.waitFor(`JSON.parse(localStorage.getItem("pi-ui2-draft:chat:${id}:main") ?? "{}").sending?.length === 1`, "record kept");
+  check("W22 nothing reached the host yet", (await messagesWith("J2b never left")) === 0);
+  await reload();
+  await eventually(async () => (await messagesWith("J2b never left")) === 1, "W22 the page sent it after the reload");
+  await page.waitFor(`JSON.parse(localStorage.getItem("pi-ui2-draft:chat:${id}:main") ?? "{}").sending?.length === 0`, "record done");
+
+  // W21: a refused send A comes back in front of B, which the owner typed meanwhile; typing on keeps both, also after a reload.
+  await patchFetch("J3 first A", "refuse", 900);
+  await type("J3 first A");
+  await ENTER();
+  await page.waitFor(`${input}.value === ""`, "A left the editor");
+  await type("J3 typed B");
+  await page.waitFor(`${input}.value.startsWith("J3 first A")`, "the refusal gave A back through the editor");
+  check("W21 A is in front of B in the editor", (await page.evaluate(`${input}.value`)) === "J3 first A\n\nJ3 typed B");
+  await type("J3 first A\n\nJ3 typed B and more");
+  check("W21 typing on keeps A in the stored draft", (await draftOf()).text === "J3 first A\n\nJ3 typed B and more", await draftOf());
+  await reload();
+  check("W21 a reload shows both", (await page.evaluate(`${input}.value`)) === "J3 first A\n\nJ3 typed B and more");
+  check(
+    "W21 the host never saw the refused message",
+    (await messagesWith("J3 first A")) === 0 && (await jobsWith("J3 first A")).length === 0,
+  );
+  await type("");
+
+  // W28/W30: restored messages of different origins and uploads never become one message; the held ones stay at the host and are offered again.
+  const web = new URL((await rpc({ action: "web" })).url);
+  const upload = async (name) =>
+    (
+      await (
+        await fetch(`${web.origin}/upload?project=${id}`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${web.hash.slice("#token=".length)}`, "x-filename": name },
+          body: `${name}\n`,
+        })
+      ).json()
+    ).data.id;
+  const up1 = await upload("one.txt"),
+    up2 = await upload("three.txt");
+  await rpc({ action: "message", id, text: "GATE2 start" });
+  await eventually(async () => (await rpc({ action: "show", id })).chats.find((chat) => chat.id === "main")?.busy, "gated turn running");
+  const queueOf = (text, extra) => rpc({ action: "message", id, text, requestId: crypto.randomUUID(), delivery: "followUp", ...extra });
+  await queueOf("J4 telegram one", { origin: "telegram", attachments: [up1] });
+  await kit.delay(30);
+  await queueOf("J4 web two");
+  await kit.delay(30);
+  await queueOf("J4 telegram three", { origin: "telegram", attachments: [up2] });
+  await page.waitFor(`document.querySelectorAll("#pending .pending-row").length === 3`, "three pending");
+  await ALT_UP();
+  await page.waitFor(`${input}.value.includes("J4 telegram one")`, "first message restored");
+  check(
+    "W28 only the compatible message joined the editor",
+    (await page.evaluate(`${input}.value`)) === "J4 telegram one" &&
+      (await draftOf()).origin === "telegram" &&
+      (await draftOf()).attachments.join() === up1,
+    await draftOf(),
+  );
+  check(
+    "W28 the held messages are still withdrawn at the host, text intact",
+    (await jobsWith("J4 web two"))[0]?.state === "withdrawn" && (await jobsWith("J4 telegram three"))[0]?.state === "withdrawn",
+    (await rpc({ action: "show", id })).jobs.map((job) => [job.text, job.state]),
+  );
+  await ENTER();
+  await eventually(
+    async () => (await jobsWith("J4 telegram one")).some((job) => job.state === "queued"),
+    "the restored message was sent as its own message",
+  );
+  const resent = (await jobsWith("J4 telegram one")).find((job) => job.state === "queued");
+  check("W28 the resent message keeps its origin and upload", resent?.origin === "telegram" && resent.attachments?.join() === up1, resent);
+  await ALT_UP();
+  await page.waitFor(`${input}.value.includes("J4 web two")`, "second restore");
+  check("W28 the next restore brings the web message alone", (await page.evaluate(`${input}.value`)) === "J4 web two");
+  await ENTER();
+  await ALT_UP();
+  await page.waitFor(`${input}.value.includes("J4 telegram three")`, "third restore");
+  check(
+    "W30 the last message comes back whole with its upload",
+    (await page.evaluate(`${input}.value`)) === "J4 telegram three" && (await draftOf()).attachments.join() === up2,
+    await draftOf(),
+  );
+  await page.shot("03-held-restore", { force: true });
+  release2();
 });

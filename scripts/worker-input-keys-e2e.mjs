@@ -14,7 +14,14 @@ const deferred = () => {
 let gateW = deferred(),
   gateH = deferred(),
   workerId = "";
+// Test seams (src/test-seams.ts): the worker's delivery waits after its check, and a Host agent send fails after the runtime took the input.
 const kit = await createKit("worker-input-keys", {
+  env: {
+    PI_PROJECTS_TEST_SEAMS: JSON.stringify({
+      "worker-submit-delay": { marker: "SLOW-SUBMIT", ms: 1500 },
+      "host-agent-submit-lost": { marker: "LOST-OUTCOME", times: 1 },
+    }),
+  },
   handler: ({ role, user, results, tools }) => {
     if (tools.includes("host_call") && user.includes("HK-GATE") && !results.length) {
       const gate = gateH;
@@ -456,4 +463,81 @@ await kit.run(async () => {
     hostRace.every((text) => hostDelivered(text) === (hostGivenBack.has(text) ? 0 : 1)),
     { hostGivenBack: [...hostGivenBack], delivered: hostRace.map((text) => [text, hostDelivered(text)]) },
   );
+
+  // Third pass (scripts/chat-queue-failures.md W23, W26, W27): the same request protocol on a worker and on the Host agent.
+  const web = new URL((await rpc({ action: "web" })).url);
+  const raw = async (body) =>
+    (
+      await fetch(`${web.origin}/api`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${web.hash.slice("#token=".length)}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ).json();
+  const w23 = uuid();
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: w23, text: "W23-FIRST", delivery: "followUp" });
+  const clash = await raw({ action: "thread-send", id, threadId: worker.id, requestId: w23, text: "W23-OTHER", delivery: "followUp" });
+  check("W23 a worker refuses the same id with other text", clash.ok === false && clash.refused === true, clash);
+  const clashMode = await raw({ action: "thread-send", id, threadId: worker.id, requestId: w23, text: "W23-FIRST", delivery: "steer" });
+  check("W23 a worker refuses the same id with another delivery", clashMode.ok === false && clashMode.refused === true, clashMode);
+  const sameAgain = await raw({ action: "thread-send", id, threadId: worker.id, requestId: w23, text: "W23-FIRST", delivery: "followUp" });
+  check("W23 the same payload is accepted again", sameAgain.ok === true, sameAgain);
+  await eventually(async () => (await threadState()).status !== "running", "worker settled after W23");
+  const h23 = uuid();
+  await rpc({ action: "host-agent-send", requestId: h23, text: "HK-W23 first", delivery: "followUp" });
+  const hostClash = await raw({ action: "host-agent-send", requestId: h23, text: "HK-W23 other", delivery: "followUp" });
+  check("W23 the Host agent refuses the same id with other text", hostClash.ok === false && hostClash.refused === true, hostClash);
+  await eventually(
+    async () => !(await rpc({ action: "host-agent-history" })).items.some((item) => item.running),
+    "host agent idle after W23",
+  );
+
+  // W26: the owner sent a message while the worker worked; the delivery task passed its check and waits (seam) before it submits. Stop ends the
+  // agent in between. The text is given back and never delivered, or kept and delivered once; `endedAt` is not proof that nobody will submit.
+  gateW = deferred();
+  await type(box, "W-GATE w26");
+  await ENTER();
+  await eventually(() => count(workerCalls(), "W-GATE w26") >= 1, "w26 gated turn");
+  const w26 = uuid();
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: w26, text: "W26-TEXT SLOW-SUBMIT", delivery: "followUp" });
+  await kit.delay(700);
+  await rpc({ action: "thread-stop", id, threadId: worker.id });
+  const w26back = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
+  gateW.open();
+  await kit.delay(3000);
+  const w26history = await rpc({ action: "thread-history", id, threadId: worker.id, limit: 200, messageText: "full" });
+  const w26delivered = w26history.items.filter(
+    (entry) => entry.kind === "message" && entry.role === "user" && entry.text.includes("W26-TEXT"),
+  ).length;
+  const w26offered = w26back.restored.filter((item) => item.id === w26).length;
+  check(
+    "W26 a stopped worker's input is given back and never delivered, or kept and delivered once; never both",
+    (w26offered === 1 && w26delivered === 0) || (w26offered === 0 && w26delivered === 1),
+    { w26offered, w26delivered, w26back },
+  );
+
+  // W27: a Host agent send whose outcome is unknown (the runtime took the input, the call failed). The ledger keeps the entry, so Alt+Up can still take
+  // the input back while it waits.
+  gateH = deferred();
+  await type(hbox, "HK-GATE w27");
+  await ENTER();
+  await eventually(
+    () =>
+      count(
+        kit.result.calls.map((call) => call.user),
+        "HK-GATE w27",
+      ) >= 1,
+    "host w27 turn started",
+  );
+  const w27 = uuid();
+  const lost = await raw({ action: "host-agent-send", requestId: w27, text: "HK-W27 LOST-OUTCOME", delivery: "followUp" });
+  check("W27 an unknown outcome is not marked refused", lost.ok === false && lost.refused !== true, lost);
+  const w27back = await rpc({ action: "host-agent-dequeue" });
+  check(
+    "W27 the Host agent still offers the input of an unknown send",
+    w27back.restored.some((item) => item.id === w27 && item.text === "HK-W27 LOST-OUTCOME"),
+    w27back,
+  );
+  await rpc({ action: "host-agent-dequeue-ack", requestIds: w27back.restored.map((item) => item.id) });
+  gateH.open();
 });
