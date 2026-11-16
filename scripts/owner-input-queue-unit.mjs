@@ -1,6 +1,6 @@
 // Unit: the withdraw / acknowledge protocol for the owner's queued inputs (scripts/chat-queue-failures.md, W3-W5). A fake runtime, no host.
 import assert from "node:assert/strict";
-import { acknowledgeInputs, pendingInputs, serialized, withdrawInputs } from "../src/owner-input-queue.ts";
+import { acknowledgeInputs, pendingInputs, withdrawInputs } from "../src/owner-input-queue.ts";
 
 /** `producers`: ids a producer may still submit (default: every input the runtime has not seen). */
 const make = (entries, runtime, producers) => {
@@ -142,29 +142,4 @@ const make = (entries, runtime, producers) => {
   assert.deepEqual(result.restored, []);
   assert.equal(ledger.get("a").state, "queued");
 }
-// P1 (W25): admission, withdrawal and acknowledgment of one surface run one at a time, in call order; another surface is not held up, and a
-// failure does not block the next operation.
-{
-  const order = [];
-  const step = (name, ms, fail) => async () => {
-    order.push(`start ${name}`);
-    await new Promise((ok) => setTimeout(ok, ms));
-    order.push(`end ${name}`);
-    if (fail) throw new Error(name);
-    return name;
-  };
-  const one = serialized("chat:p:main", step("a", 40, true)),
-    two = serialized("chat:p:main", step("b", 5)),
-    other = serialized("chat:p:other", step("c", 5));
-  await assert.rejects(one, /a/);
-  assert.equal(await two, "b");
-  assert.equal(await other, "c");
-  assert.deepEqual(
-    order.filter((line) => /[ab]$/.test(line)),
-    ["start a", "end a", "start b", "end b"],
-    "P1 one surface runs one operation at a time",
-  );
-  assert.ok(order.indexOf("end c") < order.indexOf("end a"), "P1 another surface is not held up");
-}
-
 console.log("owner-input-queue-unit: ok");

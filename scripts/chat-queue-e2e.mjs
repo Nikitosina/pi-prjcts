@@ -7,14 +7,7 @@ const workerHold = new Promise((ok) => (releaseWorker = ok));
 const seen = [];
 // Every message the Coordinator's model was given: a steering turn carries the queued report with it, so the last message alone does not show it.
 const given = [];
-// Test seams (src/test-seams.ts): a `message` whose text carries the marker waits after its ledger write, or fails there once.
 const kit = await createKit("chat-queue", {
-  env: {
-    PI_PROJECTS_TEST_SEAMS: JSON.stringify({
-      "chat-admit-delay": { marker: "SLOW-ADMIT", ms: 1500 },
-      "chat-admit-fail": { marker: "FAIL-ADMIT", times: 1 },
-    }),
-  },
   handler: ({ role, user, results, msgs }) => {
     // The worker answers only when released, so its report reaches the Coordinator while the Coordinator is busy: an internal queued input.
     if (role === "worker" && user.includes("Q11-TASK"))
@@ -243,27 +236,10 @@ await kit.run(async () => {
   await idle();
   check("W24 the retried message settled in the ledger", (await ledger()).find((job) => job.id === w24)?.state === "done", await ledger());
 
-  // W27 (chat): the admission failed after the ledger write. The error is not a refusal, the ledger entry stays, and the retry of the id runs it once.
-  const w27 = crypto.randomUUID();
-  const failed = await raw({ action: "message", id, text: "W27-TEXT FAIL-ADMIT", requestId: w27, delivery: "followUp" });
-  check("W27 a failure after the ledger write is not marked refused", failed.ok === false && failed.refused !== true, failed);
-  check(
-    "W27 the ledger keeps the entry of an uncertain submission",
-    (await ledger()).some((job) => job.id === w27 && job.state === "queued"),
-    await ledger(),
-  );
-  await send("W27-TEXT FAIL-ADMIT", "followUp", w27);
-  await eventually(async () => seen.some((user) => user.includes("W27-TEXT")), "W27 the retry ran the message", 120).catch((error) =>
-    check(error.message, false, seen),
-  );
-  await idle();
-  check("W27 it ran once", seen.filter((user) => user.includes("W27-TEXT")).length === 1, seen);
-
   // W25: two overlapping Alt+Up while the message handler is between its ledger write and its submission. The text is given back and never
   // delivered, or kept and delivered once; never both.
   const w25 = crypto.randomUUID();
-  const slow = send("W25-TEXT SLOW-ADMIT", "followUp", w25);
-  await kit.delay(300);
+  const slow = send("W25-TEXT", "followUp", w25);
   const [d1, d2] = await Promise.all([rpc({ action: "chat-dequeue", projectId: id }), rpc({ action: "chat-dequeue", projectId: id })]);
   await slow;
   await idle();

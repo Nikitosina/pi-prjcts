@@ -12,7 +12,7 @@ globalThis.localStorage = {
   },
   removeItem: (key) => storage.delete(key),
 };
-const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, settleFailure, recoverSends, restoreInto } =
+const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, recoverSends, restoreInto } =
   await import("../web/queued-input.js");
 /** What the host's answer for a refusal looks like in the page (web/api.js HostError): the host recorded nothing. */
 const refusal = (message) => Object.assign(new Error(message), { refused: true });
@@ -239,7 +239,7 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   const { box, editor } = live("");
   box.value = "B typed meanwhile";
   persistText("chat:p:main", box.value);
-  const kind = settleFailure("chat:p:main", "a1", refusal("paused"), editor);
+  const kind = failSend("chat:p:main", "a1", refusal("paused"), editor);
   assert.equal(kind, "refused");
   assert.equal(box.value, "A text\n\nB typed meanwhile", "R5 the editor shows A in front of B");
   persistText("chat:p:main", box.value + " more");
@@ -254,7 +254,7 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   beginSend("chat:p:main", { requestId: "u1", text: "hello", delivery: "followUp" });
   const { box, editor } = live("");
   for (const lost of [new TypeError("Failed to fetch"), Object.assign(new Error("HTTP 502"), { status: 502 }), new Error("timeout")])
-    assert.equal(settleFailure("chat:p:main", "u1", lost, editor), "unknown");
+    assert.equal(failSend("chat:p:main", "u1", lost, editor), "unknown");
   assert.equal(box.value, "", "R6 the editor is not given the text back");
   const [kept] = readDraft("chat:p:main").sending;
   assert.deepEqual([kept.requestId, kept.text, kept.delivery], ["u1", "hello", "followUp"]);
@@ -302,7 +302,7 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   persistText("chat:p:main", "B text");
   writeDraftRaw({ attachments: ids("y", 6), origin: "telegram" });
   const { box, editor } = live("B text");
-  settleFailure("chat:p:main", "a1", refusal("nope"), editor);
+  failSend("chat:p:main", "a1", refusal("nope"), editor);
   const held = readDraft("chat:p:main");
   assert.equal(box.value, "B text", "R8 the editor is not forced past the upload limit");
   assert.equal(held.attachments.length, 6);
@@ -328,7 +328,7 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   storage.clear();
   persistText("chat:p:main", "dup");
   beginSend("chat:p:main", { requestId: "d1", text: "dup", delivery: "steer" });
-  settleFailure("chat:p:main", "d1", new TypeError("lost"), live().editor);
+  failSend("chat:p:main", "d1", new TypeError("lost"), live().editor);
   const { box, editor } = live();
   const result = await run({ restored: [item("d1", "dup")], editor });
   assert.equal(result.count, 1);

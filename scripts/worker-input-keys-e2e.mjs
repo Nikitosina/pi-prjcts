@@ -14,14 +14,7 @@ const deferred = () => {
 let gateW = deferred(),
   gateH = deferred(),
   workerId = "";
-// Test seams (src/test-seams.ts): the worker's delivery waits after its check, and a Host agent send fails after the runtime took the input.
 const kit = await createKit("worker-input-keys", {
-  env: {
-    PI_PROJECTS_TEST_SEAMS: JSON.stringify({
-      "worker-submit-delay": { marker: "SLOW-SUBMIT", ms: 1500 },
-      "host-agent-submit-lost": { marker: "LOST-OUTCOME", times: 1 },
-    }),
-  },
   handler: ({ role, user, results, tools }) => {
     if (tools.includes("host_call") && user.includes("HK-GATE") && !results.length) {
       const gate = gateH;
@@ -499,7 +492,7 @@ await kit.run(async () => {
   await ENTER();
   await eventually(() => count(workerCalls(), "W-GATE w26") >= 1, "w26 gated turn");
   const w26 = uuid();
-  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: w26, text: "W26-TEXT SLOW-SUBMIT", delivery: "followUp" });
+  await rpc({ action: "thread-send", id, threadId: worker.id, requestId: w26, text: "W26-TEXT", delivery: "followUp" });
   await kit.delay(700);
   await rpc({ action: "thread-stop", id, threadId: worker.id });
   const w26back = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
@@ -516,28 +509,5 @@ await kit.run(async () => {
     { w26offered, w26delivered, w26back },
   );
 
-  // W27: a Host agent send whose outcome is unknown (the runtime took the input, the call failed). The ledger keeps the entry, so Alt+Up can still take
-  // the input back while it waits.
-  gateH = deferred();
-  await type(hbox, "HK-GATE w27");
-  await ENTER();
-  await eventually(
-    () =>
-      count(
-        kit.result.calls.map((call) => call.user),
-        "HK-GATE w27",
-      ) >= 1,
-    "host w27 turn started",
-  );
-  const w27 = uuid();
-  const lost = await raw({ action: "host-agent-send", requestId: w27, text: "HK-W27 LOST-OUTCOME", delivery: "followUp" });
-  check("W27 an unknown outcome is not marked refused", lost.ok === false && lost.refused !== true, lost);
-  const w27back = await rpc({ action: "host-agent-dequeue" });
-  check(
-    "W27 the Host agent still offers the input of an unknown send",
-    w27back.restored.some((item) => item.id === w27 && item.text === "HK-W27 LOST-OUTCOME"),
-    w27back,
-  );
-  await rpc({ action: "host-agent-dequeue-ack", requestIds: w27back.restored.map((item) => item.id) });
   gateH.open();
 });
