@@ -10,6 +10,7 @@ import {
   acknowledgeDraft,
   beginSend,
   failSend,
+  recoverSends,
   finishSend,
   isAltUp,
   joinText,
@@ -405,6 +406,15 @@ const acknowledgeRestored = (requestIds) => call("host-agent-dequeue-ack", { req
 input.value = readDraft(surfaces.host).text;
 input.addEventListener("input", () => persistText(surfaces.host, input.value));
 void acknowledgeDraft({ surface: surfaces.host, acknowledge: acknowledgeRestored }).catch(() => {});
+// Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor.
+void recoverSends(surfaces.host, (record) =>
+  call("host-agent-send", { requestId: record.requestId, text: record.text, delivery: record.delivery ?? "steer" }),
+)
+  .then((accepted) => {
+    if (!input.value) input.value = readDraft(surfaces.host).text;
+    if (accepted) void loadHostAgent();
+  })
+  .catch(() => {});
 // Pi's keys: Enter steers a working agent, Alt+Enter queues a follow-up.
 let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
@@ -441,14 +451,15 @@ form.addEventListener("submit", async (event) => {
   if (!text || !available || form.dataset.sending === "1") return;
   form.dataset.sending = "1";
   input.value = "";
-  const sent = beginSend(surfaces.host);
+  const requestId = uuid();
+  beginSend(surfaces.host, { requestId, text, delivery });
   try {
-    await call("host-agent-send", { requestId: uuid(), text, delivery });
-    finishSend(surfaces.host, sent);
+    await call("host-agent-send", { requestId, text, delivery });
+    finishSend(surfaces.host, requestId);
     error = "";
     await loadHostAgent();
   } catch (reason) {
-    failSend(surfaces.host, text);
+    failSend(surfaces.host, requestId);
     input.value = joinText(text, input.value);
     // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
     if (/model/i.test(reason.message ?? "")) {

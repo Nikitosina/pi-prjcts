@@ -9,6 +9,7 @@ import {
   acknowledgeDraft,
   beginSend,
   failSend,
+  recoverSends,
   finishSend,
   isAltUp,
   joinText,
@@ -594,6 +595,21 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     if (text.value) text.style.height = `${Math.min(text.scrollHeight, 240)}px`;
     text.addEventListener("input", () => persistText(surface, text.value));
     void acknowledgeDraft({ surface, acknowledge }).catch(() => {});
+    // Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor.
+    void recoverSends(surface, (record) =>
+      call("thread-send", {
+        id: state.projectId,
+        threadId: id,
+        requestId: record.requestId,
+        text: record.text,
+        delivery: record.delivery ?? "steer",
+      }),
+    )
+      .then((accepted) => {
+        if (alive() && !text.value) text.value = readDraft(surface).text;
+        if (accepted) void load();
+      })
+      .catch(() => {});
   }
   if (steer) text?.focus();
   // Pi's keys: Enter steers a working worker, Alt+Enter queues a follow-up (a plain message the worker takes after its turn).
@@ -632,15 +648,16 @@ export async function renderWorker(root, id, { steer = false } = {}) {
       working = !!find()?.working;
     followUp = false;
     text.value = "";
-    const sent = beginSend(surface);
+    const requestId = uuid();
+    beginSend(surface, { requestId, text: value, delivery });
     try {
-      await call("thread-send", { id: state.projectId, threadId: id, requestId: uuid(), text: value, delivery });
-      finishSend(surface, sent);
+      await call("thread-send", { id: state.projectId, threadId: id, requestId, text: value, delivery });
+      finishSend(surface, requestId);
       if (stale(gen)) return;
       toast(!working ? "Sent to the worker." : delivery === "steer" ? "Steer sent." : "Queued as a follow-up.");
       void load();
     } catch (error) {
-      failSend(surface, value);
+      failSend(surface, requestId);
       if (alive()) text.value = joinText(value, text.value);
       fail(error);
     }

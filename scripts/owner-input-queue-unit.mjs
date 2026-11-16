@@ -1,14 +1,16 @@
 // Unit: the withdraw / acknowledge protocol for the owner's queued inputs (scripts/chat-queue-failures.md, W3-W5). A fake runtime, no host.
 import assert from "node:assert/strict";
-import { acknowledgeInputs, afterSubmit, pendingInputs, withdrawInputs } from "../src/owner-input-queue.ts";
+import { acknowledgeInputs, pendingInputs, withdrawInputs } from "../src/owner-input-queue.ts";
 
-const make = (entries, runtime) => {
+/** `producers`: ids a producer may still submit (default: every input the runtime has not seen). */
+const make = (entries, runtime, producers) => {
   const ledger = new Map(entries.map((entry) => [entry.id, { at: 1, state: "queued", delivery: "followUp", ...entry }]));
   const port = {
     list: async () => [...ledger.values()].map((entry) => ({ ...entry })),
     setState: async (ids, state) => ids.forEach((id) => ledger.has(id) && (ledger.get(id).state = state)),
     remove: async (ids) => ids.forEach((id) => ledger.delete(id)),
     status: async (ids) => new Map(ids.map((id) => [id, runtime.get(id) ?? "unsent"])),
+    producing: async (ids) => new Set(ids.filter((id) => (producers ? producers.has(id) : !runtime.has(id)))),
     abort: async (ids) => {
       const done = ids.filter((id) => runtime.get(id) === "queued");
       for (const id of done) runtime.set(id, "aborted");
@@ -85,43 +87,32 @@ const make = (entries, runtime) => {
   assert.equal((await withdrawInputs(port)).restored.length, 1);
 }
 
-// Not submitted to the runtime yet (a worker still preparing): the withdrawal marks it, and the submission that follows is taken back out.
+// W16: an input its producer has not submitted yet is not the page's to take: the producer's check and its submission are not one step, so a
+// restored input could still run. It stays queued (kept) until the runtime has it, then Alt+Up works as usual.
 {
   const { port, runtime, ledger } = make([{ id: "a", text: "one" }], new Map());
+  const first = await withdrawInputs(port);
+  assert.deepEqual(first.restored, [], "W16 nothing is restored while the producer may still submit");
+  assert.deepEqual(first.kept, ["a"]);
+  assert.equal(ledger.get("a").state, "queued", "W16 the producer's check still sees a queued input and submits it");
+  runtime.set("a", "queued");
+  const second = await withdrawInputs(port);
+  assert.deepEqual(
+    second.restored.map((item) => item.id),
+    ["a"],
+  );
+  assert.equal(runtime.get("a"), "aborted");
+}
+// W16: a producer that is gone (the Host agent after a crash between its ledger write and its submission) can never submit: the input is the page's.
+{
+  const { port, ledger } = make([{ id: "a", text: "one" }], new Map(), new Set());
   const result = await withdrawInputs(port);
-  assert.equal(result.restored.length, 1);
-  runtime.set("a", "queued");
-  await afterSubmit(port, "a");
-  assert.equal(runtime.get("a"), "aborted");
-  assert.equal(ledger.get("a").state, "withdrawn");
-  // An input that was not withdrawn is left alone.
-  const other = make([{ id: "b", text: "two" }], new Map([["b", "queued"]]));
-  await afterSubmit(other.port, "b");
-  assert.equal(other.runtime.get("b"), "queued");
-}
-// W9: the acknowledgment of a withdrawn input the producer has not submitted yet keeps a cancellation marker, so the later submission is taken back
-// out (the page already has the text; the agent must not run it as well).
-{
-  const { port, runtime, ledger } = make([{ id: "a", text: "one" }], new Map());
-  assert.equal((await withdrawInputs(port)).restored.length, 1);
+  assert.deepEqual(
+    result.restored.map((item) => item.id),
+    ["a"],
+  );
   assert.deepEqual(await acknowledgeInputs(port, ["a"]), ["a"]);
-  assert.equal(ledger.get("a")?.state, "cancelled");
-  assert.deepEqual(await pendingInputs(port), [], "a cancellation marker is not a pending input");
-  assert.equal((await withdrawInputs(port)).restored.length, 0, "a cancelled input is never restored again");
-  runtime.set("a", "queued");
-  await afterSubmit(port, "a");
-  assert.equal(runtime.get("a"), "aborted");
-  assert.equal(ledger.has("a"), false, "the marker goes once the producer can no longer resurrect the input");
-}
-
-// W9: a marker whose input the runtime never took stays; one the runtime already aborted is swept.
-{
-  const { port, ledger } = make([{ id: "a", text: "one", state: "cancelled" }], new Map());
-  await pendingInputs(port);
-  assert.equal(ledger.has("a"), true);
-  const done = make([{ id: "b", text: "two", state: "cancelled" }], new Map([["b", "aborted"]]));
-  await pendingInputs(done.port);
-  assert.equal(done.ledger.has("b"), false);
+  assert.equal(ledger.has("a"), false);
 }
 
 // W10: a crash between the withdrawn mark and the abort leaves the runtime queue holding the input; recovery finishes the abort before it

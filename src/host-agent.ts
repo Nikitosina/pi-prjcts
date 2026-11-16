@@ -19,7 +19,6 @@ import type { FeedEvent } from "./change-feed.ts";
 import { readTiers } from "./host-documents.ts";
 import {
   acknowledgeInputs,
-  afterSubmit,
   pendingInputs,
   withdrawInputs,
   type InputPort,
@@ -252,7 +251,10 @@ export async function openHostAgent(input: {
       inputsLock = run.catch(() => {});
       return run;
     };
+    // Sends between their ledger write and the runtime's admission: a withdrawal leaves these to their send (a crash drops the set, freeing the entry).
+    const sending = new Set<string>();
     const inputPort: InputPort = {
+      producing: async (ids) => new Set(ids.filter((id) => sending.has(id))),
       list: async () => readInputs(),
       setState: async (ids, state) => writeInputs(readInputs().map((entry) => (ids.includes(entry.id) ? { ...entry, state } : entry))),
       remove: async (ids) => writeInputs(readInputs().filter((entry) => !ids.includes(entry.id))),
@@ -308,21 +310,24 @@ export async function openHostAgent(input: {
         if (!model) throw new Error("The Host agent has no model; choose one in its settings");
         if (!known(model)) throw new Error(`The Host agent's model ${model} is not in the model catalog; choose another in its settings`);
         await apply(settings);
-        await locked(async () => {
-          if (!readInputs().some((entry) => entry.id === requestId))
-            writeInputs([...readInputs(), { id: requestId, text, delivery, at: Date.now(), state: "queued" }]);
-        });
+        sending.add(requestId);
         try {
-          await root.submit(
-            { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
-            context,
-          );
-        } catch (error) {
-          await locked(() => inputPort.remove([requestId]));
-          throw error;
+          await locked(async () => {
+            if (!readInputs().some((entry) => entry.id === requestId))
+              writeInputs([...readInputs(), { id: requestId, text, delivery, at: Date.now(), state: "queued" }]);
+          });
+          try {
+            await root.submit(
+              { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
+              context,
+            );
+          } catch (error) {
+            await locked(() => inputPort.remove([requestId]));
+            throw error;
+          }
+        } finally {
+          sending.delete(requestId);
         }
-        // An Alt+Up that ran between the record and the submission already gave this text back: do not deliver it as well.
-        await locked(() => afterSubmit(inputPort, requestId));
         input.publish({ topic: "host-agent" });
         return { accepted: true };
       },

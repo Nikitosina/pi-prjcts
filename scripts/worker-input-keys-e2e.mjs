@@ -297,23 +297,30 @@ await kit.run(async () => {
   );
   await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: modeRows.map((item) => item.id) });
 
-  // W9: Alt+Up and its acknowledgment arrive before the worker's delivery task submitted the input: the acknowledged text is never delivered too.
-  const raced = [];
+  // W9/W16: Alt+Up right after a send, before the worker's delivery task submitted it: an input is either given back (and then never delivered)
+  // or kept because its producer may still submit it (and then delivered exactly once); it is never both. A later Alt+Up may give back an
+  // earlier input once the runtime holds it, so what counts is each input's final outcome.
+  const sentRace = [],
+    givenBack = new Set();
   for (let n = 0; n < 3; n++) {
-    const requestId = uuid();
-    await rpc({ action: "thread-send", id, threadId: worker.id, requestId, text: `W-RACE ${n}`, delivery: "followUp" });
+    const text = `W-RACE ${n}`;
+    await rpc({ action: "thread-send", id, threadId: worker.id, requestId: uuid(), text, delivery: "followUp" });
+    sentRace.push(text);
     const taken = await rpc({ action: "thread-dequeue", id, threadId: worker.id });
-    await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: taken.restored.map((item) => item.id) });
-    if (taken.restored.length) raced.push(`W-RACE ${n}`);
+    if (taken.restored.length)
+      await rpc({ action: "thread-dequeue-ack", id, threadId: worker.id, requestIds: taken.restored.map((item) => item.id) });
+    for (const item of taken.restored) givenBack.add(item.text);
   }
   gateW.open();
   await eventually(async () => (await threadState()).status !== "running", "worker settled after the race");
   await kit.delay(1200);
-  const afterRace = workerCalls();
+  const history = await rpc({ action: "thread-history", id, threadId: worker.id, limit: 200, messageText: "full" });
+  const delivered = (text) =>
+    history.items.filter((entry) => entry.kind === "message" && entry.role === "user" && entry.text === text).length;
   check(
-    "W9 an input acknowledged before its delivery was submitted is never delivered as well",
-    raced.length > 0 && raced.every((text) => count(afterRace, text) === 0),
-    { raced, afterRace },
+    "W9 an input is given back and never delivered, or kept and delivered once; never both",
+    sentRace.every((text) => delivered(text) === (givenBack.has(text) ? 0 : 1)),
+    { givenBack: [...givenBack], delivered: sentRace.map((text) => [text, delivered(text)]) },
   );
 
   // ---- Alt+Up and the pending list: the Host agent drawer ----

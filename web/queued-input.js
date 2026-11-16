@@ -42,23 +42,43 @@ export const surfaces = {
   host: "host",
 };
 
-/** What the owner has in a surface's editor: text, the uploads and origin of restored messages, and restored ids the host may not have forgotten yet. */
+/** Restored ids remembered per surface, so a stale response that offers one again adds nothing. */
+const RECEIPTS = 200;
+/**
+ * What a surface holds: the editor's text, the uploads and origin of restored messages, restored ids the host may not have forgotten yet
+ * (`unacked`), ids already restored and acknowledged (`done`), and the sends in flight (`sending`: each owns its text, uploads, origin and
+ * request id until the host accepted it, so a reload or a rejected request loses nothing).
+ */
 export function readDraft(surface) {
   try {
     const draft = JSON.parse(localStorage.getItem(DRAFT + surface) ?? "null");
-    return { text: draft?.text ?? "", attachments: draft?.attachments ?? [], origin: draft?.origin, unacked: draft?.unacked ?? [] };
+    return {
+      text: draft?.text ?? "",
+      attachments: draft?.attachments ?? [],
+      origin: draft?.origin,
+      unacked: draft?.unacked ?? [],
+      done: draft?.done ?? [],
+      sending: draft?.sending ?? [],
+    };
   } catch {
-    return { text: "", attachments: [], unacked: [] };
+    return { text: "", attachments: [], unacked: [], done: [], sending: [] };
   }
 }
 /** Throws when the browser refuses the write, so nothing is acknowledged on the strength of a draft that was not kept. */
 export function writeDraft(surface, draft) {
-  const empty = !draft.text && !draft.attachments?.length && !draft.unacked?.length;
+  const empty = !draft.text && !draft.attachments?.length && !draft.unacked?.length && !draft.done?.length && !draft.sending?.length;
   if (empty) localStorage.removeItem(DRAFT + surface);
   else
     localStorage.setItem(
       DRAFT + surface,
-      JSON.stringify({ text: draft.text, attachments: draft.attachments ?? [], origin: draft.origin, unacked: draft.unacked ?? [] }),
+      JSON.stringify({
+        text: draft.text,
+        attachments: draft.attachments ?? [],
+        origin: draft.origin,
+        unacked: draft.unacked ?? [],
+        done: (draft.done ?? []).slice(-RECEIPTS),
+        sending: draft.sending ?? [],
+      }),
     );
 }
 /** Typing: the editor text follows into the draft. An emptied editor drops the uploads of restored messages with their text. */
@@ -78,27 +98,58 @@ const quietly = (write) => {
     // The draft is a convenience; only restored text needs a write that succeeded, and `restoreInto` checks that itself.
   }
 };
-/** A send starts: the editor text leaves the draft; the uploads and origin ride along with this message and stay until it is accepted. */
-export function beginSend(surface) {
+/** Sends this page has in flight; a recovery never resends one of them. */
+const inFlight = new Set();
+/**
+ * A send starts: the message takes the editor text, the uploads and the origin out of the draft and keeps them, with its request id, until the
+ * host accepted it. Whatever is restored or typed meanwhile belongs to the next send.
+ */
+export function beginSend(surface, { requestId, text, delivery }) {
   const draft = readDraft(surface);
-  quietly(() => writeDraft(surface, { ...draft, text: "" }));
-  return { attachments: draft.attachments, origin: draft.origin };
+  const record = { requestId, text, delivery, attachments: draft.attachments, origin: draft.origin };
+  inFlight.add(requestId);
+  quietly(() => writeDraft(surface, { ...draft, text: "", attachments: [], origin: undefined, sending: [...draft.sending, record] }));
+  return record;
 }
-/** The host accepted the message: its uploads and origin are the host's now, whatever was restored meanwhile stays. */
-export function finishSend(surface, sent) {
+/** The host accepted the message: it is the host's now. Only this send's record goes. */
+export function finishSend(surface, requestId) {
+  inFlight.delete(requestId);
   const draft = readDraft(surface);
+  quietly(() => writeDraft(surface, { ...draft, sending: draft.sending.filter((record) => record.requestId !== requestId) }));
+}
+/** The host refused it: its text, uploads and origin go back in front of whatever the draft holds now. */
+export function failSend(surface, requestId) {
+  inFlight.delete(requestId);
+  const draft = readDraft(surface);
+  const record = draft.sending.find((item) => item.requestId === requestId);
+  if (!record) return;
   quietly(() =>
     writeDraft(surface, {
       ...draft,
-      attachments: draft.attachments.filter((id) => !sent.attachments.includes(id)),
-      origin: draft.origin === sent.origin ? undefined : draft.origin,
+      text: joinText(record.text, draft.text),
+      attachments: [...new Set([...record.attachments, ...draft.attachments])],
+      origin: draft.origin ?? record.origin,
+      sending: draft.sending.filter((item) => item.requestId !== requestId),
     }),
   );
 }
-/** The host refused it: the text goes back in front of whatever is in the draft now (the uploads never left). */
-export function failSend(surface, text) {
-  const draft = readDraft(surface);
-  quietly(() => writeDraft(surface, { ...draft, text: joinText(text, draft.text) }));
+/**
+ * A page that finds sends the last page never saw accepted sends each again under its own request id (the host takes an id once, so a
+ * request that did arrive is not repeated); one the host now refuses goes back to the draft. Returns how many were accepted.
+ */
+export async function recoverSends(surface, resend) {
+  let accepted = 0;
+  for (const record of readDraft(surface).sending.filter((item) => !inFlight.has(item.requestId))) {
+    inFlight.add(record.requestId);
+    try {
+      await resend(record);
+      finishSend(surface, record.requestId);
+      accepted++;
+    } catch {
+      failSend(surface, record.requestId);
+    }
+  }
+  return accepted;
 }
 
 /** Longest prefix of the restored messages (in Pi's order) whose uploads, together with the draft's, fit one message. */
@@ -120,17 +171,30 @@ function fit(restored, attachments) {
  * Messages that would push the draft past the upload limit stay withdrawn and unacknowledged, so the next Alt+Up offers them again.
  * Returns how many inputs came back.
  */
-export async function restoreInto({ surface, editor, dequeue, acknowledge, toast, grow }) {
+const queues = new Map();
+export function restoreInto(options) {
+  // One restore at a time per composer: a second Alt+Up waits for the first one's acknowledgment instead of racing it.
+  const run = (queues.get(options.surface) ?? Promise.resolve()).then(() => restoreOnce(options));
+  queues.set(
+    options.surface,
+    run.catch(() => {}),
+  );
+  return run;
+}
+async function restoreOnce({ surface, editor, dequeue, acknowledge, toast, grow }) {
   const result = await dequeue();
   const draft = readDraft(surface);
   if (editor.live()) draft.text = editor.read();
   // Offered again after a lost acknowledgment: already in the draft, so only the acknowledgment is retried.
-  const again = result.restored.filter((entry) => draft.unacked.includes(entry.id));
-  const fresh = result.restored.filter((entry) => !draft.unacked.includes(entry.id));
   if (!result.restored.length) {
     toast(result.kept.length ? "Already delivered; nothing to restore" : "No queued messages to restore");
     return 0;
   }
+  // A stale response can offer what an earlier restore already put in the draft and acknowledged.
+  const offered = result.restored.filter((entry) => !draft.done.includes(entry.id));
+  if (!offered.length) return 0;
+  const again = offered.filter((entry) => draft.unacked.includes(entry.id));
+  const fresh = offered.filter((entry) => !draft.unacked.includes(entry.id));
   const { take, left, attachments } = fit(fresh, draft.attachments);
   const heldNote = left.length
     ? `${left.length} queued message${left.length > 1 ? "s carry" : " carries"} more uploads than one message can send; send the editor first. ${left.length > 1 ? "They stay" : "It stays"} queued for the next Alt+Up.`
@@ -142,6 +206,7 @@ export async function restoreInto({ surface, editor, dequeue, acknowledge, toast
   }
   const origins = new Set(take.map((entry) => entry.origin ?? null));
   const merged = {
+    ...draft,
     text: take.length ? joinText(take.map((entry) => entry.text).join("\n\n"), draft.text) : draft.text,
     attachments,
     origin: draft.origin ?? (origins.size === 1 ? ([...origins][0] ?? undefined) : undefined),
@@ -168,5 +233,5 @@ export async function acknowledgeDraft({ surface, acknowledge, ids = readDraft(s
   if (!ids.length) return;
   await acknowledge(ids);
   const draft = readDraft(surface);
-  writeDraft(surface, { ...draft, unacked: draft.unacked.filter((id) => !ids.includes(id)) });
+  writeDraft(surface, { ...draft, unacked: draft.unacked.filter((id) => !ids.includes(id)), done: [...draft.done, ...ids] });
 }

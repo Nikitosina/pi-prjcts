@@ -631,8 +631,6 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
               return { status: "running", checkpoint: { phase: "report" } } as const;
             // Taken back by the owner before it reached the conversation: nothing to deliver.
             if (requestId && isWithdrawn(record.inputs?.[requestId])) {
-              // The cancellation marker did its job: this producer will never submit the input.
-              if (record.inputs?.[requestId]?.state === "cancelled") delete record.inputs[requestId];
               return { status: "running", checkpoint: { phase: "report" } } as const;
             }
             if (message.startsWith(record.brief)) record.briefed = true;
@@ -655,18 +653,13 @@ const reporterTask = (host: JobsHost, discardSettledStalls: (agentId: string) =>
           },
           taskContext,
         );
-        // A withdrawal that ran between the check above and this submission already gave the text back: take it out of the queue again.
+        // An input withdrawn after the check above never reaches here with its text given back (the queue leaves an unsent input to this producer);
+        // one withdrawn while the agent could not finish it is taken out again.
         if (
           requestId &&
           isWithdrawn((await runtime.snapshot(Jobs, ROOT_CONVERSATION_ID, taskContext))?.agents[agentId]?.inputs?.[requestId])
-        ) {
+        )
           await submission.abort(taskContext);
-          await runtime.commit(async (tx) => {
-            const input = (await tx.doc(Jobs, ROOT_CONVERSATION_ID)).agents[agentId]?.inputs;
-            if (input?.[requestId]?.state === "cancelled") delete input[requestId];
-            return undefined;
-          }, taskContext);
-        }
         const settled = await submission.wait(taskContext);
         const failure = await turnFailure(settled, async (at) => (await runtime.context(conversationId, taskContext, { at })).entries);
         // Quota (or a rate limit the host can route around): move to the next fallback model, otherwise wait for the allowance to recover and resend.
@@ -1578,6 +1571,11 @@ export function createJobs(host: JobsHost) {
         edit((agent) => {
           for (const id of ids) delete agent.inputs?.[id];
         }),
+      // The agent's delivery task submits what is unsent until the agent ends.
+      producing: async (ids) => {
+        const agent = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agentId];
+        return new Set(agent && agent.endedAt === null ? ids : []);
+      },
       status: async (ids) => {
         const found = new Map<string, InputStatus>();
         const conversationId = (await read())?.conversationId;

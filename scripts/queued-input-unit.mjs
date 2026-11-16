@@ -12,7 +12,8 @@ globalThis.localStorage = {
   },
   removeItem: (key) => storage.delete(key),
 };
-const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, restoreInto } = await import("../web/queued-input.js");
+const { ATTACHMENT_LIMIT, readDraft, persistText, beginSend, finishSend, failSend, recoverSends, restoreInto } =
+  await import("../web/queued-input.js");
 
 const item = (id, text, attachments = []) => ({ id, text, delivery: "followUp", attachments });
 const toasts = [];
@@ -55,13 +56,93 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
   assert.equal(readDraft("chat:p:main").text, "one\n\ntyped");
   persistText("chat:p:main", "one\n\ntyped and more");
   assert.equal(readDraft("chat:p:main").text, "one\n\ntyped and more");
-  const sent = beginSend("chat:p:main");
+  const sent = beginSend("chat:p:main", { requestId: "r1", text: "one\n\ntyped and more" });
   assert.equal(readDraft("chat:p:main").text, "");
-  failSend("chat:p:main", "one\n\ntyped and more");
+  failSend("chat:p:main", "r1");
   assert.equal(readDraft("chat:p:main").text, "one\n\ntyped and more", "a refused send keeps the text");
-  beginSend("chat:p:main");
-  finishSend("chat:p:main", sent);
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+  const again = beginSend("chat:p:main", { requestId: "r2", text: "one\n\ntyped and more" });
+  finishSend("chat:p:main", again.requestId);
   assert.equal(readDraft("chat:p:main").text, "");
+  void sent;
+}
+
+// R1: a send is kept, with its request id, from the moment it starts until the host accepted it. A reload (or the tab closing) while the
+// request is lost or rejected finds it again: it is sent once more under the same id (the host takes an id once), or its text is given back.
+{
+  storage.clear();
+  persistText("chat:p:main", "hello");
+  beginSend("chat:p:main", { requestId: "r1", text: "hello" });
+  // The page is gone; a new page reads what is left.
+  const left = readDraft("chat:p:main");
+  assert.equal(left.text, "");
+  assert.deepEqual(
+    left.sending.map((record) => [record.requestId, record.text]),
+    [["r1", "hello"]],
+  );
+  // A new page is a new module instance: nothing is in flight there, whatever the old page had started.
+  const { recoverSends: reload } = await import("../web/queued-input.js?page2");
+  const seen = [];
+  const resent = await reload("chat:p:main", async (record) => void seen.push(record.requestId));
+  assert.deepEqual(seen, ["r1"], "the same request id goes out again");
+  assert.equal(resent, 1);
+  // The page that started a send does not resend it behind its own back.
+  beginSend("chat:p:main", { requestId: "r0", text: "pending here" });
+  assert.equal(await recoverSends("chat:p:main", async () => assert.fail("an in-flight send is not resent")), 0);
+  finishSend("chat:p:main", "r0");
+  assert.deepEqual(readDraft("chat:p:main").sending, [], "an accepted resend is done");
+  assert.equal(readDraft("chat:p:main").text, "");
+  // The host refuses it now: the owner gets the text back in the editor draft instead of losing it.
+  beginSend("chat:p:main", { requestId: "r2", text: "again" });
+  await reload("chat:p:main", async () => Promise.reject(new Error("offline")));
+  assert.equal(readDraft("chat:p:main").text, "again");
+  assert.deepEqual(readDraft("chat:p:main").sending, []);
+}
+
+// R2: each send owns its text, uploads and origin. A restore that lands while the first send is pending belongs to the next send; finishing or
+// failing one send touches only its own.
+{
+  storage.clear();
+  const writeAttachments = (attachments, origin) =>
+    localStorage.setItem("pi-ui2-draft:chat:p:main", JSON.stringify({ ...readDraft("chat:p:main"), attachments, origin }));
+  persistText("chat:p:main", "first");
+  writeAttachments(["f1"], "o1");
+  const one = beginSend("chat:p:main", { requestId: "r1", text: "first" });
+  assert.deepEqual(one.attachments, ["f1"]);
+  assert.equal(one.origin, "o1");
+  assert.deepEqual(readDraft("chat:p:main").attachments, [], "the pending send took its uploads with it");
+  writeAttachments(["g1"], "o2");
+  persistText("chat:p:main", "second");
+  const two = beginSend("chat:p:main", { requestId: "r2", text: "second" });
+  assert.deepEqual(two.attachments, ["g1"], "the second send does not inherit the first's uploads");
+  assert.equal(two.origin, "o2");
+  finishSend("chat:p:main", "r1");
+  assert.deepEqual(
+    readDraft("chat:p:main").sending.map((record) => record.requestId),
+    ["r2"],
+    "finishing r1 leaves r2 alone",
+  );
+  failSend("chat:p:main", "r2");
+  const draft = readDraft("chat:p:main");
+  assert.equal(draft.text, "second");
+  assert.deepEqual(draft.attachments, ["g1"], "a failed send gets its own uploads back, only those");
+  assert.equal(draft.origin, "o2");
+}
+
+// R3: overlapping Alt+Up: the second response carries what the first already restored and acknowledged. One composer restores one at a time and
+// remembers what it restored, so the text is added once, also after a reload.
+{
+  storage.clear();
+  const { box, editor } = live();
+  const stale = [item("a", "one")];
+  const [first, second] = await Promise.all([run({ restored: stale, editor }), run({ restored: stale, editor })]);
+  assert.equal(box.value, "one", "R3 the same input is not added twice");
+  assert.equal(first.count + second.count, 1);
+  assert.equal(readDraft("chat:p:main").text, "one");
+  const reloaded = live(readDraft("chat:p:main").text);
+  const later = await run({ restored: stale, editor: reloaded.editor });
+  assert.equal(reloaded.box.value, "one", "R3 a stale response after a reload adds nothing either");
+  assert.equal(later.count, 0);
 }
 
 // W3: a lost acknowledgment: the same item offered again is not added twice, and the acknowledgment is retried.

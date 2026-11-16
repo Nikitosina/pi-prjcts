@@ -11,6 +11,7 @@ import {
   acknowledgeDraft,
   beginSend,
   failSend,
+  recoverSends,
   finishSend,
   pendingHtml,
   persistText,
@@ -57,6 +58,7 @@ export async function loadChat() {
         if (stale(gen)) continue;
         state.view = view;
         void acknowledgeDraft({ surface: surface(), acknowledge: acknowledgeRestored }).catch(() => {});
+        void recoverChatSends(gen);
         if (held && (entries >= held.entries || committed(view, held))) held = state.liveHeld = null;
         emit("view", view);
         renderFeed();
@@ -593,6 +595,26 @@ function renderPending() {
 const surface = () => surfaces.chat(state.projectId, state.chatId);
 const acknowledgeRestored = (requestIds) => call("chat-dequeue-ack", { projectId: state.projectId, requestIds });
 /** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
+/** Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor. */
+async function recoverChatSends(gen) {
+  const key = surface(),
+    id = state.projectId,
+    args = chatArgs();
+  const accepted = await recoverSends(key, (record) =>
+    call("message", {
+      id,
+      text: record.text,
+      requestId: record.requestId,
+      delivery: record.delivery ?? "steer",
+      ...(record.attachments?.length ? { attachments: record.attachments } : {}),
+      ...(record.origin ? { origin: record.origin } : {}),
+      ...args,
+    }),
+  ).catch(() => 0);
+  if (stale(gen)) return;
+  if (!input.value) input.value = readDraft(key).text;
+  if (accepted) void loadChat();
+}
 async function restoreQueued() {
   const gen = state.generation,
     key = surface(),
@@ -622,15 +644,17 @@ form.addEventListener("submit", async (event) => {
     key = surface();
   input.value = "";
   grow();
-  const sent = beginSend(key);
+  const requestId = uuid(),
+    sent = beginSend(key, { requestId, text, delivery });
   follow.follow();
   const slash = slashCommand(text);
   if (slash) {
     try {
       await slash.command.run(slash.argument);
+      finishSend(key, requestId);
       if (!stale(gen)) void loadChat();
     } catch (error) {
-      failSend(key, text);
+      failSend(key, requestId);
       if (!stale(gen) && !input.value) input.value = text;
       fail(error);
     }
@@ -641,17 +665,17 @@ form.addEventListener("submit", async (event) => {
     await call("message", {
       id: state.projectId,
       text,
-      requestId: uuid(),
+      requestId,
       delivery,
       ...(sent.attachments.length ? { attachments: sent.attachments } : {}),
       ...(sent.origin ? { origin: sent.origin } : {}),
       ...chatArgs(),
     });
-    finishSend(key, sent);
+    finishSend(key, requestId);
     if (stale(gen)) return;
     await loadChat();
   } catch (error) {
-    failSend(key, text);
+    failSend(key, requestId);
     if (!stale(gen) && !input.value) input.value = text;
     fail(error);
   }
