@@ -421,4 +421,39 @@ await kit.run(async () => {
     hLate.restored.length === 0 && count(hFinal, "HK-KEEP me") === 1,
     [hLate, hFinal],
   );
+
+  // W16: the Host agent's send writes its ledger entry, then submits; an Alt+Up in between must not give the input back while the send may still
+  // submit it. Each input is given back and never delivered, or kept and delivered once.
+  await eventually(async () => !(await rpc({ action: "host-agent-history" })).items.some((item) => item.running), "host agent idle");
+  gateH = deferred();
+  await type(hbox, "HK-GATE race");
+  await ENTER();
+  await eventually(
+    () =>
+      count(
+        kit.result.calls.map((call) => call.user),
+        "HK-GATE race",
+      ) >= 1,
+    "host race turn started",
+  );
+  const hostRace = [],
+    hostGivenBack = new Set();
+  for (let n = 0; n < 3; n++) {
+    const text = `HK-RACE ${n}`;
+    await rpc({ action: "host-agent-send", requestId: uuid(), text, delivery: "followUp" });
+    hostRace.push(text);
+    const taken = await rpc({ action: "host-agent-dequeue" });
+    if (taken.restored.length) await rpc({ action: "host-agent-dequeue-ack", requestIds: taken.restored.map((item) => item.id) });
+    for (const item of taken.restored) hostGivenBack.add(item.text);
+  }
+  gateH.open();
+  await kit.delay(2500);
+  const hostHistory = (await rpc({ action: "host-agent-history" })).items;
+  const hostDelivered = (text) =>
+    hostHistory.filter((entry) => entry.kind === "message" && entry.role === "user" && entry.text === text).length;
+  check(
+    "W16 a Host input is given back and never delivered, or kept and delivered once; never both",
+    hostRace.every((text) => hostDelivered(text) === (hostGivenBack.has(text) ? 0 : 1)),
+    { hostGivenBack: [...hostGivenBack], delivered: hostRace.map((text) => [text, hostDelivered(text)]) },
+  );
 });
