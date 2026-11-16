@@ -1506,6 +1506,11 @@ export function projectDir(id: string): string {
   return join(home(), parse(Id, id));
 }
 
+/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
+export function workerWorktreeRoot(id: string): string {
+  return join(projectDir(id), "worktrees");
+}
+
 export function saveJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;

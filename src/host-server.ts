@@ -33,6 +33,7 @@ import {
   notes,
   parse,
   projectDir,
+  workerWorktreeRoot,
   saveJob,
   deleteJob,
   saveProject,
@@ -220,6 +221,12 @@ async function withProjectLock<T>(id: string, operation: () => Promise<T>, durin
   }
 }
 
+/** The disable refusal for a project's plugin that needs no lock to decide (its checkout needs it, or its work is in flight), or null. */
+function loadedPluginBlock(projectId: string, plugin: string): string | null {
+  ownedProjectDir(projectId);
+  return plugins.disableBlock(loadProject(projectId), plugin);
+}
+
 async function withDurableOwner<T>({
   id,
   validate,
@@ -385,10 +392,6 @@ const rebindAuthorizations = (project: ReturnType<typeof loadProject>) =>
   plugins
     .workspaceProviders()
     .reduce((current, provider) => (provider.rebind ? provider.rebind(current) : current), rebindOneClickGithub(project));
-/** Worker worktrees for one-click grants live with the project data, outside the owner checkout. */
-function workerWorktreeRoot(id: string): string {
-  return join(projectDir(id), "worktrees");
-}
 
 async function persistWorkspaceGrant<T>(
   before: ReturnType<typeof loadProject>,
@@ -1300,7 +1303,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         labels: plugins.labels(),
         web: plugins.web(),
       };
-    case "project-plugin":
+    case "project-plugin": {
+      // Work in flight refuses the disable at once; it does not queue behind a project lock the work itself holds.
+      if (!input.enabled) {
+        const early = loadedPluginBlock(input.id, input.plugin);
+        if (early) throw new Error(early);
+      }
       return withProjectLock(input.id, async () => {
         const project = loadProject(input.id);
         if (project.deleted || project.archived) throw new Error("Inactive project settings cannot be changed");
@@ -1308,6 +1316,7 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         plugins.setEnabled(project, input.plugin, input.enabled, saveProject);
         return { plugin: input.plugin, enabled: input.enabled };
       });
+    }
     case "plugin": {
       const handler = plugins.rpc(input.plugin, input.method);
       if (!handler)
@@ -1317,29 +1326,34 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
         handler({
           params: input.params,
           projectId: input.id,
-          withRoot: (id, fn) => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) }),
+          // An RPC without a project id reaches a project only through these two: each counts as the plugin's work in that project, from before the
+          // project is opened or locked until its effects are done, and is refused once the project turned the plugin off.
+          withRoot: (id, fn) =>
+            plugins.gate.run(id, input.plugin, () => withDurableOwner({ id, operation: (owner) => owner.withRoot(fn) })),
           mutateIdle: (id, change) =>
-            lifecycle(id, change.validate, async (owner) => {
-              const view = await owner.snapshot(),
-                plan = await owner.jobs();
-              if (
-                view.chats.some((chat) => chat.busy) ||
-                view.coordinator.busy ||
-                view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
-                workBusy(plan)
-              )
-                throw new Error("This change requires no active project work");
-              await closeLifecycleOwner(id, owner);
-              return withProjectLock(
-                id,
-                async () => {
-                  const project = loadProject(id);
-                  change.validate(project);
-                  saveProject(change.apply(project));
-                },
-                true,
-              );
-            }),
+            plugins.gate.run(id, input.plugin, () =>
+              lifecycle(id, change.validate, async (owner) => {
+                const view = await owner.snapshot(),
+                  plan = await owner.jobs();
+                if (
+                  view.chats.some((chat) => chat.busy) ||
+                  view.coordinator.busy ||
+                  view.coordinator.submissions.some((item) => item.status === "queued" || item.status === "placed") ||
+                  workBusy(plan)
+                )
+                  throw new Error("This change requires no active project work");
+                await closeLifecycleOwner(id, owner);
+                return withProjectLock(
+                  id,
+                  async () => {
+                    const project = loadProject(id);
+                    change.validate(project);
+                    saveProject(change.apply(project));
+                  },
+                  true,
+                );
+              }),
+            ),
         }),
       );
     }

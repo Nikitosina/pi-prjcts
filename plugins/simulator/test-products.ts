@@ -73,24 +73,41 @@ export function workspaceKeyForRoot(root: string): string {
   return `${slug}-${createHash("sha256").update(real).digest("hex").slice(0, 12)}`;
 }
 
-/** Prunes only the workspaces a project owns: its checkout and worktrees (`roots`). Anything else under `root` is left alone. */
-export const pruneProjectProducts = (input: { root: string; now: number; keepMs: number; roots: readonly string[] }) =>
-  pruneTestProducts({ root: input.root, now: input.now, keepMs: input.keepMs, only: new Set(input.roots.map(workspaceKeyForRoot)) });
-
-/** The hourly sweep: each project that has the plugin on prunes its own workspaces; a project that turned it off is not touched. */
+/**
+ * The hourly sweep and one project's cleanup step. A workspace is pruned only for a project that has the plugin on and is the only project to
+ * claim it: a checkout two projects claim (or one a project that turned the plugin off claims) is shared and stays, as does any workspace nobody
+ * claims. `admit` runs each project's pruning through the host's project gate, which refuses a project that turned the plugin off and counts the
+ * work, so the deletion happens while the plugin is still on there. `only` limits the sweep to one project (the cleanup step).
+ */
 export async function pruneEnabledProjects(input: {
   root: string;
   now: number;
   keepMs: number;
-  projects: ReadonlyArray<{ disabledPlugins?: string[]; roots: readonly string[] }>;
+  projects: ReadonlyArray<{ id: string; disabledPlugins?: string[]; roots: readonly string[] }>;
+  admit?: <T>(projectId: string, work: () => Promise<T>) => Promise<T>;
+  only?: string;
 }): Promise<{ removed: number; bytes: number }> {
+  const claims = new Map<string, Set<string>>();
+  for (const project of input.projects)
+    for (const root of project.roots) {
+      const key = workspaceKeyForRoot(root);
+      (claims.get(key) ?? claims.set(key, new Set()).get(key)!).add(project.id);
+    }
   let removed = 0,
     bytes = 0;
   for (const project of input.projects) {
+    if (input.only !== undefined && project.id !== input.only) continue;
     if (project.disabledPlugins?.includes("simulator")) continue;
-    const done = await pruneProjectProducts({ root: input.root, now: input.now, keepMs: input.keepMs, roots: project.roots });
-    removed += done.removed;
-    bytes += done.bytes;
+    const mine = new Set(project.roots.map(workspaceKeyForRoot).filter((key) => claims.get(key)?.size === 1));
+    const work = () => pruneTestProducts({ root: input.root, now: input.now, keepMs: input.keepMs, only: mine });
+    try {
+      const done = await (input.admit ? input.admit(project.id, work) : work());
+      removed += done.removed;
+      bytes += done.bytes;
+    } catch (error) {
+      // A project that turned the plugin off is skipped; a failure of its own work is the next project's no concern.
+      if (!/disabled in this project/.test(error instanceof Error ? error.message : String(error))) throw error;
+    }
   }
   return { removed, bytes };
 }

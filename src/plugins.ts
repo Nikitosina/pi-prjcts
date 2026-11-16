@@ -30,7 +30,8 @@ import type {
 import { usePluginPromptBlocks } from "./prompt-blocks.ts";
 import { hostLeases } from "./resource-leases.ts";
 import { webFile, type WebFile } from "./web-file.ts";
-import { home, listProjects, loadProject, projectDir, type Project } from "./state.ts";
+import { home, listProjects, loadProject, projectDir, workerWorktreeRoot, type Project } from "./state.ts";
+import { verifiedWorkspaceRoots } from "./workspace-roots.ts";
 import { runCli, findVcsRoot } from "./vcs.ts";
 import {
   authorizationFingerprint,
@@ -101,11 +102,12 @@ const release = (resume: (() => void) | undefined) => {
 };
 /** Lifecycle pauses taken by a disable: held while the plugin is off, released by the enable. */
 const heldPauses = new Map<string, () => void>();
+// A project whose stored state cannot be read is not one that has the plugin on: the gate fails closed.
 const gate = createPluginGate((projectId, plugin) => {
   try {
     return disabledIn(loadProject(projectId), plugin);
   } catch {
-    return false;
+    return true;
   }
 });
 const loadedName = (name: string) => loaded.some((item) => item.plugin === name) || builtins().some((item) => item.plugin === name);
@@ -161,6 +163,13 @@ export const plugins = {
    * The project with the plugin turned on or off. Synchronous on purpose: the caller saves the result in the same tick, so no call
    * can begin between the work check and the stored flag. Refuses a plugin with active work or one the checkout needs.
    */
+  /** Why the plugin cannot be turned off in this project right now (needed by its checkout, or work in flight), or null. Read-only, so it can run before a lock. */
+  disableBlock: (project: Project, name: string): string | null => {
+    const required = requiredBy(project, name);
+    if (required) return `Cannot disable "${name}": ${required}`;
+    const busy = gate.active(project.id, name);
+    return busy ? `Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.` : null;
+  },
   setEnabled: (project: Project, name: string, enabled: boolean, save: (next: Project) => void): Project => {
     if (!loadedName(name)) throw new Error(`Plugin "${name}" is not loaded`);
     const off = new Set(project.disabledPlugins ?? []);
@@ -169,11 +178,8 @@ export const plugins = {
     let paused: (() => void) | undefined;
     if (enabled) off.delete(name);
     else {
-      const required = requiredBy(project, name);
-      if (required) throw new Error(`Cannot disable "${name}": ${required}`);
-      const busy = gate.active(project.id, name);
-      if (busy)
-        throw new Error(`Cannot disable "${name}": it has active work in this project (${busy} running). Try again when it finishes.`);
+      const blocked = plugins.disableBlock(project, name);
+      if (blocked) throw new Error(blocked);
       const lifecycle = [...builtins(), ...loaded].find((entry) => entry.plugin === name)?.capabilities.lifecycle;
       try {
         paused = lifecycle?.pause?.(project.id);
@@ -533,6 +539,8 @@ async function hostApi(name: string, stage: PluginCapabilities): Promise<HostPlu
       record: <T>(project: object, key: string) => (project as Record<string, unknown>)[key] as T | undefined,
       authorizationFingerprint,
       trustedOwner,
+      workspaceRoots: (id) => verifiedWorkspaceRoots(loadProject(id).cwd, workerWorktreeRoot(id)),
+      work: (id, work) => gate.run(id, name, work),
     },
     exec: {
       run: runCli,

@@ -101,3 +101,8 @@ Host side:
 - W31 A withdrawn input whose id is also an unknown `sending` record: the retry sends it again (the host answers withdrawn) while the text also sits in the editor. The record leaves `sending` in the write that restores it.
 - W32 The editor is cleared and a record created for a slash command, so a reload resends `/command` as a message. Slash commands have no record and run only from the editor.
 - W33 A host that cannot tell a refusal from a failure: validation errors carry `refused: true` only when no ledger entry or runtime submission was written; everything after the first write is unknown.
+
+Third pass: how it was proven
+- W25 (overlapping Alt+Up): `chat-queue-e2e` fires a send and two `chat-dequeue` calls together and asserts the given-back-or-delivered-once invariant. The race window is not forced (no production test seam was added), so a green run is a sample, not a proof; the per-surface serialization in `host-server.ts` (`serialized`) is what closes it by construction.
+- W26 (stop before the delivery task submitted): same invariant check in `worker-input-keys-e2e`; the rule itself (a live `projects.agent-reporter` task, not `endedAt`, decides whether an input may still be submitted) is in `src/jobs.ts` `inputPort.producing`.
+- W24/W27: a retry of the same id with the same payload is submitted again by the Host (`message`, Host agent), and a failure after the ledger write keeps the entry. W24 is exercised with a hand-written ledger entry; a lost submission after the ledger write cannot be forced without a test seam, so it is covered by the rule only.
