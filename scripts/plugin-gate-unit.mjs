@@ -69,5 +69,20 @@ void before;
   assert.deepEqual(await gate.settled("p7", "z", async () => ({ items: [] })), { items: [] }, "20 an enabled plugin's result passes");
 }
 
+// 25: the host's gate refuses when the project's stored state cannot be read: an unknown project is not one that has the plugin on.
+{
+  const { plugins } = await import("../src/plugins.ts");
+  let ran = false;
+  await assert.rejects(
+    () =>
+      plugins.gate.run("00000000-0000-4000-8000-000000000000", "simulator", async () => {
+        ran = true;
+      }),
+    /disabled in this project|unavailable/,
+  );
+  assert.equal(ran, false, "25 the work did not run");
+  assert.equal(plugins.gate.isOff("00000000-0000-4000-8000-000000000000", "simulator"), true, "25 unreadable state counts as off");
+}
+
 console.log("plugin-gate-unit passed");
 process.exit(0);
