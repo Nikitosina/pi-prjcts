@@ -49,7 +49,7 @@ Written before the rotation code. Rotation sends the GSEvent device-orientation 
 - Screenshots: the cached frame of the rotated clone is dropped, so the next screenshot shows the new orientation.
 - Worker binding: worker threads bound before rotation existed keep exactly their bound simulator tools; only new threads get the rotate tool.
 - Known limit: an iPhone home screen stays portrait; apps that support landscape rotate.
-- Storage: the Settings → Storage row counts only this project's owned clones; what it calls freeable is the data of exactly the clones the cleanup step would erase now (shut down, unleased, unused past the window). A failing inventory makes the row unknown, never zero.
+- Storage: the Settings → Storage row counts only this project's owned clones and their stray testing clones; what it calls freeable is the data of exactly the clones the cleanup step would erase now (shut down, unleased, unused past the window) plus the strays it would delete. A failing inventory makes the row unknown, never zero.
 
 ## XcodeBuildMCP test products
 
@@ -59,6 +59,18 @@ Written before the code. Every simulator test run through XcodeBuildMCP leaves a
 - T2 The newest finished run of a workspace is deleted, so a test-without-building rerun has to build again.
 - T3 Something other than an XcodeBuildMCP test products folder is deleted (DerivedData, result bundles, a file or folder whose name does not match XcodeBuildMCP's pattern), or a folder is followed out through a symlink.
 - T4 A removed folder leaves its completion marker behind, a missing root throws, or the summary does not say how many folders and bytes were freed.
+
+## Parallel-testing clones
+
+Written before the code. Owner decision (2026-11-16): `xcodebuild` parallel testing clones a project's simulator into Xcode's `testing` set (`~/Library/Developer/XCTestDevices`, named `Clone N of <clone name>`) and leaves the clones behind when a run is killed; ten of them took 92 GB. They are copies of the project's own clones, so the cleanup step deletes them; Xcode makes new ones on the next run. Global caches (DerivedData, DocumentationCache, iOS DeviceSupport, runtimes) stay untouched. Proof: `scripts/workspace-cleanup-unit.mjs` (X1-X3, X5), `scripts/simulator-worker-unit.mjs` (X4, X6, X7).
+
+- X1 A device that is not a testing clone of this project's simulators is deleted: a `default`-set device, a clone of another project's or of a non-project simulator, or a name that only contains the project prefix.
+- X2 A testing clone that is booted, or was used in the last hour (a run starting or in progress), is deleted.
+- X3 A clone whose owned simulator was already deleted stays forever because only owned clones are matched.
+- X4 Cleanup deletes a testing clone while simulator management is off, or reports a deletion that `simslim` did not confirm (the clone is still listed) as done.
+- X5 Settings → Storage does not count the testing clones, so their 10 GB each stay invisible and unclaimed.
+- X6 The step's summary does not say how many testing clones it deleted.
+- X7 A project that never used simulators runs `simslim` in every cleanup, so a host without it fails the routine of every project.
 
 ## Worker boot and shutdown by the lease holder
 

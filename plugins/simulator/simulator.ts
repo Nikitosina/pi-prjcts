@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Static, TSchema } from "typebox";
 import type { HostPluginApi } from "../../src/plugin-types.ts";
-import { cloneUsage, idleClones } from "./idle.ts";
+import { cloneUsage, idleClones, strayTestClones } from "./idle.ts";
 
 /** Clones one project may own at once (for example an iPhone and an iPad). */
 export const MAX_OWNED = 4;
@@ -142,6 +142,8 @@ export function createSimulators(api: HostPluginApi) {
   const simslim = () => process.env.PI_PROJECTS_SIMSLIM || "/opt/homebrew/bin/simslim";
   const xcode = () => process.env.PI_PROJECTS_XCODEBUILDMCP || "/opt/homebrew/bin/xcodebuildmcp";
   const deviceRoot = () => join(homedir(), "Library/Developer/CoreSimulator/Devices");
+  // Xcode's parallel-testing device set.
+  const testingRoot = () => join(homedir(), "Library/Developer/XCTestDevices");
   const simulatorEnabled = (id: string) => readStore(id).enabled;
 
   /** Management is on by default; the owner may turn it off (keeping the clones and all their data) or pin the default clone source. */
@@ -695,12 +697,17 @@ export function createSimulators(api: HostPluginApi) {
   function message(error: unknown) {
     return error instanceof Error ? error.message : String(error);
   }
-  /** Cleanup routine step: erases owned clones that are shut down, unleased and unused for `unusedDays`, one at a time. */
+  // A project without simulator state never made a clone, so it has nothing to clean and simslim may be missing.
+  const usedSimulators = (id: string) => existsSync(statePath(id));
+  /** Cleanup routine step: erases owned clones that are shut down, unleased and unused for `unusedDays`, one at a time, then deletes
+   * the stray parallel-testing clones of the project's simulators. */
   async function eraseIdleSimulators(id: string, unusedDays: number, signal: AbortSignal): Promise<string> {
+    if (!usedSimulators(id)) return "";
     const store = readStore(id);
-    if (!store.enabled || !store.owned.length) return "";
+    if (!store.enabled) return "";
     if (store.uncertain || store.pending || tasks.has(id)) return "Simulators: management is busy or uncertain; nothing erased.";
-    const states = new Map((await inventory(signal)).map((device) => [device.udid, device.state]));
+    const devices = await inventory(signal);
+    const states = new Map(devices.map((device) => [device.udid, device.state]));
     const idle = idleClones({
       owned: store.owned,
       states,
@@ -716,21 +723,35 @@ export function createSimulators(api: HostPluginApi) {
       if (readStore(id).uncertain) throw Error(`Erasing simulator ${owned.udid} left an unknown outcome; inspect it in Settings`);
       erased++;
     }
-    return `Simulators: erased ${erased} idle clone(s).`;
+    const strays = strayTestClones({ devices, projectId: id, root: testingRoot(), now: Date.now() });
+    let deleted = 0;
+    const unconfirmed: string[] = [];
+    for (const stray of strays) {
+      if (signal.aborted) break;
+      await command(simslim(), ["delete", stray.udid, "--json"], signal, 120000);
+      if ((await inventory(signal)).some((device) => device.udid === stray.udid)) unconfirmed.push(stray.udid);
+      else deleted++;
+    }
+    const summary = `Simulators: erased ${erased} idle clone(s), deleted ${deleted} stray testing clone(s).`;
+    if (unconfirmed.length) throw Error(`Deleting testing clone(s) ${unconfirmed.join(", ")} was not confirmed. ${summary}`);
+    return store.owned.length || strays.length ? summary : "";
   }
-  /** Settings → Storage: this project's clones and what the cleanup step would erase now. */
+  /** Settings → Storage: this project's clones with its stray testing clones, and what the cleanup step would free now. */
   async function simulatorUsage(id: string, unusedDays: number, signal: AbortSignal) {
+    if (!usedSimulators(id)) return null;
     const store = readStore(id);
-    if (!store.enabled || !store.owned.length) return null;
-    const states = new Map((await inventory(signal)).map((device) => [device.udid, device.state]));
+    if (!store.enabled) return null;
+    const devices = await inventory(signal);
+    const strays = strayTestClones({ devices, projectId: id, root: testingRoot(), now: Date.now() });
+    if (!store.owned.length && !strays.length) return null;
     const idle = idleClones({
       owned: store.owned,
-      states,
+      states: new Map(devices.map((device) => [device.udid, device.state])),
       leased: (owned) => aliasesHeld(owned).length > 0,
       now: Date.now(),
       unusedMs: unusedDays * 86_400_000,
     });
-    return { label: "Simulator clones", ...(await cloneUsage({ owned: store.owned, idle })) };
+    return { label: "Simulator clones", ...(await cloneUsage({ owned: store.owned, idle, strays })) };
   }
   return {
     SimulatorAction,

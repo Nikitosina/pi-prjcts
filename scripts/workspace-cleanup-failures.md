@@ -14,6 +14,9 @@ R22, R24), `scripts/jobs-e2e.mjs` (R14), the `storage-clean` browser journey (R2
 - R2 A disposable glob matches through a symlink and deletes a folder outside the worktree.
 - R3 A disposable match that git does not ignore (tracked or untracked work) is deleted.
 - R4 A disposable match written in the last day (a verification run in progress) is deleted.
+- R26 A disposable match in the worktree of a running Job or an open scout or reviewer is deleted. Owner decision (2026-11-16): Mari
+  lists `node_modules` as disposable, and a worker installed two days ago still builds with it although the folder was not written
+  for a day. Only worktrees nobody works in now lose their disposable paths; a Coordinator chat's worktree is not exempt.
 - R5 A workspace cache written within the unused window is removed, or one not written for longer stays.
 - R6 A cache over the size cap is removed while its workspace is using it (a build in progress); one over the cap and idle stays.
 - R7 Videos of a running, ready or recently ended Job are deleted, or screenshots, logs and reports of an old Job go with its videos.

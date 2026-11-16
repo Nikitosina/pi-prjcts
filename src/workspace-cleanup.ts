@@ -64,6 +64,16 @@ export function disposableCandidates(worktree: string, globs: readonly string[],
   return [...found];
 }
 
+/** Worktrees whose disposable paths cleanup may remove: never one a running Job or an open agent works in (R26). */
+export function disposableWorktrees(input: {
+  live: readonly { intentId: string; workspacePath: string }[];
+  items: readonly { intentId?: string; threadId: string | null }[];
+  running: ReadonlySet<string>;
+}): string[] {
+  const busy = new Set(input.items.filter((item) => item.threadId && input.running.has(item.threadId)).map((item) => item.intentId));
+  return input.live.filter((item) => !busy.has(item.intentId)).map((item) => item.workspacePath);
+}
+
 /** The paths git ignores that hold no tracked file; none outside a git worktree. */
 export async function gitIgnored(worktree: string, paths: readonly string[]): Promise<string[]> {
   if (!paths.length) return [];

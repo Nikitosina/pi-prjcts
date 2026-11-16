@@ -22,6 +22,7 @@ import {
   cachesToTrim,
   cleanupSettingsError,
   disposableCandidates,
+  disposableWorktrees,
   gitIgnored,
   oldJobVideos,
   removePaths,
@@ -29,7 +30,7 @@ import {
   withCleanupDefaults,
 } from "../src/workspace-cleanup.ts";
 import { sweepWorkspaceCaches, workspaceCaches } from "../src/workspace-cache.ts";
-import { cloneUsage, deviceLastUse, idleClones } from "../plugins/simulator/idle.ts";
+import { cloneUsage, deviceLastUse, idleClones, strayTestClones } from "../plugins/simulator/idle.ts";
 import { pruneTestProducts } from "../plugins/simulator/test-products.ts";
 
 const DAY = 86_400_000,
@@ -86,6 +87,20 @@ try {
     "a folder holding tracked files is not ignored",
   );
   assert.deepEqual(await gitIgnored(join(root, "not-a-repo"), [join(root, "not-a-repo", "x")]), [], "without git nothing is ignored");
+  // R26 disposable paths stay in the worktree of a running Job or an open agent; a Coordinator chat's worktree is not exempt.
+  assert.deepEqual(
+    disposableWorktrees({
+      live: ["running", "done", "chat", "agent", "unknown"].map((intentId) => ({ intentId, workspacePath: `/wt/${intentId}` })),
+      items: [
+        { intentId: "running", threadId: "job-running" },
+        { intentId: "done", threadId: "job-approved" },
+        { intentId: "chat", threadId: "chat-1" },
+        { intentId: "agent", threadId: "scout-open" },
+      ],
+      running: new Set(["job-running", "scout-open"]),
+    }),
+    ["/wt/done", "/wt/chat", "/wt/unknown"],
+  );
 
   // R5, R6, R18 caches: unused past the window go; over the cap or the project budget go only when idle for an hour, oldest first.
   const caches = join(root, "caches");
@@ -307,11 +322,47 @@ try {
   writeFileSync(join(idle.directory, "data", "disk.img"), Buffer.alloc(64 * 1024));
   writeFileSync(join(booted.directory, "data", "disk.img"), Buffer.alloc(128 * 1024));
   const du = (path) => Number(execFileSync("du", ["-sk", path], { encoding: "utf8" }).split("\t")[0]) * 1024;
-  const usage = await cloneUsage({ owned: [idle, booted], idle: [idle] });
+  const usage = await cloneUsage({ owned: [idle, booted], idle: [idle], strays: [] });
   assert.equal(usage.count, 2);
   assert.equal(usage.bytes, du(idle.directory) + du(booted.directory));
   assert.equal(usage.reclaimableBytes, du(join(idle.directory, "data")));
-  assert.deepEqual(await cloneUsage({ owned: [], idle: [] }), { count: 0, bytes: 0, reclaimableBytes: 0 });
+  assert.deepEqual(await cloneUsage({ owned: [], idle: [], strays: [] }), { count: 0, bytes: 0, reclaimableBytes: 0 });
+
+  // X1-X3 (plugins/simulator/FAILURES.md): testing clones of this project's simulators, shut down and unused for an hour, are strays.
+  const projectId = "6dab15f5-cd63-409c-af48-7ec9d20aa073",
+    ours = (n, request) => `Clone ${n} of pi-projects 6dab15f5 ${request}`;
+  const testing = join(root, "XCTestDevices");
+  const testDevice = (udid, name, state, usedAgo, set = "testing") => {
+    mkdirSync(join(testing, udid, "data"), { recursive: true });
+    writeFileSync(join(testing, udid, "device.plist"), "plist");
+    ago(join(testing, udid, "device.plist"), usedAgo);
+    ago(join(testing, udid, "data"), usedAgo);
+    return { udid, name, state, set, osVersion: "26.5" };
+  };
+  const request = "b7d1e2a4-16a9-4c3e-9f01-160990000003";
+  const testDevices = [
+    testDevice("STRAY", ours(2, request), "Shutdown", 2 * DAY),
+    testDevice("GONE-OWNER", ours(1, "7beaef1b-64da-4ab2-963a-00b26cbdde63"), "Shutdown", 3 * DAY),
+    testDevice("BOOTED", ours(3, request), "Booted", 2 * DAY),
+    testDevice("STARTING", ours(4, request), "Shutdown", 10 * 60_000),
+    testDevice("OTHER-PROJECT", `Clone 2 of pi-projects 15a2e06c ${request}`, "Shutdown", 2 * DAY),
+    testDevice("PLAIN", "Clone 1 of iPhone 17", "Shutdown", 2 * DAY),
+    testDevice("LOOKALIKE", `Clone 2 of my pi-projects 6dab15f5 ${request}`, "Shutdown", 2 * DAY),
+    testDevice("DEFAULT-SET", ours(5, request), "Shutdown", 2 * DAY, "default"),
+  ];
+  const strays = strayTestClones({ devices: testDevices, projectId, root: testing, now });
+  assert.deepEqual(
+    strays.map((item) => item.udid),
+    ["STRAY", "GONE-OWNER"],
+    "X1-X3 only this project's shut-down testing clones idle for an hour, also of a deleted clone",
+  );
+  assert.equal(strays[0].directory, join(testing, "STRAY"));
+  // X5 the Storage row counts the strays whole: deleting them frees all of it.
+  writeFileSync(join(testing, "STRAY", "data", "disk.img"), Buffer.alloc(256 * 1024));
+  const withStrays = await cloneUsage({ owned: [idle], idle: [], strays: [strays[0]] });
+  assert.equal(withStrays.count, 2);
+  assert.equal(withStrays.bytes, du(idle.directory) + du(join(testing, "STRAY")));
+  assert.equal(withStrays.reclaimableBytes, du(join(testing, "STRAY")));
 
   // T1-T4 (plugins/simulator/FAILURES.md): finished XcodeBuildMCP test products past the window go, except each workspace's newest.
   const xbm = join(root, "XcodeBuildMCP", "workspaces");

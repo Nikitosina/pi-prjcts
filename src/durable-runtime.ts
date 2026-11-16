@@ -103,6 +103,7 @@ import {
   DEFAULT_CLEANUP_SETTINGS,
   cachesToTrim,
   disposableCandidates,
+  disposableWorktrees,
   removePaths,
   settledWorkspaces,
   type CleanupProgress,
@@ -1861,7 +1862,10 @@ export async function openDurableProject(input: {
       at("measure", 0, live.length);
       const { trimmed } = await trimPlan(live, worktrees.kept, settings, (done, total) => at("measure", done, total));
       const disposable: string[] = [];
-      for (const worktree of settings.disposable.length ? live.map((item) => item.workspacePath) : [])
+      const idleWorktrees = settings.disposable.length
+        ? disposableWorktrees({ live, items: worktrees.kept, running: await retainedLeaseThreads() })
+        : [];
+      for (const worktree of idleWorktrees)
         if (!closed && existsSync(worktree))
           disposable.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
       const videos = oldJobVideos({ controlRoot: dir, jobs: (await jobs.snapshot(openedHarness)).jobs, days: settings.videoDays });
@@ -1959,8 +1963,8 @@ export async function openDurableProject(input: {
             if (!settings.disposable.length)
               return { count: 0, bytes: 0, reclaimableBytes: 0, note: "No disposable paths are set in the Workspace cleanup routine" };
             const paths: string[] = [];
-            for (const item of live)
-              paths.push(...(await gitIgnored(item.workspacePath, disposableCandidates(item.workspacePath, settings.disposable))));
+            for (const worktree of disposableWorktrees({ live, items: (await inventory()).items, running: await retainedLeaseThreads() }))
+              paths.push(...(await gitIgnored(worktree, disposableCandidates(worktree, settings.disposable))));
             const bytes = await diskBytes(paths);
             return { count: paths.length, bytes, reclaimableBytes: bytes };
           },

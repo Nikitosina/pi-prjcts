@@ -1,8 +1,8 @@
-// The simulator plugin's worker boot/shutdown without a host: a fake simslim, a temp HOME for the device folders, real leases
-// (plugins/simulator/FAILURES.md, "Worker boot and shutdown by the lease holder", W1-W9).
+// The simulator plugin's worker boot/shutdown and its cleanup step without a host: a fake simslim, a temp HOME for the device folders,
+// real leases (plugins/simulator/FAILURES.md, "Worker boot and shutdown by the lease holder" W1-W9, "Parallel-testing clones" X4, X6, X7).
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as typebox from "typebox";
@@ -18,7 +18,8 @@ const projectId = randomUUID(),
   source = randomUUID().toUpperCase();
 const projectDir = join(base, "project"),
   state = join(base, "simslim.json"),
-  calls = join(base, "simslim-calls.jsonl");
+  calls = join(base, "simslim-calls.jsonl"),
+  stuck = join(base, "delete-stuck");
 mkdirSync(projectDir);
 // The plugin finds clone folders under ~/Library/Developer/CoreSimulator/Devices; HOME points at the temp folder.
 process.env.HOME = join(base, "home");
@@ -44,6 +45,7 @@ const set = (value) => { for (const item of devices) if (item.udid === udid) ite
 if (command === "list") process.stdout.write(JSON.stringify(devices));
 else if (command === "on") set("Booted");
 else if (command === "shutdown") { set("Shutdown"); process.stdout.write("{}"); }
+else if (command === "delete") { if (!require("node:fs").existsSync(${JSON.stringify(stuck)})) writeFileSync(${JSON.stringify(state)}, JSON.stringify(devices.filter((item) => item.udid !== udid))); process.stdout.write("{}"); }
 else if (command === "status") process.stdout.write(JSON.stringify({ managedDisabled: 1, managedTotal: 1, booted: devices.find((item) => item.udid === udid)?.state === "Booted", persistent: true, verdict: "slim" }));
 else { process.stderr.write("unexpected " + command); process.exit(2); }
 `,
@@ -162,6 +164,58 @@ try {
     () => boot("job-a", 7).execute({ operation: "boot" }, { conversationId: 9, callId: randomUUID() }, { abortSignal: undefined }),
     /another worker conversation/,
     "W8 another conversation is refused",
+  );
+  // X4, X6 the cleanup step deletes this project's stray testing clones only while management is on, and only confirmed deletions count.
+  const stray = randomUUID().toUpperCase(),
+    foreign = randomUUID().toUpperCase();
+  const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000);
+  for (const id of [stray, foreign]) {
+    const folder = join(process.env.HOME, "Library/Developer/XCTestDevices", id);
+    mkdirSync(join(folder, "data"), { recursive: true });
+    writeFileSync(join(folder, "device.plist"), "plist");
+    for (const path of [join(folder, "device.plist"), join(folder, "data")]) utimesSync(path, twoDaysAgo, twoDaysAgo);
+  }
+  writeFileSync(
+    state,
+    JSON.stringify([
+      ...JSON.parse(readFileSync(state, "utf8")),
+      {
+        udid: stray,
+        name: `Clone 2 of pi-projects ${projectId.slice(0, 8)} ${randomUUID()}`,
+        state: "Shutdown",
+        osVersion: "18.0",
+        set: "testing",
+      },
+      { udid: foreign, name: "Clone 2 of iPhone 16", state: "Shutdown", osVersion: "18.0", set: "testing" },
+    ]),
+  );
+  const listed = (id) => JSON.parse(readFileSync(state, "utf8")).some((item) => item.udid === id);
+  const deletes = () => simslimCalls().filter(([command]) => command === "delete");
+  const store = JSON.parse(readFileSync(join(projectDir, "simulator.json"), "utf8"));
+  // X7 a project that never used simulators does not run simslim (a host without it would fail every cleanup).
+  rmSync(join(projectDir, "simulator.json"));
+  writeFileSync(calls, "");
+  assert.equal(await simulators.eraseIdle(projectId, 7, new AbortController().signal), "", "X7 no simulator state: nothing happens");
+  assert.equal(await simulators.usage(projectId, 7, new AbortController().signal), null, "X7 no simulator state: no Storage row");
+  assert.equal(simslimCalls().length, 0, "X7 simslim did not run");
+  writeFileSync(join(projectDir, "simulator.json"), JSON.stringify({ ...store, enabled: false }));
+  writeFileSync(calls, "");
+  assert.equal(await simulators.eraseIdle(projectId, 7, new AbortController().signal), "", "X4 management off: nothing happens");
+  assert.equal(deletes().length, 0, "X4 management off: no delete");
+  writeFileSync(join(projectDir, "simulator.json"), JSON.stringify(store));
+  writeFileSync(stuck, "");
+  await assert.rejects(
+    () => simulators.eraseIdle(projectId, 7, new AbortController().signal),
+    /not confirmed/,
+    "X4 a clone still listed after delete is a failure",
+  );
+  rmSync(stuck);
+  const summary = await simulators.eraseIdle(projectId, 7, new AbortController().signal);
+  assert.match(summary, /deleted 1 stray testing clone/, "X6 the summary counts deleted testing clones");
+  assert.ok(!listed(stray) && listed(foreign), "X4 only this project's stray is gone");
+  assert.ok(
+    deletes().every(([, id]) => id === stray),
+    "X4 simslim deletes only the stray",
   );
   console.log("simulator-worker-unit: ok");
 } finally {

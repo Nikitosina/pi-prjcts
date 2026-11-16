@@ -27,6 +27,24 @@ export function idleClones<T extends { udid: string; directory: string }>(input:
   );
 }
 
+/** A testing clone stays this long after its last use: xcodebuild creates it shut down just before a run boots it. */
+const TESTING_ACTIVE_MS = 3_600_000;
+
+/** Parallel-testing clones xcodebuild left behind from this project's simulators, also from ones deleted since: in Xcode's
+ * `testing` set (folders under `root`), named `Clone N of pi-projects <project> <request>`, shut down and unused for an hour. */
+export function strayTestClones<T extends { udid: string; name: string; state: string; set: string }>(input: {
+  devices: readonly T[];
+  projectId: string;
+  root: string;
+  now: number;
+}): (T & { directory: string })[] {
+  const name = new RegExp(`^Clone \\d+ of pi-projects ${input.projectId.slice(0, 8)} [0-9a-f-]{36}$`, "i");
+  return input.devices
+    .filter((device) => device.set === "testing" && device.state === "Shutdown" && name.test(device.name))
+    .map((device) => ({ ...device, directory: join(input.root, device.udid) }))
+    .filter((device) => input.now - deviceLastUse(device.directory) > TESTING_ACTIVE_MS);
+}
+
 export const diskBytes = async (paths: readonly string[]) => {
   if (!paths.length) return 0;
   const { stdout } = await run("/usr/bin/du", ["-skP", "--", ...paths], { maxBuffer: 1 << 20 });
@@ -36,14 +54,17 @@ export const diskBytes = async (paths: readonly string[]) => {
     .reduce((sum, line) => sum + Number(line.split("\t")[0]) * 1024, 0);
 };
 
-/** The Storage row of a project's clones: their whole size, and the data erasing the idle ones frees. */
+/** The Storage row of a project's clones: their whole size with stray testing clones, and what erasing the idle ones' data and
+ * deleting the strays frees. */
 export async function cloneUsage(input: {
   owned: readonly { directory: string }[];
   idle: readonly { directory: string }[];
+  strays: readonly { directory: string }[];
 }): Promise<{ count: number; bytes: number; reclaimableBytes: number }> {
+  const strayBytes = await diskBytes(input.strays.map((stray) => stray.directory));
   return {
-    count: input.owned.length,
-    bytes: await diskBytes(input.owned.map((owned) => owned.directory)),
-    reclaimableBytes: await diskBytes(input.idle.map((owned) => join(owned.directory, "data"))),
+    count: input.owned.length + input.strays.length,
+    bytes: (await diskBytes(input.owned.map((owned) => owned.directory))) + strayBytes,
+    reclaimableBytes: (await diskBytes(input.idle.map((owned) => join(owned.directory, "data")))) + strayBytes,
   };
 }
