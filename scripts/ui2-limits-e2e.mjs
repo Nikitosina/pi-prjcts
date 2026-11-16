@@ -242,6 +242,21 @@ try {
     );
     check("M10 after the refresh the keyboard is still on the button", await page.evaluate(`document.activeElement === ${button}`));
     await page.shot("03-refreshed", { force: true });
+    await page.evaluate(`${item("ollama")}.focus()`);
+    await page.waitFor(popOpen, "Ollama details on keyboard focus");
+    const ollamaDetail = await page.evaluate(`document.querySelector('#limit-detail').innerText`);
+    check(
+      "O3 Ollama's details give the monthly use and its reset, the dollars left and the source",
+      /Ollama/.test(ollamaDetail) &&
+        /25% used/.test(ollamaDetail) &&
+        /resets/.test(ollamaDetail) &&
+        /\$15(\.00)? of \$20(\.00)? included left/.test(ollamaDetail) &&
+        /\$3\.50 purchased credits left/.test(ollamaDetail),
+      ollamaDetail,
+    );
+    await page.shot("03b-ollama-details", { force: true });
+    await page.evaluate(`document.activeElement.blur()`);
+    await page.waitFor(`!${popOpen}`, "Ollama details close on blur");
 
     // A failed refresh keeps the numbers, says so in the bar, opens nothing.
     await kit.delay(COOLDOWN_MS + 500);

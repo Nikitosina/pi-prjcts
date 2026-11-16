@@ -139,6 +139,9 @@ await kit.run(async () => {
     ),
   );
   await page.shot("04-appearance", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
+  await page.shot("04-appearance-lower", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
   // A3: the letter H still jumps to Appearance from another page, and a binding saved for the old Theme page carries over.
   await page.evaluate(`document.querySelector('#settings nav [data-section="general"]').click()`);
   await page.waitFor(`document.querySelector('#settings').dataset.section === "general"`, "general page");
@@ -187,4 +190,7 @@ await kit.run(async () => {
     saved,
   );
   await page.shot("05-appearance-reloaded", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="statusline"]').scrollIntoView({ block: "end" })`);
+  await page.shot("05-appearance-reloaded-lower", { force: true });
+  await page.evaluate(`document.querySelector('#settings [data-part="theme"]').scrollIntoView({ block: "start" })`);
 });
