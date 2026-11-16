@@ -258,10 +258,18 @@ await kit.run(async () => {
   );
   const resent = (await jobsWith("J4 telegram one")).find((job) => job.state === "queued");
   check("W28 the resent message keeps its origin and upload", resent?.origin === "telegram" && resent.attachments?.join() === up1, resent);
+  // The resent message is queued again, so Alt+Up takes it back first; the held ones stay held while the draft carries the Telegram origin.
+  await ALT_UP();
+  await page.waitFor(`${input}.value.includes("J4 telegram one")`, "the resent message came back");
+  check(
+    "W28 the resent message is the only one restored while its origin is in the editor",
+    (await page.evaluate(`${input}.value`)) === "J4 telegram one",
+  );
+  await type("");
   await ALT_UP();
   await page.waitFor(`${input}.value.includes("J4 web two")`, "second restore");
   check("W28 the next restore brings the web message alone", (await page.evaluate(`${input}.value`)) === "J4 web two");
-  await ENTER();
+  await type("");
   await ALT_UP();
   await page.waitFor(`${input}.value.includes("J4 telegram three")`, "third restore");
   check(

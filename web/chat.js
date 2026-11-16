@@ -596,24 +596,31 @@ const surface = () => surfaces.chat(state.projectId, state.chatId);
 const acknowledgeRestored = (requestIds) => call("chat-dequeue-ack", { projectId: state.projectId, requestIds });
 /** Alt+Up: the host withdraws what no turn has taken yet; the editor gets it first, then whatever is already typed. */
 /** Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor. */
+const RESEND_MS = 4000;
+const editor = (gen) => ({ live: () => !stale(gen), read: () => input.value, show: (value) => (input.value = value) });
 async function recoverChatSends(gen) {
   const key = surface(),
     id = state.projectId,
     args = chatArgs();
-  const accepted = await recoverSends(key, (record) =>
-    call("message", {
-      id,
-      text: record.text,
-      requestId: record.requestId,
-      delivery: record.delivery ?? "steer",
-      ...(record.attachments?.length ? { attachments: record.attachments } : {}),
-      ...(record.origin ? { origin: record.origin } : {}),
-      ...args,
-    }),
+  const accepted = await recoverSends(
+    key,
+    (record) =>
+      call("message", {
+        id,
+        text: record.text,
+        requestId: record.requestId,
+        delivery: record.delivery ?? "steer",
+        ...(record.attachments?.length ? { attachments: record.attachments } : {}),
+        ...(record.origin ? { origin: record.origin } : {}),
+        ...args,
+      }),
+    editor(gen),
   ).catch(() => 0);
   if (stale(gen)) return;
   if (!input.value) input.value = readDraft(key).text;
   if (accepted) void loadChat();
+  // An unknown outcome stays recorded and is sent again, under the same id, until the host answers.
+  if (readDraft(key).sending.some((record) => !record.refused)) setTimeout(() => stale(gen) || void recoverChatSends(gen), RESEND_MS);
 }
 async function restoreQueued() {
   const gen = state.generation,
@@ -623,7 +630,7 @@ async function restoreQueued() {
   try {
     await restoreInto({
       surface: key,
-      editor: { live: () => !stale(gen), read: () => input.value, show: (value) => (input.value = value) },
+      editor: editor(gen),
       toast,
       grow,
       dequeue: () => call("chat-dequeue", { projectId, ...args }),
@@ -642,24 +649,30 @@ form.addEventListener("submit", async (event) => {
   if (!text || !state.projectId) return;
   const gen = state.generation,
     key = surface();
-  input.value = "";
-  grow();
-  const requestId = uuid(),
-    sent = beginSend(key, { requestId, text, delivery });
-  follow.follow();
   const slash = slashCommand(text);
   if (slash) {
+    // A slash command runs in the page, so there is nothing to send again after a reload.
+    input.value = "";
+    grow();
+    follow.follow();
     try {
       await slash.command.run(slash.argument);
-      finishSend(key, requestId);
       if (!stale(gen)) void loadChat();
     } catch (error) {
-      failSend(key, requestId);
       if (!stale(gen) && !input.value) input.value = text;
       fail(error);
     }
     return;
   }
+  const requestId = uuid(),
+    sent = beginSend(key, { requestId, text, delivery });
+  if (!sent) {
+    toast("Could not keep the message in this browser, so it was not sent");
+    return;
+  }
+  input.value = "";
+  grow();
+  follow.follow();
   try {
     // The host decides what the mode means: an idle chat takes the message as a plain turn, so the page never guesses from its copy of the state.
     await call("message", {
@@ -675,8 +688,8 @@ form.addEventListener("submit", async (event) => {
     if (stale(gen)) return;
     await loadChat();
   } catch (error) {
-    failSend(key, requestId);
-    if (!stale(gen) && !input.value) input.value = text;
+    const kind = failSend(key, requestId, error, editor(gen));
+    if (kind === "unknown") setTimeout(() => stale(gen) || void recoverChatSends(gen), RESEND_MS);
     fail(error);
   }
 });

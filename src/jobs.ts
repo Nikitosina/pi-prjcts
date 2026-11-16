@@ -44,6 +44,7 @@ import {
   pendingInputs,
   withdrawInputs,
   isWithdrawn,
+  RefusedInput,
   type InputPort,
   type InputState,
   type InputStatus,
@@ -1458,18 +1459,35 @@ export function createJobs(host: JobsHost) {
     return api.commit(async (tx) => {
       const doc = await tx.doc(Jobs, ROOT_CONVERSATION_ID);
       const agent = doc.agents[id];
-      if (!agent) return `No agent ${id}.`;
+      if (!agent) {
+        if (owner) throw new RefusedInput(`No agent ${id}.`);
+        return `No agent ${id}.`;
+      }
       const key = requestId ? `send:${requestId}` : undefined;
-      if (key && doc.requests[key]) return `Already sent to ${id}.`;
+      // The owner's refusals throw (nothing is recorded, the page gives the text back); the Coordinator's tool gets the sentence.
+      const deny = (text: string) => {
+        if (owner) throw new RefusedInput(text);
+        return text;
+      };
+      const digest = key ? `payload:${requestId}` : undefined;
+      const payload = createHash("sha256")
+        .update(JSON.stringify([id, message, followUp]))
+        .digest("hex");
+      if (key && doc.requests[key]) {
+        if (owner && digest && doc.requests[digest] && doc.requests[digest] !== payload)
+          throw new RefusedInput("This request id was already used for a different message");
+        return `Already sent to ${id}.`;
+      }
       const job = agent.jobId ? doc.jobs[agent.jobId] : undefined;
       const refusal = job?.workspace ? null : host.refuseSend?.(agent);
-      if (refusal) return refusal;
-      if (doc.paused) return "The project is paused.";
+      if (refusal) return deny(refusal);
+      if (doc.paused) return deny("The project is paused.");
       const borrower = job?.workspace?.kind === "shared" ? sharedHandoff(doc, agent.chat, id) : undefined;
-      if (borrower) return `Shared workspace is still handed to ${borrower.id}; wait for it to settle.`;
+      if (borrower) return deny(`Shared workspace is still handed to ${borrower.id}; wait for it to settle.`);
       if (job?.workspace && job.status !== "running" && agent.endedAt === null)
-        return "The task helper is still draining; wait for its workspace handoff to settle.";
+        return deny("The task helper is still draining; wait for its workspace handoff to settle.");
       if (key) doc.requests[key] = id;
+      if (digest) doc.requests[digest] = payload;
       const wasWorking = agent.endedAt === null && (!job || job.status === "running");
       const typed = message;
       // An agent that never received its brief (it failed or was stopped while preparing) gets it first, so a send retries the task.
@@ -1571,11 +1589,9 @@ export function createJobs(host: JobsHost) {
         edit((agent) => {
           for (const id of ids) delete agent.inputs?.[id];
         }),
-      // The agent's delivery task submits what is unsent until the agent ends.
-      producing: async (ids) => {
-        const agent = (await harness.snapshot(Jobs, ROOT_CONVERSATION_ID, context))?.agents[agentId];
-        return new Set(agent && agent.endedAt === null ? ids : []);
-      },
+      // The agent's delivery task submits what is unsent for as long as it is live; `endedAt` is no proof that nobody will submit (a stop can
+      // end the agent while the task between its check and its submission still runs).
+      producing: async (ids) => new Set(reportedAgents(await harness.inspect(context)).has(agentId) ? ids : []),
       status: async (ids) => {
         const found = new Map<string, InputStatus>();
         const conversationId = (await read())?.conversationId;

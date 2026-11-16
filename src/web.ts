@@ -13,6 +13,7 @@ import { plugins } from "./plugins.ts";
 import { webFile, type WebFile } from "./web-file.ts";
 import { feed, HOST_FEED, type FeedEvent } from "./change-feed.ts";
 import type { RemoteAccess } from "./remote.ts";
+import { RefusedInput } from "./owner-input-queue.ts";
 
 /** `projectId` is a project UUID or `HOST_FEED` for the Host agent. */
 type LiveWatch = (projectId: string, onFrame: (frame: unknown) => void, onEnd: () => void, chatId?: string) => Promise<() => void>;
@@ -344,7 +345,7 @@ export async function startWeb(
     } catch (error) {
       response
         .writeHead(status, { ...headers, "content-type": "application/json", ...(status === 413 ? { connection: "close" } : {}) })
-        .end(JSON.stringify({ ok: false, error: errorText(error) }));
+        .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof RefusedInput ? { refused: true } : {}) }));
     }
   });
   server.requestTimeout = 120000;

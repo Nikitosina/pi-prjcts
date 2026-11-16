@@ -12,7 +12,6 @@ import {
   recoverSends,
   finishSend,
   isAltUp,
-  joinText,
   paintPending,
   persistText,
   readDraft,
@@ -590,26 +589,43 @@ export async function renderWorker(root, id, { steer = false } = {}) {
   // What the owner typed or restored here earlier (Alt+Up, a reload, leaving the view) is in the surface's draft.
   const surface = surfaces.worker(state.projectId, id);
   const acknowledge = (requestIds) => call("thread-dequeue-ack", { id: state.projectId, threadId: id, requestIds });
+  const editor = { live: alive, read: () => text?.value ?? "", show: (value) => text && (text.value = value) };
+  const recoverLater = () => setTimeout(() => alive() && void recoverSends(surface, resendOf, editor), 4000);
+  const resendOf = (record) =>
+    call("thread-send", {
+      id: state.projectId,
+      threadId: id,
+      requestId: record.requestId,
+      text: record.text,
+      delivery: record.delivery ?? "steer",
+    });
   if (text) {
     text.value = readDraft(surface).text;
     if (text.value) text.style.height = `${Math.min(text.scrollHeight, 240)}px`;
     text.addEventListener("input", () => persistText(surface, text.value));
     void acknowledgeDraft({ surface, acknowledge }).catch(() => {});
     // Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor.
-    void recoverSends(surface, (record) =>
-      call("thread-send", {
-        id: state.projectId,
-        threadId: id,
-        requestId: record.requestId,
-        text: record.text,
-        delivery: record.delivery ?? "steer",
-      }),
-    )
-      .then((accepted) => {
-        if (alive() && !text.value) text.value = readDraft(surface).text;
-        if (accepted) void load();
-      })
-      .catch(() => {});
+    const recover = () =>
+      recoverSends(
+        surface,
+        (record) =>
+          call("thread-send", {
+            id: state.projectId,
+            threadId: id,
+            requestId: record.requestId,
+            text: record.text,
+            delivery: record.delivery ?? "steer",
+          }),
+        editor,
+      )
+        .then((accepted) => {
+          if (alive() && !text.value) text.value = readDraft(surface).text;
+          if (accepted) void load();
+          // An unknown outcome stays recorded and is sent again, under the same id, until the host answers.
+          if (alive() && readDraft(surface).sending.some((record) => !record.refused)) setTimeout(recover, 4000);
+        })
+        .catch(() => {});
+    void recover();
   }
   if (steer) text?.focus();
   // Pi's keys: Enter steers a working worker, Alt+Enter queues a follow-up (a plain message the worker takes after its turn).
@@ -619,7 +635,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     try {
       await restoreInto({
         surface,
-        editor: { live: alive, read: () => text.value, show: (value) => (text.value = value) },
+        editor,
         toast,
         grow: () => ((text.style.height = "auto"), (text.style.height = `${Math.min(text.scrollHeight, 240)}px`)),
         dequeue: () => call("thread-dequeue", { id: state.projectId, threadId: id }),
@@ -647,9 +663,12 @@ export async function renderWorker(root, id, { steer = false } = {}) {
     const delivery = followUp ? "followUp" : "steer",
       working = !!find()?.working;
     followUp = false;
-    text.value = "";
     const requestId = uuid();
-    beginSend(surface, { requestId, text: value, delivery });
+    if (!beginSend(surface, { requestId, text: value, delivery })) {
+      toast("Could not keep the message in this browser, so it was not sent");
+      return;
+    }
+    text.value = "";
     try {
       await call("thread-send", { id: state.projectId, threadId: id, requestId, text: value, delivery });
       finishSend(surface, requestId);
@@ -657,8 +676,7 @@ export async function renderWorker(root, id, { steer = false } = {}) {
       toast(!working ? "Sent to the worker." : delivery === "steer" ? "Steer sent." : "Queued as a follow-up.");
       void load();
     } catch (error) {
-      failSend(surface, requestId);
-      if (alive()) text.value = joinText(value, text.value);
+      if (failSend(surface, requestId, error, editor) === "unknown") recoverLater();
       fail(error);
     }
   });

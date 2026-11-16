@@ -341,7 +341,10 @@ const gone = { live: () => false, read: () => "stale", show: () => assert.fail("
 {
   storage.clear();
   const names = [];
-  globalThis.navigator = { locks: { request: async (name, work) => (names.push(name), work()) } };
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { locks: { request: async (name, work) => (names.push(name), work()) } },
+  });
   await run({ restored: [item("z", "locked")], editor: live().editor });
   delete globalThis.navigator;
   assert.deepEqual(names, ["pi-ui2-restore:chat:p:main"], "R10 the restore holds the surface's lock");

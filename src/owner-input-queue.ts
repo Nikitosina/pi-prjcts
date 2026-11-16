@@ -6,6 +6,27 @@
 // submit it (status `unsent`), the producer's own check and its submission are two steps, so it is never withdrawn; it stays queued and Alt+Up
 // takes it back when the runtime holds it.
 
+/** The owner's request was refused before anything was recorded: the page may treat the message as not sent and give the text back. */
+export class RefusedInput extends Error {
+  readonly refused = true;
+}
+/** One request id names one payload: a repeated id with another text or mode is refused, never answered as the first one. */
+export const samePayload = (a: { text: string; delivery: string }, b: { text: string; delivery: string }): boolean =>
+  a.text === b.text && a.delivery === b.delivery;
+
+const tails = new Map<string, Promise<unknown>>();
+/** Runs `work` after the earlier work of the same surface: admission, withdrawal and acknowledgment of one composer never overlap. */
+export function serialized<T>(surface: string, work: () => Promise<T>): Promise<T> {
+  const run = (tails.get(surface) ?? Promise.resolve()).then(work);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  tails.set(surface, tail);
+  void tail.then(() => tails.get(surface) === tail && tails.delete(surface));
+  return run;
+}
+
 export type InputState = "queued" | "withdrawn";
 export type InputDelivery = "steer" | "followUp";
 export type QueuedInput = { id: string; text: string; delivery: InputDelivery; at: number; state: InputState };

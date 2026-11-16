@@ -79,6 +79,7 @@ import { watchSelfCheckout } from "./main-pull.ts";
 import { describeAcceptance } from "./result-acceptance.ts";
 import { sendOwnerMessage, startTelegram } from "./telegram.ts";
 import type { JobsSnapshot } from "./jobs.ts";
+import { RefusedInput, serialized } from "./owner-input-queue.ts";
 import { loadAutomations, rotateWebhookSecret, updateAutomations } from "./project-automations.ts";
 import { listArtifacts } from "./artifacts.ts";
 import { openDurableHost, durableHostSnapshot, durableHostActivity, type ProjectActivity } from "./durable-host.ts";
@@ -847,50 +848,51 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
       return result;
     }
-    case "chat-dequeue": {
-      const project = loadProject(input.projectId);
-      if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
-      const owner = await durable(input.projectId),
-        chatKey = input.chatId ?? "main";
-      const mine = () => jobs(input.projectId).filter((job) => (job.chatId ?? "main") === chatKey);
-      // Only the owner's own ledger entries can be taken back; internal inputs (worker reports, approval results) have none and stay queued.
-      const asked = mine().filter((job) => job.state === "queued" && (!input.requestIds || input.requestIds.includes(job.id)));
-      // Marked before the abort: a crash between the two leaves the text recoverable, never lost.
-      for (const job of asked) saveJob(input.projectId, { ...job, state: "withdrawn" });
-      const result = await owner.dequeue(
-        input.chatId,
-        asked.map((job) => job.id),
-      );
-      for (const job of asked) if (!result.withdrawn.includes(job.id)) saveJob(input.projectId, { ...job, state: "queued" });
-      // Withdrawn earlier and never acknowledged: confirm the runtime really dropped it before offering it again.
-      const earlier = mine().filter((job) => job.state === "withdrawn" && !result.withdrawn.includes(job.id));
-      const live = earlier.length
-        ? await owner.ledgerSubmissions(
-            chatKey,
-            earlier.map((job) => job.id),
-          )
-        : [];
-      for (const job of earlier) {
-        const submission = live.find((item) => item.requestId === job.id);
-        if (submission && !(submission.status === "unanswered" && submission.reason === "aborted"))
-          saveJob(input.projectId, { ...job, state: "queued", error: null });
-      }
-      const order = (job: import("./state.ts").Job) => (job.delivery === "steer" ? 0 : 1);
-      const restored = mine()
-        .filter((job) => job.state === "withdrawn" && (!input.requestIds || input.requestIds.includes(job.id)))
-        .sort((a, b) => order(a) - order(b) || a.at.localeCompare(b.at))
-        .map((job) => ({
-          id: job.id,
-          text: job.text,
-          delivery: job.delivery ?? "followUp",
-          attachments: job.attachments ?? [],
-          ...(job.origin ? { origin: job.origin } : {}),
-        }));
-      const restoredIds = new Set(restored.map((item) => item.id));
-      const kept = (input.requestIds ?? asked.map((job) => job.id)).filter((id) => !restoredIds.has(id));
-      feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
-      return { restored, kept };
-    }
+    case "chat-dequeue":
+      return serialized(`${input.projectId}:${input.chatId ?? "main"}`, async () => {
+        const project = loadProject(input.projectId);
+        if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
+        const owner = await durable(input.projectId),
+          chatKey = input.chatId ?? "main";
+        const mine = () => jobs(input.projectId).filter((job) => (job.chatId ?? "main") === chatKey);
+        // Only the owner's own ledger entries can be taken back; internal inputs (worker reports, approval results) have none and stay queued.
+        const asked = mine().filter((job) => job.state === "queued" && (!input.requestIds || input.requestIds.includes(job.id)));
+        // Marked before the abort: a crash between the two leaves the text recoverable, never lost.
+        for (const job of asked) saveJob(input.projectId, { ...job, state: "withdrawn" });
+        const result = await owner.dequeue(
+          input.chatId,
+          asked.map((job) => job.id),
+        );
+        for (const job of asked) if (!result.withdrawn.includes(job.id)) saveJob(input.projectId, { ...job, state: "queued" });
+        // Withdrawn earlier and never acknowledged: confirm the runtime really dropped it before offering it again.
+        const earlier = mine().filter((job) => job.state === "withdrawn" && !result.withdrawn.includes(job.id));
+        const live = earlier.length
+          ? await owner.ledgerSubmissions(
+              chatKey,
+              earlier.map((job) => job.id),
+            )
+          : [];
+        for (const job of earlier) {
+          const submission = live.find((item) => item.requestId === job.id);
+          if (submission && !(submission.status === "unanswered" && submission.reason === "aborted"))
+            saveJob(input.projectId, { ...job, state: "queued", error: null });
+        }
+        const order = (job: import("./state.ts").Job) => (job.delivery === "steer" ? 0 : 1);
+        const restored = mine()
+          .filter((job) => job.state === "withdrawn" && (!input.requestIds || input.requestIds.includes(job.id)))
+          .sort((a, b) => order(a) - order(b) || a.at.localeCompare(b.at))
+          .map((job) => ({
+            id: job.id,
+            text: job.text,
+            delivery: job.delivery ?? "followUp",
+            attachments: job.attachments ?? [],
+            ...(job.origin ? { origin: job.origin } : {}),
+          }));
+        const restoredIds = new Set(restored.map((item) => item.id));
+        const kept = (input.requestIds ?? asked.map((job) => job.id)).filter((id) => !restoredIds.has(id));
+        feed.publish(input.projectId, { topic: "chat", chat: result.chatId });
+        return { restored, kept };
+      });
     case "chat-dequeue-ack": {
       const project = loadProject(input.projectId);
       if (project.deleted || project.archived) throw new Error("Inactive project has no queued input to withdraw");
@@ -1719,12 +1721,12 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+          if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         },
         operation: async (owner) => {
           const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
+          if (plan.paused) throw new RefusedInput("Project plan is paused; admission is denied");
           return {
             result: await owner.steerJob(input.threadId, input.text, { followUp: input.delivery !== "steer", requestId: input.requestId }),
           };
@@ -1733,8 +1735,8 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
     case "message": {
       const prepareJob = () => {
         const project = loadProject(input.id);
-        if (project.deleted) throw new Error("Project is deleted; admission is denied");
-        if (project.archived) throw new Error("Project is archived; admission is denied");
+        if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+        if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         for (const upload of input.attachments ?? []) uploadRecord(ownedProjectDir(input.id), upload);
         return {
           id: input.requestId ?? randomUUID(),
@@ -1748,17 +1750,22 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
           ...(input.origin ? { origin: input.origin } : {}),
         } satisfies import("./state.ts").Job;
       };
+      const payloadOf = (job: import("./state.ts").Job) =>
+        JSON.stringify([job.text, job.delivery ?? null, job.chatId ?? "main", job.attachments ?? [], job.origin ?? null]);
       return withDurableOwner({
         id: input.id,
         validate: (project) => {
-          if (project.deleted) throw new Error("Project is deleted; admission is denied");
-          if (project.archived) throw new Error("Project is archived; admission is denied");
+          if (project.deleted) throw new RefusedInput("Project is deleted; admission is denied");
+          if (project.archived) throw new RefusedInput("Project is archived; admission is denied");
         },
         operation: async (owner) => {
-          // A repeated request ID (Telegram update replay) returns the job it already admitted.
+          // One request id names one payload. A repeated id with the same payload (a retry, a Telegram update replay) is submitted again: the runtime
+          // takes an id once, and a ledger entry whose submission never happened is run now. The owner's Alt+Up on that id wins.
           const prior = input.requestId ? jobs(input.id).find((job) => job.id === input.requestId) : undefined;
-          if (prior) return prior;
-          const job = prepareJob();
+          if (prior && payloadOf(prior) !== payloadOf(prepareJob()))
+            throw new RefusedInput("This request id was already used for a different message");
+          if (prior && prior.state !== "queued" && prior.state !== "withdrawn") return prior;
+          const job = prior ?? prepareJob();
           // The job keeps what the owner typed; the coordinator receives the expanded skill.
           // `/skill:<name>` anywhere: skill blocks precede the owner's words. `@issue:/@doc:/@upload:/@file:` and `#123` / `PR #123`: compact untrusted blocks follow them.
           const text =
@@ -1766,26 +1773,28 @@ async function dispatchRequest(input: RequestData): Promise<unknown> {
             (await referencedItemsBlock(loadProject(input.id), ownedProjectDir(input.id), job.text)) +
             (await referencedPrBlock(loadProject(input.id), job.text));
           if (text.length > 120_000)
-            throw new Error(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
-          for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
-          const plan = await owner.jobs();
-          if (plan.paused) throw new Error("Project plan is paused; admission is denied");
-          // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
-          const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
-          if (!chat) throw new Error("Unknown chat for this project");
-          if (chat.archived) throw new Error("Chat is archived; restore it before sending");
-          saveJob(input.id, job);
-          await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
-            requestId: job.id,
-            origin: input.origin,
-            chatId: input.chatId,
-            steer: input.delivery === "steer",
-            title: job.text,
+            throw new RefusedInput(`Message with its skills and references is too large to send (${text.length} characters; limit 120000)`);
+          return serialized(`${input.id}:${input.chatId ?? "main"}`, async () => {
+            if (prior && jobs(input.id).find((item) => item.id === job.id)?.state === "withdrawn") return prior;
+            if (!prior) {
+              for (const invoked of skillNames(job.text)) recordInvokedSkill(ownedProjectDir(input.id), invoked);
+              const plan = await owner.jobs();
+              if (plan.paused) throw new RefusedInput("Project plan is paused; admission is denied");
+              // Validate the chat before recording the job, so an unknown or archived chat leaves no ledger entry.
+              const chat = (await owner.chats()).find((item) => item.id === (input.chatId ?? "main"));
+              if (!chat) throw new RefusedInput("Unknown chat for this project");
+              if (chat.archived) throw new RefusedInput("Chat is archived; restore it before sending");
+              saveJob(input.id, job);
+            }
+            await owner.admit(attachmentContent(ownedProjectDir(input.id), text, job.attachments, owner.acceptsImages), {
+              requestId: job.id,
+              origin: job.origin,
+              chatId: input.chatId,
+              steer: job.delivery === "steer",
+              title: job.text,
+            });
+            return job;
           });
-          // An Alt+Up and its acknowledgment that ran between the ledger entry and this admission already gave the text back: take it out again.
-          const now = jobs(input.id).find((item) => item.id === job.id);
-          if (!now || now.state === "withdrawn") await owner.dequeue(input.chatId, [job.id]);
-          return job;
         },
       });
     }
@@ -2153,7 +2162,9 @@ const server = createServer(async (request, response) => {
     const data = await dispatch(input);
     response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, data }));
   } catch (error) {
-    response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: errorText(error) }));
+    response
+      .writeHead(400, { "content-type": "application/json" })
+      .end(JSON.stringify({ ok: false, error: errorText(error), ...(error instanceof RefusedInput ? { refused: true } : {}) }));
   }
 });
 server.requestTimeout = 120000;

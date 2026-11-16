@@ -21,6 +21,8 @@ import {
   acknowledgeInputs,
   pendingInputs,
   withdrawInputs,
+  RefusedInput,
+  samePayload,
   type InputPort,
   type InputStatus,
   type QueuedInput,
@@ -307,24 +309,26 @@ export async function openHostAgent(input: {
       async send(requestId, text, delivery = "steer") {
         assertOpen();
         const model = effectiveModel(settings);
-        if (!model) throw new Error("The Host agent has no model; choose one in its settings");
-        if (!known(model)) throw new Error(`The Host agent's model ${model} is not in the model catalog; choose another in its settings`);
+        if (!model) throw new RefusedInput("The Host agent has no model; choose one in its settings");
+        if (!known(model))
+          throw new RefusedInput(`The Host agent's model ${model} is not in the model catalog; choose another in its settings`);
         await apply(settings);
         sending.add(requestId);
         try {
-          await locked(async () => {
-            if (!readInputs().some((entry) => entry.id === requestId))
-              writeInputs([...readInputs(), { id: requestId, text, delivery, at: Date.now(), state: "queued" }]);
+          // Ledger first, then the runtime. A failure after the ledger write is an unknown outcome and keeps the entry: the page sends the same id
+          // again and the runtime takes it once (its submission is keyed by the id), or Alt+Up gives the text back.
+          const withdrawn = await locked(async () => {
+            const prior = readInputs().find((entry) => entry.id === requestId);
+            if (prior && !samePayload(prior, { text, delivery }))
+              throw new RefusedInput("This request id was already used for a different message");
+            if (!prior) writeInputs([...readInputs(), { id: requestId, text, delivery, at: Date.now(), state: "queued" }]);
+            return prior?.state === "withdrawn";
           });
-          try {
+          if (!withdrawn)
             await root.submit(
               { type: "input", content: text, entry: { kind: "projects.owner-input" }, requestId, whenBusy: delivery },
               context,
             );
-          } catch (error) {
-            await locked(() => inputPort.remove([requestId]));
-            throw error;
-          }
         } finally {
           sending.delete(requestId);
         }

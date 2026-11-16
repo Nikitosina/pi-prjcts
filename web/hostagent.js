@@ -13,7 +13,6 @@ import {
   recoverSends,
   finishSend,
   isAltUp,
-  joinText,
   paintPending,
   persistText,
   readDraft,
@@ -407,14 +406,21 @@ input.value = readDraft(surfaces.host).text;
 input.addEventListener("input", () => persistText(surfaces.host, input.value));
 void acknowledgeDraft({ surface: surfaces.host, acknowledge: acknowledgeRestored }).catch(() => {});
 // Sends the last page never saw accepted go out again under their own ids; a refused one comes back into the editor.
-void recoverSends(surfaces.host, (record) =>
-  call("host-agent-send", { requestId: record.requestId, text: record.text, delivery: record.delivery ?? "steer" }),
-)
-  .then((accepted) => {
-    if (!input.value) input.value = readDraft(surfaces.host).text;
-    if (accepted) void loadHostAgent();
-  })
-  .catch(() => {});
+const editor = { live: () => true, read: () => input.value, show: (value) => (input.value = value) };
+const recover = () =>
+  recoverSends(
+    surfaces.host,
+    (record) => call("host-agent-send", { requestId: record.requestId, text: record.text, delivery: record.delivery ?? "steer" }),
+    editor,
+  )
+    .then((accepted) => {
+      if (!input.value) input.value = readDraft(surfaces.host).text;
+      if (accepted) void loadHostAgent();
+      // An unknown outcome stays recorded and is sent again, under the same id, until the host answers.
+      if (readDraft(surfaces.host).sending.some((record) => !record.refused)) setTimeout(recover, 4000);
+    })
+    .catch(() => {});
+void recover();
 // Pi's keys: Enter steers a working agent, Alt+Enter queues a follow-up.
 let nextDelivery = "steer";
 input.addEventListener("keydown", (event) => {
@@ -432,7 +438,7 @@ async function restoreQueued() {
   try {
     await restoreInto({
       surface: surfaces.host,
-      editor: { live: () => true, read: () => input.value, show: (value) => (input.value = value) },
+      editor,
       toast,
       grow: () => ((input.style.height = "auto"), (input.style.height = `${Math.min(input.scrollHeight, 240)}px`)),
       dequeue: () => call("host-agent-dequeue"),
@@ -449,18 +455,20 @@ form.addEventListener("submit", async (event) => {
   nextDelivery = "steer";
   const text = input.value.trim();
   if (!text || !available || form.dataset.sending === "1") return;
+  const requestId = uuid();
+  if (!beginSend(surfaces.host, { requestId, text, delivery })) {
+    toast("Could not keep the message in this browser, so it was not sent");
+    return;
+  }
   form.dataset.sending = "1";
   input.value = "";
-  const requestId = uuid();
-  beginSend(surfaces.host, { requestId, text, delivery });
   try {
     await call("host-agent-send", { requestId, text, delivery });
     finishSend(surfaces.host, requestId);
     error = "";
     await loadHostAgent();
   } catch (reason) {
-    failSend(surfaces.host, requestId);
-    input.value = joinText(text, input.value);
+    if (failSend(surfaces.host, requestId, reason, editor) === "unknown") setTimeout(recover, 4000);
     // "has no model" / "not in the model catalog": say it where the owner is looking and open the model picker.
     if (/model/i.test(reason.message ?? "")) {
       error = reason.message;
